@@ -1,0 +1,246 @@
+# Interface Contract Template
+# 도메인 간 API 계약 정의 템플릿
+
+domain: {domain_name}             # 예: member, order, product
+version: {major}.{minor}.{patch}  # 예: 1.0.0
+owner: {domain}-pl                # 예: member-pl
+updated: YYYY-MM-DD               # 예: 2026-02-07
+
+description: |
+  {이 도메인이 제공하는 API의 전반적 설명}
+  {주요 기능 요약}
+
+# Provider 정보 (이 API를 제공하는 도메인)
+provider:
+  domain: {domain_name}
+  team: {domain}-pl
+  contact: {domain}/README.md
+
+# Consumers 정보 (이 API를 사용하는 도메인들)
+consumers:
+  - domain: {consumer_domain_1}
+    endpoints: [list of endpoints used]
+    events: [list of events subscribed]
+    since: v{version}
+  - domain: {consumer_domain_2}
+    endpoints: [list of endpoints used]
+    events: [list of events subscribed]
+    since: v{version}
+
+# API Endpoints
+endpoints:
+  - path: /api/{domain}/{resource}
+    method: GET | POST | PUT | PATCH | DELETE
+    description: {엔드포인트 설명}
+
+    # 인증/권한 요구사항
+    auth:
+      required: true | false
+      type: Bearer | Basic | ApiKey
+      scopes: [list of required scopes]
+
+    # 요청 스펙
+    request:
+      headers:
+        Authorization: "Bearer {token}"   # 필요시
+        Content-Type: "application/json"
+
+      params:  # Path 파라미터
+        id:
+          type: string | number | uuid
+          required: true | false
+          description: {설명}
+
+      query:   # Query 파라미터
+        page:
+          type: integer
+          default: 1
+          description: {설명}
+        limit:
+          type: integer
+          default: 20
+          min: 1
+          max: 100
+          description: {설명}
+
+      body:    # Request Body (POST, PUT, PATCH)
+        field1:
+          type: string | number | boolean | object | array
+          required: true | false
+          description: {설명}
+          constraints:
+            minLength: {value}
+            maxLength: {value}
+            pattern: "{regex}"
+
+    # 응답 스펙
+    response:
+      200:  # 성공 응답
+        description: {성공 응답 설명}
+        content:
+          field1:
+            type: string
+            description: {설명}
+          field2:
+            type: object
+            properties:
+              sub_field1: string
+              sub_field2: number
+          field3:
+            type: array
+            items:
+              type: object
+              properties:
+                item_field1: string
+                item_field2: number
+
+      201:  # 생성 성공 (POST)
+        description: {생성 성공 설명}
+        content:
+          id: string
+          created_at: datetime
+
+      204:  # 성공 (본문 없음 - DELETE)
+        description: {삭제 성공}
+
+      # 에러 응답
+      400:
+        error: "Bad Request"
+        message: "{상세 에러 메시지}"
+        details: [validation errors]
+
+      401:
+        error: "Unauthorized"
+        message: "Authentication required"
+
+      403:
+        error: "Forbidden"
+        message: "Insufficient permissions"
+
+      404:
+        error: "{Resource} not found"
+        message: "{상세 메시지}"
+
+      409:
+        error: "Conflict"
+        message: "{충돌 설명}"
+
+      422:
+        error: "Unprocessable Entity"
+        message: "{유효성 검증 실패}"
+        details:
+          - field: {field_name}
+            error: {error_message}
+
+      500:
+        error: "Internal Server Error"
+        message: "An unexpected error occurred"
+
+    # 캐싱 정책 (선택사항)
+    caching:
+      enabled: true | false
+      ttl: {seconds}
+      strategy: "private" | "public"
+
+    # Rate Limiting (선택사항)
+    rate_limit:
+      requests: {number}
+      window: "{duration}"  # 예: "1m", "1h"
+
+    # 페이지네이션 (선택사항)
+    pagination:
+      type: "offset" | "cursor"
+      max_limit: {number}
+
+# Events (도메인 간 비동기 통신)
+events:
+  - name: {domain}.{event_name}     # 예: member.created
+    description: {이벤트 설명}
+    trigger: {이벤트 발생 조건}
+
+    payload:
+      field1:
+        type: string
+        required: true
+        description: {설명}
+      field2:
+        type: object
+        required: false
+        description: {설명}
+
+    subscribers:
+      - domain: {subscriber_domain}
+        handler: {handler_description}
+
+# Error Codes (전체 에러 코드 참조)
+error_codes:
+  400: "Bad Request - 잘못된 요청 형식 또는 파라미터"
+  401: "Unauthorized - 인증 정보 없음 또는 만료"
+  403: "Forbidden - 권한 없음"
+  404: "Not Found - 리소스를 찾을 수 없음"
+  409: "Conflict - 리소스 충돌 (예: 중복 생성)"
+  422: "Unprocessable Entity - 유효성 검증 실패"
+  429: "Too Many Requests - Rate limit 초과"
+  500: "Internal Server Error - 서버 내부 오류"
+  503: "Service Unavailable - 서비스 일시 중단"
+
+# Changelog (버전별 변경 이력)
+changelog:
+  - version: {version}
+    date: YYYY-MM-DD
+    type: major | minor | patch
+    breaking: true | false
+    changes:
+      - "{변경 내용 1}"
+      - "{변경 내용 2}"
+    migration:
+      required: true | false
+      guide: "docs/migrations/v{version}.md"
+    requested_by: {requesting_domain}
+    approved_by: chief-architect
+
+# Compatibility Policy (호환성 정책)
+compatibility:
+  versioning: semantic  # Semantic Versioning (major.minor.patch)
+
+  breaking_changes:
+    - "필드 제거"
+    - "필수 필드 추가"
+    - "타입 변경"
+    - "엔드포인트 경로 변경"
+    - "인증 방식 변경"
+
+  deprecation:
+    notice_period: 30 days  # 사전 공지 기간
+    support_period: 90 days # 이전 버전 지원 기간
+
+  backward_compatibility:
+    policy: "minor 버전은 하위 호환 보장"
+    duration: "최소 1개 major 버전"
+
+# SLA (Service Level Agreement) - 선택사항
+sla:
+  availability: 99.9%
+  response_time:
+    p50: 100ms
+    p95: 500ms
+    p99: 1000ms
+  error_rate: < 0.1%
+
+# Documentation Links
+documentation:
+  overview: "docs/{domain}/API_OVERVIEW.md"
+  guides: "docs/{domain}/guides/"
+  examples: "docs/{domain}/examples/"
+  postman: "docs/{domain}/postman_collection.json"
+
+# Notes for Interface Contract Users
+notes: |
+  1. **버전 관리**: Semantic Versioning을 따릅니다 (major.minor.patch)
+  2. **Breaking Changes**: major 버전 변경 시에만 허용되며, 최소 30일 사전 공지 필요
+  3. **변경 요청**: requests/to-{domain}/ 디렉토리에 요청서 제출
+  4. **승인 프로세스**:
+     - minor/patch: {domain}-pl 승인
+     - major: chief-architect 승인 필수
+  5. **자동 검증**: interface-validator 훅이 변경 시 자동 검증
+  6. **영향 분석**: 변경 시 consumers에게 자동 알림 (cross-domain-notifier)

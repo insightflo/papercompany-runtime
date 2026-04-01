@@ -1,0 +1,71 @@
+# Model Routing Configuration
+# 모델 라우팅 규칙 - multi-ai-run 스타일 CLI 기반 라우팅
+#
+# 설명:
+#   - project-team 에이전트의 모델 라우팅 규칙 정의
+#   - CLI 우선, MCP 폴백, 실패 시 Claude 직접 처리
+#
+# 사용 방법:
+#   1. 이 파일을 프로젝트 루트의 .claude/ 디렉토리에 복사
+#   2. 필요에 따라 라우팅 규칙 수정
+#
+# 우선순위:
+#   1. 프로젝트 설정 (.claude/model-routing.yaml)
+#   2. 글로벌 설정 (~/.claude/model-routing.yaml)
+#   3. 기본값
+
+---
+version: 1.0
+
+# 기본 모델 (설정 없는 에이전트에 적용)
+default: claude
+
+# 역할별 모델 오버라이드
+routing:
+  # 정확한 역할명 매칭
+  backend-specialist: codex
+  frontend-specialist: gemini
+  test-specialist: codex
+  security-specialist: claude  # 보안은 Claude 권장
+  devops-specialist: codex
+
+  # 와일드카드 패턴
+  design-*: gemini      # design-system, design-review 등
+  *-developer: codex    # auth-developer, payment-developer 등
+
+  # 도메인별 오버라이드
+  domains:
+    auth: codex         # auth 도메인 모든 작업
+    ui: gemini          # ui 도메인 모든 작업
+    payment: codex      # payment 도메인 (보안 중요)
+
+# 태스크 유형별 오버라이드 (역할보다 우선)
+task_types:
+  code_generation: codex
+  code_review: codex
+  design_implementation: gemini
+  design_review: gemini
+  architecture: claude
+  planning: claude
+  security_review: claude
+  testing: codex
+
+# CLI 명령어 매핑
+cli_commands:
+  gemini: "gemini"
+  codex: "codex exec"
+
+# CLI 실행 설정
+cli_settings:
+  timeout: 120  # 초
+  retry_count: 2
+  fallback_on_failure: true
+
+# MCP 폴백 설정
+mcp_fallback:
+  gemini:
+    enabled: true
+    tools:
+      - mcp__gemini__*
+  codex:
+    enabled: false  # Codex는 MCP 지원 없음

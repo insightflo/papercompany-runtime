@@ -1,0 +1,106 @@
+{
+  "managed": {
+    "installer": "project-team",
+    "registryVersion": "2026-03-07",
+    "mode": "team",
+    "installMode": "local",
+    "commands": [
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/contract-gate.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/permission-checker.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/policy-gate.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/risk-area-warning.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/security-scan.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/task-completed-gate.js\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/teammate-idle-gate.js\""
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/permission-checker.js\"",
+            "timeout": 5,
+            "statusMessage": "Running permission-checker..."
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/risk-area-warning.js\"",
+            "timeout": 5,
+            "statusMessage": "Running risk-area-warning..."
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/policy-gate.js\"",
+            "timeout": 5,
+            "statusMessage": "Running policy-gate..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/security-scan.js\"",
+            "timeout": 5,
+            "statusMessage": "Running security-scan..."
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/contract-gate.js\"",
+            "timeout": 5,
+            "statusMessage": "Running contract-gate..."
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.js\"",
+            "timeout": 10,
+            "statusMessage": "Running quality-gate..."
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/teammate-idle-gate.js\"",
+            "timeout": 5,
+            "statusMessage": "Running teammate-idle-gate..."
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/task-completed-gate.js\"",
+            "timeout": 5,
+            "statusMessage": "Running task-completed-gate..."
+          }
+        ]
+      }
+    ]
+  }
+}
