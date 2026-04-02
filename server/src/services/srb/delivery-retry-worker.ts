@@ -17,7 +17,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { srbDeliveryLog, srbLinks } from "@paperclipai/db";
-import { eq, and, lte, inArray } from "drizzle-orm";
+import { eq, and, lte, inArray, or } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
 import { secretService } from "../secrets.js";
 import {
@@ -45,6 +45,8 @@ const BASE_BACKOFF_MS = 30_000;
  * Worker polling interval in milliseconds (30 seconds).
  */
 const POLL_INTERVAL_MS = 30_000;
+
+const RETRYING_STALE_AFTER_MS = 2 * 60_000;
 
 /**
  * Maximum deliveries to process per polling cycle.
@@ -166,15 +168,21 @@ export function createDeliveryRetryWorker(db: Db) {
   async function pollCycle(): Promise<void> {
     state.lastPollAt = new Date();
 
-    // Claim due retry rows
     const now = new Date();
+    const retryingStaleBefore = new Date(now.getTime() - RETRYING_STALE_AFTER_MS);
     const due = await db
       .select()
       .from(srbDeliveryLog)
       .where(
-        and(
-          inArray(srbDeliveryLog.status, ["failed"]),
-          lte(srbDeliveryLog.nextRetryAt, now),
+        or(
+          and(
+            inArray(srbDeliveryLog.status, ["failed"]),
+            lte(srbDeliveryLog.nextRetryAt, now),
+          ),
+          and(
+            eq(srbDeliveryLog.status, "retrying"),
+            lte(srbDeliveryLog.updatedAt, retryingStaleBefore),
+          ),
         ),
       )
       .limit(MAX_CLAIM_PER_CYCLE);
@@ -185,7 +193,13 @@ export function createDeliveryRetryWorker(db: Db) {
       const claimed = await db
         .update(srbDeliveryLog)
         .set({ status: "retrying", updatedAt: now })
-        .where(and(eq(srbDeliveryLog.id, row.id), eq(srbDeliveryLog.status, "failed")))
+        .where(
+          and(
+            eq(srbDeliveryLog.id, row.id),
+            eq(srbDeliveryLog.status, row.status),
+            eq(srbDeliveryLog.updatedAt, row.updatedAt),
+          ),
+        )
         .returning({ id: srbDeliveryLog.id });
 
       if (claimed.length === 0) {

@@ -352,6 +352,104 @@ describe("P6 SRB dispatch", () => {
     expect(mocks.sendSrbWebhookRequest).not.toHaveBeenCalled();
   });
 
+  it("retry worker reclaims stale retrying rows", async () => {
+    const row = {
+      id: "delivery-retry-stale",
+      linkId: "link-retry-stale",
+      event: "issue.updated",
+      payloadHash: "hash-stale",
+      payloadJson: { title: "Recover me" },
+      idempotencyKey: "nonce-stale",
+      status: "retrying",
+      attemptCount: 1,
+      lastAttemptAt: null,
+      nextRetryAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(Date.now() - 5 * 60_000),
+    };
+    const link = {
+      id: "link-retry-stale",
+      localCompanyId: "company-local",
+      remoteCompanyId: "company-remote",
+      remoteServerUrl: "https://remote.example/api/srb/webhook",
+      direction: "outbound",
+      sharedSecretId: "secret-stale",
+      createdBy: "user-1",
+      createdAt: new Date(),
+    };
+
+    mocks.resolveSecretValue.mockResolvedValue("super-secret");
+    mocks.sendSrbWebhookRequest.mockResolvedValue({ ok: true, status: 200 });
+
+    const selectMock = vi.fn(() => ({
+      from: vi.fn((table) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => (table === srbLinks ? [link] : [row])),
+        })),
+      })),
+    }));
+    const setCalls: Record<string, unknown>[] = [];
+    const updateMock = createRetryUpdateMock({ claimRows: [{ id: row.id }], setCalls });
+
+    const db = {
+      select: selectMock,
+      update: updateMock,
+    } as unknown as Db;
+
+    const worker = createDeliveryRetryWorker(db);
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    worker.stop();
+
+    expect(mocks.sendSrbWebhookRequest).toHaveBeenCalledWith(expect.objectContaining({
+      headers: expect.objectContaining({
+        "X-SRB-Idempotency-Key": "nonce-stale",
+      }),
+    }));
+  });
+
+  it("retry worker does not reclaim fresh retrying rows", async () => {
+    const row = {
+      id: "delivery-retry-fresh",
+      linkId: "link-retry-fresh",
+      event: "issue.updated",
+      payloadHash: "hash-fresh",
+      payloadJson: { title: "Still running" },
+      idempotencyKey: "nonce-fresh",
+      status: "retrying",
+      attemptCount: 1,
+      lastAttemptAt: null,
+      nextRetryAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const selectMock = vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => []),
+        })),
+      })),
+    }));
+    const setCalls: Record<string, unknown>[] = [];
+    const updateMock = createRetryUpdateMock({ claimRows: [], setCalls });
+
+    const db = {
+      select: selectMock,
+      update: updateMock,
+    } as unknown as Db;
+
+    const worker = createDeliveryRetryWorker(db);
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    worker.stop();
+
+    expect(mocks.sendSrbWebhookRequest).not.toHaveBeenCalled();
+    expect(setCalls).toHaveLength(0);
+  });
+
   it("retry worker abandons legacy rows without replay payload", async () => {
     const row = {
       id: "delivery-retry-legacy",
