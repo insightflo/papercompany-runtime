@@ -4,8 +4,8 @@
  * Pre-execution checks to ensure workflow runs can proceed safely.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { workflowDefinitions, workflowRuns } from "../../packages/db/src/schema/index.js";
+import type { Db } from "@paperclipai/db";
+import { workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { eq, and, sql } from "drizzle-orm";
 
 /**

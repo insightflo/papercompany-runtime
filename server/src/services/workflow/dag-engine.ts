@@ -6,10 +6,9 @@
  */
 
 import { and, eq, sql } from "drizzle-orm";
-import type { Transaction } from "drizzle-orm";
-import type { Db } from "../../packages/db/src/client.js";
-import { workflowDefinitions, workflowRuns, workflowStepRuns, issues } from "../../packages/db/src/schema/index.js";
-import type { WorkflowStep, DagValidationResult, WorkflowExecutionResult } from "./types.js";
+import type { Db } from "@paperclipai/db";
+import { workflowDefinitions, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
+import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 
 /**
  * Workflow step definition.
@@ -145,9 +144,8 @@ function dfsReachable(step: WorkflowStep, allSteps: WorkflowStep[], visited: Set
 export async function executeWorkflowRun(
   db: Db,
   runId: string,
-  tx?: Transaction,
 ): Promise<WorkflowExecutionResult> {
-  const executor = tx || db;
+  const executor = db;
 
   // Fetch workflow run with definition
   const runResult = await executor
@@ -169,7 +167,7 @@ export async function executeWorkflowRun(
     definition: typeof workflowDefinitions.$inferSelect;
   };
 
-  const steps: WorkflowStep[] = (definition.stepsJson as unknown[]) || [];
+  const steps: WorkflowStep[] = (definition.stepsJson as WorkflowStep[]) || [];
 
   // Update run status to running
   await executor

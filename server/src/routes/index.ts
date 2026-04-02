@@ -1,4 +1,5 @@
 export { healthRoutes } from "./health.js";
+export { metricsRoutes } from "./metrics.js";
 export { companyRoutes } from "./companies.js";
 export { companySkillRoutes } from "./company-skills.js";
 export { agentRoutes } from "./agents.js";
@@ -16,3 +17,6 @@ export { llmRoutes } from "./llms.js";
 export { accessRoutes } from "./access.js";
 export { instanceSettingsRoutes } from "./instance-settings.js";
 export { schedulerRoutes } from "./scheduler.js";
+export { worktreeRoutes } from "./worktree.js";
+export { missionRoutes } from "./missions.js";
+export { srbWebhookRoutes } from "./srb-webhook.js";

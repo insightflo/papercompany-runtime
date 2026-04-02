@@ -87,7 +87,7 @@
   - domain: backend | risk: low | deps: P2-T1, P2-T3, P2-T4
   - packages/plugins/workflow-engine, tool-registry, knowledge-base
 
-- [ ] P2-T7: 단위 테스트 — DAG validation, tool dispatch, KB retrieval
+- [x] P2-T7: 단위 테스트 — DAG validation, tool dispatch, KB retrieval
   - domain: backend | risk: medium | deps: P2-T2, P2-T3, P2-T4
 
 ---
@@ -118,7 +118,7 @@
   - domain: backend | risk: low | deps: P3-T4
   - note: app.ts에서 직접 schedulerRoutes(db) 마운트
 
-- [ ] P3-T6: 테스트 — 5분/60분 cron 스케줄 동작 검증
+- [x] P3-T6: 테스트 — 5분/60분 cron 스케줄 동작 검증
   - domain: backend | risk: medium | deps: P3-T1
   - note: 서버 시작 후 scheduler.start()로 폴링 시작
 
@@ -129,43 +129,43 @@
 > Goal: MUST/SHOULD/MAY 룰 enforcement가 모든 tool invocation에 활성화.
 > 시작점: 없음 (완전 신규)
 
-- [ ] P4-T1: `server/src/services/worktree/predicate-eval.ts` — 프레디킷 미니언어
+- [x] P4-T1: `server/src/services/worktree/predicate-eval.ts` — 프레디킷 미니언어
   - domain: backend | risk: high
   - operators: $eq, $ne, $in, $notIn, $contains, $startsWith, $endsWith, $matches, $gt, $lt
   - CRITICAL: $matches → `re2` npm 패키지 사용 (ReDoS 방지, O(n))
   - CRITICAL: $matches 패턴 길이 200자 제한 + 50ms timeout
 
-- [ ] P4-T2: `server/src/services/worktree/harness.ts` — checkAction() 구현
+- [x] P4-T2: `server/src/services/worktree/harness.ts` — checkAction() 구현
   - domain: backend | risk: high | deps: P4-T1
   - MUST → WorktreeViolation throw | SHOULD → warning log | MAY → audit only
 
-- [ ] P4-T3: `server/src/services/worktree/rule-store.ts` — worktree_rules CRUD
+- [x] P4-T3: `server/src/services/worktree/rule-store.ts` — worktree_rules CRUD
   - domain: backend | risk: medium | deps: P1-T1
 
-- [ ] P4-T4: `server/src/services/worktree/proposal-store.ts` — 에이전트 proposal flow
+- [x] P4-T4: `server/src/services/worktree/proposal-store.ts` — 에이전트 proposal flow
   - domain: backend | risk: medium | deps: P1-T1
   - OQ-5: 에이전트당 하루 3건 per company 제한 서버에서 강제
 
-- [ ] P4-T5: `server/src/services/worktree/types.ts` 작성
+- [x] P4-T5: `server/src/services/worktree/types.ts` 작성
   - domain: backend | risk: low
 
-- [ ] P4-T6: `server/src/services/tools/registry.ts`에 WorktreeHarness.check() 연결
+- [x] P4-T6: `server/src/services/tools/registry.ts`에 WorktreeHarness.check() 연결
   - domain: backend | risk: high | deps: P4-T2, P2-T3
 
-- [ ] P4-T7: `server/src/services/heartbeat.ts` 수정 — file-write, command-execute 포인트에 worktree check 추가
+- [x] P4-T7: `server/src/services/heartbeat.ts` 수정 — file-write, command-execute 포인트에 worktree check 추가
   - domain: backend | risk: high | deps: P4-T2
 
-- [ ] P4-T8: `server/src/middleware/company-kind-gate.ts` 신규
+- [x] P4-T8: `server/src/middleware/company-kind-gate.ts` 신규
   - domain: backend | risk: critical | deps: P1-T3
   - CRITICAL: `app.use("/maintenance", requireMaintenanceCompany())` — per-route 절대 금지
 
-- [ ] P4-T9: `server/src/routes/worktree.ts` 신규 + `routes/index.ts` 수정
+- [x] P4-T9: `server/src/routes/worktree.ts` 신규 + `routes/index.ts` 수정
   - domain: backend | risk: low | deps: P4-T3, P4-T4, P4-T8
   - GET/POST /worktree/rules, PATCH /worktree/rules/:id
   - GET /worktree/proposals, PATCH /worktree/proposals/:id
   - /maintenance/* 하위 엔드포인트도 index.ts에서 일괄 마운트
 
-- [ ] P4-T10: 통합 테스트 — MUST/SHOULD/MAY 3개 티어 + predicate fuzz test
+- [x] P4-T10: 통합 테스트 — MUST/SHOULD/MAY 3개 티어 + predicate fuzz test
   - domain: backend | risk: medium | deps: P4-T2
   - CI 테스트: business-company JWT → /maintenance/* → 403 검증
 
@@ -176,26 +176,26 @@
 > Goal: Mission first-class entity. 에이전트 세션이 mission 범위로 유지.
 > 시작점: heartbeat.ts (agentTaskSessions 로직 수정), issues.ts (mission_id FK 추가)
 
-- [ ] P5-T1: `server/src/services/missions.ts` 신규
+- [x] P5-T1: `server/src/services/missions.ts` 신규
   - domain: backend | risk: medium | deps: P1-T1
   - CRUD + issue tree + mission_agents 관리
   - OQ-4: owner_agent_id(PO 역할), executor/reviewer/observer/specialist role
 
-- [ ] P5-T2: `server/src/services/sessions/mission-session-store.ts` 신규
+- [x] P5-T2: `server/src/services/sessions/mission-session-store.ts` 신규
   - domain: backend | risk: medium | deps: P1-T1
   - OQ-2: 30일 idle timeout, company별 설정 가능
   - 만료 세션 접근 시 → 새 세션 생성 + 요약 노트를 첫 메시지로
   - `@paperclipai/adapter-utils`의 `resolveSessionCompactionPolicy` 재사용
 
-- [ ] P5-T3: `server/src/services/heartbeat.ts` 수정 — mission session 조회 분기 추가
+- [x] P5-T3: `server/src/services/heartbeat.ts` 수정 — mission session 조회 분기 추가
   - domain: backend | risk: high | deps: P5-T2
   - missionId 있으면 mission_sessions[(missionId, agentId)] 조회
   - missionId 없으면 기존 agentTaskSessions 동작 유지 (하위 호환)
 
-- [ ] P5-T4: `server/src/services/issues.ts` 수정 — mission_id FK 지원
+- [x] P5-T4: `server/src/services/issues.ts` 수정 — mission_id FK 지원
   - domain: backend | risk: medium | deps: P1-T1
 
-- [ ] P5-T5: `server/src/routes/missions.ts` 신규 + `routes/index.ts` 수정
+- [x] P5-T5: `server/src/routes/missions.ts` 신규 + `routes/index.ts` 수정
   - domain: backend | risk: low | deps: P5-T1
   - GET/POST /missions, GET/PATCH/DELETE /missions/:id
   - GET /missions/:id/issues, GET /missions/:id/workflow-runs
@@ -210,30 +210,30 @@
 > Goal: same-instance(in-process) + cross-server(HTTP webhook) 두 경로.
 > 시작점: packages/plugins/service-request-bridge/src/store.ts (PluginEntityRecord 기반 → redesign)
 
-- [ ] P6-T1: `server/src/services/srb/router.ts` — 경로 선택 로직
+- [x] P6-T1: `server/src/services/srb/router.ts` — 경로 선택 로직
   - domain: backend | risk: medium | deps: P1-T1
   - remoteServerUrl == null → local | non-null → webhook
 
-- [ ] P6-T2: `server/src/services/srb/local-dispatch.ts` — in-process 경로
+- [x] P6-T2: `server/src/services/srb/local-dispatch.ts` — in-process 경로
   - domain: backend | risk: high | deps: P6-T1
   - 단일 DB transaction: source event + target issue 동시 커밋
 
-- [ ] P6-T3: `server/src/services/srb/webhook-dispatch.ts` — HTTP webhook 발송
+- [x] P6-T3: `server/src/services/srb/webhook-dispatch.ts` — HTTP webhook 발송
   - domain: backend | risk: high | deps: P6-T1
   - X-SRB-Timestamp (|now-ts|>300s 거부), X-SRB-Signature (HMAC-SHA256), X-SRB-Idempotency-Key
   - OQ-7: dual-secret 24h overlap window 지원
 
-- [ ] P6-T4: `server/src/routes/srb-webhook.ts` — POST /srb/webhook 수신 엔드포인트
+- [x] P6-T4: `server/src/routes/srb-webhook.ts` — POST /srb/webhook 수신 엔드포인트
   - domain: backend | risk: high | deps: P6-T3
   - HMAC 검증 + replay protection (srb_nonces unique constraint)
 
-- [ ] P6-T5: delivery retry worker — srb_delivery_log failed 레코드, exponential backoff, 최대 10회
+- [x] P6-T5: delivery retry worker — srb_delivery_log failed 레코드, exponential backoff, 최대 10회
   - domain: backend | risk: medium | deps: P6-T3
 
-- [ ] P6-T6: srb_nonces cleanup job — 10분 이상 된 nonce 삭제 (scheduler 활용)
+- [x] P6-T6: srb_nonces cleanup job — 10분 이상 된 nonce 삭제 (scheduler 활용)
   - domain: backend | risk: low | deps: P3-T1
 
-- [ ] P6-T7: service-request-bridge 플러그인 deprecated 마킹 + routes/index.ts 수정
+- [x] P6-T7: service-request-bridge 플러그인 deprecated 마킹 + routes/index.ts 수정
   - domain: backend | risk: low | deps: P6-T1
 
 ---
@@ -244,34 +244,34 @@
 > 시작점: live-events.ts (이미 존재 — outbound notifier에 재사용)
 > CRITICAL: worktree MUST 룰 활성화 전에 반드시 완료 (§12 Risk Register)
 
-- [ ] P7-T1: `server/src/channel/telegram/bot.ts` — long-poll 루프
+- [x] P7-T1: `server/src/channel/telegram/bot.ts` — long-poll 루프
   - domain: backend | risk: medium | deps: P1-T1
   - getUpdates timeout=25, offset tracking으로 중복 방지
   - OQ-3: long polling (v1), webhook 전환은 초기화 코드만 변경
 
-- [ ] P7-T2: `server/src/channel/telegram/commands.ts` — 커맨드 핸들러
+- [x] P7-T2: `server/src/channel/telegram/commands.ts` — 커맨드 핸들러
   - domain: backend | risk: medium | deps: P7-T1, P5-T1
   - /status, /mission, /approve, /assign
 
-- [ ] P7-T3: `server/src/channel/telegram/formatter.ts` + `types.ts`
+- [x] P7-T3: `server/src/channel/telegram/formatter.ts` + `types.ts`
   - domain: backend | risk: low | deps: P7-T1
 
-- [ ] P7-T4: `server/src/channel/index.ts` — channel registry + 시작
+- [x] P7-T4: `server/src/channel/index.ts` — channel registry + 시작
   - domain: backend | risk: low | deps: P7-T1
 
-- [ ] P7-T5: outbound notifier — `live-events.ts` 구독 → Telegram 발송
+- [x] P7-T5: outbound notifier — `live-events.ts` 구독 → Telegram 발송
   - domain: backend | risk: medium | deps: P7-T1
   - live-events.ts는 이미 존재 → 구독만 추가
 
-- [ ] P7-T6: Bot JWT lifecycle — 1시간 TTL, 만료 5분 전 재발급, channel_bot 역할
+- [x] P7-T6: Bot JWT lifecycle — 1시간 TTL, 만료 5분 전 재발급, channel_bot 역할
   - domain: backend | risk: medium | deps: P7-T1
 
-- [ ] P7-T7: `server/src/routes/channel.ts` 신규 + `routes/index.ts` 수정
+- [x] P7-T7: `server/src/routes/channel.ts` 신규 + `routes/index.ts` 수정
   - domain: backend | risk: low | deps: P1-T1
   - GET/PUT /channel/config, POST /channel/test
   - bot_token → company_secrets 저장 (config_json 직접 저장 금지)
 
-- [ ] P7-T8: e2e 테스트 — Telegram으로 mission status 조회
+- [x] P7-T8: e2e 테스트 — Telegram으로 mission status 조회
   - domain: backend | risk: medium | deps: P7-T2
 
 ---
@@ -281,42 +281,42 @@
 > Goal: Mission 중심 UI. Issues가 primary nav에서 secondary로.
 > 시작점: Issues.tsx, Goals.tsx, Dashboard.tsx, Sidebar.tsx 수정 + 신규 페이지 추가
 
-- [ ] P8-T1: `ui/src/pages/Missions.tsx` 신규 — mission 목록 + status chips
+- [x] P8-T1: `ui/src/pages/Missions.tsx` 신규 — mission 목록 + status chips
   - domain: frontend | risk: medium | deps: P5-T5
 
-- [ ] P8-T2: `ui/src/pages/MissionDetail.tsx` 신규 — issue tree + workflow panel + worktree panel
+- [x] P8-T2: `ui/src/pages/MissionDetail.tsx` 신규 — issue tree + workflow panel + worktree panel
   - domain: frontend | risk: high | deps: P8-T1
   - sub-components: MissionIssueTree, WorkflowDagPanel, WorktreeRulePanel
 
-- [ ] P8-T3: `ui/src/pages/MissionCreate.tsx` 신규
+- [x] P8-T3: `ui/src/pages/MissionCreate.tsx` 신규
   - domain: frontend | risk: medium | deps: P8-T1
 
-- [ ] P8-T4: `ui/src/components/MissionIssueTree.tsx` 신규 — nested issue tree
+- [x] P8-T4: `ui/src/components/MissionIssueTree.tsx` 신규 — nested issue tree
   - domain: frontend | risk: medium | deps: P8-T2
 
-- [ ] P8-T5: `ui/src/components/WorkflowDagPanel.tsx` 신규 — DAG 시각화
+- [x] P8-T5: `ui/src/components/WorkflowDagPanel.tsx` 신규 — DAG 시각화
   - domain: frontend | risk: high | deps: P8-T2
 
-- [ ] P8-T6: `ui/src/pages/WorktreeRules.tsx` 신규 — 룰 목록 + form-based 빌더
+- [x] P8-T6: `ui/src/pages/WorktreeRules.tsx` 신규 — 룰 목록 + form-based 빌더
   - domain: frontend | risk: high | deps: P4-T9
   - OQ-1: Option B(폼 빌더) + Raw JSON 파워유저 fallback
 
-- [ ] P8-T7: `ui/src/pages/WorktreeProposals.tsx` 신규 — 에이전트 제안 리뷰 UI
+- [x] P8-T7: `ui/src/pages/WorktreeProposals.tsx` 신규 — 에이전트 제안 리뷰 UI
   - domain: frontend | risk: medium | deps: P4-T9
 
-- [ ] P8-T8: `ui/src/pages/SchedulerConfig.tsx` 신규
+- [x] P8-T8: `ui/src/pages/SchedulerConfig.tsx` 신규
   - domain: frontend | risk: medium | deps: P3-T4
 
-- [ ] P8-T9: `ui/src/pages/ChannelConfig.tsx` 신규
+- [x] P8-T9: `ui/src/pages/ChannelConfig.tsx` 신규
   - domain: frontend | risk: medium | deps: P7-T7
 
-- [ ] P8-T10: `ui/src/components/Sidebar.tsx` 수정 — Missions primary, Issues secondary
+- [x] P8-T10: `ui/src/components/Sidebar.tsx` 수정 — Missions primary, Issues secondary
   - domain: frontend | risk: low | deps: P8-T1
 
-- [ ] P8-T11: `ui/src/pages/Dashboard.tsx` 수정 — goal 요약 → mission 진행 요약
+- [x] P8-T11: `ui/src/pages/Dashboard.tsx` 수정 — goal 요약 → mission 진행 요약
   - domain: frontend | risk: medium | deps: P8-T1
 
-- [ ] P8-T12: Goals primary nav 제거 (Settings 하위로 이동)
+- [x] P8-T12: Goals primary nav 제거 (Settings 하위로 이동)
   - domain: frontend | risk: low | deps: P8-T10
 
 ---
@@ -325,31 +325,31 @@
 
 > Goal: 프로덕션 배포 전 필수. SLI/SLO + 알림.
 
-- [ ] P9-T1: prom-client 설치 + `/metrics` 엔드포인트 (Prometheus 호환)
+- [x] P9-T1: prom-client 설치 + `/metrics` 엔드포인트 (Prometheus 호환)
   - domain: backend | risk: low
 
-- [ ] P9-T2: SLI 계측 — scheduler due-to-wakeup latency (p95 < 90s)
+- [x] P9-T2: SLI 계측 — scheduler due-to-wakeup latency (p95 < 90s)
   - domain: backend | risk: medium | deps: P3-T1, P9-T1
 
-- [ ] P9-T3: SLI 계측 — worktree checkAction latency (p99 < 50ms)
+- [x] P9-T3: SLI 계측 — worktree checkAction latency (p99 < 50ms)
   - domain: backend | risk: medium | deps: P4-T2, P9-T1
 
-- [ ] P9-T4: SLI 계측 — SRB webhook delivery rate (>99% within 60s)
+- [x] P9-T4: SLI 계측 — SRB webhook delivery rate (>99% within 60s)
   - domain: backend | risk: medium | deps: P6-T5, P9-T1
 
-- [ ] P9-T5: SLI 계측 — mission session reuse rate (>80%)
+- [x] P9-T5: SLI 계측 — mission session reuse rate (>80%)
   - domain: backend | risk: low | deps: P5-T2, P9-T1
 
-- [ ] P9-T6: OpenTelemetry trace spans — worktree.checkAction, scheduler.claimAndWakeup, srb.route
+- [x] P9-T6: OpenTelemetry trace spans — worktree.checkAction, scheduler.claimAndWakeup, srb.route
   - domain: backend | risk: medium | deps: P4-T2, P3-T1, P6-T1
 
-- [ ] P9-T7: Audit log TTL cleanup job — worktree_audit_log(90d), tool_audit_log(90d), srb_delivery_log(30d), srb_nonces(10min)
+- [x] P9-T7: Audit log TTL cleanup job — worktree_audit_log(90d), tool_audit_log(90d), srb_delivery_log(30d), srb_nonces(10min)
   - domain: backend | risk: medium | deps: P3-T1
 
-- [ ] P9-T8: 추가 partial index — worktree_audit_log, srb_delivery_log, workflow_runs, mission_sessions (§15.3)
+- [x] P9-T8: 추가 partial index — worktree_audit_log, srb_delivery_log, workflow_runs, mission_sessions (§15.3)
   - domain: backend | risk: low | deps: P1-T1
 
-- [ ] P9-T9: Telegram alert 룰 — scheduler down, SRB 연속 3회 실패, MUST block spike
+- [x] P9-T9: Telegram alert 룰 — scheduler down, SRB 연속 3회 실패, MUST block spike
   - domain: backend | risk: medium | deps: P7-T5, P9-T1
 
 ---

@@ -28,8 +28,10 @@ import { costService } from "./costs.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
+import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import { createWorktreeHarness, WorktreeViolation } from "./worktree/harness.js";
 import {
   buildWorkspaceReadyComment,
   cleanupExecutionWorkspaceArtifacts,
@@ -90,8 +92,10 @@ function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
 
 async function ensureManagedProjectWorkspace(input: {
   companyId: string;
+  agentId: string;
   projectId: string;
   repoUrl: string | null;
+  worktreeCheck?: (opts: { tool: string; args: Record<string, unknown>; cwd?: string; filePath?: string; command?: string }) => Promise<void>;
 }): Promise<{ cwd: string; warning: string | null }> {
   const cwd = resolveManagedProjectWorkspaceDir({
     companyId: input.companyId,
@@ -128,6 +132,15 @@ async function ensureManagedProjectWorkspace(input: {
   }
 
   try {
+    // worktree: check command-execute before git clone
+    if (input.worktreeCheck) {
+      await input.worktreeCheck({
+        tool: "command-execute",
+        args: { command: "git clone", repoUrl: input.repoUrl ?? "" },
+        cwd,
+        command: `git clone ${input.repoUrl} ${cwd}`,
+      });
+    }
     await execFile("git", ["clone", input.repoUrl, cwd], {
       env: sanitizeRuntimeServiceBaseEnv(process.env),
       timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
@@ -248,6 +261,10 @@ export type ResolvedWorkspaceForRun = {
 
 type ProjectWorkspaceCandidate = {
   id: string;
+  cwd?: string | null;
+  repoUrl?: string | null;
+  repoRef?: string | null;
+  projectId?: string | null;
 };
 
 export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWorkspaceCandidate>(
@@ -803,6 +820,39 @@ export function heartbeatService(db: Db) {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
+  const worktreeHarness = createWorktreeHarness(db);
+
+  /**
+   * worktreeCheck — call worktreeHarness.checkAction, re-throwing MUST violations.
+   * SHOULD violations are logged by the harness internally; MAY violations are audit-logged.
+   */
+  async function worktreeCheck(opts: {
+    agent: { id: string; companyId: string };
+    tool: string;
+    args: Record<string, unknown>;
+    cwd?: string;
+    filePath?: string;
+    command?: string;
+  }): Promise<void> {
+    try {
+      await worktreeHarness.checkAction({
+        companyId: opts.agent.companyId,
+        agentId: opts.agent.id,
+        tool: opts.tool,
+        args: opts.args,
+        cwd: opts.cwd,
+        filePath: opts.filePath,
+        command: opts.command,
+      });
+    } catch (err) {
+      // WorktreeViolation bubbles up as MUST violation → fail the operation
+      if (err instanceof WorktreeViolation) {
+        throw err;
+      }
+      // Unexpected error — re-throw
+      throw err;
+    }
+  }
 
   async function getAgent(agentId: string) {
     return db
@@ -1110,10 +1160,19 @@ export function heartbeatService(db: Db) {
         let managedWorkspaceWarning: string | null = null;
         if (!projectCwd || projectCwd === REPO_ONLY_CWD_SENTINEL) {
           try {
+            // worktree: check file-write before managed workspace operations
+            await worktreeCheck({
+              agent,
+              tool: "file-write",
+              args: { operation: "managed_workspace_setup" },
+            });
             const managedWorkspace = await ensureManagedProjectWorkspace({
               companyId: agent.companyId,
+              agentId: agent.id,
               projectId: workspaceProjectId ?? resolvedProjectId ?? workspace.projectId,
               repoUrl: readNonEmptyString(workspace.repoUrl),
+              worktreeCheck: async (opts) =>
+                worktreeCheck({ agent, tool: opts.tool, args: opts.args, cwd: opts.cwd, filePath: opts.filePath, command: opts.command }),
             });
             projectCwd = managedWorkspace.cwd;
             managedWorkspaceWarning = managedWorkspace.warning;
@@ -1151,6 +1210,14 @@ export function heartbeatService(db: Db) {
       }
 
       const fallbackCwd = resolveDefaultAgentWorkspaceDir(agent.id);
+      // worktree: check file-write before fallback workspace mkdir
+      await worktreeCheck({
+        agent,
+        tool: "file-write",
+        args: { operation: "fallback_workspace_mkdir" },
+        cwd: fallbackCwd,
+        filePath: fallbackCwd,
+      });
       await fs.mkdir(fallbackCwd, { recursive: true });
       const warnings: string[] = [];
       if (preferredWorkspaceWarning) {
@@ -1182,10 +1249,19 @@ export function heartbeatService(db: Db) {
     }
 
     if (workspaceProjectId) {
+      // worktree: check file-write before managed workspace operations
+      await worktreeCheck({
+        agent,
+        tool: "file-write",
+        args: { operation: "managed_workspace_setup" },
+      });
       const managedWorkspace = await ensureManagedProjectWorkspace({
         companyId: agent.companyId,
+        agentId: agent.id,
         projectId: workspaceProjectId,
         repoUrl: null,
+        worktreeCheck: async (opts) =>
+          worktreeCheck({ agent, tool: opts.tool, args: opts.args, cwd: opts.cwd, filePath: opts.filePath, command: opts.command }),
       });
       return {
         cwd: managedWorkspace.cwd,
@@ -1220,6 +1296,14 @@ export function heartbeatService(db: Db) {
     }
 
     const cwd = resolveDefaultAgentWorkspaceDir(agent.id);
+    // worktree: check file-write before default workspace mkdir
+    await worktreeCheck({
+      agent,
+      tool: "file-write",
+      args: { operation: "default_workspace_mkdir" },
+      cwd,
+      filePath: cwd,
+    });
     await fs.mkdir(cwd, { recursive: true });
     const warnings: string[] = [];
     if (sessionCwd) {
@@ -1938,6 +2022,10 @@ export function heartbeatService(db: Db) {
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
     const taskKey = deriveTaskKey(context, null);
+    // Mission session branch: when missionId is present, session is keyed by
+    // "mission:{missionId}" to ensure reuse across runs within the same mission.
+    const missionId = readNonEmptyString(context.missionId);
+    const effectiveTaskKey = missionId ? `mission:${missionId}` : taskKey;
     const sessionCodec = getAdapterSessionCodec(agent.adapterType);
     const issueId = readNonEmptyString(context.issueId);
     const issueContext = issueId
@@ -1982,8 +2070,8 @@ export function heartbeatService(db: Db) {
               isolatedWorkspacesEnabled,
             ))
       : null;
-    const taskSession = taskKey
-      ? await getTaskSession(agent.companyId, agent.id, agent.adapterType, taskKey)
+    const taskSession = effectiveTaskKey
+      ? await getTaskSession(agent.companyId, agent.id, agent.adapterType, effectiveTaskKey)
       : null;
     const resetTaskSession = shouldResetTaskSessionForWake(context);
     const sessionResetReason = describeSessionResetReason(context);
@@ -2216,6 +2304,14 @@ export function heartbeatService(db: Db) {
       worktreePath: executionWorkspace.worktreePath,
       agentHome: await (async () => {
         const home = resolveDefaultAgentWorkspaceDir(agent.id);
+        // worktree: check file-write before agent home mkdir
+        await worktreeCheck({
+          agent,
+          tool: "file-write",
+          args: { operation: "agent_home_mkdir" },
+          cwd: home,
+          filePath: home,
+        });
         await fs.mkdir(home, { recursive: true });
         return home;
       })(),
@@ -2673,10 +2769,10 @@ export function heartbeatService(db: Db) {
         await updateRuntimeState(agent, finalizedRun, adapterResult, {
           legacySessionId: nextSessionState.legacySessionId,
         }, normalizedUsage);
-        if (taskKey) {
+        if (effectiveTaskKey) {
           if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
             await clearTaskSessions(agent.companyId, agent.id, {
-              taskKey,
+              taskKey: effectiveTaskKey,
               adapterType: agent.adapterType,
             });
           } else {
@@ -2684,11 +2780,22 @@ export function heartbeatService(db: Db) {
               companyId: agent.companyId,
               agentId: agent.id,
               adapterType: agent.adapterType,
-              taskKey,
+              taskKey: effectiveTaskKey,
               sessionParamsJson: nextSessionState.params,
               sessionDisplayId: nextSessionState.displayId,
               lastRunId: finalizedRun.id,
               lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
+            });
+          }
+        }
+        // Touch the mission session record when missionId is present, to update
+        // lastActiveAt and increment runCount for idle-timeout tracking.
+        if (missionId) {
+          const msnStore = missionSessionStore(db);
+          const sessions = await msnStore.list({ missionId, agentId: agent.id, companyId: agent.companyId, status: "active" });
+          if (sessions.length > 0) {
+            await msnStore.touch(sessions[0].id).catch((err) => {
+              logger.warn({ err, missionId, agentId: agent.id }, "failed to touch mission session");
             });
           }
         }
@@ -2743,12 +2850,12 @@ export function heartbeatService(db: Db) {
           legacySessionId: runtimeForAdapter.sessionId,
         });
 
-        if (taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
+        if (effectiveTaskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
           await upsertTaskSession({
             companyId: agent.companyId,
             agentId: agent.id,
             adapterType: agent.adapterType,
-            taskKey,
+            taskKey: effectiveTaskKey,
             sessionParamsJson: previousSessionParams,
             sessionDisplayId: previousSessionDisplayId,
             lastRunId: failedRun.id,
@@ -3383,7 +3490,9 @@ export function heartbeatService(db: Db) {
       .returning()
       .then((rows) => rows[0]);
 
-    const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey);
+    const wakeupMissionId = readNonEmptyString(enrichedContextSnapshot.missionId);
+    const wakeupEffectiveTaskKey = wakeupMissionId ? `mission:${wakeupMissionId}` : taskKey;
+    const sessionBefore = await resolveSessionBeforeForWakeup(agent, wakeupEffectiveTaskKey);
 
     const newRun = await db
       .insert(heartbeatRuns)

@@ -5,7 +5,7 @@
  * Provides CRUD for knowledge bases and retrieval interfaces.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
+import type { Db } from "@paperclipai/db";
 import { kbStore } from "./kb-store.js";
 import type {
   KnowledgeBase,

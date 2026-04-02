@@ -5,8 +5,8 @@
  * Provides create, trigger, cancel, and query operations for workflows.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { validateDag, executeWorkflowRun, reconcileStuckWorkflowRuns } from "./dag-engine.js";
+import type { Db } from "@paperclipai/db";
+import { validateDag, executeWorkflowRun, reconcileWorkflowRuns } from "./dag-engine.js";
 import {
   createWorkflowDefinition,
   getWorkflowDefinitionById,
@@ -29,6 +29,7 @@ import type {
   DagValidationResult,
   WorkflowExecutionResult,
 } from "./types.js";
+import type { WorkflowStep } from "./dag-engine.js";
 
 /**
  * Workflow service singleton.
@@ -135,7 +136,7 @@ export const workflowService = {
    * Validate a workflow DAG without creating it.
    */
   async validateDag(steps: unknown[]): Promise<DagValidationResult> {
-    return validateDag(steps as { id: string; dependencies: string[] }[]);
+    return validateDag(steps as WorkflowStep[]);
   },
 
   /**
@@ -145,7 +146,7 @@ export const workflowService = {
     db: Db,
     timeoutMinutes: number = 60,
   ): Promise<{ recovered: number; failed: number }> {
-    return reconcileStuckWorkflowRuns(db, timeoutMinutes);
+    return reconcileWorkflowRuns(db, timeoutMinutes);
   },
 };
 

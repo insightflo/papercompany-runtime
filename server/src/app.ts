@@ -10,6 +10,7 @@ import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { healthRoutes } from "./routes/health.js";
+import { metricsRoutes } from "./routes/metrics.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { agentRoutes } from "./routes/agents.js";
@@ -17,6 +18,10 @@ import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { routineRoutes } from "./routes/routines.js";
 import { schedulerRoutes } from "./routes/scheduler.js";
+import { worktreeRoutes } from "./routes/worktree.js";
+import { missionRoutes } from "./routes/missions.js";
+import { srbWebhookRoutes } from "./routes/srb-webhook.js";
+import { requireMaintenanceCompany } from "./middleware/company-kind-gate.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { approvalRoutes } from "./routes/approvals.js";
@@ -49,6 +54,13 @@ import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import { heartbeatService } from "./services/heartbeat.js";
 import { createScheduler } from "./services/scheduler/index.js";
+import { createDeliveryRetryWorker } from "./services/srb/delivery-retry-worker.js";
+import { createNonceCleanupJob } from "./services/srb/nonce-cleanup.js";
+import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
+import { createAlertRules, setAlertRules } from "./services/alert-rules.js";
+import { createChannelRegistry } from "./channel/index.js";
+import { getChatId } from "./channel/telegram/outbound.js";
+import { startAlertMonitor } from "./channel/telegram/alerts.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -140,6 +152,7 @@ export async function createApp(
       companyDeletionEnabled: opts.companyDeletionEnabled,
     }),
   );
+  api.use("/metrics", metricsRoutes());
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(companySkillRoutes(db));
   api.use(agentRoutes(db));
@@ -148,7 +161,11 @@ export async function createApp(
   api.use(issueRoutes(db, opts.storageService));
   api.use(routineRoutes(db));
   api.use(schedulerRoutes(db));
+  api.use(missionRoutes(db));
+  api.use(srbWebhookRoutes(db));
   api.use(executionWorkspaceRoutes(db));
+  // CRITICAL: single mount for maintenance gate — per-route is forbidden
+  api.use("/maintenance", requireMaintenanceCompany(db), worktreeRoutes(db));
   api.use(goalRoutes(db));
   api.use(approvalRoutes(db));
   api.use(secretRoutes(db));
@@ -292,13 +309,58 @@ export async function createApp(
   const heartbeat = heartbeatService(db);
   const scheduler = createScheduler(db, {
     heartbeat: {
-      enqueueWakeup: (agentId, opts) => heartbeat.enqueueWakeup(agentId, opts),
+      enqueueWakeup: (agentId, opts) => heartbeat.wakeup(agentId, {
+        source: "automation" as const,
+        payload: {
+          triggerDetail: opts?.triggerDetail ?? null,
+          missionId: opts?.missionId ?? null,
+        },
+        reason: opts?.reason ?? null,
+      }),
     },
   });
   scheduler.start();
 
+  // Initialize channel registry (Telegram bots)
+  const channelRegistry = createChannelRegistry(db);
+  void channelRegistry.start().catch((err) => {
+    logger.error({ err }, "Failed to start channel registry");
+  });
+
+  // Initialize alert rules — broadcast to all registered Telegram chats
+  const alertRules = createAlertRules(
+    () => scheduler.getState(),
+    async (message) => {
+      for (const companyId of channelRegistry.getActiveCompanyIds()) {
+        const chatId = getChatId(companyId);
+        if (chatId === undefined) continue;
+        const sender = channelRegistry.getTelegramSender(companyId);
+        if (!sender) continue;
+        try {
+          await sender(chatId, message);
+        } catch (err) {
+          logger.warn({ err, companyId }, "Alert: failed to send to company");
+        }
+      }
+    },
+  );
+  setAlertRules(alertRules);
+  alertRules.start();
+
+  // Start Telegram alert monitor — worktree violation spike detection (P9-T9)
+  const stopAlertMonitor = startAlertMonitor(db);
+  process.once("exit", stopAlertMonitor);
+
+  const srbRetryWorker = createDeliveryRetryWorker(db);
+  srbRetryWorker.start();
+
+  const srbNonceCleanup = createNonceCleanupJob(db);
+  srbNonceCleanup.start();
+
+  const auditLogCleanup = createAuditLogCleanupJob(db);
+  auditLogCleanup.start();
+
   jobCoordinator.start();
-  scheduler.start();
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });

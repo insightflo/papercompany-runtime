@@ -4,9 +4,9 @@
  * Helper functions for workflow operations.
  */
 
-import { workflowDefinitions } from "../../packages/db/src/schema/index.js";
+import { workflowDefinitions } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
-import type { Db } from "../../packages/db/src/client.js";
+import type { Db } from "@paperclipai/db";
 import type { WorkflowStep } from "./dag-engine.js";
 
 /**

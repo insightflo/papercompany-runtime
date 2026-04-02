@@ -5,8 +5,8 @@
  * Replaces PluginContext with direct database access via Drizzle.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { workflowRuns, workflowStepRuns, issues } from "../../packages/db/src/schema/index.js";
+import type { Db } from "@paperclipai/db";
+import { workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
 import { eq, and, sql } from "drizzle-orm";
 
 /**

@@ -17,6 +17,7 @@ import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { projectWorkspaces } from "./project_workspaces.js";
 import { executionWorkspaces } from "./execution_workspaces.js";
+import { missions } from "./missions.js";
 
 export const issues = pgTable(
   "issues",
@@ -26,6 +27,7 @@ export const issues = pgTable(
     projectId: uuid("project_id").references(() => projects.id),
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
+    missionId: uuid("mission_id").references(() => missions.id, { onDelete: "set null" }),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
     title: text("title").notNull(),
     description: text("description"),
@@ -71,6 +73,7 @@ export const issues = pgTable(
       table.status,
     ),
     parentIdx: index("issues_company_parent_idx").on(table.companyId, table.parentId),
+    missionIdx: index("issues_company_mission_idx").on(table.companyId, table.missionId),
     projectIdx: index("issues_company_project_idx").on(table.companyId, table.projectId),
     originIdx: index("issues_company_origin_idx").on(table.companyId, table.originKind, table.originId),
     projectWorkspaceIdx: index("issues_company_project_workspace_idx").on(table.companyId, table.projectWorkspaceId),
