@@ -4,7 +4,7 @@ import {
   normalizeForwardedPlaywrightArgs,
   resolvePlaywrightSuiteExecutionContext,
   resolvePlaywrightSuiteConfigPath,
-} from "../../../scripts/playwright-suite-config.mjs";
+} from "../test-utils/playwright-suite-config.js";
 
 describe("playwright suite config resolver", () => {
   it("prefers the root tests path when both candidates exist", () => {
@@ -16,7 +16,7 @@ describe("playwright suite config resolver", () => {
     const resolved = resolvePlaywrightSuiteConfigPath({
       suiteName: "release-smoke",
       cwd: "/repo",
-      fileExists: (candidate) => existingPaths.has(candidate),
+      fileExists: (candidate: string) => existingPaths.has(candidate),
     });
 
     expect(resolved).toBe("/repo/tests/release-smoke/playwright.config.ts");
@@ -28,7 +28,7 @@ describe("playwright suite config resolver", () => {
     const resolved = resolvePlaywrightSuiteConfigPath({
       suiteName: "release-smoke",
       cwd: "/repo",
-      fileExists: (candidate) => existingPaths.has(candidate),
+      fileExists: (candidate: string) => existingPaths.has(candidate),
     });
 
     expect(resolved).toBe("/repo/paperclip-orginal/tests/release-smoke/playwright.config.ts");
@@ -40,7 +40,7 @@ describe("playwright suite config resolver", () => {
     const context = resolvePlaywrightSuiteExecutionContext({
       suiteName: "release-smoke",
       cwd: "/repo",
-      fileExists: (candidate) => existingPaths.has(candidate),
+      fileExists: (candidate: string) => existingPaths.has(candidate),
     });
 
     expect(context).toEqual({

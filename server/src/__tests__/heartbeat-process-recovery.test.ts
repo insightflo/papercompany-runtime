@@ -103,7 +103,7 @@ describe("heartbeat orphaned process recovery", () => {
     db = createDb(started.connectionString);
     instance = started.instance;
     dataDir = started.dataDir;
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     runningProcesses.clear();

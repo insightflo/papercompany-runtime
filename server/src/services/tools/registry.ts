@@ -4,8 +4,8 @@
  * Manages tool definitions, audit logging, and tool dispatch with worktree integration.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { toolDefinitions, toolAuditLog, agents, issues } from "../../packages/db/src/schema/index.js";
+import type { Db } from "@paperclipai/db";
+import { toolDefinitions, toolAuditLog, agents, issues } from "@paperclipai/db";
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "node:crypto";
 import type {
@@ -98,16 +98,17 @@ export const toolService = {
     db: Db,
     filters: { companyId?: string; enabled?: boolean } = {},
   ): Promise<ToolDefinition[]> {
-    let query = db.select().from(toolDefinitions);
+    const conditions = [];
+    if (filters.companyId) conditions.push(eq(toolDefinitions.companyId, filters.companyId));
+    if (filters.enabled !== undefined) conditions.push(eq(toolDefinitions.enabled, filters.enabled));
 
-    if (filters.companyId) {
-      query = query.where(eq(toolDefinitions.companyId, filters.companyId));
-    }
-    if (filters.enabled !== undefined) {
-      query = query.where(eq(toolDefinitions.enabled, filters.enabled));
-    }
+    const rows = await db
+      .select()
+      .from(toolDefinitions)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(toolDefinitions.createdAt));
 
-    return query.orderBy(desc(toolDefinitions.createdAt)) as Promise<ToolDefinition[]>;
+    return rows as ToolDefinition[];
   },
 
   /**
@@ -133,11 +134,12 @@ export const toolService = {
    * Delete a tool definition.
    */
   async deleteDefinition(db: Db, id: string): Promise<boolean> {
-    const result = await db
+    const rows = await db
       .delete(toolDefinitions)
-      .where(eq(toolDefinitions.id, id));
+      .where(eq(toolDefinitions.id, id))
+      .returning({ id: toolDefinitions.id });
 
-    return (result.rowCount ?? 0) > 0;
+    return rows.length > 0;
   },
 
   /**
@@ -241,22 +243,18 @@ export const toolService = {
     db: Db,
     filters: { toolId?: string; companyId?: string; limit?: number },
   ): Promise<ToolAuditLogEntry[]> {
-    let query = db.select().from(toolAuditLog);
+    const conditions = [];
+    if (filters.toolId) conditions.push(eq(toolAuditLog.toolId, filters.toolId));
+    if (filters.companyId) conditions.push(eq(toolAuditLog.companyId, filters.companyId));
 
-    if (filters.toolId) {
-      query = query.where(eq(toolAuditLog.toolId, filters.toolId));
-    }
-    if (filters.companyId) {
-      query = query.where(eq(toolAuditLog.companyId, filters.companyId));
-    }
+    const baseQuery = db
+      .select()
+      .from(toolAuditLog)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(toolAuditLog.createdAt));
 
-    query = query.orderBy(desc(toolAuditLog.createdAt));
-
-    if (filters.limit) {
-      query = query.limit(filters.limit);
-    }
-
-    return query as Promise<ToolAuditLogEntry[]>;
+    const rows = filters.limit !== undefined ? await baseQuery.limit(filters.limit) : await baseQuery;
+    return rows as ToolAuditLogEntry[];
   },
 };
 

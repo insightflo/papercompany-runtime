@@ -1326,14 +1326,15 @@ export function agentRoutes(db: Db) {
     const {
       desiredSkills: requestedDesiredSkills,
       ...createInput
-    } = normalizedBody;
+    } = normalizedBody as AgentCreateInput & { desiredSkills?: unknown };
+    const adapterType = typeof createInput.adapterType === "string" ? createInput.adapterType : "process";
     const requestedAdapterConfig = applyCreateDefaultsByAdapterType(
-      createInput.adapterType,
+      adapterType,
       ((createInput.adapterConfig ?? {}) as Record<string, unknown>),
     );
     const desiredSkillAssignment = await resolveDesiredSkillAssignment(
       companyId,
-      createInput.adapterType,
+      adapterType,
       requestedAdapterConfig,
       Array.isArray(requestedDesiredSkills) ? requestedDesiredSkills : undefined,
     );
@@ -1344,12 +1345,13 @@ export function agentRoutes(db: Db) {
     );
     await assertAdapterConfigConstraints(
       companyId,
-      createInput.adapterType,
+      adapterType,
       normalizedAdapterConfig,
     );
 
     const createdAgent = await svc.create(companyId, {
-      ...createInput,
+      ...(createInput as AgentCreateInput),
+      adapterType,
       adapterConfig: normalizedAdapterConfig,
       status: "idle",
       spentMonthlyCents: 0,
@@ -2291,3 +2293,4 @@ export function agentRoutes(db: Db) {
 
   return router;
 }
+type AgentCreateInput = Omit<typeof agentsTable.$inferInsert, "companyId">;

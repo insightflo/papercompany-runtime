@@ -1411,6 +1411,22 @@ function grantsFromDefaults(
   return result;
 }
 
+export function agentJoinGrantsFromDefaults(
+  defaultsPayload: Record<string, unknown> | null | undefined,
+) {
+  const grants = grantsFromDefaults(defaultsPayload, "agent");
+  if (grants.some((grant) => grant.permissionKey === "tasks:assign")) {
+    return grants;
+  }
+  return [
+    ...grants,
+    {
+      permissionKey: "tasks:assign" as (typeof PERMISSION_KEYS)[number],
+      scope: null,
+    },
+  ];
+}
+
 type JoinRequestManagerCandidate = {
   id: string;
   role: string;

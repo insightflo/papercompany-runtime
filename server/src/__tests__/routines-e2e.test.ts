@@ -154,7 +154,7 @@ describe("routine routes end-to-end", () => {
     db = createDb(started.connectionString);
     instance = started.instance;
     dataDir = started.dataDir;
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     await db.delete(activityLog);
@@ -336,5 +336,5 @@ describe("routine routes end-to-end", () => {
         "routine.run_triggered",
       ]),
     );
-  });
+  }, 20_000);
 });

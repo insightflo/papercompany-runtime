@@ -5,12 +5,12 @@ function isTaskPath(filePath: string): boolean {
 }
 
 function buildRecurringTaskPrefixes(
-  issues: Array<Pick<CompanyPortabilityIssueManifestEntry, "path" | "recurring">>,
+  issues: Array<Pick<CompanyPortabilityIssueManifestEntry, "path" | "recurrence">>,
 ): Set<string> {
   const prefixes = new Set<string>();
 
   for (const issue of issues) {
-    if (!issue.recurring) continue;
+    if (!issue.recurrence) continue;
 
     const filePath = issue.path.trim();
     if (!filePath) continue;
@@ -35,7 +35,7 @@ function isRecurringTaskFile(filePath: string, recurringTaskPrefixes: Set<string
 
 export function buildInitialExportCheckedFiles(
   filePaths: string[],
-  issues: Array<Pick<CompanyPortabilityIssueManifestEntry, "path" | "recurring">>,
+  issues: Array<Pick<CompanyPortabilityIssueManifestEntry, "path" | "recurrence">>,
   previousCheckedFiles: Set<string>,
 ): Set<string> {
   const next = new Set<string>();

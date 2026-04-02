@@ -5,11 +5,12 @@
  * Replaces PluginContext.entities with direct Drizzle ORM queries.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { workflowDefinitions, workflowRuns, workflowStepRuns, issues } from "../../packages/db/src/schema/index.js";
+import type { Db } from "@paperclipai/db";
+import { workflowDefinitions, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "./types.js";
 import type { CreateWorkflowDefinitionInput, CreateWorkflowRunInput } from "./types.js";
+import type { WorkflowStep } from "./dag-engine.js";
 
 /**
  * Create a new workflow definition.
@@ -49,14 +50,14 @@ export async function getWorkflowDefinitionById(
   if (!result[0]) return null;
 
   const def = result[0];
-  return {
-    id: def.id,
-    companyId: def.companyId,
-    name: def.name,
-    steps: def.stepsJson as unknown[],
-    createdAt: def.createdAt,
-    updatedAt: def.updatedAt,
-  };
+    return {
+      id: def.id,
+      companyId: def.companyId,
+      name: def.name,
+      steps: def.stepsJson as WorkflowStep[],
+      createdAt: def.createdAt,
+      updatedAt: def.updatedAt,
+    };
 }
 
 /**
@@ -76,7 +77,7 @@ export async function listWorkflowDefinitions(
     id: def.id,
     companyId: def.companyId,
     name: def.name,
-    steps: def.stepsJson as unknown[],
+    steps: def.stepsJson as WorkflowStep[],
     createdAt: def.createdAt,
     updatedAt: def.updatedAt,
   }));
@@ -105,11 +106,12 @@ export async function updateWorkflowDefinition(
  * Delete a workflow definition.
  */
 export async function deleteWorkflowDefinition(db: Db, id: string): Promise<boolean> {
-  const result = await db
+  const rows = await db
     .delete(workflowDefinitions)
-    .where(eq(workflowDefinitions.id, id));
+    .where(eq(workflowDefinitions.id, id))
+    .returning({ id: workflowDefinitions.id });
 
-  return (result.rowCount ?? 0) > 0;
+  return rows.length > 0;
 }
 
 /**
@@ -159,19 +161,16 @@ export async function listWorkflowRuns(
   db: Db,
   filters: { companyId?: string; workflowId?: string; missionId?: string },
 ): Promise<WorkflowRun[]> {
-  let query = db.select().from(workflowRuns);
+  const conditions = [];
+  if (filters.companyId) conditions.push(eq(workflowRuns.companyId, filters.companyId));
+  if (filters.workflowId) conditions.push(eq(workflowRuns.workflowId, filters.workflowId));
+  if (filters.missionId) conditions.push(eq(workflowRuns.missionId, filters.missionId));
 
-  if (filters.companyId) {
-    query = query.where(eq(workflowRuns.companyId, filters.companyId));
-  }
-  if (filters.workflowId) {
-    query = query.where(eq(workflowRuns.workflowId, filters.workflowId));
-  }
-  if (filters.missionId) {
-    query = query.where(eq(workflowRuns.missionId, filters.missionId));
-  }
-
-  const results = await query.orderBy(desc(workflowRuns.createdAt));
+  const results = await db
+    .select()
+    .from(workflowRuns)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(workflowRuns.createdAt));
   return results as WorkflowRun[];
 }
 
@@ -224,13 +223,14 @@ export async function updateWorkflowRunStatus(
  * Cancel a workflow run.
  */
 export async function cancelWorkflowRun(db: Db, id: string): Promise<boolean> {
-  const result = await db
+  const rows = await db
     .update(workflowRuns)
     .set({
       status: "cancelled",
       completedAt: new Date(),
     })
-    .where(eq(workflowRuns.id, id));
+    .where(eq(workflowRuns.id, id))
+    .returning({ id: workflowRuns.id });
 
-  return (result.rowCount ?? 0) > 0;
+  return rows.length > 0;
 }

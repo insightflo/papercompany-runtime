@@ -1,7 +1,16 @@
 import type { UIAdapterModule } from "../types";
-import { parseHermesStdoutLine } from "hermes-paperclip-adapter/ui";
+import type { CreateConfigValues, TranscriptEntry } from "../types";
 import { HermesLocalConfigFields } from "./config-fields";
-import { buildHermesConfig } from "hermes-paperclip-adapter/ui";
+
+function parseHermesStdoutLine(line: string, ts: string): TranscriptEntry[] {
+  return [{ kind: "stdout", ts, text: line }];
+}
+
+function buildHermesConfig(values: CreateConfigValues): Record<string, unknown> {
+  return {
+    instructionsFilePath: values.instructionsFilePath ?? undefined,
+  };
+}
 
 export const hermesLocalUIAdapter: UIAdapterModule = {
   type: "hermes_local",

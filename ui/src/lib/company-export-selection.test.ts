@@ -12,8 +12,8 @@ describe("buildInitialExportCheckedFiles", () => {
         "tasks/recurring/notes.md",
       ],
       [
-        { path: "tasks/one-off/TASK.md", recurring: false },
-        { path: "tasks/recurring/TASK.md", recurring: true },
+        { path: "tasks/one-off/TASK.md", recurrence: null },
+        { path: "tasks/recurring/TASK.md", recurrence: { cadence: "daily" } },
       ],
       new Set<string>(),
     );
@@ -29,7 +29,7 @@ describe("buildInitialExportCheckedFiles", () => {
   it("preserves previous manual selections for one-time tasks", () => {
     const checked = buildInitialExportCheckedFiles(
       ["README.md", "tasks/one-off/TASK.md"],
-      [{ path: "tasks/one-off/TASK.md", recurring: false }],
+      [{ path: "tasks/one-off/TASK.md", recurrence: null }],
       new Set(["tasks/one-off/TASK.md"]),
     );
 

@@ -12,6 +12,12 @@ export {
   type Db,
 } from "./client.js";
 export {
+  getEmbeddedPostgresTestSupport,
+  startEmbeddedPostgresTestDatabase,
+  type EmbeddedPostgresTestDatabase,
+  type EmbeddedPostgresTestSupport,
+} from "./test-embedded-postgres.js";
+export {
   runDatabaseBackup,
   runDatabaseRestore,
   formatDatabaseBackupResult,

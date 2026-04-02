@@ -18,6 +18,7 @@ import {
   issueReadStates,
   issues,
   labels,
+  missions,
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
@@ -74,6 +75,7 @@ export interface IssueFilters {
   labelId?: string;
   originKind?: string;
   originId?: string;
+  missionId?: string;
   includeRoutineExecutions?: boolean;
   q?: string;
 }
@@ -104,6 +106,7 @@ type IssueUserContextInput = {
   updatedAt: Date | string;
 };
 type ProjectGoalReader = Pick<Db, "select">;
+type IssueWriteDb = Pick<Db, "select" | "insert" | "update" | "delete">;
 
 function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   if (actorRunId) return checkoutRunId === actorRunId;
@@ -598,6 +601,125 @@ export function issueService(db: Db) {
     return adopted;
   }
 
+  async function assertValidCreateInput(
+    companyId: string,
+    data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+  ) {
+    if (data.assigneeAgentId && data.assigneeUserId) {
+      throw unprocessable("Issue can only have one assignee");
+    }
+    if (data.assigneeAgentId) {
+      await assertAssignableAgent(companyId, data.assigneeAgentId);
+    }
+    if (data.assigneeUserId) {
+      await assertAssignableUser(companyId, data.assigneeUserId);
+    }
+    if (data.projectWorkspaceId) {
+      await assertValidProjectWorkspace(companyId, data.projectId, data.projectWorkspaceId);
+    }
+    if (data.executionWorkspaceId) {
+      await assertValidExecutionWorkspace(companyId, data.projectId, data.executionWorkspaceId);
+    }
+    if (data.missionId) {
+      const [mission] = await db
+        .select({ id: missions.id, companyId: missions.companyId })
+        .from(missions)
+        .where(eq(missions.id, data.missionId))
+        .limit(1);
+      if (!mission) throw notFound(`Mission not found: ${data.missionId}`);
+      if (mission.companyId !== companyId) {
+        throw unprocessable("Mission must belong to the same company");
+      }
+    }
+    if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
+      throw unprocessable("in_progress issues require an assignee");
+    }
+  }
+
+  async function createIssueRecord(
+    dbOrTx: IssueWriteDb,
+    companyId: string,
+    data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+    isolatedWorkspacesEnabled: boolean,
+  ) {
+    const { labelIds: inputLabelIds, ...issueData } = data;
+    const defaultCompanyGoal = await getDefaultCompanyGoal(dbOrTx, companyId);
+    const projectGoalId = await getProjectDefaultGoalId(dbOrTx, companyId, issueData.projectId);
+    let executionWorkspaceSettings =
+      (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
+    if (executionWorkspaceSettings == null && issueData.projectId) {
+      const project = await dbOrTx
+        .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
+        .from(projects)
+        .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      executionWorkspaceSettings =
+        defaultIssueExecutionWorkspaceSettingsForProject(
+          gateProjectExecutionWorkspacePolicy(
+            parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy),
+            isolatedWorkspacesEnabled,
+          ),
+        ) as Record<string, unknown> | null;
+    }
+    let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
+    if (!projectWorkspaceId && issueData.projectId) {
+      const project = await dbOrTx
+        .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
+        .from(projects)
+        .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      const projectPolicy = parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy);
+      projectWorkspaceId = projectPolicy?.defaultProjectWorkspaceId ?? null;
+      if (!projectWorkspaceId) {
+        projectWorkspaceId = await dbOrTx
+          .select({ id: projectWorkspaces.id })
+          .from(projectWorkspaces)
+          .where(and(eq(projectWorkspaces.projectId, issueData.projectId), eq(projectWorkspaces.companyId, companyId)))
+          .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
+          .then((rows) => rows[0]?.id ?? null);
+      }
+    }
+    const [company] = await dbOrTx
+      .update(companies)
+      .set({ issueCounter: sql`${companies.issueCounter} + 1` })
+      .where(eq(companies.id, companyId))
+      .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
+
+    const issueNumber = company.issueCounter;
+    const identifier = `${company.issuePrefix}-${issueNumber}`;
+
+    const values = {
+      ...issueData,
+      originKind: issueData.originKind ?? "manual",
+      goalId: resolveIssueGoalId({
+        projectId: issueData.projectId,
+        goalId: issueData.goalId ?? projectGoalId,
+        defaultGoalId: defaultCompanyGoal?.id ?? null,
+      }),
+      ...(projectWorkspaceId ? { projectWorkspaceId } : {}),
+      ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
+      companyId,
+      issueNumber,
+      identifier,
+    } as typeof issues.$inferInsert;
+    if (values.status === "in_progress" && !values.startedAt) {
+      values.startedAt = new Date();
+    }
+    if (values.status === "done") {
+      values.completedAt = new Date();
+    }
+    if (values.status === "cancelled") {
+      values.cancelledAt = new Date();
+    }
+
+    const [issue] = await dbOrTx.insert(issues).values(values).returning();
+    if (inputLabelIds) {
+      await syncIssueLabels(issue.id, companyId, inputLabelIds, dbOrTx);
+    }
+    const [enriched] = await withIssueLabels(dbOrTx, [issue]);
+    return enriched;
+  }
+
   return {
     list: async (companyId: string, filters?: IssueFilters) => {
       const conditions = [eq(issues.companyId, companyId)];
@@ -650,6 +772,7 @@ export function issueService(db: Db) {
       if (filters?.parentId) conditions.push(eq(issues.parentId, filters.parentId));
       if (filters?.originKind) conditions.push(eq(issues.originKind, filters.originKind));
       if (filters?.originId) conditions.push(eq(issues.originId, filters.originId));
+      if (filters?.missionId) conditions.push(eq(issues.missionId, filters.missionId));
       if (filters?.labelId) {
         const labeledIssueIds = await db
           .select({ issueId: issueLabels.issueId })
@@ -860,104 +983,25 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }
-      if (data.assigneeAgentId && data.assigneeUserId) {
-        throw unprocessable("Issue can only have one assignee");
-      }
-      if (data.assigneeAgentId) {
-        await assertAssignableAgent(companyId, data.assigneeAgentId);
-      }
-      if (data.assigneeUserId) {
-        await assertAssignableUser(companyId, data.assigneeUserId);
-      }
-      if (data.projectWorkspaceId) {
-        await assertValidProjectWorkspace(companyId, data.projectId, data.projectWorkspaceId);
-      }
-      if (data.executionWorkspaceId) {
-        await assertValidExecutionWorkspace(companyId, data.projectId, data.executionWorkspaceId);
-      }
-      if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
-        throw unprocessable("in_progress issues require an assignee");
-      }
-      return db.transaction(async (tx) => {
-        const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
-        const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
-        let executionWorkspaceSettings =
-          (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
-        if (executionWorkspaceSettings == null && issueData.projectId) {
-          const project = await tx
-            .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
-            .from(projects)
-            .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
-            .then((rows) => rows[0] ?? null);
-          executionWorkspaceSettings =
-            defaultIssueExecutionWorkspaceSettingsForProject(
-              gateProjectExecutionWorkspacePolicy(
-                parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy),
-                isolatedWorkspacesEnabled,
-              ),
-            ) as Record<string, unknown> | null;
-        }
-        let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
-        if (!projectWorkspaceId && issueData.projectId) {
-          const project = await tx
-            .select({
-              executionWorkspacePolicy: projects.executionWorkspacePolicy,
-            })
-            .from(projects)
-            .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
-            .then((rows) => rows[0] ?? null);
-          const projectPolicy = parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy);
-          projectWorkspaceId = projectPolicy?.defaultProjectWorkspaceId ?? null;
-          if (!projectWorkspaceId) {
-            projectWorkspaceId = await tx
-              .select({ id: projectWorkspaces.id })
-              .from(projectWorkspaces)
-              .where(and(eq(projectWorkspaces.projectId, issueData.projectId), eq(projectWorkspaces.companyId, companyId)))
-              .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
-              .then((rows) => rows[0]?.id ?? null);
-          }
-        }
-        const [company] = await tx
-          .update(companies)
-          .set({ issueCounter: sql`${companies.issueCounter} + 1` })
-          .where(eq(companies.id, companyId))
-          .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
+      await assertValidCreateInput(companyId, data);
+      return db.transaction(async (tx: IssueWriteDb) =>
+        await createIssueRecord(tx, companyId, data, isolatedWorkspacesEnabled)
+      );
+    },
 
-        const issueNumber = company.issueCounter;
-        const identifier = `${company.issuePrefix}-${issueNumber}`;
-
-        const values = {
-          ...issueData,
-          originKind: issueData.originKind ?? "manual",
-          goalId: resolveIssueGoalId({
-            projectId: issueData.projectId,
-            goalId: issueData.goalId,
-            projectGoalId,
-            defaultGoalId: defaultCompanyGoal?.id ?? null,
-          }),
-          ...(projectWorkspaceId ? { projectWorkspaceId } : {}),
-          ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
-          companyId,
-          issueNumber,
-          identifier,
-        } as typeof issues.$inferInsert;
-        if (values.status === "in_progress" && !values.startedAt) {
-          values.startedAt = new Date();
-        }
-        if (values.status === "done") {
-          values.completedAt = new Date();
-        }
-        if (values.status === "cancelled") {
-          values.cancelledAt = new Date();
-        }
-
-        const [issue] = await tx.insert(issues).values(values).returning();
-        if (inputLabelIds) {
-          await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
-        }
-        const [enriched] = await withIssueLabels(tx, [issue]);
-        return enriched;
-      });
+    createFromSrb: async (
+      dbOrTx: IssueWriteDb,
+      companyId: string,
+      data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+    ) => {
+      const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
+      if (!isolatedWorkspacesEnabled) {
+        delete data.executionWorkspaceId;
+        delete data.executionWorkspacePreference;
+        delete data.executionWorkspaceSettings;
+      }
+      await assertValidCreateInput(companyId, data);
+      return await createIssueRecord(dbOrTx, companyId, data, isolatedWorkspacesEnabled);
     },
 
     update: async (id: string, data: Partial<typeof issues.$inferInsert> & { labelIds?: string[] }) => {
@@ -1002,6 +1046,19 @@ export function issueService(db: Db) {
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
       }
+      if (issueData.missionId !== undefined) {
+        if (issueData.missionId !== null) {
+          const [mission] = await db
+            .select({ id: missions.id, companyId: missions.companyId })
+            .from(missions)
+            .where(eq(missions.id, issueData.missionId))
+            .limit(1);
+          if (!mission) throw notFound(`Mission not found: ${issueData.missionId}`);
+          if (mission.companyId !== existing.companyId) {
+            throw unprocessable("Mission must belong to the same company");
+          }
+        }
+      }
       const nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
       const nextProjectWorkspaceId =
         issueData.projectWorkspaceId !== undefined ? issueData.projectWorkspaceId : existing.projectWorkspaceId;
@@ -1041,13 +1098,15 @@ export function issueService(db: Db) {
             issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
           ),
         ]);
+        const resolvedNextGoalId =
+          issueData.goalId !== undefined
+            ? issueData.goalId
+            : (nextProjectGoalId ?? currentProjectGoalId ?? existing.goalId);
         patch.goalId = resolveNextIssueGoalId({
           currentProjectId: existing.projectId,
           currentGoalId: existing.goalId,
-          currentProjectGoalId,
           projectId: issueData.projectId,
-          goalId: issueData.goalId,
-          projectGoalId: nextProjectGoalId,
+          goalId: resolvedNextGoalId,
           defaultGoalId: defaultCompanyGoal?.id ?? null,
         });
         const updated = await tx

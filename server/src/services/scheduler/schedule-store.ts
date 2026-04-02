@@ -137,11 +137,12 @@ export const scheduleStore = {
    * Delete a schedule.
    */
   async deleteSchedule(db: Db, id: string): Promise<boolean> {
-    const result = await db
+    const rows = await db
       .delete(schedules)
-      .where(eq(schedules.id, id));
+      .where(eq(schedules.id, id))
+      .returning({ id: schedules.id });
 
-    return (result.rowCount ?? 0) > 0;
+    return rows.length > 0;
   },
 
   /**

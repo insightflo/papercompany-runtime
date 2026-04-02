@@ -5,8 +5,8 @@
  * Replaces plugin entity storage with direct Drizzle ORM queries.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { knowledgeBases, agentKbGrants, agents } from "../../packages/db/src/schema/index.js";
+import type { Db } from "@paperclipai/db";
+import { knowledgeBases, agentKbGrants, agents } from "@paperclipai/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import type {
   KnowledgeBase,
@@ -150,11 +150,12 @@ export const kbStore = {
    * Delete a knowledge base.
    */
   async deleteKnowledgeBase(db: Db, id: string): Promise<boolean> {
-    const result = await db
+    const rows = await db
       .delete(knowledgeBases)
-      .where(eq(knowledgeBases.id, id));
+      .where(eq(knowledgeBases.id, id))
+      .returning({ id: knowledgeBases.id });
 
-    return (result.rowCount ?? 0) > 0;
+    return rows.length > 0;
   },
 
   /**
@@ -202,16 +203,17 @@ export const kbStore = {
    * Revoke agent access to a knowledge base.
    */
   async revokeAgentAccess(db: Db, agentId: string, kbId: string): Promise<boolean> {
-    const result = await db
+    const rows = await db
       .delete(agentKbGrants)
       .where(
         and(
           eq(agentKbGrants.agentId, agentId),
           eq(agentKbGrants.kbId, kbId),
         ),
-      );
+      )
+      .returning({ id: agentKbGrants.id });
 
-    return (result.rowCount ?? 0) > 0;
+    return rows.length > 0;
   },
 
   /**

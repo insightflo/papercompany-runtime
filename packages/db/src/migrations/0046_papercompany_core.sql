@@ -30,7 +30,7 @@ CREATE TABLE "missions" (
   "goal_id" uuid REFERENCES "goals"(id) ON DELETE SET NULL,
   "started_at" TIMESTAMPTZ,
   "completed_at" TIMESTAMPTZ,
-  "created_at" TIMESTAMPTZ NOT DEFAULT now(),
+  "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
   "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

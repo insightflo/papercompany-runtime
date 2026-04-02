@@ -4,8 +4,8 @@
  * Provides audit logging for tool invocations with aggregation and analysis.
  */
 
-import type { Db } from "../../packages/db/src/client.js";
-import { toolAuditLog, toolDefinitions } from "../../packages/db/src/schema/index.js";
+import type { Db } from "@paperclipai/db";
+import { toolAuditLog, toolDefinitions } from "@paperclipai/db";
 import { eq, and, sql, desc, gte } from "drizzle-orm";
 import type { ToolAuditLogEntry } from "./types.js";
 
@@ -63,22 +63,18 @@ export async function getRecentAuditLog(
   db: Db,
   filters: { companyId?: string; agentId?: string; limit?: number } = {},
 ): Promise<ToolAuditLogEntry[]> {
-  let query = db.select().from(toolAuditLog);
+  const conditions = [];
+  if (filters.companyId) conditions.push(eq(toolAuditLog.companyId, filters.companyId));
+  if (filters.agentId) conditions.push(eq(toolAuditLog.agentId, filters.agentId));
 
-  if (filters.companyId) {
-    query = query.where(eq(toolAuditLog.companyId, filters.companyId));
-  }
-  if (filters.agentId) {
-    query = query.where(eq(toolAuditLog.agentId, filters.agentId));
-  }
+  const baseQuery = db
+    .select()
+    .from(toolAuditLog)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(toolAuditLog.createdAt));
 
-  query = query.orderBy(desc(toolAuditLog.createdAt));
-
-  if (filters.limit) {
-    query = query.limit(filters.limit);
-  }
-
-  return query as unknown as Promise<ToolAuditLogEntry[]>;
+  const rows = filters.limit !== undefined ? await baseQuery.limit(filters.limit) : await baseQuery;
+  return rows as ToolAuditLogEntry[];
 }
 
 /**
@@ -89,7 +85,7 @@ export async function checkAgentInvocationLimit(
   agentId: string,
   windowMinutes: number = 60,
   maxInvocations: number = 1000,
-): Promise { withinLimit: boolean; currentCount: number } {
+): Promise<{ withinLimit: boolean; currentCount: number }> {
   const cutoff = new Date(Date.now() - windowMinutes * 60 * 1000);
 
   const result = await db

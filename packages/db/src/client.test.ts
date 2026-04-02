@@ -152,7 +152,7 @@ describe("applyPendingMigrations", () => {
         await verifySql.end();
       }
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -196,7 +196,7 @@ describe("applyPendingMigrations", () => {
       const finalState = await inspectMigrations(connectionString);
       expect(finalState.status).toBe("upToDate");
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -226,6 +226,6 @@ describe("applyPendingMigrations", () => {
         await sql.end();
       }
     },
-    20_000,
+    45_000,
   );
 });

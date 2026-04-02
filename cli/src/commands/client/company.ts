@@ -19,6 +19,7 @@ import {
   resolveCommandContext,
   type BaseClientOptions,
 } from "./common.js";
+import { readZipArchive } from "./zip.js";
 
 interface CompanyCommandOptions extends BaseClientOptions {}
 type CompanyDeleteSelectorMode = "auto" | "id" | "prefix";
@@ -246,6 +247,14 @@ async function pathExists(inputPath: string): Promise<boolean> {
   }
 }
 
+function isPortableFilePath(filePath: string): boolean {
+  const baseName = path.basename(filePath);
+  const isMarkdown = baseName.endsWith(".md");
+  const isPaperclipYaml = baseName === ".paperclip.yaml" || baseName === ".paperclip.yml";
+  const contentType = binaryContentTypeByExtension[path.extname(baseName).toLowerCase()];
+  return isMarkdown || isPaperclipYaml || !!contentType;
+}
+
 async function collectPackageFiles(
   root: string,
   current: string,
@@ -260,21 +269,29 @@ async function collectPackageFiles(
       continue;
     }
     if (!entry.isFile()) continue;
-    const isMarkdown = entry.name.endsWith(".md");
-    const isPaperclipYaml = entry.name === ".paperclip.yaml" || entry.name === ".paperclip.yml";
-    const contentType = binaryContentTypeByExtension[path.extname(entry.name).toLowerCase()];
-    if (!isMarkdown && !isPaperclipYaml && !contentType) continue;
+    if (!isPortableFilePath(entry.name)) continue;
     const relativePath = path.relative(root, absolutePath).replace(/\\/g, "/");
     files[relativePath] = readPortableFileEntry(relativePath, await readFile(absolutePath));
   }
 }
 
-async function resolveInlineSourceFromPath(inputPath: string): Promise<{
+export async function resolveInlineSourceFromPath(inputPath: string): Promise<{
   rootPath: string;
   files: Record<string, CompanyPortabilityFileEntry>;
 }> {
   const resolved = path.resolve(inputPath);
   const resolvedStat = await stat(resolved);
+  if (resolvedStat.isFile() && path.extname(resolved).toLowerCase() === ".zip") {
+    const archive = await readFile(resolved);
+    const extracted = await readZipArchive(archive);
+    const filteredFiles = Object.fromEntries(
+      Object.entries(extracted.files).filter(([relativePath]) => isPortableFilePath(relativePath)),
+    );
+    return {
+      rootPath: extracted.rootPath ?? path.basename(resolved, ".zip"),
+      files: filteredFiles,
+    };
+  }
   const rootDir = resolvedStat.isDirectory() ? resolved : path.dirname(resolved);
   const files: Record<string, CompanyPortabilityFileEntry> = {};
   await collectPackageFiles(rootDir, rootDir, files);
