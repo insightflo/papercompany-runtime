@@ -67,6 +67,10 @@ export const queryKeys = {
     list: (companyId: string) => ["goals", companyId] as const,
     detail: (id: string) => ["goals", "detail", id] as const,
   },
+  missions: {
+    list: (companyId: string) => ["missions", companyId] as const,
+    detail: (id: string) => ["missions", "detail", id] as const,
+  },
   budgets: {
     overview: (companyId: string) => ["budgets", "overview", companyId] as const,
   },
@@ -135,5 +139,18 @@ export const queryKeys = {
     config: (pluginId: string) => ["plugins", pluginId, "config"] as const,
     dashboard: (pluginId: string) => ["plugins", pluginId, "dashboard"] as const,
     logs: (pluginId: string) => ["plugins", pluginId, "logs"] as const,
+  },
+  scheduler: {
+    list: (companyId: string) => ["scheduler", companyId] as const,
+    detail: (id: string) => ["scheduler", "detail", id] as const,
+  },
+  channel: {
+    config: (companyId: string) => ["channel-config", companyId] as const,
+  },
+  worktree: {
+    rules: (companyId: string) => ["worktree-rules", companyId] as const,
+    ruleDetail: (id: string) => ["worktree-rules", "detail", id] as const,
+    proposals: (companyId: string) => ["worktree-proposals", companyId] as const,
+    proposalDetail: (id: string) => ["worktree-proposals", "detail", id] as const,
   },
 };

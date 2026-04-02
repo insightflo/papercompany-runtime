@@ -31,6 +31,9 @@ interface DialogContextValue {
   newGoalDefaults: NewGoalDefaults;
   openNewGoal: (defaults?: NewGoalDefaults) => void;
   closeNewGoal: () => void;
+  newMissionOpen: boolean;
+  openNewMission: () => void;
+  closeNewMission: () => void;
   newAgentOpen: boolean;
   openNewAgent: () => void;
   closeNewAgent: () => void;
@@ -48,6 +51,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newGoalOpen, setNewGoalOpen] = useState(false);
   const [newGoalDefaults, setNewGoalDefaults] = useState<NewGoalDefaults>({});
+  const [newMissionOpen, setNewMissionOpen] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingOptions, setOnboardingOptions] = useState<OnboardingOptions>({});
@@ -78,6 +82,14 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   const closeNewGoal = useCallback(() => {
     setNewGoalOpen(false);
     setNewGoalDefaults({});
+  }, []);
+
+  const openNewMission = useCallback(() => {
+    setNewMissionOpen(true);
+  }, []);
+
+  const closeNewMission = useCallback(() => {
+    setNewMissionOpen(false);
   }, []);
 
   const openNewAgent = useCallback(() => {
@@ -112,6 +124,9 @@ export function DialogProvider({ children }: { children: ReactNode }) {
         newGoalDefaults,
         openNewGoal,
         closeNewGoal,
+        newMissionOpen,
+        openNewMission,
+        closeNewMission,
         newAgentOpen,
         openNewAgent,
         closeNewAgent,

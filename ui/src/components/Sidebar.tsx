@@ -11,6 +11,11 @@ import {
   Boxes,
   Repeat,
   Settings,
+  Rocket,
+  CalendarClock,
+  MessageSquare,
+  ShieldCheck,
+  GitPullRequest,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
@@ -26,7 +31,7 @@ import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
 export function Sidebar() {
-  const { openNewIssue } = useDialog();
+  const { openNewIssue, openNewMission } = useDialog();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const inboxBadge = useInboxBadge(selectedCompanyId);
   const { data: liveRuns } = useQuery({
@@ -79,6 +84,14 @@ export function Sidebar() {
             <SquarePen className="h-4 w-4 shrink-0" />
             <span className="truncate">New Issue</span>
           </button>
+          {/* New Mission button */}
+          <button
+            onClick={() => openNewMission()}
+            className="flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+          >
+            <Rocket className="h-4 w-4 shrink-0" />
+            <span className="truncate">New Mission</span>
+          </button>
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
           <SidebarNavItem
             to="/inbox"
@@ -88,6 +101,7 @@ export function Sidebar() {
             badgeTone={inboxBadge.failedRuns > 0 ? "danger" : "default"}
             alert={inboxBadge.failedRuns > 0}
           />
+          <SidebarNavItem to="/missions" label="Missions" icon={Rocket} />
           <PluginSlotOutlet
             slotTypes={["sidebar"]}
             context={pluginContext}
@@ -100,7 +114,7 @@ export function Sidebar() {
         <SidebarSection label="Work">
           <SidebarNavItem to="/issues" label="Issues" icon={CircleDot} />
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} textBadge="Beta" textBadgeTone="amber" />
-          <SidebarNavItem to="/goals" label="Goals" icon={Target} />
+          <SidebarNavItem to="/scheduler" label="Scheduler" icon={CalendarClock} />
         </SidebarSection>
 
         <SidebarProjects />
@@ -112,6 +126,10 @@ export function Sidebar() {
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
+          <SidebarNavItem to="/goals" label="Goals" icon={Target} />
+          <SidebarNavItem to="/channels" label="Channel" icon={MessageSquare} />
+          <SidebarNavItem to="/worktree/rules" label="Worktree Rules" icon={ShieldCheck} />
+          <SidebarNavItem to="/worktree/proposals" label="Proposals" icon={GitPullRequest} />
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
         </SidebarSection>
 

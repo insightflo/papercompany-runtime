@@ -18,6 +18,12 @@ import { RoutineDetail } from "./pages/RoutineDetail";
 import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
 import { Goals } from "./pages/Goals";
 import { GoalDetail } from "./pages/GoalDetail";
+import { Missions } from "./pages/Missions";
+import { MissionDetail } from "./pages/MissionDetail";
+import { SchedulerConfig } from "./pages/SchedulerConfig";
+import { ChannelConfig } from "./pages/ChannelConfig";
+import { WorktreeRules } from "./pages/WorktreeRules";
+import { WorktreeProposals } from "./pages/WorktreeProposals";
 import { Approvals } from "./pages/Approvals";
 import { ApprovalDetail } from "./pages/ApprovalDetail";
 import { Costs } from "./pages/Costs";
@@ -158,6 +164,12 @@ function boardRoutes() {
       <Route path="execution-workspaces/:workspaceId" element={<ExecutionWorkspaceDetail />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />
+      <Route path="missions" element={<Missions />} />
+      <Route path="missions/:missionId" element={<MissionDetail />} />
+      <Route path="scheduler" element={<SchedulerConfig />} />
+      <Route path="channels" element={<ChannelConfig />} />
+      <Route path="worktree/rules" element={<WorktreeRules />} />
+      <Route path="worktree/proposals" element={<WorktreeProposals />} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />
       <Route path="approvals/pending" element={<Approvals />} />
       <Route path="approvals/all" element={<Approvals />} />

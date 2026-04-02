@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { dashboardApi } from "../api/dashboard";
 import { activityApi } from "../api/activity";
 import { issuesApi } from "../api/issues";
+import { missionsApi } from "../api/missions";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
 import { heartbeatsApi } from "../api/heartbeats";
@@ -15,11 +16,12 @@ import { MetricCard } from "../components/MetricCard";
 import { EmptyState } from "../components/EmptyState";
 import { StatusIcon } from "../components/StatusIcon";
 import { PriorityIcon } from "../components/PriorityIcon";
+import { StatusBadge } from "../components/StatusBadge";
 import { ActivityRow } from "../components/ActivityRow";
 import { Identity } from "../components/Identity";
 import { timeAgo } from "../lib/timeAgo";
 import { cn, formatCents } from "../lib/utils";
-import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle } from "lucide-react";
+import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle, Rocket } from "lucide-react";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -65,6 +67,12 @@ export function Dashboard() {
   const { data: issues } = useQuery({
     queryKey: queryKeys.issues.list(selectedCompanyId!),
     queryFn: () => issuesApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const { data: missions } = useQuery({
+    queryKey: queryKeys.missions.list(selectedCompanyId!),
+    queryFn: () => missionsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
 
@@ -256,6 +264,17 @@ export function Dashboard() {
               }
             />
             <MetricCard
+              icon={Rocket}
+              value={missions?.filter((m) => m.status === "active").length ?? 0}
+              label="Active Missions"
+              to="/missions"
+              description={
+                <span>
+                  {(missions ?? []).length} total missions
+                </span>
+              }
+            />
+            <MetricCard
               icon={DollarSign}
               value={formatCents(data.costs.monthSpendCents)}
               label="Month Spend"
@@ -323,6 +342,33 @@ export function Dashboard() {
                       className={animatedActivityIds.has(event.id) ? "activity-row-enter" : undefined}
                     />
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Recent Missions */}
+            {missions && missions.length > 0 && (
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+                  Recent Missions
+                </h3>
+                <div className="border border-border divide-y divide-border overflow-hidden">
+                  {[...missions]
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                    .slice(0, 5)
+                    .map((mission) => (
+                      <Link
+                        key={mission.id}
+                        to={`/missions/${mission.id}`}
+                        className="px-4 py-3 text-sm cursor-pointer hover:bg-accent/50 transition-colors no-underline text-inherit block"
+                      >
+                        <div className="flex items-center gap-3">
+                          <Rocket className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <span className="flex-1 truncate">{mission.title}</span>
+                          <StatusBadge status={mission.status} />
+                        </div>
+                      </Link>
+                    ))}
                 </div>
               </div>
             )}
