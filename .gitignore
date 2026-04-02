@@ -1,18 +1,62 @@
+# Dependencies
 node_modules/
-dist/
-.env
-*.tsbuildinfo
-drizzle/meta/
-.vite/
-coverage/
-.DS_Store
-data/
-.paperclip/
 .pnpm-store/
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+.vite/
+
+# Build artifacts in server src directories (TypeScript → JS)
+server/src/**/*.js
+server/src/**/*.js.map
+server/src/**/*.d.ts
+server/src/**/*.d.ts.map
+
+# npm publish build artifacts
+cli/package.dev.json
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+
+# Editor / tools
+*.tmp
+.vscode/
+/.idea/
+
+# Claude Code
+.claude/settings.local.json
+.claude/worktrees/
+.claude/memory/
+.claude/collab/*.json
+.claude/collab/*.ndjson
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Coverage
+coverage/
+
+# Test artifacts
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/release-smoke/test-results/
+tests/release-smoke/playwright-report/
+
+# Runtime / temp
+tmp/
 tmp-*
 cli/tmp/
+data/
 
-# Scratch/seed scripts (but not scripts/ dir)
+# Scratch / seed scripts
 check-*.mjs
 !scripts/check-*.mjs
 new-agent*.json
@@ -22,31 +66,12 @@ server/check-*.mjs
 server/seed-*.mjs
 packages/db/seed-*.mjs
 
-# npm publish build artifacts
-cli/package.dev.json
-
-# Build artifacts in src directories
-server/src/**/*.js
-server/src/**/*.js.map
-server/src/**/*.d.ts
-server/src/**/*.d.ts.map
-tmp/
-
-# Editor / tool temp files
-*.tmp
-.vscode/
-.claude/settings.local.json
+# Project-specific runtime dirs
+.paperclip/
 .paperclip-local/
-/.idea/
+.papercompany/
 /.agents/
 
-# Doc maintenance cursor
+# Doc maintenance
 .doc-review-cursor
-
-# Playwright
-tests/e2e/test-results/
-tests/e2e/playwright-report/
-tests/release-smoke/test-results/
-tests/release-smoke/playwright-report/
 .superset/
-.claude/worktrees/

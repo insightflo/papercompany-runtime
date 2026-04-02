@@ -16,7 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { emitHookDecision } = require('./lib/hook-decision-event');
+const { emitHookDecision } = require('./lib/hook-decision-event.cjs');
 
 // ---------------------------------------------------------------------------
 // Configuration

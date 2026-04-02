@@ -16,7 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { emitHookDecision } = require('./lib/hook-decision-event');
+const { emitHookDecision } = require('./lib/hook-decision-event.cjs');
 
 /**
  * RegExp 특수문자를 이스케이프하여 ReDoS 방지

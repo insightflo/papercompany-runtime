@@ -5,14 +5,14 @@
     "mode": "team",
     "installMode": "local",
     "commands": [
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/contract-gate.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/permission-checker.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/policy-gate.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/risk-area-warning.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/security-scan.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/task-completed-gate.js\"",
-      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/teammate-idle-gate.js\""
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/contract-gate.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/permission-checker.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/policy-gate.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/risk-area-warning.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/security-scan.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/task-completed-gate.cjs\"",
+      "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/teammate-idle-gate.cjs\""
     ]
   },
   "hooks": {
@@ -21,13 +21,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/permission-checker.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/permission-checker.cjs\"",
             "timeout": 5,
             "statusMessage": "Running permission-checker..."
           },
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/risk-area-warning.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/risk-area-warning.cjs\"",
             "timeout": 5,
             "statusMessage": "Running risk-area-warning..."
           }
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/policy-gate.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/policy-gate.cjs\"",
             "timeout": 5,
             "statusMessage": "Running policy-gate..."
           }
@@ -52,13 +52,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/security-scan.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/security-scan.cjs\"",
             "timeout": 5,
             "statusMessage": "Running security-scan..."
           },
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/contract-gate.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/contract-gate.cjs\"",
             "timeout": 5,
             "statusMessage": "Running contract-gate..."
           }
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/quality-gate.cjs\"",
             "timeout": 10,
             "statusMessage": "Running quality-gate..."
           }
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/teammate-idle-gate.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/teammate-idle-gate.cjs\"",
             "timeout": 5,
             "statusMessage": "Running teammate-idle-gate..."
           }
@@ -95,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/task-completed-gate.js\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/task-completed-gate.cjs\"",
             "timeout": 5,
             "statusMessage": "Running task-completed-gate..."
           }

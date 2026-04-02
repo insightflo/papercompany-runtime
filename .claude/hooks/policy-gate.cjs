@@ -19,7 +19,7 @@
 
 const path = require('path');
 const AgentAuthService = require('../services/auth');
-const { emitHookDecision } = require('./lib/hook-decision-event');
+const { emitHookDecision } = require('./lib/hook-decision-event.cjs');
 const {
   resolveTokenSecret
 } = AgentAuthService;
@@ -29,7 +29,7 @@ const {
   matchesAnyPattern: sharedMatchesAnyPattern,
   checkDomainBoundary,
   normalizeRole
-} = require('./lib/deterministic-policy');
+} = require('./lib/deterministic-policy.cjs');
 
 // ---------------------------------------------------------------------------
 // 1. Standards Rules (from standards-validator.js - simplified)

@@ -22,7 +22,7 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { emitHookDecision } = require('./lib/hook-decision-event');
+const { emitHookDecision } = require('./lib/hook-decision-event.cjs');
 
 // ---------------------------------------------------------------------------
 // 1. Secret Detection Patterns
@@ -459,17 +459,32 @@ function getFilesToScan(targetPath = '.') {
 
 async function main() {
   try {
-    const input = {
+    // Read stdin to get tool_input from PostToolUse hook
+    let input = {
       hook_event_name: 'ManualHook',
       tool_name: 'security-scan',
       tool_input: {},
     };
+    try {
+      const stdinData = fs.readFileSync('/dev/stdin', 'utf-8').trim();
+      if (stdinData) {
+        const parsed = JSON.parse(stdinData);
+        input = { ...input, ...parsed };
+      }
+    } catch {
+      // No stdin or not JSON — run in manual mode
+    }
+
     // Collect all findings
     const allSecrets = [];
     const allOwasp = [];
 
-    // Scan files
-    const files = getFilesToScan('.');
+    // If PostToolUse hook provides a specific file_path, scan only that file.
+    // Otherwise fall back to full project scan (manual invocation).
+    const editedFile = input.tool_input && input.tool_input.file_path;
+    const files = editedFile && fs.existsSync(editedFile)
+      ? [editedFile]
+      : getFilesToScan('.');
     for (const file of files) {
       const findings = scanFile(file);
       allSecrets.push(...findings.secrets);

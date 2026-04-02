@@ -35,7 +35,7 @@ const {
   resolveRoleIdentity,
   resolveDeterministicWriteScope,
   checkDomainBoundary: sharedCheckDomainBoundary
-} = require('./lib/deterministic-policy');
+} = require('./lib/deterministic-policy.cjs');
 
 const {
   resolveTokenSecret,
