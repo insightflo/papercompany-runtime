@@ -832,6 +832,11 @@ V1 is complete only when all criteria are true:
 8. Every mutation is auditable in activity log.
 9. App runs with embedded PostgreSQL by default and with external Postgres via `DATABASE_URL`.
 
+## 19.1 Current Implementation Notes
+
+- The board UI now includes mission detail/list views, scheduler configuration, channel configuration, and worktree governance pages as first-class control-plane surfaces.
+- SRB delivery retries persist replay payloads and idempotency keys, can reclaim stale `retrying` rows after worker interruption, and abandon legacy rows that cannot be replayed safely.
+
 ## 20. Post-V1 Backlog (Explicitly Deferred)
 
 - plugin architecture

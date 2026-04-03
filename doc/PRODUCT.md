@@ -109,6 +109,7 @@ Paperclip’s core identity is a **control plane for autonomous AI companies**, 
 - Treat **agency / internal team / startup** as the same underlying abstraction with different templates and labels.
 - Make outputs first-class: files, docs, reports, previews, links, screenshots.
 - Provide **hooks into engineering workflows**: worktrees, preview servers, PR links, external review tools.
+- Surface the live company control plane clearly: missions, scheduler, channels, and worktree governance should feel like first-class operational views rather than hidden admin endpoints.
 - Use **plugins** for edge cases like rich chat, knowledge bases, doc editors, custom tracing.
 
 **Do not**
