@@ -8,6 +8,14 @@
 import { Router } from "express";
 import client from "prom-client";
 
+function normalizeMetricRoute(url: string): string {
+  const path = url.split("?")[0] ?? url;
+  return path
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi, ":uuid")
+    .replace(/\b\d+\b/g, ":id")
+    .replace(/\b[a-z0-9_-]{20,}\b/gi, ":token");
+}
+
 // Initialize the default registry
 const register = new client.Registry();
 
@@ -111,7 +119,7 @@ export function metricsMiddleware() {
 
     res.on("finish", () => {
       const duration = (Date.now() - start) / 1000;
-      const route = req.url;
+      const route = normalizeMetricRoute(req.url);
       const labels = {
         method: req.method,
         route,

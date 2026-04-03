@@ -3,6 +3,11 @@ import { api } from "./client";
 export type MissionStatus = "planning" | "active" | "paused" | "completed" | "cancelled";
 export type MissionAgentRole = "executor" | "reviewer" | "observer" | "specialist" | "owner";
 
+export interface MissionAgentEntry {
+  agentId: string;
+  role: MissionAgentRole;
+}
+
 export interface MissionListItem {
   id: string;
   companyId: string;
@@ -44,6 +49,7 @@ export const missionsApi = {
     return api.get<MissionListItem[]>(`/companies/${companyId}/missions${qs ? `?${qs}` : ""}`);
   },
   get: (id: string) => api.get<MissionListItem>(`/missions/${id}`),
+  listAgents: (id: string) => api.get<MissionAgentEntry[]>(`/missions/${id}/agents`),
   create: (companyId: string, data: CreateMissionInput) =>
     api.post<MissionListItem>(`/companies/${companyId}/missions`, data),
   update: (id: string, data: UpdateMissionInput) =>

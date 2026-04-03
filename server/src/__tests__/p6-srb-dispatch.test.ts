@@ -101,6 +101,22 @@ function createRetryUpdateMock(options: { claimRows: unknown[]; setCalls: Record
   }));
 }
 
+function createRetrySelectMock(input: {
+  dueRows: unknown[];
+  linkRows?: unknown[];
+}) {
+  return vi.fn(() => ({
+    from: vi.fn((table) => ({
+      where: vi.fn(() => ({
+        orderBy: vi.fn(() => ({
+          limit: vi.fn(async () => (table === srbLinks ? (input.linkRows ?? []) : input.dueRows)),
+        })),
+        limit: vi.fn(async () => (table === srbLinks ? (input.linkRows ?? []) : input.dueRows)),
+      })),
+    })),
+  }));
+}
+
 describe("P6 SRB dispatch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -283,13 +299,7 @@ describe("P6 SRB dispatch", () => {
     mocks.resolveSecretValue.mockResolvedValue("super-secret");
     mocks.sendSrbWebhookRequest.mockResolvedValue({ ok: true, status: 200 });
 
-    const selectMock = vi.fn(() => ({
-      from: vi.fn((table) => ({
-        where: vi.fn(() => ({
-          limit: vi.fn(async () => (table === srbLinks ? [link] : [row])),
-        })),
-      })),
-    }));
+    const selectMock = createRetrySelectMock({ dueRows: [row], linkRows: [link] });
     const setCalls: Record<string, unknown>[] = [];
     const updateMock = createRetryUpdateMock({ claimRows: [{ id: row.id }], setCalls });
 
@@ -330,13 +340,7 @@ describe("P6 SRB dispatch", () => {
       updatedAt: new Date(),
     };
 
-    const selectMock = vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          limit: vi.fn(async () => [row]),
-        })),
-      })),
-    }));
+    const selectMock = createRetrySelectMock({ dueRows: [row] });
     const setCalls: Record<string, unknown>[] = [];
     const updateMock = createRetryUpdateMock({ claimRows: [], setCalls });
 
@@ -383,13 +387,7 @@ describe("P6 SRB dispatch", () => {
     mocks.resolveSecretValue.mockResolvedValue("super-secret");
     mocks.sendSrbWebhookRequest.mockResolvedValue({ ok: true, status: 200 });
 
-    const selectMock = vi.fn(() => ({
-      from: vi.fn((table) => ({
-        where: vi.fn(() => ({
-          limit: vi.fn(async () => (table === srbLinks ? [link] : [row])),
-        })),
-      })),
-    }));
+    const selectMock = createRetrySelectMock({ dueRows: [row], linkRows: [link] });
     const setCalls: Record<string, unknown>[] = [];
     const updateMock = createRetryUpdateMock({ claimRows: [{ id: row.id }], setCalls });
 
@@ -427,13 +425,7 @@ describe("P6 SRB dispatch", () => {
       updatedAt: new Date(),
     };
 
-    const selectMock = vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          limit: vi.fn(async () => []),
-        })),
-      })),
-    }));
+    const selectMock = createRetrySelectMock({ dueRows: [] });
     const setCalls: Record<string, unknown>[] = [];
     const updateMock = createRetryUpdateMock({ claimRows: [], setCalls });
 
@@ -481,13 +473,7 @@ describe("P6 SRB dispatch", () => {
 
     const setCalls: Record<string, unknown>[] = [];
     const updateMock = createRetryUpdateMock({ claimRows: [{ id: row.id }], setCalls });
-    const selectMock = vi.fn(() => ({
-      from: vi.fn((table) => ({
-        where: vi.fn(() => ({
-          limit: vi.fn(async () => (table === srbLinks ? [link] : [row])),
-        })),
-      })),
-    }));
+    const selectMock = createRetrySelectMock({ dueRows: [row], linkRows: [link] });
 
     const db = {
       select: selectMock,

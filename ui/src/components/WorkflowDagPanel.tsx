@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { missionsApi, type MissionAgentRole } from "../api/missions";
+import { missionsApi, type MissionAgentEntry, type MissionAgentRole } from "../api/missions";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -101,11 +101,6 @@ interface AgentRosterProps {
   agentMap: Record<string, string>;
 }
 
-interface MissionAgentEntry {
-  agentId: string;
-  role: MissionAgentRole;
-}
-
 interface MissionAgentRosterResult {
   entries: MissionAgentEntry[];
   endpointAvailable: boolean;
@@ -115,22 +110,24 @@ function AgentRoster({ missionId, agentMap }: AgentRosterProps) {
   const { data: rosterData, isLoading } = useQuery<MissionAgentRosterResult>({
     queryKey: [...queryKeys.missions.detail(missionId), "agents"],
     queryFn: async () => {
-      const res = await fetch(`/api/missions/${missionId}/agents`, {
-        credentials: "include",
-      });
-      if (res.status === 404) {
+      try {
         return {
-          entries: [],
-          endpointAvailable: false,
+          entries: await missionsApi.listAgents(missionId),
+          endpointAvailable: true,
         };
-      }
-      if (!res.ok) {
+      } catch (error) {
+        const status =
+          error instanceof Error && "status" in error
+            ? Number((error as Error & { status?: number }).status)
+            : null;
+        if (status === 404) {
+          return {
+            entries: [],
+            endpointAvailable: false,
+          };
+        }
         throw new Error("Failed to load mission roster");
       }
-      return {
-        entries: await res.json(),
-        endpointAvailable: true,
-      };
     },
     enabled: !!missionId,
   });

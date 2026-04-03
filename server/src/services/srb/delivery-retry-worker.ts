@@ -17,7 +17,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { srbDeliveryLog, srbLinks } from "@paperclipai/db";
-import { eq, and, lte, inArray, or } from "drizzle-orm";
+import { eq, and, lte, inArray, or, asc, desc } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
 import { srbRetryTransitions } from "../../routes/metrics.js";
 import { secretService } from "../secrets.js";
@@ -185,6 +185,12 @@ export function createDeliveryRetryWorker(db: Db) {
             lte(srbDeliveryLog.updatedAt, retryingStaleBefore),
           ),
         ),
+      )
+      .orderBy(
+        asc(srbDeliveryLog.nextRetryAt),
+        asc(srbDeliveryLog.updatedAt),
+        desc(srbDeliveryLog.attemptCount),
+        asc(srbDeliveryLog.id),
       )
       .limit(MAX_CLAIM_PER_CYCLE);
 
