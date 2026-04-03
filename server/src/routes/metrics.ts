@@ -202,6 +202,13 @@ export const srbWebhookDeliveries = new client.Counter({
   registers: [register],
 });
 
+export const srbRetryTransitions = new client.Counter({
+  name: "paperclip_srb_retry_transitions_total",
+  help: "SRB retry worker state transitions and claim events",
+  labelNames: ["event"],
+  registers: [register],
+});
+
 /**
  * P9-T5: Mission session reuse counter.
  * Track new vs reused sessions to compute session reuse rate.

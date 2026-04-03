@@ -19,6 +19,7 @@ import type { Db } from "@paperclipai/db";
 import { srbDeliveryLog, srbLinks } from "@paperclipai/db";
 import { eq, and, lte, inArray, or } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
+import { srbRetryTransitions } from "../../routes/metrics.js";
 import { secretService } from "../secrets.js";
 import {
   buildSrbHeaders,
@@ -206,6 +207,8 @@ export function createDeliveryRetryWorker(db: Db) {
         continue;
       }
 
+      srbRetryTransitions.inc({ event: row.status === "retrying" ? "reclaimed_retrying" : "claimed_failed" });
+
       state.totalAttempts++;
       const outcome = await attemptDelivery(row);
       const newAttemptCount = (row.attemptCount ?? 0) + 1;
@@ -222,6 +225,7 @@ export function createDeliveryRetryWorker(db: Db) {
           })
           .where(eq(srbDeliveryLog.id, row.id));
         state.totalDelivered++;
+        srbRetryTransitions.inc({ event: "delivered" });
         logger.info({ deliveryId: row.id, attempts: newAttemptCount }, "SRB retry: delivered");
       } else if (outcome === "abandoned") {
         await db
@@ -235,6 +239,7 @@ export function createDeliveryRetryWorker(db: Db) {
           })
           .where(eq(srbDeliveryLog.id, row.id));
         state.totalDead++;
+        srbRetryTransitions.inc({ event: "abandoned" });
         logger.warn({ deliveryId: row.id, attempts: newAttemptCount }, "SRB retry: delivery abandoned due to missing replay payload");
       } else if (newAttemptCount >= MAX_DELIVERY_ATTEMPTS) {
         await db
@@ -248,6 +253,7 @@ export function createDeliveryRetryWorker(db: Db) {
           })
           .where(eq(srbDeliveryLog.id, row.id));
         state.totalDead++;
+        srbRetryTransitions.inc({ event: "dead" });
         logger.warn({ deliveryId: row.id, attempts: newAttemptCount }, "SRB retry: delivery dead after max attempts");
       } else {
         const nextRetryAt = computeNextRetryAt(newAttemptCount);
@@ -261,6 +267,7 @@ export function createDeliveryRetryWorker(db: Db) {
             updatedAt: new Date(),
           })
           .where(eq(srbDeliveryLog.id, row.id));
+        srbRetryTransitions.inc({ event: "rescheduled" });
         logger.info({ deliveryId: row.id, attempts: newAttemptCount, nextRetryAt }, "SRB retry: rescheduled");
       }
     }

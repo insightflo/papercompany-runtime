@@ -40,7 +40,8 @@ function createApp(actor: Record<string, unknown>) {
 
 describe("company skill mutation permissions", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    mockAgentService.getById.mockResolvedValue(null);
     mockCompanySkillService.importFromSource.mockResolvedValue({
       imported: [],
       warnings: [],

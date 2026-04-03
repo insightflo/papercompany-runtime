@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   recordSrbSuccess: vi.fn(),
   recordSrbFailure: vi.fn(),
   srbWebhookDeliveriesInc: vi.fn(),
+  srbRetryTransitionsInc: vi.fn(),
 }));
 
 vi.mock("@paperclipai/db", () => ({
@@ -42,6 +43,7 @@ vi.mock("../services/secrets.js", () => ({
 
 vi.mock("../routes/metrics.js", () => ({
   srbWebhookDeliveries: { inc: mocks.srbWebhookDeliveriesInc },
+  srbRetryTransitions: { inc: mocks.srbRetryTransitionsInc },
 }));
 
 vi.mock("../services/alert-rules.js", () => ({

@@ -31,5 +31,9 @@ export const srbDeliveryLog = pgTable(
       table.status,
       table.nextRetryAt,
     ),
+    statusUpdatedAtIdx: index("idx_srb_delivery_log_status_updated_at").on(
+      table.status,
+      table.updatedAt,
+    ),
   }),
 );
