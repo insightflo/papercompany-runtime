@@ -56,8 +56,8 @@ export function WorkflowDagPanel({ missionId }: WorkflowDagPanelProps) {
   if (missionLoading) {
     return (
       <div className="space-y-2 py-2">
-        {[...Array(3)].map((_, i) => (
-          <div key={i} className="h-12 bg-muted animate-pulse rounded" />
+        {["mission-a", "mission-b", "mission-c"].map((key) => (
+          <div key={key} className="h-12 bg-muted animate-pulse rounded" />
         ))}
       </div>
     );
@@ -106,15 +106,31 @@ interface MissionAgentEntry {
   role: MissionAgentRole;
 }
 
+interface MissionAgentRosterResult {
+  entries: MissionAgentEntry[];
+  endpointAvailable: boolean;
+}
+
 function AgentRoster({ missionId, agentMap }: AgentRosterProps) {
-  const { data: rosterData, isLoading } = useQuery<MissionAgentEntry[]>({
+  const { data: rosterData, isLoading } = useQuery<MissionAgentRosterResult>({
     queryKey: [...queryKeys.missions.detail(missionId), "agents"],
     queryFn: async () => {
       const res = await fetch(`/api/missions/${missionId}/agents`, {
         credentials: "include",
       });
-      if (!res.ok) return [];
-      return res.json();
+      if (res.status === 404) {
+        return {
+          entries: [],
+          endpointAvailable: false,
+        };
+      }
+      if (!res.ok) {
+        throw new Error("Failed to load mission roster");
+      }
+      return {
+        entries: await res.json(),
+        endpointAvailable: true,
+      };
     },
     enabled: !!missionId,
   });
@@ -122,14 +138,26 @@ function AgentRoster({ missionId, agentMap }: AgentRosterProps) {
   if (isLoading) {
     return (
       <div className="space-y-1">
-        {[...Array(2)].map((_, i) => (
-          <div key={i} className="h-10 bg-muted animate-pulse rounded" />
+        {["roster-a", "roster-b"].map((key) => (
+          <div key={key} className="h-10 bg-muted animate-pulse rounded" />
         ))}
       </div>
     );
   }
 
-  const entries: MissionAgentEntry[] = rosterData ?? [];
+  const entries: MissionAgentEntry[] = rosterData?.entries ?? [];
+
+  if (rosterData?.endpointAvailable === false) {
+    return (
+      <div className="flex flex-col items-center py-6 text-center">
+        <User className="h-6 w-6 mb-2 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">Mission roster is not available yet.</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          This workspace can still show mission details while the roster endpoint is being rolled out.
+        </p>
+      </div>
+    );
+  }
 
   if (entries.length === 0) {
     return (

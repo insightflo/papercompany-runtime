@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { missionsApi, type MissionStatus } from "../api/missions";
 import { agentsApi } from "../api/agents";
@@ -45,6 +45,11 @@ export function NewMissionDialog() {
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId && newMissionOpen,
   });
+
+  useEffect(() => {
+    if (!newMissionOpen || ownerAgentId || !agents || agents.length === 0) return;
+    setOwnerAgentId(agents[0]!.id);
+  }, [agents, newMissionOpen, ownerAgentId]);
 
   const createMission = useMutation({
     mutationFn: (data: { title: string; description?: string; status: MissionStatus; ownerAgentId: string }) =>
@@ -166,7 +171,7 @@ export function NewMissionDialog() {
           {/* Status */}
           <Popover open={statusOpen} onOpenChange={setStatusOpen}>
             <PopoverTrigger asChild>
-              <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors">
+              <button type="button" className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors">
                 <StatusBadge status={status} />
               </button>
             </PopoverTrigger>
@@ -174,6 +179,7 @@ export function NewMissionDialog() {
               {statusOptions.map((s) => (
                 <button
                   key={s.value}
+                  type="button"
                   className={cn(
                     "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 capitalize",
                     s.value === status && "bg-accent"
@@ -189,7 +195,7 @@ export function NewMissionDialog() {
           {/* Owner Agent */}
           <Popover open={ownerOpen} onOpenChange={setOwnerOpen}>
             <PopoverTrigger asChild>
-              <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors">
+              <button type="button" className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors">
                 <User className="h-3 w-3 text-muted-foreground" />
                 {selectedOwner ? selectedOwner.name : "Owner agent"}
               </button>
@@ -198,6 +204,7 @@ export function NewMissionDialog() {
               {(agents ?? []).map((a) => (
                 <button
                   key={a.id}
+                  type="button"
                   className={cn(
                     "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 truncate",
                     a.id === ownerAgentId && "bg-accent"

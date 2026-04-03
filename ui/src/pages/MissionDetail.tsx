@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useParams } from "@/lib/router";
+import { Link, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { missionsApi, type MissionStatus } from "../api/missions";
 import { agentsApi } from "../api/agents";
@@ -208,6 +208,11 @@ export function MissionDetail() {
             <p className="text-xs text-muted-foreground">
               Worktree rule configuration will appear here once P4-T9 and P8-T6 are implemented.
             </p>
+            <div className="mt-4">
+              <Button asChild size="sm" variant="outline">
+                <Link to="/worktree/rules">Open global worktree rules</Link>
+              </Button>
+            </div>
           </div>
         </TabsContent>
       </Tabs>

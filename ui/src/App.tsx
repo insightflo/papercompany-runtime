@@ -1,3 +1,4 @@
+import { Suspense, lazy, type ReactNode } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -18,29 +19,8 @@ import { RoutineDetail } from "./pages/RoutineDetail";
 import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
 import { Goals } from "./pages/Goals";
 import { GoalDetail } from "./pages/GoalDetail";
-import { Missions } from "./pages/Missions";
-import { MissionDetail } from "./pages/MissionDetail";
-import { SchedulerConfig } from "./pages/SchedulerConfig";
-import { ChannelConfig } from "./pages/ChannelConfig";
-import { WorktreeRules } from "./pages/WorktreeRules";
-import { WorktreeProposals } from "./pages/WorktreeProposals";
-import { Approvals } from "./pages/Approvals";
-import { ApprovalDetail } from "./pages/ApprovalDetail";
-import { Costs } from "./pages/Costs";
-import { Activity } from "./pages/Activity";
 import { Inbox } from "./pages/Inbox";
 import { CompanySettings } from "./pages/CompanySettings";
-import { CompanySkills } from "./pages/CompanySkills";
-import { CompanyExport } from "./pages/CompanyExport";
-import { CompanyImport } from "./pages/CompanyImport";
-import { DesignGuide } from "./pages/DesignGuide";
-import { InstanceGeneralSettings } from "./pages/InstanceGeneralSettings";
-import { InstanceSettings } from "./pages/InstanceSettings";
-import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
-import { PluginManager } from "./pages/PluginManager";
-import { PluginSettings } from "./pages/PluginSettings";
-import { PluginPage } from "./pages/PluginPage";
-import { RunTranscriptUxLab } from "./pages/RunTranscriptUxLab";
 import { OrgChart } from "./pages/OrgChart";
 import { NewAgent } from "./pages/NewAgent";
 import { AuthPage } from "./pages/Auth";
@@ -53,6 +33,36 @@ import { useCompany } from "./context/CompanyContext";
 import { useDialog } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
 import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-route";
+
+const Missions = lazy(async () => ({ default: (await import("./pages/Missions")).Missions }));
+const MissionDetail = lazy(async () => ({ default: (await import("./pages/MissionDetail")).MissionDetail }));
+const SchedulerConfig = lazy(async () => ({ default: (await import("./pages/SchedulerConfig")).SchedulerConfig }));
+const ChannelConfig = lazy(async () => ({ default: (await import("./pages/ChannelConfig")).ChannelConfig }));
+const WorktreeRules = lazy(async () => ({ default: (await import("./pages/WorktreeRules")).WorktreeRules }));
+const WorktreeProposals = lazy(async () => ({ default: (await import("./pages/WorktreeProposals")).WorktreeProposals }));
+const Approvals = lazy(async () => ({ default: (await import("./pages/Approvals")).Approvals }));
+const ApprovalDetail = lazy(async () => ({ default: (await import("./pages/ApprovalDetail")).ApprovalDetail }));
+const Costs = lazy(async () => ({ default: (await import("./pages/Costs")).Costs }));
+const Activity = lazy(async () => ({ default: (await import("./pages/Activity")).Activity }));
+const CompanySkills = lazy(async () => ({ default: (await import("./pages/CompanySkills")).CompanySkills }));
+const CompanyExport = lazy(async () => ({ default: (await import("./pages/CompanyExport")).CompanyExport }));
+const CompanyImport = lazy(async () => ({ default: (await import("./pages/CompanyImport")).CompanyImport }));
+const DesignGuide = lazy(async () => ({ default: (await import("./pages/DesignGuide")).DesignGuide }));
+const InstanceGeneralSettings = lazy(async () => ({ default: (await import("./pages/InstanceGeneralSettings")).InstanceGeneralSettings }));
+const InstanceSettings = lazy(async () => ({ default: (await import("./pages/InstanceSettings")).InstanceSettings }));
+const InstanceExperimentalSettings = lazy(async () => ({ default: (await import("./pages/InstanceExperimentalSettings")).InstanceExperimentalSettings }));
+const PluginManager = lazy(async () => ({ default: (await import("./pages/PluginManager")).PluginManager }));
+const PluginSettings = lazy(async () => ({ default: (await import("./pages/PluginSettings")).PluginSettings }));
+const PluginPage = lazy(async () => ({ default: (await import("./pages/PluginPage")).PluginPage }));
+const RunTranscriptUxLab = lazy(async () => ({ default: (await import("./pages/RunTranscriptUxLab")).RunTranscriptUxLab }));
+
+function lazyRoute(element: ReactNode) {
+  return (
+    <Suspense fallback={<div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>}>
+      {element}
+    </Suspense>
+  );
+}
 
 function BootstrapPendingPage({ hasActiveInvite = false }: { hasActiveInvite?: boolean }) {
   return (
@@ -129,12 +139,12 @@ function boardRoutes() {
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
       <Route path="company/settings" element={<CompanySettings />} />
-      <Route path="company/export/*" element={<CompanyExport />} />
-      <Route path="company/import" element={<CompanyImport />} />
-      <Route path="skills/*" element={<CompanySkills />} />
+      <Route path="company/export/*" element={lazyRoute(<CompanyExport />)} />
+      <Route path="company/import" element={lazyRoute(<CompanyImport />)} />
+      <Route path="skills/*" element={lazyRoute(<CompanySkills />)} />
       <Route path="settings" element={<LegacySettingsRedirect />} />
       <Route path="settings/*" element={<LegacySettingsRedirect />} />
-      <Route path="plugins/:pluginId" element={<PluginPage />} />
+      <Route path="plugins/:pluginId" element={lazyRoute(<PluginPage />)} />
       <Route path="org" element={<OrgChart />} />
       <Route path="agents" element={<Navigate to="/agents/all" replace />} />
       <Route path="agents/all" element={<Agents />} />
@@ -164,26 +174,26 @@ function boardRoutes() {
       <Route path="execution-workspaces/:workspaceId" element={<ExecutionWorkspaceDetail />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />
-      <Route path="missions" element={<Missions />} />
-      <Route path="missions/:missionId" element={<MissionDetail />} />
-      <Route path="scheduler" element={<SchedulerConfig />} />
-      <Route path="channels" element={<ChannelConfig />} />
-      <Route path="worktree/rules" element={<WorktreeRules />} />
-      <Route path="worktree/proposals" element={<WorktreeProposals />} />
+      <Route path="missions" element={lazyRoute(<Missions />)} />
+      <Route path="missions/:missionId" element={lazyRoute(<MissionDetail />)} />
+      <Route path="scheduler" element={lazyRoute(<SchedulerConfig />)} />
+      <Route path="channels" element={lazyRoute(<ChannelConfig />)} />
+      <Route path="worktree/rules" element={lazyRoute(<WorktreeRules />)} />
+      <Route path="worktree/proposals" element={lazyRoute(<WorktreeProposals />)} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />
-      <Route path="approvals/pending" element={<Approvals />} />
-      <Route path="approvals/all" element={<Approvals />} />
-      <Route path="approvals/:approvalId" element={<ApprovalDetail />} />
-      <Route path="costs" element={<Costs />} />
-      <Route path="activity" element={<Activity />} />
+      <Route path="approvals/pending" element={lazyRoute(<Approvals />)} />
+      <Route path="approvals/all" element={lazyRoute(<Approvals />)} />
+      <Route path="approvals/:approvalId" element={lazyRoute(<ApprovalDetail />)} />
+      <Route path="costs" element={lazyRoute(<Costs />)} />
+      <Route path="activity" element={lazyRoute(<Activity />)} />
       <Route path="inbox" element={<InboxRootRedirect />} />
       <Route path="inbox/recent" element={<Inbox />} />
       <Route path="inbox/unread" element={<Inbox />} />
       <Route path="inbox/all" element={<Inbox />} />
       <Route path="inbox/new" element={<Navigate to="/inbox/recent" replace />} />
-      <Route path="design-guide" element={<DesignGuide />} />
-      <Route path="tests/ux/runs" element={<RunTranscriptUxLab />} />
-      <Route path=":pluginRoutePath" element={<PluginPage />} />
+      <Route path="design-guide" element={lazyRoute(<DesignGuide />)} />
+      <Route path="tests/ux/runs" element={lazyRoute(<RunTranscriptUxLab />)} />
+      <Route path=":pluginRoutePath" element={lazyRoute(<PluginPage />)} />
       <Route path="*" element={<NotFoundPage scope="board" />} />
     </>
   );
@@ -324,11 +334,11 @@ export function App() {
           <Route path="instance" element={<Navigate to="/instance/settings/general" replace />} />
           <Route path="instance/settings" element={<Layout />}>
             <Route index element={<Navigate to="general" replace />} />
-            <Route path="general" element={<InstanceGeneralSettings />} />
-            <Route path="heartbeats" element={<InstanceSettings />} />
-            <Route path="experimental" element={<InstanceExperimentalSettings />} />
-            <Route path="plugins" element={<PluginManager />} />
-            <Route path="plugins/:pluginId" element={<PluginSettings />} />
+            <Route path="general" element={lazyRoute(<InstanceGeneralSettings />)} />
+            <Route path="heartbeats" element={lazyRoute(<InstanceSettings />)} />
+            <Route path="experimental" element={lazyRoute(<InstanceExperimentalSettings />)} />
+            <Route path="plugins" element={lazyRoute(<PluginManager />)} />
+            <Route path="plugins/:pluginId" element={lazyRoute(<PluginSettings />)} />
           </Route>
           <Route path="companies" element={<UnprefixedBoardRedirect />} />
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
