@@ -28,13 +28,18 @@ cli/package.dev.json
 *.tmp
 .vscode/
 /.idea/
+**/.idea/
 
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/
 .claude/memory/
+.claude/memento/
 .claude/collab/*.json
 .claude/collab/*.ndjson
+
+# Docs tooling
+.mintlify/
 
 # Logs
 *.log
@@ -68,6 +73,7 @@ packages/db/seed-*.mjs
 
 # Project-specific runtime dirs
 .paperclip/
+.paperclip-worktrees/
 .paperclip-local/
 .papercompany/
 /.agents/
