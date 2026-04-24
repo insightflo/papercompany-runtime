@@ -1,3 +1,5 @@
+# Local-only and generated artifacts. Keep tracked runtime source in GitHub. Long-horizon docs/plans live in the sibling papercompany-artifacts repo.
+
 # Dependencies
 node_modules/
 .pnpm-store/
@@ -30,13 +32,17 @@ cli/package.dev.json
 /.idea/
 **/.idea/
 
-# Claude Code
+# Claude Code local state only
 .claude/settings.local.json
 .claude/worktrees/
 .claude/memory/
 .claude/memento/
 .claude/collab/*.json
 .claude/collab/*.ndjson
+
+# Claude Code / local agent workspace symlinks and generated state
+.claude
+.sisyphus
 
 # Docs tooling
 .mintlify/
