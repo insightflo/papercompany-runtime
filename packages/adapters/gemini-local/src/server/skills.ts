@@ -76,8 +76,12 @@ export async function syncGeminiSkills(
     const available = availableByRuntimeName.get(name);
     if (!available) continue;
     if (desiredSet.has(available.key)) continue;
-    if (installedEntry.targetPath !== available.source) continue;
-    await fs.unlink(path.join(skillsHome, name)).catch(() => {});
+    const isPaperclipManagedInstall =
+      installedEntry.targetPath === available.source ||
+      installedEntry.managedSourcePath === available.source ||
+      installedEntry.managedKey === available.key;
+    if (!isPaperclipManagedInstall) continue;
+    await fs.rm(path.join(skillsHome, name), { recursive: true, force: true }).catch(() => {});
   }
 
   return buildGeminiSkillSnapshot(ctx.config);
