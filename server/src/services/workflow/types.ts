@@ -66,12 +66,22 @@ export interface WorkflowStepRun {
   completedAt: Date | null;
 }
 
+export interface WorkflowStepExecutionContract {
+  workflowRunId: string;
+  workflowId: string;
+  missionId: string | null;
+  stepId: string;
+  stepName: string;
+  toolNames: string[];
+  knowledgeBaseIds: string[];
+}
+
 /**
  * Result of a workflow execution.
  */
 export interface WorkflowExecutionResult {
   runId: string;
-  status: "completed" | "failed" | "cancelled";
+  status: "running" | "completed" | "failed" | "cancelled";
   completedAt: Date;
   error?: string;
   stepRuns: WorkflowStepRun[];

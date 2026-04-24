@@ -656,7 +656,7 @@ export function CompanyImport() {
   }, [companyAgents]);
 
   const localZipHelpText =
-    "Upload a .zip exported directly from Paperclip. Re-zipped archives created by Finder, Explorer, or other zip tools may not import correctly.";
+    "Upload a .zip exported directly from papercompany. Re-zipped archives created by Finder, Explorer, or other zip tools may not import correctly.";
 
   useEffect(() => {
     setBreadcrumbs([
@@ -1036,7 +1036,7 @@ export function CompanyImport() {
         <div>
           <h2 className="text-base font-semibold">Import source</h2>
           <p className="text-xs text-muted-foreground mt-1">
-            Choose a GitHub repo or upload a local Paperclip zip package.
+            Choose a GitHub repo or upload a local papercompany zip package.
           </p>
         </div>
 

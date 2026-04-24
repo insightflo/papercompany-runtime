@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
-import { issuesApi } from "../api/issues";
+import { missionsApi } from "../api/missions";
 import { useCompany } from "../context/CompanyContext";
+import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
@@ -22,13 +23,14 @@ interface IssueNodeProps {
   issue: Issue;
   allIssues: Issue[];
   depth: number;
+  missionId: string;
 }
 
 // ---------------------------------------------------------------------------
 // IssueNode
 // ---------------------------------------------------------------------------
 
-function IssueNode({ issue, allIssues, depth }: IssueNodeProps) {
+function IssueNode({ issue, allIssues, depth, missionId }: IssueNodeProps) {
   const children = allIssues.filter((i) => i.parentId === issue.id);
   const hasChildren = children.length > 0;
   const [expanded, setExpanded] = useState(true);
@@ -36,7 +38,8 @@ function IssueNode({ issue, allIssues, depth }: IssueNodeProps) {
   return (
     <div>
       <Link
-        to={`issues/${issue.id}`}
+        to={`/issues/${issue.id}`}
+        state={createIssueDetailLocationState("Mission", `/missions/${missionId}`)}
         className={cn(
           "flex items-center gap-2 px-3 py-1.5 text-sm transition-colors no-underline text-inherit hover:bg-accent/50",
         )}
@@ -44,6 +47,7 @@ function IssueNode({ issue, allIssues, depth }: IssueNodeProps) {
       >
         {hasChildren ? (
           <button
+            type="button"
             className="p-0.5 shrink-0"
             onClick={(e) => {
               e.preventDefault();
@@ -76,6 +80,7 @@ function IssueNode({ issue, allIssues, depth }: IssueNodeProps) {
               issue={child}
               allIssues={allIssues}
               depth={depth + 1}
+              missionId={missionId}
             />
           ))}
         </div>
@@ -92,12 +97,8 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
   const { selectedCompanyId } = useCompany();
 
   const { data: issues, isLoading, error } = useQuery({
-    queryKey: [...queryKeys.issues.list(selectedCompanyId!), "mission", missionId],
-    queryFn: () =>
-      issuesApi.list(selectedCompanyId!, {
-        originKind: "mission",
-        originId: missionId,
-      }),
+    queryKey: queryKeys.missions.issues(missionId),
+    queryFn: () => missionsApi.listIssues(missionId),
     enabled: !!selectedCompanyId && !!missionId,
   });
 
@@ -106,11 +107,11 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
   if (isLoading) {
     return (
       <div className="space-y-1 py-2">
-        {[...Array(3)].map((_, i) => (
+        {[12, 20, 28].map((leftPadding) => (
           <div
-            key={i}
+            key={`mission-issue-skeleton-${leftPadding}`}
             className="h-7 bg-muted animate-pulse rounded"
-            style={{ marginLeft: `${i * 8 + 12}px`, width: `calc(100% - ${i * 8 + 24}px)` }}
+            style={{ marginLeft: `${leftPadding}px`, width: `calc(100% - ${leftPadding + 12}px)` }}
           />
         ))}
       </div>
@@ -120,7 +121,7 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
   if (error) {
     return (
       <p className="text-sm text-destructive px-3 py-2">
-        {error instanceof Error ? error.message : "Failed to load issues"}
+        {error instanceof Error ? error.message : "Failed to load work items"}
       </p>
     );
   }
@@ -129,9 +130,9 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
     return (
       <div className="flex flex-col items-center justify-center py-10 text-center">
         <ListTree className="h-8 w-8 mb-2 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">No issues linked to this mission.</p>
+        <p className="text-sm text-muted-foreground">No work items linked to this mission.</p>
         <p className="text-xs text-muted-foreground mt-1">
-          Issues will appear here once they are associated with this mission.
+          Work items will appear here once they are associated with this mission.
         </p>
       </div>
     );
@@ -149,6 +150,7 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
           issue={issue}
           allIssues={issues}
           depth={0}
+          missionId={missionId}
         />
       ))}
     </div>

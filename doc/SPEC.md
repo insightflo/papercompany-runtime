@@ -108,6 +108,8 @@ Configurable per agent. Two ends of the spectrum:
 - **Fat payload** — Paperclip bundles relevant context (current tasks, messages, company state, metrics) into the heartbeat invocation. Suited for simple/stateless agents that can't call back to Paperclip.
 - **Thin ping** — Heartbeat is just a wake-up signal. Agent calls Paperclip's API to fetch whatever context it needs. Suited for sophisticated agents that manage their own state.
 
+As the runtime gets thinner and more server-governed, Paperclip now attaches a server-computed step input manifest describing the adapter-visible inputs for the current heartbeat. In the current slice this manifest is primarily descriptive, and it also blocks a narrow first set of explicit repo/workspace-wide scan instructions before adapter execution when broad scans are disallowed.
+
 #### Minimum Contract
 
 The minimum requirement to be a Paperclip agent: **be callable.** That's it. Paperclip can invoke you via command or webhook. No requirement to report back — Paperclip infers basic status from process liveness when it can.

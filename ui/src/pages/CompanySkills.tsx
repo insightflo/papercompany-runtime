@@ -159,7 +159,7 @@ function sourceMeta(sourceBadge: CompanySkillSourceBadge, sourceLabel: string | 
     case "local":
       return { icon: Folder, label: sourceLabel ?? "Folder", managedLabel: "Folder managed" };
     case "paperclip":
-      return { icon: Paperclip, label: sourceLabel ?? "Paperclip", managedLabel: "Paperclip managed" };
+      return { icon: Paperclip, label: sourceLabel ?? "papercompany", managedLabel: "papercompany managed" };
     default:
       return { icon: Boxes, label: sourceLabel ?? "Catalog", managedLabel: "Catalog managed" };
   }
@@ -561,6 +561,7 @@ function SkillPane({
           </div>
           {detail.editable ? (
             <button
+              type="button"
               className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
               onClick={() => setEditMode(!editMode)}
             >
@@ -580,6 +581,7 @@ function SkillPane({
                 <SourceIcon className="h-3.5 w-3.5 text-muted-foreground" />
                 {detail.sourcePath ? (
                   <button
+                    type="button"
                     className="truncate hover:text-foreground text-muted-foreground transition-colors cursor-pointer"
                     onClick={() => {
                       navigator.clipboard.writeText(detail.sourcePath!);
@@ -666,6 +668,7 @@ function SkillPane({
             {file?.markdown && !editMode && (
               <div className="flex items-center border border-border">
                 <button
+                  type="button"
                   className={cn("px-3 py-1.5 text-sm", viewMode === "preview" && "text-foreground", viewMode !== "preview" && "text-muted-foreground")}
                   onClick={() => setViewMode("preview")}
                 >
@@ -675,6 +678,7 @@ function SkillPane({
                   </span>
                 </button>
                 <button
+                  type="button"
                   className={cn("border-l border-border px-3 py-1.5 text-sm", viewMode === "code" && "text-foreground", viewMode !== "code" && "text-muted-foreground")}
                   onClick={() => setViewMode("code")}
                 >
@@ -823,8 +827,9 @@ export function CompanySkills() {
   }, [selectedPath, selectedSkillId]);
 
   useEffect(() => {
+    void selectedSkillId;
     setEditMode(false);
-  }, [selectedSkillId, selectedPath]);
+  }, [selectedSkillId]);
 
   useEffect(() => {
     if (detailQuery.data) {
@@ -881,7 +886,7 @@ export function CompanySkills() {
       pushToast({
         tone: "success",
         title: "Skill created",
-        body: `${skill.name} is now editable in the Paperclip workspace.`,
+        body: `${skill.name} is now editable in the papercompany workspace.`,
       });
     },
     onError: (error) => {

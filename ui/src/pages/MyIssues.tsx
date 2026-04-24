@@ -17,7 +17,7 @@ export function MyIssues() {
   const { setBreadcrumbs } = useBreadcrumbs();
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "My Issues" }]);
+    setBreadcrumbs([{ label: "My Work" }]);
   }, [setBreadcrumbs]);
 
   const { data: issues, isLoading, error } = useQuery({
@@ -27,7 +27,7 @@ export function MyIssues() {
   });
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={ListTodo} message="Select a company to view your issues." />;
+    return <EmptyState icon={ListTodo} message="Select a company to view your work." />;
   }
 
   if (isLoading) {
@@ -44,7 +44,7 @@ export function MyIssues() {
       {error && <p className="text-sm text-destructive">{error.message}</p>}
 
       {myIssues.length === 0 && (
-        <EmptyState icon={ListTodo} message="No issues assigned to you." />
+        <EmptyState icon={ListTodo} message="No work items assigned to you." />
       )}
 
       {myIssues.length > 0 && (

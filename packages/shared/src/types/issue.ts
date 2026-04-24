@@ -175,3 +175,14 @@ export interface IssueAttachment {
   updatedAt: Date;
   contentPath: string;
 }
+
+export type WorkItem = Issue;
+export type WorkItemAncestor = IssueAncestor;
+export type WorkItemAncestorProject = IssueAncestorProject;
+export type WorkItemAncestorGoal = IssueAncestorGoal;
+export type WorkItemLabel = IssueLabel;
+export type WorkItemComment = IssueComment;
+export type WorkItemAttachment = IssueAttachment;
+export type WorkItemDocument = IssueDocument;
+export type WorkItemDocumentSummary = IssueDocumentSummary;
+export type WorkItemAssigneeAdapterOverrides = IssueAssigneeAdapterOverrides;

@@ -82,7 +82,32 @@ describe("gemini execute", () => {
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
-        context: {},
+        context: {
+          paperclipStepInputManifest: {
+            version: 1,
+            taskKey: "issue:123",
+            issueId: "issue-1",
+            projectId: null,
+            allowedContextKeys: ["issueId", "paperclipSessionHandoff"],
+            guardrails: { broadScanAllowed: false },
+            inputs: {
+              workspace: { available: true, source: "project_primary", workspaceId: "ws-1", projectId: null },
+              workspaceHints: { available: false, count: 0 },
+              runtimeServiceIntents: { available: false, count: 0 },
+              runtimeServices: { available: false, count: 0, primaryUrl: null },
+              sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
+            },
+          },
+          paperclipSessionHandoff: {
+            version: 1,
+            previousSessionId: "sess-1",
+            previousRunId: "run-prev",
+            issueId: "issue-1",
+            rotationReason: "budget",
+            lastRunSummaryText: "Last run summarized the issue state",
+          },
+          paperclipSessionHandoffMarkdown: "# raw handoff markdown should not appear",
+        },
         authToken: "run-jwt-token",
         onLog: async () => {},
         onMeta: async (meta) => {
@@ -102,7 +127,10 @@ describe("gemini execute", () => {
       const promptFlagIndex = capture.argv.indexOf("--prompt");
       const promptArg = promptFlagIndex >= 0 ? capture.argv[promptFlagIndex + 1] : "";
       expect(promptArg).toContain("Follow the paperclip heartbeat.");
-      expect(promptArg).toContain("Paperclip runtime note:");
+      expect(promptArg).toContain("Paperclip runtime brief:");
+      expect(promptArg).toContain("Previous session: sess-1");
+      expect(promptArg).not.toContain("Paperclip runtime note:");
+      expect(promptArg).not.toContain("# raw handoff markdown should not appear");
       expect(capture.paperclipEnvKeys).toEqual(
         expect.arrayContaining([
           "PAPERCLIP_AGENT_ID",
@@ -112,10 +140,9 @@ describe("gemini execute", () => {
           "PAPERCLIP_RUN_ID",
         ]),
       );
-      expect(invocationPrompt).toContain("Paperclip runtime note:");
-      expect(invocationPrompt).toContain("PAPERCLIP_API_URL");
-      expect(invocationPrompt).toContain("Paperclip API access note:");
-      expect(invocationPrompt).toContain("run_shell_command");
+      expect(invocationPrompt).not.toContain("Paperclip runtime note:");
+      expect(invocationPrompt).not.toContain("Paperclip API access note:");
+      expect(invocationPrompt).not.toContain("# raw handoff markdown should not appear");
       expect(result.question).toBeNull();
     } finally {
       if (previousHome === undefined) {

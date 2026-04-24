@@ -14,6 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Rocket, ListTree, GitBranch, Settings, User } from "lucide-react";
 import { MissionIssueTree } from "../components/MissionIssueTree";
+import { MissionExecutionOverview } from "../components/MissionExecutionOverview";
 import { WorkflowDagPanel } from "../components/WorkflowDagPanel";
 
 const STATUS_OPTIONS: { value: MissionStatus; label: string }[] = [
@@ -174,21 +175,29 @@ export function MissionDetail() {
       <Separator />
 
       {/* Tabbed sub-panels */}
-      <Tabs defaultValue="issues" className="w-full">
+      <Tabs defaultValue="overview" className="w-full">
         <TabsList className="shrink-0">
+          <TabsTrigger value="overview" className="gap-1.5">
+            <Rocket className="h-3.5 w-3.5" />
+            Overview
+          </TabsTrigger>
           <TabsTrigger value="issues" className="gap-1.5">
             <ListTree className="h-3.5 w-3.5" />
-            Issues
+            Work
           </TabsTrigger>
           <TabsTrigger value="workflow" className="gap-1.5">
             <GitBranch className="h-3.5 w-3.5" />
-            Workflow
+            Execution Flow
           </TabsTrigger>
           <TabsTrigger value="worktree" className="gap-1.5">
             <Settings className="h-3.5 w-3.5" />
-            Worktree Rules
+            Execution Rules
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="overview" className="mt-4">
+          <MissionExecutionOverview missionId={missionId} mission={mission} />
+        </TabsContent>
 
         {/* Issues tab — P8-T4 (MissionIssueTree) */}
         <TabsContent value="issues" className="mt-4">
@@ -204,13 +213,13 @@ export function MissionDetail() {
         <TabsContent value="worktree" className="mt-4">
           <div className="border border-border rounded-md p-8 text-center">
             <Settings className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground mb-1">Worktree rules coming soon</p>
+            <p className="text-sm text-muted-foreground mb-1">Execution rules coming soon</p>
             <p className="text-xs text-muted-foreground">
-              Worktree rule configuration will appear here once P4-T9 and P8-T6 are implemented.
+              Execution rule configuration will appear here once P4-T9 and P8-T6 are implemented.
             </p>
             <div className="mt-4">
               <Button asChild size="sm" variant="outline">
-                <Link to="/worktree/rules">Open global worktree rules</Link>
+                  <Link to="/worktree/rules">Open global execution rules</Link>
               </Button>
             </div>
           </div>

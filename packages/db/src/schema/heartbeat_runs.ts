@@ -2,6 +2,7 @@ import { type AnyPgColumn, pgTable, uuid, text, timestamp, jsonb, index, integer
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { agentWakeupRequests } from "./agent_wakeup_requests.js";
+import { issues } from "./issues.js";
 
 export const heartbeatRuns = pgTable(
   "heartbeat_runs",
@@ -9,6 +10,7 @@ export const heartbeatRuns = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
     agentId: uuid("agent_id").notNull().references(() => agents.id),
+    issueId: uuid("issue_id").references((): AnyPgColumn => issues.id, { onDelete: "set null" }),
     invocationSource: text("invocation_source").notNull().default("on_demand"),
     triggerDetail: text("trigger_detail"),
     status: text("status").notNull().default("queued"),
@@ -46,6 +48,11 @@ export const heartbeatRuns = pgTable(
       table.companyId,
       table.agentId,
       table.startedAt,
+    ),
+    companyIssueCreatedIdx: index("heartbeat_runs_company_issue_created_idx").on(
+      table.companyId,
+      table.issueId,
+      table.createdAt,
     ),
   }),
 );

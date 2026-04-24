@@ -23,13 +23,35 @@ export function executionWorkspaceRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const workspaces = await svc.list(companyId, {
-      projectId: req.query.projectId as string | undefined,
-      projectWorkspaceId: req.query.projectWorkspaceId as string | undefined,
-      issueId: req.query.issueId as string | undefined,
+      projectId: (req.query.projectId as string | undefined) ?? (req.query.workContextId as string | undefined),
+      projectWorkspaceId:
+        (req.query.projectWorkspaceId as string | undefined) ?? (req.query.workContextSpaceId as string | undefined),
+      issueId: (req.query.issueId as string | undefined) ?? (req.query.workItemId as string | undefined),
       status: req.query.status as string | undefined,
       reuseEligible: req.query.reuseEligible === "true",
     });
     res.json(workspaces);
+  });
+
+  router.get("/companies/:companyId/execution-contexts", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const workspaces = await svc.list(companyId, {
+      projectId: (req.query.projectId as string | undefined) ?? (req.query.workContextId as string | undefined),
+      projectWorkspaceId:
+        (req.query.projectWorkspaceId as string | undefined) ?? (req.query.workContextSpaceId as string | undefined),
+      issueId: (req.query.issueId as string | undefined) ?? (req.query.workItemId as string | undefined),
+      status: req.query.status as string | undefined,
+      reuseEligible: req.query.reuseEligible === "true",
+    });
+    res.json(
+      workspaces.map((workspace) => ({
+        ...workspace,
+        workContextId: workspace.projectId,
+        workContextSpaceId: workspace.projectWorkspaceId,
+        sourceWorkItemId: workspace.sourceIssueId,
+      })),
+    );
   });
 
   router.get("/execution-workspaces/:id", async (req, res) => {

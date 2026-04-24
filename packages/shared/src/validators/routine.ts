@@ -7,7 +7,15 @@ import {
   ROUTINE_TRIGGER_SIGNING_MODES,
 } from "../constants.js";
 
-export const createRoutineSchema = z.object({
+function normalizeRecurringProcedureShape(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const value = { ...(input as Record<string, unknown>) };
+  if (value.workContextId !== undefined && value.projectId === undefined) value.projectId = value.workContextId;
+  if (value.parentWorkItemId !== undefined && value.parentIssueId === undefined) value.parentIssueId = value.parentWorkItemId;
+  return value;
+}
+
+const routineFields = {
   projectId: z.string().uuid(),
   goalId: z.string().uuid().optional().nullable(),
   parentIssueId: z.string().uuid().optional().nullable(),
@@ -18,11 +26,15 @@ export const createRoutineSchema = z.object({
   status: z.enum(ROUTINE_STATUSES).optional().default("active"),
   concurrencyPolicy: z.enum(ROUTINE_CONCURRENCY_POLICIES).optional().default("coalesce_if_active"),
   catchUpPolicy: z.enum(ROUTINE_CATCH_UP_POLICIES).optional().default("skip_missed"),
-});
+};
+
+const createRoutineObjectSchema = z.object(routineFields);
+
+export const createRoutineSchema = z.preprocess(normalizeRecurringProcedureShape, createRoutineObjectSchema);
 
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
 
-export const updateRoutineSchema = createRoutineSchema.partial();
+export const updateRoutineSchema = z.preprocess(normalizeRecurringProcedureShape, createRoutineObjectSchema.partial());
 export type UpdateRoutine = z.infer<typeof updateRoutineSchema>;
 
 const baseTriggerSchema = z.object({
@@ -70,3 +82,29 @@ export type RunRoutine = z.infer<typeof runRoutineSchema>;
 
 export const rotateRoutineTriggerSecretSchema = z.object({});
 export type RotateRoutineTriggerSecret = z.infer<typeof rotateRoutineTriggerSecretSchema>;
+
+export const createProcedureSchema = createRoutineSchema;
+export const updateProcedureSchema = updateRoutineSchema;
+export const createProcedureTriggerSchema = createRoutineTriggerSchema;
+export const updateProcedureTriggerSchema = updateRoutineTriggerSchema;
+export const runProcedureSchema = runRoutineSchema;
+export const rotateProcedureTriggerSecretSchema = rotateRoutineTriggerSecretSchema;
+export const createRecurringProcedureSchema = createRoutineSchema;
+export const updateRecurringProcedureSchema = updateRoutineSchema;
+export const createRecurringProcedureTriggerSchema = createRoutineTriggerSchema;
+export const updateRecurringProcedureTriggerSchema = updateRoutineTriggerSchema;
+export const runRecurringProcedureSchema = runRoutineSchema;
+export const rotateRecurringProcedureTriggerSecretSchema = rotateRoutineTriggerSecretSchema;
+
+export type CreateProcedure = CreateRoutine;
+export type UpdateProcedure = UpdateRoutine;
+export type CreateProcedureTrigger = CreateRoutineTrigger;
+export type UpdateProcedureTrigger = UpdateRoutineTrigger;
+export type RunProcedure = RunRoutine;
+export type RotateProcedureTriggerSecret = RotateRoutineTriggerSecret;
+export type CreateRecurringProcedure = CreateRoutine;
+export type UpdateRecurringProcedure = UpdateRoutine;
+export type CreateRecurringProcedureTrigger = CreateRoutineTrigger;
+export type UpdateRecurringProcedureTrigger = UpdateRoutineTrigger;
+export type RunRecurringProcedure = RunRoutine;
+export type RotateRecurringProcedureTriggerSecret = RotateRoutineTriggerSecret;

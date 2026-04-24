@@ -61,21 +61,30 @@ For local adapters, set:
 - optional env vars and extra CLI args
 - use **Test environment** in agent configuration to run adapter-specific diagnostics before saving
 
+For adapters that support `instructionsFilePath`, relative paths are resolved from the effective heartbeat working directory (`cwd`).
+
 ## 3.4 Prompt templates
 
 You can set:
 
 - `promptTemplate`: used for every run (first run and resumed sessions)
 
+Optional heartbeat runtime guardrails:
+
+- `heartbeat.contextBudgetPreflight.maxEstimatedChars`: fail fast before adapter execution when the estimated prompt payload exceeds this char budget
+- `heartbeat.contextBudgetPreflight.maxEstimatedTokens`: fail fast before adapter execution when the estimated prompt payload exceeds this token budget
+
 Templates support variables like `{{agent.id}}`, `{{agent.name}}`, and run context values.
 
 ## 4. Session resume behavior
 
-Paperclip stores session IDs for resumable adapters.
+Paperclip stores resumable session state per `(agent, taskKey, adapterType)`.
+`taskKey` is derived from wakeup context (`taskKey`, `taskId`, or `issueId`).
 
-- Next heartbeat reuses the saved session automatically.
-- This gives continuity across heartbeats.
-- You can reset a session if context gets stale or confused.
+- A heartbeat for the same task key reuses the previous session for that task.
+- Different task keys for the same agent keep separate session state.
+- If restore fails, adapters should retry once with a fresh session and continue.
+- You can reset all sessions for an agent or reset one task session by task key.
 
 Use session reset when:
 

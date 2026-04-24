@@ -73,6 +73,7 @@ export { worktreeRules } from "./worktree_rules.js";
 export { worktreeRuleProposals } from "./worktree_rule_proposals.js";
 export { worktreeAuditLog } from "./worktree_audit_log.js";
 export { srbLinks } from "./srb_links.js";
+export { srbIssuePairs } from "./srb_issue_pairs.js";
 export { srbDeliveryLog } from "./srb_delivery_log.js";
 export { srbNonces } from "./srb_nonces.js";
 export { channelConfigs } from "./channel_configs.js";

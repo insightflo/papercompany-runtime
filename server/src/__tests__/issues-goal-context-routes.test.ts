@@ -48,6 +48,9 @@ vi.mock("../services/index.js", () => ({
   routineService: () => ({
     syncRunStatusForIssue: vi.fn(async () => undefined),
   }),
+  workflowService: {
+    syncRunStatusForIssue: vi.fn(async () => undefined),
+  },
   workProductService: () => ({
     listForIssue: vi.fn(async () => []),
   }),
@@ -114,7 +117,16 @@ describe("issue goal context routes", () => {
       latestCommentId: null,
       latestCommentAt: null,
     });
-    mockIssueService.getComment.mockResolvedValue(null);
+    mockIssueService.getComment.mockResolvedValue({
+      id: "comment-1",
+      issueId: legacyProjectLinkedIssue.id,
+      body: "Please inspect src/server.ts and ../secrets.env",
+      createdAt: new Date("2026-03-24T12:00:00Z"),
+      updatedAt: new Date("2026-03-24T12:00:00Z"),
+      companyId: "company-1",
+      authorAgentId: null,
+      authorUserId: "local-board",
+    });
     mockProjectService.getById.mockResolvedValue({
       id: legacyProjectLinkedIssue.projectId,
       companyId: "company-1",
@@ -142,8 +154,38 @@ describe("issue goal context routes", () => {
         effectiveLocalFolder: "/tmp/company-1/project-1",
         origin: "managed_checkout",
       },
-      workspaces: [],
-      primaryWorkspace: null,
+      workspaces: [
+        {
+          id: "workspace-1",
+          companyId: "company-1",
+          projectId: legacyProjectLinkedIssue.projectId,
+          name: "Onboarding Workspace",
+          cwd: "/tmp/company-1/project-1",
+          repoUrl: null,
+          repoRef: null,
+          defaultRef: null,
+          metadata: null,
+          isPrimary: true,
+          sourceType: "local_path",
+          createdAt: new Date("2026-03-20T00:00:00Z"),
+          updatedAt: new Date("2026-03-20T00:00:00Z"),
+        },
+      ],
+      primaryWorkspace: {
+        id: "workspace-1",
+        companyId: "company-1",
+        projectId: legacyProjectLinkedIssue.projectId,
+        name: "Onboarding Workspace",
+        cwd: "/tmp/company-1/project-1",
+        repoUrl: null,
+        repoRef: null,
+        defaultRef: null,
+        metadata: null,
+        isPrimary: true,
+        sourceType: "local_path",
+        createdAt: new Date("2026-03-20T00:00:00Z"),
+        updatedAt: new Date("2026-03-20T00:00:00Z"),
+      },
       archivedAt: null,
       createdAt: new Date("2026-03-20T00:00:00Z"),
       updatedAt: new Date("2026-03-20T00:00:00Z"),
@@ -171,7 +213,7 @@ describe("issue goal context routes", () => {
 
   it("surfaces the project goal from GET /issues/:id/heartbeat-context", async () => {
     const res = await request(createApp()).get(
-      "/api/issues/11111111-1111-4111-8111-111111111111/heartbeat-context",
+      "/api/issues/11111111-1111-4111-8111-111111111111/heartbeat-context?wakeCommentId=comment-1",
     );
 
     expect(res.status).toBe(200);
@@ -183,5 +225,13 @@ describe("issue goal context routes", () => {
       }),
     );
     expect(mockGoalService.getDefaultCompanyGoal).not.toHaveBeenCalled();
+    expect(res.body.fileViews).toEqual([
+      {
+        workspaceId: "workspace-1",
+        relativePath: "src/server.ts",
+        source: "wake_comment",
+        exists: false,
+      },
+    ]);
   });
 });

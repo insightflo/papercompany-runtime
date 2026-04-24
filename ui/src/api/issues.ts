@@ -7,7 +7,14 @@ import type {
   IssueDocument,
   IssueLabel,
   IssueWorkProduct,
+  WorkItem,
+  WorkItemAttachment,
+  WorkItemComment,
+  WorkItemDocument,
+  WorkItemProduct,
+  WorkItemLabel,
   UpsertIssueDocument,
+  UpsertWorkItemDocument,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -103,4 +110,63 @@ export const issuesApi = {
   updateWorkProduct: (id: string, data: Record<string, unknown>) =>
     api.patch<IssueWorkProduct>(`/work-products/${id}`, data),
   deleteWorkProduct: (id: string) => api.delete<IssueWorkProduct>(`/work-products/${id}`),
+};
+
+export const workItemsApi = {
+  list: (companyId: string, filters?: Parameters<typeof issuesApi.list>[1]) => {
+    const params = new URLSearchParams();
+    if (filters?.status) params.set("status", filters.status);
+    if (filters?.projectId) params.set("workContextId", filters.projectId);
+    if (filters?.assigneeAgentId) params.set("assigneeAgentId", filters.assigneeAgentId);
+    if (filters?.assigneeUserId) params.set("assigneeUserId", filters.assigneeUserId);
+    if (filters?.touchedByUserId) params.set("touchedByUserId", filters.touchedByUserId);
+    if (filters?.unreadForUserId) params.set("unreadForUserId", filters.unreadForUserId);
+    if (filters?.labelId) params.set("labelId", filters.labelId);
+    if (filters?.originKind) params.set("originKind", filters.originKind);
+    if (filters?.originId) params.set("originId", filters.originId);
+    if (filters?.includeRoutineExecutions) params.set("includeRoutineExecutions", "true");
+    if (filters?.q) params.set("q", filters.q);
+    const qs = params.toString();
+    return api.get<WorkItem[]>(`/companies/${companyId}/work-items${qs ? `?${qs}` : ""}`);
+  },
+  listLabels: (companyId: string) => api.get<WorkItemLabel[]>(`/companies/${companyId}/labels`),
+  createLabel: (companyId: string, data: { name: string; color: string }) => api.post<WorkItemLabel>(`/companies/${companyId}/labels`, data),
+  deleteLabel: (id: string) => api.delete<WorkItemLabel>(`/labels/${id}`),
+  get: (workItemId: string) => api.get<WorkItem>(`/work-items/${workItemId}`),
+  markRead: (workItemId: string) => api.post<{ id: string; lastReadAt: Date }>(`/work-items/${workItemId}/read`, {}),
+  create: (companyId: string, data: Record<string, unknown>) => api.post<WorkItem>(`/companies/${companyId}/work-items`, data),
+  update: (workItemId: string, data: Record<string, unknown>) => api.patch<WorkItem>(`/work-items/${workItemId}`, data),
+  remove: (workItemId: string) => api.delete<WorkItem>(`/work-items/${workItemId}`),
+  checkout: (workItemId: string, agentId: string) => api.post<WorkItem>(`/work-items/${workItemId}/checkout`, { agentId, expectedStatuses: ["todo", "backlog", "blocked"] }),
+  release: (workItemId: string) => api.post<WorkItem>(`/work-items/${workItemId}/release`, {}),
+  listComments: (workItemId: string) => api.get<WorkItemComment[]>(`/work-items/${workItemId}/comments`),
+  addComment: (workItemId: string, body: string, reopen?: boolean, interrupt?: boolean) =>
+    api.post<WorkItemComment>(`/work-items/${workItemId}/comments`, {
+      body,
+      ...(reopen === undefined ? {} : { reopen }),
+      ...(interrupt === undefined ? {} : { interrupt }),
+    }),
+  listDocuments: (workItemId: string) => api.get<WorkItemDocument[]>(`/work-items/${workItemId}/documents`),
+  getDocument: (workItemId: string, key: string) => api.get<WorkItemDocument>(`/work-items/${workItemId}/documents/${encodeURIComponent(key)}`),
+  upsertDocument: (workItemId: string, key: string, data: UpsertWorkItemDocument) =>
+    api.put<WorkItemDocument>(`/work-items/${workItemId}/documents/${encodeURIComponent(key)}`, data),
+  listDocumentRevisions: (workItemId: string, key: string) => api.get<DocumentRevision[]>(`/work-items/${workItemId}/documents/${encodeURIComponent(key)}/revisions`),
+  deleteDocument: (workItemId: string, key: string) => api.delete<{ ok: true }>(`/work-items/${workItemId}/documents/${encodeURIComponent(key)}`),
+  listAttachments: (workItemId: string) => api.get<WorkItemAttachment[]>(`/work-items/${workItemId}/attachments`),
+  uploadAttachment: (companyId: string, workItemId: string, file: File, workItemCommentId?: string | null) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (workItemCommentId) form.append("issueCommentId", workItemCommentId);
+    return api.postForm<WorkItemAttachment>(`/companies/${companyId}/work-items/${workItemId}/attachments`, form);
+  },
+  deleteAttachment: (attachmentId: string) => api.delete<{ ok: true }>(`/attachments/${attachmentId}`),
+  listApprovals: (workItemId: string) => api.get<Approval[]>(`/work-items/${workItemId}/approvals`),
+  linkApproval: (workItemId: string, approvalId: string) => api.post<Approval[]>(`/work-items/${workItemId}/approvals`, { approvalId }),
+  unlinkApproval: (workItemId: string, approvalId: string) => api.delete<{ ok: true }>(`/work-items/${workItemId}/approvals/${approvalId}`),
+  listProducts: (workItemId: string) => api.get<WorkItemProduct[]>(`/work-items/${workItemId}/work-products`),
+  createProduct: (workItemId: string, data: Record<string, unknown>) =>
+    api.post<WorkItemProduct>(`/work-items/${workItemId}/work-products`, data),
+  updateProduct: (productId: string, data: Record<string, unknown>) =>
+    api.patch<WorkItemProduct>(`/work-products/${productId}`, data),
+  deleteProduct: (productId: string) => api.delete<WorkItemProduct>(`/work-products/${productId}`),
 };

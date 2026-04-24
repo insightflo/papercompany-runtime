@@ -19,7 +19,7 @@ export function Projects() {
   const { setBreadcrumbs } = useBreadcrumbs();
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Projects" }]);
+    setBreadcrumbs([{ label: "Work Contexts" }]);
   }, [setBreadcrumbs]);
 
   const { data: allProjects, isLoading, error } = useQuery({
@@ -33,7 +33,7 @@ export function Projects() {
   );
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Hexagon} message="Select a company to view projects." />;
+    return <EmptyState icon={Hexagon} message="Select a company to view work contexts." />;
   }
 
   if (isLoading) {
@@ -45,7 +45,7 @@ export function Projects() {
       <div className="flex items-center justify-end">
         <Button size="sm" variant="outline" onClick={openNewProject}>
           <Plus className="h-4 w-4 mr-1" />
-          Add Project
+          Add Work Context
         </Button>
       </div>
 
@@ -54,8 +54,8 @@ export function Projects() {
       {!isLoading && projects.length === 0 && (
         <EmptyState
           icon={Hexagon}
-          message="No projects yet."
-          action="Add Project"
+          message="No work contexts yet."
+          action="Add Work Context"
           onAction={openNewProject}
         />
       )}

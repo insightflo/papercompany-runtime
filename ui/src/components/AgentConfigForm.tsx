@@ -297,7 +297,6 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     adapterType === "codex_local" ||
     adapterType === "gemini_local" ||
     adapterType === "opencode_local" ||
-    adapterType === "pi_local" ||
     adapterType === "cursor";
   const showLegacyWorkingDirectoryField =
     isLocal && shouldShowLegacyWorkingDirectoryField({ isCreate, adapterConfig: config });
@@ -688,8 +687,6 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       ? "codex"
                       : adapterType === "gemini_local"
                         ? "gemini"
-                        : adapterType === "pi_local"
-                          ? "pi"
                         : adapterType === "cursor"
                           ? "agent"
                         : adapterType === "opencode_local"
@@ -976,17 +973,9 @@ function AdapterEnvironmentResult({ result }: { result: AdapterEnvironmentTestRe
 
 /* ---- Internal sub-components ---- */
 
-const ENABLED_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "gemini_local", "opencode_local", "pi_local", "cursor"]);
+const ENABLED_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "gemini_local", "opencode_local", "cursor"]);
 
 /** Display list includes all real adapter types plus UI-only coming-soon entries. */
-const ADAPTER_DISPLAY_LIST: { value: string; label: string; comingSoon: boolean }[] = [
-  ...AGENT_ADAPTER_TYPES.map((t) => ({
-    value: t,
-    label: adapterLabels[t] ?? t,
-    comingSoon: !ENABLED_ADAPTER_TYPES.has(t),
-  })),
-];
-
 function AdapterTypeDropdown({
   value,
   onChange,
@@ -994,6 +983,14 @@ function AdapterTypeDropdown({
   value: string;
   onChange: (type: string) => void;
 }) {
+  const adapterDisplayList = AGENT_ADAPTER_TYPES
+    .filter((type) => type !== "pi_local" || value === "pi_local")
+    .map((type) => ({
+      value: type,
+      label: adapterLabels[type] ?? type,
+      comingSoon: !ENABLED_ADAPTER_TYPES.has(type),
+    }));
+
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -1006,7 +1003,7 @@ function AdapterTypeDropdown({
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-1" align="start">
-        {ADAPTER_DISPLAY_LIST.map((item) => (
+        {adapterDisplayList.map((item) => (
           <button
             key={item.value}
             disabled={item.comingSoon}

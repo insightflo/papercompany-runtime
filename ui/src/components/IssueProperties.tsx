@@ -24,9 +24,9 @@ import { User, Hexagon, ArrowUpRight, Tag, Plus, Trash2, Copy, Check } from "luc
 import { AgentIcon } from "./AgentIconPicker";
 
 const EXECUTION_WORKSPACE_OPTIONS = [
-  { value: "shared_workspace", label: "Project default" },
-  { value: "isolated_workspace", label: "New isolated workspace" },
-  { value: "reuse_existing", label: "Reuse existing workspace" },
+  { value: "shared_workspace", label: "Context default" },
+  { value: "isolated_workspace", label: "New isolated execution context" },
+  { value: "reuse_existing", label: "Reuse existing execution context" },
 ] as const;
 
 function defaultProjectWorkspaceIdForProject(project: {
@@ -516,7 +516,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
   ) : (
     <>
       <Hexagon className="h-3.5 w-3.5 text-muted-foreground" />
-      <span className="text-sm text-muted-foreground">No project</span>
+      <span className="text-sm text-muted-foreground">No work context</span>
     </>
   );
 
@@ -524,7 +524,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
     <>
       <input
         className="w-full px-2 py-1.5 text-xs bg-transparent outline-none border-b border-border mb-1 placeholder:text-muted-foreground/50"
-        placeholder="Search projects..."
+        placeholder="Search work contexts..."
         value={projectSearch}
         onChange={(e) => setProjectSearch(e.target.value)}
         autoFocus={!inline}
@@ -546,7 +546,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
             setProjectOpen(false);
           }}
         >
-          No project
+          No work context
         </button>
         {orderedProjects
           .filter((p) => {
@@ -639,7 +639,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
 
         <PropertyPicker
           inline={inline}
-          label="Project"
+          label="Work Context"
           open={projectOpen}
           onOpenChange={(open) => { setProjectOpen(open); if (!open) setProjectSearch(""); }}
           triggerContent={projectTrigger}
@@ -659,7 +659,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
         </PropertyPicker>
 
         {currentProjectSupportsExecutionWorkspace && (
-          <PropertyRow label="Workspace">
+          <PropertyRow label="Execution Context">
             <div className="w-full space-y-2">
               <select
                 className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
@@ -703,7 +703,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
                     });
                   }}
                 >
-                  <option value="">Choose an existing workspace</option>
+                  <option value="">Choose an existing execution context</option>
                   {deduplicatedReusableWorkspaces.map((workspace) => (
                     <option key={workspace.id} value={workspace.id}>
                       {workspace.name} · {workspace.status} · {workspace.branchName ?? workspace.cwd ?? workspace.id.slice(0, 8)}

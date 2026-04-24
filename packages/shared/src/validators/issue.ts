@@ -27,7 +27,17 @@ export const issueAssigneeAdapterOverridesSchema = z
   })
   .strict();
 
-export const createIssueSchema = z.object({
+function normalizeWorkItemShape(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const value = { ...(input as Record<string, unknown>) };
+  if (value.workContextId !== undefined && value.projectId === undefined) value.projectId = value.workContextId;
+  if (value.workContextSpaceId !== undefined && value.projectWorkspaceId === undefined) value.projectWorkspaceId = value.workContextSpaceId;
+  if (value.executionContextId !== undefined && value.executionWorkspaceId === undefined) value.executionWorkspaceId = value.executionContextId;
+  if (value.parentWorkItemId !== undefined && value.parentId === undefined) value.parentId = value.parentWorkItemId;
+  return value;
+}
+
+const issueFields = {
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
   goalId: z.string().uuid().optional().nullable(),
@@ -52,7 +62,11 @@ export const createIssueSchema = z.object({
   ]).optional().nullable(),
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
   labelIds: z.array(z.string().uuid()).optional(),
-});
+};
+
+const createIssueObjectSchema = z.object(issueFields);
+
+export const createIssueSchema = z.preprocess(normalizeWorkItemShape, createIssueObjectSchema);
 
 export type CreateIssue = z.infer<typeof createIssueSchema>;
 
@@ -63,19 +77,21 @@ export const createIssueLabelSchema = z.object({
 
 export type CreateIssueLabel = z.infer<typeof createIssueLabelSchema>;
 
-export const updateIssueSchema = createIssueSchema.partial().extend({
+export const updateIssueSchema = z.preprocess(normalizeWorkItemShape, createIssueObjectSchema.partial().extend({
   comment: z.string().min(1).optional(),
   reopen: z.boolean().optional(),
   hiddenAt: z.string().datetime().nullable().optional(),
-});
+}));
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
 export type IssueExecutionWorkspaceSettings = z.infer<typeof issueExecutionWorkspaceSettingsSchema>;
 
-export const checkoutIssueSchema = z.object({
+const checkoutIssueObjectSchema = z.object({
   agentId: z.string().uuid(),
   expectedStatuses: z.array(z.enum(ISSUE_STATUSES)).nonempty(),
 });
+
+export const checkoutIssueSchema = z.preprocess(normalizeWorkItemShape, checkoutIssueObjectSchema);
 
 export type CheckoutIssue = z.infer<typeof checkoutIssueSchema>;
 
@@ -87,9 +103,11 @@ export const addIssueCommentSchema = z.object({
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
 
-export const linkIssueApprovalSchema = z.object({
+const linkIssueApprovalObjectSchema = z.object({
   approvalId: z.string().uuid(),
 });
+
+export const linkIssueApprovalSchema = z.preprocess(normalizeWorkItemShape, linkIssueApprovalObjectSchema);
 
 export type LinkIssueApproval = z.infer<typeof linkIssueApprovalSchema>;
 
@@ -120,3 +138,26 @@ export const upsertIssueDocumentSchema = z.object({
 
 export type IssueDocumentFormat = z.infer<typeof issueDocumentFormatSchema>;
 export type UpsertIssueDocument = z.infer<typeof upsertIssueDocumentSchema>;
+
+export const createWorkItemSchema = createIssueSchema;
+export const updateWorkItemSchema = updateIssueSchema;
+export const workItemExecutionSettingsSchema = issueExecutionWorkspaceSettingsSchema;
+export const checkoutWorkItemSchema = checkoutIssueSchema;
+export const addWorkItemCommentSchema = addIssueCommentSchema;
+export const linkWorkItemApprovalSchema = linkIssueApprovalSchema;
+export const createWorkItemLabelSchema = createIssueLabelSchema;
+export const createWorkItemAttachmentMetadataSchema = createIssueAttachmentMetadataSchema;
+export const workItemDocumentFormatSchema = issueDocumentFormatSchema;
+export const workItemDocumentKeySchema = issueDocumentKeySchema;
+export const upsertWorkItemDocumentSchema = upsertIssueDocumentSchema;
+
+export type CreateWorkItem = CreateIssue;
+export type UpdateWorkItem = UpdateIssue;
+export type CheckoutWorkItem = CheckoutIssue;
+export type AddWorkItemComment = AddIssueComment;
+export type LinkWorkItemApproval = LinkIssueApproval;
+export type CreateWorkItemLabel = CreateIssueLabel;
+export type CreateWorkItemAttachmentMetadata = CreateIssueAttachmentMetadata;
+export type WorkItemDocumentFormat = IssueDocumentFormat;
+export type UpsertWorkItemDocument = UpsertIssueDocument;
+export type WorkItemExecutionSettings = IssueExecutionWorkspaceSettings;

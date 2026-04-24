@@ -1,4 +1,5 @@
 const BOARD_ROUTE_ROOTS = new Set([
+  "missions",
   "dashboard",
   "companies",
   "company",
@@ -78,8 +79,15 @@ export function toCompanyRelativePath(path: string): string {
   const segments = pathname.split("/").filter(Boolean);
 
   if (segments.length >= 2) {
+    const first = segments[0]!;
     const second = segments[1]!.toLowerCase();
-    if (!GLOBAL_ROUTE_ROOTS.has(segments[0]!.toLowerCase()) && BOARD_ROUTE_ROOTS.has(second)) {
+    const firstLower = first.toLowerCase();
+    const looksLikeCompanyPrefix =
+      !GLOBAL_ROUTE_ROOTS.has(firstLower) &&
+      !BOARD_ROUTE_ROOTS.has(firstLower) &&
+      first === normalizeCompanyPrefix(first);
+
+    if (looksLikeCompanyPrefix || BOARD_ROUTE_ROOTS.has(second)) {
       return `/${segments.slice(1).join("/")}${search}${hash}`;
     }
   }

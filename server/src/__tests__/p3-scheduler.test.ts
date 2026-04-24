@@ -14,7 +14,7 @@ vi.mock("@paperclipai/db", () => ({
   schedules: {},
 }));
 
-import { computeNextRun } from "../services/scheduler/cron-wakeup.js";
+import { claimDueSchedules, computeNextRun, createScheduler } from "../services/scheduler/cron-wakeup.js";
 import { parseCron, validateCron } from "../services/cron.js";
 
 // ---------------------------------------------------------------------------
@@ -180,5 +180,53 @@ describe("computeNextRun", () => {
     const parts = formatter.formatToParts(next!);
     const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "-1");
     expect(minute).toBe(0);
+  });
+});
+
+describe("createScheduler", () => {
+  it("forwards mission-aware scheduler wakeups to heartbeat enqueueWakeup", async () => {
+    const updateWhere = vi.fn(async () => undefined);
+    const updateSet = vi.fn(() => ({ where: updateWhere }));
+    const db = {
+      execute: vi.fn(async () => [
+        {
+          id: "schedule-1",
+          company_id: "company-1",
+          agent_id: "agent-1",
+          mission_id: "mission-1",
+          cron_expression: "* * * * *",
+          timezone: "UTC",
+        },
+      ]),
+      update: vi.fn(() => ({ set: updateSet })),
+    } as unknown as import("@paperclipai/db").Db;
+    const enqueueWakeup = vi.fn(async () => undefined);
+    const scheduler = createScheduler(db, {
+      heartbeat: { enqueueWakeup },
+    });
+
+    await scheduler.pollCycle();
+
+    expect(enqueueWakeup).toHaveBeenCalledWith("agent-1", {
+      source: "scheduler",
+      triggerDetail: "schedule:schedule-1",
+      missionId: "mission-1",
+      reason: "scheduled_wakeup",
+    });
+    expect(updateWhere).toHaveBeenCalled();
+  });
+});
+
+describe("claimDueSchedules", () => {
+  it("formats the claim timestamp as ISO text before executing the raw SQL update", async () => {
+    const toISOStringSpy = vi.spyOn(Date.prototype, "toISOString");
+    const db = {
+      execute: vi.fn(async () => []),
+    } as unknown as import("@paperclipai/db").Db;
+
+    await claimDueSchedules(db);
+
+    expect(toISOStringSpy).toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledTimes(1);
   });
 });

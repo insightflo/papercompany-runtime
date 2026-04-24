@@ -81,7 +81,6 @@ function makeSessionRow(overrides: Partial<MissionSessionRow> = {}): MissionSess
     runCount: 0,
     expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000), // 30 days
     createdAt: now,
-    updatedAt: now,
     ...overrides,
   };
 }
@@ -234,7 +233,7 @@ describe("missionSessionStore.getOrCreate — expired session compaction", () =>
     vi.clearAllMocks();
   });
 
-  it("session past expiresAt is compacted and new session is created (isNew: true)", async () => {
+  it("session past expiresAt is recycled in place and returned active (isNew: true)", async () => {
     // An expired session: expiresAt is far in the past (beyond grace period)
     const expiredSession = makeSessionRow({
       id: "session-expired",
@@ -242,45 +241,25 @@ describe("missionSessionStore.getOrCreate — expired session compaction", () =>
       expiresAt: new Date(Date.now() - 60 * 60 * 1000), // 1 hour ago — past grace period (5 min)
     });
 
-    const compactedSession = makeSessionRow({
-      id: "session-expired",
-      status: "compacted",
-    });
-
-    const newSession = makeSessionRow({
-      id: "session-new-after-compact",
-      status: "active",
-    });
-
-    // select call sequence:
-    //   1. existing session lookup (outer getOrCreate) → [expiredSession]
-    //   2. getById(expired) call after compactSession → [compactedSession]
-    //
-    // compactSession calls:
-    //   - db.update (set status = "compacted") → no returning needed
-    //   - db.insert (new session) → [newSession]   (but this result is unused by getOrCreate;
-    //     getOrCreate calls getById after compactSession, not returning from compactSession)
-    //
-    // However looking at the source: after compactSession(), getOrCreate calls:
-    //   return { session: await getById(existing.id), isNew: true }
-    // getById calls: db.select().from().where().limit(1) → returns compacted session row
+     const recycledSession = makeSessionRow({
+        id: "session-expired",
+        status: "active",
+        runCount: 0,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      });
 
     const { db } = buildDb({
-      selectResults: [
-        [expiredSession],   // outer getOrCreate: existing session lookup
-        [compactedSession], // getById(existing.id) called after compactSession
-      ],
-      insertResult: newSession, // compactSession creates new session via insert
+      selectResults: [[expiredSession]],
+      updateResult: recycledSession,
     });
 
     const store = missionSessionStore(db);
     const result = await store.getOrCreate(SESSION_INPUT);
 
-    // isNew should be true because the session was expired and compacted
     expect(result.isNew).toBe(true);
-    // The session returned is the one from getById after compaction
     expect(result.session.id).toBe("session-expired");
-    expect(result.session.status).toBe("compacted");
+    expect(result.session.status).toBe("active");
+    expect(result.session.runCount).toBe(0);
   });
 
   it("session within grace period is NOT compacted (isNew: false)", async () => {
@@ -332,7 +311,7 @@ describe("missionSessionStore.touch", () => {
     expect(result.id).toBe("session-touch");
   });
 
-  it("does not update when compaction policy triggers compaction", async () => {
+  it("recycles the session in place when compaction policy triggers compaction", async () => {
     // Enable compaction policy with maxSessionRuns = 5
     const { resolveSessionCompactionPolicy, hasSessionCompactionThresholds } =
       await import("@paperclipai/adapter-utils");
@@ -351,21 +330,17 @@ describe("missionSessionStore.touch", () => {
 
     // Session at runCount = 5 → triggers compaction
     const session = makeSessionRow({ id: "session-compact", runCount: 5 });
-    const compactedSession = makeSessionRow({ id: "session-compact", status: "compacted", runCount: 5 });
+    const compactedSession = makeSessionRow({ id: "session-compact", status: "active", runCount: 0 });
 
-    // select:
-    //   1. getById (first call in touch) → [session]
-    //   2. getById (after compact update) → [compactedSession]
     const { db } = buildDb({
-      selectResults: [[session], [compactedSession]],
+      selectResults: [[session]],
       updateResult: compactedSession,
     });
 
     const store = missionSessionStore(db);
     const result = await store.touch("session-compact");
 
-    expect(result.status).toBe("compacted");
-    // runCount should NOT have been incremented (compaction path returns early)
-    expect(result.runCount).toBe(5);
+    expect(result.status).toBe("active");
+    expect(result.runCount).toBe(0);
   });
 });

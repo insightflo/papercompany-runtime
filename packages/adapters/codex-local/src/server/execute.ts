@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
   asString,
   asNumber,
@@ -16,8 +16,6 @@ import {
   ensurePathInEnv,
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
-  renderTemplate,
-  joinPromptSections,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
@@ -417,39 +415,42 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-  const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
+  const resolvedInstructionsFilePath = instructionsFilePath
+    ? path.resolve(cwd, instructionsFilePath)
+    : "";
+  const instructionsDir = resolvedInstructionsFilePath ? `${path.dirname(resolvedInstructionsFilePath)}/` : "";
   let instructionsPrefix = "";
   let instructionsChars = 0;
-  if (instructionsFilePath) {
+  if (resolvedInstructionsFilePath) {
     try {
-      const instructionsContents = await fs.readFile(instructionsFilePath, "utf8");
+      const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
       instructionsPrefix =
         `${instructionsContents}\n\n` +
-        `The above agent instructions were loaded from ${instructionsFilePath}. ` +
+        `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +
         `Resolve any relative file references from ${instructionsDir}.\n\n`;
       instructionsChars = instructionsPrefix.length;
       await onLog(
         "stdout",
-        `[paperclip] Loaded agent instructions file: ${instructionsFilePath}\n`,
+        `[paperclip] Loaded agent instructions file: ${resolvedInstructionsFilePath}\n`,
       );
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stdout",
-        `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
+        `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
       );
     }
   }
   const commandNotes = (() => {
-    if (!instructionsFilePath) return [] as string[];
+    if (!resolvedInstructionsFilePath) return [] as string[];
     if (instructionsPrefix.length > 0) {
       return [
-        `Loaded agent instructions from ${instructionsFilePath}`,
+        `Loaded agent instructions from ${resolvedInstructionsFilePath}`,
         `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
       ];
     }
     return [
-      `Configured instructionsFilePath ${instructionsFilePath}, but file could not be read; continuing without injected instructions.`,
+      `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
     ];
   })();
   const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
@@ -467,18 +468,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     !sessionId && bootstrapPromptTemplate.trim().length > 0
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
-  const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const runtimeBrief = buildPaperclipRuntimeBrief(context);
   const prompt = joinPromptSections([
     instructionsPrefix,
     renderedBootstrapPrompt,
-    sessionHandoffNote,
+    runtimeBrief,
     renderedPrompt,
   ]);
   const promptMetrics = {
     promptChars: prompt.length,
     instructionsChars,
     bootstrapPromptChars: renderedBootstrapPrompt.length,
-    sessionHandoffChars: sessionHandoffNote.length,
+    sessionHandoffChars: runtimeBrief.length,
     heartbeatPromptChars: renderedPrompt.length,
   };
 
@@ -523,6 +524,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       stdin: prompt,
       timeoutSec,
       graceSec,
+      fatalOnLogError: true,
       onSpawn,
       onLog: async (stream, chunk) => {
         if (stream === "stdout") {

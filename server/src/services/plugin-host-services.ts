@@ -28,6 +28,10 @@ import { pluginStateStore } from "./plugin-state-store.js";
 import { createPluginSecretsHandler } from "./plugin-secrets-handler.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
+import { applyIssueCreatedSideEffects } from "./issue-create-side-effects.js";
+import { applyIssueUpdatedSideEffects } from "./issue-update-side-effects.js";
+import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
+import { workflowService } from "./workflow/engine.js";
 import { lookup as dnsLookup } from "node:dns/promises";
 import type { IncomingMessage, RequestOptions as HttpRequestOptions } from "node:http";
 import { request as httpRequest } from "node:http";
@@ -770,13 +774,59 @@ export function buildHostServices(
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return (await issues.create(companyId, params as any)) as Issue;
+        const issue = (await issues.create(companyId, params as any)) as Issue;
+        await applyIssueCreatedSideEffects({
+          db,
+          heartbeat,
+          issue,
+          actor: {
+            actorType: "system",
+            actorId: pluginId,
+          },
+          contextSource: "plugin.issues.create",
+        });
+        return issue;
       },
       async update(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        requireInCompany("Issue", await issues.getById(params.issueId), companyId);
-        return (await issues.update(params.issueId, params.patch as any)) as Issue;
+        const existing = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        const issue = (await issues.update(params.issueId, params.patch as any)) as Issue;
+        if (issue) {
+          if (issue.status !== existing.status) {
+            await syncSrbSourceIssueStatus({
+              db,
+              issueId: issue.id,
+              status: issue.status,
+            });
+          }
+          await workflowService.syncRunStatusForIssue(db, issue.id);
+          await applyIssueUpdatedSideEffects({
+            db,
+            heartbeat,
+            actor: {
+              actorType: "system",
+              actorId: pluginId,
+            },
+            existing: {
+              id: existing.id,
+              companyId: existing.companyId,
+              identifier: existing.identifier ?? null,
+              assigneeAgentId: existing.assigneeAgentId ?? null,
+              status: existing.status,
+            },
+            updated: {
+              id: issue.id,
+              companyId: issue.companyId,
+              identifier: issue.identifier ?? null,
+              assigneeAgentId: issue.assigneeAgentId ?? null,
+              status: issue.status,
+            },
+            patch: params.patch as Record<string, unknown>,
+            logActivity,
+          });
+        }
+        return issue;
       },
       async listComments(params) {
         const companyId = ensureCompanyId(params.companyId);

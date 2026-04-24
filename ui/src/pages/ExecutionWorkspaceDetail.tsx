@@ -33,13 +33,13 @@ export function ExecutionWorkspaceDetail() {
   });
 
   if (isLoading) return <p className="text-sm text-muted-foreground">Loading...</p>;
-  if (error) return <p className="text-sm text-destructive">{error instanceof Error ? error.message : "Failed to load workspace"}</p>;
+  if (error) return <p className="text-sm text-destructive">{error instanceof Error ? error.message : "Failed to load execution context"}</p>;
   if (!workspace) return null;
 
   return (
     <div className="max-w-2xl space-y-4">
       <div className="space-y-1">
-        <div className="text-xs text-muted-foreground">Execution workspace</div>
+        <div className="text-xs text-muted-foreground">Execution context</div>
         <h1 className="text-2xl font-semibold">{workspace.name}</h1>
         <div className="text-sm text-muted-foreground">
           {workspace.status} · {workspace.mode} · {workspace.providerType}
@@ -47,10 +47,10 @@ export function ExecutionWorkspaceDetail() {
       </div>
 
       <div className="rounded-lg border border-border p-4">
-        <DetailRow label="Project">
+        <DetailRow label="Work Context">
           {workspace.projectId ? <Link to={`/projects/${workspace.projectId}`} className="hover:underline">{workspace.projectId}</Link> : "None"}
         </DetailRow>
-        <DetailRow label="Source issue">
+        <DetailRow label="Source work item">
           {workspace.sourceIssueId ? <Link to={`/issues/${workspace.sourceIssueId}`} className="hover:underline">{workspace.sourceIssueId}</Link> : "None"}
         </DetailRow>
         <DetailRow label="Branch">{workspace.branchName ?? "None"}</DetailRow>

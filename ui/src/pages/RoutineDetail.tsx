@@ -746,10 +746,10 @@ export function RoutineDetail() {
             ref={projectSelectorRef}
             value={editDraft.projectId}
             options={projectOptions}
-            placeholder="Project"
-            noneLabel="No project"
-            searchPlaceholder="Search projects..."
-            emptyMessage="No projects found."
+            placeholder="Work context"
+            noneLabel="No work context"
+            searchPlaceholder="Search work contexts..."
+            emptyMessage="No work contexts found."
             onChange={(projectId) => setEditDraft((current) => ({ ...current, projectId }))}
             onConfirm={() => descriptionEditorRef.current?.focus()}
             renderTriggerValue={(option) =>
@@ -762,7 +762,7 @@ export function RoutineDetail() {
                   <span className="truncate">{option.label}</span>
                 </>
               ) : (
-                <span className="text-muted-foreground">Project</span>
+                <span className="text-muted-foreground">Work context</span>
               )
             }
             renderOption={(option) => {

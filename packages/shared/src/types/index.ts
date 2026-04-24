@@ -47,14 +47,30 @@ export type {
   AdapterEnvironmentTestResult,
 } from "./agent.js";
 export type { AssetImage } from "./asset.js";
-export type { Project, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectWorkspace } from "./project.js";
+export type {
+  Project,
+  ProjectCodebase,
+  ProjectCodebaseOrigin,
+  ProjectGoalRef,
+  ProjectWorkspace,
+  WorkContext,
+  WorkContextSpace,
+  WorkContextGoalRef,
+  WorkContextCodebase,
+  WorkContextCodebaseOrigin,
+} from "./project.js";
 export type {
   ExecutionWorkspace,
+  ExecutionContext,
   WorkspaceRuntimeService,
   ExecutionWorkspaceStrategyType,
+  ExecutionContextStrategy,
   ExecutionWorkspaceMode,
+  ExecutionContextMode,
   ExecutionWorkspaceProviderType,
+  ExecutionContextProviderType,
   ExecutionWorkspaceStatus,
+  ExecutionContextStatus,
   ExecutionWorkspaceStrategy,
   ProjectExecutionWorkspacePolicy,
   ProjectExecutionWorkspaceDefaultMode,
@@ -67,25 +83,40 @@ export type {
 } from "./workspace-operation.js";
 export type {
   IssueWorkProduct,
+  WorkItemProduct,
   IssueWorkProductType,
+  WorkItemProductType,
   IssueWorkProductProvider,
+  WorkItemProductProvider,
   IssueWorkProductStatus,
+  WorkItemProductStatus,
   IssueWorkProductReviewState,
+  WorkItemProductReviewState,
 } from "./work-product.js";
 export type {
   Issue,
+  WorkItem,
+  WorkItemAncestorProject,
+  WorkItemAncestorGoal,
   IssueAssigneeAdapterOverrides,
+  WorkItemAssigneeAdapterOverrides,
   IssueComment,
+  WorkItemComment,
   IssueDocument,
+  WorkItemDocument,
   IssueDocumentSummary,
+  WorkItemDocumentSummary,
   DocumentRevision,
   DocumentFormat,
   LegacyPlanDocument,
   IssueAncestor,
+  WorkItemAncestor,
   IssueAncestorProject,
   IssueAncestorGoal,
   IssueAttachment,
+  WorkItemAttachment,
   IssueLabel,
+  WorkItemLabel,
 } from "./issue.js";
 export type { Goal } from "./goal.js";
 export type { Approval, ApprovalComment } from "./approval.js";
@@ -109,11 +140,18 @@ export type {
 } from "./secrets.js";
 export type {
   Routine,
+  RecurringProcedure,
+  RecurringProcedureListItem,
   RoutineTrigger,
+  RecurringProcedureTrigger,
   RoutineRun,
+  RecurringProcedureRun,
   RoutineTriggerSecretMaterial,
+  RecurringProcedureTriggerSecretMaterial,
   RoutineDetail,
+  RecurringProcedureDetail,
   RoutineRunSummary,
+  RecurringProcedureRunSummary,
   RoutineExecutionIssueOrigin,
   RoutineListItem,
 } from "./routine.js";

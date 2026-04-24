@@ -50,5 +50,7 @@ export {
   redactHomePathUserSegmentsInValue,
   redactTranscriptEntryPaths,
 } from "./log-redaction.js";
+export { joinPromptSections, renderTemplate, resolvePathValue } from "./prompt-utils.js";
+export { buildPaperclipRuntimeBrief } from "./runtime-brief.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
 export * from "./skills.js";

@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+function normalizeWorkItemProductShape(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const value = { ...(input as Record<string, unknown>) };
+  if (value.workContextId !== undefined && value.projectId === undefined) value.projectId = value.workContextId;
+  if (value.executionContextId !== undefined && value.executionWorkspaceId === undefined) value.executionWorkspaceId = value.executionContextId;
+  return value;
+}
+
 export const issueWorkProductTypeSchema = z.enum([
   "preview_url",
   "runtime_service",
@@ -29,7 +37,7 @@ export const issueWorkProductReviewStateSchema = z.enum([
   "changes_requested",
 ]);
 
-export const createIssueWorkProductSchema = z.object({
+const createIssueWorkProductObjectSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   executionWorkspaceId: z.string().uuid().optional().nullable(),
   runtimeServiceId: z.string().uuid().optional().nullable(),
@@ -47,8 +55,19 @@ export const createIssueWorkProductSchema = z.object({
   createdByRunId: z.string().uuid().optional().nullable(),
 });
 
+export const createIssueWorkProductSchema = z.preprocess(normalizeWorkItemProductShape, createIssueWorkProductObjectSchema);
+
 export type CreateIssueWorkProduct = z.infer<typeof createIssueWorkProductSchema>;
 
-export const updateIssueWorkProductSchema = createIssueWorkProductSchema.partial();
+export const updateIssueWorkProductSchema = z.preprocess(normalizeWorkItemProductShape, createIssueWorkProductObjectSchema.partial());
 
 export type UpdateIssueWorkProduct = z.infer<typeof updateIssueWorkProductSchema>;
+
+export const workItemProductTypeSchema = issueWorkProductTypeSchema;
+export const workItemProductStatusSchema = issueWorkProductStatusSchema;
+export const workItemProductReviewStateSchema = issueWorkProductReviewStateSchema;
+export const createWorkItemProductSchema = createIssueWorkProductSchema;
+export const updateWorkItemProductSchema = updateIssueWorkProductSchema;
+
+export type CreateWorkItemProduct = CreateIssueWorkProduct;
+export type UpdateWorkItemProduct = UpdateIssueWorkProduct;

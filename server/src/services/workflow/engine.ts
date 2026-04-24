@@ -6,7 +6,7 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { validateDag, executeWorkflowRun, reconcileWorkflowRuns } from "./dag-engine.js";
+import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue } from "./dag-engine.js";
 import {
   createWorkflowDefinition,
   getWorkflowDefinitionById,
@@ -17,6 +17,7 @@ import {
   getWorkflowRunById,
   listWorkflowRuns,
   listWorkflowStepRuns,
+  getWorkflowStepExecutionContractForIssue,
   updateWorkflowRunStatus,
   cancelWorkflowRun,
 } from "./workflow-store.js";
@@ -28,6 +29,7 @@ import type {
   CreateWorkflowRunInput,
   DagValidationResult,
   WorkflowExecutionResult,
+  WorkflowStepExecutionContract,
 } from "./types.js";
 import type { WorkflowStep } from "./dag-engine.js";
 
@@ -133,6 +135,16 @@ export const workflowService = {
   },
 
   /**
+   * Resolve the workflow step execution contract for a workflow-owned issue.
+   */
+  async getStepExecutionContractForIssue(
+    db: Db,
+    issueId: string,
+  ): Promise<WorkflowStepExecutionContract | null> {
+    return getWorkflowStepExecutionContractForIssue(db, issueId);
+  },
+
+  /**
    * Validate a workflow DAG without creating it.
    */
   async validateDag(steps: unknown[]): Promise<DagValidationResult> {
@@ -148,6 +160,13 @@ export const workflowService = {
   ): Promise<{ recovered: number; failed: number }> {
     return reconcileWorkflowRuns(db, timeoutMinutes);
   },
+
+  /**
+   * Synchronize a workflow run after one of its execution issues changed state.
+   */
+  async syncRunStatusForIssue(db: Db, issueId: string): Promise<WorkflowExecutionResult | null> {
+    return syncWorkflowRunForIssue(db, issueId);
+  },
 };
 
 // Re-export types for convenience
@@ -159,4 +178,5 @@ export type {
   CreateWorkflowRunInput,
   DagValidationResult,
   WorkflowExecutionResult,
+  WorkflowStepExecutionContract,
 };

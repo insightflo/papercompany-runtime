@@ -1,29 +1,55 @@
 # Paperclip
 
-**Paperclip is the backbone of the autonomous economy.** We are building the infrastructure that autonomous AI companies run on. Our goal is for Paperclip-powered companies to collectively generate economic output that rivals the GDP of the world's largest countries. Every decision we make should serve that: make autonomous companies more capable, more governable, more scalable, and more real.
+**Paperclip is the operating system for agent teams.** We are building the infrastructure that lets AI workers operate inside real companies through the same regulated work systems human teams use to maintain consistency, compliance, and shared operational data.
 
 ## The Vision
 
-Autonomous companies — AI workforces organized with real structure, governance, and accountability — will become a major force in the global economy. Not one company. Thousands. Millions. An entire economic layer that runs on AI labor, coordinated through Paperclip.
+Autonomous companies will not be built by better chat windows alone.
+They will be built by giving AI workers structure, procedures, governance, and access to the operational systems real companies already depend on.
 
-Paperclip is not the company. Paperclip is what makes the companies possible. We are the control plane, the nervous system, the operating layer. Every autonomous company needs structure, task management, cost control, goal alignment, and human governance. That's us. We are to autonomous companies what the corporate operating system is to human ones — except this time, the operating system is real software, not metaphor.
+Paperclip is not the company.
+Paperclip is what makes AI-run companies possible.
+We are the control plane, the nervous system, the operating layer.
 
-The measure of our success is not whether one company works. It's whether Paperclip becomes the default foundation that autonomous companies are built on — and whether those companies, collectively, become a serious economic force that rivals the output of nations.
+A human accounting team uses an ERP.
+A human support team uses a ticketing system.
+A human operations team uses a back-office system.
+A human engineering team uses repositories, CI, and deployment tooling.
+
+Paperclip does not replace those systems.
+It coordinates agent teams so work is carried out through them, under company rules, with human oversight where needed.
+
+The measure of our success is not whether one coding workflow works.
+It is whether Paperclip becomes the default operating layer for companies made of AI workers, across many kinds of teams and many kinds of regulated business work.
 
 ## The Problem
 
-Task management software doesn't go far enough. When your entire workforce is AI agents, you need more than a to-do list — you need a **control plane** for an entire company.
+Work management software does not go far enough.
+When your workforce is AI agents, you need more than a to-do list.
+
+You need a system that can:
+
+- organize agents into teams and reporting structures
+- route work through company procedures
+- make outputs happen in the correct work systems
+- preserve shared operational data and formatting rules
+- keep approvals, review, and exceptions explicit
+- control budgets, risk, and auditability
+
+Without that, agents can generate output, but they cannot reliably operate a company.
 
 ## What This Is
 
-Paperclip is the command, communication, and control plane for a company of AI agents. It is the single place where you:
+Paperclip is the command, coordination, and governance layer for agent teams.
+It is the place where you:
 
-- **Manage agents as employees** — hire, organize, and track who does what
-- **Define org structure** — org charts that agents themselves operate within
-- **Track work in real time** — see at any moment what every agent is working on
-- **Control costs** — token salary budgets per agent, spend tracking, burn rate
-- **Align to goals** — agents see how their work serves the bigger mission
-- **Store company knowledge** — a shared brain for the organization
+- **Define company missions and operating goals** - what the company is trying to achieve and why
+- **Organize agent teams** - who owns which kind of work and who reports to whom
+- **Route work through procedures** - how work should be carried out, reviewed, and completed
+- **Complete outputs in real work systems** - where the final result must live to count as done
+- **Manage approvals and exceptions** - what needs human review, intervention, or escalation
+- **Control budgets and risk** - how autonomy stays safe, observable, and affordable
+- **Observe outcomes** - what was completed, what is blocked, and what moved the business forward
 
 ## Architecture
 
@@ -31,25 +57,32 @@ Two layers:
 
 ### 1. Control Plane (this software)
 
-The central nervous system. Manages:
+The operating layer for the company. It manages:
 
-- Agent registry and org chart
-- Task assignment and status
-- Budget and token spend tracking
-- Company knowledge base
-- Goal hierarchy (company → team → agent → task)
-- Heartbeat monitoring — know when agents are alive, idle, or stuck
+- company structure and team responsibility
+- missions, goals, and operating procedures
+- work allocation and execution state
+- approvals, review, and exceptions
+- budget policy, risk control, and audit trails
+- outcome visibility across the company
 
-### 2. Execution Services (adapters)
+### 2. Work Systems (external systems)
 
-Agents run externally and report into the control plane. An agent is just Python code that gets kicked off and does work. Adapters connect different execution environments:
+These are the regulated systems where work is actually completed and recorded.
+They enforce shared formats, required fields, state transitions, and durable business records.
 
-- **OpenClaw** — initial adapter target
-- **Heartbeat loop** — simple custom Python that loops, checks in, does work
-- **Others** — any runtime that can call an API
+Examples include:
 
-The control plane doesn't run agents. It orchestrates them. Agents run wherever they run and phone home.
+- ERP and accounting systems
+- CRM and ticketing systems
+- back-office and operations tools
+- repositories, CI, and deployment systems
+- file, document, and submission systems
+
+Paperclip does not try to become every work system.
+It orchestrates agent teams so work is completed through those systems in a governed, observable way.
 
 ## Core Principle
 
-You should be able to look at Paperclip and understand your entire company at a glance — who's doing what, how much it costs, and whether it's working.
+Work is not done when an agent produces text.
+Work is done when the right work item has been carried through the right procedure, completed in the right work system, and verified at the right level of human oversight.

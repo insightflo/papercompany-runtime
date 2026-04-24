@@ -107,8 +107,9 @@ export function Routines() {
   });
 
   useEffect(() => {
+    void draft.title;
     autoResizeTextarea(titleInputRef.current);
-  }, [draft.title, composerOpen]);
+  }, [draft.title]);
 
   const createRoutine = useMutation({
     mutationFn: () =>
@@ -131,7 +132,7 @@ export function Routines() {
       await queryClient.invalidateQueries({ queryKey: queryKeys.routines.list(selectedCompanyId!) });
       pushToast({
         title: "Routine created",
-        body: "Add the first trigger to turn it into a live workflow.",
+        body: "Add the first trigger to turn it into a live execution flow.",
         tone: "success",
       });
       navigate(`/routines/${routine.id}?tab=triggers`);
@@ -155,7 +156,7 @@ export function Routines() {
     onError: (mutationError) => {
       pushToast({
         title: "Failed to update routine",
-        body: mutationError instanceof Error ? mutationError.message : "Paperclip could not update the routine.",
+        body: mutationError instanceof Error ? mutationError.message : "papercompany could not update the routine.",
         tone: "error",
       });
     },
@@ -178,13 +179,13 @@ export function Routines() {
     onError: (mutationError) => {
       pushToast({
         title: "Routine run failed",
-        body: mutationError instanceof Error ? mutationError.message : "Paperclip could not start the routine run.",
+        body: mutationError instanceof Error ? mutationError.message : "papercompany could not start the routine run.",
         tone: "error",
       });
     },
   });
 
-  const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [composerOpen]);
+  const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), []);
   const assigneeOptions = useMemo<InlineEntityOption[]>(
     () =>
       sortAgentsByRecency(
@@ -234,7 +235,7 @@ export function Routines() {
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-400">Beta</span>
           </h1>
           <p className="text-sm text-muted-foreground">
-            Recurring work definitions that materialize into auditable execution issues.
+            Recurring work definitions that materialize into auditable execution records.
           </p>
         </div>
         <Button onClick={() => setComposerOpen(true)}>
@@ -359,10 +360,10 @@ export function Routines() {
                   ref={projectSelectorRef}
                   value={draft.projectId}
                   options={projectOptions}
-                  placeholder="Project"
-                  noneLabel="No project"
-                  searchPlaceholder="Search projects..."
-                  emptyMessage="No projects found."
+                  placeholder="Work context"
+                  noneLabel="No work context"
+                  searchPlaceholder="Search work contexts..."
+                  emptyMessage="No work contexts found."
                   onChange={(projectId) => setDraft((current) => ({ ...current, projectId }))}
                   onConfirm={() => descriptionEditorRef.current?.focus()}
                   renderTriggerValue={(option) =>
@@ -375,7 +376,7 @@ export function Routines() {
                         <span className="truncate">{option.label}</span>
                       </>
                     ) : (
-                      <span className="text-muted-foreground">Project</span>
+                      <span className="text-muted-foreground">Work context</span>
                     )
                   }
                   renderOption={(option) => {
@@ -464,7 +465,7 @@ export function Routines() {
 
           <div className="flex flex-col gap-3 border-t border-border/60 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-muted-foreground">
-              After creation, Paperclip takes you straight to trigger setup for schedules, webhooks, or internal runs.
+                  After creation, papercompany takes you straight to trigger setup for schedules, webhooks, or internal runs.
             </div>
             <div className="flex flex-col gap-2 sm:items-end">
               <Button
@@ -502,7 +503,7 @@ export function Routines() {
           <div className="py-12">
             <EmptyState
               icon={Repeat}
-              message="No routines yet. Use Create routine to define the first recurring workflow."
+              message="No routines yet. Use Create routine to define the first recurring execution flow."
             />
           </div>
         ) : (
@@ -511,7 +512,7 @@ export function Routines() {
               <thead>
                 <tr className="text-left text-xs text-muted-foreground border-b border-border">
                   <th className="px-3 py-2 font-medium">Name</th>
-                  <th className="px-3 py-2 font-medium">Project</th>
+                  <th className="px-3 py-2 font-medium">Work Context</th>
                   <th className="px-3 py-2 font-medium">Agent</th>
                   <th className="px-3 py-2 font-medium">Last run</th>
                   <th className="px-3 py-2 font-medium">Enabled</th>
@@ -575,7 +576,7 @@ export function Routines() {
                           <div className="mt-1 text-xs">{routine.lastRun.status.replaceAll("_", " ")}</div>
                         ) : null}
                       </td>
-                      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+                      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                         <div className="flex items-center gap-3">
                           <button
                             type="button"
@@ -604,7 +605,7 @@ export function Routines() {
                           </span>
                         </div>
                       </td>
-                      <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
+                      <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${routine.title}`}>

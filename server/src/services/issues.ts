@@ -601,6 +601,39 @@ export function issueService(db: Db) {
     return adopted;
   }
 
+  async function repairMalformedSameRunCheckoutLock(input: {
+    issueId: string;
+    actorAgentId: string;
+    actorRunId: string;
+  }) {
+    const now = new Date();
+    return await db
+      .update(issues)
+      .set({
+        checkoutRunId: input.actorRunId,
+        executionRunId: input.actorRunId,
+        executionLockedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(issues.id, input.issueId),
+          eq(issues.status, "in_progress"),
+          eq(issues.assigneeAgentId, input.actorAgentId),
+          isNull(issues.checkoutRunId),
+          eq(issues.executionRunId, input.actorRunId),
+        ),
+      )
+      .returning({
+        id: issues.id,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function assertValidCreateInput(
     companyId: string,
     data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
@@ -1200,6 +1233,12 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (updated) {
+        const { syncSrbSourceIssueStatus } = await import("./srb/source-status-sync.js");
+        await syncSrbSourceIssueStatus({
+          db,
+          issueId: updated.id,
+          status: updated.status,
+        });
         const [enriched] = await withIssueLabels(db, [updated]);
         return enriched;
       }
@@ -1293,6 +1332,7 @@ export function issueService(db: Db) {
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
+          executionRunId: issues.executionRunId,
         })
         .from(issues)
         .where(eq(issues.id, id))
@@ -1305,7 +1345,33 @@ export function issueService(db: Db) {
         current.assigneeAgentId === actorAgentId &&
         sameRunLock(current.checkoutRunId, actorRunId)
       ) {
-        return { ...current, adoptedFromRunId: null as string | null };
+        return {
+          ...current,
+          adoptedFromRunId: null as string | null,
+          repairedMalformedExecutionLock: false,
+        };
+      }
+
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId == null &&
+        current.executionRunId === actorRunId
+      ) {
+        const repaired = await repairMalformedSameRunCheckoutLock({
+          issueId: id,
+          actorAgentId,
+          actorRunId,
+        });
+
+        if (repaired) {
+          return {
+            ...repaired,
+            adoptedFromRunId: null as string | null,
+            repairedMalformedExecutionLock: true,
+          };
+        }
       }
 
       if (
@@ -1326,6 +1392,7 @@ export function issueService(db: Db) {
           return {
             ...adopted,
             adoptedFromRunId: current.checkoutRunId,
+            repairedMalformedExecutionLock: false,
           };
         }
       }
@@ -1378,6 +1445,12 @@ export function issueService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) return null;
+      const { syncSrbSourceIssueStatus } = await import("./srb/source-status-sync.js");
+      await syncSrbSourceIssueStatus({
+        db,
+        issueId: updated.id,
+        status: updated.status,
+      });
       const [enriched] = await withIssueLabels(db, [updated]);
       return enriched;
     },
@@ -1696,10 +1769,11 @@ export function issueService(db: Db) {
     findMentionedAgents: async (companyId: string, body: string) => {
       const re = /\B@([^\s@,!?.]+)/g;
       const tokens = new Set<string>();
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(body)) !== null) {
-        const normalized = normalizeAgentMentionToken(m[1]);
+      let match = re.exec(body);
+      while (match !== null) {
+        const normalized = normalizeAgentMentionToken(match[1]);
         if (normalized) tokens.add(normalized.toLowerCase());
+        match = re.exec(body);
       }
 
       const explicitAgentMentionIds = extractAgentMentionIds(body);

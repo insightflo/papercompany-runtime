@@ -294,12 +294,51 @@ describe("routine service live-execution coalescing", () => {
           triggerDetail: "system",
           reason: "issue_assigned",
           payload: { issueId: run.linkedIssueId, mutation: "create" },
-          requestedByActorType: undefined,
-          requestedByActorId: null,
+          requestedByActorType: "system",
+          requestedByActorId: `routine:${routine.id}`,
           contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch" },
         },
       },
     ]);
+  });
+
+  it("uses the common issue lifecycle path for routine-created issues", async () => {
+    const { companyId, routine, svc } = await seedFixture();
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(run.status).toBe("issue_created");
+    expect(run.linkedIssueId).toBeTruthy();
+
+    const createdIssue = await db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        assigneeAgentId: issues.assigneeAgentId,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(createdIssue?.identifier).toMatch(/^T[A-Z0-9]+-1$/);
+    expect(createdIssue?.assigneeAgentId).toBe(routine.assigneeAgentId);
+
+    const createdActivity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, run.linkedIssueId!))
+      .then((rows) => rows.find((row) => row.action === "issue.created") ?? null);
+    expect(createdActivity).toMatchObject({
+      companyId,
+      actorType: "system",
+      actorId: `routine:${routine.id}`,
+      action: "issue.created",
+      entityType: "issue",
+      entityId: run.linkedIssueId!,
+    });
+    expect(createdActivity?.details).toEqual({
+      title: routine.title,
+      identifier: createdIssue?.identifier,
+    });
   });
 
   it("waits for the assignee wakeup to be queued before returning the routine run", async () => {
@@ -449,6 +488,13 @@ describe("routine service live-execution coalescing", () => {
       .where(eq(issues.originId, routine.id));
 
     expect(routineIssues).toHaveLength(0);
+
+    const staleCreateActivities = await db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(eq(activityLog.action, "issue.created"));
+
+    expect(staleCreateActivities).toHaveLength(0);
   });
 
   it("accepts standard second-precision webhook timestamps for HMAC triggers", async () => {

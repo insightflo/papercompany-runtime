@@ -17,6 +17,7 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 | `cwd` | string | Yes | Working directory for the agent process (absolute path; created automatically if missing when permissions allow) |
 | `model` | string | No | Claude model to use (e.g. `claude-opus-4-6`) |
 | `promptTemplate` | string | No | Prompt used for all runs |
+| `instructionsFilePath` | string | No | Markdown instructions file resolved from the effective `cwd` and injected at runtime |
 | `env` | object | No | Environment variables (supports secret refs) |
 | `timeoutSec` | number | No | Process timeout (0 = no timeout) |
 | `graceSec` | number | No | Grace period before force-kill |

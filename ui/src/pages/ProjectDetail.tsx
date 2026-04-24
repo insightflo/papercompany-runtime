@@ -117,7 +117,7 @@ function ColorPicker({
         onClick={() => setOpen(!open)}
         className="shrink-0 h-5 w-5 rounded-md cursor-pointer hover:ring-2 hover:ring-foreground/20 transition-[box-shadow]"
         style={{ backgroundColor: currentColor }}
-        aria-label="Change project color"
+        aria-label="Change work context color"
       />
       {open && (
         <div className="absolute top-full left-0 mt-2 p-2 bg-popover border border-border rounded-lg shadow-lg z-50 w-max">
@@ -288,7 +288,7 @@ export function ProjectDetail() {
       ),
     onSuccess: (updatedProject, archived) => {
       invalidateProject();
-      const name = updatedProject?.name ?? project?.name ?? "Project";
+      const name = updatedProject?.name ?? project?.name ?? "Work Context";
       if (archived) {
         pushToast({ title: `"${name}" has been archived`, tone: "success" });
         navigate("/dashboard");
@@ -298,7 +298,7 @@ export function ProjectDetail() {
     },
     onError: (_, archived) => {
       pushToast({
-        title: archived ? "Failed to archive project" : "Failed to unarchive project",
+        title: archived ? "Failed to archive work context" : "Failed to unarchive work context",
         tone: "error",
       });
     },
@@ -321,8 +321,8 @@ export function ProjectDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Projects", href: "/projects" },
-      { label: project?.name ?? routeProjectRef ?? "Project" },
+      { label: "Work Contexts", href: "/projects" },
+      { label: project?.name ?? routeProjectRef ?? "Work Context" },
     ]);
   }, [setBreadcrumbs, project, routeProjectRef]);
 
@@ -414,7 +414,7 @@ export function ProjectDetail() {
       companyId: resolvedCompanyId ?? "",
       scopeType: "project",
       scopeId: project?.id ?? routeProjectRef,
-      scopeName: project?.name ?? "Project",
+      scopeName: project?.name ?? "Work Context",
       metric: "billed_cents",
       windowKind: "lifetime",
       amount: 0,
@@ -559,7 +559,7 @@ export function ProjectDetail() {
       <Tabs value={activeTab ?? "list"} onValueChange={(value) => handleTabChange(value as ProjectTab)}>
         <PageTabBar
           items={[
-            { value: "list", label: "Issues" },
+            { value: "list", label: "Work" },
             { value: "overview", label: "Overview" },
             { value: "configuration", label: "Configuration" },
             { value: "budget", label: "Budget" },

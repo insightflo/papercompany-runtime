@@ -1,4 +1,4 @@
-import type { Project, ProjectWorkspace } from "@paperclipai/shared";
+import type { Project, ProjectWorkspace, WorkContext, WorkContextSpace } from "@paperclipai/shared";
 import { api } from "./client";
 
 function withCompanyScope(path: string, companyId?: string) {
@@ -30,4 +30,21 @@ export const projectsApi = {
   removeWorkspace: (projectId: string, workspaceId: string, companyId?: string) =>
     api.delete<ProjectWorkspace>(projectPath(projectId, companyId, `/workspaces/${encodeURIComponent(workspaceId)}`)),
   remove: (id: string, companyId?: string) => api.delete<Project>(projectPath(id, companyId)),
+};
+
+export const workContextsApi = {
+  list: (companyId: string) => api.get<WorkContext[]>(`/companies/${companyId}/work-contexts`),
+  get: (workContextId: string, companyId?: string) => api.get<WorkContext>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}`, companyId)),
+  create: (companyId: string, data: Record<string, unknown>) => api.post<WorkContext>(`/companies/${companyId}/work-contexts`, data),
+  update: (workContextId: string, data: Record<string, unknown>, companyId?: string) =>
+    api.patch<WorkContext>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}`, companyId), data),
+  listSpaces: (workContextId: string, companyId?: string) =>
+    api.get<WorkContextSpace[]>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}/workspaces`, companyId)),
+  createSpace: (workContextId: string, data: Record<string, unknown>, companyId?: string) =>
+    api.post<WorkContextSpace>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}/workspaces`, companyId), data),
+  updateSpace: (workContextId: string, spaceId: string, data: Record<string, unknown>, companyId?: string) =>
+    api.patch<WorkContextSpace>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}/workspaces/${encodeURIComponent(spaceId)}`, companyId), data),
+  removeSpace: (workContextId: string, spaceId: string, companyId?: string) =>
+    api.delete<WorkContextSpace>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}/workspaces/${encodeURIComponent(spaceId)}`, companyId)),
+  remove: (workContextId: string, companyId?: string) => api.delete<WorkContext>(withCompanyScope(`/work-contexts/${encodeURIComponent(workContextId)}`, companyId)),
 };

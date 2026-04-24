@@ -61,17 +61,17 @@ type CommentReassignment = {
 };
 
 const ACTION_LABELS: Record<string, string> = {
-  "issue.created": "created the issue",
-  "issue.updated": "updated the issue",
-  "issue.checked_out": "checked out the issue",
-  "issue.released": "released the issue",
+  "issue.created": "created the work item",
+  "issue.updated": "updated the work item",
+  "issue.checked_out": "checked out the work item",
+  "issue.released": "released the work item",
   "issue.comment_added": "added a comment",
   "issue.attachment_added": "added an attachment",
   "issue.attachment_removed": "removed an attachment",
   "issue.document_created": "created a document",
   "issue.document_updated": "updated a document",
   "issue.document_deleted": "deleted a document",
-  "issue.deleted": "deleted the issue",
+  "issue.deleted": "deleted the work item",
   "agent.created": "created an agent",
   "agent.updated": "updated the agent",
   "agent.paused": "paused the agent",
@@ -162,8 +162,8 @@ function formatAction(action: string, details?: Record<string, unknown> | null):
     if (details.assigneeAgentId !== undefined || details.assigneeUserId !== undefined) {
       parts.push(
         details.assigneeAgentId || details.assigneeUserId
-          ? "assigned the issue"
-          : "unassigned the issue",
+          ? "assigned the work item"
+          : "unassigned the work item",
       );
     }
     if (details.title !== undefined) parts.push("updated the title");
@@ -268,7 +268,7 @@ export function IssueDetail() {
 
   const hasLiveRuns = (liveRuns ?? []).length > 0 || !!activeRun;
   const sourceBreadcrumb = useMemo(
-    () => readIssueDetailBreadcrumb(location.state) ?? { label: "Issues", href: "/issues" },
+    () => readIssueDetailBreadcrumb(location.state) ?? { label: "Work", href: "/issues" },
     [location.state],
   );
 
@@ -565,7 +565,7 @@ export function IssueDetail() {
   });
 
   useEffect(() => {
-    const titleLabel = issue?.title ?? issueId ?? "Issue";
+    const titleLabel = issue?.title ?? issueId ?? "Work Item";
     setBreadcrumbs([
       sourceBreadcrumb,
       { label: hasLiveRuns ? `🔵 ${titleLabel}` : titleLabel },
@@ -701,7 +701,7 @@ export function IssueDetail() {
       {issue.hiddenAt && (
         <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           <EyeOff className="h-4 w-4 shrink-0" />
-          This issue is hidden
+          This work item is hidden
         </div>
       )}
 
@@ -748,7 +748,7 @@ export function IssueDetail() {
           ) : (
             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground opacity-50 px-1 -mx-1 py-0.5">
               <Hexagon className="h-3 w-3 shrink-0" />
-              No project
+              No work context
             </span>
           )}
 
@@ -778,7 +778,7 @@ export function IssueDetail() {
               variant="ghost"
               size="icon-xs"
               onClick={copyIssueToClipboard}
-              title="Copy issue as markdown"
+              title="Copy work item as markdown"
             >
               {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
             </Button>
@@ -797,7 +797,7 @@ export function IssueDetail() {
               variant="ghost"
               size="icon-xs"
               onClick={copyIssueToClipboard}
-              title="Copy issue as markdown"
+              title="Copy work item as markdown"
             >
               {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
             </Button>
@@ -832,7 +832,7 @@ export function IssueDetail() {
                 }}
               >
                 <EyeOff className="h-3 w-3" />
-                Hide this Issue
+                Hide this Work Item
               </button>
             </PopoverContent>
             </Popover>
@@ -993,7 +993,7 @@ export function IssueDetail() {
           </TabsTrigger>
           <TabsTrigger value="subissues" className="gap-1.5">
             <ListTree className="h-3.5 w-3.5" />
-            Sub-issues
+            Sub-items
           </TabsTrigger>
           <TabsTrigger value="activity" className="gap-1.5">
             <ActivityIcon className="h-3.5 w-3.5" />
@@ -1040,7 +1040,7 @@ export function IssueDetail() {
 
         <TabsContent value="subissues">
           {childIssues.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No sub-issues.</p>
+            <p className="text-xs text-muted-foreground">No sub-items.</p>
           ) : (
             <div className="border border-border rounded-lg divide-y divide-border">
               {childIssues.map((child) => (

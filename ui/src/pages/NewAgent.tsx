@@ -33,7 +33,6 @@ const SUPPORTED_ADVANCED_ADAPTER_TYPES = new Set<CreateConfigValues["adapterType
   "codex_local",
   "gemini_local",
   "opencode_local",
-  "pi_local",
   "cursor",
   "openclaw_gateway",
 ]);
@@ -114,7 +113,7 @@ export function NewAgent() {
       if (!name) setName("CEO");
       if (!title) setTitle("CEO");
     }
-  }, [isFirstAgent]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isFirstAgent, name, title]);
 
   useEffect(() => {
     const requested = presetAdapterType;
@@ -226,7 +225,6 @@ export function NewAgent() {
             placeholder="Agent name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            autoFocus
           />
         </div>
 
@@ -244,8 +242,9 @@ export function NewAgent() {
         <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
           <Popover open={roleOpen} onOpenChange={setRoleOpen}>
             <PopoverTrigger asChild>
-              <button
-                className={cn(
+                <button
+                  type="button"
+                  className={cn(
                   "inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors",
                   isFirstAgent && "opacity-60 cursor-not-allowed"
                 )}
@@ -257,9 +256,10 @@ export function NewAgent() {
             </PopoverTrigger>
             <PopoverContent className="w-36 p-1" align="start">
               {AGENT_ROLES.map((r) => (
-                <button
-                  key={r}
-                  className={cn(
+                  <button
+                    type="button"
+                    key={r}
+                    className={cn(
                     "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
                     r === role && "bg-accent"
                   )}
@@ -292,7 +292,7 @@ export function NewAgent() {
             <div>
               <h2 className="text-sm font-medium">Company skills</h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Optional skills from the company library. Built-in Paperclip runtime skills are added automatically.
+                  Optional skills from the company library. Built-in papercompany runtime skills are added automatically.
               </p>
             </div>
             {availableSkills.length === 0 ? (

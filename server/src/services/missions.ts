@@ -5,10 +5,21 @@
  * OQ-4 schema: owner_agent_id (PO), executor/reviewer/observer/specialist roles.
  */
 
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, missionAgents, missions } from "@paperclipai/db";
+import {
+  agents,
+  issues,
+  missionAgents,
+  missionSessions,
+  missions,
+  workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
+} from "@paperclipai/db";
 import { notFound, badRequest } from "../errors.js";
+import { issueService } from "./issues.js";
+import type { WorkflowStep } from "./workflow/dag-engine.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,7 +51,68 @@ export type MissionAgentRow = typeof missionAgents.$inferSelect;
 export type MissionDetail = MissionRow & {
   agents: Array<MissionAgentRow & { agentName?: string }>;
   ownerAgentName?: string;
+  sessionBindings: Array<{
+    agentId: string;
+    adapterType: string;
+    status: string;
+    lastActiveAt: Date | null;
+    runCount: number;
+  }>;
 };
+
+export type MissionWorkflowStepIssue = {
+  id: string;
+  identifier: string | null;
+  title: string;
+  status: string;
+  assigneeAgentId: string | null;
+};
+
+export type MissionWorkflowRunProgress = {
+  totalSteps: number;
+  pendingSteps: number;
+  runningSteps: number;
+  completedSteps: number;
+  failedSteps: number;
+  skippedSteps: number;
+};
+
+export type MissionWorkflowRunStep = {
+  stepId: string;
+  name: string;
+  agentId: string;
+  dependencies: string[];
+  description: string | null;
+  toolNames: string[];
+  knowledgeBaseIds: string[];
+  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  issueId: string | null;
+  issue: MissionWorkflowStepIssue | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+};
+
+const MISSION_WORKFLOW_STEP_STATUSES = new Set([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "skipped",
+] as const);
+
+function normalizeMissionWorkflowStepStatus(status: string): MissionWorkflowRunStep["status"] {
+  return MISSION_WORKFLOW_STEP_STATUSES.has(status as MissionWorkflowRunStep["status"])
+    ? (status as MissionWorkflowRunStep["status"])
+    : "pending";
+}
+
+export type MissionWorkflowRunDetail = typeof workflowRuns.$inferSelect & {
+  workflowName: string | null;
+  stepRuns: Array<typeof workflowStepRuns.$inferSelect>;
+  steps: MissionWorkflowRunStep[];
+  progress: MissionWorkflowRunProgress;
+};
+export type MissionIssueTree = Awaited<ReturnType<ReturnType<typeof issueService>["list"]>>;
 
 /**
  * Input for creating a mission.
@@ -107,6 +179,40 @@ function validateRole(role: string): asserts role is MissionAgentRole {
   if (!VALID_ROLES.includes(role as MissionAgentRole)) {
     throw badRequest(`Invalid role: ${role}. Must be one of: ${VALID_ROLES.join(", ")}`);
   }
+}
+
+function buildWorkflowRunProgress(steps: MissionWorkflowRunStep[]): MissionWorkflowRunProgress {
+  return steps.reduce<MissionWorkflowRunProgress>(
+    (acc, step) => {
+      acc.totalSteps += 1;
+      switch (step.status) {
+        case "completed":
+          acc.completedSteps += 1;
+          break;
+        case "failed":
+          acc.failedSteps += 1;
+          break;
+        case "running":
+          acc.runningSteps += 1;
+          break;
+        case "skipped":
+          acc.skippedSteps += 1;
+          break;
+        default:
+          acc.pendingSteps += 1;
+          break;
+      }
+      return acc;
+    },
+    {
+      totalSteps: 0,
+      pendingSteps: 0,
+      runningSteps: 0,
+      completedSteps: 0,
+      failedSteps: 0,
+      skippedSteps: 0,
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -191,11 +297,23 @@ export function missionService(db: Db) {
       .from(agents)
       .where(eq(agents.id, mission.ownerAgentId))
       .limit(1);
+    const sessionBindings = await db
+      .select({
+        agentId: missionSessions.agentId,
+        adapterType: missionSessions.adapterType,
+        status: missionSessions.status,
+        lastActiveAt: missionSessions.lastActiveAt,
+        runCount: missionSessions.runCount,
+      })
+      .from(missionSessions)
+      .where(eq(missionSessions.missionId, id))
+      .orderBy(desc(missionSessions.lastActiveAt), asc(missionSessions.agentId));
 
     return {
       ...mission,
       agents: agentRows.map((r: { row: typeof missionAgents.$inferSelect; agentName: string | null }) => ({ ...r.row, agentName: r.agentName ?? undefined })),
       ownerAgentName: ownerRow?.name,
+      sessionBindings,
     };
   }
 
@@ -394,15 +512,131 @@ export function missionService(db: Db) {
    * Get the issue tree for a mission.
    * Returns all issues linked to this mission grouped by parent.
    */
-  async function getIssueTree(missionId: string): Promise<unknown[]> {
+  async function getIssueTree(missionId: string): Promise<MissionIssueTree> {
     // Verify mission exists
     const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
     if (!mission) throw notFound(`Mission not found: ${missionId}`);
 
-    // For now, issues are not directly linked to missions in the schema
-    // This would require adding missionId to issues table
-    // Returning empty array as placeholder
-    return [];
+    const issuesSvc = issueService(db);
+    return issuesSvc.list(mission.companyId, { missionId });
+  }
+
+  /**
+   * List workflow runs associated with a mission, including step runs and workflow names.
+   */
+  async function listWorkflowRuns(missionId: string): Promise<MissionWorkflowRunDetail[]> {
+    const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
+    if (!mission) throw notFound(`Mission not found: ${missionId}`);
+
+    const runs = await db
+      .select({
+        run: workflowRuns,
+        workflowName: workflowDefinitions.name,
+        workflowSteps: workflowDefinitions.stepsJson,
+      })
+      .from(workflowRuns)
+      .leftJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+      .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, missionId)))
+      .orderBy(desc(workflowRuns.createdAt));
+
+    if (runs.length === 0) return [];
+
+    const allStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(inArray(workflowStepRuns.workflowRunId, runs.map((entry) => entry.run.id)));
+
+    const stepIssueIds = Array.from(
+      new Set(
+        allStepRuns
+          .map((stepRun) => stepRun.issueId)
+          .filter((issueId): issueId is string => Boolean(issueId)),
+      ),
+    );
+
+    const stepIssues = stepIssueIds.length
+      ? await db
+          .select({
+            id: issues.id,
+            identifier: issues.identifier,
+            title: issues.title,
+            status: issues.status,
+            assigneeAgentId: issues.assigneeAgentId,
+          })
+          .from(issues)
+          .where(inArray(issues.id, stepIssueIds))
+      : [];
+
+    const stepRunsMap = new Map<string, Array<typeof workflowStepRuns.$inferSelect>>();
+    for (const stepRun of allStepRuns) {
+      const current = stepRunsMap.get(stepRun.workflowRunId) ?? [];
+      current.push(stepRun);
+      stepRunsMap.set(stepRun.workflowRunId, current);
+    }
+
+    const stepIssueMap = new Map<string, MissionWorkflowStepIssue>(
+      stepIssues.map((issue) => [issue.id, issue]),
+    );
+
+    return runs.map(({ run, workflowName, workflowSteps }) => {
+      const definitionSteps = ((workflowSteps as WorkflowStep[] | null) ?? []) as WorkflowStep[];
+      const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
+      const rawStepRuns = [...(stepRunsMap.get(run.id) ?? [])].sort((left, right) => {
+        const leftIndex = definitionStepOrder.get(left.stepId) ?? Number.MAX_SAFE_INTEGER;
+        const rightIndex = definitionStepOrder.get(right.stepId) ?? Number.MAX_SAFE_INTEGER;
+        return leftIndex - rightIndex || left.stepId.localeCompare(right.stepId);
+      });
+      const stepRunByStepId = new Map(rawStepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
+
+      const steps: MissionWorkflowRunStep[] = definitionSteps.map((step) => {
+        const stepRun = stepRunByStepId.get(step.id);
+        return {
+          stepId: step.id,
+          name: step.name,
+          agentId: step.agentId,
+          dependencies: [...step.dependencies],
+          description: step.description ?? null,
+          toolNames: Array.isArray(step.toolNames)
+            ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [],
+          knowledgeBaseIds: Array.isArray(step.knowledgeBaseIds)
+            ? step.knowledgeBaseIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [],
+          status: normalizeMissionWorkflowStepStatus(stepRun?.status ?? "pending"),
+          issueId: stepRun?.issueId ?? null,
+          issue: stepRun?.issueId ? stepIssueMap.get(stepRun.issueId) ?? null : null,
+          startedAt: stepRun?.startedAt ?? null,
+          completedAt: stepRun?.completedAt ?? null,
+        };
+      });
+
+      const knownStepIds = new Set(definitionSteps.map((step) => step.id));
+      for (const stepRun of rawStepRuns) {
+        if (knownStepIds.has(stepRun.stepId)) continue;
+        steps.push({
+          stepId: stepRun.stepId,
+          name: stepRun.stepId,
+          agentId: "",
+          dependencies: [],
+          description: null,
+          toolNames: [],
+          knowledgeBaseIds: [],
+          status: normalizeMissionWorkflowStepStatus(stepRun.status),
+          issueId: stepRun.issueId,
+          issue: stepRun.issueId ? stepIssueMap.get(stepRun.issueId) ?? null : null,
+          startedAt: stepRun.startedAt,
+          completedAt: stepRun.completedAt,
+        });
+      }
+
+      return {
+        ...run,
+        workflowName: workflowName ?? null,
+        stepRuns: rawStepRuns,
+        steps,
+        progress: buildWorkflowRunProgress(steps),
+      };
+    });
   }
 
   return {
@@ -416,6 +650,7 @@ export function missionService(db: Db) {
     updateAgentRole,
     listAgents,
     getIssueTree,
+    listWorkflowRuns,
   };
 }
 

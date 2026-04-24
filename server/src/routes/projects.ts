@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   createProjectSchema,
   createProjectWorkspaceSchema,
+  createWorkContextSchema,
   isUuidLike,
   updateProjectSchema,
   updateProjectWorkspaceSchema,
@@ -59,6 +60,13 @@ export function projectRoutes(db: Db) {
     res.json(result);
   });
 
+  router.get("/companies/:companyId/work-contexts", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const result = await svc.list(companyId);
+    res.json(result);
+  });
+
   router.get("/projects/:id", async (req, res) => {
     const id = req.params.id as string;
     const project = await svc.getById(id);
@@ -104,6 +112,39 @@ export function projectRoutes(db: Db) {
         name: project.name,
         workspaceId: createdWorkspaceId,
       },
+    });
+    res.status(201).json(hydratedProject ?? project);
+  });
+
+  router.post("/companies/:companyId/work-contexts", validate(createWorkContextSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    type CreateProjectPayload = Parameters<typeof svc.create>[1] & {
+      workspace?: Parameters<typeof svc.createWorkspace>[1];
+    };
+    const { workspace, ...projectData } = req.body as CreateProjectPayload;
+    const project = await svc.create(companyId, projectData);
+    let createdWorkspaceId: string | null = null;
+    if (workspace) {
+      const createdWorkspace = await svc.createWorkspace(project.id, workspace);
+      if (!createdWorkspace) {
+        await svc.remove(project.id);
+        res.status(422).json({ error: "Invalid project workspace payload" });
+        return;
+      }
+      createdWorkspaceId = createdWorkspace.id;
+    }
+    const hydratedProject = workspace ? await svc.getById(project.id) : project;
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "project.created",
+      entityType: "project",
+      entityId: project.id,
+      details: { name: project.name, workspaceId: createdWorkspaceId },
     });
     res.status(201).json(hydratedProject ?? project);
   });

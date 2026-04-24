@@ -676,7 +676,7 @@ export function Inbox() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="everything">All categories</SelectItem>
-                <SelectItem value="issues_i_touched">My recent issues</SelectItem>
+                <SelectItem value="issues_i_touched">My recent work</SelectItem>
                 <SelectItem value="join_requests">Join requests</SelectItem>
                 <SelectItem value="approvals">Approvals</SelectItem>
                 <SelectItem value="failed_runs">Failed runs</SelectItem>

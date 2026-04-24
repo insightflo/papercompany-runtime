@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   insertSrbDeliveryLog: vi.fn(),
   updateSrbDeliveryLog: vi.fn(),
   inboundReceive: vi.fn(),
+  applySrbInboundReceiveSideEffects: vi.fn(),
+  heartbeatWakeup: vi.fn(),
   recordSrbSuccess: vi.fn(),
   recordSrbFailure: vi.fn(),
   srbWebhookDeliveriesInc: vi.fn(),
@@ -63,6 +65,11 @@ vi.mock("../middleware/logger.js", () => ({
 
 vi.mock("../services/srb/inbound.js", () => ({
   createSrbInboundHandler: () => ({ receive: mocks.inboundReceive }),
+  applySrbInboundReceiveSideEffects: mocks.applySrbInboundReceiveSideEffects,
+}));
+
+vi.mock("../services/heartbeat.js", () => ({
+  heartbeatService: () => ({ wakeup: mocks.heartbeatWakeup }),
 }));
 
 vi.mock("../services/srb/shared.js", async () => {
@@ -237,6 +244,17 @@ describe("P6 SRB dispatch", () => {
       issueId: "issue-1",
       issueIdentifier: "OPS-41",
       status: "received",
+      postCommit: {
+        actorId: "link-local",
+        issue: {
+          id: "issue-1",
+          companyId: "company-target",
+          title: "Need help",
+          identifier: "OPS-41",
+          assigneeAgentId: null,
+          status: "todo",
+        },
+      },
     });
 
     const tx = {};
@@ -268,6 +286,21 @@ describe("P6 SRB dispatch", () => {
       payload: { title: "Need help", description: "Please investigate" },
       idempotencyKey: "nonce-local",
     }));
+    expect(mocks.applySrbInboundReceiveSideEffects).toHaveBeenCalledWith({
+      db,
+      heartbeat: { wakeup: mocks.heartbeatWakeup },
+      postCommit: {
+        actorId: "link-local",
+        issue: {
+          id: "issue-1",
+          companyId: "company-target",
+          title: "Need help",
+          identifier: "OPS-41",
+          assigneeAgentId: null,
+          status: "todo",
+        },
+      },
+    });
   });
 
   it("retry worker replays stored payload with SRB headers", async () => {

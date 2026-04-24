@@ -425,10 +425,10 @@ function generateReadmeFromSelection(
   lines.push("pnpm paperclipai company import this-github-url-or-folder");
   lines.push("```");
   lines.push("");
-  lines.push("See [Paperclip](https://paperclip.ing) for more information.");
+  lines.push("See [papercompany](https://paperclip.ing) for more information.");
   lines.push("");
   lines.push("---");
-  lines.push(`Exported from [Paperclip](https://paperclip.ing) on ${new Date().toISOString().split("T")[0]}`);
+  lines.push(`Exported from [papercompany](https://paperclip.ing) on ${new Date().toISOString().split("T")[0]}`);
   lines.push("");
 
   return lines.join("\n");
@@ -571,7 +571,7 @@ export function CompanyExport() {
     } else if (!urlFile && selectedFile) {
       setSelectedFile(null);
     }
-  }, [location.pathname, exportData]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [location.pathname, exportData, selectedFile]);
 
   useEffect(() => {
     setBreadcrumbs([
@@ -657,7 +657,7 @@ export function CompanyExport() {
     setExportData(null);
     exportPreviewMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCompanyId]);
+  }, [selectedCompanyId, exportPreviewMutation.isPending, exportPreviewMutation.mutate]);
 
   const tree = useMemo(
     () => (exportData ? buildFileTree(exportData.files) : []),

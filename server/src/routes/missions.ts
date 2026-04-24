@@ -261,14 +261,13 @@ export function missionRoutes(db: Db) {
    * GET /missions/:id/workflow-runs
    *
    * List workflow runs associated with this mission.
-   * Placeholder — workflow run filtering by missionId will be added in P2.
    */
   router.get("/missions/:id/workflow-runs", async (req, res) => {
     const mission = await svc.getById(req.params.id);
     assertCompanyAccess(req, mission.companyId);
 
-    // TODO: Filter workflow_runs by mission_id once workflow engine is wired
-    res.json([]);
+    const runs = await svc.listWorkflowRuns(req.params.id);
+    res.json(runs);
   });
 
   return router;
