@@ -1,7 +1,15 @@
+import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
-import { missionsApi, type MissionAgentEntry, type MissionAgentRole } from "../api/missions";
+import {
+  missionsApi,
+  type MissionAgentEntry,
+  type MissionAgentRole,
+  type MissionWorkflowRun,
+  type MissionWorkflowStep,
+} from "../api/missions";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
+import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { GitBranch, User } from "lucide-react";
@@ -37,23 +45,27 @@ const ROLE_COLORS: Record<MissionAgentRole, string> = {
 export function WorkflowDagPanel({ missionId }: WorkflowDagPanelProps) {
   const { selectedCompanyId } = useCompany();
 
-  const { data: mission, isLoading: missionLoading } = useQuery({
-    queryKey: queryKeys.missions.detail(missionId),
-    queryFn: () => missionsApi.get(missionId),
-    enabled: !!missionId,
-  });
-
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
 
+  const {
+    data: workflowRuns,
+    isLoading: workflowRunsLoading,
+    error: workflowRunsError,
+  } = useQuery({
+    queryKey: queryKeys.missions.workflowRuns(missionId),
+    queryFn: () => missionsApi.listWorkflowRuns(missionId),
+    enabled: !!missionId,
+  });
+
   const agentMap = agents
     ? Object.fromEntries(agents.map((a) => [a.id, a.name]))
     : {};
 
-  if (missionLoading) {
+  if (workflowRunsLoading) {
     return (
       <div className="space-y-2 py-2">
         {["mission-a", "mission-b", "mission-c"].map((key) => (
@@ -63,31 +75,192 @@ export function WorkflowDagPanel({ missionId }: WorkflowDagPanelProps) {
     );
   }
 
-  if (!mission) {
+  if (workflowRunsError) {
     return (
-      <p className="text-sm text-destructive px-3 py-2">Failed to load mission data.</p>
+      <p className="text-sm text-destructive px-3 py-2">Failed to load workflow runs.</p>
     );
   }
 
-  // Group agents by role from the mission detail endpoint
-  // The list endpoint returns MissionListItem (no agents field),
-  // so we show a simplified view from what we have.
-  // A future DAG endpoint will replace this with real node/edge data.
-
   return (
     <div className="space-y-6">
-      {/* DAG placeholder notice */}
-      <div className="rounded-md border border-dashed border-border p-4 text-center">
-        <GitBranch className="h-6 w-6 mx-auto mb-2 text-muted-foreground" />
-        <p className="text-sm font-medium">Workflow DAG</p>
-        <p className="text-xs text-muted-foreground mt-1">
-          Full DAG visualization requires the workflow DAG API endpoint (planned for a future phase).
-          Agent roster is shown below.
-        </p>
-      </div>
+      <WorkflowRunList runs={workflowRuns ?? []} missionId={missionId} agentMap={agentMap} />
 
       {/* Agent roster grouped by role */}
       <AgentRoster missionId={missionId} agentMap={agentMap} />
+    </div>
+  );
+}
+
+const RUN_STATUS_TONE: Record<string, string> = {
+  pending: "border-neutral-300 text-muted-foreground",
+  running: "border-blue-300 text-blue-700 dark:text-blue-300",
+  completed: "border-emerald-300 text-emerald-700 dark:text-emerald-300",
+  failed: "border-red-300 text-red-700 dark:text-red-300",
+  cancelled: "border-neutral-400 text-muted-foreground",
+};
+
+const STEP_STATUS_TONE: Record<string, string> = {
+  pending: "bg-neutral-400",
+  running: "bg-blue-500",
+  completed: "bg-emerald-500",
+  failed: "bg-red-500",
+  skipped: "bg-amber-500",
+};
+
+function formatStatusLabel(status: string) {
+  return status.replace(/_/g, " ");
+}
+
+function WorkflowRunList({
+  runs,
+  missionId,
+  agentMap,
+}: {
+  runs: MissionWorkflowRun[];
+  missionId: string;
+  agentMap: Record<string, string>;
+}) {
+  if (runs.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-4 text-center">
+        <GitBranch className="h-6 w-6 mx-auto mb-2 text-muted-foreground" />
+        <p className="text-sm font-medium">No workflow runs for this mission yet.</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Mission-linked workflow runs will appear here once execution starts.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {runs.map((run) => {
+        return (
+          <div key={run.id} className="rounded-md border border-border p-4 space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">
+                  {run.workflowName ?? "Unnamed workflow"}
+                </p>
+                <p className="text-xs text-muted-foreground font-mono truncate">{run.id}</p>
+              </div>
+              <span
+                className={cn(
+                  "text-xs rounded border px-2 py-1 uppercase tracking-wide",
+                  RUN_STATUS_TONE[run.status] ?? RUN_STATUS_TONE.pending,
+                )}
+              >
+                {formatStatusLabel(run.status)}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+              <span>Triggered by: {run.triggeredBy}</span>
+              <span>Steps: {run.progress.totalSteps}</span>
+              <span>Completed: {run.progress.completedSteps}</span>
+              {run.progress.runningSteps > 0 ? <span>Running: {run.progress.runningSteps}</span> : null}
+              {run.progress.failedSteps > 0 ? <span>Failed: {run.progress.failedSteps}</span> : null}
+              {run.progress.skippedSteps > 0 ? <span>Skipped: {run.progress.skippedSteps}</span> : null}
+            </div>
+            {run.steps.length > 0 ? (
+              <div className="space-y-2 border-t border-border pt-3">
+                {run.steps.map((step) => (
+                  <WorkflowStepRow
+                    key={`${run.id}-${step.stepId}`}
+                    missionId={missionId}
+                    step={step}
+                    steps={run.steps}
+                    agentMap={agentMap}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkflowStepRow({
+  missionId,
+  step,
+  steps,
+  agentMap,
+}: {
+  missionId: string;
+  step: MissionWorkflowStep;
+  steps: MissionWorkflowStep[];
+  agentMap: Record<string, string>;
+}) {
+  const dependencyNames = step.dependencies.map(
+    (dependencyId) => steps.find((candidate) => candidate.stepId === dependencyId)?.name ?? dependencyId,
+  );
+  const assigneeName = step.agentId ? agentMap[step.agentId] ?? step.agentId : null;
+
+  return (
+    <div className="rounded border border-border/70 px-3 py-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span
+              className={cn(
+                "h-2.5 w-2.5 shrink-0 rounded-full",
+                STEP_STATUS_TONE[step.status] ?? STEP_STATUS_TONE.pending,
+              )}
+            />
+            <span className="truncate text-sm font-medium">{step.name}</span>
+            <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+              {formatStatusLabel(step.status)}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            {assigneeName ? <span>Agent: {assigneeName}</span> : null}
+            {dependencyNames.length > 0 ? <span>Depends on: {dependencyNames.join(", ")}</span> : <span>Entry step</span>}
+          </div>
+          {step.toolNames.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {step.toolNames.map((toolName) => (
+                <span
+                  key={`${step.stepId}-${toolName}`}
+                  className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                >
+                  {toolName}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {step.knowledgeBaseIds.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {step.knowledgeBaseIds.map((knowledgeBaseId) => (
+                <span
+                  key={`${step.stepId}-${knowledgeBaseId}`}
+                  className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                >
+                  kb:{knowledgeBaseId}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {step.description ? <p className="text-xs text-muted-foreground">{step.description}</p> : null}
+        </div>
+        {step.issue ? (
+          <Link
+            to={`/issues/${step.issue.identifier ?? step.issue.id}`}
+            state={createIssueDetailLocationState("Mission", `/missions/${missionId}`)}
+            className="max-w-[16rem] shrink-0 rounded border border-border px-2 py-1 text-right text-xs no-underline transition-colors hover:bg-accent/50"
+          >
+            <span className="block truncate font-mono text-muted-foreground">
+              {step.issue.identifier ?? step.issue.id}
+            </span>
+            <span className="block truncate">{step.issue.title}</span>
+            <span className="block truncate text-muted-foreground">
+              Issue: {formatStatusLabel(step.issue.status)}
+            </span>
+          </Link>
+        ) : (
+          <span className="shrink-0 text-xs text-muted-foreground">Issue pending</span>
+        )}
+      </div>
     </div>
   );
 }

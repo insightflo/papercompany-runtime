@@ -60,11 +60,25 @@ For local adapters, set:
 - `graceSec` (time before force-kill after timeout/cancel)
 - optional env vars and extra CLI args
 
+For adapters that support `instructionsFilePath`, relative paths are resolved from the effective heartbeat working directory (`cwd`).
+
 ## 3.4 Prompt templates
 
 You can set:
 
 - `promptTemplate`: used for every run (first run and resumed sessions)
+
+Optional heartbeat runtime guardrails:
+
+- `heartbeat.contextBudgetPreflight.maxEstimatedChars`: fail fast before adapter execution when the estimated prompt payload exceeds this char budget
+- `heartbeat.contextBudgetPreflight.maxEstimatedTokens`: fail fast before adapter execution when the estimated prompt payload exceeds this token budget
+
+Step input manifest:
+
+- the server now computes `context.paperclipStepInputManifest` before adapter execution
+- it describes the server-approved step inputs currently attached to the run context (task key, issue/project ids, workspace/runtime-service presence, and session handoff availability)
+- when `guardrails.broadScanAllowed` is `false`, the server rejects a narrow first set of explicit repo/workspace-wide scan instructions before adapter execution
+- when session compaction rotates a task session, the server now attaches both `paperclipSessionHandoffMarkdown` and a minimal structured sibling `paperclipSessionHandoff`
 
 Templates support variables like `{{agent.id}}`, `{{agent.name}}`, and run context values.
 

@@ -26,7 +26,12 @@ import { srbWebhookDeliveries } from "./metrics.js";
 import { tracer } from "../lib/tracer.js";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { getAlertRules } from "../services/alert-rules.js";
-import { createSrbInboundHandler } from "../services/srb/inbound.js";
+import { heartbeatService } from "../services/heartbeat.js";
+import {
+  applySrbInboundReceiveSideEffects,
+  createSrbInboundHandler,
+  type SRBInboundReceiveResult,
+} from "../services/srb/inbound.js";
 
 /**
  * Maximum allowed clock skew in seconds.
@@ -70,6 +75,7 @@ export function srbWebhookRoutes(db: Db) {
   const router = Router();
   const secrets = secretService(db);
   const inbound = createSrbInboundHandler(db);
+  const heartbeat = heartbeatService(db);
 
   /**
    * POST /srb/webhook
@@ -191,9 +197,8 @@ export function srbWebhookRoutes(db: Db) {
 
     const body = req.body as Record<string, unknown>;
     const event = typeof body.event === "string" ? body.event : "unknown";
-
     try {
-      await db.transaction(async (tx) => {
+      const inboundResult = await db.transaction(async (tx) => {
         const txDb = tx as Pick<Db, "insert" | "update" | "select" | "delete">;
 
         await txDb.insert(srbNonces).values({
@@ -201,13 +206,19 @@ export function srbWebhookRoutes(db: Db) {
           linkId,
         });
 
-        await inbound.receive(txDb, {
+        return await inbound.receive(txDb, {
           linkId,
           targetCompanyId: link.localCompanyId,
           event,
           payload: (body.payload ?? {}) as Record<string, unknown>,
           idempotencyKey,
         });
+      });
+
+      await applySrbInboundReceiveSideEffects({
+        db,
+        heartbeat,
+        postCommit: inboundResult.postCommit,
       });
     } catch (err) {
       if (isDuplicateNonceError(err)) {

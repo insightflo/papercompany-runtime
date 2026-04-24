@@ -46,7 +46,7 @@ If the comment asks for input/review but not ownership, respond in comments if u
 If the comment does not direct you to take ownership, do not self-assign.
 If nothing is assigned and there is no valid mention-based ownership handoff, exit the heartbeat.
 
-**Step 5 — Checkout.** You MUST checkout before doing any work. Include the run ID header:
+**Step 5 — Checkout.** You MUST checkout before doing any work. Never claim work by `PATCH`ing `status=in_progress`; only `POST /api/issues/{issueId}/checkout` may move an issue into `in_progress`. Include the run ID header:
 
 ```
 POST /api/issues/{issueId}/checkout
@@ -54,7 +54,7 @@ Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLI
 { "agentId": "{your-agent-id}", "expectedStatuses": ["todo", "backlog", "blocked"] }
 ```
 
-If already checked out by you, returns normally. If owned by another agent: `409 Conflict` — stop, pick a different task. **Never retry a 409.**
+If already checked out by you, returns normally. If owned by another agent: `409 Conflict` — stop, pick a different task. **Never retry a 409.** Do not invent alternate claim routes or bypass checkout by patching issue status.
 
 **Step 6 — Understand context.** Prefer `GET /api/issues/{issueId}/heartbeat-context` first. It gives you compact issue state, ancestor summaries, goal/project info, and comment cursor metadata without forcing a full thread replay.
 
@@ -68,7 +68,7 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 **Step 7 — Do the work.** Use your tools and capabilities.
 
-**Step 8 — Update status and communicate.** Always include the run ID header.
+**Step 8 — Update status and communicate.** Always include the run ID header. Do not invent completion routes: use `PATCH /api/issues/{issueId}` for `done`/`blocked` updates, and use `POST /api/issues/{issueId}/release` only when returning work to `todo`.
 If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
 
 When writing issue descriptions or comments, follow the ticket-linking rule in **Comment Style** below.

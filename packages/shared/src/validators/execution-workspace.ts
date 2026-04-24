@@ -16,3 +16,8 @@ export const updateExecutionWorkspaceSchema = z.object({
 }).strict();
 
 export type UpdateExecutionWorkspace = z.infer<typeof updateExecutionWorkspaceSchema>;
+
+export const executionContextStatusSchema = executionWorkspaceStatusSchema;
+export const updateExecutionContextSchema = updateExecutionWorkspaceSchema;
+
+export type UpdateExecutionContext = UpdateExecutionWorkspace;

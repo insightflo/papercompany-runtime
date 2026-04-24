@@ -29,6 +29,7 @@ import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
@@ -50,7 +51,9 @@ import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+type ModuleResolver = (specifier: string) => string;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -76,7 +79,27 @@ export const DEFAULT_LOCAL_PLUGIN_DIR = path.join(
   "plugins",
 );
 
-const DEV_TSX_LOADER_PATH = path.resolve(__dirname, "../../../cli/node_modules/tsx/dist/loader.mjs");
+export function resolveDevTsxLoaderPath(
+  resolveModule: ModuleResolver = require.resolve as ModuleResolver,
+  fileExists: (filePath: string) => boolean = existsSync,
+): string | null {
+  try {
+    const directLoaderPath = resolveModule("tsx/dist/loader.mjs");
+    if (fileExists(directLoaderPath)) {
+      return directLoaderPath;
+    }
+  } catch {}
+
+  try {
+    const resolvedEntryPoint = resolveModule("tsx");
+    const loaderPath = path.resolve(path.dirname(resolvedEntryPoint), "loader.mjs");
+    if (fileExists(loaderPath)) {
+      return loaderPath;
+    }
+  } catch {}
+
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Discovery result types
@@ -1075,7 +1098,7 @@ export function pluginLoader(
         const entryPath = path.join(scanDir, entry);
 
         // Check if entry is a directory
-        let entryStat;
+        let entryStat: Awaited<ReturnType<typeof stat>>;
         try {
           entryStat = await stat(entryPath);
         } catch {
@@ -1195,7 +1218,7 @@ export function pluginLoader(
           // Non-scoped packages: check naming convention
           if (!isPluginPackageName(entry)) continue;
 
-          let entryStat;
+          let entryStat: Awaited<ReturnType<typeof stat>>;
           try {
             entryStat = await stat(entryPath);
           } catch {
@@ -1737,8 +1760,9 @@ export function pluginLoader(
       // Repo-local plugin installs can resolve workspace TS sources at runtime
       // (for example @paperclipai/shared exports). Run those workers through
       // the tsx loader so first-party example plugins work in development.
-      if (plugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
-        workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+      const devTsxLoaderPath = resolveDevTsxLoaderPath();
+      if (plugin.packagePath && devTsxLoaderPath) {
+        workerOptions.execArgv = ["--import", devTsxLoaderPath];
       }
 
       await workerManager.startWorker(pluginId, workerOptions);

@@ -26,6 +26,7 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockSyncSrbSourceIssueStatus = vi.hoisted(() => vi.fn(async () => []));
 
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
@@ -41,7 +42,14 @@ vi.mock("../services/index.js", () => ({
   routineService: () => ({
     syncRunStatusForIssue: vi.fn(async () => undefined),
   }),
+  workflowService: {
+    syncRunStatusForIssue: vi.fn(async () => undefined),
+  },
   workProductService: () => ({}),
+}));
+
+vi.mock("../services/srb/source-status-sync.js", () => ({
+  syncSrbSourceIssueStatus: mockSyncSrbSourceIssueStatus,
 }));
 
 function createApp() {
@@ -113,6 +121,7 @@ describe("issue comment reopen routes", () => {
         details: expect.not.objectContaining({ reopened: true }),
       }),
     );
+    expect(mockSyncSrbSourceIssueStatus).not.toHaveBeenCalled();
   });
 
   it("reopens closed issues via the PATCH comment path", async () => {
@@ -142,5 +151,10 @@ describe("issue comment reopen routes", () => {
         }),
       }),
     );
+    expect(mockSyncSrbSourceIssueStatus).toHaveBeenCalledWith({
+      db: expect.anything(),
+      issueId: "11111111-1111-4111-8111-111111111111",
+      status: "todo",
+    });
   });
 });

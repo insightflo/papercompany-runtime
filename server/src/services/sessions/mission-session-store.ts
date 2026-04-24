@@ -9,7 +9,7 @@
  * @see adapter-utils/src/session-compaction.ts
  */
 
-import { and, eq, gt, lt, asc } from "drizzle-orm";
+import { and, eq, lt, asc } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -158,26 +158,23 @@ export function missionSessionStore(db: Db) {
           eq(missionSessions.missionId, input.missionId),
           eq(missionSessions.agentId, input.agentId),
           eq(missionSessions.adapterType, input.adapterType),
-          eq(missionSessions.status, "active"),
         ),
       )
       .orderBy(asc(missionSessions.createdAt))
       .limit(1);
 
     if (existing) {
-      const expiresAt = existing.expiresAt ?? new Date(0);
-      const isExpired = expiresAt < graceCutoff;
+      const expiresAt = existing.expiresAt;
+      const isExpired = expiresAt ? expiresAt < graceCutoff : false;
 
-      if (!isExpired) {
+      if (existing.status === "active" && !isExpired) {
         // P9-T5: session reused
         missionSessionEvents.inc({ event: "reused" });
         return { session: existing, isNew: false };
       }
 
-      // Session is expired — compact it and create new
-      await compactSession(existing.id, input);
       return {
-        session: await getById(existing.id),
+        session: await compactSession(existing.id, input),
         isNew: true,
       };
     }
@@ -203,28 +200,14 @@ export function missionSessionStore(db: Db) {
     return { session, isNew: true };
   }
 
-  /**
-   * Compact an expired session and create a replacement.
-   * This records summary information about the old session.
-   */
   async function compactSession(
     expiredSessionId: string,
     newSessionInput: CreateMissionSessionInput,
   ): Promise<MissionSessionRow> {
-    // Mark old session as compacted (or just update status)
-    await db
+    const now = new Date();
+    const [recycledSession] = await db
       .update(missionSessions)
       .set({
-        status: "compacted",
-        expiresAt: new Date(),
-      })
-      .where(eq(missionSessions.id, expiredSessionId));
-
-    // Create new session
-    const now = new Date();
-    const [newSession] = await db
-      .insert(missionSessions)
-      .values({
         missionId: newSessionInput.missionId,
         agentId: newSessionInput.agentId,
         companyId: newSessionInput.companyId,
@@ -235,9 +218,10 @@ export function missionSessionStore(db: Db) {
         runCount: 0,
         expiresAt: new Date(now.getTime() + DEFAULT_IDLE_TIMEOUT_MS),
       })
+      .where(eq(missionSessions.id, expiredSessionId))
       .returning();
 
-    return newSession;
+    return recycledSession;
   }
 
   /**
@@ -259,13 +243,13 @@ export function missionSessionStore(db: Db) {
         session.runCount >= resolvedPolicy.policy.maxSessionRuns;
 
       if (shouldCompact) {
-        // Mark this session as needing compaction
-        await db
-          .update(missionSessions)
-          .set({ status: "compacted" })
-          .where(eq(missionSessions.id, id));
-        // Return the compacted session (caller should get a new one)
-        return getById(id);
+        return compactSession(id, {
+          missionId: session.missionId,
+          agentId: session.agentId,
+          companyId: session.companyId,
+          sessionSecretId: session.sessionSecretId,
+          adapterType: session.adapterType,
+        });
       }
     }
 

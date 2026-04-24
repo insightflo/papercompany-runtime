@@ -2,7 +2,7 @@
 
 Eval framework for testing Paperclip agent behaviors across models and prompt versions.
 
-See [the evals framework plan](../doc/plans/2026-03-13-agent-evals-framework.md) for full design rationale.
+See [the evals framework plan](../../papercompany-artifacts/doc/plans/2026-03-13-agent-evals-framework.md) for full design rationale.
 
 ## Quick Start
 

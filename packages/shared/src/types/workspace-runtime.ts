@@ -115,3 +115,9 @@ export interface WorkspaceRuntimeService {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type ExecutionContext = ExecutionWorkspace;
+export type ExecutionContextMode = ExecutionWorkspaceMode;
+export type ExecutionContextStatus = ExecutionWorkspaceStatus;
+export type ExecutionContextStrategy = ExecutionWorkspaceStrategy;
+export type ExecutionContextProviderType = ExecutionWorkspaceProviderType;

@@ -3,7 +3,7 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable, companies, heartbeatRuns } from "@paperclipai/db";
-import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, not, or, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
   createAgentKeySchema,
@@ -2066,7 +2066,7 @@ export function agentRoutes(db: Db) {
       agentId: heartbeatRuns.agentId,
       agentName: agentsTable.name,
       adapterType: agentsTable.adapterType,
-      issueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
+      issueId: heartbeatRuns.issueId,
     };
 
     const liveRuns = await db
@@ -2240,7 +2240,7 @@ export function agentRoutes(db: Db) {
         and(
           eq(heartbeatRuns.companyId, issue.companyId),
           inArray(heartbeatRuns.status, ["queued", "running"]),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+          or(eq(heartbeatRuns.issueId, issue.id), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`),
         ),
       )
       .orderBy(desc(heartbeatRuns.createdAt));
@@ -2267,7 +2267,7 @@ export function agentRoutes(db: Db) {
     if (!run && issue.assigneeAgentId && issue.status === "in_progress") {
       const candidateRun = await heartbeat.getActiveRunForAgent(issue.assigneeAgentId);
       const candidateContext = asRecord(candidateRun?.contextSnapshot);
-      const candidateIssueId = asNonEmptyString(candidateContext?.issueId);
+      const candidateIssueId = candidateRun?.issueId ?? asNonEmptyString(candidateContext?.issueId);
       if (candidateRun && candidateIssueId === issue.id) {
         run = candidateRun;
       }

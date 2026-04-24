@@ -5,10 +5,13 @@
  * A workflow is a DAG where each step has dependencies on other steps.
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { workflowDefinitions, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
+import { issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
+import { issueService } from "../issues.js";
+import { heartbeatService } from "../heartbeat.js";
+import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 
 /**
  * Workflow step definition.
@@ -19,7 +22,19 @@ export interface WorkflowStep {
   agentId: string;
   dependencies: string[]; // step IDs this step depends on
   description?: string;
+  toolNames?: string[];
+  knowledgeBaseIds?: string[];
 }
+
+const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
+const WORKFLOW_STEP_SUCCESS_STATUSES = new Set(["completed"]);
+
+type WorkflowExecutionContext = {
+  run: typeof workflowRuns.$inferSelect;
+  definition: typeof workflowDefinitions.$inferSelect;
+  steps: WorkflowStep[];
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[];
+};
 
 /**
  * Validates that a workflow DAG is acyclic and well-formed.
@@ -133,22 +148,8 @@ function dfsReachable(step: WorkflowStep, allSteps: WorkflowStep[], visited: Set
   }
 }
 
-/**
- * Executes a workflow run.
- *
- * @param db - Database instance.
- * @param runId - The workflow run ID to execute.
- * @param tx - Optional transaction for atomic execution.
- * @returns Execution result.
- */
-export async function executeWorkflowRun(
-  db: Db,
-  runId: string,
-): Promise<WorkflowExecutionResult> {
-  const executor = db;
-
-  // Fetch workflow run with definition
-  const runResult = await executor
+async function loadWorkflowExecutionContext(db: Db, runId: string): Promise<WorkflowExecutionContext> {
+  const runResult = await db
     .select({
       run: workflowRuns,
       definition: workflowDefinitions,
@@ -166,105 +167,309 @@ export async function executeWorkflowRun(
     run: typeof workflowRuns.$inferSelect;
     definition: typeof workflowDefinitions.$inferSelect;
   };
-
   const steps: WorkflowStep[] = (definition.stepsJson as WorkflowStep[]) || [];
+  const stepRuns = await db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, runId));
 
-  // Update run status to running
-  await executor
+  return { run, definition, steps, stepRuns };
+}
+
+async function ensureStepRunRecords(
+  db: Db,
+  runId: string,
+  steps: WorkflowStep[],
+): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  const existing = await db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, runId));
+
+  const existingStepIds = new Set(existing.map((stepRun) => stepRun.stepId));
+  const missingSteps = steps.filter((step) => !existingStepIds.has(step.id));
+
+  if (missingSteps.length > 0) {
+    await db.insert(workflowStepRuns).values(
+      missingSteps.map((step) => ({
+        id: crypto.randomUUID(),
+        workflowRunId: runId,
+        stepId: step.id,
+        status: "pending",
+      })),
+    );
+  }
+
+  if (missingSteps.length === 0) return existing;
+  return db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, runId));
+}
+
+function desiredStepRunStatusFromIssueStatus(issueStatus: string): "pending" | "running" | "completed" | "failed" {
+  if (issueStatus === "done") return "completed";
+  if (issueStatus === "blocked" || issueStatus === "cancelled") return "failed";
+  if (issueStatus === "in_progress" || issueStatus === "in_review") return "running";
+  return "pending";
+}
+
+async function syncStepRunsFromIssueState(
+  db: Db,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  const issueIds = stepRuns
+    .map((stepRun) => stepRun.issueId)
+    .filter((issueId): issueId is string => Boolean(issueId));
+  if (issueIds.length === 0) return stepRuns;
+
+  const issueRows = await db
+    .select({
+      id: issues.id,
+      status: issues.status,
+      startedAt: issues.startedAt,
+      completedAt: issues.completedAt,
+      cancelledAt: issues.cancelledAt,
+    })
+    .from(issues)
+    .where(inArray(issues.id, issueIds));
+  const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
+
+  for (const stepRun of stepRuns) {
+    if (!stepRun.issueId) continue;
+    const issue = issueById.get(stepRun.issueId);
+    if (!issue) continue;
+
+    const desiredStatus = desiredStepRunStatusFromIssueStatus(issue.status);
+    const patch: Partial<typeof workflowStepRuns.$inferInsert> = {};
+    const now = new Date();
+
+    if (desiredStatus !== stepRun.status) {
+      patch.status = desiredStatus;
+    }
+
+    if (desiredStatus === "running") {
+      patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
+      patch.completedAt = null;
+    } else if (desiredStatus === "completed") {
+      patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
+      patch.completedAt = issue.completedAt ?? now;
+    } else if (desiredStatus === "failed") {
+      patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
+      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? now;
+    } else {
+      patch.startedAt = null;
+      patch.completedAt = null;
+    }
+
+    if (Object.keys(patch).length === 0) continue;
+    await db
+      .update(workflowStepRuns)
+      .set(patch)
+      .where(eq(workflowStepRuns.id, stepRun.id));
+  }
+
+  return db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
+}
+
+async function createWorkflowStepIssue(input: {
+  db: Db;
+  run: typeof workflowRuns.$inferSelect;
+  definition: typeof workflowDefinitions.$inferSelect;
+  step: WorkflowStep;
+}): Promise<string> {
+  const issueSvc = issueService(input.db);
+  const heartbeat = heartbeatService(input.db);
+
+  const createdIssue = await issueSvc.create(input.run.companyId, {
+    title: `${input.definition.name}: ${input.step.name}`,
+    description: input.step.description || "",
+    status: "todo",
+    assigneeAgentId: input.step.agentId,
+    missionId: input.run.missionId ?? null,
+    originKind: "workflow_execution",
+    originId: input.run.id,
+    originRunId: input.run.id,
+  });
+
+  await applyIssueCreatedSideEffects({
+    db: input.db,
+    heartbeat,
+    issue: createdIssue,
+    actor: {
+      actorType: "system",
+      actorId: `workflow:${input.definition.id}`,
+    },
+    contextSource: "workflow.dispatch",
+  });
+
+  return createdIssue.id;
+}
+
+function buildStepRunMap(
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Map<string, typeof workflowStepRuns.$inferSelect> {
+  return new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
+}
+
+function findRunnableSteps(
+  steps: WorkflowStep[],
+  stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
+): WorkflowStep[] {
+  return steps.filter((step) => {
+    const stepRun = stepRunMap.get(step.id);
+    if (!stepRun || stepRun.issueId || stepRun.status !== "pending") return false;
+    return step.dependencies.every((dependencyId) => {
+      const dependencyRun = stepRunMap.get(dependencyId);
+      return dependencyRun ? WORKFLOW_STEP_SUCCESS_STATUSES.has(dependencyRun.status) : false;
+    });
+  });
+}
+
+async function finalizeWorkflowRunState(
+  db: Db,
+  context: WorkflowExecutionContext,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Promise<typeof workflowRuns.$inferSelect> {
+  const hasFailedStep = stepRuns.some((stepRun) => stepRun.status === "failed");
+  const hasActiveStep = stepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
+  const allStepsTerminal = stepRuns.length === context.steps.length && !hasActiveStep;
+  const nextStatus =
+    hasFailedStep && allStepsTerminal
+      ? "failed"
+      : !hasFailedStep && allStepsTerminal
+        ? "completed"
+        : "running";
+  const patch: Partial<typeof workflowRuns.$inferInsert> = {
+    status: nextStatus,
+    startedAt: context.run.startedAt ?? new Date(),
+    completedAt: nextStatus === "completed" || nextStatus === "failed" ? new Date() : null,
+  };
+
+  const [updatedRun] = await db
+    .update(workflowRuns)
+    .set(patch)
+    .where(eq(workflowRuns.id, context.run.id))
+    .returning();
+
+  return updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+}
+
+export async function syncWorkflowRunState(
+  db: Db,
+  runId: string,
+): Promise<WorkflowExecutionResult> {
+  const context = await loadWorkflowExecutionContext(db, runId);
+  let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
+  stepRuns = await syncStepRunsFromIssueState(db, stepRuns);
+
+  const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
+  if (hasFailure) {
+    const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
+    if (unlaunchedPendingSteps.length > 0) {
+      const now = new Date();
+      for (const stepRun of unlaunchedPendingSteps) {
+        await db
+          .update(workflowStepRuns)
+          .set({ status: "skipped", completedAt: now })
+          .where(eq(workflowStepRuns.id, stepRun.id));
+      }
+      stepRuns = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, runId));
+    }
+  } else {
+    const stepRunMap = buildStepRunMap(stepRuns);
+    const runnableSteps = findRunnableSteps(context.steps, stepRunMap);
+
+    for (const step of runnableSteps) {
+      const stepRun = stepRunMap.get(step.id);
+      if (!stepRun) continue;
+      const issueId = await createWorkflowStepIssue({
+        db,
+        run: context.run,
+        definition: context.definition,
+        step,
+      });
+      await db
+        .update(workflowStepRuns)
+        .set({ issueId })
+        .where(eq(workflowStepRuns.id, stepRun.id));
+    }
+
+    if (runnableSteps.length > 0) {
+      stepRuns = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, runId));
+    }
+  }
+
+  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns);
+
+  return {
+    runId,
+    status: updatedRun.status as "running" | "completed" | "failed" | "cancelled",
+    completedAt: updatedRun.completedAt ?? new Date(),
+    error: updatedRun.status === "failed" ? "One or more workflow steps failed" : undefined,
+    stepRuns: stepRuns.map((stepRun) => ({
+      id: stepRun.id,
+      workflowRunId: stepRun.workflowRunId,
+      stepId: stepRun.stepId,
+      issueId: stepRun.issueId,
+      status: stepRun.status as "pending" | "running" | "completed" | "failed" | "skipped",
+      startedAt: stepRun.startedAt,
+      completedAt: stepRun.completedAt,
+    })),
+  };
+}
+
+export async function syncWorkflowRunForIssue(
+  db: Db,
+  issueId: string,
+): Promise<WorkflowExecutionResult | null> {
+  const issue = await db
+    .select({
+      originKind: issues.originKind,
+      originRunId: issues.originRunId,
+    })
+    .from(issues)
+    .where(eq(issues.id, issueId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  if (!issue || issue.originKind !== "workflow_execution" || !issue.originRunId) {
+    return null;
+  }
+
+  return syncWorkflowRunState(db, issue.originRunId);
+}
+
+/**
+ * Executes a workflow run.
+ *
+ * @param db - Database instance.
+ * @param runId - The workflow run ID to execute.
+ * @param tx - Optional transaction for atomic execution.
+ * @returns Execution result.
+ */
+export async function executeWorkflowRun(
+  db: Db,
+  runId: string,
+): Promise<WorkflowExecutionResult> {
+  await db
     .update(workflowRuns)
     .set({
       status: "running",
       startedAt: new Date(),
+      completedAt: null,
     })
     .where(eq(workflowRuns.id, runId));
-
-  // Create step run records
-  for (const step of steps) {
-    await executor.insert(workflowStepRuns).values({
-      id: crypto.randomUUID(),
-      workflowRunId: runId,
-      stepId: step.id,
-      status: "pending",
-    });
-  }
-
-  // Execute steps in dependency order (simplified - real impl would use topological sort)
-  const stepRuns: typeof workflowStepRuns.$inferSelect[] = [];
-  let hasFailure = false;
-
-  // Simple execution: execute pending steps whose deps are satisfied
-  const pendingSteps = steps.filter((s) => s.dependencies.length === 0);
-
-  for (const step of pendingSteps) {
-    const stepRunId = crypto.randomUUID();
-
-    try {
-      // Create issue for this step
-      const issueResult = await executor
-        .insert(issues)
-        .values({
-          id: crypto.randomUUID(),
-          companyId: run.companyId,
-          title: `${definition.name}: ${step.name}`,
-          description: step.description || "",
-          status: "todo",
-          originKind: "workflow_execution",
-          originId: runId,
-          assigneeAgentId: step.agentId,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .returning();
-
-      const issueId = issueResult[0]?.id;
-
-      // Update step run
-      await executor
-        .insert(workflowStepRuns)
-        .values({
-          id: stepRunId,
-          workflowRunId: runId,
-          stepId: step.id,
-          issueId: issueId || null,
-          status: "pending",
-        })
-        .onConflictDoNothing();
-
-      stepRuns.push({
-        id: stepRunId,
-        workflowRunId: runId,
-        stepId: step.id,
-        issueId: issueId || null,
-        status: "pending",
-        startedAt: null,
-        completedAt: null,
-      });
-    } catch (error) {
-      hasFailure = true;
-      // Continue to next step instead of failing immediately
-    }
-  }
-
-  // Update run status
-  const finalStatus = hasFailure ? "failed" : "completed";
-  await executor
-    .update(workflowRuns)
-    .set({
-      status: finalStatus,
-      completedAt: new Date(),
-    })
-    .where(eq(workflowRuns.id, runId));
-
-  return {
-    runId,
-    status: finalStatus,
-    completedAt: new Date(),
-    error: hasFailure ? "One or more steps failed" : undefined,
-    stepRuns: stepRuns.map((sr) => ({
-      ...sr,
-      status: sr.status as "pending" | "running" | "completed" | "failed" | "skipped",
-    })),
-  };
+  return syncWorkflowRunState(db, runId);
 }
 
 /**

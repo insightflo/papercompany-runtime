@@ -78,6 +78,7 @@ export function activityService(db: Db) {
           and(
             eq(heartbeatRuns.companyId, companyId),
             or(
+              eq(heartbeatRuns.issueId, issueId),
               sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
               sql`exists (
                 select 1
@@ -96,6 +97,7 @@ export function activityService(db: Db) {
       const run = await db
         .select({
           companyId: heartbeatRuns.companyId,
+          issueId: heartbeatRuns.issueId,
           contextSnapshot: heartbeatRuns.contextSnapshot,
         })
         .from(heartbeatRuns)
@@ -125,9 +127,10 @@ export function activityService(db: Db) {
 
       const context = run.contextSnapshot;
       const contextIssueId =
-        context && typeof context === "object" && typeof (context as Record<string, unknown>).issueId === "string"
+        run.issueId ??
+        ((context && typeof context === "object" && typeof (context as Record<string, unknown>).issueId === "string")
           ? ((context as Record<string, unknown>).issueId as string)
-          : null;
+          : null);
       if (!contextIssueId) return fromActivity;
       if (fromActivity.some((issue) => issue.issueId === contextIssueId)) return fromActivity;
 

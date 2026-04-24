@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
   agents,
   companies,
   createDb,
+  heartbeatRuns,
   issueComments,
   issueInboxArchives,
   issues,
+  srbIssuePairs,
+  srbLinks,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -39,6 +43,9 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueComments);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
+    await db.delete(srbIssuePairs);
+    await db.delete(srbLinks);
+    await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -312,5 +319,218 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       archivedIssueId,
       resurfacedIssueId,
     ]));
+  });
+
+  it("mirrors checkout and release status transitions for mirror_source_status pairs", async () => {
+    const sourceCompanyId = randomUUID();
+    const mirrorCompanyId = randomUUID();
+    const sourceAgentId = randomUUID();
+    const mirrorAgentId = randomUUID();
+    const linkId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const mirrorIssueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values([
+      {
+        id: sourceCompanyId,
+        name: "Source Co",
+        issuePrefix: `SC${sourceCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: mirrorCompanyId,
+        name: "Mirror Co",
+        issuePrefix: `MC${mirrorCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+
+    await db.insert(agents).values([
+      {
+        id: sourceAgentId,
+        companyId: sourceCompanyId,
+        name: "Source Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: mirrorAgentId,
+        companyId: mirrorCompanyId,
+        name: "Mirror Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(srbLinks).values({
+      id: linkId,
+      localCompanyId: sourceCompanyId,
+      remoteCompanyId: mirrorCompanyId,
+      remoteServerUrl: null,
+      direction: "two_way",
+      createdBy: "test",
+    });
+
+    await db.insert(issues).values([
+      {
+        id: sourceIssueId,
+        companyId: sourceCompanyId,
+        title: "Source issue",
+        status: "todo",
+      },
+      {
+        id: mirrorIssueId,
+        companyId: mirrorCompanyId,
+        title: "Mirror issue",
+        status: "todo",
+        assigneeAgentId: mirrorAgentId,
+      },
+    ]);
+
+    await db.insert(srbIssuePairs).values({
+      linkId,
+      sourceCompanyId,
+      sourceIssueId,
+      mirrorCompanyId,
+      mirrorIssueId,
+      statusSyncMode: "mirror_source_status",
+      createdBy: "test",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: sourceCompanyId,
+      agentId: sourceAgentId,
+      invocationSource: "on_demand",
+      status: "running",
+      contextSnapshot: {},
+    });
+
+    const checkedOut = await svc.checkout(sourceIssueId, sourceAgentId, ["todo"], runId);
+    expect(checkedOut?.status).toBe("in_progress");
+
+    const mirrorInProgress = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, mirrorIssueId))
+      .then((rows) => rows[0] ?? null);
+    expect(mirrorInProgress?.status).toBe("in_progress");
+
+    const released = await svc.release(sourceIssueId, sourceAgentId, runId);
+    expect(released?.status).toBe("todo");
+
+    const mirrorReleased = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, mirrorIssueId))
+      .then((rows) => rows[0] ?? null);
+    expect(mirrorReleased?.status).toBe("todo");
+  });
+});
+
+describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lock remediation", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-service-lock-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 60_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(srbIssuePairs);
+    await db.delete(srbLinks);
+    await db.delete(heartbeatRuns);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("repairs malformed same-run locks when executionRunId already matches the actor run", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "on_demand",
+      status: "running",
+      contextSnapshot: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Malformed same-run lock",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: runId,
+      executionLockedAt: new Date(),
+    });
+
+    const ownership = await svc.assertCheckoutOwner(issueId, agentId, runId);
+
+    expect(ownership).toEqual(expect.objectContaining({
+      id: issueId,
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      checkoutRunId: runId,
+      adoptedFromRunId: null,
+      repairedMalformedExecutionLock: true,
+    }));
+
+    const repaired = await db
+      .select({
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+
+    expect(repaired).toEqual({
+      checkoutRunId: runId,
+      executionRunId: runId,
+    });
   });
 });

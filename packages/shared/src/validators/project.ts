@@ -112,3 +112,15 @@ export const updateProjectSchema = z.object(projectFields).partial();
 export type UpdateProject = z.infer<typeof updateProjectSchema>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;
+
+export const createWorkContextSchema = createProjectSchema;
+export const updateWorkContextSchema = updateProjectSchema;
+export const createWorkContextSpaceSchema = createProjectWorkspaceSchema;
+export const updateWorkContextSpaceSchema = updateProjectWorkspaceSchema;
+export const workContextExecutionPolicySchema = projectExecutionWorkspacePolicySchema;
+
+export type CreateWorkContext = CreateProject;
+export type UpdateWorkContext = UpdateProject;
+export type CreateWorkContextSpace = CreateProjectWorkspace;
+export type UpdateWorkContextSpace = UpdateProjectWorkspace;
+export type WorkContextExecutionPolicy = ProjectExecutionWorkspacePolicy;

@@ -121,3 +121,11 @@ export interface RoutineListItem extends Routine {
   lastRun: RoutineRunSummary | null;
   activeIssue: RoutineIssueSummary | null;
 }
+
+export type RecurringProcedure = Routine;
+export type RecurringProcedureListItem = RoutineListItem;
+export type RecurringProcedureTrigger = RoutineTrigger;
+export type RecurringProcedureRun = RoutineRun;
+export type RecurringProcedureDetail = RoutineDetail;
+export type RecurringProcedureRunSummary = RoutineRunSummary;
+export type RecurringProcedureTriggerSecretMaterial = RoutineTriggerSecretMaterial;

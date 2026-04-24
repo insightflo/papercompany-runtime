@@ -70,6 +70,8 @@ export const queryKeys = {
   missions: {
     list: (companyId: string) => ["missions", companyId] as const,
     detail: (id: string) => ["missions", "detail", id] as const,
+    issues: (id: string) => ["missions", "detail", id, "issues"] as const,
+    workflowRuns: (id: string) => ["missions", "detail", id, "workflow-runs"] as const,
   },
   budgets: {
     overview: (companyId: string) => ["budgets", "overview", companyId] as const,

@@ -27,7 +27,7 @@ Don't use when:
 
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
-- instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to the run prompt
+- instructionsFilePath (string, optional): markdown instructions file path resolved from the effective cwd and prepended to the run prompt
 - promptTemplate (string, optional): run prompt template
 - model (string, optional): Gemini model id. Defaults to auto.
 - sandbox (boolean, optional): run in sandbox mode (default: false, passes --sandbox=none)

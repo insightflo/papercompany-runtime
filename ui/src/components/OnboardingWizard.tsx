@@ -42,7 +42,6 @@ import {
   Rocket,
   ArrowLeft,
   ArrowRight,
-  Terminal,
   Sparkles,
   MousePointer2,
   Check,
@@ -57,7 +56,6 @@ type AdapterType =
   | "codex_local"
   | "gemini_local"
   | "opencode_local"
-  | "pi_local"
   | "cursor"
   | "http"
   | "openclaw_gateway";
@@ -66,7 +64,7 @@ const DEFAULT_TASK_DESCRIPTION = `You are the CEO. You set the direction for the
 
 - hire a founding engineer
 - write a hiring plan
-- break the roadmap into concrete tasks and start delegating work`;
+- break the roadmap into concrete work items and start delegating work`;
 
 export function OnboardingWizard() {
   const { onboardingOpen, onboardingOptions, closeOnboarding } = useDialog();
@@ -195,7 +193,6 @@ export function OnboardingWizard() {
     adapterType === "codex_local" ||
     adapterType === "gemini_local" ||
     adapterType === "opencode_local" ||
-    adapterType === "pi_local" ||
     adapterType === "cursor";
   const effectiveAdapterCommand =
     command.trim() ||
@@ -203,8 +200,6 @@ export function OnboardingWizard() {
       ? "codex"
       : adapterType === "gemini_local"
         ? "gemini"
-      : adapterType === "pi_local"
-      ? "pi"
       : adapterType === "cursor"
       ? "agent"
       : adapterType === "opencode_local"
@@ -548,7 +543,7 @@ export function OnboardingWizard() {
           : `/issues/${issueRef}`
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create task");
+      setError(err instanceof Error ? err.message : "Failed to create work item");
     } finally {
       setLoading(false);
     }
@@ -605,7 +600,7 @@ export function OnboardingWizard() {
                   [
                     { step: 1 as Step, label: "Company", icon: Building2 },
                     { step: 2 as Step, label: "Agent", icon: Bot },
-                    { step: 3 as Step, label: "Task", icon: ListTodo },
+                    { step: 3 as Step, label: "Work", icon: ListTodo },
                     { step: 4 as Step, label: "Launch", icon: Rocket }
                   ] as const
                 ).map(({ step: s, label, icon: Icon }) => (
@@ -689,7 +684,7 @@ export function OnboardingWizard() {
                     <div>
                       <h3 className="font-medium">Create your first agent</h3>
                       <p className="text-xs text-muted-foreground">
-                        Choose how this agent will run tasks.
+                          Choose how this agent will run work.
                       </p>
                     </div>
                   </div>
@@ -790,12 +785,6 @@ export function OnboardingWizard() {
                             desc: "Local multi-provider agent"
                           },
                           {
-                            value: "pi_local" as const,
-                            label: "Pi",
-                            icon: Terminal,
-                            desc: "Local Pi agent"
-                          },
-                          {
                             value: "cursor" as const,
                             label: "Cursor",
                             icon: MousePointer2,
@@ -861,7 +850,6 @@ export function OnboardingWizard() {
                     adapterType === "codex_local" ||
                     adapterType === "gemini_local" ||
                     adapterType === "opencode_local" ||
-                    adapterType === "pi_local" ||
                     adapterType === "cursor") && (
                     <div className="space-y-3">
                       <div>
@@ -1114,14 +1102,14 @@ export function OnboardingWizard() {
                     <div>
                       <h3 className="font-medium">Give it something to do</h3>
                       <p className="text-xs text-muted-foreground">
-                        Give your agent a small task to start with — a bug fix,
+                        Give your agent a small piece of work to start with - a bug fix,
                         a research question, writing a script.
                       </p>
                     </div>
                   </div>
                   <div>
                     <label className="text-xs text-muted-foreground mb-1 block">
-                      Task title
+                      Work item title
                     </label>
                     <input
                       className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
@@ -1156,7 +1144,7 @@ export function OnboardingWizard() {
                       <h3 className="font-medium">Ready to launch</h3>
                       <p className="text-xs text-muted-foreground">
                         Everything is set up. Launching now will create the
-                        starter task, wake the agent, and open the issue.
+                        starter work item, wake the agent, and open it.
                       </p>
                     </div>
                   </div>
@@ -1189,7 +1177,7 @@ export function OnboardingWizard() {
                         <p className="text-sm font-medium truncate">
                           {taskTitle}
                         </p>
-                        <p className="text-xs text-muted-foreground">Task</p>
+                        <p className="text-xs text-muted-foreground">Work Item</p>
                       </div>
                       <Check className="h-4 w-4 text-green-500 shrink-0" />
                     </div>
@@ -1271,7 +1259,7 @@ export function OnboardingWizard() {
                       ) : (
                         <ArrowRight className="h-3.5 w-3.5 mr-1" />
                       )}
-                      {loading ? "Creating..." : "Create & Open Issue"}
+                      {loading ? "Creating..." : "Create & Open Work Item"}
                     </Button>
                   )}
                 </div>

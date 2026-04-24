@@ -134,7 +134,7 @@ function CloudAccessGate() {
 function boardRoutes() {
   return (
     <>
-      <Route index element={<Navigate to="dashboard" replace />} />
+      <Route index element={<Navigate to="missions" replace />} />
       <Route path="dashboard" element={<Dashboard />} />
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
@@ -222,7 +222,7 @@ function OnboardingRoutePage() {
       ? "Create another company"
       : "Create your first company";
   const description = matchedCompany
-    ? "Run onboarding again to add an agent and a starter task for this company."
+    ? "Run onboarding again to add an agent and a starter work item for this company."
     : companies.length > 0
       ? "Run onboarding again to create another company and seed its first agent."
       : "Get started by creating a company and your first agent.";
@@ -269,7 +269,7 @@ function CompanyRootRedirect() {
     return <NoCompaniesStartPage />;
   }
 
-  return <Navigate to={`/${targetCompany.issuePrefix}/dashboard`} replace />;
+  return <Navigate to={`/${targetCompany.issuePrefix}/missions`} replace />;
 }
 
 function UnprefixedBoardRedirect() {

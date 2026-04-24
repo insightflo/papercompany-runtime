@@ -275,6 +275,48 @@ describe("heartbeat orphaned process recovery", () => {
     expect(issue?.checkoutRunId).toBe(runId);
   });
 
+  it("preserves issue linkage from heartbeatRuns.issueId even when the original context snapshot omits issueId", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+      includeIssue: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Recover local adapter after lost process",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      issueNumber: 1,
+      identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ issueId })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const retryRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId))
+      .then((rows) => rows[0] ?? null);
+
+    expect(retryRun?.issueId).toBe(issueId);
+    expect(retryRun?.contextSnapshot).toMatchObject({
+      issueId,
+      retryOfRunId: runId,
+      wakeReason: "process_lost_retry",
+    });
+  });
+
   it("does not queue a second retry after the first process-loss retry was already used", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       processPid: 999_999_999,

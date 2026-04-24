@@ -2,6 +2,7 @@ import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   createRoutineSchema,
+  createRecurringProcedureSchema,
   createRoutineTriggerSchema,
   rotateRoutineTriggerSecretSchema,
   runRoutineSchema,
@@ -56,7 +57,47 @@ export function routineRoutes(db: Db) {
     res.json(result);
   });
 
+  router.get("/companies/:companyId/recurring-procedures", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const result = await svc.list(companyId);
+    res.json(
+      result.map((routine) => ({
+        ...routine,
+        workContextId: routine.projectId,
+        parentWorkItemId: routine.parentIssueId,
+      })),
+    );
+  });
+
   router.post("/companies/:companyId/routines", validate(createRoutineSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await assertBoardCanAssignTasks(req, companyId);
+    assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);
+    const created = await svc.create(companyId, req.body, {
+      agentId: req.actor.type === "agent" ? req.actor.agentId : null,
+      userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
+    });
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "routine.created",
+      entityType: "routine",
+      entityId: created.id,
+      details: { title: created.title, assigneeAgentId: created.assigneeAgentId },
+    });
+    res.status(201).json({
+      ...created,
+      workContextId: created.projectId,
+      parentWorkItemId: created.parentIssueId,
+    });
+  });
+
+  router.post("/companies/:companyId/recurring-procedures", validate(createRecurringProcedureSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertBoardCanAssignTasks(req, companyId);
     assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);

@@ -34,11 +34,13 @@ import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { llmRoutes } from "./routes/llms.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
+import { assertCompanyAccess } from "./routes/authz.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
+import { executionWorkspaceService, issueService } from "./services/index.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
@@ -64,12 +66,72 @@ import { startAlertMonitor } from "./channel/telegram/alerts.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
+type ApiAliasSurface = "work-items" | "work-contexts" | "execution-contexts" | "recurring-procedures";
 
 export function resolveViteHmrPort(serverPort: number): number {
   if (serverPort <= 55_535) {
     return serverPort + 10_000;
   }
   return Math.max(1_024, serverPort - 10_000);
+}
+
+export function resolveUiRoot(baseDir = path.dirname(fileURLToPath(import.meta.url)), cwd = process.cwd()): string {
+  const candidates = [
+    path.resolve(baseDir, "../../ui"),
+    path.resolve(baseDir, "../ui"),
+    path.resolve(cwd, "ui"),
+  ];
+
+  return candidates.find((candidate) => fs.existsSync(path.join(candidate, "index.html"))) ?? candidates[0]!;
+}
+
+function addAliasFields(value: unknown, pairs: Array<[string, string]>): unknown {
+  if (Array.isArray(value)) return value.map((entry) => addAliasFields(entry, pairs));
+  if (!value || typeof value !== "object") return value;
+
+  const source = value as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+  for (const [key, fieldValue] of Object.entries(source)) {
+    next[key] = addAliasFields(fieldValue, pairs);
+  }
+  for (const [fromKey, toKey] of pairs) {
+    if (source[fromKey] !== undefined && next[toKey] === undefined) {
+      next[toKey] = next[fromKey];
+    }
+  }
+  return next;
+}
+
+function transformAliasResponse(alias: ApiAliasSurface, body: unknown): unknown {
+  switch (alias) {
+    case "work-items":
+      return addAliasFields(body, [
+        ["projectId", "workContextId"],
+        ["projectWorkspaceId", "workContextSpaceId"],
+        ["executionWorkspaceId", "executionContextId"],
+        ["parentId", "parentWorkItemId"],
+        ["issueId", "workItemId"],
+        ["issueNumber", "workItemNumber"],
+        ["linkedIssueId", "linkedWorkItemId"],
+      ]);
+    case "work-contexts":
+      return addAliasFields(body, [["projectId", "workContextId"]]);
+    case "execution-contexts":
+      return addAliasFields(body, [
+        ["projectId", "workContextId"],
+        ["projectWorkspaceId", "workContextSpaceId"],
+        ["sourceIssueId", "sourceWorkItemId"],
+      ]);
+    case "recurring-procedures":
+      return addAliasFields(body, [
+        ["projectId", "workContextId"],
+        ["parentIssueId", "parentWorkItemId"],
+        ["linkedIssueId", "linkedWorkItemId"],
+        ["activeIssue", "activeWorkItem"],
+        ["parentIssue", "parentWorkItem"],
+        ["linkedIssue", "linkedWorkItem"],
+      ]);
+  }
 }
 
 export async function createApp(
@@ -142,6 +204,95 @@ export async function createApp(
 
   // Mount API routes
   const api = Router();
+  const issuesSvc = issueService(db);
+  const executionWorkspacesSvc = executionWorkspaceService(db);
+  api.get("/companies/:companyId/work-items", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const assigneeUserFilterRaw = req.query.assigneeUserId as string | undefined;
+    const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
+    const inboxArchivedByUserFilterRaw = req.query.inboxArchivedByUserId as string | undefined;
+    const unreadForUserFilterRaw = req.query.unreadForUserId as string | undefined;
+    const assigneeUserId = assigneeUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : assigneeUserFilterRaw;
+    const touchedByUserId = touchedByUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : touchedByUserFilterRaw;
+    const inboxArchivedByUserId = inboxArchivedByUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : inboxArchivedByUserFilterRaw;
+    const unreadForUserId = unreadForUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : unreadForUserFilterRaw;
+    const result = await issuesSvc.list(companyId, {
+      status: req.query.status as string | undefined,
+      assigneeAgentId: req.query.assigneeAgentId as string | undefined,
+      participantAgentId: req.query.participantAgentId as string | undefined,
+      assigneeUserId,
+      touchedByUserId,
+      inboxArchivedByUserId,
+      unreadForUserId,
+      projectId: (req.query.projectId as string | undefined) ?? (req.query.workContextId as string | undefined),
+      parentId: (req.query.parentId as string | undefined) ?? (req.query.parentWorkItemId as string | undefined),
+      labelId: req.query.labelId as string | undefined,
+      originKind: req.query.originKind as string | undefined,
+      originId: req.query.originId as string | undefined,
+      includeRoutineExecutions:
+        req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
+      q: req.query.q as string | undefined,
+    });
+    res.json(
+      result.map((issue) => ({
+        ...issue,
+        workContextId: issue.projectId,
+        workContextSpaceId: issue.projectWorkspaceId,
+        parentWorkItemId: issue.parentId,
+        executionContextId: issue.executionWorkspaceId,
+        workItemNumber: issue.issueNumber,
+      })),
+    );
+  });
+  api.get("/companies/:companyId/execution-contexts", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const workspaces = await executionWorkspacesSvc.list(companyId, {
+      projectId: (req.query.projectId as string | undefined) ?? (req.query.workContextId as string | undefined),
+      projectWorkspaceId:
+        (req.query.projectWorkspaceId as string | undefined) ?? (req.query.workContextSpaceId as string | undefined),
+      issueId: (req.query.issueId as string | undefined) ?? (req.query.workItemId as string | undefined),
+      status: req.query.status as string | undefined,
+      reuseEligible: req.query.reuseEligible === "true",
+    });
+    res.json(
+      workspaces.map((workspace) => ({
+        ...workspace,
+        workContextId: workspace.projectId,
+        workContextSpaceId: workspace.projectWorkspaceId,
+        sourceWorkItemId: workspace.sourceIssueId,
+      })),
+    );
+  });
+  api.use((req, res, next) => {
+    const rewriteRules: Array<{ alias: ApiAliasSurface; pattern: RegExp; replacement: string }> = [
+      { alias: "work-items", pattern: /^\/companies\/([^/]+)\/work-items(?=\?|$)/, replacement: "/companies/$1/issues" },
+      { alias: "work-items", pattern: /^\/companies\/([^/]+)\/work-items\//, replacement: "/companies/$1/issues/" },
+      { alias: "work-items", pattern: /^\/work-items\//, replacement: "/issues/" },
+      { alias: "work-contexts", pattern: /^\/companies\/([^/]+)\/work-contexts(?=\?|$)/, replacement: "/companies/$1/projects" },
+      { alias: "work-contexts", pattern: /^\/companies\/([^/]+)\/work-contexts\//, replacement: "/companies/$1/projects/" },
+      { alias: "work-contexts", pattern: /^\/work-contexts\//, replacement: "/projects/" },
+      { alias: "execution-contexts", pattern: /^\/companies\/([^/]+)\/execution-contexts(?=\?|$)/, replacement: "/companies/$1/execution-workspaces" },
+      { alias: "execution-contexts", pattern: /^\/companies\/([^/]+)\/execution-contexts\//, replacement: "/companies/$1/execution-workspaces/" },
+      { alias: "execution-contexts", pattern: /^\/execution-contexts\//, replacement: "/execution-workspaces/" },
+      { alias: "recurring-procedures", pattern: /^\/companies\/([^/]+)\/recurring-procedures(?=\?|$)/, replacement: "/companies/$1/routines" },
+      { alias: "recurring-procedures", pattern: /^\/companies\/([^/]+)\/recurring-procedures\//, replacement: "/companies/$1/routines/" },
+      { alias: "recurring-procedures", pattern: /^\/recurring-procedures\//, replacement: "/routines/" },
+      { alias: "recurring-procedures", pattern: /^\/recurring-procedure-triggers(?=\/|\?|$)/, replacement: "/routine-triggers" },
+    ];
+
+    for (const rule of rewriteRules) {
+      if (rule.pattern.test(req.url)) {
+        const originalJson = res.json.bind(res);
+        res.json = ((body: unknown) => originalJson(transformAliasResponse(rule.alias, body))) as typeof res.json;
+        req.url = req.url.replace(rule.pattern, rule.replacement);
+        (req as { _parsedUrl?: unknown })._parsedUrl = undefined;
+        break;
+      }
+    }
+    next();
+  });
   api.use(boardMutationGuard());
   api.use(
     "/health",
@@ -153,12 +304,12 @@ export async function createApp(
     }),
   );
   api.use("/metrics", metricsRoutes());
+  api.use(issueRoutes(db, opts.storageService));
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(companySkillRoutes(db));
   api.use(agentRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
-  api.use(issueRoutes(db, opts.storageService));
   api.use(routineRoutes(db));
   api.use(schedulerRoutes(db));
   api.use(missionRoutes(db));
@@ -273,7 +424,7 @@ export async function createApp(
   }
 
   if (opts.uiMode === "vite-dev") {
-    const uiRoot = path.resolve(__dirname, "../../ui");
+    const uiRoot = resolveUiRoot(__dirname);
     const hmrPort = resolveViteHmrPort(opts.serverPort);
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
@@ -310,11 +461,9 @@ export async function createApp(
   const scheduler = createScheduler(db, {
     heartbeat: {
       enqueueWakeup: (agentId, opts) => heartbeat.wakeup(agentId, {
-        source: "automation" as const,
-        payload: {
-          triggerDetail: opts?.triggerDetail ?? null,
-          missionId: opts?.missionId ?? null,
-        },
+        source: opts?.source === "scheduler" ? "scheduler" : "automation",
+        triggerDetail: opts?.triggerDetail ?? null,
+        contextSnapshot: opts?.missionId ? { missionId: opts.missionId } : undefined,
         reason: opts?.reason ?? null,
       }),
     },

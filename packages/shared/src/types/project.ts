@@ -70,3 +70,9 @@ export interface Project {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type WorkContext = Project;
+export type WorkContextSpace = ProjectWorkspace;
+export type WorkContextGoalRef = ProjectGoalRef;
+export type WorkContextCodebase = ProjectCodebase;
+export type WorkContextCodebaseOrigin = ProjectCodebaseOrigin;

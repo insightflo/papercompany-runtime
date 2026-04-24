@@ -2,6 +2,23 @@
 
 This project can run fully in local dev without setting up PostgreSQL manually.
 
+## Repo Content Policy
+
+This repository follows the same repo-as-distribution model as upstream Paperclip: the GitHub repository itself is the shipped unit.
+
+Use `.gitignore` only for local-only state, generated artifacts, caches, logs, and machine-specific outputs.
+
+| Bucket | What belongs here | Examples / notes |
+|---|---|---|
+| Track in repo / included in GitHub distribution | Source and repository metadata that should ship with the repo | `.github/`, application code, package manifests, CI, release automation, checked-in docs |
+| Track in repo but not required at runtime | Guidance and standards that shape contributors, not the running app | `doc/` |
+| Local-only / always ignore | Developer machine state and generated outputs | workspace-root `.claude/settings.local.json`, `.claude/worktrees/`, `.claude/memory/`, `.claude/memento/`, `.mintlify/`, `.paperclip-worktrees/`, `data/`, logs, coverage, build output, temp files |
+| Case-by-case / policy decision needed | Mixed directories that can contain both tracked instructions and local state | workspace-root `.claude/` and `.sisyphus/` remain shared across `papercompany-runtime/` and `papercompany-artifacts/`. Track intentional shared instruction content there, ignore only the local/generated subpaths listed above. |
+
+Rule of thumb: if a file helps everyone who clones the repo, track it. If it is only useful on one machine or can be regenerated, ignore it.
+
+In the split workspace layout, project-process artifacts such as `TASKS.md`, `management/`, `doc/plans/`, `doc/CLIPHUB.md`, `design/system/`, and `database/standards.md` live in the sibling repo at `../papercompany-artifacts/`.
+
 ## Deployment Modes
 
 For mode definitions and intended CLI behavior, see `doc/DEPLOYMENT-MODES.md`.
@@ -34,7 +51,7 @@ pnpm dev
 
 This starts:
 
-- API server: `http://localhost:3100`
+- API server: `http://localhost:3200`
 - UI: served by the API server in dev middleware mode (same origin as API)
 
 `pnpm dev` runs the server in watch mode and restarts on changes from workspace packages (including adapter packages). Use `pnpm dev:once` to run without file watching.

@@ -20,7 +20,7 @@ Don't use when:
 
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
-- instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt
+- instructionsFilePath (string, optional): markdown instructions file path resolved from the effective cwd and appended to the system prompt via --append-system-prompt
 - promptTemplate (string, optional): user prompt template passed via -p flag
 - model (string, required): Pi model id in provider/model format (for example xai/grok-4)
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)

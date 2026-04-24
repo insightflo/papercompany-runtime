@@ -238,7 +238,12 @@ export const kbStore = {
       })
       .from(knowledgeBases)
       .innerJoin(agentKbGrants, eq(agentKbGrants.kbId, knowledgeBases.id))
-      .where(eq(agentKbGrants.agentId, agentId))
+      .where(
+        and(
+          eq(agentKbGrants.agentId, agentId),
+          eq(knowledgeBases.companyId, companyId),
+        ),
+      )
       .orderBy(desc(knowledgeBases.createdAt));
 
     return results.map((kb) => ({

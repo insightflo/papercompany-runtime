@@ -92,6 +92,7 @@ export function Dashboard() {
   const recentActivity = useMemo(() => (activity ?? []).slice(0, 10), [activity]);
 
   useEffect(() => {
+    void selectedCompanyId;
     for (const timer of activityAnimationTimersRef.current) {
       window.clearTimeout(timer);
     }
@@ -176,7 +177,7 @@ export function Dashboard() {
       return (
         <EmptyState
           icon={LayoutDashboard}
-          message="Welcome to Paperclip. Set up your first company and agent to get started."
+          message="Welcome to papercompany. Set up your first company and agent to get started."
           action="Get Started"
           onAction={openOnboarding}
         />
@@ -206,6 +207,7 @@ export function Dashboard() {
             </p>
           </div>
           <button
+            type="button"
             onClick={() => openOnboarding({ initialStep: 2, companyId: selectedCompanyId! })}
             className="text-sm font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline underline-offset-2 shrink-0"
           >
@@ -227,7 +229,7 @@ export function Dashboard() {
                     {data.budgets.activeIncidents} active budget incident{data.budgets.activeIncidents === 1 ? "" : "s"}
                   </p>
                   <p className="text-xs text-red-100/70">
-                    {data.budgets.pausedAgents} agents paused · {data.budgets.pausedProjects} projects paused · {data.budgets.pendingApprovals} pending budget approvals
+                    {data.budgets.pausedAgents} agents paused · {data.budgets.pausedProjects} work contexts paused · {data.budgets.pendingApprovals} pending budget approvals
                   </p>
                 </div>
               </div>
@@ -254,7 +256,7 @@ export function Dashboard() {
             <MetricCard
               icon={CircleDot}
               value={data.tasks.inProgress}
-              label="Tasks In Progress"
+              label="Work In Progress"
               to="/issues"
               description={
                 <span>
@@ -306,10 +308,10 @@ export function Dashboard() {
             <ChartCard title="Run Activity" subtitle="Last 14 days">
               <RunActivityChart runs={runs ?? []} />
             </ChartCard>
-            <ChartCard title="Issues by Priority" subtitle="Last 14 days">
+            <ChartCard title="Work by Priority" subtitle="Last 14 days">
               <PriorityChart issues={issues ?? []} />
             </ChartCard>
-            <ChartCard title="Issues by Status" subtitle="Last 14 days">
+            <ChartCard title="Work by Status" subtitle="Last 14 days">
               <IssueStatusChart issues={issues ?? []} />
             </ChartCard>
             <ChartCard title="Success Rate" subtitle="Last 14 days">
@@ -373,14 +375,13 @@ export function Dashboard() {
               </div>
             )}
 
-            {/* Recent Tasks */}
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
-                Recent Tasks
+                  Recent Work
               </h3>
               {recentIssues.length === 0 ? (
                 <div className="border border-border p-4">
-                  <p className="text-sm text-muted-foreground">No tasks yet.</p>
+                  <p className="text-sm text-muted-foreground">No work yet.</p>
                 </div>
               ) : (
                 <div className="border border-border divide-y divide-border overflow-hidden">

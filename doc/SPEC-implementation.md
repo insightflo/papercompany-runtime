@@ -65,6 +65,7 @@ V1 implementation extends this baseline into a company-centric, governance-aware
 - Atomic task checkout and explicit task status transitions
 - Board approvals for hires and CEO strategy proposal
 - Heartbeat invocation, status tracking, and cancellation
+- Server-computed step input manifest attached to heartbeat adapter context before execution
 - Cost event ingestion and rollups (agent/task/project/company)
 - Budget settings and hard-stop enforcement
 - Board web UI for dashboard, org chart, tasks, agents, approvals, costs

@@ -71,9 +71,29 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
       <div className="space-y-1">
         {(runtimeState?.sessionDisplayId ?? runtimeState?.sessionId) && (
           <PropertyRow label="Session">
-            <span className="text-xs font-mono">
-              {String(runtimeState.sessionDisplayId ?? runtimeState.sessionId).slice(0, 12)}...
-            </span>
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <span className="text-xs font-mono">
+                {String(runtimeState.sessionDisplayId ?? runtimeState.sessionId).slice(0, 12)}...
+              </span>
+              {runtimeState?.sessionAuthority && runtimeState.sessionAuthority !== "none" ? (
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  {runtimeState.sessionAuthority.replace("_", " ")}
+                </span>
+              ) : null}
+            </div>
+          </PropertyRow>
+        )}
+        {runtimeState?.latestMissionSession && (
+          <PropertyRow label="Mission">
+            <div className="flex flex-wrap items-center gap-2 min-w-0 text-xs">
+              <span className="font-mono">{runtimeState.latestMissionSession.missionId.slice(0, 8)}...</span>
+              <span className="text-muted-foreground">
+                runs {runtimeState.latestMissionSession.runCount}
+                {typeof runtimeState.activeMissionSessionCount === "number"
+                  ? `, active ${runtimeState.activeMissionSessionCount}`
+                  : ""}
+              </span>
+            </div>
           </PropertyRow>
         )}
         {runtimeState?.lastError && (

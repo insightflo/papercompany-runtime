@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
   asString,
@@ -13,12 +13,10 @@ import {
   parseJson,
   buildPaperclipEnv,
   readPaperclipRuntimeSkillEntries,
-  joinPromptSections,
   redactEnvForLogs,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
-  renderTemplate,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
@@ -316,12 +314,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const maxTurns = asNumber(config.maxTurnsPerRun, 0);
   const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, false);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-  const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
-  const commandNotes = instructionsFilePath
-    ? [
-        `Injected agent instructions via --append-system-prompt-file ${instructionsFilePath} (with path directive appended)`,
-      ]
-    : [];
 
   const runtimeConfig = await buildClaudeRuntimeConfig({
     runId,
@@ -348,24 +340,33 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const billingType = resolveClaudeBillingType(effectiveEnv);
   const skillsDir = await buildSkillsDir(config);
+  const resolvedInstructionsFilePath = instructionsFilePath
+    ? path.resolve(cwd, instructionsFilePath)
+    : "";
+  const instructionsFileDir = resolvedInstructionsFilePath ? `${path.dirname(resolvedInstructionsFilePath)}/` : "";
+  const commandNotes = resolvedInstructionsFilePath
+    ? [
+        `Injected agent instructions via --append-system-prompt-file ${resolvedInstructionsFilePath} (with path directive appended)`,
+      ]
+    : [];
 
   // When instructionsFilePath is configured, create a combined temp file that
   // includes both the file content and the path directive, so we only need
   // --append-system-prompt-file (Claude CLI forbids using both flags together).
-  let effectiveInstructionsFilePath: string | undefined = instructionsFilePath;
-  if (instructionsFilePath) {
+  let effectiveInstructionsFilePath: string | undefined = resolvedInstructionsFilePath || undefined;
+  if (resolvedInstructionsFilePath) {
     try {
-      const instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
-      const pathDirective = `\nThe above agent instructions were loaded from ${instructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}.`;
+      const instructionsContent = await fs.readFile(resolvedInstructionsFilePath, "utf-8");
+      const pathDirective = `\nThe above agent instructions were loaded from ${resolvedInstructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}.`;
       const combinedPath = path.join(skillsDir, "agent-instructions.md");
       await fs.writeFile(combinedPath, instructionsContent + pathDirective, "utf-8");
       effectiveInstructionsFilePath = combinedPath;
-      await onLog("stderr", `[paperclip] Loaded agent instructions file: ${instructionsFilePath}\n`);
+      await onLog("stderr", `[paperclip] Loaded agent instructions file: ${resolvedInstructionsFilePath}\n`);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stderr",
-        `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
+        `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
       );
       effectiveInstructionsFilePath = undefined;
     }
@@ -399,16 +400,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     !sessionId && bootstrapPromptTemplate.trim().length > 0
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
-  const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const runtimeBrief = buildPaperclipRuntimeBrief(context);
   const prompt = joinPromptSections([
     renderedBootstrapPrompt,
-    sessionHandoffNote,
+    runtimeBrief,
     renderedPrompt,
   ]);
   const promptMetrics = {
     promptChars: prompt.length,
     bootstrapPromptChars: renderedBootstrapPrompt.length,
-    sessionHandoffChars: sessionHandoffNote.length,
+    sessionHandoffChars: runtimeBrief.length,
     heartbeatPromptChars: renderedPrompt.length,
   };
 
@@ -466,6 +467,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       stdin: prompt,
       timeoutSec,
       graceSec,
+      fatalOnLogError: true,
       onSpawn,
       onLog,
     });

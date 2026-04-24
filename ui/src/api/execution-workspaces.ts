@@ -1,4 +1,4 @@
-import type { ExecutionWorkspace } from "@paperclipai/shared";
+import type { ExecutionContext, ExecutionWorkspace } from "@paperclipai/shared";
 import { api } from "./client";
 
 export const executionWorkspacesApi = {
@@ -23,4 +23,29 @@ export const executionWorkspacesApi = {
   },
   get: (id: string) => api.get<ExecutionWorkspace>(`/execution-workspaces/${id}`),
   update: (id: string, data: Record<string, unknown>) => api.patch<ExecutionWorkspace>(`/execution-workspaces/${id}`, data),
+};
+
+export const executionContextsApi = {
+  list: (
+    companyId: string,
+    filters?: {
+      workContextId?: string;
+      workContextSpaceId?: string;
+      workItemId?: string;
+      status?: string;
+      reuseEligible?: boolean;
+    },
+  ) =>
+    api.get<ExecutionContext[]>(`/companies/${companyId}/execution-contexts${filters ? (() => {
+      const params = new URLSearchParams();
+      if (filters.workContextId) params.set("workContextId", filters.workContextId);
+      if (filters.workContextSpaceId) params.set("workContextSpaceId", filters.workContextSpaceId);
+      if (filters.workItemId) params.set("workItemId", filters.workItemId);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.reuseEligible) params.set("reuseEligible", "true");
+      const qs = params.toString();
+      return qs ? `?${qs}` : "";
+    })() : ""}`),
+  get: (executionContextId: string) => api.get<ExecutionContext>(`/execution-contexts/${executionContextId}`),
+  update: (executionContextId: string, data: Record<string, unknown>) => api.patch<ExecutionContext>(`/execution-contexts/${executionContextId}`, data),
 };

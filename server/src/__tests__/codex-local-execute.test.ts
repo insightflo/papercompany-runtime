@@ -288,6 +288,79 @@ describe("codex execute", () => {
     }
   });
 
+  it("injects the shared runtime brief instead of raw handoff markdown", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-runtime-brief-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    try {
+      const result = await execute({
+        runId: "run-runtime-brief",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {
+          paperclipStepInputManifest: {
+            version: 1,
+            taskKey: "issue:123",
+            issueId: "issue-1",
+            projectId: null,
+            allowedContextKeys: ["issueId", "paperclipWorkspace"],
+            guardrails: { broadScanAllowed: false },
+            inputs: {
+              workspace: { available: true, source: "project_primary", workspaceId: "ws-1", projectId: null },
+              workspaceHints: { available: false, count: 0 },
+              runtimeServiceIntents: { available: false, count: 0 },
+              runtimeServices: { available: false, count: 0, primaryUrl: null },
+              sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
+            },
+          },
+          paperclipSessionHandoff: {
+            version: 1,
+            previousSessionId: "sess-1",
+            previousRunId: "run-prev",
+            issueId: "issue-1",
+            rotationReason: "budget",
+            lastRunSummaryText: "Last run summarized the issue state",
+          },
+          paperclipSessionHandoffMarkdown: "# raw handoff markdown should not appear",
+        },
+        authToken: undefined,
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.prompt).toContain("Paperclip runtime brief:");
+      expect(capture.prompt).toContain("Task key: issue:123");
+      expect(capture.prompt).toContain("Previous session: sess-1");
+      expect(capture.prompt).not.toContain("# raw handoff markdown should not appear");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("respects an explicit CODEX_HOME config override even in worktree mode", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-explicit-"));
     const workspace = path.join(root, "workspace");

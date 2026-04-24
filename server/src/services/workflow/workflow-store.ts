@@ -8,7 +8,12 @@
 import type { Db } from "@paperclipai/db";
 import { workflowDefinitions, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
 import { eq, and, desc, sql } from "drizzle-orm";
-import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "./types.js";
+import type {
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowStepRun,
+  WorkflowStepExecutionContract,
+} from "./types.js";
 import type { CreateWorkflowDefinitionInput, CreateWorkflowRunInput } from "./types.js";
 import type { WorkflowStep } from "./dag-engine.js";
 
@@ -195,6 +200,43 @@ export async function listWorkflowStepRuns(
     startedAt: sr.startedAt,
     completedAt: sr.completedAt,
   }));
+}
+
+export async function getWorkflowStepExecutionContractForIssue(
+  db: Db,
+  issueId: string,
+): Promise<WorkflowStepExecutionContract | null> {
+  const result = await db
+    .select({
+      stepRun: workflowStepRuns,
+      run: workflowRuns,
+      definition: workflowDefinitions,
+    })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+    .where(eq(workflowStepRuns.issueId, issueId))
+    .limit(1);
+
+  const row = result[0];
+  if (!row) return null;
+
+  const steps = (row.definition.stepsJson as WorkflowStep[]) ?? [];
+  const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+
+  return {
+    workflowRunId: row.run.id,
+    workflowId: row.run.workflowId,
+    missionId: row.run.missionId,
+    stepId: row.stepRun.stepId,
+    stepName: step?.name ?? row.stepRun.stepId,
+    toolNames: Array.isArray(step?.toolNames)
+      ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [],
+    knowledgeBaseIds: Array.isArray(step?.knowledgeBaseIds)
+      ? step.knowledgeBaseIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [],
+  };
 }
 
 /**

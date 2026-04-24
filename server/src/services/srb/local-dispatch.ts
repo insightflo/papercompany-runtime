@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { createSRBRouter, type SRBRoutingInput } from "./router.js";
-import { createSrbInboundHandler } from "./inbound.js";
+import { heartbeatService } from "../heartbeat.js";
+import { applySrbInboundReceiveSideEffects, createSrbInboundHandler } from "./inbound.js";
 
 export interface SRBLocalDispatchResult {
   path: "local";
@@ -13,6 +14,7 @@ export interface SRBLocalDispatchResult {
 export function createLocalDispatch(db: Db) {
   const router = createSRBRouter(db);
   const inbound = createSrbInboundHandler(db);
+  const heartbeat = heartbeatService(db);
 
   return {
     async dispatch(input: SRBRoutingInput): Promise<SRBLocalDispatchResult> {
@@ -31,9 +33,18 @@ export function createLocalDispatch(db: Db) {
         })
       );
 
+      await applySrbInboundReceiveSideEffects({
+        db,
+        heartbeat,
+        postCommit: result.postCommit,
+      });
+
       return {
         path: "local",
-        ...result,
+        deliveryId: result.deliveryId,
+        issueId: result.issueId,
+        issueIdentifier: result.issueIdentifier,
+        status: result.status,
       };
     },
   };

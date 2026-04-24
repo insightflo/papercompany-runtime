@@ -7,6 +7,7 @@ import {
   formatRuntimeWorkspaceWarningLog,
   prioritizeProjectWorkspaceCandidatesForRun,
   parseSessionCompactionPolicy,
+  resolveMissionSessionAuthorityDecision,
   resolveRuntimeSessionParamsForWorkspace,
   shouldResetTaskSessionForWake,
   type ResolvedWorkspaceForRun,
@@ -181,6 +182,71 @@ describe("shouldResetTaskSessionForWake", () => {
         wakeTriggerDetail: "callback",
       }),
     ).toBe(false);
+  });
+});
+
+describe("resolveMissionSessionAuthorityDecision", () => {
+  it("makes mission_sessions the default authority whenever mission scope is known", () => {
+    expect(
+      resolveMissionSessionAuthorityDecision({
+        missionId: "mission-1",
+        missionSessionId: "mission-session-1",
+        taskSessionDisplayId: "task-session-1",
+        taskSessionLegacySessionId: "legacy-task-session-1",
+        runtimeSessionId: "runtime-session-1",
+      }),
+    ).toEqual({
+      missionKnown: true,
+      defaultAuthority: "mission_session",
+      compatibilitySeedSessionId: "task-session-1",
+      preferredSessionId: "mission-session-1",
+    });
+  });
+
+  it("keeps task-session data as explicit compatibility seed when mission scope is known but binding is empty", () => {
+    expect(
+      resolveMissionSessionAuthorityDecision({
+        missionId: "mission-1",
+        taskSessionDisplayId: "task-session-1",
+        taskSessionLegacySessionId: "legacy-task-session-1",
+      }),
+    ).toEqual({
+      missionKnown: true,
+      defaultAuthority: "mission_session",
+      compatibilitySeedSessionId: "task-session-1",
+      preferredSessionId: null,
+    });
+  });
+
+  it("drops task-session compatibility seeding when a fresh mission session is explicitly requested", () => {
+    expect(
+      resolveMissionSessionAuthorityDecision({
+        missionId: "mission-1",
+        taskSessionDisplayId: "task-session-1",
+        taskSessionLegacySessionId: "legacy-task-session-1",
+        resetTaskSession: true,
+      }),
+    ).toEqual({
+      missionKnown: true,
+      defaultAuthority: "mission_session",
+      compatibilitySeedSessionId: null,
+      preferredSessionId: null,
+    });
+  });
+
+  it("falls back to task-session authority outside mission scope", () => {
+    expect(
+      resolveMissionSessionAuthorityDecision({
+        taskSessionDisplayId: "task-session-1",
+        taskSessionLegacySessionId: "legacy-task-session-1",
+        runtimeSessionId: "runtime-session-1",
+      }),
+    ).toEqual({
+      missionKnown: false,
+      defaultAuthority: "task_session",
+      compatibilitySeedSessionId: null,
+      preferredSessionId: "task-session-1",
+    });
   });
 });
 

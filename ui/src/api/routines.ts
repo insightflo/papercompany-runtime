@@ -1,5 +1,12 @@
 import type {
   ActivityEvent,
+  RecurringProcedure,
+  RecurringProcedureDetail,
+  RecurringProcedureListItem,
+  RecurringProcedureRun,
+  RecurringProcedureRunSummary,
+  RecurringProcedureTrigger,
+  RecurringProcedureTriggerSecretMaterial,
   Routine,
   RoutineDetail,
   RoutineListItem,
@@ -54,5 +61,38 @@ export const routinesApi = {
     return [...deduped.values()].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
+  },
+};
+
+export interface RecurringProcedureTriggerResponse {
+  trigger: RecurringProcedureTrigger;
+  secretMaterial: RecurringProcedureTriggerSecretMaterial | null;
+}
+
+export interface RotateRecurringProcedureTriggerResponse {
+  trigger: RecurringProcedureTrigger;
+  secretMaterial: RecurringProcedureTriggerSecretMaterial;
+}
+
+export const recurringProceduresApi = {
+  list: (companyId: string) => api.get<RecurringProcedureListItem[]>(`/companies/${companyId}/recurring-procedures`),
+  create: (companyId: string, data: Record<string, unknown>) => api.post<RecurringProcedure>(`/companies/${companyId}/recurring-procedures`, data),
+  get: (recurringProcedureId: string) => api.get<RecurringProcedureDetail>(`/recurring-procedures/${recurringProcedureId}`),
+  update: (recurringProcedureId: string, data: Record<string, unknown>) => api.patch<RecurringProcedure>(`/recurring-procedures/${recurringProcedureId}`, data),
+  listRuns: (recurringProcedureId: string, limit: number = 50) => api.get<RecurringProcedureRunSummary[]>(`/recurring-procedures/${recurringProcedureId}/runs?limit=${limit}`),
+  createTrigger: (recurringProcedureId: string, data: Record<string, unknown>) => api.post<RecurringProcedureTriggerResponse>(`/recurring-procedures/${recurringProcedureId}/triggers`, data),
+  updateTrigger: (recurringProcedureTriggerId: string, data: Record<string, unknown>) => api.patch<RecurringProcedureTrigger>(`/recurring-procedure-triggers/${recurringProcedureTriggerId}`, data),
+  deleteTrigger: (recurringProcedureTriggerId: string) => api.delete<void>(`/recurring-procedure-triggers/${recurringProcedureTriggerId}`),
+  rotateTriggerSecret: (recurringProcedureTriggerId: string) => api.post<RotateRecurringProcedureTriggerResponse>(`/recurring-procedure-triggers/${recurringProcedureTriggerId}/rotate-secret`, {}),
+  run: (recurringProcedureId: string, data?: Record<string, unknown>) => api.post<RecurringProcedureRun>(`/recurring-procedures/${recurringProcedureId}/run`, data ?? {}),
+  activity: async (companyId: string, recurringProcedureId: string, related?: { triggerIds?: string[]; runIds?: string[] }) => {
+    const requests = [
+      activityApi.list(companyId, { entityType: "routine", entityId: recurringProcedureId }),
+      ...(related?.triggerIds ?? []).map((triggerId) => activityApi.list(companyId, { entityType: "routine_trigger", entityId: triggerId })),
+      ...(related?.runIds ?? []).map((runId) => activityApi.list(companyId, { entityType: "routine_run", entityId: runId })),
+    ];
+    const events = (await Promise.all(requests)).flat();
+    const deduped = new Map(events.map((event) => [event.id, event]));
+    return [...deduped.values()].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   },
 };

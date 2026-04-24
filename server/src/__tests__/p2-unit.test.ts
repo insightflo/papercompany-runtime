@@ -13,6 +13,27 @@ vi.mock("@paperclipai/db", () => ({
   workflowRuns: {},
   workflowStepRuns: {},
   issues: {},
+  heartbeatRuns: {
+    id: {},
+    companyId: {},
+    agentId: {},
+    invocationSource: {},
+    triggerDetail: {},
+    status: {},
+    startedAt: {},
+    finishedAt: {},
+    error: {},
+    wakeupRequestId: {},
+    exitCode: {},
+    signal: {},
+    usageJson: {},
+    resultJson: {},
+    sessionIdBefore: {},
+    sessionIdAfter: {},
+    issueId: {},
+    createdAt: {},
+    contextSnapshot: {},
+  },
   toolDefinitions: {},
   toolAuditLog: {},
   agents: {},
@@ -33,11 +54,13 @@ import type { KnowledgeBase } from "../services/knowledge/types.js";
 
 function makeMockDb() {
   const mockResult = {
+    innerJoin: vi.fn(),
     where: vi.fn(),
     limit: vi.fn(),
     orderBy: vi.fn(),
   };
   // Make chainable
+  mockResult.innerJoin.mockReturnValue(mockResult);
   mockResult.where.mockReturnValue(mockResult);
   mockResult.limit.mockReturnValue(mockResult);
   mockResult.orderBy.mockReturnValue(mockResult);
@@ -394,6 +417,7 @@ describe("knowledgeService.retrieve", () => {
       updatedAt: kb.updatedAt,
     };
     db._mockResult.limit.mockResolvedValueOnce([fakeRow]);
+    db._mockResult.orderBy.mockResolvedValueOnce([fakeRow]);
 
     const result = await knowledgeService.retrieve(db, {
       kbId: "kb-1",
@@ -423,6 +447,7 @@ describe("knowledgeService.retrieve", () => {
       updatedAt: new Date(),
     };
     db._mockResult.limit.mockResolvedValueOnce([fakeRow]);
+    db._mockResult.orderBy.mockResolvedValueOnce([fakeRow]);
 
     const result = await knowledgeService.retrieve(db, {
       kbId: "kb-1",
@@ -436,7 +461,33 @@ describe("knowledgeService.retrieve", () => {
     expect(result.tokenCount).toBe(5);
   });
 
-  it("returns partial error for RAG KB (not yet implemented)", async () => {
+  it("returns an access error when the KB exists but is not granted to the agent", async () => {
+    const db = makeMockDb() as any;
+    const fakeRow = {
+      id: "kb-private",
+      companyId: "co-1",
+      name: "Private KB",
+      type: "static",
+      description: "",
+      maxTokenBudget: 4096,
+      configJson: { content: "Private content" },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    db._mockResult.limit.mockResolvedValueOnce([fakeRow]);
+    db._mockResult.orderBy.mockResolvedValueOnce([]);
+
+    const result = await knowledgeService.retrieve(db, {
+      kbId: "kb-private",
+      query: "private",
+      agentId: "agent-1",
+    });
+
+    expect(result.content).toBe("");
+    expect(result.error).toMatch(/not accessible/i);
+  });
+
+  it("retrieves matching passages for a RAG KB", async () => {
     const db = makeMockDb() as any;
     const fakeRow = {
       id: "kb-rag",
@@ -445,11 +496,25 @@ describe("knowledgeService.retrieve", () => {
       type: "rag",
       description: "",
       maxTokenBudget: 4096,
-      configJson: { mcpServerId: "mcp-1" },
+      configJson: {
+        documents: [
+          {
+            id: "doc-1",
+            title: "Security policy",
+            content: "The security policy requires MFA for production access and quarterly reviews.",
+          },
+          {
+            id: "doc-2",
+            title: "Hiring plan",
+            content: "The hiring plan covers recruiting and onboarding.",
+          },
+        ],
+      },
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     db._mockResult.limit.mockResolvedValueOnce([fakeRow]);
+    db._mockResult.orderBy.mockResolvedValueOnce([fakeRow]);
 
     const result = await knowledgeService.retrieve(db, {
       kbId: "kb-rag",
@@ -457,12 +522,12 @@ describe("knowledgeService.retrieve", () => {
       agentId: "agent-1",
     });
 
-    // RAG returns partial content with an error note
-    expect(result.error).toBeTruthy();
-    expect(result.content).toContain("find policy");
+    expect(result.error).toBeUndefined();
+    expect(result.content).toContain("Security policy");
+    expect(result.content).toContain("MFA");
   });
 
-  it("searches by query: retrieve uses the query string in RAG response content", async () => {
+  it("returns a bounded fallback when the query misses but corpus exists", async () => {
     const db = makeMockDb() as any;
     const fakeRow = {
       id: "kb-rag-2",
@@ -471,11 +536,17 @@ describe("knowledgeService.retrieve", () => {
       type: "rag",
       description: "",
       maxTokenBudget: 4096,
-      configJson: { mcpServerId: "mcp-2" },
+      configJson: {
+        passages: [
+          "Quarterly revenue targets are tracked in the finance planning memo.",
+          "Customer churn is reviewed in the growth dashboard.",
+        ],
+      },
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     db._mockResult.limit.mockResolvedValueOnce([fakeRow]);
+    db._mockResult.orderBy.mockResolvedValueOnce([fakeRow]);
 
     const result = await knowledgeService.retrieve(db, {
       kbId: "kb-rag-2",
@@ -483,6 +554,33 @@ describe("knowledgeService.retrieve", () => {
       agentId: "agent-1",
     });
 
-    expect(result.content).toContain("quarterly revenue targets");
+    expect(result.error).toBeUndefined();
+    expect(result.content).toContain("Quarterly revenue targets");
+  });
+
+  it("returns an empty-corpus error for ontology/RAG KBs without source data", async () => {
+    const db = makeMockDb() as any;
+    const fakeRow = {
+      id: "kb-rag-empty",
+      companyId: "co-1",
+      name: "Empty KB",
+      type: "ontology",
+      description: "",
+      maxTokenBudget: 4096,
+      configJson: { graphId: "graph-1" },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    db._mockResult.limit.mockResolvedValueOnce([fakeRow]);
+    db._mockResult.orderBy.mockResolvedValueOnce([fakeRow]);
+
+    const result = await knowledgeService.retrieve(db, {
+      kbId: "kb-rag-empty",
+      query: "production dependency",
+      agentId: "agent-1",
+    });
+
+    expect(result.content).toBe("");
+    expect(result.error).toMatch(/corpus is empty/i);
   });
 });

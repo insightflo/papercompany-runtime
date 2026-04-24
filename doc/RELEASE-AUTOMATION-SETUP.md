@@ -278,4 +278,4 @@ Check:
 
 - [doc/RELEASING.md](RELEASING.md)
 - [doc/PUBLISHING.md](PUBLISHING.md)
-- [doc/plans/2026-03-17-release-automation-and-versioning.md](plans/2026-03-17-release-automation-and-versioning.md)
+- [papercompany-artifacts/doc/plans/2026-03-17-release-automation-and-versioning.md](../../papercompany-artifacts/doc/plans/2026-03-17-release-automation-and-versioning.md)

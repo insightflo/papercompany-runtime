@@ -14,8 +14,6 @@ export {
   asStringArray,
   parseJson,
   appendWithCap,
-  resolvePathValue,
-  renderTemplate,
   redactEnvForLogs,
   buildPaperclipEnv,
   defaultPathForPlatform,
@@ -23,6 +21,7 @@ export {
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
 } from "@paperclipai/adapter-utils/server-utils";
+export { joinPromptSections, renderTemplate, resolvePathValue } from "@paperclipai/adapter-utils";
 
 // Re-export runChildProcess with the server's pino logger wired in.
 import { runChildProcess as _runChildProcess } from "@paperclipai/adapter-utils/server-utils";

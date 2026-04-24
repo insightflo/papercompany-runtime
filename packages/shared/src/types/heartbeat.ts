@@ -64,6 +64,14 @@ export interface AgentRuntimeState {
   sessionId: string | null;
   sessionDisplayId?: string | null;
   sessionParamsJson?: Record<string, unknown> | null;
+  sessionAuthority?: "mission_session" | "task_session" | "runtime_state" | "none";
+  activeMissionSessionCount?: number;
+  latestMissionSession?: {
+    missionId: string;
+    sessionId: string | null;
+    lastActiveAt: Date | null;
+    runCount: number;
+  } | null;
   stateJson: Record<string, unknown>;
   lastRunId: string | null;
   lastRunStatus: string | null;

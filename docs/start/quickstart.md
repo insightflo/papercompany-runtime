@@ -32,7 +32,7 @@ pnpm install
 pnpm dev
 ```
 
-This starts the API server and UI at [http://localhost:3100](http://localhost:3100).
+This starts the API server and UI at [http://localhost:3200](http://localhost:3200).
 
 No external database required — Paperclip uses an embedded PostgreSQL instance by default.
 
@@ -49,11 +49,11 @@ This auto-onboards if config is missing, runs health checks with auto-repair, an
 Once Paperclip is running:
 
 1. Create your first company in the web UI
-2. Define a company goal
-3. Create a CEO agent and configure its adapter
-4. Build out the org chart with more agents
-5. Set budgets and assign initial tasks
-6. Hit go — agents start their heartbeats and the company runs
+2. Define a mission and operating goals
+3. Create a CEO agent and configure how it runs
+4. Build out the org chart with more agents and responsibilities
+5. Set budgets, approvals, and initial work
+6. Hit go - agents start their heartbeats and the company begins operating
 
 <Card title="Core Concepts" href="/start/core-concepts">
   Learn the key concepts behind Paperclip

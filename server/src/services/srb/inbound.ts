@@ -1,15 +1,29 @@
 import type { Db } from "@paperclipai/db";
 import { createIssueSchema } from "@paperclipai/shared";
 import { issueService } from "../issues.js";
+import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { insertSrbDeliveryLog } from "./shared.js";
 
 type SrbInboundDb = Pick<Db, "insert" | "update" | "select" | "delete">;
+
+export interface SRBInboundPostCommitEffect {
+  actorId: string;
+  issue: {
+    id: string;
+    companyId: string;
+    title: string;
+    identifier: string | null;
+    assigneeAgentId: string | null;
+    status: string;
+  };
+}
 
 export interface SRBInboundReceiveResult {
   deliveryId: string;
   issueId: string;
   issueIdentifier: string | null;
   status: "received";
+  postCommit: SRBInboundPostCommitEffect;
 }
 
 export function createSrbInboundHandler(db: Db) {
@@ -53,7 +67,35 @@ export function createSrbInboundHandler(db: Db) {
         issueId: issue.id,
         issueIdentifier: issue.identifier,
         status: "received",
+        postCommit: {
+          actorId: input.linkId,
+          issue: {
+            id: issue.id,
+            companyId: issue.companyId,
+            title: issue.title,
+            identifier: issue.identifier,
+            assigneeAgentId: issue.assigneeAgentId ?? null,
+            status: issue.status,
+          },
+        },
       };
     },
   };
+}
+
+export async function applySrbInboundReceiveSideEffects(input: {
+  db: Db;
+  heartbeat: Parameters<typeof applyIssueCreatedSideEffects>[0]["heartbeat"];
+  postCommit: SRBInboundPostCommitEffect;
+}) {
+  await applyIssueCreatedSideEffects({
+    db: input.db,
+    heartbeat: input.heartbeat,
+    issue: input.postCommit.issue,
+    actor: {
+      actorType: "system",
+      actorId: input.postCommit.actorId,
+    },
+    contextSource: "srb.issue.create",
+  });
 }

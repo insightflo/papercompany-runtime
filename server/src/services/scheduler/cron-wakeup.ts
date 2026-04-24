@@ -11,7 +11,7 @@ import type { Db } from "@paperclipai/db";
 import { schedules } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { parseCron } from "../cron.js";
-import type { Schedule, ScheduleClaimResult } from "./types.js";
+import type { ScheduleClaimResult } from "./types.js";
 import { schedulerDueToWakeupLatency } from "../../routes/metrics.js";
 import { withSpan } from "../../lib/tracer.js";
 
@@ -177,6 +177,7 @@ function matchesCronInTimeZone(
  */
 export async function claimDueSchedules(db: Db): Promise<ScheduleClaimResult["claimed"]> {
   const now = new Date();
+  const nowIso = now.toISOString();
 
   // Execute the claim-then-run query
   const result = await db.execute(
@@ -185,19 +186,16 @@ export async function claimDueSchedules(db: Db): Promise<ScheduleClaimResult["cl
         SELECT id
         FROM schedules
         WHERE enabled = true
-          AND next_run_at <= ${now}
+          AND next_run_at <= ${nowIso}
         ORDER BY next_run_at
         FOR UPDATE SKIP LOCKED
         LIMIT ${MAX_CLAIM_PER_CYCLE}
       )
-      UPDATE schedules s
-      SET
-        last_run_at = ${now},
-        next_run_at = CASE
-          WHEN s.cron_expression IS NOT NULL THEN NULL -- Will compute in next step
-          ELSE NULL
-        END,
-        updated_at = ${now}
+        UPDATE schedules s
+        SET
+          last_run_at = ${nowIso},
+          next_run_at = NULL::timestamptz,
+          updated_at = ${nowIso}
       FROM due
       WHERE s.id = due.id
       RETURNING

@@ -31,8 +31,9 @@ import { issueService } from "./issues.js";
 import { secretService } from "./secrets.js";
 import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
-import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
+import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
+import { applyIssueCreatedSideEffects } from "./issue-create-side-effects.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"];
@@ -352,7 +353,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           and(
             eq(heartbeatRuns.companyId, issues.companyId),
             inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
-            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)`,
+            or(eq(heartbeatRuns.issueId, issues.id), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)`),
           ),
         )
         .where(
@@ -445,14 +446,14 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     return executor
       .select()
       .from(issues)
-      .innerJoin(
-        heartbeatRuns,
-        and(
-          eq(heartbeatRuns.companyId, issues.companyId),
-          inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)`,
-        ),
-      )
+        .innerJoin(
+          heartbeatRuns,
+          and(
+            eq(heartbeatRuns.companyId, issues.companyId),
+            inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+            or(eq(heartbeatRuns.issueId, issues.id), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)`),
+          ),
+        )
       .where(
         and(
           eq(issues.companyId, routine.companyId),
@@ -629,15 +630,22 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           return updated ?? createdRun;
         }
 
-        // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
-        await queueIssueAssignmentWakeup({
+        await applyIssueCreatedSideEffects({
+          db: txDb,
           heartbeat,
           issue: createdIssue,
-          reason: "issue_assigned",
-          mutation: "create",
+          actor: {
+            actorType: "system",
+            actorId:
+              input.source === "schedule"
+                ? "routine-scheduler"
+                : input.source === "webhook"
+                  ? "routine-webhook"
+                  : `routine:${input.routine.id}`,
+          },
           contextSource: "routine.dispatch",
-          requestedByActorType: input.source === "schedule" ? "system" : undefined,
-          rethrowOnError: true,
+          waitForWakeCompletion: true,
+          rethrowOnWakeError: true,
         });
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",

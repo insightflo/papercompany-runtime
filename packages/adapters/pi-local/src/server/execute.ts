@@ -2,14 +2,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
   asString,
   asNumber,
   asStringArray,
   parseObject,
   buildPaperclipEnv,
-  joinPromptSections,
   redactEnvForLogs,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
@@ -18,7 +17,6 @@ import {
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
-  renderTemplate,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
@@ -304,17 +302,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     !canResumeSession && bootstrapPromptTemplate.trim().length > 0
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
-  const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const runtimeBrief = buildPaperclipRuntimeBrief(context);
   const userPrompt = joinPromptSections([
     renderedBootstrapPrompt,
-    sessionHandoffNote,
+    runtimeBrief,
     renderedHeartbeatPrompt,
   ]);
   const promptMetrics = {
     systemPromptChars: renderedSystemPromptExtension.length,
     promptChars: userPrompt.length,
     bootstrapPromptChars: renderedBootstrapPrompt.length,
-    sessionHandoffChars: sessionHandoffNote.length,
+    sessionHandoffChars: runtimeBrief.length,
     heartbeatPromptChars: renderedHeartbeatPrompt.length,
   };
 
@@ -408,6 +406,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env: runtimeEnv,
       timeoutSec,
       graceSec,
+      fatalOnLogError: true,
       onSpawn,
       onLog: bufferedOnLog,
       stdin: buildRpcStdin(),

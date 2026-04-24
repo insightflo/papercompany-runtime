@@ -53,3 +53,9 @@ export interface IssueWorkProduct {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type WorkItemProductType = IssueWorkProductType;
+export type WorkItemProductProvider = IssueWorkProductProvider;
+export type WorkItemProductStatus = IssueWorkProductStatus;
+export type WorkItemProductReviewState = IssueWorkProductReviewState;
+export type WorkItemProduct = IssueWorkProduct;

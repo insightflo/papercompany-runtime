@@ -6,6 +6,7 @@ import {
   createIssueAttachmentMetadataSchema,
   createIssueWorkProductSchema,
   createIssueLabelSchema,
+  createWorkItemSchema,
   checkoutIssueSchema,
   createIssueSchema,
   linkIssueApprovalSchema,
@@ -28,6 +29,7 @@ import {
   logActivity,
   projectService,
   routineService,
+  workflowService,
   workProductService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
@@ -36,6 +38,9 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { applyIssueCreatedSideEffects } from "../services/issue-create-side-effects.js";
+import { buildContextSafeFileViews } from "../services/context-safe-file-views.js";
+import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -52,6 +57,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const routinesSvc = routineService(db);
+  const workflowsSvc = workflowService;
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
@@ -140,7 +146,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const runId = requireAgentRunId(req, res);
     if (!runId) return false;
     const ownership = await svc.assertCheckoutOwner(issue.id, actorAgentId, runId);
-    if (ownership.adoptedFromRunId) {
+    if (ownership.adoptedFromRunId || ownership.repairedMalformedExecutionLock) {
       const actor = getActorInfo(req);
       await logActivity(db, {
         companyId: issue.companyId,
@@ -154,7 +160,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
         details: {
           previousCheckoutRunId: ownership.adoptedFromRunId,
           checkoutRunId: runId,
-          reason: "stale_checkout_run",
+          reason: ownership.repairedMalformedExecutionLock ? "malformed_same_run_execution_lock" : "stale_checkout_run",
         },
       });
     }
@@ -225,6 +231,12 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
   });
 
+  router.get("/work-items", (_req, res) => {
+    res.status(400).json({
+      error: "Missing companyId in path. Use /api/companies/{companyId}/work-items.",
+    });
+  });
+
   router.get("/companies/:companyId/issues", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -274,7 +286,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       touchedByUserId,
       inboxArchivedByUserId,
       unreadForUserId,
-      projectId: req.query.projectId as string | undefined,
+      projectId: (req.query.projectId as string | undefined) ?? (req.query.workContextId as string | undefined),
       parentId: req.query.parentId as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
@@ -284,6 +296,62 @@ export function issueRoutes(db: Db, storage: StorageService) {
       q: req.query.q as string | undefined,
     });
     res.json(result);
+  });
+
+  router.get("/companies/:companyId/work-items", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const assigneeUserFilterRaw = req.query.assigneeUserId as string | undefined;
+    const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
+    const inboxArchivedByUserFilterRaw = req.query.inboxArchivedByUserId as string | undefined;
+    const unreadForUserFilterRaw = req.query.unreadForUserId as string | undefined;
+    const assigneeUserId = assigneeUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : assigneeUserFilterRaw;
+    const touchedByUserId = touchedByUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : touchedByUserFilterRaw;
+    const inboxArchivedByUserId = inboxArchivedByUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : inboxArchivedByUserFilterRaw;
+    const unreadForUserId = unreadForUserFilterRaw === "me" && req.actor.type === "board" ? req.actor.userId : unreadForUserFilterRaw;
+    if (assigneeUserFilterRaw === "me" && (!assigneeUserId || req.actor.type !== "board")) {
+      res.status(403).json({ error: "assigneeUserId=me requires board authentication" });
+      return;
+    }
+    if (touchedByUserFilterRaw === "me" && (!touchedByUserId || req.actor.type !== "board")) {
+      res.status(403).json({ error: "touchedByUserId=me requires board authentication" });
+      return;
+    }
+    if (inboxArchivedByUserFilterRaw === "me" && (!inboxArchivedByUserId || req.actor.type !== "board")) {
+      res.status(403).json({ error: "inboxArchivedByUserId=me requires board authentication" });
+      return;
+    }
+    if (unreadForUserFilterRaw === "me" && (!unreadForUserId || req.actor.type !== "board")) {
+      res.status(403).json({ error: "unreadForUserId=me requires board authentication" });
+      return;
+    }
+    const result = await svc.list(companyId, {
+      status: req.query.status as string | undefined,
+      assigneeAgentId: req.query.assigneeAgentId as string | undefined,
+      participantAgentId: req.query.participantAgentId as string | undefined,
+      assigneeUserId,
+      touchedByUserId,
+      inboxArchivedByUserId,
+      unreadForUserId,
+      projectId: (req.query.projectId as string | undefined) ?? (req.query.workContextId as string | undefined),
+      parentId: (req.query.parentId as string | undefined) ?? (req.query.parentWorkItemId as string | undefined),
+      labelId: req.query.labelId as string | undefined,
+      originKind: req.query.originKind as string | undefined,
+      originId: req.query.originId as string | undefined,
+      includeRoutineExecutions:
+        req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
+      q: req.query.q as string | undefined,
+    });
+    res.json(
+      result.map((issue) => ({
+        ...issue,
+        workContextId: issue.projectId,
+        workContextSpaceId: issue.projectWorkspaceId,
+        parentWorkItemId: issue.parentId,
+        executionContextId: issue.executionWorkspaceId,
+        workItemNumber: issue.issueNumber,
+      })),
+    );
   });
 
   router.get("/companies/:companyId/labels", async (req, res) => {
@@ -394,6 +462,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
       svc.getCommentCursor(issue.id),
       wakeCommentId ? svc.getComment(wakeCommentId) : null,
     ]);
+    const fileViews = await buildContextSafeFileViews({
+      text: wakeComment && wakeComment.issueId === issue.id ? wakeComment.body : null,
+      workspaceCwd: project?.primaryWorkspace?.cwd ?? null,
+      workspaceId: project?.primaryWorkspace?.id ?? null,
+    });
 
     res.json({
       issue: {
@@ -435,6 +508,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
           }
         : null,
       commentCursor,
+      fileViews,
       wakeComment:
         wakeComment && wakeComment.issueId === issue.id
           ? wakeComment
@@ -862,28 +936,43 @@ export function issueRoutes(db: Db, storage: StorageService) {
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
     });
 
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.created",
-      entityType: "issue",
-      entityId: issue.id,
-      details: { title: issue.title, identifier: issue.identifier },
-    });
-
-    void queueIssueAssignmentWakeup({
+    await applyIssueCreatedSideEffects({
+      db,
       heartbeat,
       issue,
-      reason: "issue_assigned",
-      mutation: "create",
+      actor,
       contextSource: "issue.create",
-      requestedByActorType: actor.actorType,
-      requestedByActorId: actor.actorId,
     });
 
+    res.status(201).json({
+      ...issue,
+      workContextId: issue.projectId,
+      workContextSpaceId: issue.projectWorkspaceId,
+      parentWorkItemId: issue.parentId,
+      executionContextId: issue.executionWorkspaceId,
+      workItemNumber: issue.issueNumber,
+    });
+  });
+
+  router.post("/companies/:companyId/work-items", validate(createWorkItemSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (req.body.assigneeAgentId || req.body.assigneeUserId) {
+      await assertCanAssignTasks(req, companyId);
+    }
+    const actor = getActorInfo(req);
+    const issue = await svc.create(companyId, {
+      ...req.body,
+      createdByAgentId: actor.agentId,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+    });
+    await applyIssueCreatedSideEffects({
+      db,
+      heartbeat,
+      issue,
+      actor,
+      contextSource: "issue.create",
+    });
     res.status(201).json(issue);
   });
 
@@ -913,6 +1002,16 @@ export function issueRoutes(db: Db, storage: StorageService) {
         await assertCanAssignTasks(req, existing.companyId);
       }
     }
+    if (
+      req.actor.type === "agent" &&
+      req.body.status === "in_progress" &&
+      existing.status !== "in_progress"
+    ) {
+      res.status(409).json({
+        error: "Agents must use checkout to move an issue into in_progress",
+      });
+      return;
+    }
     if (!(await assertAgentRunCheckoutOwnership(req, res, existing))) return;
 
     const actor = getActorInfo(req);
@@ -924,7 +1023,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       updateFields.status = "todo";
     }
-    let issue;
+    let issue: Awaited<ReturnType<typeof svc.update>>;
     try {
       issue = await svc.update(id, updateFields);
     } catch (err) {
@@ -956,6 +1055,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       return;
     }
     await routinesSvc.syncRunStatusForIssue(issue.id);
+    await workflowsSvc.syncRunStatusForIssue(db, issue.id);
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>
@@ -971,6 +1071,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
 
     const hasFieldChanges = Object.keys(previous).length > 0;
+    if (previous.status !== undefined && issue.status !== existing.status) {
+      await syncSrbSourceIssueStatus({
+        db,
+        issueId: issue.id,
+        status: issue.status,
+      });
+    }
     const reopened =
       commentBody &&
       reopenRequested === true &&
@@ -1168,6 +1275,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (req.actor.type === "agent" && !checkoutRunId) return;
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
+    await workflowsSvc.syncRunStatusForIssue(db, updated.id);
 
     await logActivity(db, {
       companyId: issue.companyId,
@@ -1226,6 +1334,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    await workflowsSvc.syncRunStatusForIssue(db, released.id);
 
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -1321,6 +1430,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
       reopened = true;
       reopenFromStatus = issue.status;
       currentIssue = reopenedIssue;
+      await syncSrbSourceIssueStatus({
+        db,
+        issueId: currentIssue.id,
+        status: currentIssue.status,
+      });
 
       await logActivity(db, {
         companyId: currentIssue.companyId,
@@ -1357,12 +1471,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
       ) {
         const activeRun = await heartbeat.getActiveRunForAgent(currentIssue.assigneeAgentId);
         const activeIssueId =
-          activeRun &&
+          activeRun?.issueId ??
+          (activeRun &&
             activeRun.contextSnapshot &&
             typeof activeRun.contextSnapshot === "object" &&
             typeof (activeRun.contextSnapshot as Record<string, unknown>).issueId === "string"
             ? ((activeRun.contextSnapshot as Record<string, unknown>).issueId as string)
-            : null;
+            : null);
         if (activeRun && activeRun.status === "running" && activeIssueId === currentIssue.id) {
           runToInterrupt = activeRun;
         }

@@ -194,7 +194,7 @@ export function DesignGuide() {
       <div>
         <h2 className="text-xl font-bold">Design Guide</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Every component, style, and pattern used across Paperclip.
+          Every component, style, and pattern used across papercompany.
         </p>
       </div>
 
@@ -681,9 +681,9 @@ export function DesignGuide() {
       <Section title="Scroll Area">
         <ScrollArea className="h-36 rounded-md border border-border">
           <div className="space-y-2 p-3">
-            {Array.from({ length: 12 }).map((_, i) => (
-              <div key={i} className="rounded-md border border-border p-2 text-sm">
-                Heartbeat run #{i + 1}: completed successfully
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((runNumber) => (
+              <div key={runNumber} className="rounded-md border border-border p-2 text-sm">
+                Heartbeat run #{runNumber}: completed successfully
               </div>
             ))}
           </div>
@@ -736,7 +736,7 @@ export function DesignGuide() {
             </BreadcrumbItem>
             <BreadcrumbSeparator />
             <BreadcrumbItem>
-              <BreadcrumbLink href="#">Paperclip App</BreadcrumbLink>
+                <BreadcrumbLink href="#">papercompany App</BreadcrumbLink>
             </BreadcrumbItem>
             <BreadcrumbSeparator />
             <BreadcrumbItem>
@@ -1126,11 +1126,11 @@ export function DesignGuide() {
 
         <SubSection title="View toggle">
           <div className="flex items-center border border-border rounded-md w-fit">
-            <button className="px-3 py-1.5 text-xs font-medium bg-accent text-foreground rounded-l-md">
+            <button type="button" className="px-3 py-1.5 text-xs font-medium bg-accent text-foreground rounded-l-md">
               <ListTodo className="h-3.5 w-3.5 inline mr-1" />
               List
             </button>
-            <button className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent/50 rounded-r-md">
+            <button type="button" className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent/50 rounded-r-md">
               <Target className="h-3.5 w-3.5 inline mr-1" />
               Org
             </button>

@@ -1,8 +1,12 @@
-# Paperclip — Product Definition
+# Paperclip - Product Definition
 
 ## What It Is
 
-Paperclip is the control plane for autonomous AI companies. One instance of Paperclip can run multiple companies. A **company** is a first-order object.
+Paperclip is the control plane for agent-run company operations.
+One instance of Paperclip can run multiple companies. A **company** is a first-order object.
+
+Paperclip is designed so that coding is one department, not the center of the product.
+Its purpose is to help agent teams operate more like human teams: through missions, procedures, approvals, regulated work systems, and visible outcomes.
 
 ## Core Concepts
 
@@ -10,138 +14,157 @@ Paperclip is the control plane for autonomous AI companies. One instance of Pape
 
 A company has:
 
-- A **goal** — the reason it exists ("Create the #1 AI note-taking app that does $1M MRR within 3 months")
-- **Employees** — every employee is an AI agent
-- **Org structure** — who reports to whom
-- **Revenue & expenses** — tracked at the company level
-- **Task hierarchy** — all work traces back to the company goal
+- **missions and goals** - what the company is trying to achieve and why
+- **teams and reporting structure** - who owns which kind of work
+- **procedures and operating rules** - how work should move through the business
+- **work items** - the atomic units of action that advance a mission
+- **work systems** - the regulated systems where work is actually completed and recorded
+- **approvals, review, and policies** - how autonomy stays safe and governed
+- **budgets and outcomes** - what work costs and what it accomplishes
 
-### Employees & Agents
+### Teams and Agents
 
-Every employee is an agent. When you create a company, you start by defining the CEO, then build out from there.
+Paperclip organizes workers into teams with clear responsibilities.
+Those teams may be engineering, accounting, operations, support, sales, or another business function.
 
-Each employee has:
+In the current V1 implementation, live org structure is represented primarily through companies, agents, reporting lines, goals, missions, and issues.
+That means **team** is already the right product noun, even though the current schema still expresses most of it through agent hierarchy rather than a dedicated teams model.
 
-- **Adapter type + config** — how this agent runs and what defines its identity/behavior. This is adapter-specific (e.g., an OpenClaw agent might use SOUL.md and HEARTBEAT.md files; a Claude Code agent might use CLAUDE.md; a bare script might use CLI args). Paperclip doesn't prescribe the format — the adapter does.
-- **Role & reporting** — their title, who they report to, who reports to them
-- **Capabilities description** — a short paragraph on what this agent does and when they're relevant (helps other agents discover who can help with what)
+Each worker has:
 
-Example: A CEO agent's adapter config tells it to "review what your executives are doing, check company metrics, reprioritize if needed, assign new strategic initiatives" on each heartbeat. An engineer's config tells it to "check assigned tasks, pick the highest priority, and work it."
+- **role and reporting** - title, responsibility, and who they report to
+- **capabilities** - what they are good at and when they should be involved
+- **execution configuration** - how they run and what systems they can use
+- **policies and limits** - budgets, approvals, permissions, and risk controls
 
-Then you define who reports to the CEO: a CTO managing programmers, a CMO managing the marketing team, and so on. Every agent in the tree gets their own adapter configuration.
+### Missions and Goals
 
-### Agent Execution
+A mission is the business purpose a company or team is pursuing.
+Goals provide the planning and alignment structure underneath that purpose.
 
-There are two fundamental modes for running an agent's heartbeat:
+In current V1 terms, **goals** remain the main planning object and **missions** are the newer board-facing operating object.
+The product language should move toward missions, while staying honest that the implementation still uses both.
 
-1. **Run a command** — Paperclip kicks off a process (shell command, Python script, etc.) and tracks it. The heartbeat is "execute this and monitor it."
-2. **Fire and forget a request** — Paperclip sends a webhook/API call to an externally running agent. The heartbeat is "notify this agent to wake up." (OpenClaw hooks work this way.)
+### Procedures
 
-We provide sensible defaults — a default agent that shells out to Claude Code or Codex with your configuration, remembers session IDs, runs basic scripts. But you can plug in anything.
+Work should not happen as free-form prompting alone.
+It should flow through procedures: recurring rules, workflow steps, schedules, approvals, and system interactions.
 
-### Task Management
+In V1, procedures are expressed primarily through routines, workflows, schedules, and approvals.
 
-Task management is hierarchical. At any moment, every piece of work must trace back to the company's top-level goal through a chain of parent tasks:
+### Work Items
 
-```
-I am researching the Facebook ads Granola uses (current task)
-  because → I need to create Facebook ads for our software (parent)
-    because → I need to grow new signups by 100 users (parent)
-      because → I need to get revenue to $2,000 this week (parent)
-        because → ...
-          because → We're building the #1 AI note-taking app to $1M MRR in 3 months
-```
+A work item is the atomic unit of action in the company.
+It exists in service of a mission and moves through a defined procedure.
 
-Tasks have parentage. Every task exists in service of a parent task, all the way up to the company goal. This is what keeps autonomous agents aligned — they can always answer "why am I doing this?"
+In V1, work items are represented primarily as issues.
+That makes **issue** an implementation noun, not the cleanest long-term product noun.
 
-More detailed task structure TBD.
+### Work Systems
+
+Work systems are the regulated systems human teams already use to maintain consistency, shared formats, required fields, state transitions, and durable business records.
+
+Examples include:
+
+- ERP and accounting systems
+- CRM and ticketing systems
+- back-office operations systems
+- repositories, CI, and deployment systems
+- document, file, and submission systems
+
+Paperclip does not replace these systems.
+It coordinates agent teams so work is completed through them.
+
+### Outcomes
+
+Paperclip should track not only activity and spend, but the outputs and outcomes that matter to the company.
+
+In V1, outcomes are currently represented most concretely through documents, work products, approvals, and visible artifacts rather than through a single dedicated outcome model.
+
+## V1 Implementation Bridge
+
+Paperclip's product language should evolve faster than its implementation vocabulary, but the bridge must stay explicit.
+
+In V1:
+
+- **work items** are primarily represented as issues
+- **procedures** are primarily represented through routines, workflows, schedules, and approvals
+- **outcomes** are primarily represented through documents and work products
+- **work systems** are reached through execution infrastructure such as adapters and workspaces
+
+This means the product should increasingly speak in company-operating terms, while the schema and API still use some V1 execution-oriented nouns.
 
 ## Principles
 
-1. **Unopinionated about how you run your agents.** Your agents could be OpenClaw bots, Python scripts, Node scripts, Claude Code sessions, Codex instances — we don't care. Paperclip defines the control plane for communication and provides utility infrastructure for heartbeats. It does not mandate an agent runtime.
+1. **Company is the unit of organization.** Everything lives under a company. One Paperclip instance, many companies.
 
-2. **Company is the unit of organization.** Everything lives under a company. One Paperclip instance, many companies.
+2. **Agent teams should operate like human teams.** The product should model responsibility, procedure, approvals, and outcomes, not just execution.
 
-3. **Adapter config defines the agent.** Every agent has an adapter type and configuration that controls its identity and behavior. The minimum contract is just "be callable."
+3. **Work should flow through company procedures.** Free-form generation is not enough. Durable work must pass through the right systems and constraints.
 
-4. **All work traces to the goal.** Hierarchical task management means nothing exists in isolation. If you can't explain why a task matters to the company goal, it shouldn't exist.
+4. **Outputs matter when they are completed in the right place.** Generated text is not the same thing as finished business work.
 
-5. **Control plane, not execution plane.** Paperclip orchestrates. Agents run wherever they run and phone home.
+5. **Control plane, not execution plane.** Paperclip orchestrates. The actual work is carried out through external work systems and execution infrastructure.
+
+6. **Budgets, approvals, and auditability are core features.** They are not optional enterprise add-ons.
 
 ## User Flow (Dream Scenario)
 
-1. Open Paperclip, create a new company
-2. Define the company's goal: "Create the #1 AI note-taking app, $1M MRR in 3 months"
-3. Create the CEO
-   - Choose an adapter (e.g., process adapter for Claude Code, HTTP adapter for OpenClaw)
-   - Configure the adapter (agent identity, loop behavior, execution settings)
-   - CEO proposes strategic breakdown → board approves
-4. Define the CEO's reports: CTO, CMO, CFO, etc.
-   - Each gets their own adapter config and role definition
-5. Define their reports: engineers under CTO, marketers under CMO, etc.
-6. Set budgets, define initial strategic tasks
-7. Hit go — agents start their heartbeats and the company runs
+1. Open Paperclip and create a company
+2. Define the company's mission and operating goals
+3. Create the initial leadership and key team roles
+4. Define which procedures and work systems those teams use
+5. Set budgets, approvals, and operating constraints
+6. Start the company - agents begin working through missions, procedures, and work systems
+7. Observe outcomes, review exceptions, and intervene only where needed
 
-## Guidelines
-
-There are two runtime modes Paperclip must support:
-
-- `local_trusted` (default): single-user local trusted deployment with no login friction
-- `authenticated`: login-required mode that supports both private-network and public deployment exposure policies
-
-Canonical mode design and command expectations live in `doc/DEPLOYMENT-MODES.md`.
-
-## Further Detail
-
-See [SPEC.md](./SPEC.md) for the full technical specification and [TASKS.md](./TASKS.md) for the task management data model.
-
----
-
-Paperclip’s core identity is a **control plane for autonomous AI companies**, centered on **companies, org charts, goals, issues/comments, heartbeats, budgets, approvals, and board governance**. The public docs are also explicit about the current boundaries: **tasks/comments are the built-in communication model**, Paperclip is **not a chatbot**, and it is **not a code review tool**. The roadmap already points toward **easier onboarding, cloud agents, easier agent configuration, plugins, better docs, and ClipMart/ClipHub-style reusable companies/templates**.
-
-## What Paperclip should do vs. not do
+## What Paperclip Should Do vs. Not Do
 
 **Do**
 
-- Stay **board-level and company-level**. Users should manage goals, orgs, budgets, approvals, and outputs.
-- Make the first five minutes feel magical: install, answer a few questions, see a CEO do something real.
-- Keep work anchored to **issues/comments/projects/goals**, even if the surface feels conversational.
+- Stay **board-level and company-level**. Users should manage missions, goals, orgs, budgets, approvals, and outcomes.
+- Make the first five minutes feel magical: install, answer a few questions, and see a team complete real work.
+- Keep work anchored to **missions, work items, procedures, and outputs**, even if the surface feels conversational.
 - Treat **agency / internal team / startup** as the same underlying abstraction with different templates and labels.
-- Make outputs first-class: files, docs, reports, previews, links, screenshots.
-- Provide **hooks into engineering workflows**: worktrees, preview servers, PR links, external review tools.
-- Surface the live company control plane clearly: missions, scheduler, channels, and worktree governance should feel like first-class operational views rather than hidden admin endpoints.
-- Use **plugins** for edge cases like rich chat, knowledge bases, doc editors, custom tracing.
+- Make outputs first-class: files, documents, reports, records, submissions, previews, links, and visible artifacts.
+- Support multiple kinds of work systems, not just engineering workflows.
+- Surface the live company control plane clearly: missions, scheduler, approvals, channels, costs, exceptions, and outputs should feel like first-class operational views.
+- Use **plugins and extensions** for special-purpose surfaces rather than bloating the core control plane.
 
 **Do not**
 
-- Do not make the core product a general chat app. The current product definition is explicitly task/comment-centric and “not a chatbot,” and that boundary is valuable.
-- Do not build a complete Jira/GitHub replacement. The repo/docs already position Paperclip as organization orchestration, not focused on pull-request review.
-- Do not build enterprise-grade RBAC first. The current V1 spec still treats multi-board governance and fine-grained human permissions as out of scope, so the first multi-user version should be coarse and company-scoped.
-- Do not lead with raw bash logs and transcripts. Default view should be human-readable intent/progress, with raw detail beneath.
-- Do not force users to understand provider/API-key plumbing unless absolutely necessary. There are active onboarding/auth issues already; friction here is clearly real.
+- Do not make the core product a general chat app.
+- Do not assume every important workflow is a coding workflow.
+- Do not confuse generated output with completed work.
+- Do not make adapter/workspace/runtime vocabulary the product identity.
+- Do not force users to understand provider plumbing unless absolutely necessary.
 
-## Specific design goals
+## Specific Design Goals
 
 1. **Time-to-first-success under 5 minutes**
-   A fresh user should go from install to “my CEO completed a first task” in one sitting.
+   A fresh user should go from install to a team completing meaningful work in one sitting.
 
 2. **Board-level abstraction always wins**
-   The default UI should answer: what is the company doing, who is doing it, why does it matter, what did it cost, and what needs my approval.
+   The default UI should answer: what is the company doing, who is doing it, why does it matter, what did it cost, what is blocked, and what needs review.
 
-3. **Conversation stays attached to work objects**
-   “Chat with CEO” should still resolve to strategy threads, decisions, tasks, or approvals.
+3. **Conversation stays attached to work**
+   Discussion should resolve to missions, procedures, work items, approvals, and outputs.
 
 4. **Progressive disclosure**
-   Top layer: human-readable summary. Middle layer: checklist/steps/artifacts. Bottom layer: raw logs/tool calls/transcript.
+   Top layer: human-readable summary. Middle layer: steps, artifacts, approvals, outputs. Bottom layer: raw logs, tool calls, and transcripts.
 
 5. **Output-first**
-   Work is not done until the user can see the result: file, document, preview link, screenshot, plan, or PR.
+   Work is not done until the user can see the result in the right form and in the right place.
 
 6. **Local-first, cloud-ready**
    The mental model should not change between local solo use and shared/private or public/cloud deployment.
 
 7. **Safe autonomy**
-   Auto mode is allowed; hidden token burn is not.
+   Auto mode is allowed; hidden spend, silent failures, and invisible exceptions are not.
 
 8. **Thin core, rich edges**
-   Put optional chat, knowledge, and special surfaces into plugins/extensions rather than bloating the control plane.
+   Keep the core focused on operating the company. Push specialized surfaces into plugins and extensions.
+
+## Further Detail
+
+See [SPEC.md](./SPEC.md) for the long-horizon technical specification and [SPEC-implementation.md](./SPEC-implementation.md) for the current V1 implementation contract.

@@ -5,6 +5,7 @@ import type {
   AdapterSkillEntry,
   AdapterSkillSnapshot,
 } from "./types.js";
+import { joinPromptSections, renderTemplate } from "./prompt-utils.js";
 
 export interface RunProcessResult {
   exitCode: number | null;
@@ -155,42 +156,6 @@ export function parseJson(value: string): Record<string, unknown> | null {
 export function appendWithCap(prev: string, chunk: string, cap = MAX_CAPTURE_BYTES) {
   const combined = prev + chunk;
   return combined.length > cap ? combined.slice(combined.length - cap) : combined;
-}
-
-export function resolvePathValue(obj: Record<string, unknown>, dottedPath: string) {
-  const parts = dottedPath.split(".");
-  let cursor: unknown = obj;
-
-  for (const part of parts) {
-    if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) {
-      return "";
-    }
-    cursor = (cursor as Record<string, unknown>)[part];
-  }
-
-  if (cursor === null || cursor === undefined) return "";
-  if (typeof cursor === "string") return cursor;
-  if (typeof cursor === "number" || typeof cursor === "boolean") return String(cursor);
-
-  try {
-    return JSON.stringify(cursor);
-  } catch {
-    return "";
-  }
-}
-
-export function renderTemplate(template: string, data: Record<string, unknown>) {
-  return template.replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g, (_, path) => resolvePathValue(data, path));
-}
-
-export function joinPromptSections(
-  sections: Array<string | null | undefined>,
-  separator = "\n\n",
-) {
-  return sections
-    .map((value) => (typeof value === "string" ? value.trim() : ""))
-    .filter(Boolean)
-    .join(separator);
 }
 
 export function redactEnvForLogs(env: Record<string, string>): Record<string, string> {
@@ -726,6 +691,7 @@ export async function runChildProcess(
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     onLogError?: (err: unknown, runId: string, message: string) => void;
+    fatalOnLogError?: boolean;
     onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     stdin?: string;
   },
@@ -777,7 +743,23 @@ export async function runChildProcess(
         let timedOut = false;
         let stdout = "";
         let stderr = "";
+        let logError: Error | null = null;
         let logChain: Promise<void> = Promise.resolve();
+
+        const handleLogFailure = (err: unknown, stream: "stdout" | "stderr") => {
+          onLogError(err, runId, `failed to append ${stream} log chunk`);
+          if (!opts.fatalOnLogError || logError) {
+            return;
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          logError = new Error(message || `failed to append ${stream} log chunk`);
+          if (!child.killed) {
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!child.killed) child.kill("SIGKILL");
+            }, Math.max(1, opts.graceSec) * 1000);
+          }
+        };
 
         const timeout =
           opts.timeoutSec > 0
@@ -797,7 +779,7 @@ export async function runChildProcess(
           stdout = appendWithCap(stdout, text);
           logChain = logChain
             .then(() => opts.onLog("stdout", text))
-            .catch((err) => onLogError(err, runId, "failed to append stdout log chunk"));
+            .catch((err) => handleLogFailure(err, "stdout"));
         });
 
         child.stderr?.on("data", (chunk: unknown) => {
@@ -805,7 +787,7 @@ export async function runChildProcess(
           stderr = appendWithCap(stderr, text);
           logChain = logChain
             .then(() => opts.onLog("stderr", text))
-            .catch((err) => onLogError(err, runId, "failed to append stderr log chunk"));
+            .catch((err) => handleLogFailure(err, "stderr"));
         });
 
         child.on("error", (err: Error) => {
@@ -824,6 +806,10 @@ export async function runChildProcess(
           if (timeout) clearTimeout(timeout);
           runningProcesses.delete(runId);
           void logChain.finally(() => {
+            if (logError) {
+              reject(logError);
+              return;
+            }
             resolve({
               exitCode: code,
               signal,
