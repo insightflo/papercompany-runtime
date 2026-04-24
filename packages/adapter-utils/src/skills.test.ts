@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import path from "node:path";
 import {
+  buildPersistentSkillSnapshot,
+  readInstalledSkillTargets,
+} from "./server-utils.js";
+import {
   materializeProviderSkills,
   resolveProviderSkillsDir,
 } from "./skills.js";
@@ -140,6 +144,58 @@ describe("materializeProviderSkills", () => {
       expect(await readFile(path.join(workDir, ".claude", "skills", "design-guide", "notes.md"), "utf8")).toBe(
         "v2\n",
       );
+    });
+  });
+
+  it("marks copied Papercompany-managed skills as installed in persistent snapshots", async () => {
+    await withTempDir(async (dir) => {
+      const workDir = path.join(dir, "work");
+      const sourceDir = path.join(dir, "source", "design-guide");
+      await mkdir(sourceDir, { recursive: true });
+      await writeFile(path.join(sourceDir, "SKILL.md"), "# Design Guide\n", "utf8");
+
+      await materializeProviderSkills({
+        adapterType: "gemini-local",
+        workDir,
+        env: {},
+        entries: [
+          {
+            key: "papercompany/design-guide",
+            runtimeName: "design-guide",
+            sourceDir,
+            revision: "rev-1",
+          },
+        ],
+      });
+
+      const skillsHome = path.join(workDir, ".gemini", "skills");
+      const installed = await readInstalledSkillTargets(skillsHome);
+      const snapshot = buildPersistentSkillSnapshot({
+        adapterType: "gemini_local",
+        availableEntries: [
+          {
+            key: "papercompany/design-guide",
+            runtimeName: "design-guide",
+            source: sourceDir,
+          },
+        ],
+        desiredSkills: ["papercompany/design-guide"],
+        installed,
+        skillsHome,
+        missingDetail: "missing",
+        externalConflictDetail: "external conflict",
+        externalDetail: "external",
+      });
+
+      expect(installed.get("design-guide")).toMatchObject({
+        kind: "directory",
+        managedKey: "papercompany/design-guide",
+        managedRevision: "rev-1",
+      });
+      expect(snapshot.entries.find((entry) => entry.key === "papercompany/design-guide")).toMatchObject({
+        managed: true,
+        state: "installed",
+      });
     });
   });
 

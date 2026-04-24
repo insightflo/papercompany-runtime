@@ -1,6 +1,3 @@
-import { constants as fsConstants, promises as fs } from "node:fs";
-import path from "node:path";
-
 export type ProviderSkillDeliveryMode = "provider_native" | "sidecar_only" | "unsupported";
 
 export interface ProviderSkillsDirResolution {
@@ -32,35 +29,44 @@ const PHASE_A_PROVIDER_DIRS: Record<string, (workDir: string, env: Record<string
   skillsDir: string;
   warnings?: string[];
 }> = {
-  "claude-local": (workDir) => ({ skillsDir: path.join(workDir, ".claude", "skills") }),
+  "claude-local": (workDir) => ({ skillsDir: joinPath(workDir, ".claude", "skills") }),
   "codex-local": (workDir, env) => {
     const codexHome = env.CODEX_HOME?.trim();
-    if (codexHome) return { skillsDir: path.join(codexHome, "skills") };
+    if (codexHome) return { skillsDir: joinPath(codexHome, "skills") };
     return {
-      skillsDir: path.join(workDir, ".codex", "skills"),
+      skillsDir: joinPath(workDir, ".codex", "skills"),
       warnings: ["codex-local CODEX_HOME is unset; using Papercompany workDir fallback .codex/skills."],
     };
   },
-  "gemini-local": (workDir) => ({ skillsDir: path.join(workDir, ".gemini", "skills") }),
-  "opencode-local": (workDir) => ({ skillsDir: path.join(workDir, ".config", "opencode", "skills") }),
-  "cursor-local": (workDir) => ({ skillsDir: path.join(workDir, ".cursor", "skills") }),
+  "gemini-local": (workDir) => ({ skillsDir: joinPath(workDir, ".gemini", "skills") }),
+  "opencode-local": (workDir) => ({ skillsDir: joinPath(workDir, ".config", "opencode", "skills") }),
+  "cursor-local": (workDir) => ({ skillsDir: joinPath(workDir, ".cursor", "skills") }),
   "hermes": (workDir, env) => {
     const hermesHome = env.HERMES_HOME?.trim();
-    if (hermesHome) return { skillsDir: path.join(hermesHome, "skills") };
+    if (hermesHome) return { skillsDir: joinPath(hermesHome, "skills") };
     return {
-      skillsDir: path.join(workDir, ".hermes", "skills"),
+      skillsDir: joinPath(workDir, ".hermes", "skills"),
       warnings: ["hermes HERMES_HOME is unset; using Papercompany workDir fallback .hermes/skills."],
     };
   },
   "hermes-local": (workDir, env) => {
     const hermesHome = env.HERMES_HOME?.trim();
-    if (hermesHome) return { skillsDir: path.join(hermesHome, "skills") };
+    if (hermesHome) return { skillsDir: joinPath(hermesHome, "skills") };
     return {
-      skillsDir: path.join(workDir, ".hermes", "skills"),
+      skillsDir: joinPath(workDir, ".hermes", "skills"),
       warnings: ["hermes-local HERMES_HOME is unset; using Papercompany workDir fallback .hermes/skills."],
     };
   },
 };
+
+function joinPath(first: string, ...rest: string[]): string {
+  let out = first.replace(/[\\/]+$/, "");
+  for (const part of rest) {
+    const clean = part.replace(/^[\\/]+|[\\/]+$/g, "");
+    if (clean) out = out ? `${out}/${clean}` : clean;
+  }
+  return out;
+}
 
 function normalizeAdapterType(adapterType: string): string {
   return adapterType.trim().toLowerCase().replaceAll("_", "-");
@@ -76,7 +82,7 @@ export function resolveProviderSkillsDir(options: {
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
 }): ProviderSkillsDirResolution {
   const adapterType = normalizeAdapterType(options.adapterType);
-  const sidecarDir = path.join(options.workDir, ".papercompany", "agent-context");
+  const sidecarDir = joinPath(options.workDir, ".papercompany", "agent-context");
   const resolver = PHASE_A_PROVIDER_DIRS[adapterType];
   if (!resolver) {
     return {
@@ -98,6 +104,7 @@ export function resolveProviderSkillsDir(options: {
 }
 
 async function pathExists(candidate: string): Promise<boolean> {
+  const { constants: fsConstants, promises: fs } = await import("node:fs");
   try {
     await fs.access(candidate, fsConstants.F_OK);
     return true;
@@ -107,8 +114,9 @@ async function pathExists(candidate: string): Promise<boolean> {
 }
 
 async function readVersionMarker(targetDir: string): Promise<Record<string, unknown> | null> {
+  const { promises: fs } = await import("node:fs");
   try {
-    const raw = await fs.readFile(path.join(targetDir, ".papercompany-version"), "utf8");
+    const raw = await fs.readFile(joinPath(targetDir, ".papercompany-version"), "utf8");
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
     return null;
@@ -116,11 +124,12 @@ async function readVersionMarker(targetDir: string): Promise<Record<string, unkn
 }
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
+  const { promises: fs } = await import("node:fs");
   const entries = await fs.readdir(sourceDir, { withFileTypes: true });
   await fs.mkdir(targetDir, { recursive: true });
   for (const entry of entries) {
-    const source = path.join(sourceDir, entry.name);
-    const target = path.join(targetDir, entry.name);
+    const source = joinPath(sourceDir, entry.name);
+    const target = joinPath(targetDir, entry.name);
     if (entry.isDirectory()) {
       await copyDirectoryContents(source, target);
       continue;
@@ -137,6 +146,7 @@ async function writeVersionMarker(options: {
   adapterType: string;
   timestamp: string;
 }): Promise<void> {
+  const { promises: fs } = await import("node:fs");
   const payload = {
     managedBy: "papercompany",
     key: options.entry.key,
@@ -146,7 +156,7 @@ async function writeVersionMarker(options: {
     materializedAt: options.timestamp,
   };
   await fs.writeFile(
-    path.join(options.targetDir, ".papercompany-version"),
+    joinPath(options.targetDir, ".papercompany-version"),
     `${JSON.stringify(payload, null, 2)}\n`,
     "utf8",
   );
@@ -171,6 +181,7 @@ export async function materializeProviderSkills(options: {
     warnings: [...resolution.warnings],
   };
 
+  const { promises: fs } = await import("node:fs");
   await fs.mkdir(resolution.sidecarDir, { recursive: true });
 
   if (resolution.mode !== "provider_native" || !resolution.skillsDir) {
@@ -181,7 +192,7 @@ export async function materializeProviderSkills(options: {
   const timestamp = options.timestamp ?? new Date().toISOString();
 
   for (const entry of options.entries) {
-    const targetDir = path.join(resolution.skillsDir, entry.runtimeName);
+    const targetDir = joinPath(resolution.skillsDir, entry.runtimeName);
     const exists = await pathExists(targetDir);
     const marker = exists ? await readVersionMarker(targetDir) : null;
 
@@ -213,5 +224,6 @@ export async function materializeProviderSkills(options: {
 }
 
 async function rmManagedDirectory(targetDir: string): Promise<void> {
+  const { promises: fs } = await import("node:fs");
   await fs.rm(targetDir, { recursive: true, force: true });
 }

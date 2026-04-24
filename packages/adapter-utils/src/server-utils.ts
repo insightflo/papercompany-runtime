@@ -55,6 +55,9 @@ export interface PaperclipSkillEntry {
 export interface InstalledSkillTarget {
   targetPath: string | null;
   kind: "symlink" | "directory" | "file";
+  managedSourcePath?: string | null;
+  managedKey?: string | null;
+  managedRevision?: string | null;
 }
 
 interface PersistentSkillSnapshotOptions {
@@ -120,6 +123,22 @@ function resolveInstalledEntryTarget(
     return { targetPath: fullPath, kind: "directory" };
   }
   return { targetPath: fullPath, kind: "file" };
+}
+
+async function readManagedSkillMarker(targetPath: string | null): Promise<Pick<
+  InstalledSkillTarget,
+  "managedSourcePath" | "managedKey" | "managedRevision"
+> | null> {
+  if (!targetPath) return null;
+  const raw = await fs.readFile(path.join(targetPath, ".papercompany-version"), "utf8").catch(() => null);
+  if (!raw) return null;
+  const parsed = parseJson(raw);
+  if (parsed?.managedBy !== "papercompany") return null;
+  return {
+    managedSourcePath: typeof parsed.sourcePath === "string" ? parsed.sourcePath : null,
+    managedKey: typeof parsed.key === "string" ? parsed.key : null,
+    managedRevision: typeof parsed.revision === "string" ? parsed.revision : null,
+  };
 }
 
 export function parseObject(value: unknown): Record<string, unknown> {
@@ -357,7 +376,9 @@ export async function readInstalledSkillTargets(skillsHome: string): Promise<Map
   for (const entry of entries) {
     const fullPath = path.join(skillsHome, entry.name);
     const linkedPath = entry.isSymbolicLink() ? await fs.readlink(fullPath).catch(() => null) : null;
-    out.set(entry.name, resolveInstalledEntryTarget(skillsHome, entry.name, entry, linkedPath));
+    const target = resolveInstalledEntryTarget(skillsHome, entry.name, entry, linkedPath);
+    const marker = target.kind === "directory" ? await readManagedSkillMarker(target.targetPath) : null;
+    out.set(entry.name, marker ? { ...target, ...marker } : target);
   }
   return out;
 }
@@ -389,7 +410,12 @@ export function buildPersistentSkillSnapshot(
     let managed = false;
     let detail: string | null = null;
 
-    if (installedEntry?.targetPath === available.source) {
+    const isManagedInstall =
+      installedEntry?.targetPath === available.source ||
+      installedEntry?.managedSourcePath === available.source ||
+      installedEntry?.managedKey === available.key;
+
+    if (isManagedInstall) {
       managed = true;
       state = desired ? "installed" : "stale";
       detail = installedDetail ?? null;
