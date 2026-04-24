@@ -20,6 +20,7 @@ describe("resolveProviderSkillsDir", () => {
   it("resolves Phase A provider-native skill directories", () => {
     const workDir = "/workspace/project";
     const codexHome = "/runtime/codex-home";
+    const hermesHome = "/runtime/hermes-home";
 
     expect(resolveProviderSkillsDir({ adapterType: "claude-local", workDir }).skillsDir).toBe(
       path.join(workDir, ".claude", "skills"),
@@ -43,6 +44,13 @@ describe("resolveProviderSkillsDir", () => {
     expect(resolveProviderSkillsDir({ adapterType: "cursor-local", workDir }).skillsDir).toBe(
       path.join(workDir, ".cursor", "skills"),
     );
+    expect(
+      resolveProviderSkillsDir({ adapterType: "hermes", workDir, env: { HERMES_HOME: hermesHome } }).skillsDir,
+    ).toBe(path.join(hermesHome, "skills"));
+    expect(resolveProviderSkillsDir({ adapterType: "hermes-local", workDir, env: {} }).skillsDir).toBe(
+      path.join(workDir, ".hermes", "skills"),
+    );
+    expect(resolveProviderSkillsDir({ adapterType: "hermes_local", workDir, env: {} }).mode).toBe("provider_native");
   });
 
   it("does not fake provider-native directories for excluded adapters", () => {

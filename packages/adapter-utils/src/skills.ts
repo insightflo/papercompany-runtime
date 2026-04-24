@@ -44,6 +44,22 @@ const PHASE_A_PROVIDER_DIRS: Record<string, (workDir: string, env: Record<string
   "gemini-local": (workDir) => ({ skillsDir: path.join(workDir, ".gemini", "skills") }),
   "opencode-local": (workDir) => ({ skillsDir: path.join(workDir, ".config", "opencode", "skills") }),
   "cursor-local": (workDir) => ({ skillsDir: path.join(workDir, ".cursor", "skills") }),
+  "hermes": (workDir, env) => {
+    const hermesHome = env.HERMES_HOME?.trim();
+    if (hermesHome) return { skillsDir: path.join(hermesHome, "skills") };
+    return {
+      skillsDir: path.join(workDir, ".hermes", "skills"),
+      warnings: ["hermes HERMES_HOME is unset; using Papercompany workDir fallback .hermes/skills."],
+    };
+  },
+  "hermes-local": (workDir, env) => {
+    const hermesHome = env.HERMES_HOME?.trim();
+    if (hermesHome) return { skillsDir: path.join(hermesHome, "skills") };
+    return {
+      skillsDir: path.join(workDir, ".hermes", "skills"),
+      warnings: ["hermes-local HERMES_HOME is unset; using Papercompany workDir fallback .hermes/skills."],
+    };
+  },
 };
 
 function normalizeAdapterType(adapterType: string): string {
