@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, companyMemberships, instanceUserRoles } from "@paperclipai/db";
-import type { DeploymentMode } from "@paperclipai/shared";
+import { agentApiKeys, companyMemberships, heartbeatRunEvents, instanceUserRoles } from "@paperclipai/db";
+import type { DeploymentMode, LiveEvent } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
@@ -44,6 +44,7 @@ interface UpgradeContext {
   companyId: string;
   actorType: "board" | "agent";
   actorId: string;
+  heartbeatReplayCursors: HeartbeatReplayCursor[];
 }
 
 interface IncomingMessageWithContext extends IncomingMessage {
@@ -69,6 +70,102 @@ function parseCompanyId(pathname: string) {
   } catch {
     return null;
   }
+}
+
+export interface HeartbeatReplayCursor {
+  runId: string;
+  afterSeq: number;
+}
+
+interface HeartbeatRunEventForReplay {
+  id: number;
+  companyId: string;
+  runId: string;
+  agentId: string;
+  seq: number;
+  eventType: string;
+  stream: string | null;
+  level: string | null;
+  color: string | null;
+  message: string | null;
+  payload: Record<string, unknown> | null | undefined;
+  createdAt: Date;
+}
+
+export function parseHeartbeatReplayCursors(url: URL): HeartbeatReplayCursor[] {
+  const out: HeartbeatReplayCursor[] = [];
+  for (const raw of url.searchParams.getAll("heartbeatRun")) {
+    if (!raw.includes(":")) continue;
+    const [rawRunId, rawAfterSeq] = raw.split(":");
+    const runId = rawRunId?.trim();
+    if (!runId) continue;
+    const parsedSeq = Number(rawAfterSeq ?? 0);
+    out.push({
+      runId,
+      afterSeq: Number.isFinite(parsedSeq) && parsedSeq > 0 ? Math.floor(parsedSeq) : 0,
+    });
+  }
+  return out;
+}
+
+function heartbeatRunEventToLiveEvent(event: HeartbeatRunEventForReplay): LiveEvent {
+  return {
+    id: event.id,
+    companyId: event.companyId,
+    type: "heartbeat.run.event",
+    createdAt: event.createdAt.toISOString(),
+    payload: {
+      runId: event.runId,
+      agentId: event.agentId,
+      seq: event.seq,
+      eventType: event.eventType,
+      stream: event.stream ?? null,
+      level: event.level ?? null,
+      color: event.color ?? null,
+      message: event.message ?? null,
+      payload: event.payload ?? null,
+      replay: true,
+    },
+  };
+}
+
+export async function replayHeartbeatRunEvents(options: {
+  companyId: string;
+  cursors: HeartbeatReplayCursor[];
+  listEvents: (runId: string, afterSeq: number, limit: number) => Promise<HeartbeatRunEventForReplay[]>;
+  send: (event: LiveEvent) => void;
+}): Promise<number> {
+  let sent = 0;
+  for (const cursor of options.cursors) {
+    const events = await options.listEvents(cursor.runId, cursor.afterSeq, 250);
+    for (const event of events) {
+      if (event.companyId !== options.companyId) continue;
+      options.send(heartbeatRunEventToLiveEvent(event));
+      sent += 1;
+    }
+  }
+  return sent;
+}
+
+async function listHeartbeatRunEventsForReplay(
+  db: Db,
+  companyId: string,
+  runId: string,
+  afterSeq: number,
+  limit: number,
+) {
+  return db
+    .select()
+    .from(heartbeatRunEvents)
+    .where(
+      and(
+        eq(heartbeatRunEvents.companyId, companyId),
+        eq(heartbeatRunEvents.runId, runId),
+        gt(heartbeatRunEvents.seq, afterSeq),
+      ),
+    )
+    .orderBy(asc(heartbeatRunEvents.seq))
+    .limit(Math.max(1, Math.min(limit, 250)));
 }
 
 function parseBearerToken(rawAuth: string | string[] | undefined) {
@@ -113,6 +210,7 @@ async function authorizeUpgrade(
         companyId,
         actorType: "board",
         actorId: "board",
+        heartbeatReplayCursors: parseHeartbeatReplayCursors(url),
       };
     }
 
@@ -149,6 +247,7 @@ async function authorizeUpgrade(
       companyId,
       actorType: "board",
       actorId: userId,
+      heartbeatReplayCursors: parseHeartbeatReplayCursors(url),
     };
   }
 
@@ -172,6 +271,7 @@ async function authorizeUpgrade(
     companyId,
     actorType: "agent",
     actorId: key.agentId,
+    heartbeatReplayCursors: parseHeartbeatReplayCursors(url),
   };
 }
 
@@ -209,6 +309,21 @@ export function setupLiveEventsWebSocketServer(
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify(event));
     });
+
+    if (context.heartbeatReplayCursors.length > 0) {
+      void replayHeartbeatRunEvents({
+        companyId: context.companyId,
+        cursors: context.heartbeatReplayCursors,
+        listEvents: (runId, afterSeq, limit) =>
+          listHeartbeatRunEventsForReplay(db, context.companyId, runId, afterSeq, limit),
+        send: (event) => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify(event));
+        },
+      }).catch((err) => {
+        logger.warn({ err, companyId: context.companyId }, "failed to replay heartbeat run events");
+      });
+    }
 
     cleanupByClient.set(socket, unsubscribe);
     aliveByClient.set(socket, true);

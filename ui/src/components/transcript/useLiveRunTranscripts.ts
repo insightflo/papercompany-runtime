@@ -68,6 +68,7 @@ export function useLiveRunTranscripts({
   const seenChunkKeysRef = useRef(new Set<string>());
   const pendingLogRowsByRunRef = useRef(new Map<string, string>());
   const logOffsetByRunRef = useRef(new Map<string, number>());
+  const lastEventSeqByRunRef = useRef(new Map<string, number>());
   const { data: generalSettings } = useQuery({
     queryKey: queryKeys.instance.generalSettings,
     queryFn: () => instanceSettingsApi.getGeneral(),
@@ -129,6 +130,11 @@ export function useLiveRunTranscripts({
         logOffsetByRunRef.current.delete(runId);
       }
     }
+    for (const runId of lastEventSeqByRunRef.current.keys()) {
+      if (!knownRunIds.has(runId)) {
+        lastEventSeqByRunRef.current.delete(runId);
+      }
+    }
   }, [runs]);
 
   useEffect(() => {
@@ -186,8 +192,13 @@ export function useLiveRunTranscripts({
     const connect = () => {
       if (closed) return;
       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      const url = `${protocol}://${window.location.host}/api/companies/${encodeURIComponent(companyId)}/events/ws`;
-      socket = new WebSocket(url);
+      const url = new URL(
+        `${protocol}://${window.location.host}/api/companies/${encodeURIComponent(companyId)}/events/ws`,
+      );
+      for (const runId of activeRunIds) {
+        url.searchParams.append("heartbeatRun", `${runId}:${lastEventSeqByRunRef.current.get(runId) ?? 0}`);
+      }
+      socket = new WebSocket(url.toString());
 
       socket.onmessage = (message) => {
         const raw = typeof message.data === "string" ? message.data : "";
@@ -227,6 +238,9 @@ export function useLiveRunTranscripts({
 
         if (event.type === "heartbeat.run.event") {
           const seq = typeof payload["seq"] === "number" ? payload["seq"] : null;
+          if (seq !== null) {
+            lastEventSeqByRunRef.current.set(runId, Math.max(lastEventSeqByRunRef.current.get(runId) ?? 0, seq));
+          }
           const eventType = readString(payload["eventType"]) ?? "event";
           const messageText = readString(payload["message"]) ?? eventType;
           appendChunks(runId, [{
