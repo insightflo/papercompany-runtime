@@ -8,6 +8,7 @@ import {
   asBoolean,
   asStringArray,
   parseObject,
+  parseJson,
   buildPaperclipEnv,
   redactEnvForLogs,
   ensureAbsoluteDirectory,
@@ -495,6 +496,37 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return args;
   };
 
+  const emitSessionUpdate = (() => {
+    const seen = new Set<string>();
+    return async (sessionId: string | null) => {
+      if (!sessionId || seen.has(sessionId) || !ctx.onSessionUpdate) return;
+      seen.add(sessionId);
+      await ctx.onSessionUpdate({
+        sessionId,
+        sessionParams: {
+          sessionId,
+          cwd,
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+          ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+        },
+        sessionDisplayId: sessionId,
+        source: "stdout",
+        confidence: "provider_reported",
+        observedAt: new Date().toISOString(),
+      });
+    };
+  })();
+
+  const maybeEmitSessionUpdateFromStdoutLine = async (line: string) => {
+    const event = parseJson(line);
+    if (!event) return;
+    if (asString(event.type, "") !== "thread.started") return;
+    const reportedSessionId = asString(event.thread_id, "").trim();
+    if (!reportedSessionId) return;
+    await emitSessionUpdate(reportedSessionId);
+  };
+
   const runAttempt = async (resumeSessionId: string | null) => {
     const args = buildArgs(resumeSessionId);
     const sensitiveValues = [env.PAPERCLIP_API_KEY, authToken].filter(
@@ -532,6 +564,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           const lines = stdoutBuffer.split("\n");
           stdoutBuffer = lines.pop() ?? "";
           for (const line of lines) {
+            await maybeEmitSessionUpdateFromStdoutLine(line);
             await onLog(stream, `${sanitizeCodexLogLine(line, sensitiveValues)}\n`);
           }
           return;

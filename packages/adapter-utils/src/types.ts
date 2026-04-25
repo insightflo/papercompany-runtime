@@ -112,6 +112,15 @@ export interface AdapterInvocationMeta {
   context?: Record<string, unknown>;
 }
 
+export interface AdapterSessionUpdate {
+  sessionId: string;
+  sessionParams?: Record<string, unknown> | null;
+  sessionDisplayId?: string | null;
+  source: "stdout" | "stderr" | "adapter";
+  confidence: "provider_reported" | "adapter_allocated";
+  observedAt: string;
+}
+
 export interface AdapterExecutionContext {
   runId: string;
   agent: AdapterAgent;
@@ -121,6 +130,7 @@ export interface AdapterExecutionContext {
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
   onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
+  onSessionUpdate?: (update: AdapterSessionUpdate) => Promise<void>;
   authToken?: string;
 }
 

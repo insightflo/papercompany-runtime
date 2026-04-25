@@ -22,7 +22,7 @@ import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
-import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, UsageSummary } from "../adapters/index.js";
+import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
@@ -3054,6 +3054,8 @@ export function heartbeatService(db: Db) {
           );
         }
       }
+      let earlySessionUpdate: AdapterSessionUpdate | null = null;
+      let earlySessionIdAfter: string | null = null;
       const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
         if (meta.env && secretKeys.size > 0) {
           for (const key of secretKeys) {
@@ -3066,6 +3068,35 @@ export function heartbeatService(db: Db) {
           level: "info",
           message: "adapter invocation",
           payload: meta as unknown as Record<string, unknown>,
+        });
+      };
+      const onAdapterSessionUpdate = async (update: AdapterSessionUpdate) => {
+        const sessionId = readNonEmptyString(update.sessionId);
+        if (!sessionId) return;
+        const sessionDisplayId = readNonEmptyString(update.sessionDisplayId) ?? sessionId;
+        if (earlySessionUpdate?.sessionDisplayId === sessionDisplayId || earlySessionUpdate?.sessionId === sessionId) {
+          return;
+        }
+        earlySessionUpdate = {
+          ...update,
+          sessionId,
+          sessionDisplayId,
+          sessionParams: parseObject(update.sessionParams),
+        };
+        earlySessionIdAfter = sessionDisplayId ?? sessionId;
+        await db
+          .update(heartbeatRuns)
+          .set({
+            sessionIdAfter: sessionDisplayId,
+            updatedAt: new Date(),
+          })
+          .where(eq(heartbeatRuns.id, run.id));
+        await appendRunEvent(currentRun, seq++, {
+          eventType: "adapter.session.update",
+          stream: "system",
+          level: "info",
+          message: "adapter session discovered",
+          payload: earlySessionUpdate as unknown as Record<string, unknown>,
         });
       };
 
@@ -3129,6 +3160,7 @@ export function heartbeatService(db: Db) {
         context,
         onLog,
         onMeta: onAdapterMeta,
+        onSessionUpdate: onAdapterSessionUpdate,
         onSpawn: async (meta) => {
           await persistRunProcessMetadata(run.id, meta);
         },
@@ -3206,6 +3238,11 @@ export function heartbeatService(db: Db) {
         previousDisplayId: runtimeForAdapter.sessionDisplayId,
         previousLegacySessionId: runtimeForAdapter.sessionId,
       });
+      const persistedSessionIdAfter =
+        nextSessionState.displayId ??
+        nextSessionState.legacySessionId ??
+        earlySessionIdAfter ??
+        null;
       const rawUsage = normalizeUsageTotals(adapterResult.usage);
       const sessionUsageResolution = await resolveNormalizedUsageForSession({
         agentId: agent.id,
@@ -3261,8 +3298,8 @@ export function heartbeatService(db: Db) {
                 rawOutputTokens: rawUsage.outputTokens,
               } : {}),
               ...(sessionUsageResolution.derivedFromSessionTotals ? { usageSource: "session_delta" } : {}),
-              ...((nextSessionState.displayId ?? nextSessionState.legacySessionId)
-                ? { persistedSessionId: nextSessionState.displayId ?? nextSessionState.legacySessionId }
+              ...((persistedSessionIdAfter)
+                ? { persistedSessionId: persistedSessionIdAfter }
                 : {}),
               sessionReused: runtimeForAdapter.sessionId != null || runtimeForAdapter.sessionDisplayId != null,
               taskSessionReused: taskSessionForRun != null,
@@ -3374,7 +3411,7 @@ export function heartbeatService(db: Db) {
         signal: adapterResult.signal,
         usageJson,
         resultJson: adapterResult.resultJson ?? null,
-        sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
+        sessionIdAfter: persistedSessionIdAfter,
         stdoutExcerpt,
         stderrExcerpt,
         logBytes: logSummary?.bytes,

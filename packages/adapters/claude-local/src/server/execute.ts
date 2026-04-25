@@ -445,6 +445,39 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : `Claude exited with code ${proc.exitCode ?? -1}`;
   };
 
+  const emitSessionUpdate = (() => {
+    const seen = new Set<string>();
+    return async (sessionId: string | null) => {
+      if (!sessionId || seen.has(sessionId) || !ctx.onSessionUpdate) return;
+      seen.add(sessionId);
+      await ctx.onSessionUpdate({
+        sessionId,
+        sessionParams: {
+          sessionId,
+          cwd,
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+          ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+        },
+        sessionDisplayId: sessionId,
+        source: "stdout",
+        confidence: "provider_reported",
+        observedAt: new Date().toISOString(),
+      });
+    };
+  })();
+
+  const maybeEmitSessionUpdateFromStdoutLine = async (line: string) => {
+    const event = parseJson(line);
+    if (!event) return;
+    const type = asString(event.type, "");
+    const subtype = asString(event.subtype, "");
+    if (type !== "system" || subtype !== "init") return;
+    const reportedSessionId = asString(event.session_id, "").trim();
+    if (!reportedSessionId) return;
+    await emitSessionUpdate(reportedSessionId);
+  };
+
   const runAttempt = async (resumeSessionId: string | null) => {
     const args = buildClaudeArgs(resumeSessionId);
     if (onMeta) {
@@ -461,6 +494,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    let stdoutBuffer = "";
     const proc = await runChildProcess(runId, command, args, {
       cwd,
       env,
@@ -469,8 +503,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       fatalOnLogError: true,
       onSpawn,
-      onLog,
+      onLog: async (stream, chunk) => {
+        if (stream === "stdout") {
+          stdoutBuffer += chunk;
+          const lines = stdoutBuffer.split("\n");
+          stdoutBuffer = lines.pop() ?? "";
+          for (const line of lines) {
+            await maybeEmitSessionUpdateFromStdoutLine(line);
+            await onLog(stream, `${line}\n`);
+          }
+          return;
+        }
+        await onLog(stream, chunk);
+      },
     });
+    if (stdoutBuffer) {
+      await maybeEmitSessionUpdateFromStdoutLine(stdoutBuffer);
+      await onLog("stdout", stdoutBuffer);
+    }
 
     const parsedStream = parseClaudeStreamJson(proc.stdout);
     const parsed = parsedStream.resultJson ?? parseJson(proc.stdout);

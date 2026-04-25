@@ -1869,6 +1869,61 @@ describe("heartbeat context budget preflight", () => {
     expect(resolved).toBe("legacy-mission-session");
   });
 
+  it("persists an early adapter session update on the heartbeat run before final result canonicalization", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Early Session",
+      issuePrefix: `PES${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Early Session Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    executeSpy.mockImplementationOnce(async ({ onSessionUpdate }) => {
+      await onSessionUpdate?.({
+        sessionId: "early-session-1",
+        sessionParams: { sessionId: "early-session-1", cwd: "/tmp/workspace" },
+        sessionDisplayId: "early-session-1",
+        source: "stdout",
+        confidence: "provider_reported",
+        observedAt: "2026-04-25T15:00:00.000Z",
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        usage: null,
+        provider: "test",
+        model: "test-model",
+        resultJson: null,
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual", {
+      actorType: "system",
+      actorId: "test-suite",
+    });
+
+    expect(run).not.toBeNull();
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(finalized.sessionIdAfter).toBe("early-session-1");
+  });
+
   it("persists the latest adapter session id back into the mission-session binding", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

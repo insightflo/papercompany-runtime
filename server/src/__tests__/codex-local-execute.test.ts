@@ -288,6 +288,60 @@ describe("codex execute", () => {
     }
   });
 
+  it("emits an early session update when Codex reports thread.started", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-session-update-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    try {
+      const sessionUpdates: unknown[] = [];
+      const result = await execute({
+        runId: "run-session-update",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        onLog: async () => {},
+        onSessionUpdate: async (update) => {
+          sessionUpdates.push(update);
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(sessionUpdates).toEqual([
+        expect.objectContaining({
+          sessionId: "codex-session-1",
+          sessionDisplayId: "codex-session-1",
+          source: "stdout",
+          confidence: "provider_reported",
+          sessionParams: expect.objectContaining({
+            sessionId: "codex-session-1",
+            cwd: workspace,
+          }),
+        }),
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("injects the shared runtime brief instead of raw handoff markdown", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-runtime-brief-"));
     const workspace = path.join(root, "workspace");

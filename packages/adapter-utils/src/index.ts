@@ -19,6 +19,7 @@ export type {
   AdapterSkillSnapshot,
   AdapterSkillContext,
   AdapterSessionCodec,
+  AdapterSessionUpdate,
   AdapterModel,
   HireApprovedPayload,
   HireApprovedHookResult,
