@@ -324,6 +324,53 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(workflowRun?.completedAt).toBeTruthy();
   });
 
+  it("creates unassigned issues for workflow steps without an agent", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Unassigned Workflow",
+      issuePrefix: `WU${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Unassigned Workflow",
+      stepsJson: [
+        {
+          id: "manual-review",
+          name: "Manual review",
+          agentId: "",
+          dependencies: [],
+          description: "Needs operator assignment later",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+    expect(result.status).toBe("running");
+
+    const createdIssues = await db.select().from(issues);
+    expect(createdIssues).toHaveLength(1);
+    expect(createdIssues[0]).toMatchObject({
+      title: "Unassigned Workflow: Manual review",
+      assigneeAgentId: null,
+      originKind: "workflow_execution",
+      originRunId: runId,
+    });
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+  });
+
   it("completes issue-less tool steps and advances dependent agent steps", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

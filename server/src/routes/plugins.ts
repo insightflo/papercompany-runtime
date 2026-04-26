@@ -1017,19 +1017,55 @@ export function pluginRoutes(
         if (companyId) {
           assertCompanyAccess(req, companyId);
           const nativeDefinitions = await workflowService.listDefinitions(db, companyId);
+          const nativeRuns = await workflowService.listRuns(db, { companyId });
+          const definitionNameById = new Map(nativeDefinitions.map((definition) => [definition.id, definition.name]));
+          const nativeRunSummaries = nativeRuns.map((run) => ({
+            id: run.id,
+            workflowName: definitionNameById.get(run.workflowId) ?? run.workflowId,
+            status: run.status,
+            startedAt: (run.startedAt ?? run.createdAt).toISOString(),
+            completedAt: run.completedAt?.toISOString(),
+            triggerSource: run.triggeredBy,
+          }));
           const resultRecord = result && typeof result === "object" ? result as Record<string, unknown> : {};
+          const pluginWorkflows = Array.isArray(resultRecord.workflows) ? resultRecord.workflows : [];
+          const pluginActiveRuns = Array.isArray(resultRecord.activeRuns) ? resultRecord.activeRuns : [];
+          const pluginRecentRuns = Array.isArray(resultRecord.recentRuns) ? resultRecord.recentRuns : [];
           res.json({
             data: {
               ...resultRecord,
-              workflows: nativeDefinitions.map((definition) => ({
-                id: definition.id,
-                companyId: definition.companyId,
-                name: definition.name,
-                status: "active",
-                steps: definition.steps,
-                createdAt: definition.createdAt,
-                updatedAt: definition.updatedAt,
-              })),
+              workflows: [
+                ...nativeDefinitions.map((definition) => ({
+                  id: definition.id,
+                  companyId: definition.companyId,
+                  name: definition.name,
+                  description: "",
+                  status: "active",
+                  steps: definition.steps.map((step) => {
+                    const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
+                    return {
+                      id: step.id,
+                      title: step.name,
+                      description: step.description ?? "",
+                      type: !step.agentId && toolNames.length > 0 ? "tool" : "agent",
+                      toolName: toolNames[0] ?? "",
+                      agentName: step.agentId,
+                      dependsOn: step.dependencies,
+                    };
+                  }),
+                  createdAt: definition.createdAt,
+                  updatedAt: definition.updatedAt,
+                })),
+                ...pluginWorkflows,
+              ],
+              activeRuns: [
+                ...nativeRunSummaries.filter((run) => run.status === "running"),
+                ...pluginActiveRuns,
+              ],
+              recentRuns: [
+                ...nativeRunSummaries.filter((run) => run.status !== "running").slice(0, 10),
+                ...pluginRecentRuns,
+              ],
             },
           });
           return;
@@ -1126,39 +1162,77 @@ export function pluginRoutes(
       res.json({ data: result });
     } catch (err) {
       const bridgeError = mapRpcErrorToBridgeError(err);
-      if (
+      const shouldUseWorkflowEngineNativeFallback =
         plugin.pluginKey === "insightflo.workflow-engine" &&
-        key === "create-workflow" &&
         bridgeError.code === "WORKER_ERROR" &&
-        bridgeError.message.includes("No action handler registered")
-      ) {
-        const params = body?.params ?? {};
-        const workflow = (params.workflow && typeof params.workflow === "object"
-          ? params.workflow
-          : params) as Record<string, unknown>;
-        const companyId = typeof params.companyId === "string"
-          ? params.companyId
-          : typeof body?.companyId === "string"
-            ? body.companyId
+        (bridgeError.message.includes("No action handler registered") ||
+          (key === "start-workflow" && bridgeError.message.includes("Workflow definition not found")));
+
+      if (shouldUseWorkflowEngineNativeFallback) {
+        if (key === "start-workflow") {
+          const params = actionParams;
+          const companyId = typeof params.companyId === "string"
+            ? params.companyId
+            : typeof body?.companyId === "string"
+              ? body.companyId
+              : undefined;
+          if (!companyId) {
+            res.status(400).json({ error: "companyId is required" });
+            return;
+          }
+          assertCompanyAccess(req, companyId);
+
+          const workflowId = typeof params.workflowId === "string" ? params.workflowId.trim() : "";
+          if (!workflowId) {
+            res.status(400).json({ error: "workflowId is required" });
+            return;
+          }
+
+          const missionId = typeof params.missionId === "string" && params.missionId.trim()
+            ? params.missionId.trim()
             : undefined;
-        if (!companyId) {
-          res.status(400).json({ error: "companyId is required" });
+          const triggeredBy = typeof params.triggerSource === "string" && params.triggerSource.trim()
+            ? params.triggerSource.trim()
+            : req.actor.type;
+          const run = await workflowService.trigger(db, {
+            companyId,
+            workflowId,
+            missionId,
+            triggeredBy,
+          });
+          res.json({ data: { run, ...run } });
           return;
         }
-        assertCompanyAccess(req, companyId);
-        const name = typeof workflow.name === "string" ? workflow.name.trim() : "";
-        if (!name) {
-          res.status(400).json({ error: "workflow.name is required" });
+
+        if (key === "create-workflow") {
+          const params = body?.params ?? {};
+          const workflow = (params.workflow && typeof params.workflow === "object"
+            ? params.workflow
+            : params) as Record<string, unknown>;
+          const companyId = typeof params.companyId === "string"
+            ? params.companyId
+            : typeof body?.companyId === "string"
+              ? body.companyId
+              : undefined;
+          if (!companyId) {
+            res.status(400).json({ error: "companyId is required" });
+            return;
+          }
+          assertCompanyAccess(req, companyId);
+          const name = typeof workflow.name === "string" ? workflow.name.trim() : "";
+          if (!name) {
+            res.status(400).json({ error: "workflow.name is required" });
+            return;
+          }
+          const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
+          const definition = await workflowService.createDefinition(db, {
+            companyId,
+            name,
+            steps: steps as never,
+          });
+          res.json({ data: { workflow: definition, ...definition } });
           return;
         }
-        const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
-        const definition = await workflowService.createDefinition(db, {
-          companyId,
-          name,
-          steps: steps as never,
-        });
-        res.json({ data: { workflow: definition, ...definition } });
-        return;
       }
       res.status(502).json(bridgeError);
     }

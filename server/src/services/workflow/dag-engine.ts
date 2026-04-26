@@ -284,11 +284,15 @@ async function createWorkflowStepIssue(input: {
   const issueSvc = issueService(input.db);
   const heartbeat = heartbeatService(input.db);
 
+  const assigneeAgentId = typeof input.step.agentId === "string" && input.step.agentId.trim()
+    ? input.step.agentId.trim()
+    : undefined;
+
   const createdIssue = await issueSvc.create(input.run.companyId, {
     title: `${input.definition.name}: ${input.step.name}`,
     description: input.step.description || "",
     status: "todo",
-    assigneeAgentId: input.step.agentId,
+    assigneeAgentId,
     missionId: input.run.missionId ?? null,
     originKind: "workflow_execution",
     originId: input.run.id,
