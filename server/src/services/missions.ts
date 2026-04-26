@@ -13,6 +13,7 @@ import {
   missionAgents,
   missionSessions,
   missions,
+  pluginEntities,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -213,6 +214,78 @@ function buildWorkflowRunProgress(steps: MissionWorkflowRunStep[]): MissionWorkf
       skippedSteps: 0,
     },
   );
+}
+
+type PluginWorkflowStepData = Record<string, unknown>;
+type PluginWorkflowDefinitionData = {
+  name?: unknown;
+  steps?: unknown;
+};
+type PluginWorkflowRunData = {
+  workflowId?: unknown;
+  workflowName?: unknown;
+  companyId?: unknown;
+  missionId?: unknown;
+  status?: unknown;
+  triggerSource?: unknown;
+  startedAt?: unknown;
+  completedAt?: unknown;
+};
+type PluginWorkflowStepRunData = {
+  runId?: unknown;
+  stepId?: unknown;
+  issueId?: unknown;
+  agentName?: unknown;
+  status?: unknown;
+  startedAt?: unknown;
+  completedAt?: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asTrimmedString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function parsePluginDate(value: unknown): Date | null {
+  const raw = asTrimmedString(value);
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? new Date(parsed) : null;
+}
+
+function normalizePluginWorkflowStepStatus(status: unknown): MissionWorkflowRunStep["status"] {
+  const normalized = asTrimmedString(status);
+  switch (normalized) {
+    case "done":
+      return "completed";
+    case "in_progress":
+      return "running";
+    case "failed":
+      return "failed";
+    case "skipped":
+      return "skipped";
+    case "running":
+    case "completed":
+    case "pending":
+      return normalizeMissionWorkflowStepStatus(normalized);
+    default:
+      return "pending";
+  }
+}
+
+function toPluginWorkflowStepData(value: unknown): PluginWorkflowStepData | null {
+  if (!isRecord(value)) return null;
+  const id = asTrimmedString(value.id);
+  if (!id) return null;
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -543,12 +616,12 @@ export function missionService(db: Db) {
       .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, missionId)))
       .orderBy(desc(workflowRuns.createdAt));
 
-    if (runs.length === 0) return [];
-
-    const allStepRuns = await db
-      .select()
-      .from(workflowStepRuns)
-      .where(inArray(workflowStepRuns.workflowRunId, runs.map((entry) => entry.run.id)));
+    const allStepRuns = runs.length
+      ? await db
+          .select()
+          .from(workflowStepRuns)
+          .where(inArray(workflowStepRuns.workflowRunId, runs.map((entry) => entry.run.id)))
+      : [];
 
     const stepIssueIds = Array.from(
       new Set(
@@ -582,7 +655,7 @@ export function missionService(db: Db) {
       stepIssues.map((issue) => [issue.id, issue]),
     );
 
-    return runs.map(({ run, workflowName, workflowSteps }) => {
+    const nativeDetails = runs.map(({ run, workflowName, workflowSteps }) => {
       const definitionSteps = ((workflowSteps as WorkflowStep[] | null) ?? []) as WorkflowStep[];
       const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
       const rawStepRuns = [...(stepRunsMap.get(run.id) ?? [])].sort((left, right) => {
@@ -641,6 +714,179 @@ export function missionService(db: Db) {
         progress: buildWorkflowRunProgress(steps),
       };
     });
+
+    const pluginRunEntities = (await db
+      .select()
+      .from(pluginEntities)
+      .where(and(
+        eq(pluginEntities.entityType, "workflow-run"),
+        eq(pluginEntities.scopeKind, "company"),
+        eq(pluginEntities.scopeId, mission.companyId),
+      )))
+      .filter((entity) => {
+        const data = entity.data as PluginWorkflowRunData;
+        return data.companyId === mission.companyId && data.missionId === missionId;
+      });
+
+    if (pluginRunEntities.length === 0) return nativeDetails;
+
+    const pluginWorkflowIds = Array.from(
+      new Set(pluginRunEntities.map((entity) => asTrimmedString((entity.data as PluginWorkflowRunData).workflowId)).filter((id): id is string => Boolean(id))),
+    );
+    const pluginRunIds = pluginRunEntities.map((entity) => entity.id);
+
+    const pluginDefinitionEntities = pluginWorkflowIds.length
+      ? await db
+          .select()
+          .from(pluginEntities)
+          .where(and(
+            eq(pluginEntities.entityType, "workflow-definition"),
+            eq(pluginEntities.scopeKind, "company"),
+            eq(pluginEntities.scopeId, mission.companyId),
+            inArray(pluginEntities.id, pluginWorkflowIds),
+          ))
+      : [];
+
+    const pluginStepRunEntities = await db
+      .select()
+      .from(pluginEntities)
+      .where(and(
+        eq(pluginEntities.entityType, "workflow-step-run"),
+        eq(pluginEntities.scopeKind, "company"),
+        eq(pluginEntities.scopeId, mission.companyId),
+      ));
+    const pluginStepRuns = pluginStepRunEntities.filter((entity) => {
+      const data = entity.data as PluginWorkflowStepRunData;
+      const runId = asTrimmedString(data.runId);
+      return runId !== null && pluginRunIds.includes(runId);
+    });
+
+    const pluginIssueIds = Array.from(
+      new Set(pluginStepRuns.map((entity) => asTrimmedString((entity.data as PluginWorkflowStepRunData).issueId)).filter((id): id is string => Boolean(id))),
+    );
+    const pluginIssues = pluginIssueIds.length
+      ? await db
+          .select({
+            id: issues.id,
+            identifier: issues.identifier,
+            title: issues.title,
+            status: issues.status,
+            assigneeAgentId: issues.assigneeAgentId,
+          })
+          .from(issues)
+          .where(inArray(issues.id, pluginIssueIds))
+      : [];
+    const pluginIssueMap = new Map<string, MissionWorkflowStepIssue>(pluginIssues.map((issue) => [issue.id, issue]));
+
+    const companyAgents = await db
+      .select({ id: agents.id, name: agents.name })
+      .from(agents)
+      .where(eq(agents.companyId, mission.companyId));
+    const agentIdByName = new Map(companyAgents.map((agent) => [agent.name, agent.id]));
+
+    const pluginDefinitionMap = new Map(pluginDefinitionEntities.map((entity) => [entity.id, entity]));
+    const pluginStepRunsMap = new Map<string, typeof pluginStepRuns>();
+    for (const stepRun of pluginStepRuns) {
+      const runId = asTrimmedString((stepRun.data as PluginWorkflowStepRunData).runId);
+      if (!runId) continue;
+      const current = pluginStepRunsMap.get(runId) ?? [];
+      current.push(stepRun);
+      pluginStepRunsMap.set(runId, current);
+    }
+
+    const pluginDetails: MissionWorkflowRunDetail[] = pluginRunEntities.map((entity) => {
+      const runData = entity.data as PluginWorkflowRunData;
+      const workflowId = asTrimmedString(runData.workflowId) ?? "";
+      const definitionData = (pluginDefinitionMap.get(workflowId)?.data ?? {}) as PluginWorkflowDefinitionData;
+      const definitionSteps = Array.isArray(definitionData.steps)
+        ? definitionData.steps.map(toPluginWorkflowStepData).filter((step): step is PluginWorkflowStepData => Boolean(step))
+        : [];
+      const definitionStepOrder = new Map(definitionSteps.map((step, index) => [asTrimmedString(step.id) ?? "", index]));
+      const rawStepRuns = [...(pluginStepRunsMap.get(entity.id) ?? [])].sort((left, right) => {
+        const leftData = left.data as PluginWorkflowStepRunData;
+        const rightData = right.data as PluginWorkflowStepRunData;
+        const leftStepId = asTrimmedString(leftData.stepId) ?? "";
+        const rightStepId = asTrimmedString(rightData.stepId) ?? "";
+        const leftIndex = definitionStepOrder.get(leftStepId) ?? Number.MAX_SAFE_INTEGER;
+        const rightIndex = definitionStepOrder.get(rightStepId) ?? Number.MAX_SAFE_INTEGER;
+        return leftIndex - rightIndex || leftStepId.localeCompare(rightStepId);
+      });
+      const rawStepRunRows = rawStepRuns.map((stepRun) => {
+        const data = stepRun.data as PluginWorkflowStepRunData;
+        return {
+          id: stepRun.id,
+          workflowRunId: entity.id,
+          stepId: asTrimmedString(data.stepId) ?? stepRun.title ?? stepRun.id,
+          issueId: asTrimmedString(data.issueId),
+          status: normalizePluginWorkflowStepStatus(data.status),
+          startedAt: parsePluginDate(data.startedAt),
+          completedAt: parsePluginDate(data.completedAt),
+        } as typeof workflowStepRuns.$inferSelect;
+      });
+      const stepRunByStepId = new Map(rawStepRunRows.map((stepRun) => [stepRun.stepId, stepRun]));
+
+      const steps: MissionWorkflowRunStep[] = definitionSteps.map((step) => {
+        const stepId = asTrimmedString(step.id) ?? "";
+        const stepRun = stepRunByStepId.get(stepId);
+        const agentName = asTrimmedString(step.agentName) ?? asTrimmedString(step.agent) ?? asTrimmedString(step.assigneeAgentName);
+        const agentId = asTrimmedString(step.agentId) ?? (agentName ? agentIdByName.get(agentName) : undefined) ?? "";
+        return {
+          stepId,
+          name: asTrimmedString(step.name) ?? asTrimmedString(step.title) ?? stepId,
+          agentId,
+          dependencies: asStringArray(step.dependencies).length ? asStringArray(step.dependencies) : asStringArray(step.dependsOn),
+          description: asTrimmedString(step.description),
+          toolNames: asStringArray(step.toolNames),
+          knowledgeBaseIds: asStringArray(step.knowledgeBaseIds),
+          status: stepRun ? normalizePluginWorkflowStepStatus(stepRun.status) : "pending",
+          issueId: stepRun?.issueId ?? null,
+          issue: stepRun?.issueId ? pluginIssueMap.get(stepRun.issueId) ?? null : null,
+          startedAt: stepRun?.startedAt ?? null,
+          completedAt: stepRun?.completedAt ?? null,
+        };
+      });
+
+      const knownStepIds = new Set(definitionSteps.map((step) => asTrimmedString(step.id)).filter((id): id is string => Boolean(id)));
+      for (const stepRun of rawStepRunRows) {
+        if (knownStepIds.has(stepRun.stepId)) continue;
+        steps.push({
+          stepId: stepRun.stepId,
+          name: stepRun.stepId,
+          agentId: "",
+          dependencies: [],
+          description: null,
+          toolNames: [],
+          knowledgeBaseIds: [],
+          status: normalizePluginWorkflowStepStatus(stepRun.status),
+          issueId: stepRun.issueId,
+          issue: stepRun.issueId ? pluginIssueMap.get(stepRun.issueId) ?? null : null,
+          startedAt: stepRun.startedAt,
+          completedAt: stepRun.completedAt,
+        });
+      }
+
+      const run = {
+        id: entity.id,
+        workflowId,
+        companyId: mission.companyId,
+        missionId,
+        status: asTrimmedString(runData.status) ?? entity.status ?? "pending",
+        triggeredBy: asTrimmedString(runData.triggerSource) ?? "plugin",
+        startedAt: parsePluginDate(runData.startedAt),
+        completedAt: parsePluginDate(runData.completedAt),
+        createdAt: entity.createdAt,
+      } as typeof workflowRuns.$inferSelect;
+
+      return {
+        ...run,
+        workflowName: asTrimmedString(runData.workflowName) ?? asTrimmedString(definitionData.name),
+        stepRuns: rawStepRunRows,
+        steps,
+        progress: buildWorkflowRunProgress(steps),
+      };
+    });
+
+    return [...nativeDetails, ...pluginDetails].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
   }
 
   return {

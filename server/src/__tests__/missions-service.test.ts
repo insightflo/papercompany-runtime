@@ -6,6 +6,8 @@ import {
   createDb,
   issues,
   missions,
+  pluginEntities,
+  plugins,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -35,9 +37,11 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(pluginEntities);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
+    await db.delete(plugins);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agents);
@@ -280,5 +284,163 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       failedSteps: 0,
       skippedSteps: 0,
     });
+  });
+
+  it("returns plugin entity workflow runs linked to a mission", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const stepRunId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Plugin Workflow Company",
+      issuePrefix: `PW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Plugin Workflow Mission",
+      status: "active",
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values([
+      {
+        id: workflowId,
+        pluginId,
+        entityType: "workflow-definition",
+        scopeKind: "company",
+        scopeId: companyId,
+        externalId: `workflow-definition:${workflowId}`,
+        title: "Scheduled Plugin Workflow",
+        status: "active",
+        data: {
+          name: "Scheduled Plugin Workflow",
+          description: "Scheduled plugin run should show on mission execution flow.",
+          companyId,
+          status: "active",
+          steps: [
+            {
+              id: "scheduled-step",
+              title: "Scheduled E2E pass step",
+              dependsOn: [],
+              type: "agent",
+              agentName: "Workflow Owner",
+            },
+          ],
+        },
+      },
+      {
+        id: runId,
+        pluginId,
+        entityType: "workflow-run",
+        scopeKind: "company",
+        scopeId: companyId,
+        externalId: `workflow-run:${runId}`,
+        title: "Scheduled Plugin Workflow run",
+        status: "running",
+        data: {
+          workflowId,
+          workflowName: "Scheduled Plugin Workflow",
+          companyId,
+          missionId,
+          status: "running",
+          triggerSource: "schedule",
+          startedAt: "2026-04-27T00:00:00.000Z",
+        },
+      },
+      {
+        id: stepRunId,
+        pluginId,
+        entityType: "workflow-step-run",
+        scopeKind: "company",
+        scopeId: companyId,
+        externalId: `${runId}:scheduled-step`,
+        title: "scheduled-step",
+        status: "in_progress",
+        data: {
+          runId,
+          stepId: "scheduled-step",
+          issueId,
+          agentName: "Workflow Owner",
+          status: "in_progress",
+          retryCount: 0,
+          startedAt: "2026-04-27T00:00:00.000Z",
+        },
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      title: "Scheduled plugin step issue",
+      status: "in_progress",
+      priority: "high",
+      identifier: "PW-11",
+      assigneeAgentId: ownerAgentId,
+    });
+
+    const svc = missionService(db);
+    const result = await svc.listWorkflowRuns(missionId);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual(
+      expect.objectContaining({
+        id: runId,
+        missionId,
+        companyId,
+        workflowName: "Scheduled Plugin Workflow",
+        status: "running",
+        triggeredBy: "schedule",
+      }),
+    );
+    expect(result[0]?.steps).toEqual([
+      expect.objectContaining({
+        stepId: "scheduled-step",
+        name: "Scheduled E2E pass step",
+        agentId: ownerAgentId,
+        dependencies: [],
+        status: "running",
+        issueId,
+        issue: expect.objectContaining({
+          id: issueId,
+          identifier: "PW-11",
+          title: "Scheduled plugin step issue",
+          status: "in_progress",
+          assigneeAgentId: ownerAgentId,
+        }),
+      }),
+    ]);
   });
 });
