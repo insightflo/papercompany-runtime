@@ -1031,40 +1031,54 @@ export function pluginRoutes(
           const pluginWorkflows = Array.isArray(resultRecord.workflows) ? resultRecord.workflows : [];
           const pluginActiveRuns = Array.isArray(resultRecord.activeRuns) ? resultRecord.activeRuns : [];
           const pluginRecentRuns = Array.isArray(resultRecord.recentRuns) ? resultRecord.recentRuns : [];
+          const pluginWorkflowIds = new Set(pluginWorkflows
+            .map((workflow) => workflow && typeof workflow === "object" && "id" in workflow
+              ? (workflow as { id?: unknown }).id
+              : undefined)
+            .filter((id): id is string => typeof id === "string" && id.length > 0));
+          const pluginActiveRunIds = new Set(pluginActiveRuns
+            .map((run) => run && typeof run === "object" && "id" in run ? (run as { id?: unknown }).id : undefined)
+            .filter((id): id is string => typeof id === "string" && id.length > 0));
+          const pluginRecentRunIds = new Set(pluginRecentRuns
+            .map((run) => run && typeof run === "object" && "id" in run ? (run as { id?: unknown }).id : undefined)
+            .filter((id): id is string => typeof id === "string" && id.length > 0));
+          const nativeWorkflowSummaries = nativeDefinitions
+            .filter((definition) => !pluginWorkflowIds.has(definition.id))
+            .map((definition) => ({
+              id: definition.id,
+              companyId: definition.companyId,
+              name: definition.name,
+              description: "",
+              status: "active",
+              steps: definition.steps.map((step) => {
+                const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
+                return {
+                  id: step.id,
+                  title: step.name,
+                  description: step.description ?? "",
+                  type: !step.agentId && toolNames.length > 0 ? "tool" : "agent",
+                  toolName: toolNames[0] ?? "",
+                  agentName: step.agentId,
+                  dependsOn: step.dependencies,
+                };
+              }),
+              createdAt: definition.createdAt,
+              updatedAt: definition.updatedAt,
+            }));
           res.json({
             data: {
               ...resultRecord,
               workflows: [
-                ...nativeDefinitions.map((definition) => ({
-                  id: definition.id,
-                  companyId: definition.companyId,
-                  name: definition.name,
-                  description: "",
-                  status: "active",
-                  steps: definition.steps.map((step) => {
-                    const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
-                    return {
-                      id: step.id,
-                      title: step.name,
-                      description: step.description ?? "",
-                      type: !step.agentId && toolNames.length > 0 ? "tool" : "agent",
-                      toolName: toolNames[0] ?? "",
-                      agentName: step.agentId,
-                      dependsOn: step.dependencies,
-                    };
-                  }),
-                  createdAt: definition.createdAt,
-                  updatedAt: definition.updatedAt,
-                })),
                 ...pluginWorkflows,
+                ...nativeWorkflowSummaries,
               ],
               activeRuns: [
-                ...nativeRunSummaries.filter((run) => run.status === "running"),
                 ...pluginActiveRuns,
+                ...nativeRunSummaries.filter((run) => run.status === "running" && !pluginActiveRunIds.has(run.id)),
               ],
               recentRuns: [
-                ...nativeRunSummaries.filter((run) => run.status !== "running").slice(0, 10),
                 ...pluginRecentRuns,
+                ...nativeRunSummaries.filter((run) => run.status !== "running" && !pluginRecentRunIds.has(run.id)).slice(0, 10),
               ],
             },
           });

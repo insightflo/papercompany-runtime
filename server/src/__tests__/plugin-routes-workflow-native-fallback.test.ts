@@ -94,9 +94,18 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
   it("merges native definitions and runs into workflow overview", async () => {
     const workerManager = {
       call: vi.fn().mockResolvedValue({
-        workflows: [{ id: "plugin-workflow-1", name: "Plugin workflow" }],
-        activeRuns: [{ id: "plugin-run-active", workflowName: "Plugin active", status: "running" }],
-        recentRuns: [{ id: "plugin-run-recent", workflowName: "Plugin recent", status: "completed" }],
+        workflows: [
+          { id: "workflow-1", name: "Plugin workflow", status: "paused", description: "plugin metadata" },
+          { id: "plugin-workflow-1", name: "Plugin only workflow" },
+        ],
+        activeRuns: [
+          { id: "run-active-1", workflowName: "Plugin active", status: "running" },
+          { id: "plugin-run-active", workflowName: "Plugin active only", status: "running" },
+        ],
+        recentRuns: [
+          { id: "run-recent-1", workflowName: "Plugin recent", status: "completed" },
+          { id: "plugin-run-recent", workflowName: "Plugin recent only", status: "completed" },
+        ],
       }),
     };
     mockWorkflowService.listDefinitions.mockResolvedValue([
@@ -117,6 +126,24 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
         ],
         createdAt: new Date("2026-04-20T00:00:00.000Z"),
         updatedAt: new Date("2026-04-21T00:00:00.000Z"),
+      },
+      {
+        id: "workflow-2",
+        companyId: "company-1",
+        name: "Native only workflow",
+        steps: [
+          {
+            id: "step-2",
+            name: "Ask agent",
+            description: null,
+            agentId: "agent-1",
+            toolNames: [],
+            dependencies: ["step-1"],
+            knowledgeBaseIds: [],
+          },
+        ],
+        createdAt: new Date("2026-04-24T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-25T00:00:00.000Z"),
       },
     ]);
     mockWorkflowService.listRuns.mockResolvedValue([
@@ -142,6 +169,17 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
         completedAt: new Date("2026-04-23T00:10:00.000Z"),
         createdAt: new Date("2026-04-23T00:00:00.000Z"),
       },
+      {
+        id: "run-recent-2",
+        workflowId: "workflow-2",
+        companyId: "company-1",
+        missionId: null,
+        status: "completed",
+        triggeredBy: "manual",
+        startedAt: new Date("2026-04-26T00:00:00.000Z"),
+        completedAt: new Date("2026-04-26T00:10:00.000Z"),
+        createdAt: new Date("2026-04-26T00:00:00.000Z"),
+      },
     ]);
 
     const res = await request(createApp(workerManager))
@@ -152,45 +190,46 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     expect(mockWorkflowService.listDefinitions).toHaveBeenCalledWith(expect.anything(), "company-1");
     expect(mockWorkflowService.listRuns).toHaveBeenCalledWith(expect.anything(), { companyId: "company-1" });
     expect(res.body.data.workflows).toEqual([
+      { id: "workflow-1", name: "Plugin workflow", status: "paused", description: "plugin metadata" },
+      { id: "plugin-workflow-1", name: "Plugin only workflow" },
       expect.objectContaining({
-        id: "workflow-1",
+        id: "workflow-2",
         companyId: "company-1",
-        name: "Native workflow",
+        name: "Native only workflow",
         status: "active",
         steps: [
           {
-            id: "step-1",
-            title: "Run tool",
-            description: "tool step",
-            type: "tool",
-            toolName: "paperclip.echo",
-            agentName: null,
-            dependsOn: [],
+            id: "step-2",
+            title: "Ask agent",
+            description: "",
+            type: "agent",
+            toolName: "",
+            agentName: "agent-1",
+            dependsOn: ["step-1"],
           },
         ],
       }),
-      { id: "plugin-workflow-1", name: "Plugin workflow" },
+    ]);
+    expect(res.body.data.workflows.map((workflow: { id: string }) => workflow.id)).toEqual([
+      "workflow-1",
+      "plugin-workflow-1",
+      "workflow-2",
     ]);
     expect(res.body.data.activeRuns).toEqual([
-      {
-        id: "run-active-1",
-        workflowName: "Native workflow",
-        status: "running",
-        startedAt: "2026-04-22T00:00:00.000Z",
-        triggerSource: "manual",
-      },
-      { id: "plugin-run-active", workflowName: "Plugin active", status: "running" },
+      { id: "run-active-1", workflowName: "Plugin active", status: "running" },
+      { id: "plugin-run-active", workflowName: "Plugin active only", status: "running" },
     ]);
     expect(res.body.data.recentRuns).toEqual([
+      { id: "run-recent-1", workflowName: "Plugin recent", status: "completed" },
+      { id: "plugin-run-recent", workflowName: "Plugin recent only", status: "completed" },
       {
-        id: "run-recent-1",
-        workflowName: "Native workflow",
+        id: "run-recent-2",
+        workflowName: "Native only workflow",
         status: "completed",
-        startedAt: "2026-04-23T00:00:00.000Z",
-        completedAt: "2026-04-23T00:10:00.000Z",
-        triggerSource: "scheduler",
+        startedAt: "2026-04-26T00:00:00.000Z",
+        completedAt: "2026-04-26T00:10:00.000Z",
+        triggerSource: "manual",
       },
-      { id: "plugin-run-recent", workflowName: "Plugin recent", status: "completed" },
     ]);
   });
 
