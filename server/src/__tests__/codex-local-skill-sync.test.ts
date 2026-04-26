@@ -39,14 +39,13 @@ describe("codex local skill sync", () => {
     } as const;
 
     const before = await listCodexSkills(ctx);
-    expect(before.mode).toBe("ephemeral");
+    expect(before.mode).toBe("persistent");
     expect(before.desiredSkills).toContain(paperclipKey);
     expect(before.entries.find((entry) => entry.key === paperclipKey)?.required).toBe(true);
-    expect(before.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("configured");
-    expect(before.entries.find((entry) => entry.key === paperclipKey)?.detail).toContain(".agents/skills");
+    expect(before.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("missing");
   });
 
-  it("does not persist Paperclip skills into CODEX_HOME during sync", async () => {
+  it("materializes Paperclip skills into CODEX_HOME during sync", async () => {
     const codexHome = await makeTempDir("paperclip-codex-skill-prune-");
     cleanupDirs.add(codexHome);
 
@@ -65,11 +64,9 @@ describe("codex local skill sync", () => {
     } as const;
 
     const after = await syncCodexSkills(configuredCtx, [paperclipKey]);
-    expect(after.mode).toBe("ephemeral");
-    expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("configured");
-    await expect(fs.lstat(path.join(codexHome, "skills", "paperclip"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    expect(after.mode).toBe("persistent");
+    expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("installed");
+    expect((await fs.lstat(path.join(codexHome, "skills", "paperclip"))).isDirectory()).toBe(true);
   });
 
   it("keeps required bundled Paperclip skills configured even when the desired set is emptied", async () => {
@@ -92,7 +89,7 @@ describe("codex local skill sync", () => {
 
     const after = await syncCodexSkills(configuredCtx, []);
     expect(after.desiredSkills).toContain(paperclipKey);
-    expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("configured");
+    expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("installed");
   });
 
   it("normalizes legacy flat Paperclip skill refs before reporting configured state", async () => {
@@ -116,7 +113,7 @@ describe("codex local skill sync", () => {
     expect(snapshot.warnings).toEqual([]);
     expect(snapshot.desiredSkills).toContain(paperclipKey);
     expect(snapshot.desiredSkills).not.toContain("paperclip");
-    expect(snapshot.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("configured");
+    expect(snapshot.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("missing");
     expect(snapshot.entries.find((entry) => entry.key === "paperclip")).toBeUndefined();
   });
 });

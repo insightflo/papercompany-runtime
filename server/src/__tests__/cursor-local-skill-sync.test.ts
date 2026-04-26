@@ -53,7 +53,7 @@ describe("cursor local skill sync", () => {
 
     const after = await syncCursorSkills(ctx, [paperclipKey]);
     expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("installed");
-    expect((await fs.lstat(path.join(home, ".cursor", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(home, ".cursor", "skills", "paperclip"))).isDirectory()).toBe(true);
   });
 
   it("recognizes company-library runtime skills supplied outside the bundled Paperclip directory", async () => {
@@ -101,7 +101,7 @@ describe("cursor local skill sync", () => {
     const after = await syncCursorSkills(ctx, ["ascii-heart"]);
     expect(after.warnings).toEqual([]);
     expect(after.entries.find((entry) => entry.key === "ascii-heart")?.state).toBe("installed");
-    expect((await fs.lstat(path.join(home, ".cursor", "skills", "ascii-heart"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(home, ".cursor", "skills", "ascii-heart"))).isDirectory()).toBe(true);
   });
 
   it("keeps required bundled Paperclip skills installed even when the desired set is emptied", async () => {
@@ -139,6 +139,6 @@ describe("cursor local skill sync", () => {
     const after = await syncCursorSkills(clearedCtx, []);
     expect(after.desiredSkills).toContain(paperclipKey);
     expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("installed");
-    expect((await fs.lstat(path.join(home, ".cursor", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(home, ".cursor", "skills", "paperclip"))).isDirectory()).toBe(true);
   });
 });

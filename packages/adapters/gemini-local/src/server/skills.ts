@@ -1,90 +1,39 @@
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  AdapterSkillContext,
-  AdapterSkillSnapshot,
-} from "@paperclipai/adapter-utils";
+import type { AdapterSkillContext } from "@paperclipai/adapter-utils";
 import {
-  buildPersistentSkillSnapshot,
-  ensurePaperclipSkillSymlink,
+  buildProviderNativeSkillSnapshot,
   readPaperclipRuntimeSkillEntries,
-  readInstalledSkillTargets,
   resolvePaperclipDesiredSkillNames,
+  syncProviderNativeSkills,
 } from "@paperclipai/adapter-utils/server-utils";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+function adapterType() {
+  return "gemini-local";
 }
 
-function resolveGeminiSkillsHome(config: Record<string, unknown>) {
-  const env =
-    typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
-      ? (config.env as Record<string, unknown>)
-      : {};
-  const configuredHome = asString(env.HOME);
-  const home = configuredHome ? path.resolve(configuredHome) : os.homedir();
-  return path.join(home, ".gemini", "skills");
-}
-
-async function buildGeminiSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
-  const availableEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
-  const desiredSkills = resolvePaperclipDesiredSkillNames(config, availableEntries);
-  const skillsHome = resolveGeminiSkillsHome(config);
-  const installed = await readInstalledSkillTargets(skillsHome);
-  return buildPersistentSkillSnapshot({
-    adapterType: "gemini_local",
-    availableEntries,
-    desiredSkills,
-    installed,
-    skillsHome,
-    locationLabel: "~/.gemini/skills",
-    missingDetail: "Configured but not currently linked into the Gemini skills home.",
-    externalConflictDetail: "Skill name is occupied by an external installation.",
-    externalDetail: "Installed outside Paperclip management.",
+export async function listGeminiSkills(ctx: AdapterSkillContext) {
+  return buildProviderNativeSkillSnapshot({
+    adapterType: adapterType(),
+    config: ctx.config,
+    moduleDir: __moduleDir,
+    locationLabel: ".gemini/skills",
   });
-}
-
-export async function listGeminiSkills(ctx: AdapterSkillContext): Promise<AdapterSkillSnapshot> {
-  return buildGeminiSkillSnapshot(ctx.config);
 }
 
 export async function syncGeminiSkills(
   ctx: AdapterSkillContext,
   desiredSkills: string[],
-): Promise<AdapterSkillSnapshot> {
-  const availableEntries = await readPaperclipRuntimeSkillEntries(ctx.config, __moduleDir);
-  const desiredSet = new Set([
-    ...desiredSkills,
-    ...availableEntries.filter((entry) => entry.required).map((entry) => entry.key),
-  ]);
-  const skillsHome = resolveGeminiSkillsHome(ctx.config);
-  await fs.mkdir(skillsHome, { recursive: true });
-  const installed = await readInstalledSkillTargets(skillsHome);
-  const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));
-
-  for (const available of availableEntries) {
-    if (!desiredSet.has(available.key)) continue;
-    const target = path.join(skillsHome, available.runtimeName);
-    await ensurePaperclipSkillSymlink(available.source, target);
-  }
-
-  for (const [name, installedEntry] of installed.entries()) {
-    const available = availableByRuntimeName.get(name);
-    if (!available) continue;
-    if (desiredSet.has(available.key)) continue;
-    const isPaperclipManagedInstall =
-      installedEntry.targetPath === available.source ||
-      installedEntry.managedSourcePath === available.source ||
-      installedEntry.managedKey === available.key;
-    if (!isPaperclipManagedInstall) continue;
-    await fs.rm(path.join(skillsHome, name), { recursive: true, force: true }).catch(() => {});
-  }
-
-  return buildGeminiSkillSnapshot(ctx.config);
+) {
+  await syncProviderNativeSkills({
+    adapterType: adapterType(),
+    config: ctx.config,
+    moduleDir: __moduleDir,
+    desiredSkills,
+  });
+  return listGeminiSkills(ctx);
 }
 
 export function resolveGeminiDesiredSkillNames(
@@ -92,4 +41,8 @@ export function resolveGeminiDesiredSkillNames(
   availableEntries: Array<{ key: string; required?: boolean }>,
 ) {
   return resolvePaperclipDesiredSkillNames(config, availableEntries);
+}
+
+export async function readGeminiRuntimeSkillEntries(config: Record<string, unknown>) {
+  return readPaperclipRuntimeSkillEntries(config, __moduleDir);
 }
