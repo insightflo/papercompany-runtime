@@ -14,6 +14,7 @@ import {
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
+  parseJson,
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
@@ -383,6 +384,38 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return args;
   };
 
+  let sessionUpdateEmitted = false;
+  const readSessionIdFromLine = (rawLine: string): string | null => {
+    const event = parseJson(rawLine.trim());
+    if (!event) return null;
+    return (
+      asString(event.session_id, "").trim() ||
+      asString(event.sessionId, "").trim() ||
+      asString(event.sessionID, "").trim() ||
+      null
+    );
+  };
+  const maybeEmitSessionUpdate = async (rawLine: string) => {
+    if (sessionUpdateEmitted || !ctx.onSessionUpdate) return;
+    const discoveredSessionId = readSessionIdFromLine(rawLine);
+    if (!discoveredSessionId) return;
+    sessionUpdateEmitted = true;
+    await ctx.onSessionUpdate({
+      sessionId: discoveredSessionId,
+      sessionParams: {
+        sessionId: discoveredSessionId,
+        cwd,
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+        ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+      },
+      sessionDisplayId: discoveredSessionId,
+      source: "stdout",
+      confidence: "provider_reported",
+      observedAt: new Date().toISOString(),
+    });
+  };
+
   const runAttempt = async (resumeSessionId: string | null) => {
     const args = buildArgs(resumeSessionId);
     if (onMeta) {
@@ -403,6 +436,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const emitNormalizedStdoutLine = async (rawLine: string) => {
       const normalized = normalizeCursorStreamLine(rawLine);
       if (!normalized.line) return;
+      await maybeEmitSessionUpdate(normalized.line);
       await onLog(normalized.stream ?? "stdout", `${normalized.line}\n`);
     };
     const flushStdoutChunk = async (chunk: string, finalize = false) => {
