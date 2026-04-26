@@ -329,6 +329,28 @@ function findRunnableSteps(
   });
 }
 
+function isIssueLessToolStep(step: WorkflowStep): boolean {
+  const hasToolNames = Array.isArray(step.toolNames)
+    && step.toolNames.some((toolName) => typeof toolName === "string" && toolName.trim().length > 0);
+  const agentId = typeof step.agentId === "string" ? step.agentId.trim() : "";
+  return hasToolNames && agentId.length === 0;
+}
+
+async function completeIssueLessStepRun(
+  db: Db,
+  stepRun: typeof workflowStepRuns.$inferSelect,
+  now: Date,
+): Promise<void> {
+  await db
+    .update(workflowStepRuns)
+    .set({
+      status: "completed",
+      startedAt: stepRun.startedAt ?? now,
+      completedAt: stepRun.completedAt ?? now,
+    })
+    .where(eq(workflowStepRuns.id, stepRun.id));
+}
+
 async function finalizeWorkflowRunState(
   db: Db,
   context: WorkflowExecutionContext,
@@ -383,29 +405,42 @@ export async function syncWorkflowRunState(
         .where(eq(workflowStepRuns.workflowRunId, runId));
     }
   } else {
-    const stepRunMap = buildStepRunMap(stepRuns);
-    const runnableSteps = findRunnableSteps(context.steps, stepRunMap);
+    let shouldContinue = true;
+    while (shouldContinue) {
+      shouldContinue = false;
+      const stepRunMap = buildStepRunMap(stepRuns);
+      const runnableSteps = findRunnableSteps(context.steps, stepRunMap);
+      if (runnableSteps.length === 0) break;
 
-    for (const step of runnableSteps) {
-      const stepRun = stepRunMap.get(step.id);
-      if (!stepRun) continue;
-      const issueId = await createWorkflowStepIssue({
-        db,
-        run: context.run,
-        definition: context.definition,
-        step,
-      });
-      await db
-        .update(workflowStepRuns)
-        .set({ issueId })
-        .where(eq(workflowStepRuns.id, stepRun.id));
-    }
+      let completedIssueLessStep = false;
+      for (const step of runnableSteps) {
+        const stepRun = stepRunMap.get(step.id);
+        if (!stepRun) continue;
 
-    if (runnableSteps.length > 0) {
+        if (isIssueLessToolStep(step)) {
+          await completeIssueLessStepRun(db, stepRun, new Date());
+          completedIssueLessStep = true;
+          continue;
+        }
+
+        const issueId = await createWorkflowStepIssue({
+          db,
+          run: context.run,
+          definition: context.definition,
+          step,
+        });
+        await db
+          .update(workflowStepRuns)
+          .set({ issueId })
+          .where(eq(workflowStepRuns.id, stepRun.id));
+      }
+
       stepRuns = await db
         .select()
         .from(workflowStepRuns)
         .where(eq(workflowStepRuns.workflowRunId, runId));
+
+      shouldContinue = completedIssueLessStep;
     }
   }
 

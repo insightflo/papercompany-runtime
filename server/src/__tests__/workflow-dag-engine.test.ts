@@ -324,6 +324,159 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(workflowRun?.completedAt).toBeTruthy();
   });
 
+  it("completes issue-less tool steps and advances dependent agent steps", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-tool-agent" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Tool Workflow",
+      issuePrefix: `WT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Workflow Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Tool Projection Workflow",
+      stepsJson: [
+        {
+          id: "fetch-context",
+          name: "Fetch context",
+          agentId: "",
+          dependencies: [],
+          description: "Load context through a workflow tool",
+          toolNames: ["search-docs"],
+        },
+        {
+          id: "summarize",
+          name: "Summarize",
+          agentId,
+          dependencies: ["fetch-context"],
+          description: "Summarize the context",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+    expect(result.status).toBe("running");
+
+    const stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const toolStep = stepRuns.find((stepRun) => stepRun.stepId === "fetch-context");
+    const agentStep = stepRuns.find((stepRun) => stepRun.stepId === "summarize");
+
+    expect(toolStep).toMatchObject({
+      issueId: null,
+      status: "completed",
+    });
+    expect(toolStep?.startedAt).toBeTruthy();
+    expect(toolStep?.completedAt).toBeTruthy();
+    expect(agentStep?.issueId).toBeTruthy();
+    expect(agentStep?.status).toBe("pending");
+
+    const createdIssues = await db.select().from(issues);
+    expect(createdIssues).toHaveLength(1);
+    expect(createdIssues[0]).toMatchObject({
+      title: "Tool Projection Workflow: Summarize",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+    });
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes all-tool workflows without creating issues", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Tool Only Workflow",
+      issuePrefix: `WO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Tool Only Workflow",
+      stepsJson: [
+        {
+          id: "fetch",
+          name: "Fetch",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["search-docs"],
+        },
+        {
+          id: "extract",
+          name: "Extract",
+          agentId: "",
+          dependencies: ["fetch"],
+          toolNames: ["extract-facts"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+    expect(result.status).toBe("completed");
+
+    const stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRuns).toHaveLength(2);
+    expect(stepRuns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ stepId: "fetch", issueId: null, status: "completed" }),
+        expect.objectContaining({ stepId: "extract", issueId: null, status: "completed" }),
+      ]),
+    );
+    expect(stepRuns.every((stepRun) => stepRun.startedAt && stepRun.completedAt)).toBe(true);
+
+    const createdIssues = await db.select().from(issues);
+    expect(createdIssues).toHaveLength(0);
+
+    const workflowRun = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(workflowRun?.status).toBe("completed");
+    expect(workflowRun?.completedAt).toBeTruthy();
+  });
+
   it("fails the workflow and skips dependent steps when a prerequisite execution issue fails", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
