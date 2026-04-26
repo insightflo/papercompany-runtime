@@ -18,17 +18,17 @@ vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn(async () => undefined),
 }));
 
-function createApp() {
+function createApp(actor: Record<string, unknown> = {
+  type: "board",
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "authenticated",
+  isInstanceAdmin: false,
+}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   app.use("/api", missionRoutes({} as any));
@@ -124,5 +124,33 @@ describe("mission routes subresources", () => {
       }),
     ]);
     expect(mockMissionService.listWorkflowRuns).toHaveBeenCalledWith("mission-1");
+  });
+
+  it("blocks mission issues when the board actor cannot access the mission company", async () => {
+    mockMissionService.getById.mockResolvedValue({
+      id: "mission-2",
+      companyId: "company-2",
+      title: "Other Company Mission",
+      status: "active",
+    });
+
+    const res = await request(createApp()).get("/api/missions/mission-2/issues");
+
+    expect(res.status).toBe(403);
+    expect(mockMissionService.getIssueTree).not.toHaveBeenCalled();
+  });
+
+  it("blocks mission workflow runs when the board actor cannot access the mission company", async () => {
+    mockMissionService.getById.mockResolvedValue({
+      id: "mission-2",
+      companyId: "company-2",
+      title: "Other Company Mission",
+      status: "active",
+    });
+
+    const res = await request(createApp()).get("/api/missions/mission-2/workflow-runs");
+
+    expect(res.status).toBe(403);
+    expect(mockMissionService.listWorkflowRuns).not.toHaveBeenCalled();
   });
 });
