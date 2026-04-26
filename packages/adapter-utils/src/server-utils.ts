@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import type {
@@ -6,6 +7,7 @@ import type {
   AdapterSkillSnapshot,
 } from "./types.js";
 import { joinPromptSections, renderTemplate } from "./prompt-utils.js";
+import { materializeProviderSkills, resolveProviderSkillsDir } from "./skills.js";
 
 export interface RunProcessResult {
   exitCode: number | null;
@@ -521,6 +523,127 @@ export async function readPaperclipRuntimeSkillEntries(
   const configuredEntries = normalizeConfiguredPaperclipRuntimeSkills(config.paperclipRuntimeSkills);
   if (configuredEntries.length > 0) return configuredEntries;
   return listPaperclipSkillEntries(moduleDir, additionalCandidates);
+}
+
+function skillConfigEnv(config: Record<string, unknown>): Record<string, string | undefined> {
+  const env = parseObject(config.env);
+  const out: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === "string") out[key] = value;
+  }
+  return out;
+}
+
+function skillWorkDir(config: Record<string, unknown>): string {
+  const env = skillConfigEnv(config);
+  return asString(config.cwd, env.HOME ?? process.cwd());
+}
+
+async function hashSkillDirectory(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  const walk = async (dir: string) => {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(root, fullPath).replaceAll(path.sep, "/");
+      if (entry.isDirectory()) {
+        hash.update(`dir:${relativePath}\n`);
+        await walk(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      hash.update(`file:${relativePath}\n`);
+      hash.update(await fs.readFile(fullPath));
+      hash.update("\n");
+    }
+  };
+  await walk(root);
+  return hash.digest("hex");
+}
+
+export async function buildProviderNativeSkillSnapshot(options: {
+  adapterType: string;
+  config: Record<string, unknown>;
+  moduleDir: string;
+  locationLabel?: string;
+  installedDetail?: string;
+  missingDetail?: string;
+  externalConflictDetail?: string;
+  externalDetail?: string;
+  warnings?: string[];
+}): Promise<AdapterSkillSnapshot> {
+  const availableEntries = await readPaperclipRuntimeSkillEntries(options.config, options.moduleDir);
+  const desiredSkills = resolvePaperclipDesiredSkillNames(options.config, availableEntries);
+  const workDir = skillWorkDir(options.config);
+  const env = skillConfigEnv(options.config);
+  const resolution = resolveProviderSkillsDir({ adapterType: options.adapterType, workDir, env });
+  if (resolution.mode !== "provider_native" || !resolution.skillsDir) {
+    return {
+      adapterType: options.adapterType.replaceAll("-", "_"),
+      supported: false,
+      mode: "unsupported",
+      desiredSkills,
+      entries: [],
+      warnings: [...resolution.warnings, ...(options.warnings ?? [])],
+    };
+  }
+  const installed = await readInstalledSkillTargets(resolution.skillsDir);
+  return buildPersistentSkillSnapshot({
+    adapterType: options.adapterType.replaceAll("-", "_"),
+    availableEntries,
+    desiredSkills,
+    installed,
+    skillsHome: resolution.skillsDir,
+    locationLabel: options.locationLabel ?? resolution.skillsDir,
+    installedDetail: options.installedDetail ?? "Installed in the provider-native skills directory.",
+    missingDetail: options.missingDetail ?? "Configured but not currently materialized into the provider-native skills directory.",
+    externalConflictDetail: options.externalConflictDetail ?? "Skill name is occupied by an external installation.",
+    externalDetail: options.externalDetail ?? "Installed outside Papercompany management.",
+    warnings: [...resolution.warnings, ...(options.warnings ?? [])],
+  });
+}
+
+export async function syncProviderNativeSkills(options: {
+  adapterType: string;
+  config: Record<string, unknown>;
+  moduleDir: string;
+  desiredSkills: string[];
+}): Promise<void> {
+  const availableEntries = await readPaperclipRuntimeSkillEntries(options.config, options.moduleDir);
+  const desiredSet = new Set([
+    ...options.desiredSkills,
+    ...availableEntries.filter((entry) => entry.required).map((entry) => entry.key),
+  ]);
+  const workDir = skillWorkDir(options.config);
+  const env = skillConfigEnv(options.config);
+  const resolution = resolveProviderSkillsDir({ adapterType: options.adapterType, workDir, env });
+  const entries = await Promise.all(
+    availableEntries
+      .filter((entry) => desiredSet.has(entry.key))
+      .map(async (entry) => ({
+        key: entry.key,
+        runtimeName: entry.runtimeName,
+        sourceDir: entry.source,
+        revision: await hashSkillDirectory(entry.source),
+      })),
+  );
+  await materializeProviderSkills({
+    adapterType: options.adapterType,
+    workDir,
+    env,
+    entries,
+  });
+
+  if (resolution.mode !== "provider_native" || !resolution.skillsDir) return;
+  const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));
+  const installed = await readInstalledSkillTargets(resolution.skillsDir);
+  for (const [runtimeName, installedEntry] of installed.entries()) {
+    const available = availableByRuntimeName.get(runtimeName);
+    if (!available || desiredSet.has(available.key) || !installedEntry.managedKey) continue;
+    if (installedEntry.managedKey !== available.key) continue;
+    await fs.rm(path.join(resolution.skillsDir, runtimeName), { recursive: true, force: true });
+  }
 }
 
 export async function readPaperclipSkillMarkdown(

@@ -40,14 +40,13 @@ describe("opencode local skill sync", () => {
 
     const before = await listOpenCodeSkills(ctx);
     expect(before.mode).toBe("persistent");
-    expect(before.warnings).toContain("OpenCode currently uses the shared Claude skills home (~/.claude/skills).");
     expect(before.desiredSkills).toContain(paperclipKey);
     expect(before.entries.find((entry) => entry.key === paperclipKey)?.required).toBe(true);
     expect(before.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("missing");
 
     const after = await syncOpenCodeSkills(ctx, [paperclipKey]);
     expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("installed");
-    expect((await fs.lstat(path.join(home, ".claude", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(home, ".config", "opencode", "skills", "paperclip"))).isDirectory()).toBe(true);
   });
 
   it("keeps required bundled Paperclip skills installed even when the desired set is emptied", async () => {
@@ -85,6 +84,6 @@ describe("opencode local skill sync", () => {
     const after = await syncOpenCodeSkills(clearedCtx, []);
     expect(after.desiredSkills).toContain(paperclipKey);
     expect(after.entries.find((entry) => entry.key === paperclipKey)?.state).toBe("installed");
-    expect((await fs.lstat(path.join(home, ".claude", "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(home, ".config", "opencode", "skills", "paperclip"))).isDirectory()).toBe(true);
   });
 });

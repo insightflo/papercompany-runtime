@@ -38,7 +38,7 @@ function createApp(actor: Record<string, unknown> = {
 
 describe("mission routes subresources", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockMissionService.getById.mockResolvedValue({
       id: "mission-1",
       companyId: "company-1",
