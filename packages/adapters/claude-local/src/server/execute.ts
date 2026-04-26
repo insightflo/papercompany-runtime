@@ -306,7 +306,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const promptTemplate = asString(
     config.promptTemplate,
-    "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work. Follow the Paperclip heartbeat procedure exactly. For assignments, use GET /api/agents/me/inbox-lite first. Fall back only to the company issues endpoint filtered by assigneeAgentId with statuses todo,in_progress,blocked. Do not improvise alternate issue query parameters such as status=open, assigneeId, or agentId. If no assignments are returned, exit the heartbeat.",
+    "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work. Follow the Paperclip heartbeat procedure exactly. Use the local runtime from the PAPERCLIP_API_URL environment variable as the only API base URL, and include Authorization: Bearer $PAPERCLIP_API_KEY when the key is present. Never use https://runtime.paperclip.ai or any other legacy remote runtime during a local Papercompany heartbeat. For assignments, call GET $PAPERCLIP_API_URL/api/agents/me/inbox-lite first. Fall back only to GET $PAPERCLIP_API_URL/api/companies/{{agent.companyId}}/issues?assigneeAgentId={{agent.id}}&status=todo,in_progress,blocked when you need full issue objects. Do not improvise alternate issue query parameters such as status=open, assigneeId, or agentId. If no assignments are returned from the local runtime, exit the heartbeat.",
   );
   const model = asString(config.model, "");
   const effort = asString(config.effort, "");
