@@ -16,6 +16,7 @@ import {
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
+  parseJson,
   parseObject,
   redactEnvForLogs,
   runChildProcess,
@@ -300,6 +301,59 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return args;
   };
 
+  let sessionUpdateEmitted = false;
+  const readSessionIdFromLine = (rawLine: string): string | null => {
+    const event = parseJson(rawLine.trim());
+    if (!event) return null;
+    return (
+      asString(event.session_id, "").trim() ||
+      asString(event.sessionId, "").trim() ||
+      asString(event.sessionID, "").trim() ||
+      asString(event.checkpoint_id, "").trim() ||
+      asString(event.thread_id, "").trim() ||
+      null
+    );
+  };
+  const maybeEmitSessionUpdate = async (rawLine: string) => {
+    if (sessionUpdateEmitted || !ctx.onSessionUpdate) return;
+    const discoveredSessionId = readSessionIdFromLine(rawLine);
+    if (!discoveredSessionId) return;
+    sessionUpdateEmitted = true;
+    await ctx.onSessionUpdate({
+      sessionId: discoveredSessionId,
+      sessionParams: {
+        sessionId: discoveredSessionId,
+        cwd,
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+        ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+      },
+      sessionDisplayId: discoveredSessionId,
+      source: "stdout",
+      confidence: "provider_reported",
+      observedAt: new Date().toISOString(),
+    });
+  };
+  let stdoutLineBuffer = "";
+  const onLogWithSessionUpdate: AdapterExecutionContext["onLog"] = async (stream, chunk) => {
+    if (stream !== "stdout") {
+      await onLog(stream, chunk);
+      return;
+    }
+    const combined = `${stdoutLineBuffer}${chunk}`;
+    const lines = combined.split(/\r?\n/);
+    stdoutLineBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      await maybeEmitSessionUpdate(line);
+    }
+    await onLog(stream, chunk);
+  };
+  const flushSessionUpdateBuffer = async () => {
+    const trailing = stdoutLineBuffer.trim();
+    stdoutLineBuffer = "";
+    if (trailing) await maybeEmitSessionUpdate(trailing);
+  };
+
   const runAttempt = async (resumeSessionId: string | null) => {
     const args = buildArgs(resumeSessionId);
     if (onMeta) {
@@ -325,8 +379,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       fatalOnLogError: true,
       onSpawn,
-      onLog,
+      onLog: onLogWithSessionUpdate,
     });
+    await flushSessionUpdateBuffer();
     return {
       proc,
       parsed: parseGeminiJsonl(proc.stdout),
