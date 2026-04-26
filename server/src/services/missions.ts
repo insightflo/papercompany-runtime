@@ -33,7 +33,7 @@ export type MissionStatus = "planning" | "active" | "completed" | "cancelled" | 
 /**
  * Mission agent role.
  */
-export type MissionAgentRole = "executor" | "reviewer" | "observer" | "specialist" | "owner";
+export type MissionAgentRole = "executor" | "reviewer" | "observer";
 
 /**
  * Mission row type.
@@ -167,7 +167,7 @@ export interface ListMissionsFilter {
 // ---------------------------------------------------------------------------
 
 const VALID_STATUSES: MissionStatus[] = ["planning", "active", "completed", "cancelled", "paused"];
-const VALID_ROLES: MissionAgentRole[] = ["executor", "reviewer", "observer", "specialist", "owner"];
+const VALID_ROLES: MissionAgentRole[] = ["executor", "reviewer", "observer"];
 
 function validateStatus(status: string): asserts status is MissionStatus {
   if (!VALID_STATUSES.includes(status as MissionStatus)) {
@@ -247,11 +247,13 @@ export function missionService(db: Db) {
       })
       .returning();
 
-    // Add owner as owner role in mission_agents
+    // Add owner as the initial executor in mission_agents. Mission ownership is
+    // tracked on missions.ownerAgentId; mission_agents.role is constrained to
+    // executor/reviewer/observer by the database.
     await db.insert(missionAgents).values({
       missionId: mission.id,
       agentId: input.ownerAgentId,
-      role: "owner",
+      role: "executor",
     });
 
     // Add additional agents if provided
@@ -485,7 +487,9 @@ export function missionService(db: Db) {
       .limit(1);
     if (!existing) throw notFound("Agent is not a member of this mission");
 
-    if (existing.role === "owner") {
+    const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
+    if (!mission) throw notFound(`Mission not found: ${missionId}`);
+    if (agentId === mission.ownerAgentId) {
       throw badRequest("Cannot change the role of the owner agent");
     }
 

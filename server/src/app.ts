@@ -27,6 +27,7 @@ import { goalRoutes } from "./routes/goals.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
+import { channelConfigRoutes } from "./routes/channel-config.js";
 import { activityRoutes } from "./routes/activity.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
@@ -315,12 +316,14 @@ export async function createApp(
   api.use(missionRoutes(db));
   api.use(srbWebhookRoutes(db));
   api.use(executionWorkspaceRoutes(db));
+  api.use(worktreeRoutes(db));
   // CRITICAL: single mount for maintenance gate — per-route is forbidden
   api.use("/maintenance", requireMaintenanceCompany(db), worktreeRoutes(db));
   api.use(goalRoutes(db));
   api.use(approvalRoutes(db));
   api.use(secretRoutes(db));
   api.use(costRoutes(db));
+  api.use(channelConfigRoutes(db));
   api.use(activityRoutes(db));
   api.use(dashboardRoutes(db));
   api.use(sidebarBadgeRoutes(db));

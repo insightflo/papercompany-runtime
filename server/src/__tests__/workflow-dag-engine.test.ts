@@ -27,6 +27,7 @@ vi.mock("../services/heartbeat.js", () => ({
 
 import { issueService } from "../services/issues.ts";
 import { executeWorkflowRun, syncWorkflowRunForIssue } from "../services/workflow/dag-engine.js";
+import { workflowService } from "../services/workflow/engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -60,6 +61,40 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("creates workflow definitions from plugin UI step payloads", async () => {
+    const companyId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Workflow",
+      issuePrefix: `WF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const definition = await workflowService.createDefinition(db, {
+      companyId,
+      name: "Plugin UI Workflow",
+      steps: [
+        {
+          id: "qa-step",
+          title: "QA step",
+          description: "Use this step only for QA usability verification.",
+          type: "agent",
+          dependsOn: [],
+        },
+      ] as never,
+    });
+
+    expect(definition.name).toBe("Plugin UI Workflow");
+    expect(definition.steps).toEqual([
+      expect.objectContaining({
+        id: "qa-step",
+        name: "QA step",
+        dependencies: [],
+      }),
+    ]);
   });
 
   it("creates workflow entry step issues through the common lifecycle path and keeps the run active", async () => {
