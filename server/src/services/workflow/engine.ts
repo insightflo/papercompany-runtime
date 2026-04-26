@@ -6,7 +6,10 @@
  */
 
 import type { Db } from "@paperclipai/db";
+import { agents } from "@paperclipai/db";
+import { eq, asc } from "drizzle-orm";
 import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue } from "./dag-engine.js";
+import { missionService } from "../missions.js";
 import {
   createWorkflowDefinition,
   getWorkflowDefinitionById,
@@ -69,6 +72,55 @@ function normalizeWorkflowSteps(steps: unknown[]): WorkflowStep[] {
       ...(toolNames ? { toolNames } : {}),
     };
   });
+}
+
+function formatWorkflowMissionTitle(workflowName: string, now = new Date()): string {
+  const yyyyMmDd = now.toISOString().slice(0, 10);
+  return `${yyyyMmDd} ${workflowName}`;
+}
+
+async function resolveWorkflowMissionOwnerAgentId(
+  db: Db,
+  companyId: string,
+  workflow: WorkflowDefinition,
+): Promise<string> {
+  const stepAgentId = workflow.steps.find((step) => typeof step.agentId === "string" && step.agentId.trim())?.agentId;
+  if (stepAgentId) return stepAgentId;
+
+  const [agent] = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(eq(agents.companyId, companyId))
+    .orderBy(asc(agents.createdAt))
+    .limit(1);
+
+  if (!agent) {
+    throw new Error("Cannot create workflow mission: no agent exists for company");
+  }
+  return agent.id;
+}
+
+async function ensureMissionForWorkflowRun(
+  db: Db,
+  input: CreateWorkflowRunInput,
+): Promise<CreateWorkflowRunInput> {
+  if (input.missionId) return input;
+
+  const workflow = await getWorkflowDefinitionById(db, input.workflowId);
+  if (!workflow) {
+    throw new Error(`Workflow definition not found: ${input.workflowId}`);
+  }
+
+  const ownerAgentId = await resolveWorkflowMissionOwnerAgentId(db, input.companyId, workflow);
+  const mission = await missionService(db).create({
+    companyId: input.companyId,
+    ownerAgentId,
+    title: formatWorkflowMissionTitle(workflow.name),
+    description: `Created automatically for workflow run: ${workflow.name}`,
+    status: "active",
+  });
+
+  return { ...input, missionId: mission.id };
 }
 
 /**
@@ -140,7 +192,8 @@ export const workflowService = {
     db: Db,
     input: CreateWorkflowRunInput,
   ): Promise<WorkflowExecutionResult> {
-    const run = await createWorkflowRun(db, input);
+    const runInput = await ensureMissionForWorkflowRun(db, input);
+    const run = await createWorkflowRun(db, runInput);
     return executeWorkflowRun(db, run.id);
   },
 

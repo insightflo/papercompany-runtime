@@ -212,6 +212,91 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(workflowRun?.status).toBe("running");
   });
 
+  it("creates a mission for a workflow trigger without an existing mission and links run and step issues", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const stepId = "collect-news";
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-auto-mission" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Papercompany Workflow",
+      issuePrefix: `WF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Tech Scout Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const definition = await workflowService.createDefinition(db, {
+      companyId,
+      name: "tech-scout report 생성",
+      steps: [
+        {
+          id: stepId,
+          name: "Collect AI infra news",
+          agentId,
+          dependencies: [],
+          description: "Collect source material for the daily tech scout report",
+        },
+      ],
+    });
+
+    const result = await workflowService.trigger(db, {
+      companyId,
+      workflowId: definition.id,
+      triggeredBy: "manual",
+    });
+
+    expect(result.status).toBe("running");
+
+    const [run] = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, result.runId))
+      .limit(1);
+    expect(run?.missionId).toBeTruthy();
+
+    const [mission] = await db
+      .select()
+      .from(missions)
+      .where(eq(missions.id, run!.missionId!))
+      .limit(1);
+    expect(mission).toMatchObject({
+      companyId,
+      ownerAgentId: agentId,
+      title: expect.stringContaining("tech-scout report 생성"),
+      status: "active",
+    });
+
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, result.runId))
+      .limit(1);
+    const [stepIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, stepRun.issueId!))
+      .limit(1);
+    expect(stepIssue).toMatchObject({
+      missionId: run!.missionId,
+      originKind: "workflow_execution",
+      originId: result.runId,
+      assigneeAgentId: agentId,
+    });
+  });
+
   it("progresses dependent steps and completes the workflow as execution issues complete", async () => {
     const companyId = randomUUID();
     const agentAId = randomUUID();
