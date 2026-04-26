@@ -1094,15 +1094,24 @@ export function pluginRoutes(
       return;
     }
 
-    const body = req.body as {
+    const body = req.body as ({
       companyId?: string;
       params?: Record<string, unknown>;
       renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
-    } | undefined;
+    } & Record<string, unknown>) | undefined;
 
     if (body?.companyId) {
       assertCompanyAccess(req, body.companyId);
     }
+
+    const actionParams = (() => {
+      if (body?.params) return body.params;
+      if (plugin.pluginKey !== "insightflo.workflow-engine" || key !== "start-workflow" || !body) {
+        return {};
+      }
+      const { renderEnvironment: _renderEnvironment, params: _params, ...topLevelParams } = body;
+      return topLevelParams;
+    })();
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1110,7 +1119,7 @@ export function pluginRoutes(
         "performAction",
         {
           key,
-          params: body?.params ?? {},
+          params: actionParams,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );
