@@ -127,7 +127,7 @@ export function Missions() {
               className="flex items-center gap-3 px-4 py-3 text-sm border-b border-border last:border-b-0 hover:bg-accent/30 transition-colors"
             >
               <Link
-                to={`missions/${mission.id}`}
+                to={`/missions/${mission.id}`}
                 className="flex-1 flex items-center gap-3 min-w-0 no-underline text-inherit hover:no-underline"
               >
                 <Rocket className="h-4 w-4 shrink-0 text-muted-foreground" />

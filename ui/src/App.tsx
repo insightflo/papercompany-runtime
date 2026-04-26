@@ -340,6 +340,16 @@ export function App() {
             <Route path="plugins" element={lazyRoute(<PluginManager />)} />
             <Route path="plugins/:pluginId" element={lazyRoute(<PluginSettings />)} />
           </Route>
+          <Route path="channels" element={<Layout />}>
+            <Route index element={lazyRoute(<ChannelConfig />)} />
+          </Route>
+          <Route path="scheduler" element={<Layout />}>
+            <Route index element={lazyRoute(<SchedulerConfig />)} />
+          </Route>
+          <Route path="worktree" element={<Layout />}>
+            <Route path="rules" element={lazyRoute(<WorktreeRules />)} />
+            <Route path="proposals" element={lazyRoute(<WorktreeProposals />)} />
+          </Route>
           <Route path="companies" element={<UnprefixedBoardRedirect />} />
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />

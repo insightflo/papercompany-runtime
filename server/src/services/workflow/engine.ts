@@ -33,6 +33,44 @@ import type {
 } from "./types.js";
 import type { WorkflowStep } from "./dag-engine.js";
 
+type WorkflowStepLike = WorkflowStep & {
+  title?: unknown;
+  dependsOn?: unknown;
+  tools?: unknown;
+  agentName?: unknown;
+};
+
+function normalizeWorkflowSteps(steps: unknown[]): WorkflowStep[] {
+  return steps.map((rawStep) => {
+    const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as WorkflowStepLike;
+    const dependencies = Array.isArray(step.dependencies)
+      ? step.dependencies
+      : Array.isArray(step.dependsOn)
+        ? step.dependsOn
+        : [];
+    const toolNames = Array.isArray(step.toolNames)
+      ? step.toolNames
+      : typeof step.tools === "string"
+        ? step.tools.split(",").map((tool) => tool.trim()).filter(Boolean)
+        : undefined;
+
+    return {
+      ...step,
+      id: typeof step.id === "string" ? step.id : crypto.randomUUID(),
+      name: typeof step.name === "string"
+        ? step.name
+        : typeof step.title === "string"
+          ? step.title
+          : typeof step.id === "string"
+            ? step.id
+            : "Untitled step",
+      agentId: typeof step.agentId === "string" ? step.agentId : "",
+      dependencies,
+      ...(toolNames ? { toolNames } : {}),
+    };
+  });
+}
+
 /**
  * Workflow service singleton.
  */
@@ -44,13 +82,14 @@ export const workflowService = {
     db: Db,
     input: CreateWorkflowDefinitionInput,
   ): Promise<WorkflowDefinition> {
+    const steps = normalizeWorkflowSteps(input.steps as unknown[]);
     // Validate DAG structure
-    const validation = validateDag(input.steps);
+    const validation = validateDag(steps);
     if (!validation.valid) {
       throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
     }
 
-    return createWorkflowDefinition(db, input);
+    return createWorkflowDefinition(db, { ...input, steps });
   },
 
   /**
@@ -76,10 +115,12 @@ export const workflowService = {
     updates: Partial<Omit<WorkflowDefinition, "id" | "createdAt" | "updatedAt">>,
   ): Promise<WorkflowDefinition | null> {
     if (updates.steps) {
-      const validation = validateDag(updates.steps);
+      const steps = normalizeWorkflowSteps(updates.steps as unknown[]);
+      const validation = validateDag(steps);
       if (!validation.valid) {
         throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
       }
+      updates = { ...updates, steps };
     }
 
     return updateWorkflowDefinition(db, id, updates);
@@ -148,7 +189,7 @@ export const workflowService = {
    * Validate a workflow DAG without creating it.
    */
   async validateDag(steps: unknown[]): Promise<DagValidationResult> {
-    return validateDag(steps as WorkflowStep[]);
+    return validateDag(normalizeWorkflowSteps(steps));
   },
 
   /**

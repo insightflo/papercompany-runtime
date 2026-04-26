@@ -49,6 +49,7 @@ import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
+import { workflowService } from "../services/workflow/engine.js";
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -1006,6 +1007,34 @@ export function pluginRoutes(
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );
+      if (plugin.pluginKey === "insightflo.workflow-engine" && key === "workflow-overview") {
+        const params = body?.params ?? {};
+        const companyId = typeof params.companyId === "string"
+          ? params.companyId
+          : typeof body?.companyId === "string"
+            ? body.companyId
+            : undefined;
+        if (companyId) {
+          assertCompanyAccess(req, companyId);
+          const nativeDefinitions = await workflowService.listDefinitions(db, companyId);
+          const resultRecord = result && typeof result === "object" ? result as Record<string, unknown> : {};
+          res.json({
+            data: {
+              ...resultRecord,
+              workflows: nativeDefinitions.map((definition) => ({
+                id: definition.id,
+                companyId: definition.companyId,
+                name: definition.name,
+                status: "active",
+                steps: definition.steps,
+                createdAt: definition.createdAt,
+                updatedAt: definition.updatedAt,
+              })),
+            },
+          });
+          return;
+        }
+      }
       res.json({ data: result });
     } catch (err) {
       const bridgeError = mapRpcErrorToBridgeError(err);
@@ -1088,6 +1117,40 @@ export function pluginRoutes(
       res.json({ data: result });
     } catch (err) {
       const bridgeError = mapRpcErrorToBridgeError(err);
+      if (
+        plugin.pluginKey === "insightflo.workflow-engine" &&
+        key === "create-workflow" &&
+        bridgeError.code === "WORKER_ERROR" &&
+        bridgeError.message.includes("No action handler registered")
+      ) {
+        const params = body?.params ?? {};
+        const workflow = (params.workflow && typeof params.workflow === "object"
+          ? params.workflow
+          : params) as Record<string, unknown>;
+        const companyId = typeof params.companyId === "string"
+          ? params.companyId
+          : typeof body?.companyId === "string"
+            ? body.companyId
+            : undefined;
+        if (!companyId) {
+          res.status(400).json({ error: "companyId is required" });
+          return;
+        }
+        assertCompanyAccess(req, companyId);
+        const name = typeof workflow.name === "string" ? workflow.name.trim() : "";
+        if (!name) {
+          res.status(400).json({ error: "workflow.name is required" });
+          return;
+        }
+        const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
+        const definition = await workflowService.createDefinition(db, {
+          companyId,
+          name,
+          steps: steps as never,
+        });
+        res.json({ data: { workflow: definition, ...definition } });
+        return;
+      }
       res.status(502).json(bridgeError);
     }
   });

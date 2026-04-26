@@ -131,6 +131,7 @@ function TelegramSection({ companyId, config }: TelegramSectionProps) {
       channelApi.updateConfig(companyId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.channel.config(companyId) });
+      setBotToken("");
       setSaveSuccess(true);
       setFormError(null);
       setTimeout(() => setSaveSuccess(false), 3000);

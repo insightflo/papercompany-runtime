@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyCompanyPrefix,
   extractCompanyPrefixFromPath,
   isBoardPathWithoutPrefix,
+  isGlobalPath,
   toCompanyRelativePath,
 } from "./company-routes";
 
@@ -13,5 +15,13 @@ describe("company mission routes", () => {
 
   it("converts company-prefixed plugin routes into company-relative paths", () => {
     expect(toCompanyRelativePath("/CMPA/tool-registry")).toBe("/tool-registry");
+  });
+
+  it("keeps global utility pages out of company-prefix extraction", () => {
+    for (const path of ["/channels", "/scheduler", "/worktree/rules", "/worktree/proposals"]) {
+      expect(isGlobalPath(path)).toBe(true);
+      expect(extractCompanyPrefixFromPath(path)).toBeNull();
+      expect(applyCompanyPrefix(path, "CMPAA")).toBe(path);
+    }
   });
 });
