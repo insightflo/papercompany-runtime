@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -93,6 +94,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         role: "executor",
       }),
     ]);
+  });
+
+  it("rejects non-UUID mission ids before mission subresource queries", async () => {
+    const svc = missionService(db);
+
+    await expect(svc.getById("mission-1")).rejects.toMatchObject({ status: 400 });
+    await expect(svc.getIssueTree("mission-1")).rejects.toMatchObject({ status: 400 });
+    await expect(svc.listWorkflowRuns("mission-1")).rejects.toMatchObject({ status: 400 });
   });
 
   it("returns mission-linked issues through getIssueTree", async () => {
@@ -284,6 +293,219 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       failedSteps: 0,
       skippedSteps: 0,
     });
+  });
+
+  it("updates active workflow-created missions when all linked plugin runs are terminal", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Terminal Plugin Workflow Company",
+      issuePrefix: `TP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-04-27 tech-scout",
+      description: "Created automatically for workflow run: tech-scout",
+      status: "active",
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values({
+      id: runId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${runId}`,
+      title: "tech-scout run",
+      status: "aborted",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "tech-scout",
+        companyId,
+        missionId,
+        status: "aborted",
+        triggerSource: "schedule",
+        startedAt: "2026-04-27T00:41:03.618Z",
+        completedAt: "2026-04-27T00:42:33.653Z",
+      },
+    });
+
+    const svc = missionService(db);
+    const activeList = await svc.list({ companyId, status: "active" });
+    const detail = await svc.getById(missionId);
+    const listed = await svc.list({ companyId });
+
+    expect(activeList.find((mission) => mission.id === missionId)).toBeUndefined();
+    expect(detail.status).toBe("cancelled");
+    expect(detail.completedAt).toEqual(new Date("2026-04-27T00:42:33.653Z"));
+    expect(listed.find((mission) => mission.id === missionId)?.status).toBe("cancelled");
+
+    const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
+    expect(stored?.status).toBe("cancelled");
+  });
+
+  it("links plugin workflow step issue ancestors to the mission before returning the issue tree", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const stepRunId = randomUUID();
+    const parentIssueId = randomUUID();
+    const stepIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Plugin Workflow Issue Company",
+      issuePrefix: `PI${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Plugin Workflow Mission",
+      status: "active",
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values([
+      {
+        id: workflowId,
+        pluginId,
+        entityType: "workflow-definition",
+        scopeKind: "company",
+        scopeId: companyId,
+        externalId: `workflow-definition:${workflowId}`,
+        title: "tech-scout",
+        status: "active",
+        data: { name: "tech-scout", companyId, steps: [{ id: "scout", title: "Scout", dependsOn: [] }] },
+      },
+      {
+        id: runId,
+        pluginId,
+        entityType: "workflow-run",
+        scopeKind: "company",
+        scopeId: companyId,
+        externalId: `workflow-run:${runId}`,
+        title: "tech-scout run",
+        status: "running",
+        data: {
+          workflowId,
+          workflowName: "tech-scout",
+          companyId,
+          missionId,
+          status: "running",
+          triggerSource: "schedule",
+        },
+      },
+      {
+        id: stepRunId,
+        pluginId,
+        entityType: "workflow-step-run",
+        scopeKind: "company",
+        scopeId: companyId,
+        externalId: `${runId}:scout`,
+        title: "scout",
+        status: "completed",
+        data: { runId, stepId: "scout", issueId: stepIssueId, status: "completed" },
+      },
+    ]);
+
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId: null,
+        title: "[tech-scout] #2026-04-27-1",
+        status: "backlog",
+        priority: "medium",
+        identifier: "PI-1",
+      },
+      {
+        id: stepIssueId,
+        companyId,
+        missionId: null,
+        parentId: parentIssueId,
+        title: "[tech-scout] 2026-04-27 기술 리서치 리포트",
+        status: "done",
+        priority: "high",
+        identifier: "PI-2",
+      },
+    ]);
+
+    const svc = missionService(db);
+    const result = await svc.getIssueTree(missionId);
+
+    expect(result.map((issue) => issue.id)).toEqual(expect.arrayContaining([parentIssueId, stepIssueId]));
+    expect(result.find((issue) => issue.id === stepIssueId)?.parentId).toBe(parentIssueId);
+
+    const stored = await db
+      .select({ id: issues.id, missionId: issues.missionId })
+      .from(issues)
+      .where(inArray(issues.id, [parentIssueId, stepIssueId]));
+    expect(stored).toEqual(
+      expect.arrayContaining([
+        { id: parentIssueId, missionId },
+        { id: stepIssueId, missionId },
+      ]),
+    );
   });
 
   it("returns plugin entity workflow runs linked to a mission", async () => {

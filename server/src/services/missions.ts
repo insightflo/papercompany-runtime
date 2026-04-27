@@ -6,6 +6,7 @@
  */
 
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -182,6 +183,12 @@ function validateRole(role: string): asserts role is MissionAgentRole {
   }
 }
 
+function assertMissionId(value: string): void {
+  if (!isUuidLike(value)) {
+    throw badRequest(`Invalid mission id: ${value}`);
+  }
+}
+
 function buildWorkflowRunProgress(steps: MissionWorkflowRunStep[]): MissionWorkflowRunProgress {
   return steps.reduce<MissionWorkflowRunProgress>(
     (acc, step) => {
@@ -293,6 +300,159 @@ function toPluginWorkflowStepData(value: unknown): PluginWorkflowStepData | null
 // ---------------------------------------------------------------------------
 
 export function missionService(db: Db) {
+  const activeWorkflowRunStatuses = new Set(["pending", "queued", "running", "in_progress"]);
+  const failedWorkflowRunStatuses = new Set(["aborted", "failed", "cancelled", "canceled", "error"]);
+  const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
+
+  async function reconcileMissionStatusFromWorkflowRuns(mission: MissionRow): Promise<MissionRow> {
+    if (mission.status !== "active") return mission;
+
+    const linkedRuns: Array<{ status: string; completedAt: Date | null }> = [];
+    const nativeRuns = await db
+      .select({ status: workflowRuns.status, completedAt: workflowRuns.completedAt })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.missionId, mission.id));
+    for (const run of nativeRuns) {
+      linkedRuns.push({ status: run.status, completedAt: run.completedAt });
+    }
+
+    const pluginRunEntities = await db
+      .select()
+      .from(pluginEntities)
+      .where(and(
+        eq(pluginEntities.entityType, "workflow-run"),
+        eq(pluginEntities.scopeKind, "company"),
+        eq(pluginEntities.scopeId, mission.companyId),
+      ));
+    for (const entity of pluginRunEntities) {
+      const data = entity.data as PluginWorkflowRunData;
+      if (data.companyId !== mission.companyId || data.missionId !== mission.id) continue;
+      linkedRuns.push({
+        status: asTrimmedString(data.status) ?? entity.status ?? "",
+        completedAt: parsePluginDate(data.completedAt) ?? entity.updatedAt ?? null,
+      });
+    }
+
+    if (linkedRuns.length === 0) return mission;
+
+    const normalizedStatuses = linkedRuns.map((run) => run.status.trim().toLowerCase()).filter(Boolean);
+    if (normalizedStatuses.some((status) => activeWorkflowRunStatuses.has(status))) return mission;
+    if (normalizedStatuses.some((status) => !failedWorkflowRunStatuses.has(status) && !completedWorkflowRunStatuses.has(status))) {
+      return mission;
+    }
+
+    const nextStatus: MissionStatus = normalizedStatuses.some((status) => failedWorkflowRunStatuses.has(status))
+      ? "cancelled"
+      : "completed";
+    const completedAt = linkedRuns
+      .map((run) => run.completedAt)
+      .filter((value): value is Date => value instanceof Date)
+      .sort((left, right) => right.getTime() - left.getTime())[0] ?? new Date();
+
+    const updates: Partial<MissionRow> = {
+      status: nextStatus,
+      completedAt,
+      updatedAt: new Date(),
+    };
+    await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+
+    return {
+      ...mission,
+      ...updates,
+    };
+  }
+
+  async function collectWorkflowIssueIdsForMission(mission: MissionRow): Promise<string[]> {
+    const issueIds = new Set<string>();
+
+    const nativeRuns = await db
+      .select({ id: workflowRuns.id })
+      .from(workflowRuns)
+      .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, mission.id)));
+    if (nativeRuns.length > 0) {
+      const nativeStepRuns = await db
+        .select({ issueId: workflowStepRuns.issueId })
+        .from(workflowStepRuns)
+        .where(inArray(workflowStepRuns.workflowRunId, nativeRuns.map((run) => run.id)));
+      for (const stepRun of nativeStepRuns) {
+        if (stepRun.issueId) issueIds.add(stepRun.issueId);
+      }
+    }
+
+    const pluginRunEntities = await db
+      .select()
+      .from(pluginEntities)
+      .where(and(
+        eq(pluginEntities.entityType, "workflow-run"),
+        eq(pluginEntities.scopeKind, "company"),
+        eq(pluginEntities.scopeId, mission.companyId),
+      ));
+    const pluginRunIds = pluginRunEntities
+      .filter((entity) => {
+        const data = entity.data as PluginWorkflowRunData;
+        return data.companyId === mission.companyId && data.missionId === mission.id;
+      })
+      .map((entity) => entity.id);
+
+    if (pluginRunIds.length > 0) {
+      const pluginStepRunEntities = await db
+        .select()
+        .from(pluginEntities)
+        .where(and(
+          eq(pluginEntities.entityType, "workflow-step-run"),
+          eq(pluginEntities.scopeKind, "company"),
+          eq(pluginEntities.scopeId, mission.companyId),
+        ));
+      for (const entity of pluginStepRunEntities) {
+        const data = entity.data as PluginWorkflowStepRunData;
+        const runId = asTrimmedString(data.runId);
+        const issueId = asTrimmedString(data.issueId);
+        if (runId && issueId && pluginRunIds.includes(runId)) issueIds.add(issueId);
+      }
+    }
+
+    return [...issueIds];
+  }
+
+  async function collectIssueIdsWithAncestors(companyId: string, seedIssueIds: string[]): Promise<string[]> {
+    const result = new Set<string>();
+    const visited = new Set<string>();
+    let frontier = [...new Set(seedIssueIds)];
+
+    while (frontier.length > 0) {
+      const current = frontier.filter((id) => !visited.has(id));
+      if (current.length === 0) break;
+      for (const id of current) visited.add(id);
+
+      const rows = await db
+        .select({ id: issues.id, parentId: issues.parentId })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), inArray(issues.id, current)));
+
+      const next: string[] = [];
+      for (const row of rows) {
+        result.add(row.id);
+        if (row.parentId && !visited.has(row.parentId)) next.push(row.parentId);
+      }
+      frontier = next;
+    }
+
+    return [...result];
+  }
+
+  async function ensureWorkflowIssuesLinkedToMission(mission: MissionRow): Promise<void> {
+    const workflowIssueIds = await collectWorkflowIssueIdsForMission(mission);
+    if (workflowIssueIds.length === 0) return;
+
+    const issueIdsWithAncestors = await collectIssueIdsWithAncestors(mission.companyId, workflowIssueIds);
+    if (issueIdsWithAncestors.length === 0) return;
+
+    await db
+      .update(issues)
+      .set({ missionId: mission.id, updatedAt: new Date() })
+      .where(and(eq(issues.companyId, mission.companyId), inArray(issues.id, issueIdsWithAncestors)));
+  }
+
   /**
    * Create a new mission.
    */
@@ -350,13 +510,16 @@ export function missionService(db: Db) {
    * Get a mission by ID with full detail.
    */
   async function getById(id: string): Promise<MissionDetail> {
-    const [mission] = await db
+    assertMissionId(id);
+
+    let [mission] = await db
       .select()
       .from(missions)
       .where(eq(missions.id, id))
       .limit(1);
 
     if (!mission) throw notFound(`Mission not found: ${id}`);
+    mission = await reconcileMissionStatusFromWorkflowRuns(mission);
 
     const agentRows = await db
       .select({
@@ -416,37 +579,39 @@ export function missionService(db: Db) {
 
     const order = filter.sortOrder === "desc" ? desc(sortColumn) : asc(sortColumn);
 
+    let rows: MissionRow[];
     if (filter.limit !== undefined && filter.offset !== undefined) {
-      return await db
+      rows = await db
         .select()
         .from(missions)
         .where(and(...conditions))
         .orderBy(order)
         .limit(filter.limit)
         .offset(filter.offset);
-    }
-    if (filter.limit !== undefined) {
-      return await db
+    } else if (filter.limit !== undefined) {
+      rows = await db
         .select()
         .from(missions)
         .where(and(...conditions))
         .orderBy(order)
         .limit(filter.limit);
-    }
-    if (filter.offset !== undefined) {
-      return await db
+    } else if (filter.offset !== undefined) {
+      rows = await db
         .select()
         .from(missions)
         .where(and(...conditions))
         .orderBy(order)
         .offset(filter.offset);
+    } else {
+      rows = await db
+        .select()
+        .from(missions)
+        .where(and(...conditions))
+        .orderBy(order);
     }
 
-    return await db
-      .select()
-      .from(missions)
-      .where(and(...conditions))
-      .orderBy(order);
+    const reconciledRows = await Promise.all(rows.map((mission) => reconcileMissionStatusFromWorkflowRuns(mission)));
+    return filter.status ? reconciledRows.filter((mission) => mission.status === filter.status) : reconciledRows;
   }
 
   /**
@@ -590,11 +755,14 @@ export function missionService(db: Db) {
    * Returns all issues linked to this mission grouped by parent.
    */
   async function getIssueTree(missionId: string): Promise<MissionIssueTree> {
+    assertMissionId(missionId);
+
     // Verify mission exists
     const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
     if (!mission) throw notFound(`Mission not found: ${missionId}`);
 
     const issuesSvc = issueService(db);
+    await ensureWorkflowIssuesLinkedToMission(mission);
     return issuesSvc.list(mission.companyId, { missionId });
   }
 
@@ -602,6 +770,8 @@ export function missionService(db: Db) {
    * List workflow runs associated with a mission, including step runs and workflow names.
    */
   async function listWorkflowRuns(missionId: string): Promise<MissionWorkflowRunDetail[]> {
+    assertMissionId(missionId);
+
     const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
     if (!mission) throw notFound(`Mission not found: ${missionId}`);
 
