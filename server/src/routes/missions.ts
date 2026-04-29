@@ -34,19 +34,21 @@ export function missionRoutes(db: Db) {
    * GET /companies/:companyId/missions
    *
    * List missions for a company.
-   * Query params: ?status=active&ownerAgentId=xxx&goalId=xxx&sortBy=createdAt&sortOrder=desc&limit=50&offset=0
+   * Query params: ?status=active&ownerAgentId=xxx&goalId=xxx&from=2026-04-01&to=2026-04-29&sortBy=createdAt&sortOrder=desc&limit=50&offset=0
    */
   router.get("/companies/:companyId/missions", async (req, res) => {
     const { companyId } = req.params;
     assertCompanyAccess(req, companyId);
 
-    const { status, ownerAgentId, goalId, sortBy, sortOrder, limit, offset } = req.query;
+    const { status, ownerAgentId, goalId, from, to, sortBy, sortOrder, limit, offset } = req.query;
 
     const result = await svc.list({
       companyId,
       status: status as "planning" | "active" | "paused" | "completed" | "cancelled" | undefined,
       ownerAgentId: ownerAgentId as string | undefined,
       goalId: goalId as string | undefined,
+      from: from as string | undefined,
+      to: to as string | undefined,
       sortBy: sortBy as "createdAt" | "updatedAt" | "title" | "status" | undefined,
       sortOrder: sortOrder as "asc" | "desc" | undefined,
       limit: limit ? parseInt(limit as string, 10) : undefined,
@@ -64,7 +66,7 @@ export function missionRoutes(db: Db) {
     const { companyId } = req.params;
     assertCompanyAccess(req, companyId);
 
-    const { ownerAgentId, title, description, goalId, status, agentIds } = req.body;
+    const { ownerAgentId, title, description, goalId, status, agentIds, source } = req.body;
 
     if (!ownerAgentId || !title) {
       throw badRequest("ownerAgentId and title are required");
@@ -78,6 +80,7 @@ export function missionRoutes(db: Db) {
       goalId,
       status,
       agentIds,
+      source,
     });
 
     const actor = getActorInfo(req);

@@ -5,8 +5,10 @@ import { missionRoutes } from "../routes/missions.js";
 import { errorHandler } from "../middleware/index.js";
 
 const mockMissionService = vi.hoisted(() => ({
+  create: vi.fn(),
   getById: vi.fn(),
   getIssueTree: vi.fn(),
+  list: vi.fn(),
   listWorkflowRuns: vi.fn(),
 }));
 
@@ -45,6 +47,49 @@ describe("mission routes subresources", () => {
       title: "Mission",
       status: "active",
     });
+  });
+
+  it("passes mission list date range filters to the mission service", async () => {
+    mockMissionService.list.mockResolvedValue([]);
+
+    const res = await request(createApp())
+      .get("/api/companies/company-1/missions")
+      .query({ from: "2026-04-01", to: "2026-04-29" });
+
+    expect(res.status).toBe(200);
+    expect(mockMissionService.list).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      from: "2026-04-01",
+      to: "2026-04-29",
+    }));
+  });
+
+  it("forwards workflow mission source to avoid creating manual planning issues", async () => {
+    mockMissionService.create.mockResolvedValue({
+      id: "mission-1",
+      companyId: "company-1",
+      ownerAgentId: "agent-1",
+      title: "Workflow mission",
+      status: "active",
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/missions")
+      .send({
+        ownerAgentId: "agent-1",
+        title: "Workflow mission",
+        description: "Created automatically for workflow run: gazua-morning",
+        status: "active",
+        source: "workflow",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockMissionService.create).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      ownerAgentId: "agent-1",
+      title: "Workflow mission",
+      source: "workflow",
+    }));
   });
 
   it("returns mission issues from the mission service", async () => {

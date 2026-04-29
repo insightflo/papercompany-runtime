@@ -2,10 +2,10 @@
  * Mission Service
  *
  * CRUD operations for missions and mission_agents.
- * OQ-4 schema: owner_agent_id (PO), executor/reviewer/observer/specialist roles.
+ * OQ-4 schema: owner_agent_id is the mission main executor; mission_agents carries executor/reviewer/observer roles.
  */
 
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
@@ -126,6 +126,7 @@ export interface CreateMissionInput {
   description?: string;
   goalId?: string;
   status?: MissionStatus;
+  source?: "manual" | "workflow";
   agentIds?: Array<{ agentId: string; role: MissionAgentRole }>;
 }
 
@@ -158,6 +159,8 @@ export interface ListMissionsFilter {
   status?: MissionStatus;
   ownerAgentId?: string;
   goalId?: string;
+  from?: string;
+  to?: string;
   limit?: number;
   offset?: number;
   sortBy?: "createdAt" | "updatedAt" | "title" | "status";
@@ -268,6 +271,19 @@ function parsePluginDate(value: unknown): Date | null {
   return Number.isFinite(parsed) ? new Date(parsed) : null;
 }
 
+function parseMissionDateFilter(value: string, boundary: "start" | "end"): Date {
+  const normalized = value.trim();
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
+  const raw = dateOnlyMatch
+    ? `${normalized}T${boundary === "start" ? "00:00:00.000" : "23:59:59.999"}Z`
+    : normalized;
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) {
+    throw badRequest(`Invalid mission date filter: ${value}`);
+  }
+  return new Date(parsed);
+}
+
 function normalizePluginWorkflowStepStatus(status: unknown): MissionWorkflowRunStep["status"] {
   const normalized = asTrimmedString(status);
   switch (normalized) {
@@ -305,7 +321,10 @@ export function missionService(db: Db) {
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
 
   async function reconcileMissionStatusFromWorkflowRuns(mission: MissionRow): Promise<MissionRow> {
-    if (mission.status !== "active") return mission;
+    const isWorkflowCreatedMission = mission.description?.startsWith("Created automatically for workflow run:") ?? false;
+    const canReconcileTerminalWorkflowMission =
+      isWorkflowCreatedMission && (mission.status === "completed" || mission.status === "cancelled");
+    if (mission.status !== "active" && !canReconcileTerminalWorkflowMission) return mission;
 
     const linkedRuns: Array<{ status: string; completedAt: Date | null }> = [];
     const nativeRuns = await db
@@ -336,7 +355,19 @@ export function missionService(db: Db) {
     if (linkedRuns.length === 0) return mission;
 
     const normalizedStatuses = linkedRuns.map((run) => run.status.trim().toLowerCase()).filter(Boolean);
-    if (normalizedStatuses.some((status) => activeWorkflowRunStatuses.has(status))) return mission;
+    if (normalizedStatuses.some((status) => activeWorkflowRunStatuses.has(status))) {
+      if (mission.status === "active" && mission.completedAt === null) return mission;
+      const updates: Partial<MissionRow> = {
+        status: "active",
+        completedAt: null,
+        updatedAt: new Date(),
+      };
+      await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+      return {
+        ...mission,
+        ...updates,
+      };
+    }
     if (normalizedStatuses.some((status) => !failedWorkflowRunStatuses.has(status) && !completedWorkflowRunStatuses.has(status))) {
       return mission;
     }
@@ -453,6 +484,65 @@ export function missionService(db: Db) {
       .where(and(eq(issues.companyId, mission.companyId), inArray(issues.id, issueIdsWithAncestors)));
   }
 
+  async function findMainExecutorIssue(missionId: string, originKind: string) {
+    return db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.missionId, missionId), eq(issues.originKind, originKind)))
+      .orderBy(asc(issues.createdAt), asc(issues.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function ensureMainExecutorPlanningIssue(mission: MissionRow): Promise<void> {
+    if (await findMainExecutorIssue(mission.id, "mission_main_executor_plan")) return;
+
+    await issueService(db).create(mission.companyId, {
+      assigneeAgentId: mission.ownerAgentId,
+      description: [
+        "Plan and coordinate the mission before execution begins.",
+        "",
+        `Mission: ${mission.title}`,
+        mission.description ? `Brief: ${mission.description}` : null,
+        "",
+        "Expected output:",
+        "- Break down the work into executable issues or workflow runs.",
+        "- Identify blockers and approval needs early.",
+        "- Keep this issue updated with the current plan.",
+      ].filter(Boolean).join("\n"),
+      missionId: mission.id,
+      originKind: "mission_main_executor_plan",
+      priority: "medium",
+      status: "todo",
+      title: `[Plan] ${mission.title}`,
+    });
+  }
+
+  async function ensureMainExecutorOversightIssue(mission: MissionRow, workflowName: string): Promise<void> {
+    if (await findMainExecutorIssue(mission.id, "mission_main_executor_oversight")) return;
+
+    await issueService(db).create(mission.companyId, {
+      assigneeAgentId: mission.ownerAgentId,
+      description: [
+        "Monitor this workflow-created mission and keep execution moving.",
+        "",
+        `Mission: ${mission.title}`,
+        `Workflow: ${workflowName}`,
+        "",
+        "Main executor duties:",
+        "- Watch step progress and comments.",
+        "- Comment on failed or blocked steps with the current judgement.",
+        "- Retry failed workflow steps when retry is safe and within the retry limit.",
+        "- Escalate instead of blindly retrying when the same step keeps failing.",
+      ].join("\n"),
+      missionId: mission.id,
+      originKind: "mission_main_executor_oversight",
+      priority: "medium",
+      status: "todo",
+      title: `[Oversight] ${workflowName}`,
+    });
+  }
+
   /**
    * Create a new mission.
    */
@@ -466,6 +556,25 @@ export function missionService(db: Db) {
       .where(eq(agents.id, input.ownerAgentId))
       .limit(1);
     if (!ownerRow) throw notFound(`Agent not found: ${input.ownerAgentId}`);
+
+    if ((input.source ?? "manual") === "workflow" && (input.status ?? "planning") === "active") {
+      const existingActiveWorkflowMission = await db
+        .select({ id: missions.id })
+        .from(missions)
+        .where(and(
+          eq(missions.companyId, input.companyId),
+          eq(missions.title, input.title),
+          input.description == null ? isNull(missions.description) : eq(missions.description, input.description),
+          eq(missions.status, "active"),
+        ))
+        .orderBy(asc(missions.createdAt), asc(missions.id))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+      if (existingActiveWorkflowMission) {
+        return getById(existingActiveWorkflowMission.id);
+      }
+    }
 
     // Create mission
     const [mission] = await db
@@ -501,6 +610,10 @@ export function missionService(db: Db) {
           role: role ?? "executor",
         }).onConflictDoNothing();
       }
+    }
+
+    if ((input.source ?? "manual") === "manual") {
+      await ensureMainExecutorPlanningIssue(mission);
     }
 
     return getById(mission.id);
@@ -567,6 +680,8 @@ export function missionService(db: Db) {
     }
     if (filter.ownerAgentId) conditions.push(eq(missions.ownerAgentId, filter.ownerAgentId));
     if (filter.goalId) conditions.push(eq(missions.goalId, filter.goalId));
+    if (filter.from) conditions.push(gte(missions.createdAt, parseMissionDateFilter(filter.from, "start")));
+    if (filter.to) conditions.push(lte(missions.createdAt, parseMissionDateFilter(filter.to, "end")));
 
     const sortColumn =
       filter.sortBy === "title"
@@ -1071,6 +1186,7 @@ export function missionService(db: Db) {
     listAgents,
     getIssueTree,
     listWorkflowRuns,
+    ensureMainExecutorOversightIssue,
   };
 }
 

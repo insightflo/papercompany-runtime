@@ -90,6 +90,18 @@ export interface MissionListItem {
   updatedAt: Date;
 }
 
+export interface MissionListFilters {
+  status?: MissionStatus;
+  goalId?: string;
+  ownerAgentId?: string;
+  from?: string;
+  to?: string;
+  sortBy?: "createdAt" | "updatedAt" | "title" | "status";
+  sortOrder?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
 export interface MissionDetailItem extends MissionListItem {
   agents: MissionAgentEntry[];
   ownerAgentName?: string;
@@ -115,10 +127,17 @@ export interface UpdateMissionInput {
 }
 
 export const missionsApi = {
-  list: (companyId: string, filters?: { status?: MissionStatus; goalId?: string }) => {
+  list: (companyId: string, filters?: MissionListFilters) => {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
     if (filters?.goalId) params.set("goalId", filters.goalId);
+    if (filters?.ownerAgentId) params.set("ownerAgentId", filters.ownerAgentId);
+    if (filters?.from) params.set("from", filters.from);
+    if (filters?.to) params.set("to", filters.to);
+    if (filters?.sortBy) params.set("sortBy", filters.sortBy);
+    if (filters?.sortOrder) params.set("sortOrder", filters.sortOrder);
+    if (filters?.limit !== undefined) params.set("limit", String(filters.limit));
+    if (filters?.offset !== undefined) params.set("offset", String(filters.offset));
     const qs = params.toString();
     return api.get<MissionListItem[]>(`/companies/${companyId}/missions${qs ? `?${qs}` : ""}`);
   },

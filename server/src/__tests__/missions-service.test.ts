@@ -96,6 +96,210 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]);
   });
 
+  it("creates a main executor planning issue for a manual mission", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Planning Mission Company",
+      issuePrefix: `PM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const result = await missionService(db).create({
+      companyId,
+      ownerAgentId,
+      title: "Customer homepage rollout",
+      description: "Plan and coordinate the homepage launch.",
+      status: "planning",
+    });
+
+    const planningIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, result.id));
+
+    expect(planningIssues).toEqual([
+      expect.objectContaining({
+        companyId,
+        assigneeAgentId: ownerAgentId,
+        missionId: result.id,
+        originKind: "mission_main_executor_plan",
+        status: "todo",
+        title: "[Plan] Customer homepage rollout",
+      }),
+    ]);
+    expect(planningIssues[0]?.description).toContain("Plan and coordinate the mission");
+  });
+
+  it("does not create a manual planning issue for a workflow-created mission", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workflow Mission Company",
+      issuePrefix: `WM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const result = await missionService(db).create({
+      companyId,
+      ownerAgentId,
+      title: "2026-04-28 gazua-morning",
+      description: "Created automatically for workflow run: gazua-morning",
+      status: "active",
+      source: "workflow",
+    });
+
+    const planningIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, result.id));
+
+    expect(planningIssues).toEqual([]);
+  });
+
+  it("reuses an existing active workflow mission with the same company, title, and workflow description", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workflow Mission Dedup Company",
+      issuePrefix: `WD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const input = {
+      companyId,
+      ownerAgentId,
+      title: "2026-04-30 gazua-watchlist-refresh",
+      description: "Created automatically for workflow run: gazua-watchlist-refresh",
+      status: "active" as const,
+      source: "workflow" as const,
+    };
+
+    const first = await missionService(db).create(input);
+    const second = await missionService(db).create(input);
+    const missionRows = await db
+      .select({ id: missions.id })
+      .from(missions)
+      .where(eq(missions.companyId, companyId));
+
+    expect(second.id).toBe(first.id);
+    expect(missionRows).toHaveLength(1);
+  });
+
+  it("filters listed missions by inclusive created date range", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Date Filter Mission Company",
+      issuePrefix: `DF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values([
+      {
+        id: randomUUID(),
+        companyId,
+        ownerAgentId,
+        title: "Before range",
+        status: "active",
+        createdAt: new Date("2026-03-31T23:59:59.000Z"),
+      },
+      {
+        id: randomUUID(),
+        companyId,
+        ownerAgentId,
+        title: "Inside range start",
+        status: "active",
+        createdAt: new Date("2026-04-01T00:00:00.000Z"),
+      },
+      {
+        id: randomUUID(),
+        companyId,
+        ownerAgentId,
+        title: "Inside range end",
+        status: "active",
+        createdAt: new Date("2026-04-29T23:59:59.000Z"),
+      },
+      {
+        id: randomUUID(),
+        companyId,
+        ownerAgentId,
+        title: "After range",
+        status: "active",
+        createdAt: new Date("2026-04-30T00:00:00.000Z"),
+      },
+    ]);
+
+    const result = await missionService(db).list({
+      companyId,
+      from: "2026-04-01",
+      to: "2026-04-29",
+      sortBy: "createdAt",
+      sortOrder: "asc",
+    });
+
+    expect(result.map((mission) => mission.title)).toEqual([
+      "Inside range start",
+      "Inside range end",
+    ]);
+  });
+
   it("rejects non-UUID mission ids before mission subresource queries", async () => {
     const svc = missionService(db);
 
@@ -374,6 +578,213 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
     expect(stored?.status).toBe("cancelled");
+  });
+
+  it("corrects a prematurely completed workflow-created mission when its linked plugin run later aborts", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Premature Completed Workflow Company",
+      issuePrefix: `PC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-04-28 gazua-morning",
+      description: "Created automatically for workflow run: gazua-morning",
+      status: "completed",
+      completedAt: new Date("2026-04-27T23:51:06.620Z"),
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values({
+      id: runId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${runId}`,
+      title: "gazua-morning #2026-04-28-1",
+      status: "aborted",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "gazua-morning",
+        companyId,
+        missionId,
+        status: "aborted",
+        triggerSource: "schedule",
+        runLabel: "#2026-04-28-1",
+        startedAt: "2026-04-27T22:00:06.773Z",
+        completedAt: "2026-04-28T00:10:29.987Z",
+      },
+    });
+
+    const svc = missionService(db);
+    const completedList = await svc.list({ companyId, status: "completed" });
+    const detail = await svc.getById(missionId);
+    const cancelledList = await svc.list({ companyId, status: "cancelled" });
+
+    expect(completedList.find((mission) => mission.id === missionId)).toBeUndefined();
+    expect(detail.status).toBe("cancelled");
+    expect(detail.completedAt).toEqual(new Date("2026-04-28T00:10:29.987Z"));
+    expect(cancelledList.find((mission) => mission.id === missionId)?.status).toBe("cancelled");
+
+    const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
+    expect(stored?.status).toBe("cancelled");
+  });
+
+  it("reactivates a prematurely cancelled workflow-created mission while a linked plugin run is still active", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Premature Cancelled Workflow Company",
+      issuePrefix: `PX${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-04-28 gazua-morning",
+      description: "Created automatically for workflow run: gazua-morning",
+      status: "cancelled",
+      completedAt: new Date("2026-04-28T00:10:29.987Z"),
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values({
+      id: runId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${runId}`,
+      title: "gazua-morning #2026-04-28-1",
+      status: "running",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "gazua-morning",
+        companyId,
+        missionId,
+        status: "running",
+        triggerSource: "schedule",
+        runLabel: "#2026-04-28-1",
+        startedAt: "2026-04-27T22:00:06.773Z",
+        completedAt: null,
+      },
+    });
+
+    const svc = missionService(db);
+    const cancelledList = await svc.list({ companyId, status: "cancelled" });
+    const activeList = await svc.list({ companyId, status: "active" });
+    const detail = await svc.getById(missionId);
+
+    expect(cancelledList.find((mission) => mission.id === missionId)).toBeUndefined();
+    expect(activeList.find((mission) => mission.id === missionId)?.status).toBe("active");
+    expect(detail.status).toBe("active");
+    expect(detail.completedAt).toBeNull();
+
+    const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
+    expect(stored?.status).toBe("active");
+    expect(stored?.completedAt).toBeNull();
+  });
+
+  it("does not reactivate an ordinary manually cancelled mission with no workflow-created marker", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Manual Cancelled Mission Company",
+      issuePrefix: `MC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Manual mission",
+      description: "Operator cancelled this manually",
+      status: "cancelled",
+      completedAt: new Date("2026-04-28T00:10:29.987Z"),
+    });
+
+    const svc = missionService(db);
+    const detail = await svc.getById(missionId);
+    expect(detail.status).toBe("cancelled");
+    expect(detail.completedAt).toEqual(new Date("2026-04-28T00:10:29.987Z"));
   });
 
   it("links plugin workflow step issue ancestors to the mission before returning the issue tree", async () => {
