@@ -531,6 +531,44 @@ maintenance_vendor_handoff_followed
 | `mirror_sync` / `srb_sync` | source issue 상태와 mirror issue 상태를 동기화하면서, mirror 쪽 role 책임 판단이 누락되지 않도록 관찰한다. | source status를 mirror status로 반영, alignment observation audit 기록, sync 실패 warn. | mirror issue가 vendor/incident/missing-input 책임을 요구하는데 terminal close로 동기화되는 경우 해당 담당 role 또는 `operator`에게 rationale 확인 필요. | cross-company irreversible close, 외부 발송을 동반한 sync, 비용/계약/법무 상태 동기화. |
 | `approver` / `operator` | 예외 승인, high-risk action 승인, 책임자 지정, override reason 품질을 관리한다. | override reason 승인, high-risk action 승인/반려, hard-stop 예외 승인, 담당 role 재배정. | 법무/보안/재무 전문 판단이 필요한 경우 해당 사람/role과 협업. | irreversible, external, cost, contract/legal/compliance, production-destructive action. |
 
+#### Future mission-level role: `mission_owner` / `main_executor`
+
+현재 Phase A 구현 범위에는 포함하지 않는다. 다만 이후 role/mission-owner 설계에서는 mission의 `main executor`를 단순 표시용 담당자 이름이나 기본 실행 agent가 아니라 **mission outcome owner**로 모델링한다.
+
+`mission_owner` / `main_executor`의 responsibility는 다음 mission-level accountability를 포함해야 한다.
+
+1. mission planning: workflow, execution/worktree rules, KB를 종합해 실행 계획을 구성한다.
+2. delegation: 적절한 role/agent에게 업무를 배분한다.
+3. progress supervision: 중간 상태와 실패를 감지한다.
+4. failure diagnosis: 정보 부족, 권한 부족, 외부 의존, 기술 실패, scope/contract 문제 등으로 실패 원인을 분류한다.
+5. recovery/replan: 우회, 재시도, 역할 재배치, 추가 정보 요청 등으로 완료 방향을 복구한다.
+6. escalation/report: 완료 불가 시 이유, 막힌 지점, 필요한 결정사항을 보고한다.
+
+이 역시 RPA식 세부 절차가 아니라 mission-level accountability 모델이다. `mission_owner`는 이름표가 아니라 mission 완료 책임자이며, maintenance context role들은 이 책임자가 계획·위임·복구하는 하위/협업 role로 해석한다.
+
+중요하게, 이 책임은 prompt 지침 문구만으로 충분하지 않다. Hermes가 memory/tool/skill/harness를 실제로 사용하듯, Papercompany의 mission owner도 계획·분배·감독·실패진단·복구·보고를 수행할 때 구조적으로 사용할 수 있는 substrate가 필요하다.
+
+추후 별도 phase에서는 다음 구조적 지원을 설계한다.
+
+1. `mission_plan` artifact
+   - workflow, execution/worktree rules, KB references를 종합한 현재 계획.
+   - steps, role assignment, success criteria, assumptions, required inputs를 포함한다.
+2. `delegation_record`
+   - 어떤 role/agent에게 어떤 responsibility를 맡겼는지 기록한다.
+   - expected output, due/blocked state, handoff context를 포함한다.
+3. supervision/progress loop
+   - mission owner가 step/issue/workflow 상태를 주기적으로 읽고 다음 action을 판단한다.
+   - stale, blocked, failure 상태를 감지한다.
+4. failure diagnosis object/event
+   - `info_missing`, `authority_missing`, `external_dependency`, `tool_failure`, `kb_gap`, `workflow_gap`, `scope_contract_unclear` 등으로 실패 원인을 분류한다.
+   - attempted recovery와 next decision needed를 남긴다.
+5. recovery/replan artifact
+   - plan revision, reassignment, escalation, additional info request를 기록한다.
+6. impossible/completion report
+   - 완료 또는 완료불가를 evidence와 decision-needed 형태로 보고한다.
+
+이는 세세한 절차 강제가 아니라 mission owner가 사용할 memory/tool/skill/harness에 해당하는 구조적 지원이다. Phase A는 role context prompt 노출로 작게 유지하고, mission owner loop / mission plan artifact / delegation tracking은 이후 별도 phase로 다룬다.
+
 #### Boundary 원칙
 
 - `responsibility`: role이 반드시 확인하거나 설명해야 하는 결과. 예: `maintenance_triage`는 affected system/severity/next role을 설명해야 한다.
