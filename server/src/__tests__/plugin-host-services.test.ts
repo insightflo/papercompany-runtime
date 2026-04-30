@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   heartbeatWakeup: vi.fn(),
   logActivity: vi.fn(),
   syncSrbSourceIssueStatus: vi.fn(),
+  registryGetConfig: vi.fn(),
+  registryUpsertEntity: vi.fn(),
+  registryListEntities: vi.fn(),
 }));
 
 vi.mock("../services/companies.js", () => ({ companyService: () => ({}) }));
@@ -32,7 +35,9 @@ vi.mock("../services/costs.js", () => ({ costService: () => ({}) }));
 vi.mock("../services/assets.js", () => ({ assetService: () => ({}) }));
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => ({
-    getConfig: vi.fn().mockResolvedValue(null),
+    getConfig: mocks.registryGetConfig.mockResolvedValue(null),
+    upsertEntity: mocks.registryUpsertEntity,
+    listEntities: mocks.registryListEntities,
   }),
 }));
 vi.mock("../services/plugin-state-store.js", () => ({
@@ -74,7 +79,27 @@ describe("buildHostServices issues", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.heartbeatWakeup.mockResolvedValue({ id: "run-1" });
+    mocks.registryGetConfig.mockResolvedValue(null);
+    mocks.registryUpsertEntity.mockImplementation(async (_pluginId, input) => ({
+      id: "entity-1",
+      pluginId: "plugin-install-1",
+      ...input,
+    }));
+    mocks.registryListEntities.mockResolvedValue([]);
   });
+
+  function createEventBus(): PluginEventBus {
+    return {
+      emit: vi.fn().mockResolvedValue({ delivered: 0, errors: [] }),
+      forPlugin: vi.fn(() => ({
+        emit: vi.fn().mockResolvedValue({ delivered: 0, errors: [] }),
+        subscribe: vi.fn(),
+        clear: vi.fn(),
+      })),
+      clearPlugin: vi.fn(),
+      subscriptionCount: vi.fn().mockReturnValue(0),
+    };
+  }
 
   it("logs issue.created and queues assignment wake for plugin-created issues", async () => {
     mocks.issueCreate.mockResolvedValue({
@@ -256,6 +281,65 @@ describe("buildHostServices issues", () => {
       requestedByActorType: "system",
       requestedByActorId: "plugin-install-1",
       contextSnapshot: { issueId: "issue-3", source: "plugin.issue.status_change" },
+    }));
+
+    services.dispose();
+  });
+
+  it("blocks a linked issue when a plugin workflow step run fails", async () => {
+    mocks.issueGetById.mockResolvedValue({
+      id: "issue-4",
+      companyId: "company-1",
+      identifier: "CMPA-1517",
+      assigneeAgentId: "agent-4",
+      status: "todo",
+    });
+    mocks.issueUpdate.mockResolvedValue({
+      id: "issue-4",
+      companyId: "company-1",
+      identifier: "CMPA-1517",
+      assigneeAgentId: "agent-4",
+      status: "blocked",
+    });
+
+    const services = buildHostServices(
+      {} as never,
+      "plugin-install-1",
+      "paperclipai.service-request-bridge",
+      createEventBus(),
+    );
+
+    await services.entities.upsert({
+      entityType: "workflow-step-run",
+      scopeKind: "company",
+      scopeId: "company-1",
+      externalId: "run-1:step-1",
+      title: "Generate report",
+      data: {
+        workflowRunId: "run-1",
+        issueId: "issue-4",
+        status: "failed",
+      },
+    });
+
+    expect(mocks.issueUpdate).toHaveBeenCalledWith("issue-4", { status: "blocked" });
+    expect(mocks.syncSrbSourceIssueStatus).toHaveBeenCalledWith({
+      db: expect.anything(),
+      issueId: "issue-4",
+      status: "blocked",
+    });
+    expect(mocks.logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: "company-1",
+      actorType: "system",
+      actorId: "plugin-install-1",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: "issue-4",
+      details: {
+        status: "blocked",
+        identifier: "CMPA-1517",
+        _previous: { status: "todo" },
+      },
     }));
 
     services.dispose();

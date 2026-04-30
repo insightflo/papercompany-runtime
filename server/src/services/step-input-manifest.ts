@@ -82,6 +82,11 @@ export function buildStepInputManifest(input: {
     .filter((key) => key !== "paperclipStepInputManifest")
     .sort();
 
+  const workspaceSource = readString(workspace.source) || null;
+  const workspaceId = readString(workspace.workspaceId) || null;
+  const workspaceProjectId = readString(workspace.projectId) || null;
+  const hasProjectPrimaryWorkspace = workspaceSource === "project_primary" && workspaceId !== null;
+
   return {
     version: 1,
     taskKey,
@@ -89,14 +94,14 @@ export function buildStepInputManifest(input: {
     projectId: readString(context.projectId) || null,
     allowedContextKeys,
     guardrails: {
-      broadScanAllowed: false,
+      broadScanAllowed: hasProjectPrimaryWorkspace,
     },
     inputs: {
       workspace: {
         available: Object.keys(workspace).length > 0,
-        source: readString(workspace.source) || null,
-        workspaceId: readString(workspace.workspaceId) || null,
-        projectId: readString(workspace.projectId) || null,
+        source: workspaceSource,
+        workspaceId,
+        projectId: workspaceProjectId,
       },
       workspaceHints: {
         available: workspaceHints.length > 0,

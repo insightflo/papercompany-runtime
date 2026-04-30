@@ -50,7 +50,7 @@ describe("buildStepInputManifest", () => {
         "projectId",
       ],
       guardrails: {
-        broadScanAllowed: false,
+        broadScanAllowed: true,
       },
       inputs: {
         workspace: {

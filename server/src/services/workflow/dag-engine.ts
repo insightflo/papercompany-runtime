@@ -7,7 +7,7 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { issues, issueComments, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
@@ -364,15 +364,17 @@ async function finalizeWorkflowRunState(
   const hasActiveStep = stepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
   const allStepsTerminal = stepRuns.length === context.steps.length && !hasActiveStep;
   const nextStatus =
-    hasFailedStep && allStepsTerminal
-      ? "failed"
-      : !hasFailedStep && allStepsTerminal
-        ? "completed"
-        : "running";
+    context.run.status === "cancelled"
+      ? "cancelled"
+      : hasFailedStep && allStepsTerminal
+        ? "failed"
+        : !hasFailedStep && allStepsTerminal
+          ? "completed"
+          : "running";
   const patch: Partial<typeof workflowRuns.$inferInsert> = {
     status: nextStatus,
     startedAt: context.run.startedAt ?? new Date(),
-    completedAt: nextStatus === "completed" || nextStatus === "failed" ? new Date() : null,
+    completedAt: nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled" ? new Date() : null,
   };
 
   const [updatedRun] = await db
@@ -382,6 +384,140 @@ async function finalizeWorkflowRunState(
     .returning();
 
   return updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+}
+
+async function cancelOutstandingWorkflowIssues(
+  db: Db,
+  runId: string,
+): Promise<void> {
+  const now = new Date();
+  await db
+    .update(issues)
+    .set({
+      status: "cancelled",
+      cancelledAt: now,
+      updatedAt: now,
+      checkoutRunId: null,
+      executionRunId: null,
+      executionLockedAt: null,
+    })
+    .where(and(
+      eq(issues.originKind, "workflow_execution"),
+      eq(issues.originRunId, runId),
+      sql`${issues.status} not in ('done', 'cancelled')`,
+    ));
+}
+
+async function syncCancelledWorkflowRunState(
+  db: Db,
+  runId: string,
+): Promise<void> {
+  await cancelOutstandingWorkflowIssues(db, runId);
+
+  let stepRuns = await db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, runId));
+
+  if (stepRuns.length === 0) {
+    return;
+  }
+
+  stepRuns = await syncStepRunsFromIssueState(db, stepRuns);
+
+  const now = new Date();
+  for (const stepRun of stepRuns) {
+    if (WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status)) continue;
+
+    const patch: Partial<typeof workflowStepRuns.$inferInsert> = {
+      completedAt: stepRun.completedAt ?? now,
+    };
+
+    if (stepRun.issueId) {
+      patch.status = "failed";
+      patch.startedAt = stepRun.startedAt ?? now;
+    } else {
+      patch.status = "skipped";
+    }
+
+    await db
+      .update(workflowStepRuns)
+      .set(patch)
+      .where(eq(workflowStepRuns.id, stepRun.id));
+  }
+}
+
+export async function cancelWorkflowRunWithCleanup(
+  db: Db,
+  runId: string,
+): Promise<boolean> {
+  const updatedRows = await db
+    .update(workflowRuns)
+    .set({
+      status: "cancelled",
+      completedAt: new Date(),
+    })
+    .where(eq(workflowRuns.id, runId))
+    .returning({ id: workflowRuns.id });
+
+  if (updatedRows.length === 0) {
+    return false;
+  }
+
+  await syncCancelledWorkflowRunState(db, runId);
+  return true;
+}
+
+async function commentOnMainExecutorOversightForFailures(
+  db: Db,
+  context: WorkflowExecutionContext,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Promise<void> {
+  const missionId = context.run.missionId;
+  if (!missionId) return;
+
+  const failedStepRuns = stepRuns.filter((stepRun) => stepRun.status === "failed");
+  if (failedStepRuns.length === 0) return;
+
+  const oversightIssue = await db
+    .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId })
+    .from(issues)
+    .where(and(
+      eq(issues.missionId, missionId),
+      eq(issues.originKind, "mission_main_executor_oversight"),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!oversightIssue) return;
+
+  const existingComments = await db
+    .select({ body: issueComments.body })
+    .from(issueComments)
+    .where(eq(issueComments.issueId, oversightIssue.id));
+  const existingBodies = existingComments.map((comment) => comment.body).join("\n");
+
+  for (const stepRun of failedStepRuns) {
+    const marker = `workflow-failure:${context.run.id}:${stepRun.stepId}`;
+    if (existingBodies.includes(marker)) continue;
+    const step = context.steps.find((candidate) => candidate.id === stepRun.stepId);
+    await db.insert(issueComments).values({
+      authorAgentId: oversightIssue.assigneeAgentId,
+      body: [
+        "### Workflow step failed",
+        `<!-- ${marker} -->`,
+        `- Workflow: ${context.definition.name}`,
+        `- Run: ${context.run.id}`,
+        `- Step: ${stepRun.stepId}${step?.name ? ` (${step.name})` : ""}`,
+        `- Observed at: ${new Date().toISOString()}`,
+        "",
+        "Main executor action:",
+        "- Review the failed step output and decide whether a retry is safe.",
+        "- Retry failed steps only within the retry limit; otherwise escalate with context.",
+      ].join("\n"),
+      companyId: context.run.companyId,
+      issueId: oversightIssue.id,
+    });
+  }
 }
 
 export async function syncWorkflowRunState(
@@ -408,6 +544,7 @@ export async function syncWorkflowRunState(
         .from(workflowStepRuns)
         .where(eq(workflowStepRuns.workflowRunId, runId));
     }
+    await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   } else {
     let shouldContinue = true;
     while (shouldContinue) {

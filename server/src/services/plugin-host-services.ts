@@ -514,6 +514,70 @@ export function buildHostServices(
     return record;
   };
 
+  const getLinkedIssueStatusForPluginStepTerminalState = (stepStatus: unknown): Issue["status"] | null => {
+    const normalized = typeof stepStatus === "string" ? stepStatus.trim().toLowerCase() : "";
+    if (["failed", "error", "errored", "aborted"].includes(normalized)) {
+      return "blocked";
+    }
+    return null;
+  };
+
+  const syncLinkedIssueStatusForPluginStepRun = async (params: {
+    entityType?: unknown;
+    scopeKind?: unknown;
+    scopeId?: unknown;
+    data?: Record<string, unknown> | null;
+  }) => {
+    if (params.entityType !== "workflow-step-run") return;
+    if (params.scopeKind !== "company") return;
+
+    const companyId = typeof params.scopeId === "string" && params.scopeId.length > 0 ? params.scopeId : null;
+    if (!companyId) return;
+
+    const data = params.data && typeof params.data === "object" ? params.data : null;
+    const issueId = typeof data?.issueId === "string" && data.issueId.length > 0 ? data.issueId : null;
+    const nextStatus = getLinkedIssueStatusForPluginStepTerminalState(data?.status);
+    if (!issueId || !nextStatus) return;
+
+    const existing = await issues.getById(issueId);
+    if (!inCompany(existing, companyId)) return;
+    if (existing.status === nextStatus || existing.status === "done" || existing.status === "cancelled") return;
+
+    const issue = (await issues.update(issueId, { status: nextStatus } as any)) as Issue;
+    if (!issue) return;
+
+    await syncSrbSourceIssueStatus({
+      db,
+      issueId: issue.id,
+      status: issue.status,
+    });
+    await workflowService.syncRunStatusForIssue(db, issue.id);
+    await applyIssueUpdatedSideEffects({
+      db,
+      heartbeat,
+      actor: {
+        actorType: "system",
+        actorId: pluginId,
+      },
+      existing: {
+        id: existing.id,
+        companyId: existing.companyId,
+        identifier: existing.identifier ?? null,
+        assigneeAgentId: existing.assigneeAgentId ?? null,
+        status: existing.status,
+      },
+      updated: {
+        id: issue.id,
+        companyId: issue.companyId,
+        identifier: issue.identifier ?? null,
+        assigneeAgentId: issue.assigneeAgentId ?? null,
+        status: issue.status,
+      },
+      patch: { status: nextStatus },
+      logActivity,
+    });
+  };
+
   return {
     config: {
       async get() {
@@ -548,7 +612,14 @@ export function buildHostServices(
 
     entities: {
       async upsert(params) {
-        return registry.upsertEntity(pluginId, params as any) as any;
+        const entity = await registry.upsertEntity(pluginId, params as any) as any;
+        await syncLinkedIssueStatusForPluginStepRun({
+          entityType: params.entityType,
+          scopeKind: params.scopeKind,
+          scopeId: params.scopeId,
+          data: (params as { data?: Record<string, unknown> | null }).data ?? null,
+        });
+        return entity;
       },
       async list(params) {
         return registry.listEntities(pluginId, params as any) as any;

@@ -8,7 +8,7 @@
 import type { Db } from "@paperclipai/db";
 import { agents } from "@paperclipai/db";
 import { eq, asc } from "drizzle-orm";
-import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue } from "./dag-engine.js";
+import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
 import { missionService } from "../missions.js";
 import {
   createWorkflowDefinition,
@@ -22,7 +22,6 @@ import {
   listWorkflowStepRuns,
   getWorkflowStepExecutionContractForIssue,
   updateWorkflowRunStatus,
-  cancelWorkflowRun,
 } from "./workflow-store.js";
 import type {
   WorkflowDefinition,
@@ -118,7 +117,9 @@ async function ensureMissionForWorkflowRun(
     title: formatWorkflowMissionTitle(workflow.name),
     description: `Created automatically for workflow run: ${workflow.name}`,
     status: "active",
+    source: "workflow",
   });
+  await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name);
 
   return { ...input, missionId: mission.id };
 }
@@ -201,7 +202,7 @@ export const workflowService = {
    * Cancel a workflow run.
    */
   async cancelRun(db: Db, id: string): Promise<boolean> {
-    return cancelWorkflowRun(db, id);
+    return cancelWorkflowRunWithCleanup(db, id);
   },
 
   /**

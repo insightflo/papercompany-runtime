@@ -258,7 +258,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "Before range",
         status: "active",
-        createdAt: new Date("2026-03-31T23:59:59.000Z"),
+        createdAt: new Date(2026, 2, 31, 23, 59, 59, 999),
       },
       {
         id: randomUUID(),
@@ -266,7 +266,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "Inside range start",
         status: "active",
-        createdAt: new Date("2026-04-01T00:00:00.000Z"),
+        createdAt: new Date(2026, 3, 1, 0, 0, 0, 0),
       },
       {
         id: randomUUID(),
@@ -274,7 +274,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "Inside range end",
         status: "active",
-        createdAt: new Date("2026-04-29T23:59:59.000Z"),
+        createdAt: new Date(2026, 3, 29, 23, 59, 59, 999),
       },
       {
         id: randomUUID(),
@@ -282,7 +282,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "After range",
         status: "active",
-        createdAt: new Date("2026-04-30T00:00:00.000Z"),
+        createdAt: new Date(2026, 3, 30, 0, 0, 0, 0),
       },
     ]);
 
@@ -298,6 +298,59 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       "Inside range start",
       "Inside range end",
     ]);
+  });
+
+  it("interprets date-only mission filters as local-day boundaries", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Local Date Filter Mission Company",
+      issuePrefix: `LD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values([
+      {
+        id: randomUUID(),
+        companyId,
+        ownerAgentId,
+        title: "Local Apr 29 late night",
+        status: "active",
+        createdAt: new Date("2026-04-29T14:59:59.000Z"),
+      },
+      {
+        id: randomUUID(),
+        companyId,
+        ownerAgentId,
+        title: "Local Apr 30 morning",
+        status: "active",
+        createdAt: new Date("2026-04-29T22:00:00.000Z"),
+      },
+    ]);
+
+    const result = await missionService(db).list({
+      companyId,
+      from: "2026-04-29",
+      to: "2026-04-29",
+      sortBy: "createdAt",
+      sortOrder: "asc",
+    });
+
+    expect(result.map((mission) => mission.title)).toEqual(["Local Apr 29 late night"]);
   });
 
   it("rejects non-UUID mission ids before mission subresource queries", async () => {

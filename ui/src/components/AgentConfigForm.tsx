@@ -40,6 +40,7 @@ import {
 } from "./agent-config-primitives";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { getUIAdapter } from "../adapters";
+import { getCustomModelCandidate } from "../lib/model-dropdown";
 import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { ChoosePathButton } from "./PathInstructionsModal";
@@ -1302,6 +1303,7 @@ function ModelDropdown({
 }) {
   const [modelSearch, setModelSearch] = useState("");
   const selected = models.find((m) => m.id === value);
+  const customModelCandidate = getCustomModelCandidate(models, modelSearch);
   const filteredModels = useMemo(() => {
     return models.filter((m) => {
       if (!modelSearch.trim()) return true;
@@ -1378,6 +1380,22 @@ function ModelDropdown({
                 }}
               >
                 Default
+              </button>
+            )}
+            {customModelCandidate && (
+              <button
+                className="flex items-center justify-between w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 border-b border-border/60 mb-1"
+                onClick={() => {
+                  onChange(customModelCandidate);
+                  onOpenChange(false);
+                }}
+              >
+                <span className="block min-w-0 truncate text-left" title={customModelCandidate}>
+                  Use custom model “{customModelCandidate}”
+                </span>
+                <span className="ml-2 shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                  custom
+                </span>
               </button>
             )}
             {groupedModels.map((group) => (

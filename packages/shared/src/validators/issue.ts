@@ -62,6 +62,9 @@ const issueFields = {
   ]).optional().nullable(),
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
   labelIds: z.array(z.string().uuid()).optional(),
+  originKind: z.string().trim().min(1).optional(),
+  originId: z.string().trim().min(1).optional().nullable(),
+  originRunId: z.string().trim().min(1).optional().nullable(),
 };
 
 const createIssueObjectSchema = z.object(issueFields);

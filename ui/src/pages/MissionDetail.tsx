@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { missionsApi, type MissionStatus } from "../api/missions";
@@ -14,6 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Rocket, ListTree, GitBranch, Settings, User } from "lucide-react";
 import { MissionIssueTree } from "../components/MissionIssueTree";
+import { MissionIssueInspector } from "../components/MissionIssueInspector";
 import { MissionExecutionOverview } from "../components/MissionExecutionOverview";
 import { WorkflowDagPanel } from "../components/WorkflowDagPanel";
 
@@ -39,6 +40,7 @@ export function MissionDetail() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
 
   const {
     data: mission,
@@ -78,6 +80,10 @@ export function MissionDetail() {
     ]);
   }, [setBreadcrumbs, mission, missionId]);
 
+  useEffect(() => {
+    setSelectedIssueId(null);
+  }, [missionId]);
+
   if (!missionId) {
     return <div className="p-4 text-sm text-muted-foreground">No mission selected.</div>;
   }
@@ -98,7 +104,6 @@ export function MissionDetail() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Rocket className="h-5 w-5 text-muted-foreground shrink-0" />
@@ -113,24 +118,20 @@ export function MissionDetail() {
         />
       </div>
 
-      {/* Meta row */}
       <div className="flex flex-wrap items-center gap-3">
         <StatusBadge status={mission.status} />
 
-        {/* Owner */}
         <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
           <User className="h-3.5 w-3.5" />
-          <span>{agentMap[mission.ownerAgentId] ?? mission.ownerAgentId ?? "—"}</span>
+          <span>Main executor: {agentMap[mission.ownerAgentId] ?? mission.ownerAgentId ?? "—"}</span>
         </div>
 
-        {/* Started */}
         {mission.startedAt && (
           <span className="text-sm text-muted-foreground">
             Started {formatDate(mission.startedAt)}
           </span>
         )}
 
-        {/* Completed */}
         {mission.completedAt && (
           <span className="text-sm text-muted-foreground">
             Completed {formatDate(mission.completedAt)}
@@ -142,7 +143,6 @@ export function MissionDetail() {
         </span>
       </div>
 
-      {/* Status transition buttons */}
       <div className="flex flex-wrap items-center gap-2">
         {STATUS_OPTIONS.filter((s) => s.value !== mission.status).map((s) => (
           <Button
@@ -160,7 +160,6 @@ export function MissionDetail() {
 
       <Separator />
 
-      {/* Description */}
       <div className="space-y-1.5">
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Description</p>
         <InlineEditor
@@ -174,7 +173,6 @@ export function MissionDetail() {
 
       <Separator />
 
-      {/* Tabbed sub-panels */}
       <Tabs defaultValue="overview" className="w-full">
         <TabsList className="shrink-0">
           <TabsTrigger value="overview" className="gap-1.5">
@@ -199,17 +197,31 @@ export function MissionDetail() {
           <MissionExecutionOverview missionId={missionId} mission={mission} />
         </TabsContent>
 
-        {/* Issues tab — P8-T4 (MissionIssueTree) */}
         <TabsContent value="issues" className="mt-4">
-          <MissionIssueTree missionId={missionId} />
+          <div className="grid gap-4 xl:grid-cols-[minmax(320px,1fr)_minmax(420px,1.3fr)]">
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Mission work items
+              </p>
+              <MissionIssueTree
+                missionId={missionId}
+                selectedIssueId={selectedIssueId}
+                onSelectIssue={setSelectedIssueId}
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Selected work item
+              </p>
+              <MissionIssueInspector issueId={selectedIssueId} />
+            </div>
+          </div>
         </TabsContent>
 
-        {/* Workflow tab — P8-T5 (WorkflowDagPanel) */}
         <TabsContent value="workflow" className="mt-4">
           <WorkflowDagPanel missionId={missionId} />
         </TabsContent>
 
-        {/* Worktree Rules tab — P8-T6 */}
         <TabsContent value="worktree" className="mt-4">
           <div className="border border-border rounded-md p-8 text-center">
             <Settings className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
@@ -219,7 +231,7 @@ export function MissionDetail() {
             </p>
             <div className="mt-4">
               <Button asChild size="sm" variant="outline">
-                  <Link to="/worktree/rules">Open global execution rules</Link>
+                <Link to="/worktree/rules">Open global execution rules</Link>
               </Button>
             </div>
           </div>

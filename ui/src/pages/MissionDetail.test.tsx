@@ -79,18 +79,16 @@ vi.mock("../components/MissionIssueTree", () => ({
   ),
 }));
 
+vi.mock("../components/MissionIssueInspector", () => ({
+  MissionIssueInspector: ({ issueId }: { issueId?: string | null }) => (
+    <section data-component="MissionIssueInspector">Inspector for {issueId ?? "none"}</section>
+  ),
+}));
+
 vi.mock("../components/WorkflowDagPanel", () => ({
   WorkflowDagPanel: ({ missionId }: { missionId: string }) => (
     <section data-component="WorkflowDagPanel">Workflow DAG for {missionId}</section>
   ),
-}));
-
-vi.mock("../components/InlineEditor", () => ({
-  InlineEditor: ({ value }: { value: string }) => <div data-testid="inline-editor">{value}</div>,
-}));
-
-vi.mock("../components/PageSkeleton", () => ({
-  PageSkeleton: () => <div data-testid="page-skeleton" />,
 }));
 
 vi.mock("@/components/StatusBadge", () => ({
@@ -125,14 +123,20 @@ vi.mock("lucide-react", () => ({
 }));
 
 describe("MissionDetail", () => {
-  it("renders real mission issue and workflow panels, while execution rules remains coming soon", () => {
+  it("renders mission work list and embedded issue inspector without leaving the mission screen", () => {
     const html = renderToStaticMarkup(<MissionDetail />);
 
     expect(html).toContain("Launch Mission");
     expect(html).toContain("Mission detail test");
+    expect(html).toContain("Main executor");
+    expect(html).toContain("Planner");
     expect(html).toContain("Work");
+    expect(html).toContain("Mission work items");
     expect(html).toContain('data-component="MissionIssueTree"');
     expect(html).toContain("Issue tree for mission-1");
+    expect(html).toContain("Selected work item");
+    expect(html).toContain('data-component="MissionIssueInspector"');
+    expect(html).toContain("Inspector for none");
     expect(html).toContain("Execution Flow");
     expect(html).toContain('data-component="WorkflowDagPanel"');
     expect(html).toContain("Workflow DAG for mission-1");

@@ -192,12 +192,12 @@ export function NewMissionDialog() {
             </PopoverContent>
           </Popover>
 
-          {/* Owner Agent */}
+          {/* Main executor */}
           <Popover open={ownerOpen} onOpenChange={setOwnerOpen}>
             <PopoverTrigger asChild>
               <button type="button" className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors">
                 <User className="h-3 w-3 text-muted-foreground" />
-                {selectedOwner ? selectedOwner.name : "Owner agent"}
+                {selectedOwner ? selectedOwner.name : "Main executor"}
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-48 p-1" align="start">

@@ -1,9 +1,7 @@
-import { useState } from "react";
-import { Link } from "@/lib/router";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { missionsApi } from "../api/missions";
 import { useCompany } from "../context/CompanyContext";
-import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
@@ -11,43 +9,39 @@ import { cn } from "../lib/utils";
 import { ChevronRight, ListTree } from "lucide-react";
 import type { Issue } from "@paperclipai/shared";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 interface MissionIssueTreeProps {
   missionId: string;
+  selectedIssueId?: string | null;
+  onSelectIssue?: (issueId: string) => void;
 }
 
 interface IssueNodeProps {
   issue: Issue;
   allIssues: Issue[];
   depth: number;
-  missionId: string;
+  selectedIssueId?: string | null;
+  onSelectIssue?: (issueId: string) => void;
 }
 
-// ---------------------------------------------------------------------------
-// IssueNode
-// ---------------------------------------------------------------------------
-
-function IssueNode({ issue, allIssues, depth, missionId }: IssueNodeProps) {
+function IssueNode({ issue, allIssues, depth, selectedIssueId, onSelectIssue }: IssueNodeProps) {
   const children = allIssues.filter((i) => i.parentId === issue.id);
   const hasChildren = children.length > 0;
   const [expanded, setExpanded] = useState(true);
+  const isSelected = selectedIssueId === issue.id;
 
   return (
     <div>
-      <Link
-        to={`/issues/${issue.id}`}
-        state={createIssueDetailLocationState("Mission", `/missions/${missionId}`)}
+      <div
         className={cn(
-          "flex items-center gap-2 px-3 py-1.5 text-sm transition-colors no-underline text-inherit hover:bg-accent/50",
+          "flex items-center gap-2 px-3 py-1.5 text-sm transition-colors hover:bg-accent/50",
+          isSelected && "bg-accent/60",
         )}
         style={{ paddingLeft: `${depth * 16 + 12}px` }}
       >
         {hasChildren ? (
           <button
             type="button"
+            aria-label={expanded ? "Collapse child issues" : "Expand child issues"}
             className="p-0.5 shrink-0"
             onClick={(e) => {
               e.preventDefault();
@@ -62,15 +56,21 @@ function IssueNode({ issue, allIssues, depth, missionId }: IssueNodeProps) {
         ) : (
           <span className="w-4 shrink-0" />
         )}
-        <StatusIcon status={issue.status} className="shrink-0" />
-        <PriorityIcon priority={issue.priority} className="shrink-0" />
-        <span className="flex-1 truncate">{issue.title}</span>
-        {issue.identifier && (
-          <span className="shrink-0 text-xs text-muted-foreground font-mono">
-            {issue.identifier}
-          </span>
-        )}
-      </Link>
+        <button
+          type="button"
+          onClick={() => onSelectIssue?.(issue.id)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <StatusIcon status={issue.status} className="shrink-0" />
+          <PriorityIcon priority={issue.priority} className="shrink-0" />
+          <span className="flex-1 truncate">{issue.title}</span>
+          {issue.identifier && (
+            <span className="shrink-0 text-xs text-muted-foreground font-mono">
+              {issue.identifier}
+            </span>
+          )}
+        </button>
+      </div>
 
       {hasChildren && expanded && (
         <div>
@@ -80,7 +80,8 @@ function IssueNode({ issue, allIssues, depth, missionId }: IssueNodeProps) {
               issue={child}
               allIssues={allIssues}
               depth={depth + 1}
-              missionId={missionId}
+              selectedIssueId={selectedIssueId}
+              onSelectIssue={onSelectIssue}
             />
           ))}
         </div>
@@ -89,11 +90,7 @@ function IssueNode({ issue, allIssues, depth, missionId }: IssueNodeProps) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// MissionIssueTree
-// ---------------------------------------------------------------------------
-
-export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
+export function MissionIssueTree({ missionId, selectedIssueId, onSelectIssue }: MissionIssueTreeProps) {
   const { selectedCompanyId } = useCompany();
 
   const { data: issues, isLoading, error } = useQuery({
@@ -101,6 +98,18 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
     queryFn: () => missionsApi.listIssues(missionId),
     enabled: !!selectedCompanyId && !!missionId,
   });
+
+  const roots = useMemo(() => {
+    if (!issues) return [];
+    const issueIds = new Set(issues.map((i) => i.id));
+    return issues.filter((i) => !i.parentId || !issueIds.has(i.parentId));
+  }, [issues]);
+
+  useEffect(() => {
+    if (!issues || issues.length === 0 || !onSelectIssue) return;
+    if (selectedIssueId && issues.some((issue) => issue.id === selectedIssueId)) return;
+    onSelectIssue(issues[0].id);
+  }, [issues, onSelectIssue, selectedIssueId]);
 
   if (!selectedCompanyId) return null;
 
@@ -138,10 +147,6 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
     );
   }
 
-  // Build tree — root issues have no parent within this set
-  const issueIds = new Set(issues.map((i) => i.id));
-  const roots = issues.filter((i) => !i.parentId || !issueIds.has(i.parentId));
-
   return (
     <div className="border border-border py-1">
       {roots.map((issue) => (
@@ -150,7 +155,8 @@ export function MissionIssueTree({ missionId }: MissionIssueTreeProps) {
           issue={issue}
           allIssues={issues}
           depth={0}
-          missionId={missionId}
+          selectedIssueId={selectedIssueId}
+          onSelectIssue={onSelectIssue}
         />
       ))}
     </div>

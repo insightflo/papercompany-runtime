@@ -48,6 +48,7 @@ interface CommentThreadProps {
   currentAssigneeValue?: string;
   suggestedAssigneeValue?: string;
   mentions?: MentionOption[];
+  readOnly?: boolean;
 }
 
 const DRAFT_DEBOUNCE_MS = 800;
@@ -270,6 +271,7 @@ export function CommentThread({
   currentAssigneeValue = "",
   suggestedAssigneeValue,
   mentions: providedMentions,
+  readOnly = false,
 }: CommentThreadProps) {
   const [body, setBody] = useState("");
   const [reopen, setReopen] = useState(true);
@@ -410,6 +412,7 @@ export function CommentThread({
 
       {liveRunSlot}
 
+      {readOnly ? null : (
       <div className="space-y-2">
         <MarkdownEditor
           ref={editorRef}
@@ -494,6 +497,7 @@ export function CommentThread({
           </Button>
         </div>
       </div>
+      )}
     </div>
   );
 }

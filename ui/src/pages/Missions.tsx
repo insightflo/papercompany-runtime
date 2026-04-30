@@ -43,6 +43,13 @@ function formatDateTime(date: Date | string | null | undefined): string {
   }).format(new Date(date));
 }
 
+function formatLocalDateInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function parsePositiveInt(value: string | null, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -58,8 +65,9 @@ export function Missions() {
   const ownerAgentId = searchParams.get("ownerAgentId") ?? "all";
   const sortBy = (searchParams.get("sortBy") as MissionListFilters["sortBy"]) ?? "updatedAt";
   const sortOrder = (searchParams.get("sortOrder") as MissionListFilters["sortOrder"]) ?? "desc";
-  const from = searchParams.get("from") ?? "";
-  const to = searchParams.get("to") ?? "";
+  const defaultDate = formatLocalDateInputValue(new Date());
+  const from = searchParams.get("from") ?? defaultDate;
+  const to = searchParams.get("to") ?? defaultDate;
   const pageSize = parsePositiveInt(searchParams.get("pageSize"), 25);
   const page = parsePositiveInt(searchParams.get("page"), 1);
 

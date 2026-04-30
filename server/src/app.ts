@@ -512,6 +512,7 @@ export async function createApp(
   const auditLogCleanup = createAuditLogCleanupJob(db);
   auditLogCleanup.start();
 
+  pluginScheduler.start();
   jobCoordinator.start();
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");

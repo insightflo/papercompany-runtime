@@ -274,10 +274,20 @@ function parsePluginDate(value: unknown): Date | null {
 function parseMissionDateFilter(value: string, boundary: "start" | "end"): Date {
   const normalized = value.trim();
   const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
-  const raw = dateOnlyMatch
-    ? `${normalized}T${boundary === "start" ? "00:00:00.000" : "23:59:59.999"}Z`
-    : normalized;
-  const parsed = Date.parse(raw);
+  if (dateOnlyMatch) {
+    const [, year, month, day] = dateOnlyMatch;
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      boundary === "start" ? 0 : 23,
+      boundary === "start" ? 0 : 59,
+      boundary === "start" ? 0 : 59,
+      boundary === "start" ? 0 : 999,
+    );
+  }
+
+  const parsed = Date.parse(normalized);
   if (!Number.isFinite(parsed)) {
     throw badRequest(`Invalid mission date filter: ${value}`);
   }

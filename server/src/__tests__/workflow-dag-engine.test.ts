@@ -6,6 +6,7 @@ import {
   agents,
   companies,
   createDb,
+  issueComments,
   issues,
   missions,
   workflowDefinitions,
@@ -53,6 +54,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agents);
@@ -294,6 +296,18 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       originKind: "workflow_execution",
       originId: result.runId,
       assigneeAgentId: agentId,
+    });
+
+    const missionIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, run!.missionId!));
+    expect(missionIssues.find((issue) => issue.originKind === "mission_main_executor_plan")).toBeUndefined();
+    expect(missionIssues.find((issue) => issue.originKind === "mission_main_executor_oversight")).toMatchObject({
+      assigneeAgentId: agentId,
+      missionId: run!.missionId,
+      status: "todo",
+      title: "[Oversight] tech-scout report 생성",
     });
   });
 
@@ -614,6 +628,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const agentId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
+    const missionId = randomUUID();
 
     heartbeatWakeup.mockResolvedValue({ id: "queued-run-3" });
 
@@ -634,6 +649,21 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       runtimeConfig: {},
       permissions: {},
     });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Failure Workflow Mission",
+      status: "active",
+    });
+    const issueSvc = issueService(db);
+    const oversightIssue = await issueSvc.create(companyId, {
+      assigneeAgentId: agentId,
+      missionId,
+      originKind: "mission_main_executor_oversight",
+      status: "todo",
+      title: "[Oversight] Failure Workflow",
+    });
     await db.insert(workflowDefinitions).values({
       id: workflowId,
       companyId,
@@ -647,11 +677,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       id: runId,
       workflowId,
       companyId,
+      missionId,
       triggeredBy: "system",
       status: "pending",
     });
 
-    const issueSvc = issueService(db);
     await executeWorkflowRun(db, runId);
     const prepareStepRun = await db
       .select()
@@ -672,5 +702,95 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(prepare?.status).toBe("failed");
     expect(ship?.status).toBe("skipped");
     expect(ship?.issueId).toBeNull();
+
+    const oversightComments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, oversightIssue.id));
+    expect(oversightComments.map((comment) => comment.body).join("\n")).toContain("Workflow step failed");
+    expect(oversightComments.map((comment) => comment.body).join("\n")).toContain("prepare");
+    expect(oversightComments[0]?.authorAgentId).toBe(agentId);
+  });
+
+  it("cancels outstanding workflow execution issues when a workflow run is cancelled", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-cancel" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Workflow Cancel",
+      issuePrefix: `WC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Workflow Cancel Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const definition = await workflowService.createDefinition(db, {
+      companyId,
+      name: "Cancelable Workflow",
+      steps: [
+        { id: "prepare", name: "Prepare", agentId, dependencies: [], description: "Prepare the work" },
+        { id: "ship", name: "Ship", agentId, dependencies: ["prepare"], description: "Ship the work" },
+      ],
+    });
+
+    const result = await workflowService.trigger(db, {
+      companyId,
+      workflowId: definition.id,
+      triggeredBy: "manual",
+    });
+
+    expect(result.status).toBe("running");
+
+    const initialStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, result.runId));
+    const prepareStepRun = initialStepRuns.find((stepRun) => stepRun.stepId === "prepare");
+    const shipStepRun = initialStepRuns.find((stepRun) => stepRun.stepId === "ship");
+    expect(prepareStepRun?.issueId).toBeTruthy();
+    expect(shipStepRun?.issueId).toBeNull();
+
+    const cancelled = await workflowService.cancelRun(db, result.runId);
+    expect(cancelled).toBe(true);
+
+    const workflowRun = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, result.runId))
+      .then((rows) => rows[0] ?? null);
+    expect(workflowRun?.status).toBe("cancelled");
+
+    const cancelledIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, prepareStepRun!.issueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(cancelledIssue).toMatchObject({
+      status: "cancelled",
+      originKind: "workflow_execution",
+      originRunId: result.runId,
+    });
+    expect(cancelledIssue?.cancelledAt).toBeTruthy();
+
+    const finalStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, result.runId));
+    expect(finalStepRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "prepare", status: "failed" }),
+      expect.objectContaining({ stepId: "ship", status: "skipped" }),
+    ]));
   });
 });

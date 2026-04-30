@@ -1,6 +1,7 @@
 import type { AdapterModel } from "./types.js";
 import { models as codexFallbackModels } from "@paperclipai/adapter-codex-local";
 import { readConfigFile } from "../config-file.js";
+import { dedupeAdapterModels, discoverModelsFromLocalCli } from "./local-cli-models.js";
 
 const OPENAI_MODELS_ENDPOINT = "https://api.openai.com/v1/models";
 const OPENAI_MODELS_TIMEOUT_MS = 5000;
@@ -12,20 +13,8 @@ function fingerprint(apiKey: string): string {
   return `${apiKey.length}:${apiKey.slice(-6)}`;
 }
 
-function dedupeModels(models: AdapterModel[]): AdapterModel[] {
-  const seen = new Set<string>();
-  const deduped: AdapterModel[] = [];
-  for (const model of models) {
-    const id = model.id.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    deduped.push({ id, label: model.label.trim() || id });
-  }
-  return deduped;
-}
-
 function mergedWithFallback(models: AdapterModel[]): AdapterModel[] {
-  return dedupeModels([
+  return dedupeAdapterModels([
     ...models,
     ...codexFallbackModels,
   ]).sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true, sensitivity: "base" }));
@@ -62,7 +51,7 @@ async function fetchOpenAiModels(apiKey: string): Promise<AdapterModel[]> {
       if (typeof id !== "string" || id.trim().length === 0) continue;
       models.push({ id, label: id });
     }
-    return dedupeModels(models);
+    return dedupeAdapterModels(models);
   } catch {
     return [];
   } finally {
@@ -72,14 +61,32 @@ async function fetchOpenAiModels(apiKey: string): Promise<AdapterModel[]> {
 
 export async function listCodexModels(): Promise<AdapterModel[]> {
   const apiKey = resolveOpenAiApiKey();
-  const fallback = dedupeModels(codexFallbackModels);
-  if (!apiKey) return fallback;
-
+  const fallback = dedupeAdapterModels(codexFallbackModels);
   const now = Date.now();
-  const keyFingerprint = fingerprint(apiKey);
+  const keyFingerprint = apiKey ? fingerprint(apiKey) : "local-cli";
   if (cached && cached.keyFingerprint === keyFingerprint && cached.expiresAt > now) {
     return cached.models;
   }
+
+  const command = process.env.PAPERCLIP_CODEX_COMMAND?.trim() || "codex";
+  const cliModels = discoverModelsFromLocalCli(command, [
+    ["models", "--json"],
+    ["models"],
+    ["debug", "models", "--json"],
+    ["debug", "models"],
+    ["--list-models"],
+  ]);
+  if (cliModels.length > 0) {
+    const merged = mergedWithFallback(cliModels);
+    cached = {
+      keyFingerprint,
+      expiresAt: now + OPENAI_MODELS_CACHE_TTL_MS,
+      models: merged,
+    };
+    return merged;
+  }
+
+  if (!apiKey) return fallback;
 
   const fetched = await fetchOpenAiModels(apiKey);
   if (fetched.length > 0) {

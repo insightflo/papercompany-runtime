@@ -4,15 +4,21 @@ import { models as cursorFallbackModels } from "@paperclipai/adapter-cursor-loca
 import { resetOpenCodeModelsCacheForTests } from "@paperclipai/adapter-opencode-local/server";
 import { listAdapterModels } from "../adapters/index.js";
 import { resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
+import { resetClaudeModelsCacheForTests } from "../adapters/claude-models.js";
+import { resetGeminiModelsCacheForTests } from "../adapters/gemini-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
+import { setLocalCliModelsRunnerForTests } from "../adapters/local-cli-models.js";
 
 describe("adapter model listing", () => {
   beforeEach(() => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.PAPERCLIP_OPENCODE_COMMAND;
     resetCodexModelsCacheForTests();
+    resetClaudeModelsCacheForTests();
+    resetGeminiModelsCacheForTests();
     resetCursorModelsCacheForTests();
     setCursorModelsRunnerForTests(null);
+    setLocalCliModelsRunnerForTests(null);
     resetOpenCodeModelsCacheForTests();
     vi.restoreAllMocks();
   });
@@ -22,7 +28,13 @@ describe("adapter model listing", () => {
     expect(models).toEqual([]);
   });
 
-  it("returns codex fallback models when no OpenAI key is available", async () => {
+  it("returns codex fallback models when no CLI or OpenAI discovery is available", async () => {
+    setLocalCliModelsRunnerForTests(() => ({
+      status: null,
+      stdout: "",
+      stderr: "",
+      hasError: true,
+    }));
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const models = await listAdapterModels("codex_local");
 
@@ -30,8 +42,38 @@ describe("adapter model listing", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("loads codex models dynamically and merges fallback options", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+  it("loads codex models from Codex CLI before OpenAI discovery", async () => {
+    process.env.OPENAI_API_KEY = "***";
+    const runner = vi.fn(() => ({
+      status: 0,
+      stdout: JSON.stringify({ models: [{ id: "gpt-5.5-codex" }, { id: "gpt-5.3-codex-spark" }] }),
+      stderr: "",
+      hasError: false,
+    }));
+    setLocalCliModelsRunnerForTests(runner);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: "gpt-from-openai" }] }),
+    } as Response);
+
+    const first = await listAdapterModels("codex_local");
+    const second = await listAdapterModels("codex_local");
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(first).toEqual(second);
+    expect(first.some((model) => model.id === "gpt-5.5-codex")).toBe(true);
+    expect(first.some((model) => model.id === "codex-mini-latest")).toBe(true);
+  });
+
+  it("loads codex models dynamically from OpenAI when CLI discovery fails and merges fallback options", async () => {
+    process.env.OPENAI_API_KEY = "***";
+    setLocalCliModelsRunnerForTests(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "no codex catalog",
+      hasError: false,
+    }));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -49,6 +91,42 @@ describe("adapter model listing", () => {
     expect(first).toEqual(second);
     expect(first.some((model) => model.id === "gpt-5-pro")).toBe(true);
     expect(first.some((model) => model.id === "codex-mini-latest")).toBe(true);
+  });
+
+  it("loads claude models from Claude CLI and merges fallback options", async () => {
+    const runner = vi.fn(() => ({
+      status: 0,
+      stdout: JSON.stringify({ models: [{ id: "claude-sonnet-5-0" }, { id: "claude-opus-4-6" }] }),
+      stderr: "",
+      hasError: false,
+    }));
+    setLocalCliModelsRunnerForTests(runner);
+
+    const first = await listAdapterModels("claude_local");
+    const second = await listAdapterModels("claude_local");
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(first).toEqual(second);
+    expect(first.some((model) => model.id === "claude-sonnet-5-0")).toBe(true);
+    expect(first.some((model) => model.id === "claude-opus-4-6")).toBe(true);
+  });
+
+  it("loads gemini models from Gemini CLI and merges fallback options", async () => {
+    const runner = vi.fn(() => ({
+      status: 0,
+      stdout: "Available models: gemini-3.0-pro, gemini-2.5-flash",
+      stderr: "",
+      hasError: false,
+    }));
+    setLocalCliModelsRunnerForTests(runner);
+
+    const first = await listAdapterModels("gemini_local");
+    const second = await listAdapterModels("gemini_local");
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(first).toEqual(second);
+    expect(first.some((model) => model.id === "gemini-3.0-pro")).toBe(true);
+    expect(first.some((model) => model.id === "gemini-2.5-pro")).toBe(true);
   });
 
   it("falls back to static codex models when OpenAI model discovery fails", async () => {
