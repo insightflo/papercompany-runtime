@@ -40,6 +40,8 @@ import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { applyIssueCreatedSideEffects } from "../services/issue-create-side-effects.js";
 import { buildContextSafeFileViews } from "../services/context-safe-file-views.js";
+import { buildMaintenanceDecisionContext } from "../services/maintenance/decision-context.js";
+import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -165,6 +167,55 @@ export function issueRoutes(db: Db, storage: StorageService) {
       });
     }
     return true;
+  }
+
+  async function auditMaintenanceActionMismatch(input: {
+    actor: ReturnType<typeof getActorInfo>;
+    issue: {
+      id: string;
+      companyId: string;
+      identifier?: string | null;
+      title?: string | null;
+      description?: string | null;
+      status?: string | null;
+      priority?: string | null;
+      metadata?: Record<string, unknown> | null;
+      projectId?: string | null;
+    };
+    attemptedAction: string;
+    attemptedStatus?: string | null;
+    attemptedComment?: string | null;
+  }) {
+    const decision = buildMaintenanceDecisionContext({
+      issue: {
+        id: input.issue.id,
+        identifier: input.issue.identifier,
+        title: input.issue.title,
+        description: input.issue.description,
+        status: input.issue.status,
+        priority: input.issue.priority,
+        metadata: input.issue.metadata,
+      },
+      requestedStatus: input.attemptedStatus,
+      guidance: null,
+    });
+    if (!decision) return;
+    await logMaintenanceDecisionActionMismatch({
+      db,
+      companyId: input.issue.companyId,
+      actor: input.actor,
+      issue: {
+        id: input.issue.id,
+        identifier: input.issue.identifier,
+        projectId: input.issue.projectId,
+      },
+      decision,
+      attemptedAction: input.attemptedAction,
+      attemptedStatus: input.attemptedStatus,
+      attemptedComment: input.attemptedComment,
+    }).catch((err) => {
+      logger.warn({ err, issueId: input.issue.id }, "failed to write maintenance decision action mismatch audit");
+    });
   }
 
   async function normalizeIssueIdentifier(rawId: string): Promise<string> {
@@ -1102,6 +1153,16 @@ export function issueRoutes(db: Db, storage: StorageService) {
         _previous: hasFieldChanges ? previous : undefined,
       },
     });
+
+    if (typeof updateFields.status === "string" && updateFields.status !== existing.status) {
+      await auditMaintenanceActionMismatch({
+        actor,
+        issue: existing,
+        attemptedAction: "issue.patch",
+        attemptedStatus: updateFields.status,
+        attemptedComment: commentBody,
+      });
+    }
 
     let comment = null;
     if (commentBody) {

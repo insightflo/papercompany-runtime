@@ -27,6 +27,7 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockLogMaintenanceDecisionActionMismatch = vi.hoisted(() => vi.fn(async () => null));
 
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
@@ -48,6 +49,10 @@ vi.mock("../services/index.js", () => ({
 
 vi.mock("../services/srb/source-status-sync.js", () => ({
   syncSrbSourceIssueStatus: vi.fn(async () => []),
+}));
+
+vi.mock("../services/maintenance/decision-audit.js", () => ({
+  logMaintenanceDecisionActionMismatch: mockLogMaintenanceDecisionActionMismatch,
 }));
 
 function createApp() {
@@ -97,5 +102,55 @@ describe("issue routes agent patch guard", () => {
     });
     expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("soft-audits maintenance decision mismatch when an agent closes an issue via PATCH", async () => {
+    const issue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      projectId: "project-1",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      assigneeUserId: null,
+      createdByUserId: null,
+      identifier: "PAP-1000",
+      title: "Kiosk payment outage",
+      description: "Customer-facing outage. affected system: kiosk payment. symptom: checkout down. time window: today.",
+      metadata: {},
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({ ...issue, status: "done" });
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1", body: "fixed" });
+
+    const res = await request(createApp())
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done", comment: "fixed" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockLogMaintenanceDecisionActionMismatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        actor: expect.objectContaining({
+          actorType: "agent",
+          actorId: "22222222-2222-4222-8222-222222222222",
+          agentId: "22222222-2222-4222-8222-222222222222",
+          runId: "run-1",
+        }),
+        issue: expect.objectContaining({
+          id: issue.id,
+          identifier: "PAP-1000",
+          projectId: "project-1",
+        }),
+        attemptedAction: "issue.patch",
+        attemptedStatus: "done",
+        attemptedComment: "fixed",
+        decision: expect.objectContaining({
+          recommendedNextAction: "escalate_incident",
+          warnings: expect.arrayContaining(["completion_evidence_missing"]),
+        }),
+      }),
+    );
   });
 });
