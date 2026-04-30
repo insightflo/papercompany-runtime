@@ -54,6 +54,7 @@ import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
+import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
 import {
   buildExecutionWorkspaceAdapterConfig,
@@ -2577,6 +2578,7 @@ export function heartbeatService(db: Db) {
             title: issues.title,
             description: issues.description,
             status: issues.status,
+            priority: issues.priority,
             projectId: issues.projectId,
             projectWorkspaceId: issues.projectWorkspaceId,
             executionWorkspaceId: issues.executionWorkspaceId,
@@ -2715,6 +2717,25 @@ export function heartbeatService(db: Db) {
       context.paperclipMaintenanceGuidance = maintenanceGuidanceContext;
     } else {
       delete context.paperclipMaintenanceGuidance;
+    }
+    const maintenanceDecisionContext = buildMaintenanceDecisionContext({
+      issue: issueContext
+        ? {
+            id: issueContext.id,
+            identifier: issueContext.identifier,
+            title: issueContext.title,
+            description: issueContext.description,
+            status: issueContext.status,
+            priority: issueContext.priority,
+          }
+        : null,
+      requestedStatus: readNonEmptyString(context.requestedStatus),
+      guidance: maintenanceGuidanceContext,
+    });
+    if (maintenanceDecisionContext) {
+      context.paperclipMaintenanceDecision = maintenanceDecisionContext;
+    } else {
+      delete context.paperclipMaintenanceDecision;
     }
     const existingExecutionWorkspace =
       issueRef?.executionWorkspaceId ? await executionWorkspacesSvc.getById(issueRef.executionWorkspaceId) : null;

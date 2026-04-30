@@ -48,6 +48,14 @@ export interface StepInputManifest {
       ruleExcerpts: string[];
       knowledgeExcerpts: string[];
     };
+    maintenanceDecision: {
+      available: boolean;
+      recommendedNextAction: string | null;
+      suggestedStatus: string | null;
+      requiredInputs: string[];
+      warnings: string[];
+      handoffTarget: string | null;
+    };
     fileViews: {
       available: boolean;
       count: number;
@@ -90,6 +98,13 @@ export function buildStepInputManifest(input: {
     : [];
   const maintenanceKnowledge = Array.isArray(maintenanceGuidance.knowledge)
     ? maintenanceGuidance.knowledge.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+    : [];
+  const maintenanceDecision = parseObject(context.paperclipMaintenanceDecision);
+  const maintenanceRequiredInputs = Array.isArray(maintenanceDecision.requiredInputs)
+    ? maintenanceDecision.requiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const maintenanceWarnings = Array.isArray(maintenanceDecision.warnings)
+    ? maintenanceDecision.warnings.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
   const fileViews = Array.isArray(context.paperclipFileViews)
     ? context.paperclipFileViews.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
@@ -164,6 +179,14 @@ export function buildStepInputManifest(input: {
           .map((entry) => readString(entry.content))
           .filter((value): value is string => value.length > 0)
           .map(truncateBriefExcerpt),
+      },
+      maintenanceDecision: {
+        available: Object.keys(maintenanceDecision).length > 0,
+        recommendedNextAction: readString(maintenanceDecision.recommendedNextAction) || null,
+        suggestedStatus: readString(maintenanceDecision.suggestedStatus) || null,
+        requiredInputs: maintenanceRequiredInputs,
+        warnings: maintenanceWarnings,
+        handoffTarget: readString(maintenanceDecision.handoffTarget) || null,
       },
       fileViews: {
         available: fileViews.length > 0,

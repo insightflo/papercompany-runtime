@@ -29,6 +29,14 @@ describe("buildPaperclipRuntimeBrief", () => {
             ruleExcerpts: ["수신처가 없으면 고객응대 담당에게 보완 요청"],
             knowledgeExcerpts: ["운영 응대는 증상, 시간대, 수신처를 확인한다."],
           },
+          maintenanceDecision: {
+            available: true,
+            recommendedNextAction: "vendor_handoff",
+            suggestedStatus: "in_progress",
+            requiredInputs: [],
+            warnings: [],
+            handoffTarget: "vendor",
+          },
           fileViews: { available: true, count: 2, source: "wake_comment" },
           sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
         },
@@ -54,6 +62,10 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Rules: 수신처 누락 시 보완 요청");
     expect(brief).toContain("Rule excerpts: 수신처가 없으면 고객응대 담당에게 보완 요청");
     expect(brief).toContain("Guidance KB excerpts: 운영 응대는 증상, 시간대, 수신처를 확인한다.");
+    expect(brief).toContain("Maintenance decision: vendor_handoff (suggested status: in_progress)");
+    expect(brief).toContain("Handoff target: vendor");
+    expect(brief).toContain("Required inputs: none");
+    expect(brief).toContain("Decision warnings: none");
     expect(brief).toContain("File views: 2 available (wake_comment)");
     expect(brief).toContain("Previous session: sess-1");
     expect(brief).toContain("Last run summary: Last run summarized the issue state");

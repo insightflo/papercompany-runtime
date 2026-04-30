@@ -593,6 +593,7 @@ describe("heartbeat context budget preflight", () => {
       id: issueId,
       companyId,
       title: "Manifest issue",
+      description: "사용자가 불편하다고만 전달했고 대상 시스템, 증상, 발생 시간이 빠짐",
       status: "todo",
     });
     await db.insert(issueComments).values({
@@ -646,6 +647,13 @@ describe("heartbeat context budget preflight", () => {
       throw new Error("Expected adapter invocation context to be captured");
     }
     const adapterVisibleContext = invocationContext;
+    expect(adapterVisibleContext.paperclipMaintenanceDecision).toEqual(
+      expect.objectContaining({
+        recommendedNextAction: "request_missing_input",
+        suggestedStatus: "blocked",
+        requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+      }),
+    );
     expect(adapterVisibleContext.paperclipStepInputManifest).toEqual(
       expect.objectContaining({
         version: 1,
@@ -666,6 +674,12 @@ describe("heartbeat context budget preflight", () => {
           runtimeServiceIntents: { available: false, count: 0 },
           runtimeServices: { available: false, count: 0, primaryUrl: null },
           fileViews: { available: true, count: 1, source: "wake_comment" },
+          maintenanceDecision: expect.objectContaining({
+            available: true,
+            recommendedNextAction: "request_missing_input",
+            suggestedStatus: "blocked",
+            requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+          }),
           sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
         }),
       }),

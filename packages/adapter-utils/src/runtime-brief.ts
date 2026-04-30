@@ -38,6 +38,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const tools = asRecord(manifestInputs?.tools);
   const knowledge = asRecord(manifestInputs?.knowledge);
   const maintenanceGuidance = asRecord(manifestInputs?.maintenanceGuidance);
+  const maintenanceDecision = asRecord(manifestInputs?.maintenanceDecision);
   const fileViews = asRecord(manifestInputs?.fileViews);
   const guardrails = asRecord(manifest?.guardrails);
 
@@ -95,6 +96,26 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       ? `- Guidance KB excerpts: ${maintenanceGuidance.knowledgeExcerpts.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(" | ")}`
       : null;
 
+  const maintenanceDecisionLine =
+    maintenanceDecision?.available === true && asString(maintenanceDecision.recommendedNextAction)
+      ? `- Maintenance decision: ${asString(maintenanceDecision.recommendedNextAction)} (suggested status: ${asString(maintenanceDecision.suggestedStatus) ?? "none"})`
+      : null;
+
+  const maintenanceDecisionRequiredInputsLine =
+    maintenanceDecision?.available === true && Array.isArray(maintenanceDecision.requiredInputs)
+      ? `- Required inputs: ${maintenanceDecision.requiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(", ") || "none"}`
+      : null;
+
+  const maintenanceDecisionWarningsLine =
+    maintenanceDecision?.available === true && Array.isArray(maintenanceDecision.warnings)
+      ? `- Decision warnings: ${maintenanceDecision.warnings.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(", ") || "none"}`
+      : null;
+
+  const maintenanceDecisionHandoffLine =
+    maintenanceDecision?.available === true && asString(maintenanceDecision.handoffTarget)
+      ? `- Handoff target: ${asString(maintenanceDecision.handoffTarget)}`
+      : null;
+
   const guardrailLine =
     guardrails?.broadScanAllowed === false
       ? "- Broad scans: disallowed. Stay within the manifest-provided context."
@@ -129,6 +150,10 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     maintenanceRuleExcerptLine,
     maintenanceKnowledgeLine,
     maintenanceKnowledgeExcerptLine,
+    maintenanceDecisionLine,
+    maintenanceDecisionRequiredInputsLine,
+    maintenanceDecisionWarningsLine,
+    maintenanceDecisionHandoffLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

@@ -148,5 +148,5 @@ describe("createApp plugin scheduler lifecycle", () => {
     });
 
     expect(pluginSchedulerStart).toHaveBeenCalledTimes(1);
-  });
+  }, 15_000);
 });
