@@ -116,6 +116,35 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       ? `- Handoff target: ${asString(maintenanceDecision.handoffTarget)}`
       : null;
 
+  const maintenanceRoleContext = asRecord(maintenanceDecision?.roleContext);
+  const maintenanceRoles = Array.isArray(maintenanceRoleContext?.roles)
+    ? maintenanceRoleContext.roles.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+    : [];
+  const maintenanceRoleQuestions = Array.isArray(maintenanceRoleContext?.questions)
+    ? maintenanceRoleContext.questions.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const maintenanceRoleContextLine =
+    maintenanceDecision?.available === true && maintenanceRoles.length > 0
+      ? `- Maintenance role context: ${maintenanceRoles
+          .map((role) => {
+            const metadata = asRecord(role.metadata);
+            const aliases = Array.isArray(metadata?.aliases)
+              ? metadata.aliases.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+              : [];
+            return [
+              asString(role.id),
+              asString(role.kind) ? `(${asString(role.kind)})` : null,
+              aliases.length > 0 ? `[aliases: ${aliases.join(", ")}]` : null,
+            ].filter(Boolean).join(" ");
+          })
+          .filter(Boolean)
+          .join(", ")}`
+      : null;
+  const maintenanceRoleQuestionsLine =
+    maintenanceDecision?.available === true && maintenanceRoleQuestions.length > 0
+      ? `- Role alignment questions: ${maintenanceRoleQuestions.join(" | ")}`
+      : null;
+
   const guardrailLine =
     guardrails?.broadScanAllowed === false
       ? "- Broad scans: disallowed. Stay within the manifest-provided context."
@@ -154,6 +183,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     maintenanceDecisionRequiredInputsLine,
     maintenanceDecisionWarningsLine,
     maintenanceDecisionHandoffLine,
+    maintenanceRoleContextLine,
+    maintenanceRoleQuestionsLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

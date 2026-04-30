@@ -36,6 +36,22 @@ describe("buildPaperclipRuntimeBrief", () => {
             requiredInputs: [],
             warnings: [],
             handoffTarget: "vendor",
+            roleContext: {
+              roles: [
+                { id: "customer_response", responsibilities: ["collect customer-facing intake"] },
+                { id: "maintenance_triage", responsibilities: ["diagnose affected system"] },
+                { id: "vendor_handoff", responsibilities: ["prepare external handoff"] },
+                { id: "approver", responsibilities: ["review high-risk exceptions"], metadata: { aliases: ["operator"] } },
+                { id: "incident_owner", responsibilities: ["coordinate outage response"] },
+                { id: "srb_sync", kind: "system", responsibilities: ["mirror issue status"], metadata: { aliases: ["mirror_sync"] } },
+              ],
+              questions: [
+                "What role am I acting as?",
+                "Does this action fit the role responsibility/authority?",
+                "Do I need rationale or override reason?",
+                "Is this a hard-stop candidate or observation/escalation?",
+              ],
+            },
           },
           fileViews: { available: true, count: 2, source: "wake_comment" },
           sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
@@ -66,6 +82,18 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Handoff target: vendor");
     expect(brief).toContain("Required inputs: none");
     expect(brief).toContain("Decision warnings: none");
+    expect(brief).toContain("Maintenance role context:");
+    expect(brief).toContain("customer_response");
+    expect(brief).toContain("maintenance_triage");
+    expect(brief).toContain("vendor_handoff");
+    expect(brief).toContain("approver");
+    expect(brief).toContain("operator");
+    expect(brief).toContain("incident_owner");
+    expect(brief).toContain("srb_sync");
+    expect(brief).toContain("mirror_sync");
+    expect(brief).toContain("role responsibility/authority");
+    expect(brief).toMatch(/rationale|override/);
+    expect(brief).toMatch(/hard-stop|observation|escalation/);
     expect(brief).toContain("File views: 2 available (wake_comment)");
     expect(brief).toContain("Previous session: sess-1");
     expect(brief).toContain("Last run summary: Last run summarized the issue state");

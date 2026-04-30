@@ -55,6 +55,7 @@ export interface StepInputManifest {
       requiredInputs: string[];
       warnings: string[];
       handoffTarget: string | null;
+      roleContext: Record<string, unknown> | null;
     };
     fileViews: {
       available: boolean;
@@ -187,6 +188,7 @@ export function buildStepInputManifest(input: {
         requiredInputs: maintenanceRequiredInputs,
         warnings: maintenanceWarnings,
         handoffTarget: readString(maintenanceDecision.handoffTarget) || null,
+        roleContext: parseObject(maintenanceDecision.roleContext),
       },
       fileViews: {
         available: fileViews.length > 0,

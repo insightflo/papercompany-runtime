@@ -33,6 +33,22 @@ describe("buildStepInputManifest", () => {
           requiredInputs: ["affectedSystem", "timeWindow"],
           warnings: ["completion_evidence_missing"],
           handoffTarget: null,
+          roleContext: {
+            roles: [
+              { id: "customer_response", responsibilities: ["intake"], authority: ["request missing input"] },
+              { id: "maintenance_triage", responsibilities: ["diagnosis"], authority: ["prioritize investigation"] },
+              { id: "vendor_handoff", responsibilities: ["external dependency"], authority: ["prepare vendor packet"] },
+              { id: "approver", responsibilities: ["approval gate"], authority: ["approve high-risk changes"] },
+              { id: "incident_owner", responsibilities: ["customer impact"], authority: ["coordinate incident response"] },
+              { id: "srb_sync", kind: "system", responsibilities: ["mirror issue status"] },
+            ],
+            questions: [
+              "What role am I acting as?",
+              "Does this action fit the role responsibility/authority?",
+              "Do I need rationale or override reason?",
+              "Is this a hard-stop candidate or observation/escalation?",
+            ],
+          },
         },
         paperclipFileViews: [{ workspaceId: "ws-1", relativePath: "src/server.ts", source: "wake_comment", exists: true }],
         paperclipSessionHandoffMarkdown: "# handoff",
@@ -113,6 +129,22 @@ describe("buildStepInputManifest", () => {
           requiredInputs: ["affectedSystem", "timeWindow"],
           warnings: ["completion_evidence_missing"],
           handoffTarget: null,
+          roleContext: expect.objectContaining({
+            roles: expect.arrayContaining([
+              expect.objectContaining({ id: "customer_response" }),
+              expect.objectContaining({ id: "maintenance_triage" }),
+              expect.objectContaining({ id: "vendor_handoff" }),
+              expect.objectContaining({ id: "approver" }),
+              expect.objectContaining({ id: "incident_owner" }),
+              expect.objectContaining({ id: "srb_sync", kind: "system" }),
+            ]),
+            questions: expect.arrayContaining([
+              expect.stringMatching(/role/i),
+              expect.stringMatching(/responsibility\/authority/i),
+              expect.stringMatching(/rationale|override/i),
+              expect.stringMatching(/hard-stop|observation|escalation/i),
+            ]),
+          }),
         },
         fileViews: {
           available: true,

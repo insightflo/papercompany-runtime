@@ -42,6 +42,20 @@ export type MaintenanceDecisionResult = {
   promptBlock: string;
   kbReferences: Array<{ id: string; name: string; source: string; excerpt: string }>;
   warnings: string[];
+  roleContext?: MaintenanceRoleContext;
+};
+
+export type MaintenanceRoleContext = {
+  roles: Array<{
+    id: string;
+    kind: "human" | "system";
+    responsibilities: string[];
+    authority: string[];
+    needsCollaboration?: string[];
+    hardStopCandidates?: string[];
+    metadata?: Record<string, unknown>;
+  }>;
+  questions: string[];
 };
 
 export type EvaluateMaintenanceIssueInput = {
@@ -122,14 +136,73 @@ function hasCompletionEvidence(issue: MaintenanceIssue, text: string) {
 function buildPromptBlock(result: Omit<MaintenanceDecisionResult, "promptBlock">) {
   const required = result.requiredInputs.length > 0 ? result.requiredInputs.join(", ") : "none";
   const matches = result.matchedRules.map((rule) => `${rule.name}: ${rule.reason}`).join("; ") || "none";
+  const roleIds = result.roleContext?.roles.map((role) => role.id).join(", ") || "none";
+  const questions = result.roleContext?.questions.map((question) => `  - ${question}`).join("\n") || "  - none";
   return [
     "Maintenance decision preflight:",
     `- Recommended next action: ${result.recommendedNextAction}`,
     `- Suggested status: ${result.suggestedStatus ?? "none"}`,
     `- Required inputs: ${required}`,
     `- Matched rules: ${matches}`,
+    `- Role context: ${roleIds}`,
+    "- Role alignment questions:",
+    questions,
   ].join("\n");
 }
+
+export const maintenanceRoleContext: MaintenanceRoleContext = {
+  roles: [
+    {
+      id: "customer_response",
+      kind: "human",
+      responsibilities: ["collect customer-facing intake", "ask for missing affected system, symptom, and time window"],
+      authority: ["request missing input", "keep the issue blocked until intake is usable"],
+      needsCollaboration: ["maintenance_triage", "incident_owner"],
+    },
+    {
+      id: "maintenance_triage",
+      kind: "human",
+      responsibilities: ["diagnose the affected system", "choose the next investigation or repair direction"],
+      authority: ["prioritize investigation", "propose repair or verification steps"],
+      needsCollaboration: ["vendor_handoff", "approver", "incident_owner"],
+    },
+    {
+      id: "vendor_handoff",
+      kind: "human",
+      responsibilities: ["prepare external dependency evidence", "coordinate vendor-facing next steps"],
+      authority: ["prepare vendor packet", "ask for missing vendor evidence"],
+      needsCollaboration: ["maintenance_triage", "approver"],
+    },
+    {
+      id: "approver",
+      kind: "human",
+      responsibilities: ["review high-risk or exceptional maintenance actions"],
+      authority: ["approve or reject high-risk changes", "request rationale or override reason"],
+      hardStopCandidates: ["irreversible external action", "cost/contract/legal/compliance risk", "production-destructive operation"],
+      metadata: { aliases: ["operator"] },
+    },
+    {
+      id: "incident_owner",
+      kind: "human",
+      responsibilities: ["coordinate customer-impact or outage response", "track escalation and communication state"],
+      authority: ["declare incident coordination needed", "route work to the responsible responder"],
+      needsCollaboration: ["customer_response", "maintenance_triage", "approver"],
+    },
+    {
+      id: "srb_sync",
+      kind: "system",
+      responsibilities: ["mirror issue status between source and maintenance queues"],
+      authority: ["observe and mirror sync state without replacing human role judgment"],
+      metadata: { aliases: ["mirror_sync", "srb-sync", "mirror-sync"], systemRole: true },
+    },
+  ],
+  questions: [
+    "What role am I acting as now?",
+    "Is the action inside this role's responsibility/authority?",
+    "If I am judging differently from rule/KB/workflow guidance, do I need rationale or override reason?",
+    "Is this a hard-stop candidate, or is observation/escalation enough?",
+  ],
+};
 
 export const maintenanceDecisionService = {
   evaluateIssue(input: EvaluateMaintenanceIssueInput): MaintenanceDecisionResult {
@@ -226,6 +299,7 @@ export const maintenanceDecisionService = {
         excerpt: reference.excerpt ?? "",
       })),
       warnings,
+      roleContext: maintenanceRoleContext,
     };
 
     return {

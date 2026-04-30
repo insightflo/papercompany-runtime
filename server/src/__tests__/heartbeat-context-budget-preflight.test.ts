@@ -655,6 +655,22 @@ describe("heartbeat context budget preflight", () => {
         recommendedNextAction: "request_missing_input",
         suggestedStatus: "blocked",
         requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+        roleContext: expect.objectContaining({
+          roles: expect.arrayContaining([
+            expect.objectContaining({ id: "customer_response" }),
+            expect.objectContaining({ id: "maintenance_triage" }),
+            expect.objectContaining({ id: "vendor_handoff" }),
+            expect.objectContaining({ id: "approver" }),
+            expect.objectContaining({ id: "incident_owner" }),
+            expect.objectContaining({ id: "srb_sync", kind: "system" }),
+          ]),
+          questions: expect.arrayContaining([
+            expect.stringMatching(/role/i),
+            expect.stringMatching(/responsibility\/authority/i),
+            expect.stringMatching(/rationale|override/i),
+            expect.stringMatching(/hard-stop|observation|escalation/i),
+          ]),
+        }),
       }),
     );
     const missingInputAuditRows = await db
@@ -702,6 +718,10 @@ describe("heartbeat context budget preflight", () => {
             recommendedNextAction: "request_missing_input",
             suggestedStatus: "blocked",
             requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+            roleContext: expect.objectContaining({
+              roles: expect.arrayContaining([expect.objectContaining({ id: "srb_sync", kind: "system" })]),
+              questions: expect.arrayContaining([expect.stringMatching(/rationale|override/i)]),
+            }),
           }),
           sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
         }),
