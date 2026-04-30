@@ -517,6 +517,105 @@ maintenance_vendor_handoff_followed
 - override reason 요구 없음. 다음 설계 후보는 단순 block보다 role/responsibility/authority + decision rationale/override reason이다.
 - comment-only route를 terminal close처럼 확대 해석하지 않음.
 
+### Role / Responsibility / Authority 설계 초안 — 2026-04-30
+
+목표는 RPA식 `조건 → 무조건 행동`이 아니라, 인간 팀처럼 역할과 책임을 가진 agent에게 rule/workflow/KB 하네스를 제공하는 것이다. Rule/KB/workflow는 agent 판단을 대체하는 명령이 아니라 판단을 설명 가능하게 만드는 근거이며, hard enforcement는 마지막 수단이다.
+
+#### Maintenance context role 예시
+
+| Role | responsibility: 책임지는 결과/상태 | authority: 단독으로 할 수 있는 조치 | needs_collaboration: 넘겨야 하는 경우 | hard_stop_candidates |
+| --- | --- | --- | --- | --- |
+| `customer_response` | 요청자/고객에게 현재 상태, 필요한 추가 정보, 완료 근거를 이해 가능하게 전달한다. 누락 입력(symptom/time window/contact/repro)을 확인한다. | 보완 질문, 상태 공유, 확인 요청, evidence 요청 comment 작성. | 비용/계약/법무 표현, 벤더 공식 발송, 장애 보상/책임 인정, 원인 단정이 필요한 경우 `approver`/`operator`와 협업. | 외부 확정 발송, 법적 책임 인정, 보상/환불 약속. |
+| `maintenance_triage` | issue의 affected system, severity, customer impact, incident 여부, 다음 담당 role을 판단한다. | `todo`/`in_progress`/`blocked`/`in_review` 수준의 상태 제안·변경, 필요한 입력/KB/로그 요청, 담당 role 추천. | vendor 의존은 `vendor_handoff`, 외부/비용/권한 초과는 `approver`, 고객 영향 큰 장애는 `operator` 또는 incident owner와 협업. | high-impact issue를 evidence/rationale 없이 `done` 처리, incident를 일반 issue처럼 close. |
+| `vendor_handoff` | 벤더/외부 장비/API/PG 의존 이슈의 재현 자료, 로그, 문의 문맥, handoff packet을 준비한다. | 벤더 문의 초안 작성, 내부 handoff note 작성, 필요한 evidence 목록화. | 실제 벤더 발송, 계약/SLA/비용/책임 표현, 고객-facing 약속은 `approver`/`operator` 확인 필요. | 외부 발송, 비용 발생 요청, SLA penalty 인정, 계약 해석. |
+| `mirror_sync` / `srb_sync` | source issue 상태와 mirror issue 상태를 동기화하면서, mirror 쪽 role 책임 판단이 누락되지 않도록 관찰한다. | source status를 mirror status로 반영, alignment observation audit 기록, sync 실패 warn. | mirror issue가 vendor/incident/missing-input 책임을 요구하는데 terminal close로 동기화되는 경우 해당 담당 role 또는 `operator`에게 rationale 확인 필요. | cross-company irreversible close, 외부 발송을 동반한 sync, 비용/계약/법무 상태 동기화. |
+| `approver` / `operator` | 예외 승인, high-risk action 승인, 책임자 지정, override reason 품질을 관리한다. | override reason 승인, high-risk action 승인/반려, hard-stop 예외 승인, 담당 role 재배정. | 법무/보안/재무 전문 판단이 필요한 경우 해당 사람/role과 협업. | irreversible, external, cost, contract/legal/compliance, production-destructive action. |
+
+#### Boundary 원칙
+
+- `responsibility`: role이 반드시 확인하거나 설명해야 하는 결과. 예: `maintenance_triage`는 affected system/severity/next role을 설명해야 한다.
+- `authority`: role이 단독으로 실행·확정할 수 있는 범위. 예: `customer_response`는 보완 질문은 가능하지만 비용/계약 약속은 불가하다.
+- `needs_collaboration`: 다른 role/사람에게 넘기거나 rationale을 받아야 하는 상황. 이는 block이 아니라 협업 요청 또는 observation으로 시작한다.
+- `hard_stop_candidates`: irreversible/external/cost/legal/production-destructive처럼 정책상 극소수만 후보가 된다.
+- Worktree Rule은 세부 절차표가 아니라 role별 판단 기준이고, KB는 시스템별 근거/맥락이다. KB 부재는 즉시 block보다 “근거 부족” observation과 보완 요청으로 남긴다.
+
+#### Decision alignment observation event shape 후보
+
+기존 `maintenance_decision_action_mismatch`는 바로 폐기하지 않는다. 상위 개념을 `decision_alignment_observation` 또는 `maintenance_decision_observed`로 잡고, 기존 event는 `alignment=diverged_*`의 초기 구현으로 해석한다.
+
+```ts
+type MaintenanceDecisionObserved = {
+  event:
+    | "maintenance_decision_observed"
+    | "maintenance_decision_alignment_observed"
+    | "maintenance_decision_action_mismatch"; // backward-compatible legacy event
+  issueId: string;
+  actor: {
+    type: "agent" | "user" | "system";
+    id: string;
+    role?: "customer_response" | "maintenance_triage" | "vendor_handoff" | "mirror_sync" | "srb_sync" | "approver" | "operator" | string;
+  };
+  responsibility?: string | null;
+  attemptedAction: string;
+  attemptedStatus?: string | null;
+  expectedAction?: string | null;
+  expectedStatus?: string | null;
+  alignment: "aligned" | "diverged_with_rationale" | "diverged_without_rationale" | "insufficient_context";
+  severity: "observe" | "needs_reason" | "needs_approval";
+  rationale?: string | null;
+  overrideReason?: string | null;
+  authorityBoundary?: {
+    currentRole?: string | null;
+    requiredRole?: string | null;
+    withinAuthority: boolean;
+    needsCollaborationWith?: string[];
+    reason?: string | null;
+  };
+  observationReasons: string[];
+  ruleRefs: Array<{ id: string; name: string; action?: string | null }>;
+  kbRefs: Array<{ id: string; name: string; source?: string | null }>;
+  workflowRefs?: Array<{ workflowId?: string; stepId?: string; name?: string }>;
+  hardStopCandidate?: boolean;
+};
+```
+
+의미:
+
+- 사용자-facing 용어는 `violation`이 아니라 `decision alignment observation`으로 둔다.
+- `mismatchReasons`는 장기적으로 `observationReasons`로 확장한다.
+- `recommendedNextAction`은 상위 payload에서 `expectedAction`으로 일반화할 수 있다.
+- route hook은 mutation을 막지 않고, 어떤 role의 어떤 responsibility 판단이 rule/KB/workflow와 다르게 진행됐는지, 그리고 rationale/override reason이 있었는지를 남긴다.
+- `severity=observe`: 관찰만.
+- `severity=needs_reason`: 진행은 허용하되 rationale/override reason이 필요.
+- `severity=needs_approval`: approver/operator collaboration이 필요. 그래도 hard stop과는 구분한다.
+
+#### Hard stop 후보 제한
+
+Hard stop은 극소수로 제한한다.
+
+- irreversible action: 데이터 삭제, 영구 상태 변경, 되돌리기 어려운 운영 조치
+- external action: 고객/벤더/외부 채널로 실제 발송되는 확정 메시지, 법적/계약상 표현
+- cost action: 결제, 구매, 유료 리소스 증설, SLA/보상 인정
+- contract/legal/compliance action: 계약 해석, 개인정보, 보안 사고, 법적 책임 인정, 규제 대응
+- production-destructive action: 운영 DB/인프라에 직접 파괴적 영향이 있는 조치
+
+그 외 업무흐름 divergence는 block보다 rationale/override reason을 요구하거나, `approver`/`operator`에게 escalation하는 방식이 Papercompany 목적에 맞다.
+
+#### Implementation sequencing 후보
+
+- Phase A — prompt/runtime brief에 role context 추가
+  - agent에게 현재 role, responsibility, authority boundary, collaboration 필요 조건을 brief에 제공한다.
+  - rule/KB는 “해야 할 명령”이 아니라 role 판단의 근거로 표현한다.
+- Phase B — audit event에 rationale/role 필드 확장
+  - 기존 `maintenance_decision_action_mismatch` details에 `role`, `responsibility`, `expectedAction`, `rationale`, `overrideReason`, `authorityBoundary`, `severity`를 backward-compatible하게 추가한다.
+  - 이후 상위 event명 `maintenance_decision_alignment_observed`로 확장할지 결정한다.
+- Phase C — UI surfacing
+  - issue/workflow 화면에 current role, expected action, divergence reason, rationale/override reason, ruleRefs/kbRefs를 보여준다.
+  - operator가 “차단”보다 “책임 있는 예외/협업 필요”를 판단할 수 있게 한다.
+- Phase D — optional approval/hard stop only for high-risk actions
+  - irreversible/external/cost/contract/legal/production-destructive action에만 approval 또는 hard stop을 검토한다.
+  - 일반 workflow divergence는 observation + rationale + collaboration으로 유지한다.
+
 ### Phase 6 — UI Surfacing: 다음 구현 후보
 
 Operator가 issue/workflow 화면에서 다음을 볼 수 있어야 한다.
