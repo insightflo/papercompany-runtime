@@ -142,13 +142,17 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   env.PAPERCLIP_RUN_ID = runId;
 
-  // papercompany: Support isolated agent config directory
-  // This prevents agents from sharing global Claude hooks/settings
+  // papercompany: Support isolated agent config directory when explicitly configured.
+  // Do not set CLAUDE_CONFIG_DIR by default: Claude Code's subscription login is tied
+  // to its default config resolution, and pointing CLAUDE_CONFIG_DIR at either an empty
+  // value or ~/.claude makes the CLI report "Not logged in" on this host.
   const agentConfigDir =
     asString(config.claudeConfigDir, "") ||
     process.env.PAPERCLIP_AGENT_CLAUDE_CONFIG_DIR ||
-    path.join(os.homedir(), '.claude-agent');
-  env.CLAUDE_CONFIG_DIR = agentConfigDir;
+    "";
+  if (agentConfigDir) {
+    env.CLAUDE_CONFIG_DIR = agentConfigDir;
+  }
 
   const wakeTaskId =
     (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
