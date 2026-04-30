@@ -18,6 +18,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.ts";
+import { createSrbPairSync } from "../services/srb/pair-sync.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -433,6 +434,93 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       .where(eq(issues.id, mirrorIssueId))
       .then((rows) => rows[0] ?? null);
     expect(mirrorReleased?.status).toBe("todo");
+  });
+
+  it("audits terminal SRB mirror status sync mismatches without blocking the mirror update", async () => {
+    const sourceCompanyId = randomUUID();
+    const mirrorCompanyId = randomUUID();
+    const linkId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const mirrorIssueId = randomUUID();
+
+    await db.insert(companies).values([
+      {
+        id: sourceCompanyId,
+        name: "SourceCo",
+        issuePrefix: `SRC${sourceCompanyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: mirrorCompanyId,
+        name: "MirrorCo",
+        issuePrefix: `MIR${mirrorCompanyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+
+    await db.insert(srbLinks).values({
+      id: linkId,
+      localCompanyId: sourceCompanyId,
+      remoteCompanyId: mirrorCompanyId,
+      remoteServerUrl: null,
+      direction: "two_way",
+      createdBy: "test",
+    });
+
+    await db.insert(issues).values([
+      {
+        id: sourceIssueId,
+        companyId: sourceCompanyId,
+        title: "Source issue",
+        status: "in_progress",
+      },
+      {
+        id: mirrorIssueId,
+        companyId: mirrorCompanyId,
+        title: "PG사 결제 API 응답 오류",
+        description: "시스템: 결제 API\n증상: 외부 PG사 API timeout\n시간: 오늘 오전부터 반복. 벤더 확인 필요.",
+        status: "in_progress",
+      },
+    ]);
+
+    await db.insert(srbIssuePairs).values({
+      linkId,
+      sourceCompanyId,
+      sourceIssueId,
+      mirrorCompanyId,
+      mirrorIssueId,
+      statusSyncMode: "mirror_source_status",
+      createdBy: "test",
+    });
+
+    const pairSync = createSrbPairSync(db);
+    await pairSync.syncSourceStatus({ sourceIssueId, sourceStatus: "done" });
+
+    const mirrorDone = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, mirrorIssueId))
+      .then((rows) => rows[0] ?? null);
+    expect(mirrorDone?.status).toBe("done");
+
+    const audit = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "maintenance_decision_action_mismatch"))
+      .then((rows) => rows[0] ?? null);
+    expect(audit).toEqual(expect.objectContaining({
+      companyId: mirrorCompanyId,
+      actorType: "system",
+      actorId: "srb-status-sync",
+      entityType: "issue",
+      entityId: mirrorIssueId,
+    }));
+    expect(audit?.details).toEqual(expect.objectContaining({
+      attemptedAction: "srb.mirror_status_sync",
+      attemptedStatus: "done",
+      recommendedNextAction: "vendor_handoff",
+      mismatchReasons: expect.arrayContaining(["vendor_handoff_required_before_close"]),
+    }));
   });
 });
 

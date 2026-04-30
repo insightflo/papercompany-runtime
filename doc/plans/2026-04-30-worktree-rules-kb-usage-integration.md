@@ -462,9 +462,9 @@ type WorkflowDecisionRuleConfig = {
 - dogfood 결과상 다음 구현은 broad hard enforcement가 아니라 route-level soft enforcement audit가 적절하다.
 - 우선 후보는 `maintenance_decision_action_mismatch`이며, missing input → done, vendor handoff → self-close, incident → normal close, evidence missing → done 시도를 관찰 대상으로 삼는다.
 
-### Phase 5 — Soft Enforcement: 다음 구현 후보
+### Phase 5 — Observability / Soft Mismatch Audit: 다음 구현 후보
 
-Issue action route에서 decision과 실제 action이 어긋나는지 audit한다. 처음부터 block하지 않는다.
+Issue action route에서 decision과 실제 action이 어긋날 수 있는 지점을 관찰 가능한 audit로 남긴다. 목적은 agent 판단을 RPA식으로 차단하는 것이 아니라, 인간 팀처럼 역할별 책임 판단과 설명 가능한 이탈을 추적하는 것이다. 처음부터 block하지 않는다.
 
 후보 이벤트:
 
@@ -482,7 +482,40 @@ maintenance_vendor_handoff_followed
 - `recommendedNextAction=vendor_handoff`인데 자체 완료하면 mismatch audit.
 - `recommendedNextAction=escalate_incident`인데 일반 issue close하면 mismatch audit.
 
-처음에는 API 응답을 실패시키지 않고 audit만 남긴다. 이후 운영 로그를 보고 `require_override` 또는 `block`으로 승격한다.
+처음에는 API 응답을 실패시키지 않고 audit만 남긴다. 이후 운영 로그를 보고 단순 block으로 승격하기보다, 먼저 `role/responsibility/authority`, `decision rationale`, `override reason` 모델을 설계한다. Hard block은 회사 정책상 절대 위반하면 안 되는 execution guard 또는 명백한 권한 초과에만 마지막 수단으로 검토한다.
+
+### Phase 5 coverage 확인 결과 — 2026-04-30
+
+목표는 `PATCH /api/issues/:id` 외 issue 상태/조치 변경 경로 중 soft mismatch audit 누락을 확인하고, 필요한 최소 hook만 붙이는 것이다.
+
+확인한 entry point:
+
+| Entry point | 분류 | 역할/책임 관점의 판단/조치 |
+| --- | --- | --- |
+| `PATCH /api/issues/:id` (`server/src/routes/issues.ts`) | already covered | status 변경 시 `auditMaintenanceActionMismatch()`가 `maintenance_decision_action_mismatch`를 기록한다. terminal status(`done`/`cancelled`/`closed`)만 helper에서 mismatch 평가된다. |
+| `POST /api/issues/:id/checkout` → `issueService.checkout()` | not terminal status mutation | status를 `in_progress`로 바꾸는 claim/lock 경로다. terminal close가 아니므로 mismatch audit 대상에서 제외했다. SRB source sync는 mirror를 `in_progress`로만 동기화한다. |
+| `POST /api/issues/:id/release` → `issueService.release()` | not terminal status mutation | status를 `todo`로 되돌리는 release 경로다. terminal close가 아니므로 mismatch audit 대상에서 제외했다. |
+| `POST /api/issues/:id/comments` reopen path | not terminal status mutation | closed issue에 `reopen=true`가 있으면 status를 `todo`로 변경한다. close가 아니라 reopen이므로 mismatch audit 대상에서 제외했다. |
+| `POST /api/issues/:id/comments` comment-only | not terminal status mutation | issue `updatedAt`과 comment만 변경한다. status close/done/cancelled를 동반하지 않는다. |
+| issue document/work-product/read/inbox/archive/approval routes | not terminal status mutation | issue 상태를 변경하지 않는다. |
+| `issueService.update()` 직접 호출 | covered via known API route or future candidate | 일반 API route는 `PATCH /api/issues/:id`에서 hook을 탄다. 서비스 자체는 범용 update라 hard coupling하지 않았다. 내부 direct caller는 별도 확인했다. |
+| `createSrbPairSync().syncSourceStatus()` → mirror issue `issueSvc.update(pair.mirrorIssueId, { status: nextMirrorStatus })` | separate mutation path needing audit hook | source issue status를 mirror issue에 동기화하는 별도 service mutation path다. source route audit와 별개로 mirror issue terminal close가 발생할 수 있으므로 `logMaintenanceDecisionActionMismatch()`를 재사용해 `attemptedAction=srb.mirror_status_sync` audit hook을 추가했다. 이 hook은 mirror 담당 role의 vendor handoff / incident / missing input 책임 판단이 rule/KB와 어긋날 수 있는 지점을 관찰 가능하게 하는 용도이며, 실패해도 sync는 차단하지 않고 warn만 남긴다. |
+| `heartbeat.ts` auto-block on run failure/timeout | not terminal status mutation | 자동 `blocked` 전환이다. terminal close가 아니므로 mismatch audit 대상에서 제외했다. |
+| workflow/routine `syncRunStatusForIssue()` | unclear / future candidate | 현재 확인 범위에서는 issue status를 직접 terminal로 바꾸는 경로가 아니라 run/status aggregate sync에 가깝다. 향후 workflow plugin이 issue terminal status를 직접 업데이트하는 action route가 생기면 같은 helper hook 후보다. |
+
+추가 테스트:
+
+- `server/src/__tests__/issues-service.test.ts`
+  - `audits terminal SRB mirror status sync mismatches without blocking the mirror update`
+  - `mirror_source_status` pair에서 source `done` 동기화가 mirror issue를 `done`으로 바꾸되, mirror issue가 vendor handoff decision이면 `maintenance_decision_action_mismatch` audit을 남기는지 검증한다.
+
+제외한 것:
+
+- schema/API/UI/rule kind split 변경 없음.
+- hard block 없음.
+- RPA식 세부 절차화 없음. agent의 상황 판단은 유지하고, 이탈 가능성은 설명 가능한 audit로 관찰한다.
+- override reason 요구 없음. 다음 설계 후보는 단순 block보다 role/responsibility/authority + decision rationale/override reason이다.
+- comment-only route를 terminal close처럼 확대 해석하지 않음.
 
 ### Phase 6 — UI Surfacing: 다음 구현 후보
 
@@ -496,16 +529,16 @@ Operator가 issue/workflow 화면에서 다음을 볼 수 있어야 한다.
 - Handoff target
 - Audit timeline: evaluated / followed / overridden / mismatched
 
-### Phase 7 — Hard Enforcement: 마지막
+### Phase 7 — Authority Boundary / Hard Enforcement: 마지막
 
-회사 정책상 절대 어기면 안 되는 rule만 block한다.
+회사 정책상 절대 어기면 안 되는 execution guard 또는 명백한 authority boundary만 block한다. Workflow Decision Rule은 기본적으로 인간 팀의 업무 규정집처럼 role/responsibility/accountability를 제공하고, agent가 상황에 맞게 판단한 근거와 예외를 남기게 한다.
 
 - destructive execution guard
-- 명백한 missing required input 상태에서 done 처리
-- vendor handoff required인데 자체 완료
-- incident escalation required인데 일반 close
+- 명백한 missing required input 상태에서 done 처리: 우선 rationale/override reason 요구 후보, 즉시 block은 아님
+- vendor handoff required인데 자체 완료: 담당 role의 권한/책임 범위와 decision rationale 확인 후보
+- incident escalation required인데 일반 close: incident owner 책임과 escalation authority 확인 후보
 
-Hard enforcement 전에는 반드시 UI override/exception 흐름과 operator audit가 있어야 한다.
+Hard enforcement 전에는 반드시 role/responsibility/authority 모델, UI override/exception 흐름, operator audit가 있어야 한다.
 
 ## 완료 기준
 

@@ -4,6 +4,9 @@ import { issues, srbIssuePairs, srbLinks } from "@paperclipai/db";
 import { heartbeatService } from "../heartbeat.js";
 import { issueService } from "../issues.js";
 import { applySrbInboundReceiveSideEffects, createSrbInboundHandler } from "./inbound.js";
+import { logger } from "../../middleware/logger.js";
+import { buildMaintenanceDecisionContext } from "../maintenance/decision-context.js";
+import { logMaintenanceDecisionActionMismatch } from "../maintenance/decision-audit.js";
 
 export type SRBPairStatusSyncMode = "blocked_only" | "mirror_source_status";
 
@@ -219,6 +222,41 @@ export function createSrbPairSync(
         if (mirrorIssue.status !== nextMirrorStatus) {
           const updatedMirrorIssue = await issueSvc.update(pair.mirrorIssueId, { status: nextMirrorStatus });
           if (updatedMirrorIssue) {
+            const decision = buildMaintenanceDecisionContext({
+              issue: {
+                id: mirrorIssue.id,
+                identifier: mirrorIssue.identifier,
+                title: mirrorIssue.title,
+                description: mirrorIssue.description,
+                status: mirrorIssue.status,
+                priority: mirrorIssue.priority,
+              },
+              requestedStatus: nextMirrorStatus,
+              guidance: null,
+            });
+            if (decision) {
+              await logMaintenanceDecisionActionMismatch({
+                db,
+                companyId: mirrorIssue.companyId,
+                actor: {
+                  actorType: "system",
+                  actorId: "srb-status-sync",
+                },
+                issue: {
+                  id: mirrorIssue.id,
+                  identifier: mirrorIssue.identifier,
+                  projectId: mirrorIssue.projectId,
+                },
+                decision,
+                attemptedAction: "srb.mirror_status_sync",
+                attemptedStatus: nextMirrorStatus,
+              }).catch((err) => {
+                logger.warn(
+                  { err, issueId: mirrorIssue.id, sourceIssueId: input.sourceIssueId },
+                  "failed to write maintenance decision action mismatch audit for SRB mirror status sync",
+                );
+              });
+            }
             const { workflowService } = await import("../workflow/engine.js");
             await workflowService.syncRunStatusForIssue(db, updatedMirrorIssue.id);
           }
