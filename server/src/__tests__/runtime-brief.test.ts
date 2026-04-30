@@ -53,6 +53,19 @@ describe("buildPaperclipRuntimeBrief", () => {
               ],
             },
           },
+          missionPlan: {
+            available: true,
+            revision: 2,
+            status: "active",
+            missionGoal: "Customer homepage rollout",
+            requiredInputsCount: 1,
+            openRequiredInputs: ["qa-owner"],
+            successCriteriaCount: 2,
+            riskCount: 1,
+            stepCount: 3,
+            stepSummary: ["Confirm owner", "Run QA", "Collect approval"],
+            refs: { planningIssueId: "issue-plan-1", workflowRunIds: ["run-1"] },
+          },
           fileViews: { available: true, count: 2, source: "wake_comment" },
           sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
         },
@@ -83,6 +96,10 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Required inputs: none");
     expect(brief).toContain("Decision warnings: none");
     expect(brief).toContain("Maintenance role context:");
+    expect(brief).toContain("Mission plan: rev 2 active — Customer homepage rollout");
+    expect(brief).toContain("Mission plan inputs: 1 required, open: qa-owner");
+    expect(brief).toContain("Mission plan steps: 3 total — Confirm owner | Run QA | Collect approval");
+    expect(brief).not.toContain("private assumption");
     expect(brief).toContain("customer_response");
     expect(brief).toContain("maintenance_triage");
     expect(brief).toContain("vendor_handoff");

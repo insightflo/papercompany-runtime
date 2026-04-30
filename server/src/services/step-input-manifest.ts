@@ -57,6 +57,20 @@ export interface StepInputManifest {
       handoffTarget: string | null;
       roleContext: Record<string, unknown> | null;
     };
+    missionPlan: {
+      available: boolean;
+      missionPlanId: string | null;
+      revision: number | null;
+      status: string | null;
+      missionGoal: string | null;
+      requiredInputsCount: number;
+      openRequiredInputs: string[];
+      successCriteriaCount: number;
+      riskCount: number;
+      stepCount: number;
+      stepSummary: string[];
+      refs: Record<string, unknown> | null;
+    };
     fileViews: {
       available: boolean;
       count: number;
@@ -101,11 +115,18 @@ export function buildStepInputManifest(input: {
     ? maintenanceGuidance.knowledge.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
     : [];
   const maintenanceDecision = parseObject(context.paperclipMaintenanceDecision);
+  const missionPlan = parseObject(context.paperclipMissionPlan);
   const maintenanceRequiredInputs = Array.isArray(maintenanceDecision.requiredInputs)
     ? maintenanceDecision.requiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
   const maintenanceWarnings = Array.isArray(maintenanceDecision.warnings)
     ? maintenanceDecision.warnings.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionPlanOpenRequiredInputs = Array.isArray(missionPlan.openRequiredInputs)
+    ? missionPlan.openRequiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionPlanStepSummary = Array.isArray(missionPlan.stepSummary)
+    ? missionPlan.stepSummary.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
   const fileViews = Array.isArray(context.paperclipFileViews)
     ? context.paperclipFileViews.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
@@ -190,6 +211,20 @@ export function buildStepInputManifest(input: {
         handoffTarget: readString(maintenanceDecision.handoffTarget) || null,
         roleContext: parseObject(maintenanceDecision.roleContext),
       },
+      missionPlan: {
+        available: missionPlan.available === true,
+        missionPlanId: readString(missionPlan.missionPlanId) || null,
+        revision: readNumber(missionPlan.revision),
+        status: readString(missionPlan.status) || null,
+        missionGoal: readString(missionPlan.missionGoal) || null,
+        requiredInputsCount: readNumber(missionPlan.requiredInputsCount) ?? 0,
+        openRequiredInputs: missionPlanOpenRequiredInputs,
+        successCriteriaCount: readNumber(missionPlan.successCriteriaCount) ?? 0,
+        riskCount: readNumber(missionPlan.riskCount) ?? 0,
+        stepCount: readNumber(missionPlan.stepCount) ?? 0,
+        stepSummary: missionPlanStepSummary,
+        refs: parseObject(missionPlan.refs),
+      },
       fileViews: {
         available: fileViews.length > 0,
         count: fileViews.length,
@@ -206,6 +241,10 @@ export function buildStepInputManifest(input: {
 
 function readString(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+function readNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function truncateBriefExcerpt(value: string) {

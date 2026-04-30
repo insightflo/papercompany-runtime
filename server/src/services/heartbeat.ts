@@ -56,6 +56,7 @@ import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
+import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
 import {
   buildExecutionWorkspaceAdapterConfig,
@@ -2584,6 +2585,7 @@ export function heartbeatService(db: Db) {
             projectWorkspaceId: issues.projectWorkspaceId,
             executionWorkspaceId: issues.executionWorkspaceId,
             executionWorkspacePreference: issues.executionWorkspacePreference,
+            missionId: issues.missionId,
             assigneeAgentId: issues.assigneeAgentId,
             assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
@@ -2766,6 +2768,16 @@ export function heartbeatService(db: Db) {
       }
     } else {
       delete context.paperclipMaintenanceDecision;
+    }
+    const effectiveMissionIdForPlan = issueContext?.missionId ?? missionId;
+    if (effectiveMissionIdForPlan) {
+      const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({
+        companyId: agent.companyId,
+        missionId: effectiveMissionIdForPlan,
+      });
+      context.paperclipMissionPlan = missionPlanArtifactService(db).summarizeMissionPlanForRuntime(activePlan);
+    } else {
+      delete context.paperclipMissionPlan;
     }
     const existingExecutionWorkspace =
       issueRef?.executionWorkspaceId ? await executionWorkspacesSvc.getById(issueRef.executionWorkspaceId) : null;

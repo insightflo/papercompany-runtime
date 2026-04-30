@@ -40,6 +40,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const maintenanceGuidance = asRecord(manifestInputs?.maintenanceGuidance);
   const maintenanceDecision = asRecord(manifestInputs?.maintenanceDecision);
   const fileViews = asRecord(manifestInputs?.fileViews);
+  const missionPlan = asRecord(manifestInputs?.missionPlan);
   const guardrails = asRecord(manifest?.guardrails);
 
   const workspaceLine =
@@ -145,6 +146,25 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       ? `- Role alignment questions: ${maintenanceRoleQuestions.join(" | ")}`
       : null;
 
+  const missionPlanStepSummary = Array.isArray(missionPlan?.stepSummary)
+    ? missionPlan.stepSummary.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionPlanOpenInputs = Array.isArray(missionPlan?.openRequiredInputs)
+    ? missionPlan.openRequiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionPlanLine =
+    missionPlan?.available === true && asString(missionPlan.missionGoal)
+      ? `- Mission plan: rev ${Number(missionPlan.revision ?? 0)} ${asString(missionPlan.status) ?? "unknown"} — ${asString(missionPlan.missionGoal)}`
+      : null;
+  const missionPlanInputsLine =
+    missionPlan?.available === true
+      ? `- Mission plan inputs: ${Number(missionPlan.requiredInputsCount ?? 0)} required, open: ${missionPlanOpenInputs.join(", ") || "none"}`
+      : null;
+  const missionPlanStepsLine =
+    missionPlan?.available === true
+      ? `- Mission plan steps: ${Number(missionPlan.stepCount ?? 0)} total${missionPlanStepSummary.length > 0 ? ` — ${missionPlanStepSummary.join(" | ")}` : ""}`
+      : null;
+
   const guardrailLine =
     guardrails?.broadScanAllowed === false
       ? "- Broad scans: disallowed. Stay within the manifest-provided context."
@@ -185,6 +205,9 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     maintenanceDecisionHandoffLine,
     maintenanceRoleContextLine,
     maintenanceRoleQuestionsLine,
+    missionPlanLine,
+    missionPlanInputsLine,
+    missionPlanStepsLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,
