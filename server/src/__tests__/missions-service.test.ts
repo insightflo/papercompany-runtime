@@ -6,6 +6,7 @@ import {
   companies,
   createDb,
   issues,
+  missionPlanArtifacts,
   missions,
   pluginEntities,
   plugins,
@@ -39,6 +40,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
   afterEach(async () => {
     await db.delete(pluginEntities);
+    await db.delete(missionPlanArtifacts);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
@@ -143,6 +145,62 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       }),
     ]);
     expect(planningIssues[0]?.description).toContain("Plan and coordinate the mission");
+  });
+
+  it("creates an initial active mission plan artifact alongside the manual planning issue", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Mission Plan Artifact Company",
+      issuePrefix: `MA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const result = await missionService(db).create({
+      companyId,
+      ownerAgentId,
+      title: "Customer homepage rollout",
+      description: "Plan and coordinate the homepage launch.",
+      status: "planning",
+    });
+
+    const planningIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, result.id));
+    const planArtifacts = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, result.id));
+
+    expect(planningIssues).toEqual([
+      expect.objectContaining({ originKind: "mission_main_executor_plan" }),
+    ]);
+    expect(planArtifacts).toEqual([
+      expect.objectContaining({
+        companyId,
+        missionId: result.id,
+        ownerAgentId,
+        revision: 1,
+        status: "active",
+        missionGoal: expect.stringContaining("Customer homepage rollout"),
+      }),
+    ]);
+    expect(planArtifacts[0]?.refs).toEqual({ planningIssueId: planningIssues[0]?.id });
   });
 
   it("does not create a manual planning issue for a workflow-created mission", async () => {

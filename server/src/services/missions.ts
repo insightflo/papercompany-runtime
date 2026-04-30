@@ -21,6 +21,7 @@ import {
 } from "@paperclipai/db";
 import { notFound, badRequest } from "../errors.js";
 import { issueService } from "./issues.js";
+import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import type { WorkflowStep } from "./workflow/dag-engine.js";
 
 // ---------------------------------------------------------------------------
@@ -504,10 +505,11 @@ export function missionService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function ensureMainExecutorPlanningIssue(mission: MissionRow): Promise<void> {
-    if (await findMainExecutorIssue(mission.id, "mission_main_executor_plan")) return;
+  async function ensureMainExecutorPlanningIssue(mission: MissionRow) {
+    const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_plan");
+    if (existing) return existing;
 
-    await issueService(db).create(mission.companyId, {
+    return issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: [
         "Plan and coordinate the mission before execution begins.",
@@ -623,7 +625,12 @@ export function missionService(db: Db) {
     }
 
     if ((input.source ?? "manual") === "manual") {
-      await ensureMainExecutorPlanningIssue(mission);
+      const planningIssue = await ensureMainExecutorPlanningIssue(mission);
+      await missionPlanArtifactService(db).createInitialMissionPlan({
+        companyId: mission.companyId,
+        missionId: mission.id,
+        refs: planningIssue?.id ? { planningIssueId: planningIssue.id } : {},
+      });
     }
 
     return getById(mission.id);
