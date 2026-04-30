@@ -20,6 +20,15 @@ describe("buildPaperclipRuntimeBrief", () => {
           runtimeServices: { available: true, count: 1, primaryUrl: "http://localhost:4000" },
           tools: { available: true, count: 2, names: ["search-docs", "fetch-spec"] },
           knowledge: { available: true, count: 1, names: ["Mission KB"] },
+          maintenanceGuidance: {
+            available: true,
+            ruleCount: 1,
+            knowledgeCount: 1,
+            ruleNames: ["수신처 누락 시 보완 요청"],
+            knowledgeNames: ["운영 응대 KB"],
+            ruleExcerpts: ["수신처가 없으면 고객응대 담당에게 보완 요청"],
+            knowledgeExcerpts: ["운영 응대는 증상, 시간대, 수신처를 확인한다."],
+          },
           fileViews: { available: true, count: 2, source: "wake_comment" },
           sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
         },
@@ -41,6 +50,10 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Broad scans: disallowed");
     expect(brief).toContain("Allowed tools: search-docs, fetch-spec");
     expect(brief).toContain("Knowledge: Mission KB");
+    expect(brief).toContain("Maintenance guidance: 1 rules, 1 KB references");
+    expect(brief).toContain("Rules: 수신처 누락 시 보완 요청");
+    expect(brief).toContain("Rule excerpts: 수신처가 없으면 고객응대 담당에게 보완 요청");
+    expect(brief).toContain("Guidance KB excerpts: 운영 응대는 증상, 시간대, 수신처를 확인한다.");
     expect(brief).toContain("File views: 2 available (wake_comment)");
     expect(brief).toContain("Previous session: sess-1");
     expect(brief).toContain("Last run summary: Last run summarized the issue state");

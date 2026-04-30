@@ -21,6 +21,11 @@ describe("buildStepInputManifest", () => {
         paperclipWorkflowStepKnowledgeContext: {
           entries: [{ id: "kb-1", name: "Mission KB" }],
         },
+        paperclipMaintenanceGuidance: {
+          version: 1,
+          rules: [{ id: "rule-1", name: "수신처 누락 시 보완 요청", excerpt: "수신처가 없으면 고객응대 담당에게 보완 요청" }],
+          knowledge: [{ id: "kb-ops", name: "운영 응대 KB", content: "운영 응대는 증상, 시간대, 수신처를 확인한다." }],
+        },
         paperclipFileViews: [{ workspaceId: "ws-1", relativePath: "src/server.ts", source: "wake_comment", exists: true }],
         paperclipSessionHandoffMarkdown: "# handoff",
         paperclipSessionRotationReason: "budget",
@@ -38,6 +43,7 @@ describe("buildStepInputManifest", () => {
         "issueId",
         "note",
         "paperclipFileViews",
+        "paperclipMaintenanceGuidance",
         "paperclipPreviousSessionId",
         "paperclipRuntimePrimaryUrl",
         "paperclipRuntimeServiceIntents",
@@ -81,6 +87,15 @@ describe("buildStepInputManifest", () => {
           available: true,
           count: 1,
           names: ["Mission KB"],
+        },
+        maintenanceGuidance: {
+          available: true,
+          ruleCount: 1,
+          knowledgeCount: 1,
+          ruleNames: ["수신처 누락 시 보완 요청"],
+          knowledgeNames: ["운영 응대 KB"],
+          ruleExcerpts: ["수신처가 없으면 고객응대 담당에게 보완 요청"],
+          knowledgeExcerpts: ["운영 응대는 증상, 시간대, 수신처를 확인한다."],
         },
         fileViews: {
           available: true,

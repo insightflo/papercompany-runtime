@@ -37,6 +37,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const runtimeServices = asRecord(manifestInputs?.runtimeServices);
   const tools = asRecord(manifestInputs?.tools);
   const knowledge = asRecord(manifestInputs?.knowledge);
+  const maintenanceGuidance = asRecord(manifestInputs?.maintenanceGuidance);
   const fileViews = asRecord(manifestInputs?.fileViews);
   const guardrails = asRecord(manifest?.guardrails);
 
@@ -69,6 +70,31 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       ? `- Knowledge: ${Array.isArray(knowledge.names) && knowledge.names.length > 0 ? knowledge.names.join(", ") : `${Number(knowledge.count ?? 0)} connected`}`
       : null;
 
+  const maintenanceGuidanceLine =
+    maintenanceGuidance?.available === true
+      ? `- Maintenance guidance: ${Number(maintenanceGuidance.ruleCount ?? 0)} rules, ${Number(maintenanceGuidance.knowledgeCount ?? 0)} KB references`
+      : null;
+
+  const maintenanceRuleLine =
+    maintenanceGuidance?.available === true && Array.isArray(maintenanceGuidance.ruleNames) && maintenanceGuidance.ruleNames.length > 0
+      ? `- Rules: ${maintenanceGuidance.ruleNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(", ")}`
+      : null;
+
+  const maintenanceRuleExcerptLine =
+    maintenanceGuidance?.available === true && Array.isArray(maintenanceGuidance.ruleExcerpts) && maintenanceGuidance.ruleExcerpts.length > 0
+      ? `- Rule excerpts: ${maintenanceGuidance.ruleExcerpts.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(" | ")}`
+      : null;
+
+  const maintenanceKnowledgeLine =
+    maintenanceGuidance?.available === true && Array.isArray(maintenanceGuidance.knowledgeNames) && maintenanceGuidance.knowledgeNames.length > 0
+      ? `- Guidance KB: ${maintenanceGuidance.knowledgeNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(", ")}`
+      : null;
+
+  const maintenanceKnowledgeExcerptLine =
+    maintenanceGuidance?.available === true && Array.isArray(maintenanceGuidance.knowledgeExcerpts) && maintenanceGuidance.knowledgeExcerpts.length > 0
+      ? `- Guidance KB excerpts: ${maintenanceGuidance.knowledgeExcerpts.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(" | ")}`
+      : null;
+
   const guardrailLine =
     guardrails?.broadScanAllowed === false
       ? "- Broad scans: disallowed. Stay within the manifest-provided context."
@@ -98,6 +124,11 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     runtimeServicesLine,
     toolsLine,
     knowledgeLine,
+    maintenanceGuidanceLine,
+    maintenanceRuleLine,
+    maintenanceRuleExcerptLine,
+    maintenanceKnowledgeLine,
+    maintenanceKnowledgeExcerptLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

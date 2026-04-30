@@ -39,6 +39,15 @@ export interface StepInputManifest {
       count: number;
       names: string[];
     };
+    maintenanceGuidance: {
+      available: boolean;
+      ruleCount: number;
+      knowledgeCount: number;
+      ruleNames: string[];
+      knowledgeNames: string[];
+      ruleExcerpts: string[];
+      knowledgeExcerpts: string[];
+    };
     fileViews: {
       available: boolean;
       count: number;
@@ -74,6 +83,13 @@ export function buildStepInputManifest(input: {
   const knowledgeContract = parseObject(context.paperclipWorkflowStepKnowledgeContext);
   const knowledgeEntries = Array.isArray(knowledgeContract.entries)
     ? knowledgeContract.entries.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+    : [];
+  const maintenanceGuidance = parseObject(context.paperclipMaintenanceGuidance);
+  const maintenanceRules = Array.isArray(maintenanceGuidance.rules)
+    ? maintenanceGuidance.rules.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+    : [];
+  const maintenanceKnowledge = Array.isArray(maintenanceGuidance.knowledge)
+    ? maintenanceGuidance.knowledge.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
     : [];
   const fileViews = Array.isArray(context.paperclipFileViews)
     ? context.paperclipFileViews.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
@@ -130,6 +146,25 @@ export function buildStepInputManifest(input: {
           .map((entry) => readString(entry.name))
           .filter((value): value is string => value.length > 0),
       },
+      maintenanceGuidance: {
+        available: maintenanceRules.length > 0 || maintenanceKnowledge.length > 0,
+        ruleCount: maintenanceRules.length,
+        knowledgeCount: maintenanceKnowledge.length,
+        ruleNames: maintenanceRules
+          .map((entry) => readString(entry.name))
+          .filter((value): value is string => value.length > 0),
+        knowledgeNames: maintenanceKnowledge
+          .map((entry) => readString(entry.name))
+          .filter((value): value is string => value.length > 0),
+        ruleExcerpts: maintenanceRules
+          .map((entry) => readString(entry.excerpt) || readString(entry.message))
+          .filter((value): value is string => value.length > 0)
+          .map(truncateBriefExcerpt),
+        knowledgeExcerpts: maintenanceKnowledge
+          .map((entry) => readString(entry.content))
+          .filter((value): value is string => value.length > 0)
+          .map(truncateBriefExcerpt),
+      },
       fileViews: {
         available: fileViews.length > 0,
         count: fileViews.length,
@@ -146,4 +181,9 @@ export function buildStepInputManifest(input: {
 
 function readString(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+function truncateBriefExcerpt(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
 }
