@@ -55,6 +55,7 @@ import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./sess
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
+import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
 import {
   buildExecutionWorkspaceAdapterConfig,
@@ -2734,6 +2735,35 @@ export function heartbeatService(db: Db) {
     });
     if (maintenanceDecisionContext) {
       context.paperclipMaintenanceDecision = maintenanceDecisionContext;
+      if (issueContext?.id) {
+        await logMaintenanceDecisionEvaluated({
+          db,
+          companyId: agent.companyId,
+          agentId: agent.id,
+          runId: run.id,
+          issue: {
+            id: issueContext.id,
+            identifier: issueContext.identifier,
+            projectId: issueContext.projectId,
+          },
+          workflow: workflowStepToolContext
+            ? {
+                workflowRunId: workflowStepToolContext.workflowRunId,
+                workflowId: workflowStepToolContext.workflowId,
+                stepId: workflowStepToolContext.stepId,
+                stepName: workflowStepToolContext.stepName,
+              }
+            : workflowStepKnowledgeContext
+              ? {
+                  workflowRunId: workflowStepKnowledgeContext.workflowRunId,
+                  workflowId: workflowStepKnowledgeContext.workflowId,
+                  stepId: workflowStepKnowledgeContext.stepId,
+                  stepName: workflowStepKnowledgeContext.stepName,
+                }
+              : null,
+          decision: maintenanceDecisionContext,
+        });
+      }
     } else {
       delete context.paperclipMaintenanceDecision;
     }

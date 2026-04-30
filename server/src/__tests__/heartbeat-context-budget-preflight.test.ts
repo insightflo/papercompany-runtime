@@ -12,6 +12,7 @@ import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
+  activityLog,
   companies,
   companySecrets,
   companySkills,
@@ -125,6 +126,8 @@ async function waitForRunTerminal(heartbeat: ReturnType<typeof heartbeatService>
 async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await db.delete(heartbeatRunEvents);
+    await db.delete(activityLog);
+    await db.delete(agentTaskSessions);
     try {
       await db.delete(heartbeatRuns);
       return;
@@ -654,6 +657,26 @@ describe("heartbeat context budget preflight", () => {
         requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
       }),
     );
+    const missingInputAuditRows = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.runId, run!.id));
+    expect(missingInputAuditRows).toEqual([
+      expect.objectContaining({
+        action: "maintenance_decision_evaluated",
+        entityType: "issue",
+        entityId: issueId,
+        agentId,
+        runId: run!.id,
+        details: expect.objectContaining({
+          issueId,
+          runId: run!.id,
+          recommendedNextAction: "request_missing_input",
+          suggestedStatus: "blocked",
+          requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+        }),
+      }),
+    ]);
     expect(adapterVisibleContext.paperclipStepInputManifest).toEqual(
       expect.objectContaining({
         version: 1,
@@ -713,6 +736,84 @@ describe("heartbeat context budget preflight", () => {
         }),
       }),
     );
+  });
+
+  it("records vendor maintenance decisions as heartbeat audit activity", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Vendor Audit Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Follow the heartbeat." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "PG사 external API 오류",
+      description: "오늘 11:00부터 결제 vendor timeout, 증상: approval failed",
+      status: "todo",
+    });
+
+    executeSpy.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      usage: null,
+      provider: "test",
+      model: "test-model",
+      resultJson: null,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "on_demand", { issueId, note: "vendor check" }, "manual", {
+      actorType: "system",
+      actorId: "test-suite",
+    });
+
+    expect(run).not.toBeNull();
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const auditRows = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.runId, run!.id));
+    expect(auditRows).toEqual([
+      expect.objectContaining({
+        action: "maintenance_decision_evaluated",
+        entityType: "issue",
+        entityId: issueId,
+        agentId,
+        runId: run!.id,
+        details: expect.objectContaining({
+          issueId,
+          runId: run!.id,
+          recommendedNextAction: "vendor_handoff",
+          suggestedStatus: "in_progress",
+          requiredInputs: [],
+          warnings: [],
+          handoffTarget: "vendor",
+          matchedRules: expect.arrayContaining([
+            expect.objectContaining({ id: "maintenance-vendor-handoff", action: "vendor_handoff" }),
+          ]),
+        }),
+      }),
+    ]);
   });
 
   it("attaches workflow step tool contracts to the runtime context", async () => {
