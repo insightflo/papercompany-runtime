@@ -569,6 +569,8 @@ maintenance_vendor_handoff_followed
 
 이는 세세한 절차 강제가 아니라 mission owner가 사용할 memory/tool/skill/harness에 해당하는 구조적 지원이다. Phase A는 role context prompt 노출로 작게 유지하고, mission owner loop / mission plan artifact / delegation tracking은 이후 별도 phase로 다룬다.
 
+후속 설계 문서: [`2026-04-30-mission-ownership-substrate-plan.md`](./2026-04-30-mission-ownership-substrate-plan.md)
+
 #### Boundary 원칙
 
 - `responsibility`: role이 반드시 확인하거나 설명해야 하는 결과. 예: `maintenance_triage`는 affected system/severity/next role을 설명해야 한다.
