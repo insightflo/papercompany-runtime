@@ -59,6 +59,7 @@ export { pluginLogs } from "./plugin_logs.js";
 
 // papercompany core tables
 export { missions } from "./missions.js";
+export { missionPlanArtifacts } from "./mission_plan_artifacts.js";
 export { missionAgents } from "./mission_agents.js";
 export { missionSessions } from "./mission_sessions.js";
 export { workflowDefinitions } from "./workflow_definitions.js";
