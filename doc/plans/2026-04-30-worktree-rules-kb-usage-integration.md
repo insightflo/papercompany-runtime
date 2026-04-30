@@ -411,6 +411,57 @@ type WorkflowDecisionRuleConfig = {
    - 조치가 끝난 것처럼 보이나 evidence가 부족한 issue를 맡긴다.
    - 기대: 완료 전에 evidence/recurrence prevention 기록을 요구한다.
 
+### Phase 4 dogfood 결과 — 2026-04-30
+
+검증 파일:
+
+- `server/src/__tests__/maintenance-mission-dogfood.test.ts`
+
+검증 방식:
+
+- 실제 운영 DB나 provider adapter를 사용하지 않고, embedded Postgres + fake adapter로 heartbeat runtime path를 태웠다.
+- 각 scenario는 mission-linked issue, active Worktree Rules, agent-accessible Maintenance SOP KB를 만든 뒤 heartbeat를 실행한다.
+- fake adapter가 받은 context에서 다음을 확인한다.
+  - `paperclipMaintenanceGuidance`
+  - `paperclipMaintenanceDecision`
+  - `paperclipStepInputManifest.inputs.maintenanceGuidance`
+  - `paperclipStepInputManifest.inputs.maintenanceDecision`
+  - `buildPaperclipRuntimeBrief(context)` 결과
+  - `activity_log`의 `maintenance_decision_evaluated` payload
+
+시나리오별 관찰:
+
+1. Missing input
+   - 입력: affected system, symptom, time window가 없는 maintenance issue.
+   - runtime context decision: `recommendedNextAction=request_missing_input`, `suggestedStatus=blocked`, `requiredInputs=[affectedSystem, symptom, timeWindow]`.
+   - brief에 agent가 보는 문구: `Maintenance decision: request_missing_input`, `Required inputs: affectedSystem, symptom, timeWindow`.
+   - activity_log payload: 같은 action/status/requiredInputs와 KB reference를 기록한다.
+   - soft enforcement 후보: 이 상태에서 `done` 또는 repair성 status/action으로 가면 mismatch audit.
+2. Customer-impact outage
+   - 입력: production/customer impact/outage와 결제 불가, 발생 시각, symptom이 명시된 issue.
+   - runtime context decision: `recommendedNextAction=escalate_incident`, `suggestedStatus=in_progress`, `requiredInputs=[]`.
+   - brief에 agent가 보는 문구: `Maintenance decision: escalate_incident`, `Required inputs: none`.
+   - activity_log payload: incident escalation match와 KB reference를 기록한다.
+   - soft enforcement 후보: incident escalation 추천인데 일반 close/done 처리하면 mismatch audit.
+3. Vendor dependency
+   - 입력: PG사/external API/vendor timeout이 명시된 issue.
+   - runtime context decision: `recommendedNextAction=vendor_handoff`, `suggestedStatus=in_progress`, `handoffTarget=vendor`.
+   - brief에 agent가 보는 문구: `Maintenance decision: vendor_handoff`, `Handoff target: vendor`.
+   - activity_log payload: vendor handoff target과 matched rule, KB reference를 기록한다.
+   - soft enforcement 후보: vendor handoff 추천인데 자체 완료하면 mismatch audit.
+4. Done without evidence
+   - 입력: affected system/symptom/time window는 있으나 evidence/verification 없이 `requestedStatus=done`이 들어온 issue.
+   - runtime context decision: `recommendedNextAction=verify_and_close`, `suggestedStatus=in_review`, `warnings=[completion_evidence_missing]`.
+   - brief에 agent가 보는 문구: `Maintenance decision: verify_and_close`, `Decision warnings: completion_evidence_missing`.
+   - activity_log payload: warning과 verify-before-close matched rule, KB reference를 기록한다.
+   - soft enforcement 후보: evidence/verification 없이 `done` 처리하면 mismatch 또는 require-override audit.
+
+결론:
+
+- 현재 baseline은 fake adapter runtime path에서 agent-visible input까지 의미 있게 도달한다.
+- dogfood 결과상 다음 구현은 broad hard enforcement가 아니라 route-level soft enforcement audit가 적절하다.
+- 우선 후보는 `maintenance_decision_action_mismatch`이며, missing input → done, vendor handoff → self-close, incident → normal close, evidence missing → done 시도를 관찰 대상으로 삼는다.
+
 ### Phase 5 — Soft Enforcement: 다음 구현 후보
 
 Issue action route에서 decision과 실제 action이 어긋나는지 audit한다. 처음부터 block하지 않는다.
