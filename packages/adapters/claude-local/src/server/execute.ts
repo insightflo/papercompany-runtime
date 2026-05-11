@@ -100,6 +100,43 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+function resolvePyenvShimLockPath(env: Record<string, string>): string {
+  const pyenvRoot = env.PYENV_ROOT?.trim();
+  if (pyenvRoot) return path.join(pyenvRoot, "shims", ".pyenv-shim");
+  const home = env.HOME?.trim() || os.homedir();
+  return path.join(home, ".pyenv", "shims", ".pyenv-shim");
+}
+
+async function clearStalePyenvShimLock(input: {
+  env: Record<string, string>;
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  nowMs?: number;
+}): Promise<void> {
+  const disable = input.env.PAPERCLIP_DISABLE_PYENV_SHIM_LOCK_PREFLIGHT?.trim();
+  if (disable === "1" || disable === "true") return;
+
+  const rawStaleMs = Number(input.env.PAPERCLIP_PYENV_SHIM_LOCK_STALE_MS ?? "90000");
+  const staleMs = Number.isFinite(rawStaleMs) && rawStaleMs >= 0 ? rawStaleMs : 90000;
+  const lockPath = resolvePyenvShimLockPath(input.env);
+  const nowMs = input.nowMs ?? Date.now();
+
+  try {
+    const stat = await fs.stat(lockPath);
+    const ageMs = nowMs - stat.mtimeMs;
+    if (ageMs < staleMs) return;
+    await fs.rm(lockPath, { force: true });
+    await input.onLog(
+      "stderr",
+      `[paperclip] Removed stale pyenv shim lock before Claude launch: ${lockPath} ageMs=${Math.round(ageMs)}\n`,
+    );
+  } catch (err) {
+    const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code) : "";
+    if (code === "ENOENT") return;
+    const reason = err instanceof Error ? err.message : String(err);
+    await input.onLog("stderr", `[paperclip] Warning: pyenv shim lock preflight failed for ${lockPath}: ${reason}\n`);
+  }
+}
+
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, authToken } = input;
 
@@ -343,6 +380,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ),
   );
   const billingType = resolveClaudeBillingType(effectiveEnv);
+  await clearStalePyenvShimLock({ env: effectiveEnv, onLog });
   const skillsDir = await buildSkillsDir(config);
   const resolvedInstructionsFilePath = instructionsFilePath
     ? path.resolve(cwd, instructionsFilePath)
