@@ -523,6 +523,18 @@ export function issueService(db: Db) {
     }
   }
 
+  async function assertValidParentIssue(companyId: string, parentId: string) {
+    const parent = await db
+      .select({ id: issues.id, companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, parentId))
+      .then((rows) => rows[0] ?? null);
+    if (!parent) throw notFound("Parent issue not found");
+    if (parent.companyId !== companyId) {
+      throw unprocessable("Parent issue must belong to same company");
+    }
+  }
+
   async function assertValidLabelIds(companyId: string, labelIds: string[], dbOrTx: any = db) {
     if (labelIds.length === 0) return;
     const existing = await dbOrTx
@@ -652,6 +664,9 @@ export function issueService(db: Db) {
     }
     if (data.executionWorkspaceId) {
       await assertValidExecutionWorkspace(companyId, data.projectId, data.executionWorkspaceId);
+    }
+    if (data.parentId) {
+      await assertValidParentIssue(companyId, data.parentId);
     }
     if (data.missionId) {
       const [mission] = await db
