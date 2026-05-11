@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { approvalRoutes } from "../routes/approvals.js";
 import { errorHandler } from "../middleware/index.js";
 
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
   getById: vi.fn(),
@@ -32,6 +36,7 @@ const mockSecretService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/index.js", () => ({
+  agentService: () => mockAgentService,
   approvalService: () => mockApprovalService,
   heartbeatService: () => mockHeartbeatService,
   issueApprovalService: () => mockIssueApprovalService,
@@ -39,17 +44,17 @@ vi.mock("../services/index.js", () => ({
   secretService: () => mockSecretService,
 }));
 
-function createApp() {
+function createApp(actor: Record<string, unknown> = {
+  type: "board",
+  userId: "user-1",
+  companyIds: ["company-1"],
+  source: "session",
+  isInstanceAdmin: false,
+}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "user-1",
-      companyIds: ["company-1"],
-      source: "session",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   app.use("/api", approvalRoutes({} as any));
@@ -60,6 +65,20 @@ function createApp() {
 describe("approval routes idempotent retries", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAgentService.getById.mockResolvedValue({
+      id: "root-agent",
+      companyId: "company-1",
+      reportsTo: null,
+      status: "idle",
+    });
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "hire_agent",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-1",
+    });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
     mockLogActivity.mockResolvedValue(undefined);
@@ -106,5 +125,96 @@ describe("approval routes idempotent retries", () => {
 
     expect(res.status).toBe(200);
     expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("allows a root CEO agent to approve an approval in its company", async () => {
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-1",
+        companyId: "company-1",
+        type: "publish_upload",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "root-agent",
+      },
+      applied: true,
+    });
+
+    const res = await request(
+      createApp({
+        type: "agent",
+        agentId: "root-agent",
+        companyId: "company-1",
+        runId: "run-1",
+      }),
+    )
+      .post("/api/approvals/approval-1/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockApprovalService.approve).toHaveBeenCalledWith(
+      "approval-1",
+      "agent:root-agent",
+      undefined,
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorType: "agent",
+        actorId: "root-agent",
+        agentId: "root-agent",
+        action: "approval.approved",
+      }),
+    );
+  });
+
+  it("does not allow a non-root agent to resolve approvals", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      id: "worker-agent",
+      companyId: "company-1",
+      reportsTo: "root-agent",
+      status: "idle",
+    });
+
+    const res = await request(
+      createApp({
+        type: "agent",
+        agentId: "worker-agent",
+        companyId: "company-1",
+      }),
+    )
+      .post("/api/approvals/approval-1/approve")
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockApprovalService.approve).not.toHaveBeenCalled();
+  });
+
+  it("allows a root CEO agent to request an approval revision", async () => {
+    mockApprovalService.requestRevision.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "publish_upload",
+      status: "revision_requested",
+      payload: {},
+      requestedByAgentId: "worker-agent",
+    });
+
+    const res = await request(
+      createApp({
+        type: "agent",
+        agentId: "root-agent",
+        companyId: "company-1",
+      }),
+    )
+      .post("/api/approvals/approval-1/request-revision")
+      .send({ decisionNote: "Revise publish target" });
+
+    expect(res.status).toBe(200);
+    expect(mockApprovalService.requestRevision).toHaveBeenCalledWith(
+      "approval-1",
+      "agent:root-agent",
+      "Revise publish target",
+    );
   });
 });
