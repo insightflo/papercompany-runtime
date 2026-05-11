@@ -5,13 +5,17 @@
  * OQ-4 schema: owner_agent_id is the mission main executor; mission_agents carries executor/reviewer/observer roles.
  */
 
+import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  heartbeatRuns,
+  issueComments,
   issues,
   missionAgents,
+  missionPlanArtifacts,
   missionSessions,
   missions,
   pluginEntities,
@@ -22,7 +26,7 @@ import {
 import { notFound, badRequest } from "../errors.js";
 import { issueService } from "./issues.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
-import type { WorkflowStep } from "./workflow/dag-engine.js";
+import { syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -116,6 +120,45 @@ export type MissionWorkflowRunDetail = typeof workflowRuns.$inferSelect & {
   progress: MissionWorkflowRunProgress;
 };
 export type MissionIssueTree = Awaited<ReturnType<ReturnType<typeof issueService>["list"]>>;
+
+export type MissionOwnerSupervisionRecommendationType =
+  | "dispatch_missing_step"
+  | "retry_failed_step_if_safe"
+  | "request_replan"
+  | "escalate_blocked";
+
+export type MissionOwnerSupervisionRecommendation = {
+  type: MissionOwnerSupervisionRecommendationType;
+  missionId: string;
+  reason: string;
+  safeToAutoApply: boolean;
+  workflowRunId?: string;
+  stepId?: string;
+  issueId?: string;
+};
+
+export type MissionOwnerSupervisionAppliedAction = {
+  type: "dispatch_missing_step";
+  missionId: string;
+  workflowRunId: string;
+  stepIds: string[];
+  resultStatus: string;
+};
+
+export type MissionOwnerSupervisionResult = {
+  missionId: string;
+  oversightIssueId: string | null;
+  findings: string[];
+  recommendations: MissionOwnerSupervisionRecommendation[];
+  appliedActions: MissionOwnerSupervisionAppliedAction[];
+  commented: boolean;
+};
+
+export type ActiveMissionOwnerSupervisionResult = {
+  companyId?: string;
+  missionIds: string[];
+  missions: MissionOwnerSupervisionResult[];
+};
 
 /**
  * Input for creating a mission.
@@ -530,10 +573,73 @@ export function missionService(db: Db) {
     });
   }
 
-  async function ensureMainExecutorOversightIssue(mission: MissionRow, workflowName: string): Promise<void> {
-    if (await findMainExecutorIssue(mission.id, "mission_main_executor_oversight")) return;
+  async function ensureWorkflowMissionPlanArtifact(
+    mission: MissionRow,
+    oversightIssue: typeof issues.$inferSelect,
+    workflowName: string,
+    metadata: { workflowStepIds?: string[]; sourceRunId?: string } = {},
+  ): Promise<void> {
+    const refs = {
+      oversightIssueId: oversightIssue.id,
+      workflowName,
+      ...(metadata.workflowStepIds ? { workflowStepIds: metadata.workflowStepIds } : {}),
+      ...(metadata.sourceRunId ? { sourceRunId: metadata.sourceRunId } : {}),
+    };
+    const planSvc = missionPlanArtifactService(db);
+    const activePlan = await planSvc.getActiveMissionPlan({ companyId: mission.companyId, missionId: mission.id });
+    if (activePlan) {
+      const currentRefs = typeof activePlan.refs === "object" && activePlan.refs !== null && !Array.isArray(activePlan.refs)
+        ? activePlan.refs as Record<string, unknown>
+        : {};
+      const mergedRefs = { ...currentRefs, ...refs };
+      const changed = JSON.stringify(currentRefs) !== JSON.stringify(mergedRefs);
+      if (changed) {
+        await db
+          .update(missionPlanArtifacts)
+          .set({ refs: mergedRefs, updatedAt: new Date() })
+          .where(eq(missionPlanArtifacts.id, activePlan.id));
+      }
+      return;
+    }
 
-    await issueService(db).create(mission.companyId, {
+    await planSvc.createInitialMissionPlan({
+      companyId: mission.companyId,
+      missionId: mission.id,
+      refs,
+      assumptions: [
+        "Workflow-created mission: the main executor owns supervision, diagnosis, recovery/replan, and escalation rather than only executing a single step.",
+      ],
+      requiredInputs: [
+        { key: "workflow-step-state", status: "tracked", source: "workflow_runs/workflow_step_runs/issues" },
+        { key: "owner-judgement", status: "ongoing", source: "mission_main_executor_oversight" },
+      ],
+      successCriteria: [
+        { description: "All workflow steps are completed or explicitly diagnosed as blocked/impossible with evidence." },
+        { description: "The main executor oversight issue records the current judgement, recovery/replan, or escalation path." },
+      ],
+      risks: [
+        { description: "Step dispatch omission or stale unstarted work can leave the mission active without owner-visible diagnosis.", category: "dispatch_gap", severity: "observe" },
+      ],
+      steps: [
+        { id: "supervise", title: "Supervise workflow step progress and detect stale/blocked/failing work", status: "ongoing", intendedRole: "mission_owner" },
+        { id: "diagnose", title: "Diagnose failures or dispatch omissions with evidence", status: "planned", intendedRole: "mission_owner" },
+        { id: "recover-or-escalate", title: "Recover, replan, or report impossible completion", status: "planned", intendedRole: "mission_owner" },
+      ],
+    });
+  }
+
+  async function ensureMainExecutorOversightIssue(
+    mission: MissionRow,
+    workflowName: string,
+    metadata: { workflowStepIds?: string[]; sourceRunId?: string } = {},
+  ): Promise<typeof issues.$inferSelect> {
+    const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
+    if (existing) {
+      await ensureWorkflowMissionPlanArtifact(mission, existing, workflowName, metadata);
+      return existing;
+    }
+
+    const oversightIssue = await issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: [
         "Monitor this workflow-created mission and keep execution moving.",
@@ -543,9 +649,9 @@ export function missionService(db: Db) {
         "",
         "Main executor duties:",
         "- Watch step progress and comments.",
-        "- Comment on failed or blocked steps with the current judgement.",
+        "- Comment on failed, stale, undispatched, or blocked steps with the current judgement.",
         "- Retry failed workflow steps when retry is safe and within the retry limit.",
-        "- Escalate instead of blindly retrying when the same step keeps failing.",
+        "- Recover/replan toward completion, or escalate/report impossible states with evidence.",
       ].join("\n"),
       missionId: mission.id,
       originKind: "mission_main_executor_oversight",
@@ -553,8 +659,293 @@ export function missionService(db: Db) {
       status: "todo",
       title: `[Oversight] ${workflowName}`,
     });
+    await ensureWorkflowMissionPlanArtifact(mission, oversightIssue, workflowName, metadata);
+    return oversightIssue;
   }
 
+  async function runMainExecutorSupervision(input: {
+    missionId: string;
+    staleAfterMinutes?: number;
+    now?: Date;
+    applySafeActions?: boolean;
+  }): Promise<MissionOwnerSupervisionResult> {
+    const mission = await db
+      .select()
+      .from(missions)
+      .where(eq(missions.id, input.missionId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (!mission) throw notFound(`Mission not found: ${input.missionId}`);
+
+    const oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
+    if (!oversightIssue) {
+      return { missionId: mission.id, oversightIssueId: null, findings: [], recommendations: [], appliedActions: [], commented: false };
+    }
+
+    const now = input.now ?? new Date();
+    const staleAfterMs = Math.max(1, input.staleAfterMinutes ?? 120) * 60 * 1000;
+    const missionIssues = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, mission.companyId), eq(issues.missionId, mission.id)))
+      .orderBy(asc(issues.createdAt), asc(issues.id));
+
+    const missionIssueIds = missionIssues.map((issue) => issue.id);
+    const missionIssueById = new Map(missionIssues.map((issue) => [issue.id, issue]));
+    const issueCommentRows = missionIssueIds.length > 0
+      ? await db
+        .select({ issueId: issueComments.issueId, body: issueComments.body })
+        .from(issueComments)
+        .where(inArray(issueComments.issueId, missionIssueIds))
+      : [];
+    const commentsByIssueId = new Map<string, string[]>();
+    for (const comment of issueCommentRows) {
+      const list = commentsByIssueId.get(comment.issueId) ?? [];
+      list.push(comment.body);
+      commentsByIssueId.set(comment.issueId, list);
+    }
+    const issueRunRows = missionIssueIds.length > 0
+      ? await db
+        .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId, status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, mission.companyId), inArray(heartbeatRuns.issueId, missionIssueIds)))
+      : [];
+    const heartbeatCountByIssueId = new Map<string, number>();
+    for (const run of issueRunRows) {
+      if (!run.issueId) continue;
+      heartbeatCountByIssueId.set(run.issueId, (heartbeatCountByIssueId.get(run.issueId) ?? 0) + 1);
+    }
+
+    const stepRows = await db
+      .select({
+        stepRun: workflowStepRuns,
+        run: workflowRuns,
+        definition: workflowDefinitions,
+      })
+      .from(workflowStepRuns)
+      .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+      .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+      .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, mission.id)))
+      .orderBy(asc(workflowRuns.createdAt), asc(workflowStepRuns.stepId));
+    const stepRowsByIssueId = new Map<string, typeof stepRows>();
+    for (const row of stepRows) {
+      if (!row.stepRun.issueId) continue;
+      const list = stepRowsByIssueId.get(row.stepRun.issueId) ?? [];
+      list.push(row);
+      stepRowsByIssueId.set(row.stepRun.issueId, list);
+    }
+
+    const findings: string[] = [];
+    const recommendations: MissionOwnerSupervisionRecommendation[] = [];
+    const addRecommendation = (recommendation: MissionOwnerSupervisionRecommendation) => {
+      const key = `${recommendation.type}:${recommendation.workflowRunId ?? ""}:${recommendation.stepId ?? ""}:${recommendation.issueId ?? ""}`;
+      if (recommendations.some((existing) => `${existing.type}:${existing.workflowRunId ?? ""}:${existing.stepId ?? ""}:${existing.issueId ?? ""}` === key)) return;
+      recommendations.push(recommendation);
+    };
+
+    for (const issue of missionIssues) {
+      if (issue.id === oversightIssue.id) continue;
+      const ageMs = now.getTime() - issue.createdAt.getTime();
+      const label = issue.identifier ?? issue.id;
+      const runCount = heartbeatCountByIssueId.get(issue.id) ?? 0;
+      const comments = commentsByIssueId.get(issue.id) ?? [];
+      const stepRowsForIssue = stepRowsByIssueId.get(issue.id) ?? [];
+      const hasCheckoutOrExecution = Boolean(issue.checkoutRunId || issue.executionRunId || issue.startedAt || runCount > 0);
+      const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
+
+      if (isStaleQueueStatus && ageMs >= staleAfterMs && !hasCheckoutOrExecution) {
+        findings.push(`stale_todo: ${label} ${issue.status} with no checkout/execution/heartbeat run_count=${runCount} — ${issue.title}`);
+      }
+      if (isStaleQueueStatus && stepRowsForIssue.some((row) => row.stepRun.status === "pending") && runCount === 0 && ageMs >= staleAfterMs) {
+        findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
+      }
+      if (issue.status === "blocked") {
+        const body = comments.join("\n").toLowerCase();
+        const hasReplanSignal = body.includes("replan") || body.includes("re-plan") || body.includes("recover") || body.includes("escalat") || body.includes("impossible") || body.includes("blocked_without_replan");
+        if (!hasReplanSignal) {
+          findings.push(`blocked_without_replan: ${label} blocked without recovery/replan/escalation comment — ${issue.title}`);
+          addRecommendation({ type: "request_replan", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs recovery/replan evidence`, safeToAutoApply: false });
+          addRecommendation({ type: "escalate_blocked", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs owner escalation or impossible-completion report`, safeToAutoApply: false });
+        }
+      }
+    }
+
+    const stepRowsByRunId = new Map<string, typeof stepRows>();
+    for (const row of stepRows) {
+      const list = stepRowsByRunId.get(row.run.id) ?? [];
+      list.push(row);
+      stepRowsByRunId.set(row.run.id, list);
+    }
+    for (const [runId, rowsForRun] of stepRowsByRunId) {
+      const stepRunByStepId = new Map(rowsForRun.map((row) => [row.stepRun.stepId, row.stepRun]));
+      const steps = (rowsForRun[0]?.definition.stepsJson as WorkflowStep[] | null) ?? [];
+      for (const step of steps) {
+        const stepRun = stepRunByStepId.get(step.id);
+        if (stepRun?.issueId && stepRun.status !== "completed") {
+          const stepIssue = missionIssueById.get(stepRun.issueId);
+          if (stepIssue?.status === "done") {
+            findings.push(`dispatch_missing_step: run=${runId} step=${step.id} linked issue done but workflow run needs safe sync`);
+            addRecommendation({
+              type: "dispatch_missing_step",
+              missionId: mission.id,
+              workflowRunId: runId,
+              stepId: step.id,
+              issueId: stepRun.issueId,
+              reason: `Workflow step ${step.id} has a done issue; safely sync workflow state and dispatch newly-ready internal steps`,
+              safeToAutoApply: true,
+            });
+          }
+        }
+        if (!stepRun || stepRun.status !== "pending" || stepRun.issueId) continue;
+        const dependenciesComplete = step.dependencies.every((dependencyId) => stepRunByStepId.get(dependencyId)?.status === "completed");
+        if (!dependenciesComplete) continue;
+        findings.push(`dispatch_missing_step: run=${runId} step=${step.id} ready but no workflow execution issue exists`);
+        addRecommendation({
+          type: "dispatch_missing_step",
+          missionId: mission.id,
+          workflowRunId: runId,
+          stepId: step.id,
+          reason: `Workflow step ${step.id} is runnable but has no execution issue`,
+          safeToAutoApply: true,
+        });
+      }
+    }
+
+    const oversightBodies = (commentsByIssueId.get(oversightIssue.id) ?? []).join("\n");
+    const failedStepRows = stepRows.filter((row) => row.stepRun.status === "failed");
+    for (const row of failedStepRows) {
+      const marker = `workflow-failure:${row.run.id}:${row.stepRun.stepId}`;
+      const stepIssueComments = row.stepRun.issueId ? (commentsByIssueId.get(row.stepRun.issueId) ?? []).join("\n") : "";
+      const hasDiagnosis = oversightBodies.includes(marker)
+        || stepIssueComments.toLowerCase().includes("diagnos")
+        || stepIssueComments.toLowerCase().includes("root cause")
+        || stepIssueComments.toLowerCase().includes("replan")
+        || stepIssueComments.toLowerCase().includes("escalat");
+      if (!hasDiagnosis) {
+        findings.push(`failed_step_without_diagnosis: run=${row.run.id} step=${row.stepRun.stepId}`);
+        addRecommendation({
+          type: "retry_failed_step_if_safe",
+          missionId: mission.id,
+          workflowRunId: row.run.id,
+          stepId: row.stepRun.stepId,
+          issueId: row.stepRun.issueId ?? undefined,
+          reason: `Failed workflow step ${row.stepRun.stepId} needs owner diagnosis before any retry`,
+          safeToAutoApply: false,
+        });
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          workflowRunId: row.run.id,
+          stepId: row.stepRun.stepId,
+          issueId: row.stepRun.issueId ?? undefined,
+          reason: `Failed workflow step ${row.stepRun.stepId} needs recovery/replan path signal`,
+          safeToAutoApply: false,
+        });
+      }
+    }
+
+    const uniqueFindings = Array.from(new Set(findings));
+    const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
+    const safeDispatchRecommendations = recommendations.filter((recommendation) => recommendation.type === "dispatch_missing_step" && recommendation.safeToAutoApply && recommendation.workflowRunId);
+    if (input.applySafeActions && safeDispatchRecommendations.length > 0) {
+      const stepIdsByRunId = new Map<string, string[]>();
+      for (const recommendation of safeDispatchRecommendations) {
+        const runId = recommendation.workflowRunId!;
+        const list = stepIdsByRunId.get(runId) ?? [];
+        if (recommendation.stepId) list.push(recommendation.stepId);
+        stepIdsByRunId.set(runId, list);
+      }
+      for (const [runId, stepIds] of stepIdsByRunId) {
+        const result = await syncWorkflowRunState(db, runId);
+        appliedActions.push({
+          type: "dispatch_missing_step",
+          missionId: mission.id,
+          workflowRunId: runId,
+          stepIds,
+          resultStatus: result.status,
+        });
+      }
+    }
+
+    if (uniqueFindings.length === 0) {
+      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: false };
+    }
+
+    const findingsSignature = createHash("sha256")
+      .update(uniqueFindings.slice().sort().join("\n"))
+      .digest("hex")
+      .slice(0, 16);
+    const markerText = `mission-owner-supervision:${mission.id}:${now.toISOString().slice(0, 13)}:${findingsSignature}`;
+    if (oversightBodies.includes(markerText)) {
+      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: false };
+    }
+
+    await issueService(db).addComment(
+      oversightIssue.id,
+      [
+        "### Mission owner supervision diagnosis",
+        `<!-- ${markerText} -->`,
+        `- Mission: ${mission.title}`,
+        `- Observed at: ${now.toISOString()}`,
+        "- Mode: decision alignment observation; this is not a hard block or RPA gate.",
+        "",
+        "Findings:",
+        ...uniqueFindings.map((finding) => `- ${finding}`),
+        "",
+        "Recommended owner actions:",
+        ...(recommendations.length > 0
+          ? recommendations.map((recommendation) => `- ${recommendation.type}${recommendation.safeToAutoApply ? " (safe internal auto-apply candidate)" : " (owner decision required)"}: ${recommendation.reason}`)
+          : ["- None"]),
+        "",
+        "Applied safe actions:",
+        ...(appliedActions.length > 0
+          ? appliedActions.map((action) => `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`)
+          : ["- None"]),
+        "",
+        "Main executor action:",
+        "- Decide whether to dispatch/retry, recover, replan, escalate, or report impossible completion with evidence.",
+        "- If the path changes, use this as a future replan path signal; no replan artifact is generated by this observation yet.",
+      ].join("\n"),
+      { agentId: mission.ownerAgentId },
+    );
+
+    return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: true };
+  }
+
+  async function runActiveMissionOwnerSupervision(input: {
+    companyId?: string;
+    missionIds?: string[];
+    staleAfterMinutes?: number;
+    now?: Date;
+    applySafeActions?: boolean;
+  } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
+    const filters = [
+      eq(missions.status, "active"),
+      inArray(workflowRuns.status, ["pending", "running"]),
+    ];
+    if (input.companyId) filters.push(eq(missions.companyId, input.companyId));
+    if (input.missionIds && input.missionIds.length > 0) filters.push(inArray(missions.id, input.missionIds));
+
+    const rows = await db
+      .select({ missionId: missions.id })
+      .from(missions)
+      .innerJoin(workflowRuns, eq(workflowRuns.missionId, missions.id))
+      .where(and(...filters))
+      .orderBy(asc(missions.createdAt), asc(missions.id));
+
+    const missionIds = Array.from(new Set(rows.map((row) => row.missionId)));
+    const results: MissionOwnerSupervisionResult[] = [];
+    for (const missionId of missionIds) {
+      results.push(await runMainExecutorSupervision({
+        missionId,
+        staleAfterMinutes: input.staleAfterMinutes,
+        now: input.now,
+        applySafeActions: input.applySafeActions,
+      }));
+    }
+
+    return { companyId: input.companyId, missionIds, missions: results };
+  }
   /**
    * Create a new mission.
    */
@@ -1204,6 +1595,8 @@ export function missionService(db: Db) {
     getIssueTree,
     listWorkflowRuns,
     ensureMainExecutorOversightIssue,
+    runMainExecutorSupervision,
+    runActiveMissionOwnerSupervision,
   };
 }
 

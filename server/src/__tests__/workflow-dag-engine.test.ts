@@ -8,6 +8,7 @@ import {
   createDb,
   issueComments,
   issues,
+  missionPlanArtifacts,
   missions,
   workflowDefinitions,
   workflowRuns,
@@ -27,6 +28,7 @@ vi.mock("../services/heartbeat.js", () => ({
 }));
 
 import { issueService } from "../services/issues.ts";
+import { missionService } from "../services/missions.js";
 import { executeWorkflowRun, syncWorkflowRunForIssue } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 
@@ -56,6 +58,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await db.delete(workflowDefinitions);
     await db.delete(issueComments);
     await db.delete(issues);
+    await db.delete(missionPlanArtifacts);
     await db.delete(missions);
     await db.delete(agents);
     await db.delete(companies);
@@ -303,12 +306,31 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(issues)
       .where(eq(issues.missionId, run!.missionId!));
     expect(missionIssues.find((issue) => issue.originKind === "mission_main_executor_plan")).toBeUndefined();
-    expect(missionIssues.find((issue) => issue.originKind === "mission_main_executor_oversight")).toMatchObject({
+    const oversight = missionIssues.find((issue) => issue.originKind === "mission_main_executor_oversight");
+    expect(oversight).toMatchObject({
       assigneeAgentId: agentId,
       missionId: run!.missionId,
       status: "todo",
       title: "[Oversight] tech-scout report 생성",
     });
+
+    const planArtifacts = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, run!.missionId!));
+    expect(planArtifacts).toEqual([
+      expect.objectContaining({
+        ownerAgentId: agentId,
+        revision: 1,
+        status: "active",
+        refs: expect.objectContaining({
+          oversightIssueId: oversight!.id,
+          sourceRunId: result.runId,
+          workflowName: "tech-scout report 생성",
+          workflowStepIds: [stepId],
+        }),
+      }),
+    ]);
   });
 
   it("progresses dependent steps and completes the workflow as execution issues complete", async () => {
@@ -710,6 +732,326 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(oversightComments.map((comment) => comment.body).join("\n")).toContain("Workflow step failed");
     expect(oversightComments.map((comment) => comment.body).join("\n")).toContain("prepare");
     expect(oversightComments[0]?.authorAgentId).toBe(agentId);
+
+    await db.delete(issueComments).where(eq(issueComments.issueId, oversightIssue.id));
+
+    const supervision = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    expect(supervision).toMatchObject({
+      missionId,
+      oversightIssueId: oversightIssue.id,
+      commented: true,
+    });
+    expect(supervision.findings.join("\n")).toContain("blocked_without_replan");
+    expect(supervision.findings.join("\n")).toContain("failed_step_without_diagnosis");
+    const commentsAfterSupervision = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, oversightIssue.id));
+    expect(commentsAfterSupervision.map((comment) => comment.body).join("\n")).toContain("Mission owner supervision diagnosis");
+  });
+
+  it("observes stale workflow todo dispatch omissions without hard-blocking", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Workflow Supervision",
+      issuePrefix: `WS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Workflow Supervisor Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Supervision Workflow Mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Supervision Workflow",
+      stepsJson: [
+        { id: "publish", name: "Publish", agentId, dependencies: [], description: "Publish the output" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+    });
+
+    const issueSvc = issueService(db);
+    const oversightIssue = await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Supervision Workflow Mission", description: null, status: "active", source: "manual", createdAt: new Date(), updatedAt: new Date() },
+      "Supervision Workflow",
+      { sourceRunId: runId, workflowStepIds: ["publish"] },
+    );
+    const stepIssue = await issueSvc.create(companyId, {
+      assigneeAgentId: agentId,
+      missionId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+      status: "todo",
+      title: "Supervision Workflow: Publish",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: randomUUID(),
+      workflowRunId: runId,
+      stepId: "publish",
+      issueId: stepIssue.id,
+      status: "pending",
+    });
+
+    const supervision = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    expect(supervision).toMatchObject({
+      missionId,
+      oversightIssueId: oversightIssue.id,
+      commented: true,
+    });
+    expect(supervision.findings.join("\n")).toContain("stale_todo");
+    expect(supervision.findings.join("\n")).toContain("dispatch_omission");
+
+    const [planArtifact] = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId))
+      .limit(1);
+    expect(planArtifact.refs).toEqual(expect.objectContaining({
+      oversightIssueId: oversightIssue.id,
+      sourceRunId: runId,
+      workflowName: "Supervision Workflow",
+      workflowStepIds: ["publish"],
+    }));
+    const [stepIssueAfter] = await db.select().from(issues).where(eq(issues.id, stepIssue.id)).limit(1);
+    expect(stepIssueAfter.status).toBe("todo");
+
+    const repeatedSameFinding = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    expect(repeatedSameFinding.commented).toBe(false);
+
+    await issueSvc.update(stepIssue.id, { status: "blocked" });
+    const newFindingSameHour = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    expect(newFindingSameHour.commented).toBe(true);
+    expect(newFindingSameHour.findings.join("\n")).toContain("blocked_without_replan");
+
+    const commentsAfterSignatureDedupe = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, oversightIssue.id));
+    expect(commentsAfterSignatureDedupe).toHaveLength(2);
+  });
+
+  it("runs active mission owner supervision and applies only safe workflow dispatch sync", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Active Supervision",
+      issuePrefix: `AS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Active Supervisor Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Active Supervision Mission",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Active Supervision Workflow",
+      stepsJson: [
+        { id: "prepare", name: "Prepare", agentId, dependencies: [], description: "Prepare" },
+        { id: "ship", name: "Ship", agentId, dependencies: ["prepare"], description: "Ship" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+    });
+    const oversightIssue = await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Active Supervision Mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },
+      "Active Supervision Workflow",
+      { sourceRunId: runId, workflowStepIds: ["prepare", "ship"] },
+    );
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-active-supervision" });
+    await executeWorkflowRun(db, runId);
+    const prepareStepRun = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId))
+      .then((rows) => rows.find((row) => row.stepId === "prepare") ?? null);
+    expect(prepareStepRun?.issueId).toBeTruthy();
+
+    await issueService(db).update(prepareStepRun!.issueId!, { status: "done" });
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+      applySafeActions: true,
+    });
+
+    expect(result.missions).toHaveLength(1);
+    expect(result.missions[0]).toMatchObject({
+      missionId,
+      oversightIssueId: oversightIssue.id,
+      commented: true,
+    });
+    expect(result.missions[0]?.recommendations.map((recommendation) => recommendation.type)).toContain("dispatch_missing_step");
+    expect(result.missions[0]?.appliedActions.map((action) => action.type)).toContain("dispatch_missing_step");
+
+    const finalStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const shipStepRun = finalStepRuns.find((stepRun) => stepRun.stepId === "ship");
+    expect(shipStepRun?.issueId).toBeTruthy();
+    const [shipIssue] = await db.select().from(issues).where(eq(issues.id, shipStepRun!.issueId!)).limit(1);
+    expect(shipIssue.status).toBe("todo");
+  });
+
+  it("keeps retry replan and escalation recommendations as owner actions, not automatic changes", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Unsafe Supervision",
+      issuePrefix: `US${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Unsafe Supervisor Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Unsafe Supervision Mission",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Unsafe Supervision Workflow",
+      stepsJson: [
+        { id: "prepare", name: "Prepare", agentId, dependencies: [], description: "Prepare" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+    });
+    await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Unsafe Supervision Mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },
+      "Unsafe Supervision Workflow",
+      { sourceRunId: runId, workflowStepIds: ["prepare"] },
+    );
+    const blockedIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: agentId,
+      missionId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+      status: "blocked",
+      title: "Unsafe Supervision Workflow: Prepare",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: randomUUID(),
+      workflowRunId: runId,
+      stepId: "prepare",
+      issueId: blockedIssue.id,
+      status: "failed",
+    });
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+      applySafeActions: true,
+    });
+
+    const recommendations = result.missions[0]?.recommendations.map((recommendation) => recommendation.type) ?? [];
+    expect(recommendations).toContain("retry_failed_step_if_safe");
+    expect(recommendations).toContain("request_replan");
+    expect(recommendations).toContain("escalate_blocked");
+    expect(result.missions[0]?.appliedActions).toEqual([]);
+
+    const [blockedIssueAfter] = await db.select().from(issues).where(eq(issues.id, blockedIssue.id)).limit(1);
+    expect(blockedIssueAfter.status).toBe("blocked");
+    const [stepRunAfter] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.issueId, blockedIssue.id)).limit(1);
+    expect(stepRunAfter.status).toBe("failed");
   });
 
   it("cancels outstanding workflow execution issues when a workflow run is cancelled", async () => {

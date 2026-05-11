@@ -119,7 +119,9 @@ async function ensureMissionForWorkflowRun(
     status: "active",
     source: "workflow",
   });
-  await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name);
+  await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
+    workflowStepIds: workflow.steps.map((step) => step.id),
+  });
 
   return { ...input, missionId: mission.id };
 }
@@ -195,6 +197,18 @@ export const workflowService = {
   ): Promise<WorkflowExecutionResult> {
     const runInput = await ensureMissionForWorkflowRun(db, input);
     const run = await createWorkflowRun(db, runInput);
+    if (run.missionId) {
+      const workflow = await getWorkflowDefinitionById(db, run.workflowId);
+      if (workflow) {
+        const mission = await missionService(db).getById(run.missionId);
+        if (mission) {
+          await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
+            sourceRunId: run.id,
+            workflowStepIds: workflow.steps.map((step) => step.id),
+          });
+        }
+      }
+    }
     return executeWorkflowRun(db, run.id);
   },
 
