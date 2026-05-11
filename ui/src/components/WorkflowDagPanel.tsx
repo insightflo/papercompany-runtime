@@ -11,7 +11,7 @@ import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
-import { cn } from "../lib/utils";
+import { cn, formatDateTime } from "../lib/utils";
 import { GitBranch, User } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -155,6 +155,8 @@ function WorkflowRunList({
             </div>
             <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
               <span>Triggered by: {run.triggeredBy}</span>
+              <span>Started: {run.startedAt ? formatDateTime(run.startedAt) : "—"}</span>
+              <span>Ended: {run.completedAt ? formatDateTime(run.completedAt) : "—"}</span>
               <span>Steps: {run.progress.totalSteps}</span>
               <span>Completed: {run.progress.completedSteps}</span>
               {run.progress.runningSteps > 0 ? <span>Running: {run.progress.runningSteps}</span> : null}
@@ -216,6 +218,8 @@ function WorkflowStepRow({
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
             {assigneeName ? <span>Agent: {assigneeName}</span> : null}
             {dependencyNames.length > 0 ? <span>Depends on: {dependencyNames.join(", ")}</span> : <span>Entry step</span>}
+            <span>Started: {step.startedAt ? formatDateTime(step.startedAt) : "—"}</span>
+            <span>Ended: {step.completedAt ? formatDateTime(step.completedAt) : "—"}</span>
           </div>
           {step.toolNames.length > 0 ? (
             <div className="flex flex-wrap gap-1">

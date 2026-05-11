@@ -25,8 +25,8 @@ vi.mock("@tanstack/react-query", () => ({
             missionId: "mission-1",
             status: "running",
             triggeredBy: "system",
-            startedAt: null,
-            completedAt: null,
+            startedAt: "2026-04-15T09:00:00",
+            completedAt: "2026-04-15T10:30:00",
             createdAt: "2026-04-15T00:00:00.000Z",
             workflowName: "Mission Workflow",
             stepRuns: [],
@@ -48,8 +48,8 @@ vi.mock("@tanstack/react-query", () => ({
                   status: "in_progress",
                   assigneeAgentId: "agent-1",
                 },
-                startedAt: null,
-                completedAt: null,
+                startedAt: "2026-04-15T09:10:00",
+                completedAt: "2026-04-15T10:05:00",
               },
             ],
             progress: {
@@ -107,6 +107,13 @@ describe("WorkflowDagPanel", () => {
     const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
 
     expect(html).toContain("Mission Workflow");
+    expect(html).toContain("Triggered by: system");
+    expect(html).toContain("Started:");
+    expect(html).toContain("Ended:");
+    expect(html).toContain("9:00 AM");
+    expect(html).toContain("10:30 AM");
+    expect(html).toContain("9:10 AM");
+    expect(html).toContain("10:05 AM");
     expect(html).toContain("Planner");
     expect(html).toContain("Draft");
     expect(html).toContain("Prepare the mission brief");
