@@ -243,6 +243,98 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(planningIssues).toEqual([]);
   });
 
+  it("ensures plugin-backed active mission execution substrate idempotently", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const runEntityId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Plugin Substrate Company",
+      issuePrefix: `PS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: `test-plugin-${pluginId}`,
+      packageName: "@paperclip/test-plugin",
+      version: "0.0.1",
+      manifestJson: { id: `test-plugin-${pluginId}`, name: "Test Plugin", version: "0.0.1", apiVersion: 1 },
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Plugin-backed mission",
+      description: "Created automatically for plugin workflow run: plugin-daily",
+      status: "active",
+    });
+    await db.insert(pluginEntities).values({
+      id: runEntityId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: "plugin-run-1",
+      title: "Plugin daily workflow",
+      status: "running",
+      data: {
+        companyId,
+        missionId,
+        workflowId: "plugin-daily",
+        workflowName: "Plugin Daily",
+        status: "running",
+      },
+    });
+
+    const svc = missionService(db);
+    const first = await svc.ensureMissionExecutionPlan({ companyId, missionId });
+    const second = await svc.ensureMissionExecutionPlan({ companyId, missionId });
+
+    expect(second).toEqual(first);
+    const oversightIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, missionId));
+    const planArtifacts = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId));
+
+    expect(oversightIssues).toEqual([
+      expect.objectContaining({
+        originKind: "mission_main_executor_oversight",
+        title: "[Oversight] Plugin Daily",
+      }),
+    ]);
+    expect(planArtifacts).toHaveLength(1);
+    expect(planArtifacts[0]?.refs).toMatchObject({
+      schemaVersion: 2,
+      oversightIssueId: oversightIssues[0]?.id,
+      workflowName: "Plugin Daily",
+      executionUnits: [
+        expect.objectContaining({
+          kind: "plugin_workflow_run",
+          status: "running",
+          sourceRef: expect.objectContaining({ type: "plugin_workflow_run", id: runEntityId }),
+        }),
+      ],
+    });
+  });
+
   it("reuses an existing active workflow mission with the same company, title, and workflow description", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

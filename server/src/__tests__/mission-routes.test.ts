@@ -10,6 +10,7 @@ const mockMissionService = vi.hoisted(() => ({
   getIssueTree: vi.fn(),
   list: vi.fn(),
   listWorkflowRuns: vi.fn(),
+  runActiveMissionOwnerSupervision: vi.fn(),
 }));
 
 vi.mock("../services/missions.js", () => ({
@@ -171,6 +172,111 @@ describe("mission routes subresources", () => {
     expect(mockMissionService.listWorkflowRuns).toHaveBeenCalledWith("mission-1");
   });
 
+
+
+  it("runs manual mission owner supervision with read-only safe defaults", async () => {
+    mockMissionService.runActiveMissionOwnerSupervision.mockResolvedValue({
+      missionIds: ["mission-1"],
+      missions: [
+        {
+          missionId: "mission-1",
+          findings: ["dispatch_omission: step=draft"],
+          recommendations: [
+            { type: "dispatch_missing_unit", missionId: "mission-1", reason: "dispatch missing", safeToAutoApply: true },
+          ],
+          appliedActions: [],
+          commented: true,
+        },
+      ],
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/missions/mission-1/supervision/run")
+      .send({ staleAfterMinutes: 15 });
+
+    expect(res.status).toBe(200);
+    expect(mockMissionService.getById).toHaveBeenCalledWith("mission-1");
+    expect(mockMissionService.runActiveMissionOwnerSupervision).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      missionIds: ["mission-1"],
+      staleAfterMinutes: 15,
+      applySafeActions: false,
+    }));
+    expect(res.body).toEqual(expect.objectContaining({
+      missionIds: ["mission-1"],
+      missions: [
+        expect.objectContaining({
+          missionId: "mission-1",
+          findings: expect.any(Array),
+          recommendations: expect.any(Array),
+          appliedActions: [],
+          commented: true,
+        }),
+      ],
+    }));
+  });
+
+  it("lets manual supervision explicitly apply only safe actions", async () => {
+    mockMissionService.runActiveMissionOwnerSupervision.mockResolvedValue({
+      missionIds: ["mission-1"],
+      missions: [
+        {
+          missionId: "mission-1",
+          findings: ["dispatch_omission: step=draft"],
+          recommendations: [],
+          appliedActions: [{ type: "dispatch_missing_step", missionId: "mission-1" }],
+          commented: false,
+        },
+      ],
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/missions/mission-1/supervision/run")
+      .send({ staleAfterMinutes: "20", applySafeActions: true });
+
+    expect(res.status).toBe(200);
+    expect(mockMissionService.runActiveMissionOwnerSupervision).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      missionIds: ["mission-1"],
+      staleAfterMinutes: 20,
+      applySafeActions: true,
+    }));
+    expect(res.body.missions[0]).toEqual(expect.objectContaining({
+      appliedActions: [expect.objectContaining({ type: "dispatch_missing_step" })],
+    }));
+  });
+
+  it("blocks manual supervision when route company does not match the mission company", async () => {
+    mockMissionService.getById.mockResolvedValue({
+      id: "mission-2",
+      companyId: "company-2",
+      title: "Other Company Mission",
+      status: "active",
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/missions/mission-2/supervision/run")
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(mockMissionService.runActiveMissionOwnerSupervision).not.toHaveBeenCalled();
+  });
+
+  it("blocks manual supervision when the board actor cannot access the mission company", async () => {
+    mockMissionService.getById.mockResolvedValue({
+      id: "mission-2",
+      companyId: "company-2",
+      title: "Other Company Mission",
+      status: "active",
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-2/missions/mission-2/supervision/run")
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockMissionService.runActiveMissionOwnerSupervision).not.toHaveBeenCalled();
+  });
   it("blocks mission issues when the board actor cannot access the mission company", async () => {
     mockMissionService.getById.mockResolvedValue({
       id: "mission-2",

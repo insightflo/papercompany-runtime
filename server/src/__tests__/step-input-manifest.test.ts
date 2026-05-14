@@ -158,6 +158,11 @@ describe("buildStepInputManifest", () => {
           riskCount: 0,
           stepCount: 0,
           stepSummary: [],
+          executionUnitCount: 0,
+          blockedOrFailedUnitCount: 0,
+          ruleRefCount: 0,
+          ruleNames: [],
+          ruleModes: [],
           refs: {},
         },
         fileViews: {

@@ -69,6 +69,11 @@ export interface StepInputManifest {
       riskCount: number;
       stepCount: number;
       stepSummary: string[];
+      executionUnitCount: number;
+      blockedOrFailedUnitCount: number;
+      ruleRefCount: number;
+      ruleNames: string[];
+      ruleModes: string[];
       refs: Record<string, unknown> | null;
     };
     fileViews: {
@@ -223,6 +228,11 @@ export function buildStepInputManifest(input: {
         riskCount: readNumber(missionPlan.riskCount) ?? 0,
         stepCount: readNumber(missionPlan.stepCount) ?? 0,
         stepSummary: missionPlanStepSummary,
+        executionUnitCount: readNumber(missionPlan.executionUnitCount) ?? 0,
+        blockedOrFailedUnitCount: readNumber(missionPlan.blockedOrFailedUnitCount) ?? 0,
+        ruleRefCount: readNumber(missionPlan.ruleRefCount) ?? 0,
+        ruleNames: readStringArray(missionPlan.ruleNames),
+        ruleModes: readStringArray(missionPlan.ruleModes),
         refs: parseObject(missionPlan.refs),
       },
       fileViews: {
@@ -245,6 +255,12 @@ function readString(value: unknown) {
 
 function readNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
 }
 
 function truncateBriefExcerpt(value: string) {

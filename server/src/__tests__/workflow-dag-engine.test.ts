@@ -10,6 +10,8 @@ import {
   issues,
   missionPlanArtifacts,
   missions,
+  pluginEntities,
+  plugins,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -56,6 +58,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
+    await db.delete(pluginEntities);
+    await db.delete(plugins);
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missionPlanArtifacts);
@@ -966,6 +970,93 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(shipIssue.status).toBe("todo");
   });
 
+  it("includes aborted workflow missions in active owner supervision", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Aborted Supervision",
+      issuePrefix: `AS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Aborted Supervisor Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Aborted Supervision Mission",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Aborted Supervision Workflow",
+      stepsJson: [
+        { id: "publish", name: "Publish", agentId, dependencies: [], description: "Publish" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "failed",
+      completedAt: new Date(),
+    });
+    const oversightIssue = await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Aborted Supervision Mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },
+      "Aborted Supervision Workflow",
+      { sourceRunId: runId, workflowStepIds: ["publish"] },
+    );
+    const blockedIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: agentId,
+      missionId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+      status: "blocked",
+      title: "Aborted Supervision Workflow: Publish",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: randomUUID(),
+      workflowRunId: runId,
+      stepId: "publish",
+      issueId: blockedIssue.id,
+      status: "failed",
+    });
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+      applySafeActions: true,
+    });
+
+    expect(result.missions).toHaveLength(1);
+    expect(result.missions[0]).toMatchObject({
+      missionId,
+      oversightIssueId: oversightIssue.id,
+      commented: true,
+    });
+    expect(result.missions[0]?.findings.join("\n")).toContain("blocked_without_replan");
+    expect(result.missions[0]?.findings.join("\n")).toContain("failed_step_without_diagnosis");
+  });
+
   it("keeps retry replan and escalation recommendations as owner actions, not automatic changes", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -1052,6 +1143,306 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(blockedIssueAfter.status).toBe("blocked");
     const [stepRunAfter] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.issueId, blockedIssue.id)).limit(1);
     expect(stepRunAfter.status).toBe("failed");
+  });
+
+  it("selects plugin-only active missions for owner supervision", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const pluginRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Plugin-only Supervision Company",
+      issuePrefix: `PS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Plugin Supervisor Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Plugin-only Workflow Mission",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine.supervision",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine.supervision", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+    await db.insert(pluginEntities).values({
+      id: pluginRunId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${pluginRunId}`,
+      title: "Plugin-only active run",
+      status: "running",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "Plugin Supervision Workflow",
+        companyId,
+        missionId,
+        status: "running",
+        triggerSource: "schedule",
+      },
+    });
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+
+    expect(result.missionIds).toContain(missionId);
+    expect(result.missions.map((mission) => mission.missionId)).toContain(missionId);
+  });
+
+
+  it("diagnoses plugin failed units without linked issues as owner-decision findings", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const pluginRunId = randomUUID();
+    const pluginStepId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Plugin failed unit supervision",
+      issuePrefix: `PF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Plugin Failed Unit Supervisor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Plugin failed unit mission",
+      status: "active",
+      source: "workflow",
+    });
+    await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Plugin failed unit mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },
+      "Plugin Failed Unit Workflow",
+    );
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine.failed-unit",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine.failed-unit", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+    await db.insert(pluginEntities).values({
+      id: pluginRunId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${pluginRunId}`,
+      title: "Plugin failed run",
+      status: "running",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "Plugin Failed Unit Workflow",
+        companyId,
+        missionId,
+        status: "running",
+        triggerSource: "schedule",
+      },
+    });
+    await db.insert(pluginEntities).values({
+      id: pluginStepId,
+      pluginId,
+      entityType: "workflow-step-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-step-run:${pluginStepId}`,
+      title: "External publish",
+      status: "failed",
+      data: {
+        workflowRunId: pluginRunId,
+        stepId: "external-publish",
+        status: "failed",
+        companyId,
+      },
+    });
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+      applySafeActions: true,
+    });
+
+    const missionResult = result.missions.find((entry) => entry.missionId === missionId);
+    expect(missionResult?.findings.join("\n")).toContain("failed_unit_without_diagnosis");
+    expect(missionResult?.findings.join("\n")).toContain(pluginStepId);
+    expect(missionResult?.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "retry_unit_if_safe", safeToAutoApply: false }),
+      expect.objectContaining({ type: "request_replan", safeToAutoApply: false }),
+    ]));
+    expect(missionResult?.appliedActions).toEqual([]);
+  });
+
+  it("observes active plan required inputs, approval gates, rule mismatch, and plan drift without blocking", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const pluginRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Plan drift supervision",
+      issuePrefix: `PD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Plan Drift Supervisor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Plan drift mission",
+      status: "active",
+      source: "workflow",
+    });
+    await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Plan drift mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },
+      "Plan Drift Workflow",
+    );
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine.plan-drift",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine.plan-drift", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+    await db.insert(pluginEntities).values({
+      id: pluginRunId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${pluginRunId}`,
+      title: "Plan drift run",
+      status: "running",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "Plan Drift Workflow",
+        companyId,
+        missionId,
+        status: "running",
+      },
+    });
+    await db.update(missionPlanArtifacts)
+      .set({
+        refs: {
+          schemaVersion: 2,
+          executionUnits: [
+            {
+              sourceRef: { type: "plugin_workflow_run", id: pluginRunId },
+              status: "pending",
+              actionCategory: "external_cost",
+            },
+          ],
+          ruleRefs: [{ key: "cost-approval", mode: "approval_gate" }],
+        },
+        requiredInputs: [{ key: "budget_limit", status: "requested" }],
+        successCriteria: [],
+        risks: [],
+        steps: [],
+      })
+      .where(eq(missionPlanArtifacts.missionId, missionId));
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+      applySafeActions: true,
+    });
+
+    const missionResult = result.missions.find((entry) => entry.missionId === missionId);
+    const findings = missionResult?.findings.join("\n") ?? "";
+    expect(findings).toContain("missing_required_input");
+    expect(findings).toContain("approval_required");
+    expect(findings).toContain("rule_mismatch");
+    expect(findings).not.toContain("plan_outdated");
+    expect(missionResult?.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "request_approval", safeToAutoApply: false }),
+    ]));
+    expect(missionResult?.appliedActions).toEqual([]);
+
+    const pluginStepId = randomUUID();
+    await db.insert(pluginEntities).values({
+      id: pluginStepId,
+      pluginId,
+      entityType: "workflow-step-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-step-run:${pluginStepId}`,
+      title: "Unplanned step",
+      status: "running",
+      data: {
+        workflowRunId: pluginRunId,
+        stepId: "unplanned-step",
+        status: "running",
+        companyId,
+      },
+    });
+
+    const changedResult = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    const changedMissionResult = changedResult.missions.find((entry) => entry.missionId === missionId);
+    expect(changedMissionResult?.commented).toBe(true);
+    expect(changedMissionResult?.findings.join("\n")).toContain("plan_outdated");
   });
 
   it("cancels outstanding workflow execution issues when a workflow run is cancelled", async () => {

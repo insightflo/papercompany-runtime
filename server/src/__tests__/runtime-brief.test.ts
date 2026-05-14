@@ -64,6 +64,11 @@ describe("buildPaperclipRuntimeBrief", () => {
             riskCount: 1,
             stepCount: 3,
             stepSummary: ["Confirm owner", "Run QA", "Collect approval"],
+            executionUnitCount: 4,
+            blockedOrFailedUnitCount: 1,
+            ruleRefCount: 2,
+            ruleNames: ["Approval before publish", "Observe budget"],
+            ruleModes: ["approval_gate", "observation"],
             refs: { planningIssueId: "issue-plan-1", workflowRunIds: ["run-1"] },
           },
           fileViews: { available: true, count: 2, source: "wake_comment" },
@@ -99,6 +104,8 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Mission plan: rev 2 active — Customer homepage rollout");
     expect(brief).toContain("Mission plan inputs: 1 required, open: qa-owner");
     expect(brief).toContain("Mission plan steps: 3 total — Confirm owner | Run QA | Collect approval");
+    expect(brief).toContain("Mission execution units: 4 total, 1 blocked/failed");
+    expect(brief).toContain("Mission rules: 2 refs — Approval before publish, Observe budget (approval_gate, observation)");
     expect(brief).not.toContain("private assumption");
     expect(brief).toContain("customer_response");
     expect(brief).toContain("maintenance_triage");

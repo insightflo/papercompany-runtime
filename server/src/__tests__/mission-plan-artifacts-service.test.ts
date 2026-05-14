@@ -13,6 +13,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
+  mergeMissionPlanRefs,
   missionPlanArtifactService,
   summarizeMissionPlanForRuntime,
 } from "../services/mission-plan-artifacts.js";
@@ -25,6 +26,86 @@ if (!embeddedPostgresSupport.supported) {
     `Skipping embedded Postgres mission plan artifact tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
 }
+
+describe("mission plan refs v2 helpers", () => {
+  it("preserves legacy refs while adding execution units", () => {
+    const merged = mergeMissionPlanRefs(
+      {
+        oversightIssueId: "issue-1",
+        workflowName: "Morning Workflow",
+        sourceRunId: "run-1",
+      },
+      {
+        executionUnits: [
+          {
+            kind: "native_workflow_run",
+            sourceRef: { type: "native_workflow_run", id: "run-2" },
+            status: "running",
+          },
+        ],
+      },
+    );
+
+    expect(merged).toMatchObject({
+      schemaVersion: 2,
+      oversightIssueId: "issue-1",
+      workflowName: "Morning Workflow",
+      sourceRunId: "run-1",
+      executionUnits: [
+        expect.objectContaining({
+          kind: "native_workflow_run",
+          status: "running",
+          sourceRef: { type: "native_workflow_run", id: "run-2" },
+        }),
+      ],
+    });
+  });
+
+  it("dedupes execution units by sourceRef and lets incoming units update deterministically", () => {
+    const merged = mergeMissionPlanRefs(
+      {
+        schemaVersion: 2,
+        executionUnits: [
+          {
+            kind: "plugin_workflow_run",
+            sourceRef: { type: "plugin_workflow_run", id: "plugin-run-1" },
+            status: "pending",
+            title: "Old title",
+          },
+        ],
+      },
+      {
+        executionUnits: [
+          {
+            kind: "plugin_workflow_run",
+            sourceRef: { type: "plugin_workflow_run", id: "plugin-run-1" },
+            status: "failed",
+            title: "Updated title",
+          },
+          {
+            kind: "plugin_workflow_step_run",
+            sourceRef: { type: "plugin_workflow_step_run", id: "plugin-step-1", workflowRunId: "plugin-run-1" },
+            status: "timed_out",
+          },
+        ],
+      },
+    );
+
+    expect(merged.executionUnits).toEqual([
+      expect.objectContaining({
+        kind: "plugin_workflow_run",
+        sourceRef: { type: "plugin_workflow_run", id: "plugin-run-1" },
+        status: "failed",
+        title: "Updated title",
+      }),
+      expect.objectContaining({
+        kind: "plugin_workflow_step_run",
+        sourceRef: { type: "plugin_workflow_step_run", id: "plugin-step-1", workflowRunId: "plugin-run-1" },
+        status: "timed_out",
+      }),
+    ]);
+  });
+});
 
 describeEmbeddedPostgres("mission plan artifact service", () => {
   let db!: ReturnType<typeof createDb>;
@@ -184,6 +265,9 @@ describeEmbeddedPostgres("mission plan artifact service", () => {
       successCriteriaCount: 1,
       riskCount: 1,
       stepCount: 4,
+      executionUnitCount: 0,
+      blockedOrFailedUnitCount: 0,
+      ruleRefCount: 0,
       refs: { planningIssueId: "issue-1", workflowRunIds: ["run-1"] },
     });
     expect(summary.missionGoal.length).toBeLessThanOrEqual(220);
@@ -191,5 +275,44 @@ describeEmbeddedPostgres("mission plan artifact service", () => {
     expect(summary.stepSummary).toHaveLength(3);
     expect(JSON.stringify(summary)).not.toContain("private assumption");
     expect(JSON.stringify(summary)).not.toContain("Risk body should stay out of brief");
+  });
+
+  it("summarizes v2 refs with execution unit and rule counts", async () => {
+    const summary = summarizeMissionPlanForRuntime({
+      id: "plan-v2",
+      companyId: "company-1",
+      missionId: "mission-1",
+      revision: 1,
+      status: "active",
+      ownerAgentId: "agent-1",
+      missionGoal: "Coordinate a plugin-backed workflow mission.",
+      refs: {
+        schemaVersion: 2,
+        executionUnits: [
+          { sourceRef: { type: "native_workflow_run", id: "run-1" }, status: "running" },
+          { sourceRef: { type: "plugin_workflow_step_run", id: "step-1" }, status: "failed" },
+          { sourceRef: { type: "plugin_workflow_step_run", id: "step-2" }, status: "blocked" },
+          { sourceRef: { type: "plugin_workflow_step_run", id: "step-3" }, status: "completed" },
+        ],
+        ruleRefs: [
+          { id: "approval-before-publish", mode: "approval_gate" },
+          { id: "observe-cost", mode: "observation" },
+        ],
+      },
+      assumptions: [],
+      requiredInputs: [],
+      successCriteria: [],
+      risks: [],
+      steps: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    expect(summary).toMatchObject({
+      available: true,
+      executionUnitCount: 4,
+      blockedOrFailedUnitCount: 2,
+      ruleRefCount: 2,
+    });
   });
 });

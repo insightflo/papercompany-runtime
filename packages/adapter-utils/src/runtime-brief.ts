@@ -164,6 +164,20 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlan?.available === true
       ? `- Mission plan steps: ${Number(missionPlan.stepCount ?? 0)} total${missionPlanStepSummary.length > 0 ? ` — ${missionPlanStepSummary.join(" | ")}` : ""}`
       : null;
+  const missionPlanRuleNames = Array.isArray(missionPlan?.ruleNames)
+    ? missionPlan.ruleNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionPlanRuleModes = Array.isArray(missionPlan?.ruleModes)
+    ? missionPlan.ruleModes.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionPlanExecutionUnitsLine =
+    missionPlan?.available === true && Number(missionPlan.executionUnitCount ?? 0) > 0
+      ? `- Mission execution units: ${Number(missionPlan.executionUnitCount ?? 0)} total, ${Number(missionPlan.blockedOrFailedUnitCount ?? 0)} blocked/failed`
+      : null;
+  const missionPlanRulesLine =
+    missionPlan?.available === true && Number(missionPlan.ruleRefCount ?? 0) > 0
+      ? `- Mission rules: ${Number(missionPlan.ruleRefCount ?? 0)} refs${missionPlanRuleNames.length > 0 ? ` — ${missionPlanRuleNames.join(", ")}` : ""}${missionPlanRuleModes.length > 0 ? ` (${missionPlanRuleModes.join(", ")})` : ""}`
+      : null;
 
   const guardrailLine =
     guardrails?.broadScanAllowed === false
@@ -208,6 +222,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanLine,
     missionPlanInputsLine,
     missionPlanStepsLine,
+    missionPlanExecutionUnitsLine,
+    missionPlanRulesLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

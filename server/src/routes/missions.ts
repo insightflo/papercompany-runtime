@@ -100,6 +100,41 @@ export function missionRoutes(db: Db) {
   });
 
   /**
+   * POST /companies/:companyId/missions/:missionId/supervision/run
+   *
+   * Manually run mission owner supervision for one mission.
+   * Defaults to read-only observation mode; only safe internal sync actions run when explicitly requested.
+   */
+  router.post("/companies/:companyId/missions/:missionId/supervision/run", async (req, res) => {
+    const { companyId, missionId } = req.params;
+    const mission = await svc.getById(missionId);
+    if (mission.companyId !== companyId) {
+      throw notFound("Mission not found");
+    }
+    assertCompanyAccess(req, companyId);
+
+    const { staleAfterMinutes, applySafeActions } = req.body ?? {};
+    let parsedStaleAfterMinutes: number | undefined;
+    if (staleAfterMinutes !== undefined) {
+      parsedStaleAfterMinutes = typeof staleAfterMinutes === "number"
+        ? staleAfterMinutes
+        : Number.parseInt(String(staleAfterMinutes), 10);
+      if (!Number.isFinite(parsedStaleAfterMinutes) || parsedStaleAfterMinutes <= 0) {
+        throw badRequest("staleAfterMinutes must be a positive number");
+      }
+    }
+
+    const result = await svc.runActiveMissionOwnerSupervision({
+      companyId,
+      missionIds: [missionId],
+      staleAfterMinutes: parsedStaleAfterMinutes,
+      applySafeActions: applySafeActions === true,
+    });
+
+    res.json(result);
+  });
+
+  /**
    * GET /missions/:id
    *
    * Get a mission by ID with agents and metadata.

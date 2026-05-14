@@ -18,7 +18,27 @@ export type MissionPlanRuntimeSummary = {
   riskCount?: number;
   stepCount?: number;
   stepSummary?: string[];
+  executionUnitCount?: number;
+  blockedOrFailedUnitCount?: number;
+  ruleRefCount?: number;
+  ruleNames?: string[];
+  ruleModes?: string[];
   refs?: Record<string, unknown>;
+};
+
+type MissionPlanExecutionUnitRef = JsonRecord & {
+  kind?: string;
+  status?: string;
+  sourceRef?: JsonRecord & {
+    type?: string;
+    id?: string;
+  };
+};
+
+export type MissionPlanRefsV2 = JsonRecord & {
+  schemaVersion?: 2;
+  executionUnits?: MissionPlanExecutionUnitRef[];
+  ruleRefs?: JsonRecord[];
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -77,6 +97,88 @@ function itemTitle(value: unknown) {
     : null;
 }
 
+function refsExecutionUnitKey(unit: MissionPlanExecutionUnitRef): string | null {
+  const sourceRef = asRecord(unit.sourceRef);
+  const type = typeof sourceRef.type === "string" ? sourceRef.type.trim() : "";
+  const id = typeof sourceRef.id === "string" ? sourceRef.id.trim() : "";
+  if (!type || !id) return null;
+  return `${type}:${id}`;
+}
+
+function ruleRefKey(ruleRef: JsonRecord): string | null {
+  const key = typeof ruleRef.key === "string" ? ruleRef.key.trim() : "";
+  if (key) return key;
+  const source = typeof ruleRef.source === "string" ? ruleRef.source.trim() : "";
+  const id = typeof ruleRef.id === "string" ? ruleRef.id.trim() : "";
+  if (source && id) return `${source}:${id}`;
+  if (id) return id;
+  const name = typeof ruleRef.name === "string" ? ruleRef.name.trim() : "";
+  return name || null;
+}
+
+function asExecutionUnits(value: unknown): MissionPlanExecutionUnitRef[] {
+  return asRecordArray(value).filter((unit): unit is MissionPlanExecutionUnitRef => refsExecutionUnitKey(unit as MissionPlanExecutionUnitRef) !== null);
+}
+
+export function mergeMissionPlanRefs(existing: unknown, incoming: unknown): MissionPlanRefsV2 {
+  const existingRefs = asRecord(existing);
+  const incomingRefs = asRecord(incoming);
+  const merged: MissionPlanRefsV2 = { ...existingRefs, ...incomingRefs };
+
+  const unitsByKey = new Map<string, MissionPlanExecutionUnitRef>();
+  for (const unit of [...asExecutionUnits(existingRefs.executionUnits), ...asExecutionUnits(incomingRefs.executionUnits)]) {
+    const key = refsExecutionUnitKey(unit);
+    if (!key) continue;
+    unitsByKey.set(key, unit);
+  }
+
+  const executionUnits = Array.from(unitsByKey.values());
+  if (executionUnits.length > 0) {
+    merged.schemaVersion = 2;
+    merged.executionUnits = executionUnits;
+  }
+
+  const ruleRefsByKey = new Map<string, JsonRecord>();
+  for (const ruleRef of [...asRecordArray(existingRefs.ruleRefs), ...asRecordArray(incomingRefs.ruleRefs)]) {
+    const key = ruleRefKey(ruleRef);
+    if (!key) continue;
+    ruleRefsByKey.set(key, ruleRef);
+  }
+  const ruleRefs = Array.from(ruleRefsByKey.values());
+  if (ruleRefs.length > 0) {
+    merged.schemaVersion = 2;
+    merged.ruleRefs = ruleRefs;
+  }
+
+  return merged;
+}
+
+function refsRuleRefs(refs: JsonRecord): JsonRecord[] {
+  return asRecordArray(refs.ruleRefs);
+}
+
+function ruleRefName(ruleRef: JsonRecord): string | null {
+  const name = typeof ruleRef.name === "string" ? ruleRef.name.trim() : "";
+  if (name) return truncate(name, 80);
+  const key = typeof ruleRef.key === "string" ? ruleRef.key.trim() : "";
+  if (key) return truncate(key, 80);
+  const id = typeof ruleRef.id === "string" ? ruleRef.id.trim() : "";
+  return id ? truncate(id, 80) : null;
+}
+
+function ruleRefMode(ruleRef: JsonRecord): string | null {
+  return typeof ruleRef.mode === "string" && ruleRef.mode.trim().length > 0 ? ruleRef.mode.trim() : null;
+}
+
+function uniqueStrings(values: Array<string | null>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value))));
+}
+
+function isBlockedOrFailedExecutionUnit(unit: JsonRecord): boolean {
+  const status = typeof unit.status === "string" ? unit.status.trim().toLowerCase() : "";
+  return ["blocked", "failed", "error", "cancelled", "canceled", "aborted", "timed_out", "timed-out", "timeout"].includes(status);
+}
+
 export function summarizeMissionPlanForRuntime(plan: MissionPlanArtifact | null | undefined): MissionPlanRuntimeSummary {
   if (!plan) return { available: false };
 
@@ -92,6 +194,9 @@ export function summarizeMissionPlanForRuntime(plan: MissionPlanArtifact | null 
     .filter((value): value is string => Boolean(value))
     .slice(0, 3)
     .map((title) => truncate(title, 80));
+  const refs = asRecord(plan.refs);
+  const executionUnits = asExecutionUnits(refs.executionUnits);
+  const ruleRefs = refsRuleRefs(refs);
 
   return {
     available: true,
@@ -105,7 +210,12 @@ export function summarizeMissionPlanForRuntime(plan: MissionPlanArtifact | null 
     riskCount: asArray(plan.risks).length,
     stepCount: steps.length,
     stepSummary,
-    refs: asRecord(plan.refs),
+    executionUnitCount: executionUnits.length,
+    blockedOrFailedUnitCount: executionUnits.filter((unit) => isBlockedOrFailedExecutionUnit(unit)).length,
+    ruleRefCount: ruleRefs.length,
+    ruleNames: uniqueStrings(ruleRefs.map(ruleRefName)).slice(0, 10),
+    ruleModes: uniqueStrings(ruleRefs.map(ruleRefMode)).slice(0, 10),
+    refs,
   };
 }
 

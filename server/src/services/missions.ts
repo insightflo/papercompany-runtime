@@ -25,7 +25,16 @@ import {
 } from "@paperclipai/db";
 import { notFound, badRequest } from "../errors.js";
 import { issueService } from "./issues.js";
-import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import { mergeMissionPlanRefs, missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import {
+  isTerminalFailureStatus,
+  listMissionExecutionSourceSnapshots,
+  type MissionExecutionStatus,
+  type MissionExecutionSourceRef,
+  type MissionExecutionUnit,
+} from "./missions/mission-execution-sources.js";
+import { buildMissionRuleContext } from "./missions/mission-rule-context.js";
+import { buildMissionSupervisionContext } from "./missions/mission-supervision-context.js";
 import { syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
 
 // ---------------------------------------------------------------------------
@@ -123,9 +132,13 @@ export type MissionIssueTree = Awaited<ReturnType<ReturnType<typeof issueService
 
 export type MissionOwnerSupervisionRecommendationType =
   | "dispatch_missing_step"
+  | "dispatch_missing_unit"
   | "retry_failed_step_if_safe"
+  | "retry_unit_if_safe"
   | "request_replan"
-  | "escalate_blocked";
+  | "request_approval"
+  | "escalate_blocked"
+  | "mark_impossible_with_evidence";
 
 export type MissionOwnerSupervisionRecommendation = {
   type: MissionOwnerSupervisionRecommendationType;
@@ -135,6 +148,7 @@ export type MissionOwnerSupervisionRecommendation = {
   workflowRunId?: string;
   stepId?: string;
   issueId?: string;
+  sourceRef?: MissionExecutionSourceRef;
 };
 
 export type MissionOwnerSupervisionAppliedAction = {
@@ -577,21 +591,42 @@ export function missionService(db: Db) {
     mission: MissionRow,
     oversightIssue: typeof issues.$inferSelect,
     workflowName: string,
-    metadata: { workflowStepIds?: string[]; sourceRunId?: string } = {},
+    metadata: { workflowStepIds?: string[]; sourceRunId?: string; executionUnits?: Array<Record<string, unknown>> } = {},
   ): Promise<void> {
-    const refs = {
+    const executionUnits = metadata.executionUnits ?? [
+      ...(metadata.sourceRunId ? [{
+        kind: "native_workflow_run",
+        title: workflowName,
+        status: "running",
+        sourceRef: { type: "native_workflow_run", id: metadata.sourceRunId },
+      }] : []),
+      ...(metadata.workflowStepIds ?? []).map((stepId) => ({
+        kind: "native_workflow_step_run",
+        title: stepId,
+        status: "pending",
+        sourceRef: {
+          type: "native_workflow_step_run",
+          id: stepId,
+          ...(metadata.sourceRunId ? { workflowRunId: metadata.sourceRunId } : {}),
+        },
+      })),
+    ];
+    const missionRuleContext = await buildMissionRuleContext(db, { companyId: mission.companyId });
+    const refs = mergeMissionPlanRefs({}, {
       oversightIssueId: oversightIssue.id,
       workflowName,
       ...(metadata.workflowStepIds ? { workflowStepIds: metadata.workflowStepIds } : {}),
       ...(metadata.sourceRunId ? { sourceRunId: metadata.sourceRunId } : {}),
-    };
+      ...(executionUnits.length > 0 ? { executionUnits } : {}),
+      ...(missionRuleContext.ruleRefs.length > 0 ? { ruleRefs: missionRuleContext.ruleRefs } : {}),
+    });
     const planSvc = missionPlanArtifactService(db);
     const activePlan = await planSvc.getActiveMissionPlan({ companyId: mission.companyId, missionId: mission.id });
     if (activePlan) {
+      const mergedRefs = mergeMissionPlanRefs(activePlan.refs, refs);
       const currentRefs = typeof activePlan.refs === "object" && activePlan.refs !== null && !Array.isArray(activePlan.refs)
         ? activePlan.refs as Record<string, unknown>
         : {};
-      const mergedRefs = { ...currentRefs, ...refs };
       const changed = JSON.stringify(currentRefs) !== JSON.stringify(mergedRefs);
       if (changed) {
         await db
@@ -631,7 +666,7 @@ export function missionService(db: Db) {
   async function ensureMainExecutorOversightIssue(
     mission: MissionRow,
     workflowName: string,
-    metadata: { workflowStepIds?: string[]; sourceRunId?: string } = {},
+    metadata: { workflowStepIds?: string[]; sourceRunId?: string; executionUnits?: Array<Record<string, unknown>> } = {},
   ): Promise<typeof issues.$inferSelect> {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     if (existing) {
@@ -663,19 +698,127 @@ export function missionService(db: Db) {
     return oversightIssue;
   }
 
+  async function ensureMissionExecutionPlan(input: {
+    companyId: string;
+    missionId: string;
+    sourceHints?: {
+      workflowName?: string;
+      sourceRunId?: string;
+      workflowStepIds?: string[];
+      executionUnits?: Array<Record<string, unknown>>;
+    };
+  }): Promise<{ missionId: string; oversightIssueId: string; planId: string | null }> {
+    const [mission] = await db
+      .select()
+      .from(missions)
+      .where(and(eq(missions.companyId, input.companyId), eq(missions.id, input.missionId)))
+      .limit(1);
+    if (!mission) throw notFound(`Mission not found: ${input.missionId}`);
+
+    const snapshot = await listMissionExecutionSourceSnapshots(db, {
+      companyId: input.companyId,
+      missionIds: [input.missionId],
+    }).then((snapshots) => snapshots[input.missionId] ?? null);
+    const snapshotUnits = snapshot?.units.map((unit) => ({
+      kind: unit.kind,
+      title: unit.title ?? unit.workflowName ?? null,
+      status: unit.status,
+      sourceRef: unit.sourceRef,
+    })) ?? [];
+    const executionUnits = input.sourceHints?.executionUnits ?? snapshotUnits;
+    const workflowName = input.sourceHints?.workflowName
+      ?? snapshot?.units.find((unit) => unit.workflowName)?.workflowName
+      ?? snapshot?.units.find((unit) => unit.title)?.title
+      ?? "Mission execution";
+
+    const oversightIssue = await ensureMainExecutorOversightIssue(mission, workflowName, {
+      workflowStepIds: input.sourceHints?.workflowStepIds,
+      sourceRunId: input.sourceHints?.sourceRunId,
+      executionUnits,
+    });
+    const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({
+      companyId: input.companyId,
+      missionId: input.missionId,
+    });
+    return { missionId: mission.id, oversightIssueId: oversightIssue.id, planId: activePlan?.id ?? null };
+  }
+
+  type JsonRecord = Record<string, unknown>;
+
+  function asRecord(value: unknown): JsonRecord {
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonRecord : {};
+  }
+
+  function asRecordArray(value: unknown): JsonRecord[] {
+    return Array.isArray(value)
+      ? value.filter((item): item is JsonRecord => typeof item === "object" && item !== null && !Array.isArray(item))
+      : [];
+  }
+
+  function trimmedString(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function normalizedPlanStatus(value: unknown): string {
+    return trimmedString(value)?.toLowerCase() ?? "";
+  }
+
+  function executionUnitKeyFromSourceRef(sourceRef: unknown): string | null {
+    const ref = asRecord(sourceRef);
+    const type = trimmedString(ref.type);
+    const id = trimmedString(ref.id);
+    return type && id ? `${type}:${id}` : null;
+  }
+
+  function executionUnitKey(unit: Pick<MissionExecutionUnit, "sourceRef">): string {
+    return `${unit.sourceRef.type}:${unit.sourceRef.id}`;
+  }
+
+  function textContainsAny(value: unknown, needles: string[]): boolean {
+    const text = JSON.stringify(value ?? "").toLowerCase();
+    return needles.some((needle) => text.includes(needle));
+  }
+
+  function unitRequiresGovernedAction(unit: JsonRecord): boolean {
+    return textContainsAny(unit, ["external", "cost", "legal", "destructive", "delete", "spend", "payment", "production"]);
+  }
+
+  function isApprovalRuleMode(mode: unknown): boolean {
+    const normalized = normalizedPlanStatus(mode);
+    return normalized === "approval_gate" || normalized === "hard_gate";
+  }
+
+  function hasDiagnosisSignal(...bodies: string[]): boolean {
+    const body = bodies.join("\n").toLowerCase();
+    return body.includes("diagnos")
+      || body.includes("root cause")
+      || body.includes("replan")
+      || body.includes("re-plan")
+      || body.includes("recover")
+      || body.includes("escalat")
+      || body.includes("impossible")
+      || body.includes("failure:")
+      || body.includes("failed_unit_without_diagnosis");
+  }
+
   async function runMainExecutorSupervision(input: {
     missionId: string;
     staleAfterMinutes?: number;
     now?: Date;
     applySafeActions?: boolean;
   }): Promise<MissionOwnerSupervisionResult> {
-    const mission = await db
-      .select()
-      .from(missions)
-      .where(eq(missions.id, input.missionId))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (!mission) throw notFound(`Mission not found: ${input.missionId}`);
+    const context = await buildMissionSupervisionContext(db, { missionId: input.missionId });
+    const {
+      mission,
+      missionIssues,
+      missionIssueById,
+      commentsByIssueId,
+      heartbeatCountByIssueId,
+      stepRows,
+      stepRowsByIssueId,
+      executionSnapshot,
+      activePlan,
+    } = context;
 
     const oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     if (!oversightIssue) {
@@ -684,62 +827,16 @@ export function missionService(db: Db) {
 
     const now = input.now ?? new Date();
     const staleAfterMs = Math.max(1, input.staleAfterMinutes ?? 120) * 60 * 1000;
-    const missionIssues = await db
-      .select()
-      .from(issues)
-      .where(and(eq(issues.companyId, mission.companyId), eq(issues.missionId, mission.id)))
-      .orderBy(asc(issues.createdAt), asc(issues.id));
-
-    const missionIssueIds = missionIssues.map((issue) => issue.id);
-    const missionIssueById = new Map(missionIssues.map((issue) => [issue.id, issue]));
-    const issueCommentRows = missionIssueIds.length > 0
-      ? await db
-        .select({ issueId: issueComments.issueId, body: issueComments.body })
-        .from(issueComments)
-        .where(inArray(issueComments.issueId, missionIssueIds))
-      : [];
-    const commentsByIssueId = new Map<string, string[]>();
-    for (const comment of issueCommentRows) {
-      const list = commentsByIssueId.get(comment.issueId) ?? [];
-      list.push(comment.body);
-      commentsByIssueId.set(comment.issueId, list);
-    }
-    const issueRunRows = missionIssueIds.length > 0
-      ? await db
-        .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId, status: heartbeatRuns.status })
-        .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.companyId, mission.companyId), inArray(heartbeatRuns.issueId, missionIssueIds)))
-      : [];
-    const heartbeatCountByIssueId = new Map<string, number>();
-    for (const run of issueRunRows) {
-      if (!run.issueId) continue;
-      heartbeatCountByIssueId.set(run.issueId, (heartbeatCountByIssueId.get(run.issueId) ?? 0) + 1);
-    }
-
-    const stepRows = await db
-      .select({
-        stepRun: workflowStepRuns,
-        run: workflowRuns,
-        definition: workflowDefinitions,
-      })
-      .from(workflowStepRuns)
-      .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-      .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-      .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, mission.id)))
-      .orderBy(asc(workflowRuns.createdAt), asc(workflowStepRuns.stepId));
-    const stepRowsByIssueId = new Map<string, typeof stepRows>();
-    for (const row of stepRows) {
-      if (!row.stepRun.issueId) continue;
-      const list = stepRowsByIssueId.get(row.stepRun.issueId) ?? [];
-      list.push(row);
-      stepRowsByIssueId.set(row.stepRun.issueId, list);
-    }
 
     const findings: string[] = [];
     const recommendations: MissionOwnerSupervisionRecommendation[] = [];
     const addRecommendation = (recommendation: MissionOwnerSupervisionRecommendation) => {
-      const key = `${recommendation.type}:${recommendation.workflowRunId ?? ""}:${recommendation.stepId ?? ""}:${recommendation.issueId ?? ""}`;
-      if (recommendations.some((existing) => `${existing.type}:${existing.workflowRunId ?? ""}:${existing.stepId ?? ""}:${existing.issueId ?? ""}` === key)) return;
+      const sourceKey = recommendation.sourceRef ? `${recommendation.sourceRef.type}:${recommendation.sourceRef.id}` : "";
+      const key = `${recommendation.type}:${recommendation.workflowRunId ?? ""}:${recommendation.stepId ?? ""}:${recommendation.issueId ?? ""}:${sourceKey}`;
+      if (recommendations.some((existing) => {
+        const existingSourceKey = existing.sourceRef ? `${existing.sourceRef.type}:${existing.sourceRef.id}` : "";
+        return `${existing.type}:${existing.workflowRunId ?? ""}:${existing.stepId ?? ""}:${existing.issueId ?? ""}:${existingSourceKey}` === key;
+      })) return;
       recommendations.push(recommendation);
     };
 
@@ -816,11 +913,7 @@ export function missionService(db: Db) {
     for (const row of failedStepRows) {
       const marker = `workflow-failure:${row.run.id}:${row.stepRun.stepId}`;
       const stepIssueComments = row.stepRun.issueId ? (commentsByIssueId.get(row.stepRun.issueId) ?? []).join("\n") : "";
-      const hasDiagnosis = oversightBodies.includes(marker)
-        || stepIssueComments.toLowerCase().includes("diagnos")
-        || stepIssueComments.toLowerCase().includes("root cause")
-        || stepIssueComments.toLowerCase().includes("replan")
-        || stepIssueComments.toLowerCase().includes("escalat");
+      const hasDiagnosis = oversightBodies.includes(marker) || hasDiagnosisSignal(stepIssueComments);
       if (!hasDiagnosis) {
         findings.push(`failed_step_without_diagnosis: run=${row.run.id} step=${row.stepRun.stepId}`);
         addRecommendation({
@@ -833,6 +926,24 @@ export function missionService(db: Db) {
           safeToAutoApply: false,
         });
         addRecommendation({
+          type: "retry_unit_if_safe",
+          missionId: mission.id,
+          workflowRunId: row.run.id,
+          stepId: row.stepRun.stepId,
+          issueId: row.stepRun.issueId ?? undefined,
+          sourceRef: {
+            type: "native_workflow_run",
+            id: row.run.id,
+            workflowRunId: row.run.id,
+            stepId: row.stepRun.stepId,
+            issueId: row.stepRun.issueId ?? null,
+            pluginId: null,
+            externalId: null,
+          },
+          reason: `Failed execution unit ${row.run.id}/${row.stepRun.stepId} needs owner diagnosis before any retry`,
+          safeToAutoApply: false,
+        });
+        addRecommendation({
           type: "request_replan",
           missionId: mission.id,
           workflowRunId: row.run.id,
@@ -841,6 +952,80 @@ export function missionService(db: Db) {
           reason: `Failed workflow step ${row.stepRun.stepId} needs recovery/replan path signal`,
           safeToAutoApply: false,
         });
+      }
+    }
+
+    for (const unit of executionSnapshot.units) {
+      if (!(unit.kind === "plugin_workflow_run" || unit.kind === "plugin_workflow_step_run")) continue;
+      if (!(unit.status === "failed" || unit.status === "timed_out")) continue;
+      const marker = `unit-failure:${unit.sourceRef.type}:${unit.sourceRef.id}`;
+      const linkedIssueComments = unit.issueId ? (commentsByIssueId.get(unit.issueId) ?? []).join("\n") : "";
+      const hasDiagnosis = oversightBodies.includes(marker) || hasDiagnosisSignal(linkedIssueComments);
+      if (hasDiagnosis) continue;
+      findings.push(`failed_unit_without_diagnosis: source=${unit.sourceRef.type} id=${unit.sourceRef.id} status=${unit.status}${unit.stepId ? ` step=${unit.stepId}` : ""}`);
+      addRecommendation({
+        type: "retry_unit_if_safe",
+        missionId: mission.id,
+        workflowRunId: unit.workflowRunId ?? undefined,
+        stepId: unit.stepId ?? undefined,
+        issueId: unit.issueId ?? undefined,
+        sourceRef: unit.sourceRef,
+        reason: `Failed execution unit ${unit.sourceRef.type}:${unit.sourceRef.id} needs owner diagnosis before retry`,
+        safeToAutoApply: false,
+      });
+      addRecommendation({
+        type: "request_replan",
+        missionId: mission.id,
+        workflowRunId: unit.workflowRunId ?? undefined,
+        stepId: unit.stepId ?? undefined,
+        issueId: unit.issueId ?? undefined,
+        sourceRef: unit.sourceRef,
+        reason: `Failed execution unit ${unit.sourceRef.type}:${unit.sourceRef.id} needs recovery/replan path signal`,
+        safeToAutoApply: false,
+      });
+    }
+
+    if (activePlan) {
+      for (const requiredInput of asRecordArray(activePlan.requiredInputs)) {
+        const key = trimmedString(requiredInput.key) ?? trimmedString(requiredInput.title) ?? "required-input";
+        if (normalizedPlanStatus(requiredInput.status) === "received") continue;
+        findings.push(`missing_required_input: ${key} not received for active plan revision=${activePlan.revision}`);
+      }
+
+      const refs = asRecord(activePlan.refs);
+      const planUnits = asRecordArray(refs.executionUnits);
+      const planUnitKeys = new Set(planUnits.map((unit) => executionUnitKeyFromSourceRef(unit.sourceRef)).filter((key): key is string => Boolean(key)));
+      for (const unit of executionSnapshot.units) {
+        if (!planUnitKeys.has(executionUnitKey(unit))) {
+          findings.push(`plan_outdated: active execution unit missing from plan refs source=${unit.sourceRef.type} id=${unit.sourceRef.id}`);
+        }
+      }
+
+      const approvalRuleRefs = asRecordArray(refs.ruleRefs).filter((ruleRef) => isApprovalRuleMode(ruleRef.mode));
+      for (const ruleRef of approvalRuleRefs) {
+        const ruleLabel = trimmedString(ruleRef.key) ?? trimmedString(ruleRef.id) ?? trimmedString(ruleRef.name) ?? "rule";
+        for (const planUnit of planUnits) {
+          if (!unitRequiresGovernedAction(planUnit)) continue;
+          const key = executionUnitKeyFromSourceRef(planUnit.sourceRef) ?? "unknown-unit";
+          findings.push(`approval_required: ${ruleLabel} requires owner approval for governed action unit=${key}`);
+          addRecommendation({
+            type: "request_approval",
+            missionId: mission.id,
+            sourceRef: asRecord(planUnit.sourceRef) as unknown as MissionExecutionSourceRef,
+            reason: `Rule ${ruleLabel} requires owner approval for governed action unit ${key}`,
+            safeToAutoApply: false,
+          });
+        }
+      }
+
+      for (const planUnit of planUnits) {
+        const expectedStatus = normalizedPlanStatus(planUnit.status);
+        if (!expectedStatus) continue;
+        const key = executionUnitKeyFromSourceRef(planUnit.sourceRef);
+        if (!key) continue;
+        const runtimeUnit = executionSnapshot.units.find((unit) => executionUnitKey(unit) === key);
+        if (!runtimeUnit || normalizedPlanStatus(runtimeUnit.status) === expectedStatus) continue;
+        findings.push(`rule_mismatch: plan unit=${key} status=${expectedStatus} runtime_status=${runtimeUnit.status}`);
       }
     }
 
@@ -912,6 +1097,12 @@ export function missionService(db: Db) {
     return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: true };
   }
 
+  const ACTIVE_SUPERVISION_EXECUTION_STATUSES = new Set<MissionExecutionStatus>(["pending", "running", "failed", "cancelled", "timed_out"]);
+
+  function isActiveSupervisionExecutionStatus(status: MissionExecutionStatus): boolean {
+    return status === "pending" || status === "running" || isTerminalFailureStatus(status);
+  }
+
   async function runActiveMissionOwnerSupervision(input: {
     companyId?: string;
     missionIds?: string[];
@@ -919,21 +1110,37 @@ export function missionService(db: Db) {
     now?: Date;
     applySafeActions?: boolean;
   } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
-    const filters = [
-      eq(missions.status, "active"),
-      inArray(workflowRuns.status, ["pending", "running"]),
-    ];
+    const filters = [eq(missions.status, "active")];
     if (input.companyId) filters.push(eq(missions.companyId, input.companyId));
     if (input.missionIds && input.missionIds.length > 0) filters.push(inArray(missions.id, input.missionIds));
 
-    const rows = await db
-      .select({ missionId: missions.id })
+    const missionRows = await db
+      .select({ id: missions.id, companyId: missions.companyId, createdAt: missions.createdAt })
       .from(missions)
-      .innerJoin(workflowRuns, eq(workflowRuns.missionId, missions.id))
       .where(and(...filters))
       .orderBy(asc(missions.createdAt), asc(missions.id));
 
-    const missionIds = Array.from(new Set(rows.map((row) => row.missionId)));
+    const missionIds: string[] = [];
+    const missionRowsByCompanyId = new Map<string, typeof missionRows>();
+    for (const row of missionRows) {
+      const rows = missionRowsByCompanyId.get(row.companyId) ?? [];
+      rows.push(row);
+      missionRowsByCompanyId.set(row.companyId, rows);
+    }
+
+    for (const [companyId, rows] of missionRowsByCompanyId) {
+      const snapshots = await listMissionExecutionSourceSnapshots(db, {
+        companyId,
+        missionIds: rows.map((row) => row.id),
+      });
+
+      for (const row of rows) {
+        const snapshot = snapshots[row.id];
+        const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
+        if (hasSupervisionUnit) missionIds.push(row.id);
+      }
+    }
+
     const results: MissionOwnerSupervisionResult[] = [];
     for (const missionId of missionIds) {
       results.push(await runMainExecutorSupervision({
@@ -1595,6 +1802,7 @@ export function missionService(db: Db) {
     getIssueTree,
     listWorkflowRuns,
     ensureMainExecutorOversightIssue,
+    ensureMissionExecutionPlan,
     runMainExecutorSupervision,
     runActiveMissionOwnerSupervision,
   };
