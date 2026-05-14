@@ -19,6 +19,34 @@ vi.mock("@tanstack/react-query", () => ({
           createdAt: "2026-04-15T00:00:00.000Z",
           startedAt: null,
           completedAt: null,
+          agents: [],
+          sessionBindings: [],
+          activeMissionPlan: {
+            available: true,
+            missionPlanId: "plan-1",
+            revision: 2,
+            status: "active",
+            missionGoal: "Launch with supervised owner decisions",
+            requiredInputsCount: 2,
+            openRequiredInputs: ["owner-judgement", "vendor-confirmation"],
+            successCriteriaCount: 1,
+            riskCount: 1,
+            stepCount: 3,
+            stepSummary: ["Collect evidence", "Owner diagnosis", "Operator report"],
+            executionUnitCount: 4,
+            blockedOrFailedUnitCount: 1,
+            ruleRefCount: 2,
+            ruleNames: ["Vendor handoff rule", "Approval gate rule"],
+            ruleModes: ["guidance", "approval_gate"],
+            refs: {
+              ruleRefs: [
+                { name: "Vendor handoff rule", mode: "guidance", source: "worktree_rules" },
+                { name: "Approval gate rule", mode: "approval_gate", source: "worktree_rules" },
+              ],
+              kbRefs: [{ title: "Launch KB", excerpt: "Use release notes as operator evidence." }],
+              executionUnits: [{ kind: "plugin_workflow_step_run", status: "failed" }],
+            },
+          },
         },
         isLoading: false,
         error: null,
@@ -140,7 +168,18 @@ describe("MissionDetail", () => {
     expect(html).toContain("Execution Flow");
     expect(html).toContain('data-component="WorkflowDagPanel"');
     expect(html).toContain("Workflow DAG for mission-1");
-    expect(html).toContain("Execution rules coming soon");
-    expect(html).toContain("Open global execution rules");
+    expect(html).toContain("Execution Rules");
+    expect(html).toContain("Applied Worktree Rules");
+    expect(html).toContain("Vendor handoff rule");
+    expect(html).toContain("approval_gate");
+    expect(html).toContain("Injected KB references/excerpts");
+    expect(html).toContain("Launch KB");
+    expect(html).toContain("Use release notes as operator evidence.");
+    expect(html).toContain("Required inputs");
+    expect(html).toContain("owner-judgement");
+    expect(html).toContain("Suggested status/action");
+    expect(html).toContain("Latest Maintenance Decision");
+    expect(html).toContain("Audit timeline");
+    expect(html).toContain("1 blocked/failed");
   });
 });

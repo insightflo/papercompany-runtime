@@ -201,6 +201,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       }),
     ]);
     expect(planArtifacts[0]?.refs).toEqual({ planningIssueId: planningIssues[0]?.id });
+    expect(result.activeMissionPlan).toEqual(
+      expect.objectContaining({
+        available: true,
+        missionPlanId: planArtifacts[0]?.id,
+        revision: 1,
+        status: "active",
+      }),
+    );
   });
 
   it("does not create a manual planning issue for a workflow-created mission", async () => {

@@ -102,10 +102,31 @@ export interface MissionListFilters {
   offset?: number;
 }
 
+export interface MissionPlanRuntimeSummary {
+  available: boolean;
+  missionPlanId?: string | null;
+  revision?: number | null;
+  status?: string | null;
+  missionGoal?: string | null;
+  requiredInputsCount?: number;
+  openRequiredInputs?: string[];
+  successCriteriaCount?: number;
+  riskCount?: number;
+  stepCount?: number;
+  stepSummary?: string[];
+  executionUnitCount?: number;
+  blockedOrFailedUnitCount?: number;
+  ruleRefCount?: number;
+  ruleNames?: string[];
+  ruleModes?: string[];
+  refs?: Record<string, unknown>;
+}
+
 export interface MissionDetailItem extends MissionListItem {
   agents: MissionAgentEntry[];
   ownerAgentName?: string;
   sessionBindings: MissionSessionBinding[];
+  activeMissionPlan?: MissionPlanRuntimeSummary;
 }
 
 export interface CreateMissionInput {

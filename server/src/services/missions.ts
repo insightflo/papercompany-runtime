@@ -25,7 +25,7 @@ import {
 } from "@paperclipai/db";
 import { notFound, badRequest } from "../errors.js";
 import { issueService } from "./issues.js";
-import { mergeMissionPlanRefs, missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import { mergeMissionPlanRefs, missionPlanArtifactService, summarizeMissionPlanForRuntime, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
 import {
   isTerminalFailureStatus,
   listMissionExecutionSourceSnapshots,
@@ -74,6 +74,7 @@ export type MissionDetail = MissionRow & {
     lastActiveAt: Date | null;
     runCount: number;
   }>;
+  activeMissionPlan: MissionPlanRuntimeSummary;
 };
 
 export type MissionWorkflowStepIssue = {
@@ -1275,11 +1276,17 @@ export function missionService(db: Db) {
       .where(eq(missionSessions.missionId, id))
       .orderBy(desc(missionSessions.lastActiveAt), asc(missionSessions.agentId));
 
+    const activeMissionPlan = await missionPlanArtifactService(db).getActiveMissionPlan({
+      companyId: mission.companyId,
+      missionId: id,
+    });
+
     return {
       ...mission,
       agents: agentRows.map((r: { row: typeof missionAgents.$inferSelect; agentName: string | null }) => ({ ...r.row, agentName: r.agentName ?? undefined })),
       ownerAgentName: ownerRow?.name,
       sessionBindings,
+      activeMissionPlan: summarizeMissionPlanForRuntime(activeMissionPlan),
     };
   }
 

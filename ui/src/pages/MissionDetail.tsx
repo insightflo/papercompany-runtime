@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { missionsApi, type MissionStatus } from "../api/missions";
+import { missionsApi, type MissionPlanRuntimeSummary, type MissionStatus } from "../api/missions";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -33,6 +33,143 @@ function formatDate(date: Date | string | null | undefined): string {
     day: "numeric",
     year: "numeric",
   }).format(new Date(date));
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordArray(value: unknown): JsonRecord[] {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function textValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function labelForRecord(record: JsonRecord, fallback: string): string {
+  return textValue(record.name) ?? textValue(record.title) ?? textValue(record.key) ?? textValue(record.id) ?? fallback;
+}
+
+function getPlanRefArray(plan: MissionPlanRuntimeSummary | undefined, key: string): JsonRecord[] {
+  return recordArray(isRecord(plan?.refs) ? plan.refs[key] : undefined);
+}
+
+function MissionExecutionRulesPanel({ plan }: { plan?: MissionPlanRuntimeSummary }) {
+  const ruleRefs = getPlanRefArray(plan, "ruleRefs");
+  const kbRefs = getPlanRefArray(plan, "kbRefs");
+  const executionUnits = getPlanRefArray(plan, "executionUnits");
+  const openRequiredInputs = plan?.openRequiredInputs ?? [];
+  const ruleNames = plan?.ruleNames ?? [];
+  const ruleModes = plan?.ruleModes ?? [];
+  const blockedOrFailed = plan?.blockedOrFailedUnitCount ?? 0;
+
+  if (!plan?.available) {
+    return (
+      <div className="border border-border rounded-md p-8 text-center">
+        <Settings className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground mb-1">No active mission execution plan yet</p>
+        <p className="text-xs text-muted-foreground">
+          Worktree Rules, KB excerpts, required inputs, and maintenance decisions appear here once the
+          mission owner substrate creates an active plan.
+        </p>
+        <div className="mt-4">
+          <Button asChild size="sm" variant="outline">
+            <Link to="/worktree/rules">Open global execution rules</Link>
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Latest Maintenance Decision</p>
+            <p className="mt-1 text-sm font-medium">Mission plan revision {plan.revision ?? "—"} · {plan.status ?? "active"}</p>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {plan.executionUnitCount ?? executionUnits.length} execution units · {blockedOrFailed} blocked/failed
+          </div>
+        </div>
+        {plan.missionGoal && <p className="mt-3 text-sm text-muted-foreground">{plan.missionGoal}</p>}
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <div className="rounded border border-border/70 p-3">
+            <p className="text-xs font-medium text-muted-foreground">Required inputs</p>
+            <p className="mt-1 text-sm">{plan.requiredInputsCount ?? openRequiredInputs.length} total · {openRequiredInputs.length} open</p>
+          </div>
+          <div className="rounded border border-border/70 p-3">
+            <p className="text-xs font-medium text-muted-foreground">Suggested status/action</p>
+            <p className="mt-1 text-sm">Owner decision required for retry/replan/escalation</p>
+          </div>
+          <div className="rounded border border-border/70 p-3">
+            <p className="text-xs font-medium text-muted-foreground">Handoff target</p>
+            <p className="mt-1 text-sm">Main executor / operator as required</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-md border border-border p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Applied Worktree Rules</p>
+          {ruleRefs.length > 0 || ruleNames.length > 0 ? (
+            <ul className="mt-3 space-y-2 text-sm">
+              {(ruleRefs.length > 0 ? ruleRefs : ruleNames.map<JsonRecord>((name) => ({ name }))).slice(0, 10).map((rule, index) => {
+                const mode = textValue(rule.mode) ?? ruleModes[index] ?? null;
+                return (
+                  <li key={`${labelForRecord(rule, "Rule")}-${index}`} className="rounded border border-border/70 p-2">
+                    <span className="font-medium">{labelForRecord(rule, `Rule ${index + 1}`)}</span>
+                    {mode && <span className="ml-2 text-xs text-muted-foreground">{mode}</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">No rule refs attached to the active mission plan.</p>
+          )}
+        </section>
+
+        <section className="rounded-md border border-border p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Injected KB references/excerpts</p>
+          {kbRefs.length > 0 ? (
+            <ul className="mt-3 space-y-2 text-sm">
+              {kbRefs.slice(0, 5).map((kb, index) => (
+                <li key={`${labelForRecord(kb, "KB")}-${index}`} className="rounded border border-border/70 p-2">
+                  <span className="font-medium">{labelForRecord(kb, `KB ${index + 1}`)}</span>
+                  {textValue(kb.excerpt) && <p className="mt-1 text-xs text-muted-foreground">{textValue(kb.excerpt)}</p>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">No KB excerpts are attached to this active plan.</p>
+          )}
+        </section>
+      </div>
+
+      <section className="rounded-md border border-border p-4">
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Required inputs</p>
+        {openRequiredInputs.length > 0 ? (
+          <ul className="mt-3 flex flex-wrap gap-2 text-sm">
+            {openRequiredInputs.map((input) => <li key={input} className="rounded-full border border-border px-2 py-1">{input}</li>)}
+          </ul>
+        ) : (
+          <p className="mt-3 text-sm text-muted-foreground">No open required inputs reported.</p>
+        )}
+      </section>
+
+      <section className="rounded-md border border-border p-4">
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Audit timeline</p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Evaluated observations are visible through mission owner supervision comments and activity logs; followed,
+          overridden, and mismatched events will appear here once route-level audit wiring records them.
+        </p>
+      </section>
+    </div>
+  );
 }
 
 export function MissionDetail() {
@@ -223,18 +360,7 @@ export function MissionDetail() {
         </TabsContent>
 
         <TabsContent value="worktree" className="mt-4">
-          <div className="border border-border rounded-md p-8 text-center">
-            <Settings className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground mb-1">Execution rules coming soon</p>
-            <p className="text-xs text-muted-foreground">
-              Execution rule configuration will appear here once P4-T9 and P8-T6 are implemented.
-            </p>
-            <div className="mt-4">
-              <Button asChild size="sm" variant="outline">
-                <Link to="/worktree/rules">Open global execution rules</Link>
-              </Button>
-            </div>
-          </div>
+          <MissionExecutionRulesPanel plan={mission.activeMissionPlan} />
         </TabsContent>
       </Tabs>
     </div>
