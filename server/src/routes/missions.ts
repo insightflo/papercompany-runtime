@@ -131,6 +131,32 @@ export function missionRoutes(db: Db) {
       applySafeActions: applySafeActions === true,
     });
 
+    const actor = getActorInfo(req);
+    const missionResults = Array.isArray(result.missions) ? result.missions : [];
+    const countNestedItems = (key: "findings" | "recommendations" | "appliedActions") =>
+      missionResults.reduce((total, missionResult) => {
+        const value = (missionResult as Record<string, unknown>)[key];
+        return total + (Array.isArray(value) ? value.length : 0);
+      }, 0);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "mission.supervision.run",
+      entityType: "mission",
+      entityId: missionId,
+      details: {
+        staleAfterMinutes: parsedStaleAfterMinutes ?? null,
+        applySafeActions: applySafeActions === true,
+        missionCount: missionResults.length,
+        findingCount: countNestedItems("findings"),
+        recommendationCount: countNestedItems("recommendations"),
+        appliedActionCount: countNestedItems("appliedActions"),
+      },
+    });
+
     res.json(result);
   });
 

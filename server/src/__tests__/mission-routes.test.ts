@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { missionRoutes } from "../routes/missions.js";
 import { errorHandler } from "../middleware/index.js";
+import { logActivity } from "../services/activity-log.js";
 
 const mockMissionService = vi.hoisted(() => ({
   create: vi.fn(),
@@ -213,6 +214,43 @@ describe("mission routes subresources", () => {
           commented: true,
         }),
       ],
+    }));
+  });
+
+  it("writes audit activity when manual mission supervision runs", async () => {
+    mockMissionService.runActiveMissionOwnerSupervision.mockResolvedValue({
+      missionIds: ["mission-1"],
+      missions: [
+        {
+          missionId: "mission-1",
+          findings: ["dispatch_omission: step=draft"],
+          recommendations: [
+            { type: "dispatch_missing_unit", missionId: "mission-1", reason: "dispatch missing", safeToAutoApply: true },
+          ],
+          appliedActions: [],
+          commented: true,
+        },
+      ],
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/missions/mission-1/supervision/run")
+      .send({ staleAfterMinutes: 15 });
+
+    expect(res.status).toBe(200);
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: "company-1",
+      action: "mission.supervision.run",
+      entityType: "mission",
+      entityId: "mission-1",
+      details: expect.objectContaining({
+        staleAfterMinutes: 15,
+        applySafeActions: false,
+        missionCount: 1,
+        findingCount: 1,
+        recommendationCount: 1,
+        appliedActionCount: 0,
+      }),
     }));
   });
 

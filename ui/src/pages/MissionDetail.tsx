@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { missionsApi, type MissionPlanRuntimeSummary, type MissionStatus } from "../api/missions";
+import { activityApi } from "../api/activity";
+import type { ActivityEvent } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -86,7 +88,22 @@ function getPlanRefArray(plan: MissionPlanRuntimeSummary | undefined, key: strin
   return recordArray(isRecord(plan?.refs) ? plan.refs[key] : undefined);
 }
 
-function MissionExecutionRulesPanel({ plan }: { plan?: MissionPlanRuntimeSummary }) {
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function formatAuditEventSummary(event: ActivityEvent): string | null {
+  const details = isRecord(event.details) ? event.details : {};
+  const findingCount = numberValue(details.findingCount);
+  const recommendationCount = numberValue(details.recommendationCount);
+  const appliedActionCount = numberValue(details.appliedActionCount);
+  if (findingCount || recommendationCount || appliedActionCount) {
+    return `${findingCount} findings · ${recommendationCount} recommendations · ${appliedActionCount} applied`;
+  }
+  return null;
+}
+
+function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: MissionPlanRuntimeSummary; auditEvents?: ActivityEvent[] }) {
   const ruleRefs = getPlanRefArray(plan, "ruleRefs");
   const kbRefs = getPlanRefArray(plan, "kbRefs");
   const executionUnits = getPlanRefArray(plan, "executionUnits");
@@ -234,10 +251,26 @@ function MissionExecutionRulesPanel({ plan }: { plan?: MissionPlanRuntimeSummary
 
       <section className="rounded-md border border-border p-4">
         <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Audit timeline</p>
-        <p className="mt-3 text-sm text-muted-foreground">
-          Evaluated observations are visible through mission owner supervision comments and activity logs; followed,
-          overridden, and mismatched events will appear here once route-level audit wiring records them.
-        </p>
+        {auditEvents.length > 0 ? (
+          <ul className="mt-3 space-y-2 text-sm">
+            {auditEvents.slice(0, 8).map((event) => {
+              const summary = formatAuditEventSummary(event);
+              return (
+                <li key={event.id} className="rounded border border-border/70 p-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium">{event.action}</span>
+                    <span className="text-xs text-muted-foreground">{formatDate(event.createdAt)}</span>
+                  </div>
+                  {summary && <p className="mt-1 text-xs text-muted-foreground">{summary}</p>}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No route-level audit events recorded for this mission yet.
+          </p>
+        )}
       </section>
     </div>
   );
@@ -264,6 +297,12 @@ export function MissionDetail() {
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
+  });
+
+  const { data: missionActivity } = useQuery({
+    queryKey: queryKeys.missions.activity(missionId!),
+    queryFn: () => activityApi.list(selectedCompanyId!, { entityType: "mission", entityId: missionId! }),
+    enabled: !!selectedCompanyId && !!missionId,
   });
 
   const agentMap = agents
@@ -431,7 +470,7 @@ export function MissionDetail() {
         </TabsContent>
 
         <TabsContent value="worktree" className="mt-4">
-          <MissionExecutionRulesPanel plan={mission.activeMissionPlan} />
+          <MissionExecutionRulesPanel plan={mission.activeMissionPlan} auditEvents={missionActivity ?? []} />
         </TabsContent>
       </Tabs>
     </div>

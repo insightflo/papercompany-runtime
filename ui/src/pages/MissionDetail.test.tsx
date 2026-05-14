@@ -60,6 +60,32 @@ vi.mock("@tanstack/react-query", () => ({
       };
     }
 
+    if (queryKey[0] === "missions" && queryKey[1] === "activity") {
+      return {
+        data: [
+          {
+            id: "activity-1",
+            companyId: "company-1",
+            actorType: "user",
+            actorId: "local-board",
+            action: "mission.supervision.run",
+            entityType: "mission",
+            entityId: "mission-1",
+            agentId: null,
+            runId: null,
+            details: {
+              findingCount: 1,
+              recommendationCount: 1,
+              appliedActionCount: 0,
+            },
+            createdAt: "2026-04-16T00:00:00.000Z",
+          },
+        ],
+        isLoading: false,
+        error: null,
+      };
+    }
+
     if (queryKey[0] === "agents") {
       return {
         data: [{ id: "agent-1", name: "Planner" }],
@@ -194,6 +220,8 @@ describe("MissionDetail", () => {
     expect(html).toContain("plugin_workflow_step_run:step-run-1");
     expect(html).toContain("failed");
     expect(html).toContain("Audit timeline");
+    expect(html).toContain("mission.supervision.run");
+    expect(html).toContain("1 findings · 1 recommendations · 0 applied");
     expect(html).toContain("1 blocked/failed");
   });
 });
