@@ -521,6 +521,81 @@ describe("heartbeat context budget preflight", () => {
     expect(finalized.error).toContain("scan the entire repo");
   });
 
+  it("reuses mission_sessions token authority across three heartbeats for the same mission", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Mission Session Company",
+      issuePrefix: "MSC",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Mission Session Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Continue mission session." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Reuse mission session authority",
+      status: "active",
+    });
+
+    executeSpy.mockImplementation(async ({ runtime }) => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      usage: null,
+      provider: "test",
+      model: "test-model",
+      resultJson: null,
+      sessionId: runtime.sessionId ?? "mission-token-1",
+    }));
+
+    const heartbeat = heartbeatService(db);
+    for (let i = 0; i < 3; i += 1) {
+      const run = await heartbeat.invoke(agentId, "on_demand", { missionId }, "manual", {
+        actorType: "system",
+        actorId: "test-suite",
+      });
+      expect(run).not.toBeNull();
+      const finalized = await waitForRunTerminal(heartbeat, run!.id);
+      expect(finalized.status).toBe("succeeded");
+    }
+
+    expect(executeSpy).toHaveBeenCalledTimes(3);
+    const runtimes = executeSpy.mock.calls.map((call) => call[0].runtime as { sessionId: string | null; sessionDisplayId: string | null });
+    expect(runtimes.map((runtime) => runtime.sessionId)).toEqual([null, "mission-token-1", "mission-token-1"]);
+    expect(runtimes.map((runtime) => runtime.sessionDisplayId)).toEqual([null, "mission-token-1", "mission-token-1"]);
+
+    const rows = await db.select().from(missionSessions).where(eq(missionSessions.missionId, missionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        companyId,
+        missionId,
+        agentId,
+        adapterType: "codex_local",
+        runCount: 3,
+      }),
+    );
+    expect(rows[0]?.sessionSecretId).toBeTruthy();
+
+    const secretValue = await secretService(db).resolveSecretValue(companyId, rows[0]!.sessionSecretId, "latest");
+    expect(secretValue).toBe("mission-token-1");
+  });
+
   it("counts agent and run placeholders before adapter execution", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
