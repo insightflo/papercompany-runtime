@@ -53,6 +53,35 @@ function labelForRecord(record: JsonRecord, fallback: string): string {
   return textValue(record.name) ?? textValue(record.title) ?? textValue(record.key) ?? textValue(record.id) ?? fallback;
 }
 
+function sourceRefLabel(record: JsonRecord): string | null {
+  const sourceRef = isRecord(record.sourceRef) ? record.sourceRef : null;
+  const sourceType = textValue(sourceRef?.type);
+  const sourceId = textValue(sourceRef?.id);
+  if (sourceType && sourceId) return `${sourceType}:${sourceId}`;
+  return sourceType ?? sourceId;
+}
+
+function statusTone(status: string | null): string {
+  switch (status?.toLowerCase()) {
+    case "completed":
+    case "done":
+      return "text-emerald-600";
+    case "failed":
+    case "blocked":
+    case "aborted":
+    case "cancelled":
+    case "canceled":
+    case "timed_out":
+    case "timed-out":
+      return "text-destructive";
+    case "running":
+    case "in_progress":
+      return "text-blue-600";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
 function getPlanRefArray(plan: MissionPlanRuntimeSummary | undefined, key: string): JsonRecord[] {
   return recordArray(isRecord(plan?.refs) ? plan.refs[key] : undefined);
 }
@@ -64,6 +93,7 @@ function MissionExecutionRulesPanel({ plan }: { plan?: MissionPlanRuntimeSummary
   const openRequiredInputs = plan?.openRequiredInputs ?? [];
   const ruleNames = plan?.ruleNames ?? [];
   const ruleModes = plan?.ruleModes ?? [];
+  const stepSummary = plan?.stepSummary ?? [];
   const blockedOrFailed = plan?.blockedOrFailedUnitCount ?? 0;
 
   if (!plan?.available) {
@@ -111,6 +141,47 @@ function MissionExecutionRulesPanel({ plan }: { plan?: MissionPlanRuntimeSummary
             <p className="mt-1 text-sm">Main executor / operator as required</p>
           </div>
         </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-md border border-border p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Plan steps</p>
+          {stepSummary.length > 0 ? (
+            <ol className="mt-3 space-y-2 text-sm">
+              {stepSummary.map((step, index) => (
+                <li key={`${step}-${index}`} className="rounded border border-border/70 p-2">
+                  <span className="mr-2 text-xs text-muted-foreground">{index + 1}.</span>
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">No plan steps summarized yet.</p>
+          )}
+        </section>
+
+        <section className="rounded-md border border-border p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Execution units</p>
+          {executionUnits.length > 0 ? (
+            <ul className="mt-3 space-y-2 text-sm">
+              {executionUnits.slice(0, 8).map((unit, index) => {
+                const status = textValue(unit.status);
+                const source = sourceRefLabel(unit);
+                return (
+                  <li key={`${source ?? labelForRecord(unit, "Execution unit")}-${index}`} className="rounded border border-border/70 p-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium">{labelForRecord(unit, `Execution unit ${index + 1}`)}</span>
+                      {status && <span className={`text-xs ${statusTone(status)}`}>{status}</span>}
+                    </div>
+                    {source && <p className="mt-1 text-xs text-muted-foreground">{source}</p>}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">No execution units attached to this active plan.</p>
+          )}
+        </section>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

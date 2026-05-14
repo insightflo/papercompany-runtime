@@ -44,7 +44,14 @@ vi.mock("@tanstack/react-query", () => ({
                 { name: "Approval gate rule", mode: "approval_gate", source: "worktree_rules" },
               ],
               kbRefs: [{ title: "Launch KB", excerpt: "Use release notes as operator evidence." }],
-              executionUnits: [{ kind: "plugin_workflow_step_run", status: "failed" }],
+              executionUnits: [
+                {
+                  kind: "plugin_workflow_step_run",
+                  title: "Publish handoff step",
+                  status: "failed",
+                  sourceRef: { type: "plugin_workflow_step_run", id: "step-run-1" },
+                },
+              ],
             },
           },
         },
@@ -179,6 +186,13 @@ describe("MissionDetail", () => {
     expect(html).toContain("owner-judgement");
     expect(html).toContain("Suggested status/action");
     expect(html).toContain("Latest Maintenance Decision");
+    expect(html).toContain("Plan steps");
+    expect(html).toContain("Collect evidence");
+    expect(html).toContain("Owner diagnosis");
+    expect(html).toContain("Execution units");
+    expect(html).toContain("Publish handoff step");
+    expect(html).toContain("plugin_workflow_step_run:step-run-1");
+    expect(html).toContain("failed");
     expect(html).toContain("Audit timeline");
     expect(html).toContain("1 blocked/failed");
   });
