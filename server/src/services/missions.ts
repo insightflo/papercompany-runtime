@@ -24,6 +24,7 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import { notFound, badRequest } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { issueService } from "./issues.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, summarizeMissionPlanForRuntime, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
 import {
@@ -384,7 +385,17 @@ function toPluginWorkflowStepData(value: unknown): PluginWorkflowStepData | null
 // Service
 // ---------------------------------------------------------------------------
 
-export function missionService(db: Db) {
+export type MissionOwnerActionCreatedHandler = (input: {
+  mission: MissionRow;
+  issue: typeof issues.$inferSelect;
+  sourceIssue: typeof issues.$inferSelect;
+}) => Promise<unknown> | unknown;
+
+export interface MissionServiceDeps {
+  onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
+}
+
+export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   const activeWorkflowRunStatuses = new Set(["pending", "queued", "running", "in_progress"]);
   const failedWorkflowRunStatuses = new Set(["aborted", "failed", "cancelled", "canceled", "error"]);
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
@@ -664,6 +675,61 @@ export function missionService(db: Db) {
     });
   }
 
+  async function ensureMainExecutorUnblockIssue(
+    mission: MissionRow,
+    blockedIssue: typeof issues.$inferSelect,
+  ): Promise<typeof issues.$inferSelect> {
+    const existing = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, mission.companyId),
+        eq(issues.missionId, mission.id),
+        eq(issues.originKind, "mission_main_executor_unblock"),
+        eq(issues.originId, blockedIssue.id),
+        isNull(issues.hiddenAt),
+      ))
+      .orderBy(asc(issues.createdAt), asc(issues.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (existing) return existing;
+
+    const blockedLabel = blockedIssue.identifier ?? blockedIssue.id;
+    const unblockIssue = await issueService(db).create(mission.companyId, {
+      assigneeAgentId: mission.ownerAgentId,
+      description: [
+        "Resolve the mission-level blocker without taking over the delegated execution issue.",
+        "",
+        `Mission: ${mission.title}`,
+        `Blocked issue: ${blockedLabel}`,
+        `Original assignee agent: ${blockedIssue.assigneeAgentId ?? "unassigned"}`,
+        "",
+        "Main executor duties:",
+        "- Diagnose why the delegated issue is blocked.",
+        "- Decide whether to request input, retry, reassign, replan, escalate, or report impossible completion.",
+        "- Keep the original blocked issue assigned to its executor unless an explicit reassign decision is made.",
+      ].join("\n"),
+      missionId: mission.id,
+      originKind: "mission_main_executor_unblock",
+      originId: blockedIssue.id,
+      priority: "high",
+      status: "todo",
+      title: `[Unblock] ${blockedLabel}: ${blockedIssue.title}`,
+    });
+
+    if (deps.onOwnerActionCreated) {
+      void Promise.resolve(deps.onOwnerActionCreated({
+        mission,
+        issue: unblockIssue,
+        sourceIssue: blockedIssue,
+      })).catch((err) => {
+        logger.warn({ err, missionId: mission.id, issueId: unblockIssue.id }, "failed to notify owner about mission unblock action");
+      });
+    }
+
+    return unblockIssue;
+  }
+
   async function ensureMainExecutorOversightIssue(
     mission: MissionRow,
     workflowName: string,
@@ -821,7 +887,11 @@ export function missionService(db: Db) {
       activePlan,
     } = context;
 
-    const oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
+    let oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
+    if (!oversightIssue) {
+      await ensureMissionExecutionPlan({ companyId: mission.companyId, missionId: mission.id });
+      oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
+    }
     if (!oversightIssue) {
       return { missionId: mission.id, oversightIssueId: null, findings: [], recommendations: [], appliedActions: [], commented: false };
     }
@@ -857,7 +927,8 @@ export function missionService(db: Db) {
       if (isStaleQueueStatus && stepRowsForIssue.some((row) => row.stepRun.status === "pending") && runCount === 0 && ageMs >= staleAfterMs) {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
       }
-      if (issue.status === "blocked") {
+      if (issue.status === "blocked" && issue.originKind !== "mission_main_executor_unblock") {
+        await ensureMainExecutorUnblockIssue(mission, issue);
         const body = comments.join("\n").toLowerCase();
         const hasReplanSignal = body.includes("replan") || body.includes("re-plan") || body.includes("recover") || body.includes("escalat") || body.includes("impossible") || body.includes("blocked_without_replan");
         if (!hasReplanSignal) {

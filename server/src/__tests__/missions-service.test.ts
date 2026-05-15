@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   companies,
   createDb,
+  issueComments,
   issues,
   missionPlanArtifacts,
   missions,
@@ -19,6 +20,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { missionService } from "../services/missions.js";
+import { issueService } from "../services/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -45,6 +47,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(plugins);
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agents);
@@ -221,7 +224,6 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       issuePrefix: `WM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
-
     await db.insert(agents).values({
       id: ownerAgentId,
       companyId,
@@ -249,6 +251,111 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .where(eq(issues.missionId, result.id));
 
     expect(planningIssues).toEqual([]);
+  });
+
+  it("creates an owner unblock action without stealing a blocked issue from its assignee", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Blocked Mission Company",
+      issuePrefix: `BM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Main Executor",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Worker Agent",
+        role: "writer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Blocked workflow mission",
+      status: "active",
+    });
+
+    const onOwnerActionCreated = vi.fn();
+    const svc = missionService(db, { onOwnerActionCreated });
+    const blockedIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "Blocked delegated work",
+    });
+
+    await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+
+    const missionIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, missionId));
+    const sourceIssue = missionIssues.find((issue) => issue.id === blockedIssue.id);
+    const unblockIssues = missionIssues.filter((issue) => issue.originKind === "mission_main_executor_unblock");
+
+    expect(sourceIssue).toEqual(expect.objectContaining({
+      id: blockedIssue.id,
+      assigneeAgentId: workerAgentId,
+      status: "blocked",
+    }));
+    expect(unblockIssues).toEqual([
+      expect.objectContaining({
+        assigneeAgentId: ownerAgentId,
+        originId: blockedIssue.id,
+        status: "todo",
+        title: expect.stringContaining("Blocked delegated work"),
+      }),
+    ]);
+    expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
+    expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ id: missionId, ownerAgentId }),
+      issue: expect.objectContaining({
+        id: unblockIssues[0]?.id,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_unblock",
+        status: "todo",
+      }),
+      sourceIssue: expect.objectContaining({ id: blockedIssue.id, assigneeAgentId: workerAgentId }),
+    }));
+
+    await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 11 * 60 * 1000),
+    });
+    const repeatedUnblockIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"));
+    expect(repeatedUnblockIssues).toHaveLength(1);
+    expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
   });
 
   it("ensures plugin-backed active mission execution substrate idempotently", async () => {

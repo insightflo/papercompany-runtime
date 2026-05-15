@@ -18,13 +18,37 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { missionService } from "../services/missions.js";
+import { heartbeatService } from "../services/heartbeat.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 
 export function missionRoutes(db: Db) {
   const router = Router();
-  const svc = missionService(db);
+  const heartbeat = heartbeatService(db);
+  const svc = missionService(db, {
+    onOwnerActionCreated: ({ mission, issue, sourceIssue }) => {
+      if (!issue.assigneeAgentId) return null;
+      return heartbeat.wakeup(issue.assigneeAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_unblock_action_created",
+        payload: {
+          issueId: issue.id,
+          mutation: "mission_main_executor_unblock",
+          sourceIssueId: sourceIssue.id,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision",
+        contextSnapshot: {
+          issueId: issue.id,
+          missionId: mission.id,
+          source: "mission_supervision",
+          sourceIssueId: sourceIssue.id,
+        },
+      });
+    },
+  });
 
   // ---------------------------------------------------------------------------
   // Mission CRUD
