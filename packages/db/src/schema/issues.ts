@@ -88,5 +88,8 @@ export const issues = pgTable(
           and ${table.executionRunId} is not null
           and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
       ),
+    missionMainExecutorOversightUq: uniqueIndex("issues_mission_main_executor_oversight_uq")
+      .on(table.missionId)
+      .where(sql`${table.originKind} = 'mission_main_executor_oversight' and ${table.missionId} is not null`),
   }),
 );

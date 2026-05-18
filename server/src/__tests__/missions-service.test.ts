@@ -245,12 +245,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       source: "workflow",
     });
 
-    const planningIssues = await db
+    const workflowIssues = await db
       .select()
       .from(issues)
       .where(eq(issues.missionId, result.id));
 
-    expect(planningIssues).toEqual([]);
+    expect(workflowIssues).toEqual([
+      expect.objectContaining({
+        originKind: "mission_main_executor_oversight",
+        title: "[Oversight] 2026-04-28 gazua-morning",
+      }),
+    ]);
+    expect(workflowIssues.some((issue) => issue.originKind === "mission_main_executor_plan")).toBe(false);
   });
 
   it("creates an owner unblock action without stealing a blocked issue from its assignee", async () => {
@@ -447,6 +453,64 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
           sourceRef: expect.objectContaining({ type: "plugin_workflow_run", id: runEntityId }),
         }),
       ],
+    });
+  });
+
+  it("creates the main executor oversight substrate when a workflow mission is created", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workflow Mission Oversight Company",
+      issuePrefix: `WO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const result = await missionService(db).create({
+      companyId,
+      ownerAgentId,
+      title: "2026-05-15 gazua-weekly",
+      description: "Created automatically for plugin workflow run: gazua-weekly",
+      status: "active",
+      source: "workflow",
+    });
+
+    const oversightIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, result.id));
+    const planArtifacts = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, result.id));
+
+    expect(oversightIssues).toEqual([
+      expect.objectContaining({
+        companyId,
+        assigneeAgentId: ownerAgentId,
+        missionId: result.id,
+        originKind: "mission_main_executor_oversight",
+        status: "todo",
+        title: "[Oversight] 2026-05-15 gazua-weekly",
+      }),
+    ]);
+    expect(planArtifacts).toHaveLength(1);
+    expect(planArtifacts[0]?.refs).toMatchObject({
+      oversightIssueId: oversightIssues[0]?.id,
+      workflowName: "2026-05-15 gazua-weekly",
     });
   });
 

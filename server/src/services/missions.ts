@@ -737,6 +737,14 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   ): Promise<typeof issues.$inferSelect> {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     if (existing) {
+      const nextTitle = `[Oversight] ${workflowName}`;
+      if (existing.title !== nextTitle) {
+        await db
+          .update(issues)
+          .set({ title: nextTitle, updatedAt: new Date() })
+          .where(eq(issues.id, existing.id));
+        existing.title = nextTitle;
+      }
       await ensureWorkflowMissionPlanArtifact(mission, existing, workflowName, metadata);
       return existing;
     }
@@ -1254,6 +1262,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         .then((rows) => rows[0] ?? null);
 
       if (existingActiveWorkflowMission) {
+        const existingMission = await getById(existingActiveWorkflowMission.id);
+        await ensureMainExecutorOversightIssue(existingMission, input.title);
         return getById(existingActiveWorkflowMission.id);
       }
     }
@@ -1292,6 +1302,10 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           role: role ?? "executor",
         }).onConflictDoNothing();
       }
+    }
+
+    if ((input.source ?? "manual") === "workflow") {
+      await ensureMainExecutorOversightIssue(mission, input.title);
     }
 
     if ((input.source ?? "manual") === "manual") {
