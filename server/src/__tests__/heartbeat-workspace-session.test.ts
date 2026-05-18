@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { agents } from "@paperclipai/db";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
+  CODEX_REAUTH_REQUIRED_PAUSE_REASON,
   buildCodexAuthAutoBlockedComment,
   detectCodexAuthFailureForAutoBlock,
   formatRuntimeWorkspaceWarningLog,
@@ -284,6 +285,35 @@ describe("detectCodexAuthFailureForAutoBlock", () => {
     });
   });
 
+  it("detects Codex refresh-token reuse even when the final error is not formatted as 401 text", () => {
+    expect(
+      detectCodexAuthFailureForAutoBlock({
+        adapterType: "codex_local",
+        errorMessage:
+          "Your access token could not be refreshed because your refresh token was already used. code: refresh_token_reused. Please log out and sign in again.",
+      }),
+    ).toEqual({
+      reasonCode: "CODEX_AUTH_REFRESH_TOKEN_REUSED",
+      authErrorCode: "refresh_token_reused",
+    });
+  });
+
+  it("detects expired Codex authentication tokens as reauth-required failures", () => {
+    expect(
+      detectCodexAuthFailureForAutoBlock({
+        adapterType: "codex_local",
+        stderrExcerpt: "Provided authentication token is expired. code: token_expired",
+      }),
+    ).toEqual({
+      reasonCode: "CODEX_AUTH_TOKEN_EXPIRED",
+      authErrorCode: "token_expired",
+    });
+  });
+
+  it("exports the pause reason used for reauth-required Codex failures", () => {
+    expect(CODEX_REAUTH_REQUIRED_PAUSE_REASON).toBe("reauth_required");
+  });
+
   it("ignores non-codex adapters", () => {
     expect(
       detectCodexAuthFailureForAutoBlock({
@@ -305,8 +335,8 @@ describe("buildCodexAuthAutoBlockedComment", () => {
 
     expect(comment).toContain("자동 차단: codex_local 인증 오류");
     expect(comment).toContain("`CODEX_AUTH_401_ACCOUNT_DEACTIVATED`");
-    expect(comment).toContain("`codex auth status`");
-    expect(comment).toContain("`codex auth login`");
+    expect(comment).toContain("`hermes auth`");
+    expect(comment).toContain("`codex login`");
     expect(comment).toContain("`run-123`");
   });
 });

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType } from "@paperclipai/shared";
 import {
@@ -78,6 +78,7 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
+export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -880,14 +881,35 @@ export function detectCodexAuthFailureForAutoBlock(input: {
   ]
     .join("\n")
     .trim();
-  if (!/\b401\s+unauthorized\b|\bauth error:\s*401\b/i.test(haystack)) return null;
 
-  const match = haystack.match(/\bauth error code:\s*([a-z0-9_]+)/i);
-  const authErrorCode = match?.[1]?.toLowerCase() ?? null;
-  return {
-    reasonCode: authErrorCode ? `CODEX_AUTH_401_${normalizeReasonCodeSegment(authErrorCode)}` : "CODEX_AUTH_401",
-    authErrorCode,
-  };
+  const explicitAuthErrorCode = haystack.match(/\bauth error code:\s*([a-z0-9_]+)/i)?.[1]?.toLowerCase() ?? null;
+  const detectedAuthErrorCode =
+    explicitAuthErrorCode ??
+    (haystack.match(/\b(refresh_token_reused|token_expired|invalid_grant|session_expired)\b/i)?.[1]?.toLowerCase() ?? null);
+
+  if (/\b401\s+unauthorized\b|\bauth error:\s*401\b/i.test(haystack)) {
+    return {
+      reasonCode: detectedAuthErrorCode
+        ? `CODEX_AUTH_401_${normalizeReasonCodeSegment(detectedAuthErrorCode)}`
+        : "CODEX_AUTH_401",
+      authErrorCode: detectedAuthErrorCode,
+    };
+  }
+
+  if (
+    detectedAuthErrorCode ||
+    /provided authentication token is expired|access token could not be refreshed|please log out and sign in again|no codex credentials stored/i.test(
+      haystack,
+    )
+  ) {
+    const authErrorCode = detectedAuthErrorCode ?? "reauth_required";
+    return {
+      reasonCode: `CODEX_AUTH_${normalizeReasonCodeSegment(authErrorCode)}`,
+      authErrorCode,
+    };
+  }
+
+  return null;
 }
 
 export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo & { runId: string }): string {
@@ -899,10 +921,10 @@ export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo &
     `- 원인코드: \`${input.reasonCode}\``,
     `- 감지: ${detected}`,
     `- 실행 runId: \`${input.runId}\``,
-    "- 조치 1: `codex auth status`로 현재 인증 상태 점검",
-    "- 조치 2: 필요 시 `codex auth login`으로 재인증",
+    "- 조치 1: `codex login`으로 Codex CLI를 재인증",
+    "- 조치 2: Hermes `openai-codex`도 같은 계정 세션을 쓰면 `hermes auth`로 별도 재인증 상태 확인",
     "- 조치 3: OPENAI API 키 사용 모드면 `OPENAI_API_KEY` 유효성 재확인",
-    "- 재개: 인증 복구 후 이슈를 `todo`로 전환하고 heartbeat 재실행",
+    "- 재개: 인증 복구 후 에이전트 일시정지를 해제하고 heartbeat 재실행",
   ].join("\n");
 }
 
@@ -2281,6 +2303,40 @@ export function heartbeatService(db: Db) {
     return claimed;
   }
 
+  async function pauseAgentForReauthRequired(
+    agentId: string,
+    authInfo: CodexAuthAutoBlockInfo,
+  ) {
+    const paused = await db
+      .update(agents)
+      .set({
+        status: "paused",
+        pauseReason: CODEX_REAUTH_REQUIRED_PAUSE_REASON,
+        pausedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(agents.id, agentId), not(inArray(agents.status, ["paused", "terminated", "pending_approval"]))))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+
+    if (paused) {
+      publishLiveEvent({
+        companyId: paused.companyId,
+        type: "agent.status",
+        payload: {
+          agentId: paused.id,
+          status: paused.status,
+          pauseReason: paused.pauseReason,
+          pausedAt: paused.pausedAt ? new Date(paused.pausedAt).toISOString() : null,
+          outcome: "reauth_required",
+          reasonCode: authInfo.reasonCode,
+        },
+      });
+    }
+
+    return paused;
+  }
+
   async function finalizeAgentStatus(
     agentId: string,
     outcome: "succeeded" | "failed" | "cancelled" | "timed_out",
@@ -3486,11 +3542,24 @@ export function heartbeatService(db: Db) {
             } as Record<string, unknown>)
           : null;
 
+        if (codexAuthAutoBlock) {
+          try {
+            await pauseAgentForReauthRequired(agent.id, codexAuthAutoBlock);
+          } catch (pauseErr) {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to mark agent reauth_required after codex auth failure: ${
+                pauseErr instanceof Error ? pauseErr.message : String(pauseErr)
+              }\n`,
+            );
+          }
+        }
+
         if (
           codexAuthAutoBlock &&
           issueId &&
-        issueContext?.status === "in_progress" &&
-        issueContext.assigneeAgentId === agent.id
+          issueContext?.status === "in_progress" &&
+          issueContext.assigneeAgentId === agent.id
         ) {
           try {
             const autoBlockedIssue = await issuesSvc.update(issueId, { status: "blocked" });
