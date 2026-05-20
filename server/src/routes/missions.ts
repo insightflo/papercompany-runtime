@@ -13,8 +13,8 @@
  * - DELETE /missions/:id/agents/:agentId             — Remove agent from mission
  * - GET    /missions/:id/issues                      — Get mission issue tree
  * - GET    /missions/:id/workflow-runs               — List workflow runs for mission
+ * - GET    /missions/:id/governance-thread           — Read mission governance thread
  */
-
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { missionService } from "../services/missions.js";
@@ -22,6 +22,7 @@ import { heartbeatService } from "../services/heartbeat.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
+import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
 
 export function missionRoutes(db: Db) {
   const router = Router();
@@ -331,6 +332,31 @@ export function missionRoutes(db: Db) {
   // ---------------------------------------------------------------------------
   // Mission sub-resources
   // ---------------------------------------------------------------------------
+
+  /**
+   * GET /missions/:id/governance-thread
+   *
+   * Read the mission governance thread projection for this mission.
+   */
+  router.get("/missions/:id/governance-thread", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+
+    const thread = await listMissionGovernanceThread(db, {
+      companyId: mission.companyId,
+      missionId: mission.id,
+    });
+    if (!thread) {
+      throw notFound("Mission not found");
+    }
+
+    res.json({
+      missionId: mission.id,
+      companyId: mission.companyId,
+      events: thread.events,
+      summary: thread.summary,
+    });
+  });
 
   /**
    * GET /missions/:id/issues
