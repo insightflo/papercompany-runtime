@@ -12,6 +12,7 @@ import {
 } from "@paperclipai/db";
 import { notFound } from "../../errors.js";
 import { listMissionExecutionSourceSnapshots, type MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
+import { listMissionGovernanceThread, type MissionGovernanceThread } from "./governance-thread.js";
 
 export type MissionSupervisionMission = typeof missions.$inferSelect;
 export type MissionSupervisionIssue = typeof issues.$inferSelect;
@@ -33,6 +34,7 @@ export type MissionSupervisionContext = {
   stepRows: MissionSupervisionWorkflowStepRow[];
   stepRowsByIssueId: Map<string, MissionSupervisionWorkflowStepRow[]>;
   executionSnapshot: MissionExecutionSourceSnapshot;
+  governanceThread: MissionGovernanceThread | null;
   activePlan: MissionSupervisionPlanArtifact | null;
 };
 
@@ -119,6 +121,11 @@ export async function buildMissionSupervisionContext(
   });
   const executionSnapshot = snapshots[mission.id] ?? { missionId: mission.id, companyId: mission.companyId, units: [] };
 
+  const governanceThread = await listMissionGovernanceThread(db, {
+    companyId: mission.companyId,
+    missionId: mission.id,
+  });
+
   const [activePlan] = await db
     .select()
     .from(missionPlanArtifacts)
@@ -139,6 +146,7 @@ export async function buildMissionSupervisionContext(
     stepRows,
     stepRowsByIssueId,
     executionSnapshot,
+    governanceThread,
     activePlan: activePlan ?? null,
   };
 }
