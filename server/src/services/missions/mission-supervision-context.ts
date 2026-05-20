@@ -20,6 +20,7 @@ export type MissionSupervisionWorkflowStepRow = {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
 };
+export type MissionSupervisionHeartbeatRun = Pick<typeof heartbeatRuns.$inferSelect, "id" | "issueId" | "status" | "error" | "errorCode" | "exitCode" | "finishedAt" | "createdAt">;
 export type MissionSupervisionPlanArtifact = typeof missionPlanArtifacts.$inferSelect;
 
 export type MissionSupervisionContext = {
@@ -28,6 +29,7 @@ export type MissionSupervisionContext = {
   missionIssueById: Map<string, MissionSupervisionIssue>;
   commentsByIssueId: Map<string, string[]>;
   heartbeatCountByIssueId: Map<string, number>;
+  heartbeatRunsByIssueId: Map<string, MissionSupervisionHeartbeatRun[]>;
   stepRows: MissionSupervisionWorkflowStepRow[];
   stepRowsByIssueId: Map<string, MissionSupervisionWorkflowStepRow[]>;
   executionSnapshot: MissionExecutionSourceSnapshot;
@@ -69,14 +71,27 @@ export async function buildMissionSupervisionContext(
 
   const issueRunRows = missionIssueIds.length > 0
     ? await db
-      .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId, status: heartbeatRuns.status })
+      .select({
+        id: heartbeatRuns.id,
+        issueId: heartbeatRuns.issueId,
+        status: heartbeatRuns.status,
+        error: heartbeatRuns.error,
+        errorCode: heartbeatRuns.errorCode,
+        exitCode: heartbeatRuns.exitCode,
+        finishedAt: heartbeatRuns.finishedAt,
+        createdAt: heartbeatRuns.createdAt,
+      })
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.companyId, mission.companyId), inArray(heartbeatRuns.issueId, missionIssueIds)))
     : [];
   const heartbeatCountByIssueId = new Map<string, number>();
+  const heartbeatRunsByIssueId = new Map<string, MissionSupervisionHeartbeatRun[]>();
   for (const run of issueRunRows) {
     if (!run.issueId) continue;
     heartbeatCountByIssueId.set(run.issueId, (heartbeatCountByIssueId.get(run.issueId) ?? 0) + 1);
+    const list = heartbeatRunsByIssueId.get(run.issueId) ?? [];
+    list.push(run);
+    heartbeatRunsByIssueId.set(run.issueId, list);
   }
 
   const stepRows = await db
@@ -120,6 +135,7 @@ export async function buildMissionSupervisionContext(
     missionIssueById,
     commentsByIssueId,
     heartbeatCountByIssueId,
+    heartbeatRunsByIssueId,
     stepRows,
     stepRowsByIssueId,
     executionSnapshot,

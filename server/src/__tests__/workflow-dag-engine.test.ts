@@ -6,6 +6,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRuns,
   issueComments,
   issues,
   missionPlanArtifacts,
@@ -55,6 +56,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
   afterEach(async () => {
     heartbeatWakeup.mockReset();
     await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
@@ -876,6 +878,87 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(issueComments)
       .where(eq(issueComments.issueId, oversightIssue.id));
     expect(commentsAfterSignatureDedupe).toHaveLength(2);
+  });
+
+  it("observes stale todo issues whose only execution run failed", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const failedRunId = randomUUID();
+    const oldCreatedAt = new Date(Date.now() - 10 * 60 * 1000);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Failed Todo Supervision",
+      issuePrefix: `FT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Failed Todo Supervisor Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Failed Todo Supervision Mission",
+      status: "active",
+      source: "workflow",
+    });
+    const oversightIssue = await missionService(db).ensureMainExecutorOversightIssue(
+      { id: missionId, companyId, ownerAgentId: agentId, title: "Failed Todo Supervision Mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },
+      "Failed Todo Supervision Workflow",
+      {},
+    );
+    const staleIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: agentId,
+      missionId,
+      originKind: "manual",
+      status: "todo",
+      title: "Run failed but issue still appears queued",
+    });
+    await db.update(issues).set({ createdAt: oldCreatedAt }).where(eq(issues.id, staleIssue.id));
+    await db.insert(heartbeatRuns).values({
+      id: failedRunId,
+      companyId,
+      agentId,
+      issueId: staleIssue.id,
+      status: "failed",
+      errorCode: "adapter_failed",
+      error: "access token could not be refreshed",
+      exitCode: 1,
+      createdAt: oldCreatedAt,
+      startedAt: oldCreatedAt,
+      finishedAt: new Date(oldCreatedAt.getTime() + 10_000),
+    });
+
+    const directSupervision = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(),
+    });
+    expect(directSupervision).toMatchObject({
+      missionId,
+      oversightIssueId: oversightIssue.id,
+      commented: true,
+    });
+    expect(directSupervision.findings.join("\n")).toContain("stale_todo_after_failed_run");
+    expect(directSupervision.recommendations.map((recommendation) => recommendation.type)).toEqual(expect.arrayContaining(["retry_unit_if_safe", "request_replan"]));
+
+    const activeSupervision = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    expect(activeSupervision.missionIds).toContain(missionId);
+    expect(activeSupervision.missions[0]?.findings.join("\n")).toContain("stale_todo_after_failed_run");
   });
 
   it("runs active mission owner supervision and applies only safe workflow dispatch sync", async () => {

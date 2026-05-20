@@ -364,6 +364,207 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
   });
 
+  it("surfaces blocked owner unblock actions as recovery work instead of ignoring the deadlock", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Owner Action Deadlock Company",
+      issuePrefix: `OD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Main Executor",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Blog Writer",
+        role: "writer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "gazua-morning artifact mission",
+      status: "active",
+    });
+
+    const blockedIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "[gazua-morning] blog markdown 작성",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: blockedIssue.id,
+      authorAgentId: workerAgentId,
+      body: [
+        "### Work completed in comment but artifact missing",
+        "Required source artifact is missing: `/tmp/Public_Market_Report_2026-05-20.md`",
+        "# Public Market Report 2026-05-20",
+        "본문 초안입니다.",
+      ].join("\n"),
+    });
+
+    await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    const unblockIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"))
+      .then((rows) => rows[0]);
+    expect(unblockIssue).toBeTruthy();
+
+    await issueService(db).update(unblockIssue!.id, { status: "blocked" });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: unblockIssue!.id,
+      authorAgentId: ownerAgentId,
+      body: "Blocked: Required source artifact is missing: `/tmp/Public_Market_Report_2026-05-20.md`",
+    });
+
+    const result = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 20 * 60 * 1000),
+    });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("owner_unblock_action_blocked"),
+      expect.stringContaining("artifact_recovery_available"),
+    ]));
+    expect(result.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "materialize_artifact_from_comment",
+        issueId: blockedIssue.id,
+        reason: expect.stringContaining("comment body"),
+        safeToAutoApply: false,
+      }),
+      expect.objectContaining({
+        type: "request_replan",
+        issueId: unblockIssue!.id,
+        reason: expect.stringContaining("self-block"),
+        safeToAutoApply: false,
+      }),
+    ]));
+
+    const unblockIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"));
+    expect(unblockIssues).toHaveLength(1);
+  });
+
+  it("surfaces repeated artifact-missing failures as recurring owner-improvement work", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Recurring Artifact Company",
+      issuePrefix: `RA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Main Executor",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Blog Writer",
+        role: "writer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "gazua-morning recurring blog artifact mission",
+      status: "active",
+    });
+
+    const previousIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      status: "blocked",
+      title: "[gazua-morning] 2026-05-18 일간 블로그 markdown 작성",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: previousIssue.id,
+      body: "### Required workflow artifact missing\n- Required artifact: reports/blog/202605/Public_Market_Report_2026-05-18.md",
+    });
+    const currentIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "[gazua-morning] 2026-05-20 일간 블로그 markdown 작성",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: currentIssue.id,
+      body: "### Required workflow artifact missing\n- Required artifact: reports/blog/202605/Public_Market_Report_2026-05-20.md",
+    });
+
+    const result = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("recurring_artifact_missing"),
+    ]));
+    expect(result.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "request_replan",
+        issueId: currentIssue.id,
+        reason: expect.stringContaining("Recurring artifact-missing"),
+        safeToAutoApply: false,
+      }),
+    ]));
+  });
+
   it("ensures plugin-backed active mission execution substrate idempotently", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

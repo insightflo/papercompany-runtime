@@ -6,7 +6,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
@@ -140,6 +140,7 @@ export type MissionOwnerSupervisionRecommendationType =
   | "request_replan"
   | "request_approval"
   | "escalate_blocked"
+  | "materialize_artifact_from_comment"
   | "mark_impossible_with_evidence";
 
 export type MissionOwnerSupervisionRecommendation = {
@@ -876,6 +877,56 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       || body.includes("failed_unit_without_diagnosis");
   }
 
+  function hasArtifactMissingSignal(...bodies: string[]): boolean {
+    const body = bodies.join("\n").toLowerCase();
+    return body.includes("required workflow artifact missing")
+      || body.includes("required source artifact is missing")
+      || body.includes("artifact missing")
+      || body.includes("블로그 파일 누락")
+      || body.includes("markdown 파일로 저장")
+      || body.includes("파일로만 저장");
+  }
+
+  function hasRecoverableArtifactComment(...bodies: string[]): boolean {
+    const body = bodies.join("\n");
+    const lower = body.toLowerCase();
+    return hasArtifactMissingSignal(body)
+      && (lower.includes(".md") || lower.includes("markdown"))
+      && /^#{1,3}\s+\S+/m.test(body);
+  }
+
+  async function listRecurringArtifactMissingIssueRefs(input: {
+    companyId: string;
+    assigneeAgentId: string | null;
+    since: Date;
+  }): Promise<Array<{ id: string; identifier: string | null; title: string }>> {
+    if (!input.assigneeAgentId) return [];
+    const rows = await db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+      })
+      .from(issues)
+      .innerJoin(issueComments, eq(issueComments.issueId, issues.id))
+      .where(and(
+        eq(issues.companyId, input.companyId),
+        eq(issues.assigneeAgentId, input.assigneeAgentId),
+        isNull(issues.hiddenAt),
+        gte(issueComments.createdAt, input.since),
+        sql`(
+          ${issueComments.body} ilike '%required workflow artifact missing%'
+          or ${issueComments.body} ilike '%artifact missing%'
+          or ${issueComments.body} ilike '%블로그 파일 누락%'
+          or ${issueComments.body} ilike '%markdown 파일로 저장%'
+          or ${issueComments.body} ilike '%파일로만 저장%'
+        )`,
+      ));
+    const byIssueId = new Map<string, { id: string; identifier: string | null; title: string }>();
+    for (const row of rows) byIssueId.set(row.id, row);
+    return [...byIssueId.values()];
+  }
+
   async function runMainExecutorSupervision(input: {
     missionId: string;
     staleAfterMinutes?: number;
@@ -889,6 +940,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       missionIssueById,
       commentsByIssueId,
       heartbeatCountByIssueId,
+      heartbeatRunsByIssueId,
       stepRows,
       stepRowsByIssueId,
       executionSnapshot,
@@ -924,20 +976,89 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       const ageMs = now.getTime() - issue.createdAt.getTime();
       const label = issue.identifier ?? issue.id;
       const runCount = heartbeatCountByIssueId.get(issue.id) ?? 0;
+      const runsForIssue = heartbeatRunsByIssueId.get(issue.id) ?? [];
       const comments = commentsByIssueId.get(issue.id) ?? [];
       const stepRowsForIssue = stepRowsByIssueId.get(issue.id) ?? [];
+      const hasActiveHeartbeat = runsForIssue.some((run) => run.status === "queued" || run.status === "running");
+      const failedRunsForIssue = runsForIssue.filter((run) => run.status === "failed" || run.error || run.errorCode || run.exitCode != null);
       const hasCheckoutOrExecution = Boolean(issue.checkoutRunId || issue.executionRunId || issue.startedAt || runCount > 0);
       const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
 
       if (isStaleQueueStatus && ageMs >= staleAfterMs && !hasCheckoutOrExecution) {
         findings.push(`stale_todo: ${label} ${issue.status} with no checkout/execution/heartbeat run_count=${runCount} — ${issue.title}`);
       }
+      if (isStaleQueueStatus && ageMs >= staleAfterMs && failedRunsForIssue.length > 0 && !hasActiveHeartbeat) {
+        const latestFailedRun = failedRunsForIssue
+          .slice()
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+        findings.push(`stale_todo_after_failed_run: ${label} ${issue.status} has failed heartbeat run=${latestFailedRun.id} and no active execution — ${issue.title}`);
+        addRecommendation({
+          type: "retry_unit_if_safe",
+          missionId: mission.id,
+          issueId: issue.id,
+          reason: `Queued issue ${label} has a failed heartbeat run and no active execution; owner should diagnose before retry/re-dispatch`,
+          safeToAutoApply: false,
+        });
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          issueId: issue.id,
+          reason: `Queued issue ${label} remains ${issue.status} after failed execution; owner should recover, replan, or escalate`,
+          safeToAutoApply: false,
+        });
+      }
       if (isStaleQueueStatus && stepRowsForIssue.some((row) => row.stepRun.status === "pending") && runCount === 0 && ageMs >= staleAfterMs) {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
+      }
+      if (issue.status === "blocked" && issue.originKind === "mission_main_executor_unblock") {
+        const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
+        const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (issue.originId ?? "unknown-source");
+        const ownerActionBody = comments.join("\n");
+        const sourceComments = sourceIssue ? (commentsByIssueId.get(sourceIssue.id) ?? []) : [];
+        const sourceBody = sourceComments.join("\n");
+        findings.push(`owner_unblock_action_blocked: ${label} is a mission owner unblock action for ${sourceLabel} but is itself blocked — ${issue.title}`);
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          issueId: issue.id,
+          reason: `Owner unblock action ${label} is self-blocked; owner should choose a recovery decision instead of blocking the recovery issue`,
+          safeToAutoApply: false,
+        });
+        if (sourceIssue && hasRecoverableArtifactComment(sourceBody, ownerActionBody, sourceIssue.description ?? "", issue.description ?? "")) {
+          findings.push(`artifact_recovery_available: ${sourceLabel} has required artifact missing signal and candidate markdown content in comments; materialize the canonical file before retrying — ${sourceIssue.title}`);
+          addRecommendation({
+            type: "materialize_artifact_from_comment",
+            missionId: mission.id,
+            issueId: sourceIssue.id,
+            reason: `Required artifact for ${sourceLabel} appears recoverable from comment body; materialize the canonical markdown file, then retry/reconcile the workflow step`,
+            safeToAutoApply: false,
+          });
+        }
       }
       if (issue.status === "blocked" && issue.originKind !== "mission_main_executor_unblock") {
         await ensureMainExecutorUnblockIssue(mission, issue);
         const body = comments.join("\n").toLowerCase();
+        if (hasArtifactMissingSignal(body)) {
+          const recurringIssues = await listRecurringArtifactMissingIssueRefs({
+            companyId: mission.companyId,
+            assigneeAgentId: issue.assigneeAgentId,
+            since: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
+          });
+          if (recurringIssues.length >= 2) {
+            const issueRefs = recurringIssues
+              .map((row) => row.identifier ?? row.id)
+              .sort()
+              .join(", ");
+            findings.push(`recurring_artifact_missing: ${label} repeats required artifact/file materialization failure for assignee across ${recurringIssues.length} recent issues (${issueRefs}) — ${issue.title}`);
+            addRecommendation({
+              type: "request_replan",
+              missionId: mission.id,
+              issueId: issue.id,
+              reason: `Recurring artifact-missing failure detected for ${label}; owner should update the workflow/agent instructions and evidence contract before retrying`,
+              safeToAutoApply: false,
+            });
+          }
+        }
         const hasReplanSignal = body.includes("replan") || body.includes("re-plan") || body.includes("recover") || body.includes("escalat") || body.includes("impossible") || body.includes("blocked_without_replan");
         if (!hasReplanSignal) {
           findings.push(`blocked_without_replan: ${label} blocked without recovery/replan/escalation comment — ${issue.title}`);
@@ -1063,6 +1184,42 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         reason: `Failed execution unit ${unit.sourceRef.type}:${unit.sourceRef.id} needs recovery/replan path signal`,
         safeToAutoApply: false,
       });
+    }
+
+    for (const unit of executionSnapshot.units) {
+      if (!(unit.kind === "plugin_workflow_run" || unit.kind === "plugin_workflow_step_run" || unit.kind === "native_workflow_run")) continue;
+      const isActiveExecutionStatus = unit.status === "pending" || unit.status === "running";
+      if (!isActiveExecutionStatus) continue;
+      const lastObservedAt = unit.updatedAt ?? unit.startedAt ?? unit.createdAt;
+      if (lastObservedAt && now.getTime() - lastObservedAt.getTime() >= staleAfterMs) {
+        findings.push(`stale_execution_unit: source=${unit.sourceRef.type} id=${unit.sourceRef.id} status=${unit.status} stale_since=${lastObservedAt.toISOString()}${unit.stepId ? ` step=${unit.stepId}` : ""}`);
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          workflowRunId: unit.workflowRunId ?? undefined,
+          stepId: unit.stepId ?? undefined,
+          issueId: unit.issueId ?? undefined,
+          sourceRef: unit.sourceRef,
+          reason: `Execution unit ${unit.sourceRef.type}:${unit.sourceRef.id} is still ${unit.status} after ${input.staleAfterMinutes ?? 120} minutes; owner should recover/replan/escalate`,
+          safeToAutoApply: false,
+        });
+      }
+      if (unit.issueId && unit.status === "running") {
+        const linkedIssue = missionIssueById.get(unit.issueId);
+        if (linkedIssue?.status === "blocked") {
+          findings.push(`execution_issue_status_mismatch: source=${unit.sourceRef.type} id=${unit.sourceRef.id} status=running linked_issue=${linkedIssue.identifier ?? linkedIssue.id} status=blocked${unit.stepId ? ` step=${unit.stepId}` : ""}`);
+          addRecommendation({
+            type: "request_replan",
+            missionId: mission.id,
+            workflowRunId: unit.workflowRunId ?? undefined,
+            stepId: unit.stepId ?? undefined,
+            issueId: unit.issueId,
+            sourceRef: unit.sourceRef,
+            reason: `Linked issue ${linkedIssue.identifier ?? linkedIssue.id} is blocked while execution unit ${unit.sourceRef.type}:${unit.sourceRef.id} remains running`,
+            safeToAutoApply: false,
+          });
+        }
+      }
     }
 
     if (activePlan) {
@@ -1208,16 +1365,37 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       missionRowsByCompanyId.set(row.companyId, rows);
     }
 
+    const now = input.now ?? new Date();
+    const staleCutoff = new Date(now.getTime() - Math.max(1, input.staleAfterMinutes ?? 120) * 60 * 1000);
+
     for (const [companyId, rows] of missionRowsByCompanyId) {
+      const rowMissionIds = rows.map((row) => row.id);
       const snapshots = await listMissionExecutionSourceSnapshots(db, {
         companyId,
-        missionIds: rows.map((row) => row.id),
+        missionIds: rowMissionIds,
       });
+      const staleFailedHeartbeatMissionIds = new Set(
+        rowMissionIds.length > 0
+          ? (await db
+            .select({ missionId: issues.missionId })
+            .from(issues)
+            .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
+            .where(and(
+              eq(issues.companyId, companyId),
+              inArray(issues.missionId, rowMissionIds),
+              inArray(issues.status, ["todo", "backlog"]),
+              lte(issues.createdAt, staleCutoff),
+              eq(heartbeatRuns.status, "failed"),
+            )))
+            .map((row) => row.missionId)
+            .filter((missionId): missionId is string => Boolean(missionId))
+          : [],
+      );
 
       for (const row of rows) {
         const snapshot = snapshots[row.id];
         const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        if (hasSupervisionUnit) missionIds.push(row.id);
+        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id)) missionIds.push(row.id);
       }
     }
 
