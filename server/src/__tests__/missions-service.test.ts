@@ -339,6 +339,32 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         title: expect.stringContaining("Blocked delegated work"),
       }),
     ]);
+    const description = unblockIssues[0]!.description ?? "";
+    expect(description).toContain(`<!-- mission-owner-action:{"missionId":"${missionId}","sourceIssueId":"${blockedIssue.id}","actionType":"unblock","status":"decision_required"} -->`);
+    expect(description).toContain(`Mission id: ${missionId}`);
+    expect(description).toContain("Mission title: Blocked workflow mission");
+    expect(description).toContain(`Source issue id: ${blockedIssue.id}`);
+    expect(description).toContain(`Source issue identifier: ${blockedIssue.identifier}`);
+    expect(description).toContain("Source issue title: Blocked delegated work");
+    expect(description).toContain("Source issue status: blocked");
+    expect(description).toContain(`Original assignee agent: ${workerAgentId}`);
+    expect(description).toContain("Mission owner duties:");
+    for (const decision of [
+      "request_input",
+      "retry_source_issue",
+      "reassign_source_issue",
+      "replan_mission",
+      "escalate",
+      "report_impossible",
+      "recover_artifact",
+      "no_action_waiting",
+    ]) {
+      expect(description).toContain(decision);
+    }
+    expect(description).toContain("### Mission owner decision");
+    expect(description).toContain("Decision: <one of the allowed decision options>");
+    expect(description).toContain("Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.");
+    expect(description).toContain("Governance evidence: latest evidence unavailable for this owner action template.");
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
       mission: expect.objectContaining({ id: missionId, ownerAgentId }),

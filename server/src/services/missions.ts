@@ -58,6 +58,90 @@ export type MissionAgentRole = "executor" | "reviewer" | "observer";
  */
 export type MissionRow = typeof missions.$inferSelect;
 
+type IssueRow = typeof issues.$inferSelect;
+
+type MissionOwnerDecisionOption =
+  | "request_input"
+  | "retry_source_issue"
+  | "reassign_source_issue"
+  | "replan_mission"
+  | "escalate"
+  | "report_impossible"
+  | "recover_artifact"
+  | "no_action_waiting";
+
+const MISSION_OWNER_DECISION_OPTIONS: MissionOwnerDecisionOption[] = [
+  "request_input",
+  "retry_source_issue",
+  "reassign_source_issue",
+  "replan_mission",
+  "escalate",
+  "report_impossible",
+  "recover_artifact",
+  "no_action_waiting",
+];
+
+function buildMissionOwnerActionMarker(input: {
+  missionId: string;
+  sourceIssueId: string;
+  actionType: "unblock";
+  status: "decision_required";
+}): string {
+  return `<!-- mission-owner-action:${JSON.stringify({
+    missionId: input.missionId,
+    sourceIssueId: input.sourceIssueId,
+    actionType: input.actionType,
+    status: input.status,
+  })} -->`;
+}
+
+function buildMissionOwnerDecisionFormat(): string {
+  return [
+    "Required output format:",
+    "### Mission owner decision",
+    "Decision: <one of the allowed decision options>",
+    "Source issue: <source issue identifier or id>",
+    "Reason: <why this decision is appropriate>",
+    "Next action: <specific next action or waiting condition>",
+    "Evidence: <compact evidence used for the decision>",
+  ].join("\n");
+}
+
+function buildMissionOwnerUnblockDescription(mission: MissionRow, blockedIssue: IssueRow): string {
+  const sourceLabel = blockedIssue.identifier ?? blockedIssue.id;
+  return [
+    buildMissionOwnerActionMarker({
+      missionId: mission.id,
+      sourceIssueId: blockedIssue.id,
+      actionType: "unblock",
+      status: "decision_required",
+    }),
+    "Resolve the mission-level blocker without taking over the delegated execution issue.",
+    "",
+    `Mission id: ${mission.id}`,
+    `Mission title: ${mission.title}`,
+    `Source issue id: ${blockedIssue.id}`,
+    `Source issue identifier: ${sourceLabel}`,
+    `Source issue title: ${blockedIssue.title}`,
+    `Source issue status: ${blockedIssue.status}`,
+    `Original assignee agent: ${blockedIssue.assigneeAgentId ?? "unassigned"}`,
+    "",
+    "Mission owner duties:",
+    "- Manage the mission outcome boundary: diagnose blockers, decide recovery direction, and keep the mission moving.",
+    "- Do not perform the delegated source work by default; coordinate, decide, and record the next owner action.",
+    "- Preserve the source issue assignee unless an explicit reassignment decision is made.",
+    "- Use Governance Thread information only as read-only evidence for this owner decision.",
+    "",
+    "Allowed decision options:",
+    ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => `- ${decision}`),
+    "",
+    buildMissionOwnerDecisionFormat(),
+    "",
+    "Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.",
+    "Governance evidence: latest evidence unavailable for this owner action template.",
+  ].join("\n");
+}
+
 /**
  * MissionAgent row type.
  */
@@ -740,18 +824,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const blockedLabel = blockedIssue.identifier ?? blockedIssue.id;
     const unblockIssue = await issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
-      description: [
-        "Resolve the mission-level blocker without taking over the delegated execution issue.",
-        "",
-        `Mission: ${mission.title}`,
-        `Blocked issue: ${blockedLabel}`,
-        `Original assignee agent: ${blockedIssue.assigneeAgentId ?? "unassigned"}`,
-        "",
-        "Main executor duties:",
-        "- Diagnose why the delegated issue is blocked.",
-        "- Decide whether to request input, retry, reassign, replan, escalate, or report impossible completion.",
-        "- Keep the original blocked issue assigned to its executor unless an explicit reassign decision is made.",
-      ].join("\n"),
+      description: buildMissionOwnerUnblockDescription(mission, blockedIssue),
       missionId: mission.id,
       originKind: "mission_main_executor_unblock",
       originId: blockedIssue.id,
