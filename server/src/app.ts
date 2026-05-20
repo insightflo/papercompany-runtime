@@ -60,6 +60,7 @@ import { createScheduler } from "./services/scheduler/index.js";
 import { createDeliveryRetryWorker } from "./services/srb/delivery-retry-worker.js";
 import { createNonceCleanupJob } from "./services/srb/nonce-cleanup.js";
 import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
+import { createMissionOwnerSupervisionMonitor } from "./services/mission-owner-supervision-monitor.js";
 import { createAlertRules, setAlertRules } from "./services/alert-rules.js";
 import { createChannelRegistry } from "./channel/index.js";
 import { getChatId } from "./channel/telegram/outbound.js";
@@ -511,6 +512,33 @@ export async function createApp(
 
   const auditLogCleanup = createAuditLogCleanupJob(db);
   auditLogCleanup.start();
+
+  const missionOwnerSupervisionMonitor = createMissionOwnerSupervisionMonitor(db, {
+    onOwnerActionCreated: ({ mission, issue, sourceIssue }) => {
+      if (!issue.assigneeAgentId) return null;
+      return heartbeat.wakeup(issue.assigneeAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_unblock_action_created",
+        payload: {
+          issueId: issue.id,
+          missionId: mission.id,
+          mutation: "mission_main_executor_unblock",
+          sourceIssueId: sourceIssue.id,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision-monitor",
+        contextSnapshot: {
+          issueId: issue.id,
+          missionId: mission.id,
+          source: "mission_supervision_monitor",
+          sourceIssueId: sourceIssue.id,
+        },
+      });
+    },
+  });
+  missionOwnerSupervisionMonitor.start();
+  process.once("exit", () => missionOwnerSupervisionMonitor.stop());
 
   pluginScheduler.start();
   jobCoordinator.start();

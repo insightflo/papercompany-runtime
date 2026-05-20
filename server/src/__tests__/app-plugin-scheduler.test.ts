@@ -1,6 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const pluginSchedulerStart = vi.fn();
+const missionOwnerSupervisionMonitorStart = vi.fn();
+const createMissionOwnerSupervisionMonitorMock = vi.fn(() => ({
+  start: missionOwnerSupervisionMonitorStart,
+  stop: vi.fn(),
+  run: vi.fn(),
+}));
 
 vi.mock("../services/plugin-job-scheduler.js", () => ({
   createPluginJobScheduler: vi.fn(() => ({
@@ -131,7 +137,17 @@ vi.mock("../services/audit-log-cleanup.js", () => ({
   createAuditLogCleanupJob: vi.fn(() => ({ start: vi.fn() })),
 }));
 
+vi.mock("../services/mission-owner-supervision-monitor.js", () => ({
+  createMissionOwnerSupervisionMonitor: createMissionOwnerSupervisionMonitorMock,
+}));
+
 describe("createApp plugin scheduler lifecycle", () => {
+  beforeEach(() => {
+    pluginSchedulerStart.mockClear();
+    missionOwnerSupervisionMonitorStart.mockClear();
+    createMissionOwnerSupervisionMonitorMock.mockClear();
+  });
+
   it("starts the plugin job scheduler so plugin cron jobs can tick", async () => {
     const { createApp } = await import("../app.js");
 
@@ -148,5 +164,29 @@ describe("createApp plugin scheduler lifecycle", () => {
     });
 
     expect(pluginSchedulerStart).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it("starts the mission owner supervision monitor so stale active missions are inspected automatically", async () => {
+    const { createApp } = await import("../app.js");
+
+    await createApp({} as never, {
+      uiMode: "none",
+      serverPort: 3200,
+      storageService: {} as never,
+      deploymentMode: "local_trusted",
+      deploymentExposure: "private",
+      allowedHostnames: [],
+      bindHost: "127.0.0.1",
+      authReady: true,
+      companyDeletionEnabled: true,
+    });
+
+    expect(missionOwnerSupervisionMonitorStart).toHaveBeenCalledTimes(1);
+    expect(createMissionOwnerSupervisionMonitorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        onOwnerActionCreated: expect.any(Function),
+      }),
+    );
   }, 15_000);
 });
