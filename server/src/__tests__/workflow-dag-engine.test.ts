@@ -757,7 +757,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .select()
       .from(issueComments)
       .where(eq(issueComments.issueId, oversightIssue.id));
-    expect(commentsAfterSupervision.map((comment) => comment.body).join("\n")).toContain("Mission owner supervision diagnosis");
+    const supervisionCommentBody = commentsAfterSupervision.map((comment) => comment.body).join("\n");
+    expect(supervisionCommentBody).toContain("Mission owner supervision diagnosis");
+    expect(supervisionCommentBody).toContain("Governance thread evidence:");
+    expect(supervisionCommentBody).toContain("Workflow step reached terminal status failed.");
+    expect(supervisionCommentBody).toContain("workflow_step_failed: Workflow step failed");
+    expect(supervisionCommentBody).not.toContain("wake_agent");
   });
 
   it("observes stale workflow todo dispatch omissions without hard-blocking", async () => {
