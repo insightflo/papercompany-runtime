@@ -364,12 +364,28 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
 };
 
+export type MissionOwnerActionExplanationStatus =
+  | "decision_required"
+  | "decision_recorded_read_only"
+  | "retry_applied_no_wakeup"
+  | "not_applicable_or_invalid";
+
+export type MissionOwnerActionExplanation = {
+  ownerActionIssue: Pick<IssueRow, "id" | "identifier" | "title" | "status" | "originKind">;
+  sourceIssue: Pick<IssueRow, "id" | "identifier" | "title" | "status" | "assigneeAgentId"> | null;
+  latestDecision: ExtractedMissionOwnerDecision | null;
+  retryApplied: boolean;
+  status: MissionOwnerActionExplanationStatus;
+  explanation: string;
+};
+
 export type MissionOwnerSupervisionResult = {
   missionId: string;
   oversightIssueId: string | null;
   findings: string[];
   recommendations: MissionOwnerSupervisionRecommendation[];
   appliedActions: MissionOwnerSupervisionAppliedAction[];
+  ownerActionExplanations: MissionOwnerActionExplanation[];
   commented: boolean;
 };
 
@@ -1193,7 +1209,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     }
     if (!oversightIssue) {
-      return { missionId: mission.id, oversightIssueId: null, findings: [], recommendations: [], appliedActions: [], commented: false };
+      return { missionId: mission.id, oversightIssueId: null, findings: [], recommendations: [], appliedActions: [], ownerActionExplanations: [], commented: false };
     }
 
     const now = input.now ?? new Date();
@@ -1657,6 +1673,72 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
     }
 
+    const ownerActionExplanations: MissionOwnerActionExplanation[] = [];
+    for (const ownerActionIssue of missionIssues.filter((issue) => issue.originKind === "mission_main_executor_unblock")) {
+      const ownerActionComments = commentsByIssueId.get(ownerActionIssue.id) ?? [];
+      const latestDecision = extractLatestMissionOwnerDecision(ownerActionComments);
+      const sourceIssue = ownerActionIssue.originId
+        ? await db
+          .select({
+            id: issues.id,
+            identifier: issues.identifier,
+            title: issues.title,
+            status: issues.status,
+            assigneeAgentId: issues.assigneeAgentId,
+          })
+          .from(issues)
+          .where(and(eq(issues.id, ownerActionIssue.originId), eq(issues.companyId, mission.companyId), eq(issues.missionId, mission.id), isNull(issues.hiddenAt)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+        : null;
+      const sourceComments = sourceIssue
+        ? await db
+          .select({ body: issueComments.body })
+          .from(issueComments)
+          .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssue.id)))
+        : [];
+      const retryApplied = Boolean(sourceIssue && hasMissionOwnerDecisionAppliedMarker(sourceComments.map((comment) => comment.body), {
+        ownerActionIssueId: ownerActionIssue.id,
+        sourceIssueId: sourceIssue.id,
+        decision: "retry_source_issue",
+      }));
+      const invalidDecision = latestDecision?.decision === null;
+      const terminalSource = Boolean(sourceIssue && isTerminalIssueStatus(sourceIssue.status));
+      const status: MissionOwnerActionExplanationStatus = retryApplied
+        ? "retry_applied_no_wakeup"
+        : invalidDecision || terminalSource || !sourceIssue
+          ? "not_applicable_or_invalid"
+          : latestDecision
+            ? "decision_recorded_read_only"
+            : "decision_required";
+      const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerActionIssue.originId ?? "unknown source");
+      const explanation = status === "retry_applied_no_wakeup"
+        ? `Retry was explicitly applied for source issue ${sourceLabel}; it is queued again and no heartbeat wakeup was created by this status surface.`
+        : status === "decision_recorded_read_only"
+          ? `Mission owner decision ${latestDecision?.decision ?? "unknown"} was recorded but not applied; source issue ${sourceLabel} remains assigned to its current assignee.`
+          : status === "decision_required"
+            ? `Owner decision required for source issue ${sourceLabel}; source issue remains assigned to its current assignee.`
+            : invalidDecision
+              ? `Mission owner decision is invalid (${latestDecision.invalidDecision}); no execution action was taken.`
+              : terminalSource
+                ? `Source issue ${sourceLabel} is terminal; owner-action status is informational only and no execution action was taken.`
+                : `Source issue ${sourceLabel} is unavailable for this mission; owner-action status is informational only and no execution action was taken.`;
+      ownerActionExplanations.push({
+        ownerActionIssue: {
+          id: ownerActionIssue.id,
+          identifier: ownerActionIssue.identifier,
+          title: ownerActionIssue.title,
+          status: ownerActionIssue.status,
+          originKind: ownerActionIssue.originKind,
+        },
+        sourceIssue,
+        latestDecision,
+        retryApplied,
+        status,
+        explanation,
+      });
+    }
+
     const uniqueFindings = Array.from(new Set(findings));
     const safeDispatchRecommendations = recommendations.filter((recommendation) => recommendation.type === "dispatch_missing_step" && recommendation.safeToAutoApply && recommendation.workflowRunId);
     if (input.applySafeActions && safeDispatchRecommendations.length > 0) {
@@ -1680,7 +1762,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     }
 
     if (uniqueFindings.length === 0) {
-      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: false };
+      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, ownerActionExplanations, commented: false };
     }
 
     const findingsSignature = createHash("sha256")
@@ -1689,7 +1771,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .slice(0, 16);
     const markerText = `mission-owner-supervision:${mission.id}:${now.toISOString().slice(0, 13)}:${findingsSignature}`;
     if (oversightBodies.includes(markerText)) {
-      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: false };
+      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, ownerActionExplanations, commented: false };
     }
 
     await issueService(db).addComment(
@@ -1729,7 +1811,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       { agentId: mission.ownerAgentId },
     );
 
-    return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, commented: true };
+    return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, ownerActionExplanations, commented: true };
   }
 
   const ACTIVE_SUPERVISION_EXECUTION_STATUSES = new Set<MissionExecutionStatus>(["pending", "running", "failed", "cancelled", "timed_out"]);
