@@ -4,6 +4,7 @@ import type { AgentRuntimeState } from "@paperclipai/shared";
 import { AlertTriangle, BookOpen, Bot, GitBranch, Wrench } from "lucide-react";
 import { agentsApi } from "../api/agents";
 import { missionsApi, type MissionDetailItem } from "../api/missions";
+import { MissionGovernanceThreadPanel } from "./MissionGovernanceThreadPanel";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 
@@ -208,6 +209,8 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
           icon={<AlertTriangle className="h-3.5 w-3.5" />}
         />
       </div>
+
+      <MissionGovernanceThreadPanel missionId={missionId} />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="rounded-md border border-border p-4 space-y-3">
