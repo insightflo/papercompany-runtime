@@ -167,6 +167,57 @@ function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMissionOwn
   return null;
 }
 
+function buildMissionOwnerDecisionAppliedMarker(input: {
+  ownerActionIssueId: string;
+  sourceIssueId: string;
+  decision: "retry_source_issue";
+}): string {
+  return `<!-- mission-owner-decision-applied:${JSON.stringify(input)} -->`;
+}
+
+function hasMissionOwnerDecisionAppliedMarker(comments: string[], input: {
+  ownerActionIssueId: string;
+  sourceIssueId: string;
+  decision: "retry_source_issue";
+}): boolean {
+  const marker = buildMissionOwnerDecisionAppliedMarker(input);
+  return comments.some((comment) => comment.includes(marker));
+}
+
+function isTerminalIssueStatus(status: string): boolean {
+  return status === "done" || status === "cancelled";
+}
+
+function summarizeOwnerDecisionNotApplied(input: {
+  ownerActionLabel: string;
+  sourceLabel: string;
+  reason: string;
+}) {
+  return `owner_action_decision_not_applied: ${input.ownerActionLabel} retry_source_issue source=${input.sourceLabel} — ${input.reason}`;
+}
+
+function buildRetrySourceIssueComment(input: {
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  decisionReason?: string;
+}) {
+  return [
+    "### Mission owner retry applied",
+    buildMissionOwnerDecisionAppliedMarker({
+      ownerActionIssueId: input.ownerActionIssueId,
+      sourceIssueId: input.sourceIssueId,
+      decision: "retry_source_issue",
+    }),
+    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    "Decision: retry_source_issue",
+    "Action: explicit mission-owner retry action moved the source issue back to todo; no wakeup was created by this reconciler.",
+    `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
+  ].join("\n");
+}
+
 function buildMissionOwnerUnblockDescription(mission: MissionRow, blockedIssue: IssueRow): string {
   const sourceLabel = blockedIssue.identifier ?? blockedIssue.id;
   return [
@@ -304,6 +355,12 @@ export type MissionOwnerSupervisionAppliedAction = {
   missionId: string;
   workflowRunId: string;
   stepIds: string[];
+  resultStatus: string;
+} | {
+  type: "owner_decision_retry_source_issue";
+  missionId: string;
+  ownerActionIssueId: string;
+  sourceIssueId: string;
   resultStatus: string;
 };
 
@@ -1107,6 +1164,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     staleAfterMinutes?: number;
     now?: Date;
     applySafeActions?: boolean;
+    applyOwnerDecisionActions?: boolean;
   }): Promise<MissionOwnerSupervisionResult> {
     const context = await buildMissionSupervisionContext(db, { missionId: input.missionId });
     const {
@@ -1155,6 +1213,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         reason: enrichRecommendationReason(recommendation.reason),
       });
     };
+    const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
@@ -1213,6 +1272,68 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                 reason: `${baseReason}; source issue should be re-dispatched or woken only in a later approved execution slice`,
                 safeToAutoApply: false,
               });
+              if (input.applyOwnerDecisionActions) {
+                const sourceIssueId = issue.originId;
+                if (!sourceIssueId) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel, reason: "owner-action issue has no canonical originId source issue" }));
+                  break;
+                }
+                const sourceCandidate = await db
+                  .select()
+                  .from(issues)
+                  .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, mission.companyId)))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null);
+                const sourceCandidateLabel = sourceCandidate ? (sourceCandidate.identifier ?? sourceCandidate.id) : sourceLabel;
+                if (!sourceCandidate) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue is missing or outside this company" }));
+                  break;
+                }
+                if (sourceCandidate.missionId !== mission.id) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue belongs to a different mission" }));
+                  break;
+                }
+                if (sourceCandidate.hiddenAt) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue is hidden" }));
+                  break;
+                }
+                if (isTerminalIssueStatus(sourceCandidate.status)) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is already terminal status=${sourceCandidate.status}` }));
+                  break;
+                }
+                if (sourceCandidate.status !== "blocked") {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked` }));
+                  break;
+                }
+                const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
+                const markerInput = { ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id, decision: "retry_source_issue" as const };
+                if (hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput)) {
+                  findings.push(`owner_action_decision_already_applied: ${label} retry_source_issue source=${sourceCandidateLabel}`);
+                  break;
+                }
+                await db
+                  .update(issues)
+                  .set({ status: "todo", updatedAt: now })
+                  .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), eq(issues.status, "blocked"), isNull(issues.hiddenAt)));
+                await issueService(db).addComment(
+                  sourceCandidate.id,
+                  buildRetrySourceIssueComment({
+                    ownerActionIssueId: issue.id,
+                    ownerActionLabel: label,
+                    sourceIssueId: sourceCandidate.id,
+                    sourceLabel: sourceCandidateLabel,
+                    decisionReason: ownerDecision.reason,
+                  }),
+                  { agentId: mission.ownerAgentId },
+                );
+                appliedActions.push({
+                  type: "owner_decision_retry_source_issue",
+                  missionId: mission.id,
+                  ownerActionIssueId: issue.id,
+                  sourceIssueId: sourceCandidate.id,
+                  resultStatus: "todo",
+                });
+              }
               break;
             case "reassign_source_issue":
               addRecommendation({
@@ -1537,7 +1658,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     }
 
     const uniqueFindings = Array.from(new Set(findings));
-    const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
     const safeDispatchRecommendations = recommendations.filter((recommendation) => recommendation.type === "dispatch_missing_step" && recommendation.safeToAutoApply && recommendation.workflowRunId);
     if (input.applySafeActions && safeDispatchRecommendations.length > 0) {
       const stepIdsByRunId = new Map<string, string[]>();
@@ -1597,7 +1717,9 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           : []),
         "Applied safe actions:",
         ...(appliedActions.length > 0
-          ? appliedActions.map((action) => `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`)
+          ? appliedActions.map((action) => action.type === "dispatch_missing_step"
+            ? `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`
+            : `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus}`)
           : ["- None"]),
         "",
         "Main executor action:",
@@ -1622,6 +1744,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     staleAfterMinutes?: number;
     now?: Date;
     applySafeActions?: boolean;
+    applyOwnerDecisionActions?: boolean;
   } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
     const filters = [eq(missions.status, "active")];
     if (input.companyId) filters.push(eq(missions.companyId, input.companyId));
@@ -1682,6 +1805,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         staleAfterMinutes: input.staleAfterMinutes,
         now: input.now,
         applySafeActions: input.applySafeActions,
+        applyOwnerDecisionActions: input.applyOwnerDecisionActions,
       }));
     }
 
