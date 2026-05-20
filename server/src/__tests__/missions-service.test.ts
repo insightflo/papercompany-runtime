@@ -19,7 +19,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { missionService } from "../services/missions.js";
+import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -30,6 +30,46 @@ if (!embeddedPostgresSupport.supported) {
     `Skipping embedded Postgres mission service tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
 }
+
+describe("mission owner decision parser", () => {
+  it("extracts the latest valid mission owner decision block", () => {
+    expect(extractMissionOwnerDecisionFromText([
+      "### Mission owner decision",
+      "Decision: request_input",
+      "Source issue: old-source",
+      "Reason: old reason",
+      "",
+      "### Mission owner decision",
+      "Decision: retry_source_issue",
+      "Source issue: BM123-1",
+      "Reason: Source executor confirmed the transient failure is gone.",
+      "Next action: Re-dispatch source issue after approval.",
+      "Evidence: Owner reviewed the blocked issue comment.",
+    ].join("\n"))).toEqual({
+      decision: "retry_source_issue",
+      sourceIssueRef: "BM123-1",
+      reason: "Source executor confirmed the transient failure is gone.",
+      nextAction: "Re-dispatch source issue after approval.",
+      evidence: "Owner reviewed the blocked issue comment.",
+    });
+  });
+
+  it("returns a conservative invalid decision signal for unknown decisions", () => {
+    expect(extractMissionOwnerDecisionFromText([
+      "### Mission owner decision",
+      "Decision: auto_fix_everything",
+      "Source issue: BM123-1",
+      "Reason: Too broad.",
+    ].join("\n"))).toEqual({
+      decision: null,
+      invalidDecision: "auto_fix_everything",
+      sourceIssueRef: "BM123-1",
+      reason: "Too broad.",
+      nextAction: undefined,
+      evidence: undefined,
+    });
+  });
+});
 
 describeEmbeddedPostgres("mission service mission-linked subresources", () => {
   let db!: ReturnType<typeof createDb>;
@@ -388,6 +428,150 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .where(eq(issues.originKind, "mission_main_executor_unblock"));
     expect(repeatedUnblockIssues).toHaveLength(1);
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces completed owner-action decisions as read-only supervision signals", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Owner Decision Company",
+      issuePrefix: `OD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Decision mission", status: "active" });
+
+    const svc = missionService(db);
+    const blockedIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "Blocked source work",
+    });
+
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
+    const unblockIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"))
+      .then((rows) => rows[0]);
+    expect(unblockIssue).toBeTruthy();
+
+    await issueService(db).update(unblockIssue!.id, { status: "done" });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: unblockIssue!.id,
+      authorAgentId: ownerAgentId,
+      body: [
+        "### Mission owner decision",
+        "Decision: retry_source_issue",
+        `Source issue: ${blockedIssue.identifier}`,
+        "Reason: The owner confirmed the blocker is transient and the source executor should retry later.",
+        "Next action: Re-dispatch source issue after explicit approval.",
+        "Evidence: Source issue comment and mission owner review.",
+      ].join("\n"),
+    });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000) });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("owner_action_decision_recorded"),
+      expect.stringContaining("decision=retry_source_issue"),
+    ]));
+    expect(result.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "retry_unit_if_safe",
+        issueId: blockedIssue.id,
+        reason: expect.stringContaining("later approved execution slice"),
+        safeToAutoApply: false,
+      }),
+    ]));
+    expect(result.appliedActions).toEqual([]);
+
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, blockedIssue.id))
+      .then((rows) => rows[0]);
+    expect(sourceIssue).toEqual(expect.objectContaining({
+      assigneeAgentId: workerAgentId,
+      status: "blocked",
+    }));
+  });
+
+  it("treats invalid owner-action decisions conservatively without auto action", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Invalid Owner Decision Company",
+      issuePrefix: `IO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Invalid decision mission", status: "active" });
+
+    const svc = missionService(db);
+    const blockedIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "Blocked source work",
+    });
+
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
+    const unblockIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"))
+      .then((rows) => rows[0]);
+    expect(unblockIssue).toBeTruthy();
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: unblockIssue!.id,
+      authorAgentId: ownerAgentId,
+      body: [
+        "### Mission owner decision",
+        "Decision: auto_fix_everything",
+        `Source issue: ${blockedIssue.identifier}`,
+        "Reason: Unsupported automated action.",
+      ].join("\n"),
+    });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000) });
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("owner_action_decision_invalid"),
+    ]));
+    expect(result.recommendations).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: expect.stringContaining("auto_fix_everything") }),
+    ]));
+    expect(result.appliedActions).toEqual([]);
+
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, blockedIssue.id))
+      .then((rows) => rows[0]);
+    expect(sourceIssue).toEqual(expect.objectContaining({
+      assigneeAgentId: workerAgentId,
+      status: "blocked",
+    }));
   });
 
   it("surfaces blocked owner unblock actions as recovery work instead of ignoring the deadlock", async () => {

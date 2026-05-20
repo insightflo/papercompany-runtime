@@ -60,7 +60,7 @@ export type MissionRow = typeof missions.$inferSelect;
 
 type IssueRow = typeof issues.$inferSelect;
 
-type MissionOwnerDecisionOption =
+export type MissionOwnerDecisionOption =
   | "request_input"
   | "retry_source_issue"
   | "reassign_source_issue"
@@ -105,6 +105,66 @@ function buildMissionOwnerDecisionFormat(): string {
     "Next action: <specific next action or waiting condition>",
     "Evidence: <compact evidence used for the decision>",
   ].join("\n");
+}
+
+export type ExtractedMissionOwnerDecision = {
+  decision: MissionOwnerDecisionOption;
+  sourceIssueRef?: string;
+  reason?: string;
+  nextAction?: string;
+  evidence?: string;
+} | {
+  decision: null;
+  invalidDecision: string;
+  sourceIssueRef?: string;
+  reason?: string;
+  nextAction?: string;
+  evidence?: string;
+};
+
+const MISSION_OWNER_DECISION_BLOCK_HEADING = "### Mission owner decision";
+
+function firstNonEmptyLine(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  return normalized.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+}
+
+function readDecisionField(block: string, field: string): string | undefined {
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^${escapedField}\\s*:\\s*([\\s\\S]*?)(?=^\\w[\\w ]*\\s*:|^###\\s+|(?![\\s\\S]))`, "im");
+  return firstNonEmptyLine(pattern.exec(block)?.[1]);
+}
+
+export function extractMissionOwnerDecisionFromText(text: string): ExtractedMissionOwnerDecision | null {
+  const headingIndex = text.toLowerCase().lastIndexOf(MISSION_OWNER_DECISION_BLOCK_HEADING.toLowerCase());
+  if (headingIndex < 0) return null;
+
+  const blockStart = headingIndex + MISSION_OWNER_DECISION_BLOCK_HEADING.length;
+  const rest = text.slice(blockStart);
+  const nextHeading = rest.search(/^###\s+/m);
+  const block = nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
+  const rawDecision = readDecisionField(block, "Decision")?.toLowerCase();
+  if (!rawDecision) return null;
+
+  const sourceIssueRef = readDecisionField(block, "Source issue");
+  const reason = readDecisionField(block, "Reason");
+  const nextAction = readDecisionField(block, "Next action");
+  const evidence = readDecisionField(block, "Evidence");
+
+  if (!MISSION_OWNER_DECISION_OPTIONS.includes(rawDecision as MissionOwnerDecisionOption)) {
+    return { decision: null, invalidDecision: rawDecision, sourceIssueRef, reason, nextAction, evidence };
+  }
+
+  return { decision: rawDecision as MissionOwnerDecisionOption, sourceIssueRef, reason, nextAction, evidence };
+}
+
+function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMissionOwnerDecision | null {
+  for (const text of texts.slice().reverse()) {
+    const decision = extractMissionOwnerDecisionFromText(text);
+    if (decision) return decision;
+  }
+  return null;
 }
 
 function buildMissionOwnerUnblockDescription(mission: MissionRow, blockedIssue: IssueRow): string {
@@ -1134,6 +1194,91 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
       if (isStaleQueueStatus && stepRowsForIssue.some((row) => row.stepRun.status === "pending") && runCount === 0 && ageMs >= staleAfterMs) {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
+      }
+      if (issue.originKind === "mission_main_executor_unblock") {
+        const ownerDecision = extractLatestMissionOwnerDecision(comments);
+        if (ownerDecision?.decision === null) {
+          findings.push(`owner_action_decision_invalid: ${label} has unsupported decision=${ownerDecision.invalidDecision} — ${issue.title}`);
+        } else if (ownerDecision) {
+          const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
+          const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerDecision.sourceIssueRef ?? issue.originId ?? "unknown-source");
+          findings.push(`owner_action_decision_recorded: ${label} decision=${ownerDecision.decision} source=${sourceLabel} — ${issue.title}`);
+          const baseReason = ownerDecision.reason ? `Owner decision ${ownerDecision.decision} for ${sourceLabel}: ${ownerDecision.reason}` : `Owner decision ${ownerDecision.decision} recorded for ${sourceLabel}`;
+          switch (ownerDecision.decision) {
+            case "retry_source_issue":
+              addRecommendation({
+                type: "retry_unit_if_safe",
+                missionId: mission.id,
+                issueId: sourceIssue?.id ?? issue.originId ?? issue.id,
+                reason: `${baseReason}; source issue should be re-dispatched or woken only in a later approved execution slice`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "reassign_source_issue":
+              addRecommendation({
+                type: "request_approval",
+                missionId: mission.id,
+                issueId: sourceIssue?.id ?? issue.originId ?? issue.id,
+                reason: `${baseReason}; source issue reassignment requires explicit approved handling in a later execution slice`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "replan_mission":
+              addRecommendation({
+                type: "request_replan",
+                missionId: mission.id,
+                issueId: issue.id,
+                reason: `${baseReason}; mission plan revision is required before execution changes`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "recover_artifact":
+              addRecommendation({
+                type: "materialize_artifact_from_comment",
+                missionId: mission.id,
+                issueId: sourceIssue?.id ?? issue.originId ?? issue.id,
+                reason: `${baseReason}; artifact materialization/reconciliation is needed before retrying`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "request_input":
+              addRecommendation({
+                type: "request_approval",
+                missionId: mission.id,
+                issueId: issue.id,
+                reason: `${baseReason}; external/operator input is needed and must not be auto-applied`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "escalate":
+              addRecommendation({
+                type: "escalate_blocked",
+                missionId: mission.id,
+                issueId: issue.id,
+                reason: `${baseReason}; escalation should be handled explicitly by an operator or later approved slice`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "report_impossible":
+              addRecommendation({
+                type: "mark_impossible_with_evidence",
+                missionId: mission.id,
+                issueId: issue.id,
+                reason: `${baseReason}; impossible completion report should remain read-only until an approved execution slice`,
+                safeToAutoApply: false,
+              });
+              break;
+            case "no_action_waiting":
+              addRecommendation({
+                type: "request_approval",
+                missionId: mission.id,
+                issueId: issue.id,
+                reason: `${baseReason}; waiting condition recorded, no automatic action should run`,
+                safeToAutoApply: false,
+              });
+              break;
+          }
+        }
       }
       if (issue.status === "blocked" && issue.originKind === "mission_main_executor_unblock") {
         const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
