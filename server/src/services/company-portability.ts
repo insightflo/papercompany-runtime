@@ -482,6 +482,10 @@ const ADAPTER_DEFAULT_RULES_BY_TYPE: Record<string, Array<{ path: string[]; valu
     { path: ["timeoutSec"], value: 0 },
     { path: ["graceSec"], value: 15 },
   ],
+  antigravity_local: [
+    { path: ["timeoutSec"], value: 0 },
+    { path: ["graceSec"], value: 20 },
+  ],
   opencode_local: [
     { path: ["timeoutSec"], value: 0 },
     { path: ["graceSec"], value: 15 },

@@ -1,6 +1,11 @@
 import type { ServerAdapterModule } from "./types.js";
 import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
 import {
+  execute as antigravityExecute,
+  testEnvironment as antigravityTestEnvironment,
+} from "@paperclipai/adapter-antigravity-local/server";
+import { agentConfigurationDoc as antigravityAgentConfigurationDoc, models as antigravityModels } from "@paperclipai/adapter-antigravity-local";
+import {
   execute as claudeExecute,
   listClaudeSkills,
   syncClaudeSkills,
@@ -80,6 +85,16 @@ import {
 import { listHermesSkills, syncHermesSkills } from "./hermes-skills.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
+
+const antigravityLocalAdapter: ServerAdapterModule = {
+  type: "antigravity_local",
+  execute: antigravityExecute,
+  testEnvironment: antigravityTestEnvironment,
+  sessionManagement: getAdapterSessionManagement("antigravity_local") ?? undefined,
+  models: antigravityModels,
+  supportsLocalAgentJwt: true,
+  agentConfigurationDoc: antigravityAgentConfigurationDoc,
+};
 
 const claudeLocalAdapter: ServerAdapterModule = {
   type: "claude_local",
@@ -181,6 +196,7 @@ const hermesLocalAdapter: ServerAdapterModule = {
   execute: hermesExecute,
   testEnvironment: hermesTestEnvironment,
   sessionCodec: hermesSessionCodec,
+  sessionManagement: getAdapterSessionManagement("hermes_local") ?? undefined,
   models: hermesModels,
   supportsLocalAgentJwt: true,
   listSkills: listHermesSkills,
@@ -192,6 +208,7 @@ const adaptersByType = new Map<string, ServerAdapterModule>(
   [
     claudeLocalAdapter,
     codexLocalAdapter,
+    antigravityLocalAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,
     cursorLocalAdapter,

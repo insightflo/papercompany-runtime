@@ -17,15 +17,25 @@ const joinAdapterOptions: AgentAdapterType[] = AGENT_ADAPTER_TYPES.filter(
 const adapterLabels: Record<string, string> = {
   claude_local: "Claude (local)",
   codex_local: "Codex (local)",
+  antigravity_local: "Antigravity (local)",
   gemini_local: "Gemini CLI (local)",
   opencode_local: "OpenCode (local)",
+  hermes_local: "Hermes Agent (local)",
   openclaw_gateway: "OpenClaw Gateway",
   cursor: "Cursor (local)",
   process: "Process",
   http: "HTTP",
 };
 
-const ENABLED_INVITE_ADAPTERS = new Set(["claude_local", "codex_local", "gemini_local", "opencode_local", "cursor"]);
+const ENABLED_INVITE_ADAPTERS = new Set([
+  "claude_local",
+  "codex_local",
+  "antigravity_local",
+  "gemini_local",
+  "opencode_local",
+  "hermes_local",
+  "cursor",
+]);
 
 function dateTime(value: string) {
   return new Date(value).toLocaleString();

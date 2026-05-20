@@ -42,11 +42,13 @@ import { defaultCreateValues } from "./agent-config-defaults";
 import { getUIAdapter } from "../adapters";
 import { getCustomModelCandidate } from "../lib/model-dropdown";
 import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
+import { AntigravityLocalAdvancedFields } from "../adapters/antigravity-local/config-fields";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { ChoosePathButton } from "./PathInstructionsModal";
 import { OpenCodeLogoIcon } from "./OpenCodeLogoIcon";
 import { ReportsToPicker } from "./ReportsToPicker";
 import { shouldShowLegacyWorkingDirectoryField } from "../lib/legacy-agent-config";
+import { isAdapterTypeEnabled } from "./agent-config-adapter-types";
 
 /* ---- Create mode values ---- */
 
@@ -298,6 +300,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     adapterType === "codex_local" ||
     adapterType === "gemini_local" ||
     adapterType === "opencode_local" ||
+    adapterType === "hermes_local" ||
+    adapterType === "antigravity_local" ||
     adapterType === "cursor";
   const showLegacyWorkingDirectoryField =
     isLocal && shouldShowLegacyWorkingDirectoryField({ isCreate, adapterConfig: config });
@@ -561,6 +565,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
                     } else if (t === "opencode_local") {
                       nextValues.model = "";
+                    } else if (t === "antigravity_local") {
+                      nextValues.model = "auto";
+                      nextValues.dangerouslySkipPermissions = true;
                     }
                     set!(nextValues);
                   } else {
@@ -577,6 +584,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                               ? DEFAULT_GEMINI_LOCAL_MODEL
                             : t === "cursor"
                               ? DEFAULT_CURSOR_LOCAL_MODEL
+                            : t === "antigravity_local"
+                              ? "auto"
                             : "",
                         effort: "",
                         modelReasoningEffort: "",
@@ -692,6 +701,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                           ? "agent"
                         : adapterType === "opencode_local"
                           ? "opencode"
+                          : adapterType === "hermes_local"
+                            ? "hermes"
+                        : adapterType === "antigravity_local"
+                          ? "agy"
                           : "claude"
                   }
                 />
@@ -769,6 +782,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               )}
               {adapterType === "claude_local" && (
                 <ClaudeLocalAdvancedFields {...adapterFieldProps} />
+              )}
+              {adapterType === "antigravity_local" && (
+                <AntigravityLocalAdvancedFields {...adapterFieldProps} />
               )}
 
               <Field label="Extra args (comma-separated)" hint={help.extraArgs}>
@@ -974,8 +990,6 @@ function AdapterEnvironmentResult({ result }: { result: AdapterEnvironmentTestRe
 
 /* ---- Internal sub-components ---- */
 
-const ENABLED_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "gemini_local", "opencode_local", "cursor"]);
-
 /** Display list includes all real adapter types plus UI-only coming-soon entries. */
 function AdapterTypeDropdown({
   value,
@@ -989,7 +1003,7 @@ function AdapterTypeDropdown({
     .map((type) => ({
       value: type,
       label: adapterLabels[type] ?? type,
-      comingSoon: !ENABLED_ADAPTER_TYPES.has(type),
+      comingSoon: !isAdapterTypeEnabled(type),
     }));
 
   return (

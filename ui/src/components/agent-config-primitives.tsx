@@ -60,8 +60,10 @@ export const help: Record<string, string> = {
 export const adapterLabels: Record<string, string> = {
   claude_local: "Claude (local)",
   codex_local: "Codex (local)",
+  antigravity_local: "Antigravity (local)",
   gemini_local: "Gemini CLI (local)",
   opencode_local: "OpenCode (local)",
+  hermes_local: "Hermes Agent (local)",
   openclaw_gateway: "OpenClaw Gateway",
   cursor: "Cursor (local)",
   process: "Process",

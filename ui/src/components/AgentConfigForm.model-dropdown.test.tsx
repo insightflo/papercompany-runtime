@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
+import { isAdapterTypeEnabled } from "./agent-config-adapter-types";
 import { getCustomModelCandidate } from "../lib/model-dropdown";
 
 describe("AgentConfigForm model dropdown custom option", () => {
@@ -23,5 +24,9 @@ describe("AgentConfigForm model dropdown custom option", () => {
     );
 
     expect(candidate).toBeNull();
+  });
+
+  it("treats Antigravity local as selectable rather than coming soon", () => {
+    expect(isAdapterTypeEnabled("antigravity_local")).toBe(true);
   });
 });

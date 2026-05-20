@@ -7,6 +7,7 @@ export default defineConfig({
       "packages/adapter-utils",
       "packages/adapters/gemini-local",
       "packages/adapters/opencode-local",
+      "packages/adapters/antigravity-local",
       "packages/adapters/pi-local",
       "server",
       "ui",

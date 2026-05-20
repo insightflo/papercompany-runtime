@@ -23,8 +23,10 @@ import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
 const adapterLabels: Record<string, string> = {
   claude_local: "Claude",
   codex_local: "Codex",
+  antigravity_local: "Antigravity",
   gemini_local: "Gemini",
   opencode_local: "OpenCode",
+  hermes_local: "Hermes",
   cursor: "Cursor",
   openclaw_gateway: "OpenClaw Gateway",
   process: "Process",
