@@ -272,6 +272,7 @@ export type MissionDetail = MissionRow & {
     runCount: number;
   }>;
   activeMissionPlan: MissionPlanRuntimeSummary;
+  ownerActionExplanations: MissionOwnerActionExplanation[];
 };
 
 export type MissionWorkflowStepIssue = {
@@ -394,6 +395,102 @@ export type ActiveMissionOwnerSupervisionResult = {
   missionIds: string[];
   missions: MissionOwnerSupervisionResult[];
 };
+
+async function buildMissionOwnerActionExplanations(db: Db, mission: MissionRow): Promise<MissionOwnerActionExplanation[]> {
+  const ownerActionIssues = await db
+    .select({
+      id: issues.id,
+      identifier: issues.identifier,
+      title: issues.title,
+      status: issues.status,
+      originKind: issues.originKind,
+      originId: issues.originId,
+    })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, mission.companyId),
+      eq(issues.missionId, mission.id),
+      eq(issues.originKind, "mission_main_executor_unblock"),
+      isNull(issues.hiddenAt),
+    ));
+
+  const explanations: MissionOwnerActionExplanation[] = [];
+  for (const ownerActionIssue of ownerActionIssues) {
+    const ownerActionCommentRows = await db
+      .select({ body: issueComments.body })
+      .from(issueComments)
+      .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, ownerActionIssue.id)))
+      .orderBy(asc(issueComments.createdAt));
+    const latestDecision = extractLatestMissionOwnerDecision(ownerActionCommentRows.map((comment) => comment.body));
+    const sourceIssue = ownerActionIssue.originId
+      ? await db
+        .select({
+          id: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(and(
+          eq(issues.id, ownerActionIssue.originId),
+          eq(issues.companyId, mission.companyId),
+          eq(issues.missionId, mission.id),
+          isNull(issues.hiddenAt),
+        ))
+        .limit(1)
+        .then((rows) => rows[0] ?? null)
+      : null;
+    const sourceComments = sourceIssue
+      ? await db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssue.id)))
+      : [];
+    const retryApplied = Boolean(sourceIssue && hasMissionOwnerDecisionAppliedMarker(sourceComments.map((comment) => comment.body), {
+      ownerActionIssueId: ownerActionIssue.id,
+      sourceIssueId: sourceIssue.id,
+      decision: "retry_source_issue",
+    }));
+    const invalidDecision = latestDecision?.decision === null;
+    const terminalSource = Boolean(sourceIssue && isTerminalIssueStatus(sourceIssue.status));
+    const status: MissionOwnerActionExplanationStatus = retryApplied
+      ? "retry_applied_no_wakeup"
+      : invalidDecision || terminalSource || !sourceIssue
+        ? "not_applicable_or_invalid"
+        : latestDecision
+          ? "decision_recorded_read_only"
+          : "decision_required";
+    const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerActionIssue.originId ?? "unknown source");
+    const explanation = status === "retry_applied_no_wakeup"
+      ? `Retry was explicitly applied for source issue ${sourceLabel}; it is queued again and no heartbeat wakeup was created by this status surface.`
+      : status === "decision_recorded_read_only"
+        ? `Mission owner decision ${latestDecision?.decision ?? "unknown"} was recorded but not applied; source issue ${sourceLabel} remains assigned to its current assignee.`
+        : status === "decision_required"
+          ? `Owner decision required for source issue ${sourceLabel}; source issue remains assigned to its current assignee.`
+          : invalidDecision
+            ? `Mission owner decision is invalid (${latestDecision.invalidDecision}); no execution action was taken.`
+            : terminalSource
+              ? `Source issue ${sourceLabel} is terminal; owner-action status is informational only and no execution action was taken.`
+              : `Source issue ${sourceLabel} is unavailable for this mission; owner-action status is informational only and no execution action was taken.`;
+    explanations.push({
+      ownerActionIssue: {
+        id: ownerActionIssue.id,
+        identifier: ownerActionIssue.identifier,
+        title: ownerActionIssue.title,
+        status: ownerActionIssue.status,
+        originKind: ownerActionIssue.originKind,
+      },
+      sourceIssue,
+      latestDecision,
+      retryApplied,
+      status,
+      explanation,
+    });
+  }
+
+  return explanations;
+}
 
 type GovernanceSummaryEvent = MissionGovernanceThreadSummary["latestEvents"][number];
 
@@ -2025,6 +2122,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       companyId: mission.companyId,
       missionId: id,
     });
+    const ownerActionExplanations = await buildMissionOwnerActionExplanations(db, mission);
 
     return {
       ...mission,
@@ -2032,6 +2130,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       ownerAgentName: ownerRow?.name,
       sessionBindings,
       activeMissionPlan: summarizeMissionPlanForRuntime(activeMissionPlan),
+      ownerActionExplanations,
     };
   }
 

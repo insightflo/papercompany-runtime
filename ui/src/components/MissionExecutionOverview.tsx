@@ -3,7 +3,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import type { AgentRuntimeState } from "@paperclipai/shared";
 import { AlertTriangle, BookOpen, Bot, GitBranch, Wrench } from "lucide-react";
 import { agentsApi } from "../api/agents";
-import { missionsApi, type MissionDetailItem } from "../api/missions";
+import { missionsApi, type MissionDetailItem, type MissionOwnerActionExplanationStatus } from "../api/missions";
 import { MissionGovernanceThreadPanel } from "./MissionGovernanceThreadPanel";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -65,6 +65,41 @@ function formatToolLabel(value: string) {
   return normalized
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join("-");
+}
+
+function formatIssueLabel(issue: { identifier: string | null; id: string; title: string }) {
+  return `${issue.identifier ?? issue.id} · ${issue.title}`;
+}
+
+function formatDecisionLabel(decision: string | null | undefined) {
+  if (!decision) return "none";
+  return decision.replace(/_/g, " ");
+}
+
+function missionOwnerStatusLabel(status: MissionOwnerActionExplanationStatus) {
+  switch (status) {
+    case "decision_required":
+      return "Decision required";
+    case "decision_recorded_read_only":
+      return "Decision recorded, not applied";
+    case "retry_applied_no_wakeup":
+      return "Retry queued, no wakeup created";
+    case "not_applicable_or_invalid":
+      return "Invalid or not applicable";
+  }
+}
+
+function missionOwnerStatusText(status: MissionOwnerActionExplanationStatus) {
+  switch (status) {
+    case "decision_required":
+      return "오너 결정 필요 — source issue는 현재 담당자와 상태를 유지합니다.";
+    case "decision_recorded_read_only":
+      return "결정 기록됨, 아직 적용 안 됨 — 명시 적용 전까지 source issue는 그대로 유지됩니다.";
+    case "retry_applied_no_wakeup":
+      return "재시도 대기열 복귀, 자동 실행 없음 — source issue만 todo로 돌아갔고 wakeup은 만들지 않았습니다.";
+    case "not_applicable_or_invalid":
+      return "적용 불가/잘못된 결정 — 실행 동작 없이 상태만 표시합니다.";
+  }
 }
 
 function SummaryCard({
@@ -211,6 +246,46 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
       </div>
 
       <MissionGovernanceThreadPanel missionId={missionId} />
+
+      <section className="rounded-md border border-border p-4 space-y-3" aria-label="Mission owner status">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">Mission owner status</h3>
+            <p className="text-xs text-muted-foreground">Read-only owner-action decisions and source issue status</p>
+          </div>
+          <span className="rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">read-only</span>
+        </div>
+        {(mission.ownerActionExplanations ?? []).length > 0 ? (
+          <div className="space-y-2">
+            {(mission.ownerActionExplanations ?? []).map((item) => (
+              <article key={item.ownerActionIssue.id} className="rounded border border-border/70 px-3 py-2 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">{formatIssueLabel(item.ownerActionIssue)}</p>
+                    <p className="text-xs text-muted-foreground">Owner-action status: {item.ownerActionIssue.status}</p>
+                  </div>
+                  <span className="rounded border border-border px-2 py-1 text-xs text-muted-foreground">
+                    {missionOwnerStatusLabel(item.status)}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">{missionOwnerStatusText(item.status)}</p>
+                {item.sourceIssue ? (
+                  <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                    <span>Source: {formatIssueLabel(item.sourceIssue)}</span>
+                    <span>Source status: {item.sourceIssue.status}</span>
+                    <span>Assignee: {item.sourceIssue.assigneeAgentId ?? "unassigned"}</span>
+                    <span>Decision: {formatDecisionLabel(item.latestDecision?.decision)}</span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">Source issue unavailable for this mission.</p>
+                )}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">No owner-action status to show.</p>
+        )}
+      </section>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="rounded-md border border-border p-4 space-y-3">

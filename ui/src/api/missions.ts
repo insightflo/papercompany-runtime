@@ -218,11 +218,47 @@ export interface MissionPlanRuntimeSummary {
   refs?: Record<string, unknown>;
 }
 
+export type MissionOwnerActionExplanationStatus =
+  | "decision_required"
+  | "decision_recorded_read_only"
+  | "retry_applied_no_wakeup"
+  | "not_applicable_or_invalid";
+
+export interface MissionOwnerActionExplanationIssue {
+  id: string;
+  identifier: string | null;
+  title: string;
+  status: string;
+}
+
+export interface MissionOwnerActionIssueSummary extends MissionOwnerActionExplanationIssue {
+  originKind: string | null;
+}
+
+export interface MissionOwnerDecisionSummary {
+  decision: string | null;
+  invalidDecision?: string;
+  sourceIssueRef?: string;
+  reason?: string;
+  nextAction?: string;
+  evidence?: string;
+}
+
+export interface MissionOwnerActionExplanation {
+  ownerActionIssue: MissionOwnerActionIssueSummary;
+  sourceIssue: (MissionOwnerActionExplanationIssue & { assigneeAgentId: string | null }) | null;
+  latestDecision: MissionOwnerDecisionSummary | null;
+  retryApplied: boolean;
+  status: MissionOwnerActionExplanationStatus;
+  explanation: string;
+}
+
 export interface MissionDetailItem extends MissionListItem {
   agents: MissionAgentEntry[];
   ownerAgentName?: string;
   sessionBindings: MissionSessionBinding[];
   activeMissionPlan?: MissionPlanRuntimeSummary;
+  ownerActionExplanations?: MissionOwnerActionExplanation[];
 }
 
 export interface CreateMissionInput {

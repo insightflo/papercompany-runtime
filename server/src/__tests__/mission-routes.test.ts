@@ -108,6 +108,49 @@ describe("mission routes subresources", () => {
     expect(mockMissionService.getIssueTree).toHaveBeenCalledWith("mission-1");
   });
 
+  it("returns additive owner-action explanations on mission detail", async () => {
+    mockMissionService.getById.mockResolvedValue({
+      id: "mission-1",
+      companyId: "company-1",
+      title: "Mission",
+      status: "active",
+      ownerActionExplanations: [
+        {
+          ownerActionIssue: {
+            id: "owner-action-1",
+            identifier: "PC-9",
+            title: "Unblock source work",
+            status: "done",
+            originKind: "mission_main_executor_unblock",
+          },
+          sourceIssue: {
+            id: "source-1",
+            identifier: "PC-7",
+            title: "Repair adapter handoff",
+            status: "todo",
+            assigneeAgentId: "agent-2",
+          },
+          latestDecision: { decision: "retry_source_issue", sourceIssueRef: "PC-7" },
+          retryApplied: true,
+          status: "retry_applied_no_wakeup",
+          explanation: "Retry applied without wakeup.",
+        },
+      ],
+    });
+
+    const res = await request(createApp()).get("/api/missions/mission-1");
+
+    expect(res.status).toBe(200);
+    expect(res.body.ownerActionExplanations).toEqual([
+      expect.objectContaining({
+        status: "retry_applied_no_wakeup",
+        ownerActionIssue: expect.objectContaining({ identifier: "PC-9" }),
+        sourceIssue: expect.objectContaining({ identifier: "PC-7", status: "todo", assigneeAgentId: "agent-2" }),
+        latestDecision: expect.objectContaining({ decision: "retry_source_issue" }),
+      }),
+    ]);
+  });
+
   it("returns mission workflow runs from the mission service", async () => {
     mockMissionService.listWorkflowRuns.mockResolvedValue([
       {

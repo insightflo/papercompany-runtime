@@ -96,6 +96,72 @@ vi.mock("../context/CompanyContext", () => ({
 }));
 
 describe("MissionExecutionOverview", () => {
+  it("renders read-only mission owner status without raw markers", () => {
+    const html = renderToStaticMarkup(
+      <MissionExecutionOverview
+        missionId="mission-1"
+        mission={{
+          id: "mission-1",
+          companyId: "company-1",
+          ownerAgentId: "agent-1",
+          title: "Mission",
+          description: null,
+          status: "active",
+          goalId: null,
+          startedAt: null,
+          completedAt: null,
+          createdAt: new Date("2026-04-15T00:00:00.000Z"),
+          updatedAt: new Date("2026-04-15T00:00:00.000Z"),
+          ownerAgentName: "Planner",
+          agents: [],
+          sessionBindings: [],
+          ownerActionExplanations: [
+            {
+              ownerActionIssue: {
+                id: "owner-action-1",
+                identifier: "PC-9",
+                title: "Unblock source work",
+                status: "done",
+                originKind: "mission_main_executor_unblock",
+              },
+              sourceIssue: {
+                id: "source-1",
+                identifier: "PC-7",
+                title: "Repair adapter handoff",
+                status: "todo",
+                assigneeAgentId: "agent-2",
+              },
+              latestDecision: {
+                decision: "retry_source_issue",
+                sourceIssueRef: "PC-7",
+                reason: "Retry after owner review",
+                nextAction: "Return to queue",
+                evidence: "mission-owner-decision-applied raw marker should not render",
+              },
+              retryApplied: true,
+              status: "retry_applied_no_wakeup",
+              explanation: "Retry was explicitly applied; mission-owner-decision-applied raw marker should not render.",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(html).toContain("Mission owner status");
+    expect(html).toContain("Retry queued, no wakeup created");
+    expect(html).toContain("PC-9");
+    expect(html).toContain("Unblock source work");
+    expect(html).toContain("PC-7");
+    expect(html).toContain("Repair adapter handoff");
+    expect(html).toContain("Source status: todo");
+    expect(html).toContain("Assignee: agent-2");
+    expect(html).toContain("Decision: retry source issue");
+    expect(html).not.toContain("mission-owner-decision-applied");
+    expect(html).not.toContain("mission-owner-action");
+    expect(html).not.toContain("{&quot;");
+    expect(html).not.toContain("<button");
+  });
+
   it("renders mission continuity, risk, and delivery summaries", () => {
     const html = renderToStaticMarkup(
       <MissionExecutionOverview
