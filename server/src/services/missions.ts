@@ -184,6 +184,49 @@ function hasMissionOwnerDecisionAppliedMarker(comments: string[], input: {
   return comments.some((comment) => comment.includes(marker));
 }
 
+function buildMissionOwnerDecisionWakeupIdempotencyKey(input: {
+  missionId: string;
+  ownerActionIssueId: string;
+  sourceIssueId: string;
+}): string {
+  return `mission-owner-decision-wakeup:${input.missionId}:${input.ownerActionIssueId}:${input.sourceIssueId}:retry_source_issue`;
+}
+
+function buildMissionOwnerDecisionWakeupDispatchedMarker(input: {
+  missionId: string;
+  ownerActionIssueId: string;
+  sourceIssueId: string;
+  decision: "retry_source_issue";
+  idempotencyKey: string;
+}): string {
+  return `<!-- mission-owner-decision-wakeup-dispatched:${JSON.stringify(input)} -->`;
+}
+
+function buildRetrySourceIssueWakeupDispatchedComment(input: {
+  missionId: string;
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  return [
+    "### Mission owner retry wakeup dispatched",
+    buildMissionOwnerDecisionWakeupDispatchedMarker({
+      missionId: input.missionId,
+      ownerActionIssueId: input.ownerActionIssueId,
+      sourceIssueId: input.sourceIssueId,
+      decision: "retry_source_issue",
+      idempotencyKey: input.idempotencyKey,
+    }),
+    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    `Target agent: ${input.targetAgentId}`,
+    `Idempotency key: ${input.idempotencyKey}`,
+  ].join("\n");
+}
+
 function isTerminalIssueStatus(status: string): boolean {
   return status === "done" || status === "cancelled";
 }
@@ -213,7 +256,7 @@ function buildRetrySourceIssueComment(input: {
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     "Decision: retry_source_issue",
-    "Action: explicit mission-owner retry action moved the source issue back to todo; no wakeup was created by this reconciler.",
+    "Action: explicit mission-owner retry action moved the source issue back to todo; wakeup dispatch, if requested, is recorded separately.",
     `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
   ].join("\n");
 }
@@ -351,6 +394,8 @@ export type MissionOwnerSupervisionRecommendation = {
   sourceRef?: MissionExecutionSourceRef;
 };
 
+export type MissionOwnerDecisionWakeupDispatchStatus = "not_requested" | "dispatched" | "skipped_no_assignee" | "failed";
+
 export type MissionOwnerSupervisionAppliedAction = {
   type: "dispatch_missing_step";
   missionId: string;
@@ -363,6 +408,8 @@ export type MissionOwnerSupervisionAppliedAction = {
   ownerActionIssueId: string;
   sourceIssueId: string;
   resultStatus: string;
+  wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
+  idempotencyKey?: string;
 };
 
 export type MissionOwnerActionExplanationStatus =
@@ -748,8 +795,17 @@ export type MissionOwnerActionCreatedHandler = (input: {
   sourceIssue: typeof issues.$inferSelect;
 }) => Promise<unknown> | unknown;
 
+export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
+  mission: MissionRow;
+  ownerActionIssue: typeof issues.$inferSelect;
+  sourceIssue: typeof issues.$inferSelect;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) => Promise<unknown> | unknown;
+
 export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
+  onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
 }
 
 export function missionService(db: Db, deps: MissionServiceDeps = {}) {
@@ -1278,6 +1334,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     now?: Date;
     applySafeActions?: boolean;
     applyOwnerDecisionActions?: boolean;
+    dispatchOwnerDecisionWakeups?: boolean;
   }): Promise<MissionOwnerSupervisionResult> {
     const context = await buildMissionSupervisionContext(db, { missionId: input.missionId });
     const {
@@ -1424,6 +1481,12 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                   findings.push(`owner_action_decision_already_applied: ${label} retry_source_issue source=${sourceCandidateLabel}`);
                   break;
                 }
+                const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
+                  missionId: mission.id,
+                  ownerActionIssueId: issue.id,
+                  sourceIssueId: sourceCandidate.id,
+                });
+                let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchOwnerDecisionWakeups ? "skipped_no_assignee" : "not_requested";
                 await db
                   .update(issues)
                   .set({ status: "todo", updatedAt: now })
@@ -1439,12 +1502,51 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                   }),
                   { agentId: mission.ownerAgentId },
                 );
+                if (input.dispatchOwnerDecisionWakeups) {
+                  if (!sourceCandidate.assigneeAgentId) {
+                    findings.push(`owner_action_wakeup_skipped: ${sourceCandidateLabel} source issue has no assignee; wakeup dispatch skipped`);
+                    wakeupDispatchStatus = "skipped_no_assignee";
+                  } else if (deps.onOwnerDecisionRetrySourceIssueApplied) {
+                    try {
+                      await deps.onOwnerDecisionRetrySourceIssueApplied({
+                        mission,
+                        ownerActionIssue: issue,
+                        sourceIssue: sourceCandidate,
+                        targetAgentId: sourceCandidate.assigneeAgentId,
+                        idempotencyKey,
+                      });
+                      await issueService(db).addComment(
+                        sourceCandidate.id,
+                        buildRetrySourceIssueWakeupDispatchedComment({
+                          missionId: mission.id,
+                          ownerActionIssueId: issue.id,
+                          ownerActionLabel: label,
+                          sourceIssueId: sourceCandidate.id,
+                          sourceLabel: sourceCandidateLabel,
+                          targetAgentId: sourceCandidate.assigneeAgentId,
+                          idempotencyKey,
+                        }),
+                        { agentId: mission.ownerAgentId },
+                      );
+                      wakeupDispatchStatus = "dispatched";
+                    } catch (err) {
+                      const message = err instanceof Error ? err.message : String(err);
+                      findings.push(`owner_action_wakeup_failed: ${sourceCandidateLabel} retry_source_issue wakeup callback failed — ${message}`);
+                      wakeupDispatchStatus = "failed";
+                    }
+                  } else {
+                    findings.push(`owner_action_wakeup_skipped: ${sourceCandidateLabel} dispatchOwnerDecisionWakeups enabled but no wakeup callback configured`);
+                    wakeupDispatchStatus = "failed";
+                  }
+                }
                 appliedActions.push({
                   type: "owner_decision_retry_source_issue",
                   missionId: mission.id,
                   ownerActionIssueId: issue.id,
                   sourceIssueId: sourceCandidate.id,
                   resultStatus: "todo",
+                  wakeupDispatchStatus,
+                  idempotencyKey,
                 });
               }
               break;
@@ -1924,6 +2026,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     now?: Date;
     applySafeActions?: boolean;
     applyOwnerDecisionActions?: boolean;
+    dispatchOwnerDecisionWakeups?: boolean;
   } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
     const filters = [eq(missions.status, "active")];
     if (input.companyId) filters.push(eq(missions.companyId, input.companyId));
@@ -1985,6 +2088,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         now: input.now,
         applySafeActions: input.applySafeActions,
         applyOwnerDecisionActions: input.applyOwnerDecisionActions,
+        dispatchOwnerDecisionWakeups: input.dispatchOwnerDecisionWakeups,
       }));
     }
 

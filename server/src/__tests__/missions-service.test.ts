@@ -509,11 +509,12 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     }));
   });
 
-  it("explicitly applies retry_source_issue owner decisions without changing source assignee or waking execution", async () => {
+  it("explicitly applies retry_source_issue owner decisions without changing source assignee or waking execution by default", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
     const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn();
 
     await db.insert(companies).values({ id: companyId, name: "Apply Retry Company", issuePrefix: `AR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values([
@@ -522,7 +523,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]);
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Apply retry mission", status: "active" });
 
-    const svc = missionService(db);
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked retry source" });
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
@@ -551,50 +552,129 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]));
     await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: workerAgentId }));
     await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, blockedIssue.id))).resolves.toHaveLength(0);
+    expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
     const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id));
     expect(sourceComments.map((comment) => comment.body).join("\n")).toContain("mission-owner-decision-applied");
     expect(sourceComments.map((comment) => comment.body).join("\n")).toContain("explicit mission-owner retry action");
+    expect(sourceComments.map((comment) => comment.body).join("\n")).not.toContain("mission-owner-decision-wakeup-dispatched");
   });
 
-  it("does not apply the same retry_source_issue owner decision twice", async () => {
+  it("dispatches one explicit retry_source_issue wakeup to the source assignee with idempotency marker", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
     const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-1", runId: "run-1" });
+
+    await db.insert(companies).values({ id: companyId, name: "Wake Retry Company", issuePrefix: `WR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Wake retry mission", status: "active" });
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
+    const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked wake source" });
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
+    const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
+    await issueService(db).update(unblockIssue.id, { status: "done" });
+    await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry and wake once"].join("\n") });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue`;
+
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ id: missionId, ownerAgentId }),
+      ownerActionIssue: expect.objectContaining({ id: unblockIssue.id, assigneeAgentId: ownerAgentId }),
+      sourceIssue: expect.objectContaining({ id: blockedIssue.id, assigneeAgentId: workerAgentId }),
+      targetAgentId: workerAgentId,
+      idempotencyKey,
+    }));
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: blockedIssue.id, wakeupDispatchStatus: "dispatched", idempotencyKey }),
+    ]));
+    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: workerAgentId }));
+    const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id));
+    const sourceBody = sourceComments.map((comment) => comment.body).join("\n");
+    expect(sourceBody).toContain("mission-owner-decision-applied");
+    expect(sourceBody).toContain("mission-owner-decision-wakeup-dispatched");
+    expect(sourceBody).toContain(idempotencyKey);
+  });
+
+  it("does not apply or dispatch the same retry_source_issue owner decision twice", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-1" });
     await db.insert(companies).values({ id: companyId, name: "Retry Idempotent Company", issuePrefix: `RI${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values([
       { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
       { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
     ]);
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Idempotent retry mission", status: "active" });
-    const svc = missionService(db);
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked source" });
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry once"].join("\n") });
 
-    const first = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true });
-    const second = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 30 * 60 * 1000), applyOwnerDecisionActions: true });
+    const first = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    const second = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 30 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     expect(first.appliedActions).toHaveLength(1);
     expect(second.appliedActions).toEqual([]);
-    const markerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id)).then((rows) => rows.filter((row) => row.body.includes("mission-owner-decision-applied")));
-    expect(markerComments).toHaveLength(1);
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
+    const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id));
+    const applyMarkers = sourceComments.filter((row) => row.body.includes("mission-owner-decision-applied"));
+    const wakeupMarkers = sourceComments.filter((row) => row.body.includes("mission-owner-decision-wakeup-dispatched"));
+    expect(applyMarkers).toHaveLength(1);
+    expect(wakeupMarkers).toHaveLength(1);
   });
 
-  it("does not mutate missing, cross-mission, or terminal retry_source_issue sources", async () => {
+  it("applies retry_source_issue with no source assignee but skips explicit wakeup dispatch", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn();
+    await db.insert(companies).values({ id: companyId, name: "Retry No Assignee Company", issuePrefix: `RA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "No assignee retry mission", status: "active" });
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
+    const blockedIssue = await issueService(db).create(companyId, { missionId, originKind: "workflow_execution", status: "blocked", title: "Unassigned blocked source" });
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
+    const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
+    await issueService(db).update(unblockIssue.id, { status: "done" });
+    await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry unassigned source"].join("\n") });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
+    expect(result.findings.join("\n")).toContain("source issue has no assignee; wakeup dispatch skipped");
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: blockedIssue.id, resultStatus: "todo", wakeupDispatchStatus: "skipped_no_assignee" }),
+    ]));
+    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: null }));
+    const sourceBody = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id)).then((rows) => rows.map((row) => row.body).join("\n"));
+    expect(sourceBody).toContain("mission-owner-decision-applied");
+    expect(sourceBody).not.toContain("mission-owner-decision-wakeup-dispatched");
+  });
+
+  it("does not mutate or dispatch missing, cross-mission, terminal, or hidden retry_source_issue sources", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
     const missionId = randomUUID();
     const otherMissionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn();
     await db.insert(companies).values({ id: companyId, name: "Retry Safety Company", issuePrefix: `RS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values([{ id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} }, { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} }]);
     await db.insert(missions).values([{ id: missionId, companyId, ownerAgentId, title: "Retry safety mission", status: "active" }, { id: otherMissionId, companyId, ownerAgentId, title: "Other mission", status: "active" }]);
-    const svc = missionService(db);
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const terminalIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "done", title: "Terminal source" });
     const crossMissionIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId: otherMissionId, originKind: "workflow_execution", status: "blocked", title: "Cross mission source" });
-    for (const [sourceIssue, title] of [[terminalIssue, "Terminal owner action"], [crossMissionIssue, "Cross mission owner action"]] as const) {
+    const hiddenIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Hidden source" });
+    await db.update(issues).set({ hiddenAt: new Date() }).where(eq(issues.id, hiddenIssue.id));
+    for (const [sourceIssue, title] of [[terminalIssue, "Terminal owner action"], [crossMissionIssue, "Cross mission owner action"], [hiddenIssue, "Hidden owner action"]] as const) {
       const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title });
       await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: should not mutate"].join("\n") });
     }
@@ -602,28 +682,32 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const missingOwnerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: missingSourceId, status: "done", title: "Missing owner action" });
     await db.insert(issueComments).values({ companyId, issueId: missingOwnerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${missingSourceId}`, "Reason: should not mutate missing source"].join("\n") });
 
-    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true });
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     expect(result.appliedActions).toEqual([]);
     expect(result.findings.join("\n")).toContain("owner_action_decision_not_applied");
+    expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
     await expect(db.select().from(issues).where(eq(issues.id, terminalIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "done", assigneeAgentId: workerAgentId }));
     await expect(db.select().from(issues).where(eq(issues.id, crossMissionIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: workerAgentId }));
+    await expect(db.select().from(issues).where(eq(issues.id, hiddenIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: workerAgentId }));
   });
 
-  it("keeps non-retry owner decisions read-only even with explicit owner-decision apply enabled", async () => {
+  it("keeps non-retry owner decisions read-only even with explicit owner-decision apply and wakeup dispatch enabled", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
     const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn();
     await db.insert(companies).values({ id: companyId, name: "Non Retry Company", issuePrefix: `NR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values([{ id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} }, { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} }]);
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Non retry mission", status: "active" });
-    const svc = missionService(db);
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked source" });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: blockedIssue.id, status: "done", title: "Replan owner action" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: replan_mission", `Source issue: ${blockedIssue.identifier}`, "Reason: plan must change"].join("\n") });
 
-    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true });
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     expect(result.appliedActions).toEqual([]);
+    expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
     await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: workerAgentId }));
   });
 
