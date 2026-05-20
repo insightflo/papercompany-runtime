@@ -70,7 +70,7 @@ export type MissionOwnerDecisionOption =
   | "recover_artifact"
   | "no_action_waiting";
 
-const MISSION_OWNER_DECISION_OPTIONS: MissionOwnerDecisionOption[] = [
+export const MISSION_OWNER_DECISION_OPTIONS: MissionOwnerDecisionOption[] = [
   "request_input",
   "retry_source_issue",
   "reassign_source_issue",

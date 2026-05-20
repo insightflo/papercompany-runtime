@@ -12,8 +12,10 @@ import {
   agentWakeupRequests,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueComments,
   issues,
   missionSessions,
+  missions,
   projects,
   projectWorkspaces,
   worktreeRules,
@@ -57,6 +59,10 @@ import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-gua
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import {
+  extractMissionOwnerDecisionFromText,
+  MISSION_OWNER_DECISION_OPTIONS,
+} from "./missions.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
 import {
   buildExecutionWorkspaceAdapterConfig,
@@ -591,7 +597,165 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
 }
 
 function readNonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+const MISSION_OWNER_ACTION_MARKER_PATTERN = /<!--\s*mission-owner-action\s*:\s*(\{[\s\S]*?\})\s*-->/i;
+
+function truncateContextText(value: string | null | undefined, max = 220) {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return trimmed.length > max ? `${trimmed.slice(0, max - 3)}...` : trimmed;
+}
+
+function parseMissionOwnerActionMarker(description: string | null | undefined) {
+  const match = description?.match(MISSION_OWNER_ACTION_MARKER_PATTERN);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]!) as Record<string, unknown>;
+    const missionId = readNonEmptyString(parsed.missionId);
+    const sourceIssueId = readNonEmptyString(parsed.sourceIssueId);
+    const actionType = readNonEmptyString(parsed.actionType);
+    const status = readNonEmptyString(parsed.status);
+    if (!missionId || actionType !== "unblock") return null;
+    return { missionId, sourceIssueId, actionType, status };
+  } catch {
+    return null;
+  }
+}
+
+function isMissionOwnerTaskIssue(issue: {
+  originKind: string | null;
+  description: string | null;
+}) {
+  return (
+    issue.originKind === "mission_main_executor_oversight" ||
+    issue.originKind === "mission_main_executor_unblock" ||
+    parseMissionOwnerActionMarker(issue.description) !== null
+  );
+}
+
+export type MissionOwnerTaskContext = {
+  available: true;
+  gating: "originKind" | "mission-owner-action-marker";
+  mission: {
+    id: string;
+    title: string;
+    status: string;
+  };
+  ownerTaskIssue: {
+    id: string;
+    identifier: string | null;
+    title: string;
+    originKind: string | null;
+    status: string;
+  };
+  sourceIssue: {
+    id: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+    assigneeAgentId: string | null;
+  } | null;
+  latestOwnerActionDecision: ReturnType<typeof extractMissionOwnerDecisionFromText>;
+  governanceEvidence: string;
+  allowedDecisionOptions: string[];
+  requiredDecisionFormat: string[];
+};
+
+async function resolveMissionOwnerTaskContext(input: {
+  db: Db;
+  companyId: string;
+  issue: {
+    id: string;
+    identifier: string | null;
+    title: string;
+    description: string | null;
+    status: string;
+    missionId: string | null;
+    originKind: string | null;
+    originId: string | null;
+  } | null;
+}): Promise<MissionOwnerTaskContext | null> {
+  const { db, companyId, issue } = input;
+  if (!issue || !isMissionOwnerTaskIssue(issue)) return null;
+
+  const marker = parseMissionOwnerActionMarker(issue.description);
+  const missionId = issue.missionId ?? marker?.missionId ?? null;
+  if (!missionId) return null;
+
+  const mission = await db
+    .select({ id: missions.id, title: missions.title, status: missions.status })
+    .from(missions)
+    .where(and(eq(missions.id, missionId), eq(missions.companyId, companyId)))
+    .then((rows) => rows[0] ?? null);
+  if (!mission) return null;
+
+  const sourceIssueId = issue.originKind === "mission_main_executor_unblock"
+    ? issue.originId
+    : marker?.sourceIssueId ?? null;
+  const sourceIssue = sourceIssueId
+    ? await db
+        .select({
+          id: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, companyId)))
+        .then((rows) => rows[0] ?? null)
+    : null;
+
+  const latestDecisionComment = await db
+    .select({ body: issueComments.body })
+    .from(issueComments)
+    .where(and(eq(issueComments.issueId, issue.id), eq(issueComments.companyId, companyId)))
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+    .limit(5);
+  const latestOwnerActionDecision = latestDecisionComment
+    .map((comment) => extractMissionOwnerDecisionFromText(comment.body))
+    .find((decision) => decision !== null) ?? extractMissionOwnerDecisionFromText(issue.description ?? "");
+
+  return {
+    available: true,
+    gating: issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock"
+      ? "originKind"
+      : "mission-owner-action-marker",
+    mission: {
+      id: mission.id,
+      title: truncateContextText(mission.title, 160) ?? "Untitled mission",
+      status: mission.status,
+    },
+    ownerTaskIssue: {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: truncateContextText(issue.title, 160) ?? "Untitled issue",
+      originKind: issue.originKind,
+      status: issue.status,
+    },
+    sourceIssue: sourceIssue
+      ? {
+          id: sourceIssue.id,
+          identifier: sourceIssue.identifier,
+          title: truncateContextText(sourceIssue.title, 160) ?? "Untitled source issue",
+          status: sourceIssue.status,
+          assigneeAgentId: sourceIssue.assigneeAgentId,
+        }
+      : null,
+    latestOwnerActionDecision,
+    governanceEvidence: "Governance evidence: unavailable in this context builder",
+    allowedDecisionOptions: [...MISSION_OWNER_DECISION_OPTIONS],
+    requiredDecisionFormat: [
+      "### Mission owner decision",
+      "Decision:",
+      "Source issue:",
+      "Reason:",
+      "Next action:",
+      "Evidence:",
+    ],
+  };
 }
 
 function normalizeLedgerBillingType(value: unknown): BillingType {
@@ -2642,6 +2806,8 @@ export function heartbeatService(db: Db) {
             executionWorkspaceId: issues.executionWorkspaceId,
             executionWorkspacePreference: issues.executionWorkspacePreference,
             missionId: issues.missionId,
+            originKind: issues.originKind,
+            originId: issues.originId,
             assigneeAgentId: issues.assigneeAgentId,
             assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
@@ -2834,6 +3000,16 @@ export function heartbeatService(db: Db) {
       context.paperclipMissionPlan = missionPlanArtifactService(db).summarizeMissionPlanForRuntime(activePlan);
     } else {
       delete context.paperclipMissionPlan;
+    }
+    const missionOwnerTaskContext = await resolveMissionOwnerTaskContext({
+      db,
+      companyId: agent.companyId,
+      issue: issueContext,
+    });
+    if (missionOwnerTaskContext) {
+      context.paperclipMissionOwnerTaskContext = missionOwnerTaskContext;
+    } else {
+      delete context.paperclipMissionOwnerTaskContext;
     }
     const existingExecutionWorkspace =
       issueRef?.executionWorkspaceId ? await executionWorkspacesSvc.getById(issueRef.executionWorkspaceId) : null;

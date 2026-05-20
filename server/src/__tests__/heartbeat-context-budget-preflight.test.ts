@@ -138,6 +138,91 @@ async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
   }
 }
 
+function successfulAdapterResult() {
+  return {
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    errorMessage: null,
+    usage: null,
+    provider: "test",
+    model: "test-model",
+    resultJson: null,
+    runtimeServices: [],
+  };
+}
+
+async function seedMissionOwnerTaskContextFixture(db: ReturnType<typeof createDb>, issueKind: string, description?: string) {
+  const companyId = randomUUID();
+  const agentId = randomUUID();
+  const missionId = randomUUID();
+  const sourceIssueId = randomUUID();
+  const ownerTaskIssueId = randomUUID();
+
+  await db.insert(companies).values({
+    id: companyId,
+    name: "Paperclip",
+    issuePrefix: "PAP",
+    requireBoardApprovalForNewAgents: false,
+  });
+  await db.insert(agents).values({
+    id: agentId,
+    companyId,
+    name: "Shared Worker",
+    role: "engineer",
+    status: "active",
+    adapterType: "codex_local",
+    adapterConfig: { promptTemplate: "Follow the issue." },
+    runtimeConfig: {},
+    permissions: {},
+  });
+  await db.insert(missions).values({
+    id: missionId,
+    companyId,
+    ownerAgentId: agentId,
+    title: "Mission owner context mission",
+    status: "active",
+  });
+  await db.insert(issues).values({
+    id: sourceIssueId,
+    companyId,
+    missionId,
+    identifier: "PAP-SOURCE",
+    title: "Blocked source issue",
+    description: "source issue private detail should stay bounded",
+    status: "blocked",
+    assigneeAgentId: agentId,
+    originKind: "workflow_execution",
+  });
+  await db.insert(issues).values({
+    id: ownerTaskIssueId,
+    companyId,
+    missionId,
+    identifier: `PAP-${issueKind.toUpperCase().slice(0, 8)}`,
+    title: `${issueKind} current issue`,
+    description: description ?? "Mission owner task description",
+    status: "todo",
+    assigneeAgentId: agentId,
+    originKind: issueKind,
+    originId: issueKind === "mission_main_executor_unblock" ? sourceIssueId : null,
+  });
+  await db.insert(issueComments).values({
+    companyId,
+    issueId: ownerTaskIssueId,
+    authorAgentId: agentId,
+    body: [
+      "### Mission owner decision",
+      "Decision: retry_source_issue",
+      `Source issue: ${sourceIssueId}`,
+      "Reason: source is now unblockable",
+      "Next action: re-dispatch later after approval",
+      "Evidence: bounded owner comment",
+    ].join("\n"),
+  });
+
+  return { companyId, agentId, missionId, sourceIssueId, ownerTaskIssueId };
+}
+
 describe("heartbeat context budget preflight", () => {
   let db!: ReturnType<typeof createDb>;
   let instance: EmbeddedPostgresInstance | null = null;
@@ -180,6 +265,124 @@ describe("heartbeat context budget preflight", () => {
     if (dataDir) {
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
+  });
+
+  it("attaches mission-owner-task context to mission_main_executor_unblock issues only by issue purpose", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_unblock");
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "owner-action:unblock", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionOwnerTaskContext).toEqual(
+      expect.objectContaining({
+        available: true,
+        gating: "originKind",
+        mission: expect.objectContaining({ id: fixture.missionId, title: "Mission owner context mission", status: "active" }),
+        ownerTaskIssue: expect.objectContaining({ id: fixture.ownerTaskIssueId, originKind: "mission_main_executor_unblock" }),
+        sourceIssue: expect.objectContaining({ id: fixture.sourceIssueId, status: "blocked", assigneeAgentId: fixture.agentId }),
+        latestOwnerActionDecision: expect.objectContaining({ decision: "retry_source_issue" }),
+      }),
+    );
+    const serialized = JSON.stringify(invocationContext?.paperclipMissionOwnerTaskContext);
+    expect(serialized).toContain("Governance evidence: unavailable in this context builder");
+    expect(serialized).toContain("### Mission owner decision");
+    expect(serialized).not.toContain("source issue private detail should stay bounded");
+  });
+
+  it("attaches mission-owner-task context to mission_main_executor_oversight issues", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_oversight");
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "owner-action:oversight", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionOwnerTaskContext).toEqual(
+      expect.objectContaining({
+        available: true,
+        gating: "originKind",
+        mission: expect.objectContaining({ id: fixture.missionId }),
+        ownerTaskIssue: expect.objectContaining({ id: fixture.ownerTaskIssueId, originKind: "mission_main_executor_oversight" }),
+        sourceIssue: null,
+      }),
+    );
+  });
+
+  it("does not attach mission-owner-task context to normal workflow_execution issues assigned to the same agent", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "workflow_execution");
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "worker:normal", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionOwnerTaskContext).toBeUndefined();
+  });
+
+  it("attaches mission-owner-task context from a valid mission-owner-action marker", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "manual", "placeholder");
+    const marker = `<!-- mission-owner-action:{"missionId":"${fixture.missionId}","sourceIssueId":"${fixture.sourceIssueId}","actionType":"unblock","status":"decision_required"} -->`;
+    await db.update(issues).set({ description: marker }).where(eq(issues.id, fixture.ownerTaskIssueId));
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "owner-action:marker", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionOwnerTaskContext).toEqual(
+      expect.objectContaining({
+        available: true,
+        gating: "mission-owner-action-marker",
+        mission: expect.objectContaining({ id: fixture.missionId }),
+        sourceIssue: expect.objectContaining({ id: fixture.sourceIssueId }),
+      }),
+    );
   });
 
   it("blocks execution before adapter.execute when the estimated context budget is exceeded", async () => {
