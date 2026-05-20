@@ -76,6 +76,102 @@ export interface MissionWorkflowRun {
   progress: MissionWorkflowRunProgress;
 }
 
+export type MissionGovernanceThreadEventType =
+  | "status_changed"
+  | "assignment_changed"
+  | "wakeup_requested"
+  | "heartbeat_started"
+  | "heartbeat_succeeded"
+  | "heartbeat_failed"
+  | "activity_observed"
+  | "workflow_started"
+  | "workflow_step_started"
+  | "workflow_step_succeeded"
+  | "workflow_step_failed"
+  | "approval_requested"
+  | "approval_granted"
+  | "approval_rejected"
+  | "tool_result"
+  | "compact_error"
+  | "owner_diagnosis"
+  | "evidence_missing";
+
+export type MissionGovernanceThreadSourceType =
+  | "mission"
+  | "issue"
+  | "issue_comment"
+  | "activity_log"
+  | "workflow_run"
+  | "workflow_step_run"
+  | "plugin_workflow_run"
+  | "plugin_workflow_step_run"
+  | "plugin_tool_execution_log"
+  | "tool_audit_log"
+  | "agent_wakeup_request"
+  | "heartbeat_run"
+  | "mission_plan_artifact"
+  | "approval"
+  | "approval_comment"
+  | "issue_approval";
+
+export type MissionGovernanceThreadSeverity = "info" | "attention" | "blocked" | "failed" | "approved" | "completed";
+
+export interface MissionGovernanceThreadSourceRef {
+  type: MissionGovernanceThreadSourceType;
+  id: string;
+  externalId?: string;
+  table?: string;
+}
+
+export interface MissionGovernanceThreadActor {
+  type: "agent" | "board" | "user" | "system" | "tool" | "external";
+  id?: string;
+  role?: string;
+  authorityRole?: "specialist" | "mission_owner" | "approver" | "operator" | "system";
+}
+
+export interface MissionGovernanceThreadEvidenceRef {
+  type: "file" | "url" | "artifact" | "test" | "approval" | "log" | "comment" | "plan" | "rule" | "kb";
+  ref: string;
+  label?: string;
+}
+
+export interface MissionGovernanceThreadEvent {
+  id: string;
+  companyId: string;
+  scope: {
+    missionId: string;
+    issueId?: string;
+    workflowRunId?: string;
+    workflowStepRunId?: string;
+    heartbeatRunId?: string;
+    approvalId?: string;
+    toolExecutionId?: string;
+  };
+  sourceRef: MissionGovernanceThreadSourceRef;
+  eventType: MissionGovernanceThreadEventType;
+  title: string;
+  summary: string;
+  timestamp: string;
+  severity?: MissionGovernanceThreadSeverity;
+  actor?: MissionGovernanceThreadActor;
+  evidenceRefs?: MissionGovernanceThreadEvidenceRef[];
+  rawAvailable?: boolean;
+}
+
+export interface MissionGovernanceThreadSummary {
+  totalEventCount: number;
+  latestEvents: MissionGovernanceThreadEvent[];
+  openDecisions: MissionGovernanceThreadEvent[];
+}
+
+export interface MissionGovernanceThreadResponse {
+  missionId: string;
+  companyId: string;
+  events: MissionGovernanceThreadEvent[];
+  summary: MissionGovernanceThreadSummary;
+}
+
 export interface MissionListItem {
   id: string;
   companyId: string;
@@ -166,6 +262,7 @@ export const missionsApi = {
   listAgents: (id: string) => api.get<MissionAgentEntry[]>(`/missions/${id}/agents`),
   listIssues: (id: string) => api.get<Issue[]>(`/missions/${id}/issues`),
   listWorkflowRuns: (id: string) => api.get<MissionWorkflowRun[]>(`/missions/${id}/workflow-runs`),
+  getGovernanceThread: (id: string) => api.get<MissionGovernanceThreadResponse>(`/missions/${id}/governance-thread`),
   create: (companyId: string, data: CreateMissionInput) =>
     api.post<MissionListItem>(`/companies/${companyId}/missions`, data),
   update: (id: string, data: UpdateMissionInput) =>
