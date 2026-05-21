@@ -35,6 +35,19 @@ vi.mock("@tanstack/react-query", () => ({
             stepSummary: ["Collect evidence", "Owner diagnosis", "Operator report"],
             executionUnitCount: 4,
             blockedOrFailedUnitCount: 1,
+            selectedExecutionUnitCount: 4,
+            selectedExecutionUnitSelectionStateCounts: {
+              selected: 1,
+              candidate: 1,
+              excluded: 1,
+              satisfied: 1,
+            },
+            selectedExecutionUnitExecutionStateCounts: {
+              blocked: 1,
+              failed: 1,
+              cancelled: 1,
+            },
+            selectedExecutionUnitLabels: ["Collect data", "Write briefing", "Publish report", "Hidden fourth label"],
             ruleRefCount: 2,
             ruleNames: ["Vendor handoff rule", "Approval gate rule"],
             ruleModes: ["guidance", "approval_gate"],
@@ -50,6 +63,16 @@ vi.mock("@tanstack/react-query", () => ({
                   title: "Publish handoff step",
                   status: "failed",
                   sourceRef: { type: "plugin_workflow_step_run", id: "step-run-1" },
+                },
+              ],
+              selectedExecutionUnits: [
+                {
+                  title: "Collect data",
+                  selectionState: "selected",
+                  executionState: "blocked",
+                  body: "PRIVATE RAW BODY SHOULD NOT RENDER",
+                  reason: "PRIVATE REASON SHOULD NOT RENDER",
+                  evidenceRefs: [{ ref: "PRIVATE-EVIDENCE" }],
                 },
               ],
             },
@@ -219,6 +242,20 @@ describe("MissionDetail", () => {
     expect(html).toContain("Publish handoff step");
     expect(html).toContain("plugin_workflow_step_run:step-run-1");
     expect(html).toContain("failed");
+    expect(html).toContain("Selected execution units");
+    expect(html).toContain("4 total");
+    expect(html).toContain("selected 1");
+    expect(html).toContain("candidate 1");
+    expect(html).toContain("excluded 1");
+    expect(html).toContain("satisfied 1");
+    expect(html).toContain("exceptions: blocked 1, failed 1, cancelled 1");
+    expect(html).toContain("Collect data");
+    expect(html).toContain("Write briefing");
+    expect(html).toContain("Publish report");
+    expect(html).not.toContain("Hidden fourth label");
+    expect(html).not.toContain("PRIVATE RAW BODY SHOULD NOT RENDER");
+    expect(html).not.toContain("PRIVATE REASON SHOULD NOT RENDER");
+    expect(html).not.toContain("PRIVATE-EVIDENCE");
     expect(html).toContain("Audit timeline");
     expect(html).toContain("mission.supervision.run");
     expect(html).toContain("1 findings · 1 recommendations · 0 applied");

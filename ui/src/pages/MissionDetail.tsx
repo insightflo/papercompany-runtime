@@ -112,6 +112,19 @@ function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: Mission
   const ruleModes = plan?.ruleModes ?? [];
   const stepSummary = plan?.stepSummary ?? [];
   const blockedOrFailed = plan?.blockedOrFailedUnitCount ?? 0;
+  const selectedUnitCount = plan?.selectedExecutionUnitCount ?? 0;
+  const selectedStateCounts = plan?.selectedExecutionUnitSelectionStateCounts;
+  const selectedExceptionCounts = plan?.selectedExecutionUnitExecutionStateCounts;
+  const selectedUnitLabels = (plan?.selectedExecutionUnitLabels ?? []).filter((label) => label.trim().length > 0).slice(0, 3);
+  const selectedExceptionSummary = selectedExceptionCounts
+    ? [
+        ["blocked", selectedExceptionCounts.blocked],
+        ["failed", selectedExceptionCounts.failed],
+        ["cancelled", selectedExceptionCounts.cancelled],
+      ]
+        .map(([label, count]) => `${label} ${count}`)
+        .join(", ")
+    : null;
 
   if (!plan?.available) {
     return (
@@ -200,6 +213,28 @@ function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: Mission
           )}
         </section>
       </div>
+
+      {selectedUnitCount > 0 && (
+        <section className="rounded-md border border-border p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Selected execution units</p>
+            <span className="text-xs text-muted-foreground">{selectedUnitCount} total</span>
+          </div>
+          {selectedStateCounts && (
+            <p className="mt-3 text-sm text-muted-foreground">
+              selected {selectedStateCounts.selected} · candidate {selectedStateCounts.candidate} · excluded {selectedStateCounts.excluded} · satisfied {selectedStateCounts.satisfied}
+            </p>
+          )}
+          {selectedExceptionSummary && <p className="mt-2 text-sm text-muted-foreground">exceptions: {selectedExceptionSummary}</p>}
+          {selectedUnitLabels.length > 0 && (
+            <ul className="mt-3 flex flex-wrap gap-2 text-sm">
+              {selectedUnitLabels.map((label) => (
+                <li key={label} className="rounded-full border border-border px-2 py-1">{label}</li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-md border border-border p-4">
