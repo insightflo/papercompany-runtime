@@ -10,6 +10,10 @@ function asString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function asNumber(value: unknown) {
+  return typeof value === "number" && isFinite(value) ? value : 0;
+}
+
 function summarizeMarkdownHandoff(markdown: string | null) {
   const trimmed = markdown?.trim();
   if (!trimmed) return null;
@@ -170,9 +174,18 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const missionPlanRuleModes = Array.isArray(missionPlan?.ruleModes)
     ? missionPlan.ruleModes.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
+  const selectedUnitSelectionCounts = asRecord(missionPlan?.selectedExecutionUnitSelectionStateCounts);
+  const selectedUnitExecutionCounts = asRecord(missionPlan?.selectedExecutionUnitExecutionStateCounts);
+  const selectedUnitLabels = Array.isArray(missionPlan?.selectedExecutionUnitLabels)
+    ? missionPlan.selectedExecutionUnitLabels.filter((value): value is string => typeof value === "string" && value.trim().length > 0).slice(0, 3)
+    : [];
   const missionPlanExecutionUnitsLine =
     missionPlan?.available === true && Number(missionPlan.executionUnitCount ?? 0) > 0
       ? `- Mission execution units: ${Number(missionPlan.executionUnitCount ?? 0)} total, ${Number(missionPlan.blockedOrFailedUnitCount ?? 0)} blocked/failed`
+      : null;
+  const missionPlanSelectedUnitsLine =
+    missionPlan?.available === true && asNumber(missionPlan.selectedExecutionUnitCount) > 0
+      ? `- Mission selected units: ${asNumber(missionPlan.selectedExecutionUnitCount)} total — selected ${asNumber(selectedUnitSelectionCounts?.selected)}, candidate ${asNumber(selectedUnitSelectionCounts?.candidate)}, excluded ${asNumber(selectedUnitSelectionCounts?.excluded)}, satisfied ${asNumber(selectedUnitSelectionCounts?.satisfied)}; blocked ${asNumber(selectedUnitExecutionCounts?.blocked)}, failed ${asNumber(selectedUnitExecutionCounts?.failed)}, cancelled ${asNumber(selectedUnitExecutionCounts?.cancelled)}${selectedUnitLabels.length > 0 ? ` — ${selectedUnitLabels.join(" | ")}` : ""}`
       : null;
   const missionPlanRulesLine =
     missionPlan?.available === true && Number(missionPlan.ruleRefCount ?? 0) > 0
@@ -223,6 +236,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanInputsLine,
     missionPlanStepsLine,
     missionPlanExecutionUnitsLine,
+    missionPlanSelectedUnitsLine,
     missionPlanRulesLine,
     fileViewsLine,
     guardrailLine,

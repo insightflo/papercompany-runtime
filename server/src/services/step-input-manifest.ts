@@ -71,6 +71,19 @@ export interface StepInputManifest {
       stepSummary: string[];
       executionUnitCount: number;
       blockedOrFailedUnitCount: number;
+      selectedExecutionUnitCount: number;
+      selectedExecutionUnitSelectionStateCounts: {
+        selected: number;
+        excluded: number;
+        satisfied: number;
+        candidate: number;
+      };
+      selectedExecutionUnitExecutionStateCounts: {
+        blocked: number;
+        failed: number;
+        cancelled: number;
+      };
+      selectedExecutionUnitLabels: string[];
       ruleRefCount: number;
       ruleNames: string[];
       ruleModes: string[];
@@ -230,6 +243,19 @@ export function buildStepInputManifest(input: {
         stepSummary: missionPlanStepSummary,
         executionUnitCount: readNumber(missionPlan.executionUnitCount) ?? 0,
         blockedOrFailedUnitCount: readNumber(missionPlan.blockedOrFailedUnitCount) ?? 0,
+        selectedExecutionUnitCount: readNumber(missionPlan.selectedExecutionUnitCount) ?? 0,
+        selectedExecutionUnitSelectionStateCounts: {
+          selected: readNumber(parseObject(missionPlan.selectedExecutionUnitSelectionStateCounts).selected) ?? 0,
+          excluded: readNumber(parseObject(missionPlan.selectedExecutionUnitSelectionStateCounts).excluded) ?? 0,
+          satisfied: readNumber(parseObject(missionPlan.selectedExecutionUnitSelectionStateCounts).satisfied) ?? 0,
+          candidate: readNumber(parseObject(missionPlan.selectedExecutionUnitSelectionStateCounts).candidate) ?? 0,
+        },
+        selectedExecutionUnitExecutionStateCounts: {
+          blocked: readNumber(parseObject(missionPlan.selectedExecutionUnitExecutionStateCounts).blocked) ?? 0,
+          failed: readNumber(parseObject(missionPlan.selectedExecutionUnitExecutionStateCounts).failed) ?? 0,
+          cancelled: readNumber(parseObject(missionPlan.selectedExecutionUnitExecutionStateCounts).cancelled) ?? 0,
+        },
+        selectedExecutionUnitLabels: readStringArray(missionPlan.selectedExecutionUnitLabels),
         ruleRefCount: readNumber(missionPlan.ruleRefCount) ?? 0,
         ruleNames: readStringArray(missionPlan.ruleNames),
         ruleModes: readStringArray(missionPlan.ruleModes),

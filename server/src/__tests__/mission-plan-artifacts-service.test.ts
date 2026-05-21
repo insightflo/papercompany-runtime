@@ -466,4 +466,76 @@ describeEmbeddedPostgres("mission plan artifact service", () => {
       ruleRefCount: 2,
     });
   });
+
+  it("summarizes v3 selected execution-unit planning metadata without full unit bodies", async () => {
+    const summary = summarizeMissionPlanForRuntime({
+      id: "plan-v3",
+      companyId: "company-1",
+      missionId: "mission-1",
+      revision: 1,
+      status: "active",
+      ownerAgentId: "agent-1",
+      missionGoal: "Coordinate selected workflow subset execution.",
+      refs: {
+        schemaVersion: 3,
+        selectedExecutionUnits: [
+          {
+            id: "unit-selected",
+            title: "Run preflight smoke",
+            selectionState: "selected",
+            executionState: "blocked",
+            reason: "Required before operator handoff",
+            sourceRef: { type: "workflow_definition_step", id: "workflow-1", stepId: "preflight" },
+            body: "large private workflow instruction body should not be copied into compact fields",
+          },
+          {
+            title: "Collect candidate QA owner",
+            selectionState: "candidate",
+            executionState: "not_materialized",
+            reason: "Candidate until owner confirms",
+            sourceRef: { type: "workflow_definition_step", id: "workflow-1", stepId: "qa-owner" },
+          },
+          {
+            selectionState: "excluded",
+            executionState: "cancelled",
+            reason: "Out of scope for this mission",
+            sourceRef: { type: "workflow_definition_step", id: "workflow-1", stepId: "deploy" },
+          },
+          {
+            selectionState: "satisfied",
+            executionState: "completed",
+            reason: "Already satisfied by prior artifact",
+            dependencyTreatment: "satisfied_by_prior_artifact",
+            evidenceRefs: [{ type: "artifact", id: "artifact-1", label: "prior QA note" }],
+            sourceRef: { type: "workflow_definition_step", id: "workflow-1", stepId: "prior-qa" },
+          },
+        ],
+      },
+      assumptions: [],
+      requiredInputs: [],
+      successCriteria: [],
+      risks: [],
+      steps: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    expect(summary).toMatchObject({
+      available: true,
+      selectedExecutionUnitCount: 4,
+      selectedExecutionUnitSelectionStateCounts: {
+        selected: 1,
+        excluded: 1,
+        satisfied: 1,
+        candidate: 1,
+      },
+      selectedExecutionUnitExecutionStateCounts: {
+        blocked: 1,
+        failed: 0,
+        cancelled: 1,
+      },
+      selectedExecutionUnitLabels: ["Run preflight smoke", "Collect candidate QA owner"],
+    });
+    expect(JSON.stringify(summary.selectedExecutionUnitLabels)).not.toContain("large private workflow instruction body");
+  });
 });

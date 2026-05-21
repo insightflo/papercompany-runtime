@@ -198,6 +198,19 @@ export interface MissionListFilters {
   offset?: number;
 }
 
+export interface MissionPlanSelectedExecutionUnitSelectionStateCounts {
+  selected: number;
+  excluded: number;
+  satisfied: number;
+  candidate: number;
+}
+
+export interface MissionPlanSelectedExecutionUnitExecutionStateCounts {
+  blocked: number;
+  failed: number;
+  cancelled: number;
+}
+
 export interface MissionPlanRuntimeSummary {
   available: boolean;
   missionPlanId?: string | null;
@@ -212,6 +225,10 @@ export interface MissionPlanRuntimeSummary {
   stepSummary?: string[];
   executionUnitCount?: number;
   blockedOrFailedUnitCount?: number;
+  selectedExecutionUnitCount?: number;
+  selectedExecutionUnitSelectionStateCounts?: MissionPlanSelectedExecutionUnitSelectionStateCounts;
+  selectedExecutionUnitExecutionStateCounts?: MissionPlanSelectedExecutionUnitExecutionStateCounts;
+  selectedExecutionUnitLabels?: string[];
   ruleRefCount?: number;
   ruleNames?: string[];
   ruleModes?: string[];

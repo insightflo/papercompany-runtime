@@ -66,6 +66,10 @@ describe("buildPaperclipRuntimeBrief", () => {
             stepSummary: ["Confirm owner", "Run QA", "Collect approval"],
             executionUnitCount: 4,
             blockedOrFailedUnitCount: 1,
+            selectedExecutionUnitCount: 4,
+            selectedExecutionUnitSelectionStateCounts: { selected: 1, excluded: 1, satisfied: 1, candidate: 1 },
+            selectedExecutionUnitExecutionStateCounts: { blocked: 1, failed: 0, cancelled: 1 },
+            selectedExecutionUnitLabels: ["Run preflight smoke", "Collect candidate QA owner", "Deploy production", "Ignored fourth"],
             ruleRefCount: 2,
             ruleNames: ["Approval before publish", "Observe budget"],
             ruleModes: ["approval_gate", "observation"],
@@ -105,6 +109,8 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Mission plan inputs: 1 required, open: qa-owner");
     expect(brief).toContain("Mission plan steps: 3 total — Confirm owner | Run QA | Collect approval");
     expect(brief).toContain("Mission execution units: 4 total, 1 blocked/failed");
+    expect(brief).toContain("Mission selected units: 4 total — selected 1, candidate 1, excluded 1, satisfied 1; blocked 1, failed 0, cancelled 1 — Run preflight smoke | Collect candidate QA owner | Deploy production");
+    expect(brief).not.toContain("Ignored fourth");
     expect(brief).toContain("Mission rules: 2 refs — Approval before publish, Observe budget (approval_gate, observation)");
     expect(brief).not.toContain("private assumption");
     expect(brief).toContain("customer_response");

@@ -6,6 +6,19 @@ import { notFound } from "../errors.js";
 export type MissionPlanArtifact = typeof missionPlanArtifacts.$inferSelect;
 export type MissionPlanArtifactStatus = "draft" | "active" | "replanned" | "completed" | "superseded" | "archived";
 
+export type MissionPlanSelectedExecutionUnitStateCounts = {
+  selected: number;
+  excluded: number;
+  satisfied: number;
+  candidate: number;
+};
+
+export type MissionPlanSelectedExecutionUnitExecutionStateCounts = {
+  blocked: number;
+  failed: number;
+  cancelled: number;
+};
+
 export type MissionPlanRuntimeSummary = {
   available: boolean;
   missionPlanId?: string;
@@ -20,6 +33,10 @@ export type MissionPlanRuntimeSummary = {
   stepSummary?: string[];
   executionUnitCount?: number;
   blockedOrFailedUnitCount?: number;
+  selectedExecutionUnitCount?: number;
+  selectedExecutionUnitSelectionStateCounts?: MissionPlanSelectedExecutionUnitStateCounts;
+  selectedExecutionUnitExecutionStateCounts?: MissionPlanSelectedExecutionUnitExecutionStateCounts;
+  selectedExecutionUnitLabels?: string[];
   ruleRefCount?: number;
   ruleNames?: string[];
   ruleModes?: string[];
@@ -270,6 +287,57 @@ function isBlockedOrFailedExecutionUnit(unit: JsonRecord): boolean {
   return ["blocked", "failed", "error", "cancelled", "canceled", "aborted", "timed_out", "timed-out", "timeout"].includes(status);
 }
 
+function selectedExecutionUnitLabel(unit: MissionPlanExecutionUnitSelection): string | null {
+  const title = typeof unit.title === "string" ? unit.title.trim() : "";
+  if (title) return truncate(title, 80);
+
+  const sourceRef = asRecord(unit.sourceRef);
+  const workflowName = typeof sourceRef.workflowDefinitionName === "string" ? sourceRef.workflowDefinitionName.trim() : "";
+  const stepId = typeof sourceRef.stepId === "string" ? sourceRef.stepId.trim() : "";
+  if (workflowName && stepId) return truncate(`${workflowName}:${stepId}`, 80);
+  if (workflowName) return truncate(workflowName, 80);
+
+  const type = typeof sourceRef.type === "string" ? sourceRef.type.trim() : "";
+  const id = typeof sourceRef.id === "string" ? sourceRef.id.trim() : "";
+  if (type && id && stepId) return truncate(`${type}:${id}:${stepId}`, 80);
+  if (type && id) return truncate(`${type}:${id}`, 80);
+  return null;
+}
+
+function selectedExecutionUnitRuntimeSummary(units: MissionPlanExecutionUnitSelection[]) {
+  const selectionStateCounts: MissionPlanSelectedExecutionUnitStateCounts = {
+    selected: 0,
+    excluded: 0,
+    satisfied: 0,
+    candidate: 0,
+  };
+  const executionStateCounts: MissionPlanSelectedExecutionUnitExecutionStateCounts = {
+    blocked: 0,
+    failed: 0,
+    cancelled: 0,
+  };
+  const labels: string[] = [];
+
+  for (const unit of units) {
+    selectionStateCounts[unit.selectionState] += 1;
+    if (unit.executionState === "blocked") executionStateCounts.blocked += 1;
+    if (unit.executionState === "failed") executionStateCounts.failed += 1;
+    if (unit.executionState === "cancelled") executionStateCounts.cancelled += 1;
+
+    if ((unit.selectionState === "selected" || unit.selectionState === "candidate") && labels.length < 5) {
+      const label = selectedExecutionUnitLabel(unit);
+      if (label) labels.push(label);
+    }
+  }
+
+  return {
+    selectedExecutionUnitCount: units.length,
+    selectedExecutionUnitSelectionStateCounts: selectionStateCounts,
+    selectedExecutionUnitExecutionStateCounts: executionStateCounts,
+    selectedExecutionUnitLabels: labels,
+  };
+}
+
 export function summarizeMissionPlanForRuntime(plan: MissionPlanArtifact | null | undefined): MissionPlanRuntimeSummary {
   if (!plan) return { available: false };
 
@@ -287,6 +355,7 @@ export function summarizeMissionPlanForRuntime(plan: MissionPlanArtifact | null 
     .map((title) => truncate(title, 80));
   const refs = asRecord(plan.refs);
   const executionUnits = asExecutionUnits(refs.executionUnits);
+  const selectedExecutionUnits = asSelectedExecutionUnits(refs.selectedExecutionUnits);
   const ruleRefs = refsRuleRefs(refs);
 
   return {
@@ -303,6 +372,7 @@ export function summarizeMissionPlanForRuntime(plan: MissionPlanArtifact | null 
     stepSummary,
     executionUnitCount: executionUnits.length,
     blockedOrFailedUnitCount: executionUnits.filter((unit) => isBlockedOrFailedExecutionUnit(unit)).length,
+    ...(selectedExecutionUnits.length > 0 ? selectedExecutionUnitRuntimeSummary(selectedExecutionUnits) : {}),
     ruleRefCount: ruleRefs.length,
     ruleNames: uniqueStrings(ruleRefs.map(ruleRefName)).slice(0, 10),
     ruleModes: uniqueStrings(ruleRefs.map(ruleRefMode)).slice(0, 10),
