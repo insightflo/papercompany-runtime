@@ -13,8 +13,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
+  asSelectedExecutionUnits,
   mergeMissionPlanRefs,
   missionPlanArtifactService,
+  selectedExecutionUnitKey,
   summarizeMissionPlanForRuntime,
 } from "../services/mission-plan-artifacts.js";
 
@@ -102,6 +104,155 @@ describe("mission plan refs v2 helpers", () => {
         kind: "plugin_workflow_step_run",
         sourceRef: { type: "plugin_workflow_step_run", id: "plugin-step-1", workflowRunId: "plugin-run-1" },
         status: "timed_out",
+      }),
+    ]);
+  });
+
+  it("preserves v2 executionUnits and ruleRefs while adding v3 selectedExecutionUnits", () => {
+    const merged = mergeMissionPlanRefs(
+      {
+        schemaVersion: 2,
+        executionUnits: [{ sourceRef: { type: "workflow_run", id: "run-1" }, status: "completed" }],
+        ruleRefs: [{ id: "approval-before-publish", mode: "approval_gate" }],
+      },
+      {
+        selectedExecutionUnits: [
+          {
+            id: "wf:wf-1:step:comic",
+            kind: "workflow_definition_step",
+            selectionState: "selected",
+            executionState: "not_materialized",
+            reason: "Mission owner selected only the comic generation step.",
+            sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "comic" },
+          },
+        ],
+      },
+    );
+
+    expect(merged).toMatchObject({
+      schemaVersion: 3,
+      executionUnits: [{ sourceRef: { type: "workflow_run", id: "run-1" }, status: "completed" }],
+      ruleRefs: [{ id: "approval-before-publish", mode: "approval_gate" }],
+      selectedExecutionUnits: [
+        expect.objectContaining({
+          id: "wf:wf-1:step:comic",
+          selectionState: "selected",
+          reason: "Mission owner selected only the comic generation step.",
+        }),
+      ],
+    });
+  });
+
+  it("keeps v2 schemaVersion when selectedExecutionUnits are absent or invalid", () => {
+    const legacyOnly = mergeMissionPlanRefs(
+      { executionUnits: [{ sourceRef: { type: "workflow_run", id: "run-1" }, status: "running" }] },
+      { ruleRefs: [{ id: "observe-cost", mode: "observation" }] },
+    );
+    expect(legacyOnly.schemaVersion).toBe(2);
+    expect(legacyOnly.selectedExecutionUnits).toBeUndefined();
+
+    const invalidSelected = mergeMissionPlanRefs(legacyOnly, {
+      selectedExecutionUnits: [
+        { selectionState: "selected", reason: "missing source", sourceRef: { type: "", id: "" } },
+      ],
+    });
+    expect(invalidSelected.schemaVersion).toBe(2);
+    expect(invalidSelected.selectedExecutionUnits).toBeUndefined();
+  });
+
+  it("dedupes selectedExecutionUnits by stable key and lets incoming update reason and state", () => {
+    const merged = mergeMissionPlanRefs(
+      {
+        selectedExecutionUnits: [
+          {
+            id: "wf:wf-1:step:comic",
+            selectionState: "candidate",
+            reason: "Candidate before owner decision.",
+            sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "comic" },
+          },
+        ],
+      },
+      {
+        selectedExecutionUnits: [
+          {
+            id: "wf:wf-1:step:comic",
+            selectionState: "selected",
+            reason: "Owner selected this as the bounded replay unit.",
+            sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "comic" },
+          },
+          {
+            selectionState: "excluded",
+            reason: "Publishing is explicitly out of scope for this replay.",
+            sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "publish" },
+          },
+        ],
+      },
+    );
+
+    expect(merged.schemaVersion).toBe(3);
+    expect(merged.selectedExecutionUnits).toEqual([
+      expect.objectContaining({
+        id: "wf:wf-1:step:comic",
+        selectionState: "selected",
+        reason: "Owner selected this as the bounded replay unit.",
+      }),
+      expect.objectContaining({
+        selectionState: "excluded",
+        reason: "Publishing is explicitly out of scope for this replay.",
+        sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "publish" },
+      }),
+    ]);
+    const selectedUnits = asSelectedExecutionUnits(merged.selectedExecutionUnits);
+    expect(selectedExecutionUnitKey(selectedUnits[1])).toBe("workflow_definition_step:wf-1:publish");
+  });
+
+  it("rejects malformed selectedExecutionUnits with missing sourceRef, state, or reason", () => {
+    const units = asSelectedExecutionUnits([
+      { selectionState: "selected", reason: "missing source", sourceRef: { type: "", id: "" } },
+      { selectionState: "nonsense", reason: "bad state", sourceRef: { type: "workflow_definition_step", id: "wf-1" } },
+      { selectionState: "selected", reason: " ", sourceRef: { type: "workflow_definition_step", id: "wf-1" } },
+      { selectionState: "selected", reason: "valid", sourceRef: { type: "workflow_definition_step", id: "wf-1" } },
+    ]);
+
+    expect(units).toEqual([
+      expect.objectContaining({
+        selectionState: "selected",
+        reason: "valid",
+        sourceRef: { type: "workflow_definition_step", id: "wf-1" },
+      }),
+    ]);
+  });
+
+  it("rejects satisfied_by_prior_artifact without at least one valid evidence ref", () => {
+    const units = asSelectedExecutionUnits([
+      {
+        selectionState: "satisfied",
+        dependencyTreatment: "satisfied_by_prior_artifact",
+        reason: "Claimed satisfied but no evidence.",
+        sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "collect" },
+      },
+      {
+        selectionState: "satisfied",
+        dependencyTreatment: "satisfied_by_prior_artifact",
+        reason: "Claimed satisfied but evidence is malformed.",
+        sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "collect" },
+        evidenceRefs: [{ label: "No type" }],
+      },
+      {
+        selectionState: "satisfied",
+        dependencyTreatment: "satisfied_by_prior_artifact",
+        reason: "Prior collection artifact exists.",
+        sourceRef: { type: "workflow_definition_step", id: "wf-1", stepId: "collect" },
+        evidenceRefs: [{ type: "artifact", id: "artifact-1" }],
+      },
+    ]);
+
+    expect(units).toEqual([
+      expect.objectContaining({
+        selectionState: "satisfied",
+        dependencyTreatment: "satisfied_by_prior_artifact",
+        reason: "Prior collection artifact exists.",
+        evidenceRefs: [{ type: "artifact", id: "artifact-1" }],
       }),
     ]);
   });

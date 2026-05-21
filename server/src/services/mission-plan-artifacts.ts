@@ -35,11 +35,49 @@ type MissionPlanExecutionUnitRef = JsonRecord & {
   };
 };
 
+export type MissionPlanExecutionUnitSelection = JsonRecord & {
+  id?: string;
+  kind?: "workflow_definition_step" | "workflow_run" | "workflow_step_run" | "mission_issue" | "tool_execution_candidate";
+  title?: string | null;
+  selectionState: "selected" | "excluded" | "satisfied" | "candidate";
+  executionState?: "not_materialized" | "materialized" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+  reason: string;
+  sourceRef: JsonRecord & {
+    type: string;
+    id: string;
+    workflowDefinitionId?: string;
+    workflowDefinitionName?: string;
+    workflowDefinitionSnapshotAt?: string | null;
+    definitionVersionLabel?: string | number | null;
+    workflowRunId?: string | null;
+    workflowStepRunId?: string | null;
+    stepId?: string | null;
+    issueId?: string | null;
+  };
+  dependencyTreatment?: "none" | "selected" | "satisfied_by_prior_artifact" | "explicitly_skipped" | "blocked";
+  evidenceRefs?: Array<JsonRecord & {
+    type?: string;
+    id?: string | null;
+    label?: string | null;
+  }>;
+  materializedRef?: {
+    type: "mission_issue" | "workflow_run" | "workflow_step_run" | "tool_execution";
+    id: string;
+  } | null;
+};
+
 export type MissionPlanRefsV2 = JsonRecord & {
   schemaVersion?: 2;
   executionUnits?: MissionPlanExecutionUnitRef[];
   ruleRefs?: JsonRecord[];
 };
+
+export type MissionPlanRefsV3 = Omit<MissionPlanRefsV2, "schemaVersion"> & {
+  schemaVersion: 3;
+  selectedExecutionUnits?: MissionPlanExecutionUnitSelection[];
+};
+
+type MissionPlanRefs = MissionPlanRefsV2 | MissionPlanRefsV3;
 
 type JsonRecord = Record<string, unknown>;
 type MissionPlanArtifactJsonArray = Array<JsonRecord | string>;
@@ -105,6 +143,42 @@ function refsExecutionUnitKey(unit: MissionPlanExecutionUnitRef): string | null 
   return `${type}:${id}`;
 }
 
+const selectedExecutionUnitStates = new Set(["selected", "excluded", "satisfied", "candidate"]);
+
+function hasValidEvidenceRef(value: unknown): boolean {
+  const ref = asRecord(value);
+  return typeof ref.type === "string" && ref.type.trim().length > 0;
+}
+
+export function selectedExecutionUnitKey(unit: MissionPlanExecutionUnitSelection): string | null {
+  const id = typeof unit.id === "string" ? unit.id.trim() : "";
+  if (id) return id;
+
+  const sourceRef = asRecord(unit.sourceRef);
+  const type = typeof sourceRef.type === "string" ? sourceRef.type.trim() : "";
+  const sourceId = typeof sourceRef.id === "string" ? sourceRef.id.trim() : "";
+  if (!type || !sourceId) return null;
+
+  const stepId = typeof sourceRef.stepId === "string" ? sourceRef.stepId.trim() : "";
+  return [type, sourceId, stepId].filter(Boolean).join(":");
+}
+
+export function asSelectedExecutionUnits(value: unknown): MissionPlanExecutionUnitSelection[] {
+  return asRecordArray(value).filter((unit): unit is MissionPlanExecutionUnitSelection => {
+    const sourceRef = asRecord(unit.sourceRef);
+    const sourceType = typeof sourceRef.type === "string" ? sourceRef.type.trim() : "";
+    const sourceId = typeof sourceRef.id === "string" ? sourceRef.id.trim() : "";
+    const selectionState = typeof unit.selectionState === "string" ? unit.selectionState.trim() : "";
+    const reason = typeof unit.reason === "string" ? unit.reason.trim() : "";
+    if (!sourceType || !sourceId || !selectedExecutionUnitStates.has(selectionState) || !reason) return false;
+    if (selectedExecutionUnitKey(unit as MissionPlanExecutionUnitSelection) === null) return false;
+    if (unit.dependencyTreatment === "satisfied_by_prior_artifact") {
+      return Array.isArray(unit.evidenceRefs) && unit.evidenceRefs.some(hasValidEvidenceRef);
+    }
+    return true;
+  });
+}
+
 function ruleRefKey(ruleRef: JsonRecord): string | null {
   const key = typeof ruleRef.key === "string" ? ruleRef.key.trim() : "";
   if (key) return key;
@@ -120,10 +194,10 @@ function asExecutionUnits(value: unknown): MissionPlanExecutionUnitRef[] {
   return asRecordArray(value).filter((unit): unit is MissionPlanExecutionUnitRef => refsExecutionUnitKey(unit as MissionPlanExecutionUnitRef) !== null);
 }
 
-export function mergeMissionPlanRefs(existing: unknown, incoming: unknown): MissionPlanRefsV2 {
+export function mergeMissionPlanRefs(existing: unknown, incoming: unknown): MissionPlanRefs {
   const existingRefs = asRecord(existing);
   const incomingRefs = asRecord(incoming);
-  const merged: MissionPlanRefsV2 = { ...existingRefs, ...incomingRefs };
+  const merged: MissionPlanRefs = { ...existingRefs, ...incomingRefs } as MissionPlanRefs;
 
   const unitsByKey = new Map<string, MissionPlanExecutionUnitRef>();
   for (const unit of [...asExecutionUnits(existingRefs.executionUnits), ...asExecutionUnits(incomingRefs.executionUnits)]) {
@@ -148,6 +222,23 @@ export function mergeMissionPlanRefs(existing: unknown, incoming: unknown): Miss
   if (ruleRefs.length > 0) {
     merged.schemaVersion = 2;
     merged.ruleRefs = ruleRefs;
+  }
+
+  const selectedUnitsByKey = new Map<string, MissionPlanExecutionUnitSelection>();
+  for (const unit of [
+    ...asSelectedExecutionUnits(existingRefs.selectedExecutionUnits),
+    ...asSelectedExecutionUnits(incomingRefs.selectedExecutionUnits),
+  ]) {
+    const key = selectedExecutionUnitKey(unit);
+    if (!key) continue;
+    selectedUnitsByKey.set(key, unit);
+  }
+  const selectedExecutionUnits = Array.from(selectedUnitsByKey.values());
+  if (selectedExecutionUnits.length > 0) {
+    merged.schemaVersion = 3;
+    merged.selectedExecutionUnits = selectedExecutionUnits;
+  } else {
+    delete (merged as JsonRecord).selectedExecutionUnits;
   }
 
   return merged;
