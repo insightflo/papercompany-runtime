@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, issueComments, issues, missions } from "@paperclipai/db";
 import {
+  buildMissionOwnerPlanRevisionDraft,
   findLatestAuthorizedMissionOwnerPlanDecision,
   parseMissionOwnerPlanDecision,
 } from "../services/mission-owner-plan-decisions.js";
@@ -441,6 +442,310 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
           message: expect.stringContaining("Invalid Mission owner plan decision JSON"),
         },
       ],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice 3C – buildMissionOwnerPlanRevisionDraft (pure, no DB)
+// ---------------------------------------------------------------------------
+
+describe("buildMissionOwnerPlanRevisionDraft", () => {
+  const baseDecision = {
+    missionId: "mission-42",
+    missionGoal: "Ship controlled rollout",
+    selectedExecutionUnits: [{ id: "unit-1", title: "Run smoke" }],
+    ruleRefs: ["rule:security"],
+    kbRefs: ["kb:rollout"],
+    requiredInputs: ["stagingUrl"],
+    successCriteria: ["smoke passes"],
+    steps: [{ id: "step-1", title: "Verify staging" }],
+  };
+
+  const baseArgs = {
+    expectedMissionId: "mission-42",
+    planningIssueId: "issue-99",
+    commentId: "comment-77",
+  };
+
+  it("defaults omitted array fields to empty arrays for a minimal decision", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { missionId: "mission-42" },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: {
+        missionId: "mission-42",
+        refs: {
+          schemaVersion: 3,
+          selectedExecutionUnits: [],
+          ruleRefs: [],
+          kbRefs: [],
+          ownerPlanDecision: { planningIssueId: "issue-99", commentId: "comment-77" },
+        },
+        requiredInputs: [],
+        successCriteria: [],
+        steps: [],
+      },
+    });
+  });
+
+  it("defaults null array fields to empty arrays", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: {
+        missionId: "mission-42",
+        selectedExecutionUnits: null,
+        ruleRefs: null,
+        kbRefs: null,
+        requiredInputs: null,
+        successCriteria: null,
+        steps: null,
+      },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        refs: expect.objectContaining({
+          selectedExecutionUnits: [],
+          ruleRefs: [],
+          kbRefs: [],
+          ownerPlanDecision: { planningIssueId: "issue-99", commentId: "comment-77" },
+        }),
+        requiredInputs: [],
+        successCriteria: [],
+        steps: [],
+      }),
+    });
+  });
+
+  // 1. Valid decision with missionGoal normalizes all fields correctly
+  it("normalizes a valid decision with missionGoal into a complete draft", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: baseDecision,
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: {
+        missionId: "mission-42",
+        missionGoal: "Ship controlled rollout",
+        refs: {
+          schemaVersion: 3,
+          selectedExecutionUnits: [{ id: "unit-1", title: "Run smoke" }],
+          ruleRefs: ["rule:security"],
+          kbRefs: ["kb:rollout"],
+          ownerPlanDecision: { planningIssueId: "issue-99", commentId: "comment-77" },
+        },
+        requiredInputs: ["stagingUrl"],
+        successCriteria: ["smoke passes"],
+        steps: [{ id: "step-1", title: "Verify staging" }],
+      },
+    });
+  });
+
+  // 2. goal fallback: uses decision.goal when decision.missionGoal is absent
+  it("falls back to decision.goal when missionGoal is absent", () => {
+    const { missionGoal: _, ...withoutGoal } = baseDecision;
+    const decision = { ...withoutGoal, goal: "Fallback goal text" };
+
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision,
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        missionGoal: "Fallback goal text",
+      }),
+    });
+  });
+
+  // 3. Missing goal omitted when both missionGoal and goal are absent or empty
+  it("omits missionGoal when both missionGoal and goal are absent", () => {
+    const { missionGoal: _, ...withoutGoal } = baseDecision;
+
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: withoutGoal,
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({ ok: true, draft: expect.not.objectContaining({ missionGoal: expect.anything() }) });
+  });
+
+  it("omits missionGoal when both missionGoal and goal are empty strings", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, missionGoal: "", goal: "" },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({ ok: true, draft: expect.not.objectContaining({ missionGoal: expect.anything() }) });
+  });
+
+  // 4. missionId mismatch → invalid result, no throw
+  it("returns invalid result (no throw) when missionId does not match expectedMissionId", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, missionId: "WRONG-MISSION" },
+      expectedMissionId: "mission-42",
+      planningIssueId: "issue-99",
+      commentId: "comment-77",
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+    if (!result.ok) {
+      expect(result.diagnostics.length).toBeGreaterThan(0);
+      expect(result.diagnostics.some((d) => /missionId/i.test(d.message) || /mismatch/i.test(d.message))).toBe(true);
+    }
+  });
+
+  it("returns ok when missionId is absent from decision", () => {
+    const { missionId: _, ...withoutId } = baseDecision;
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: withoutId,
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({ ok: true, draft: expect.objectContaining({ missionId: "mission-42" }) });
+  });
+
+  // 5. Wrong top-level shapes rejected with diagnostics
+  it("rejects selectedExecutionUnits that is not an array", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, selectedExecutionUnits: "not-an-array" },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+    if (!result.ok) {
+      expect(result.diagnostics.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("rejects selectedExecutionUnits containing non-object entries", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, selectedExecutionUnits: ["string-not-allowed"] },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+    if (!result.ok) {
+      expect(result.diagnostics.some((d) => /selectedExecutionUnits/i.test(d.message))).toBe(true);
+    }
+  });
+
+  it("rejects ruleRefs that is not an array", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, ruleRefs: 42 },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  it("rejects ruleRefs containing non-string/non-object entries", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, ruleRefs: [123] },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  it("rejects kbRefs containing non-string/non-object entries", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, kbRefs: [true] },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  it("rejects requiredInputs containing non-string/non-object entries", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, requiredInputs: [null] },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  it("rejects successCriteria containing non-string/non-object entries", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, successCriteria: [undefined] },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  it("rejects steps containing non-string/non-object entries", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, steps: [42] },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  // 6. Over-cap arrays rejected
+  it("rejects absurdly large selectedExecutionUnits array", () => {
+    const huge = Array.from({ length: 1100 }, (_, i) => ({ id: `unit-${i}` }));
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, selectedExecutionUnits: huge },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+    if (!result.ok) {
+      expect(result.diagnostics.some((d) => /selectedExecutionUnits/i.test(d.message))).toBe(true);
+    }
+  });
+
+  it("rejects absurdly large ruleRefs array", () => {
+    const huge = Array.from({ length: 1100 }, (_, i) => `rule:${i}`);
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, ruleRefs: huge },
+      ...baseArgs,
+    });
+
+    expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+  });
+
+  // 7. selectedExecutionUnits preserve arbitrary object structure without DB validation
+  it("preserves arbitrary object structure in selectedExecutionUnits without DB validation", () => {
+    const customUnits = [
+      { id: "custom-1", foo: "bar", nested: { deep: true }, count: 42 },
+      { name: "unit-no-id", metadata: [{ tag: "a" }] },
+    ];
+
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, selectedExecutionUnits: customUnits },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        refs: expect.objectContaining({ selectedExecutionUnits: customUnits }),
+      }),
+    });
+  });
+
+  it("preserves mixed string and object entries in ruleRefs", () => {
+    const mixed = ["rule:a", { ref: "rule:b", confidence: 0.9 }];
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, ruleRefs: mixed },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({ refs: expect.objectContaining({ ruleRefs: mixed }) }),
     });
   });
 });

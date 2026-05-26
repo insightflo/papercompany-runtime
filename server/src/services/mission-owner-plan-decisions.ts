@@ -313,3 +313,176 @@ function getAuthorizedDecisionAuthor({
 function isRecord(value: unknown): value is MissionOwnerPlanDecisionPayload {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+// ---------------------------------------------------------------------------
+// Slice 3C – buildMissionOwnerPlanRevisionDraft
+// ---------------------------------------------------------------------------
+
+const MAX_ARRAY_LENGTH = 1000;
+
+export type BuildMissionOwnerPlanRevisionDraftInput = {
+  decision: MissionOwnerPlanDecisionPayload;
+  expectedMissionId: string;
+  planningIssueId: string;
+  commentId: string;
+};
+
+export type PlanRevisionDraft = {
+  missionId: string;
+  missionGoal?: string;
+  refs: {
+    schemaVersion: 3;
+    selectedExecutionUnits: Record<string, unknown>[];
+    ruleRefs: (string | Record<string, unknown>)[];
+    kbRefs: (string | Record<string, unknown>)[];
+    ownerPlanDecision: { planningIssueId: string; commentId: string };
+  };
+  requiredInputs: (string | Record<string, unknown>)[];
+  successCriteria: (string | Record<string, unknown>)[];
+  steps: (string | Record<string, unknown>)[];
+};
+
+export type BuildMissionOwnerPlanRevisionDraftSuccess = {
+  ok: true;
+  draft: PlanRevisionDraft;
+};
+
+export type BuildMissionOwnerPlanRevisionDraftDiagnostic = {
+  code: string;
+  message: string;
+};
+
+export type BuildMissionOwnerPlanRevisionDraftFailure = {
+  ok: false;
+  diagnostics: BuildMissionOwnerPlanRevisionDraftDiagnostic[];
+};
+
+export type BuildMissionOwnerPlanRevisionDraftResult =
+  | BuildMissionOwnerPlanRevisionDraftSuccess
+  | BuildMissionOwnerPlanRevisionDraftFailure;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringOrObject(entry: unknown): entry is string | Record<string, unknown> {
+  if (typeof entry === "string") return true;
+  return isPlainObject(entry);
+}
+
+function validateArrayOfStringsOrObjects(
+  value: unknown,
+  fieldName: string,
+  diagnostics: BuildMissionOwnerPlanRevisionDraftDiagnostic[],
+): (string | Record<string, unknown>)[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    diagnostics.push({ code: "invalid_field_shape", message: `${fieldName} must be an array` });
+    return [];
+  }
+  if (value.length > MAX_ARRAY_LENGTH) {
+    diagnostics.push({
+      code: "array_too_large",
+      message: `${fieldName} exceeds maximum length of ${MAX_ARRAY_LENGTH} (got ${value.length})`,
+    });
+    return [];
+  }
+  for (const entry of value) {
+    if (!isStringOrObject(entry)) {
+      diagnostics.push({
+        code: "invalid_entry_type",
+        message: `${fieldName} entries must be strings or objects, got ${typeof entry}`,
+      });
+      return [];
+    }
+  }
+  return value as (string | Record<string, unknown>)[];
+}
+
+export function buildMissionOwnerPlanRevisionDraft({
+  decision,
+  expectedMissionId,
+  planningIssueId,
+  commentId,
+}: BuildMissionOwnerPlanRevisionDraftInput): BuildMissionOwnerPlanRevisionDraftResult {
+  const diagnostics: BuildMissionOwnerPlanRevisionDraftDiagnostic[] = [];
+
+  // Validate missionId
+  if (decision.missionId !== undefined && decision.missionId !== null && decision.missionId !== expectedMissionId) {
+    diagnostics.push({
+      code: "mission_id_mismatch",
+      message: `decision.missionId mismatch: expected ${expectedMissionId}, got ${String(decision.missionId)}`,
+    });
+  }
+
+  let selectedExecutionUnits: Record<string, unknown>[] = [];
+
+  // Validate selectedExecutionUnits when present: must be array of objects only
+  if (decision.selectedExecutionUnits === undefined || decision.selectedExecutionUnits === null) {
+    selectedExecutionUnits = [];
+  } else if (!Array.isArray(decision.selectedExecutionUnits)) {
+    diagnostics.push({
+      code: "invalid_field_shape",
+      message: "selectedExecutionUnits must be an array",
+    });
+  } else if (decision.selectedExecutionUnits.length > MAX_ARRAY_LENGTH) {
+    diagnostics.push({
+      code: "array_too_large",
+      message: `selectedExecutionUnits exceeds maximum length of ${MAX_ARRAY_LENGTH} (got ${decision.selectedExecutionUnits.length})`,
+    });
+  } else {
+    for (const entry of decision.selectedExecutionUnits) {
+      if (!isPlainObject(entry)) {
+        diagnostics.push({
+          code: "invalid_entry_type",
+          message: `selectedExecutionUnits entries must be objects, got ${typeof entry}`,
+        });
+        break;
+      }
+    }
+
+    if (!diagnostics.some((diagnostic) => diagnostic.message.includes("selectedExecutionUnits"))) {
+      selectedExecutionUnits = decision.selectedExecutionUnits as Record<string, unknown>[];
+    }
+  }
+
+  // Validate flexible arrays (strings or objects)
+  const ruleRefs = validateArrayOfStringsOrObjects(decision.ruleRefs, "ruleRefs", diagnostics);
+  const kbRefs = validateArrayOfStringsOrObjects(decision.kbRefs, "kbRefs", diagnostics);
+  const requiredInputs = validateArrayOfStringsOrObjects(decision.requiredInputs, "requiredInputs", diagnostics);
+  const successCriteria = validateArrayOfStringsOrObjects(decision.successCriteria, "successCriteria", diagnostics);
+  const steps = validateArrayOfStringsOrObjects(decision.steps, "steps", diagnostics);
+
+  // If any diagnostics accumulated, return failure
+  if (diagnostics.length > 0) {
+    return { ok: false, diagnostics };
+  }
+
+  // Resolve missionGoal: prefer missionGoal, fallback to goal, omit if empty
+  let missionGoal: string | undefined;
+  if (typeof decision.missionGoal === "string" && decision.missionGoal.trim() !== "") {
+    missionGoal = decision.missionGoal;
+  } else if (typeof decision.goal === "string" && decision.goal.trim() !== "") {
+    missionGoal = decision.goal;
+  }
+
+  const draft: PlanRevisionDraft = {
+    missionId: expectedMissionId,
+    ...(missionGoal !== undefined ? { missionGoal } : {}),
+    refs: {
+      schemaVersion: 3,
+      selectedExecutionUnits,
+      ruleRefs,
+      kbRefs,
+      ownerPlanDecision: { planningIssueId, commentId },
+    },
+    requiredInputs,
+    successCriteria,
+    steps,
+  };
+
+  return { ok: true, draft };
+}
