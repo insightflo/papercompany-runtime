@@ -49,6 +49,26 @@ export function missionRoutes(db: Db) {
         },
       });
     },
+    onOwnerPlanningIssueCreated: ({ mission, issue, targetAgentId, idempotencyKey }) => {
+      return heartbeat.wakeup(targetAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_owner_planning_issue_created",
+        idempotencyKey,
+        payload: {
+          issueId: issue.id,
+          missionId: mission.id,
+          mutation: "mission_main_executor_plan",
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-planning",
+        contextSnapshot: {
+          issueId: issue.id,
+          missionId: mission.id,
+          source: "mission_owner_planning_issue_created",
+        },
+      });
+    },
   });
 
   // ---------------------------------------------------------------------------

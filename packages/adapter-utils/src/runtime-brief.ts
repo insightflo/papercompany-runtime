@@ -45,6 +45,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const maintenanceDecision = asRecord(manifestInputs?.maintenanceDecision);
   const fileViews = asRecord(manifestInputs?.fileViews);
   const missionPlan = asRecord(manifestInputs?.missionPlan);
+  const missionOwnerPlanningContext = asRecord(manifestInputs?.missionOwnerPlanningContext);
   const guardrails = asRecord(manifest?.guardrails);
 
   const workspaceLine =
@@ -191,6 +192,10 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlan?.available === true && Number(missionPlan.ruleRefCount ?? 0) > 0
       ? `- Mission rules: ${Number(missionPlan.ruleRefCount ?? 0)} refs${missionPlanRuleNames.length > 0 ? ` — ${missionPlanRuleNames.join(", ")}` : ""}${missionPlanRuleModes.length > 0 ? ` (${missionPlanRuleModes.join(", ")})` : ""}`
       : null;
+  const missionOwnerPlanningContextLine =
+    missionOwnerPlanningContext?.available === true
+      ? `- Mission owner planning context: mission ${asString(missionOwnerPlanningContext.missionId) ?? "unknown"}, planning issue ${asString(missionOwnerPlanningContext.planningIssueId) ?? "none"}, active plan ${missionOwnerPlanningContext.activePlanAvailable === true ? "yes" : "no"}, selected units ${asNumber(missionOwnerPlanningContext.selectedExecutionUnitCount)}, execution source units ${asNumber(missionOwnerPlanningContext.executionSourceUnitCount)}`
+      : null;
 
   const guardrailLine =
     guardrails?.broadScanAllowed === false
@@ -238,6 +243,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanExecutionUnitsLine,
     missionPlanSelectedUnitsLine,
     missionPlanRulesLine,
+    missionOwnerPlanningContextLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

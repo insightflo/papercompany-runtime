@@ -181,6 +181,14 @@ describe("buildStepInputManifest", () => {
           ruleModes: [],
           refs: {},
         },
+        missionOwnerPlanningContext: {
+          available: false,
+          planningIssueId: null,
+          missionId: null,
+          activePlanAvailable: false,
+          selectedExecutionUnitCount: 0,
+          executionSourceUnitCount: 0,
+        },
         fileViews: {
           available: true,
           count: 1,

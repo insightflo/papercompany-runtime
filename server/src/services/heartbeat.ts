@@ -59,6 +59,7 @@ import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-gua
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
 import {
   extractMissionOwnerDecisionFromText,
   MISSION_OWNER_DECISION_OPTIONS,
@@ -3010,6 +3011,17 @@ export function heartbeatService(db: Db) {
       context.paperclipMissionOwnerTaskContext = missionOwnerTaskContext;
     } else {
       delete context.paperclipMissionOwnerTaskContext;
+    }
+    const missionOwnerPlanningMissionId = issueContext?.originKind === "mission_main_executor_plan"
+      ? issueContext.missionId ?? missionId
+      : null;
+    if (missionOwnerPlanningMissionId) {
+      context.paperclipMissionOwnerPlanningContext = await buildMissionOwnerPlanningContext(db, {
+        companyId: agent.companyId,
+        missionId: missionOwnerPlanningMissionId,
+      });
+    } else {
+      delete context.paperclipMissionOwnerPlanningContext;
     }
     const existingExecutionWorkspace =
       issueRef?.executionWorkspaceId ? await executionWorkspacesSvc.getById(issueRef.executionWorkspaceId) : null;

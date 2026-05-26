@@ -2490,4 +2490,75 @@ describe("heartbeat context budget preflight", () => {
       }),
     );
   });
+
+  it("attaches mission-owner-planning context when the heartbeat issue originKind is mission_main_executor_plan", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_plan");
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "owner-plan:plan", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionOwnerPlanningContext).toEqual(
+      expect.objectContaining({
+        mission: expect.objectContaining({
+          id: fixture.missionId,
+          title: "Mission owner context mission",
+          status: "active",
+          companyId: fixture.companyId,
+          ownerAgentId: fixture.agentId,
+        }),
+        planningIssueId: fixture.ownerTaskIssueId,
+        activePlan: expect.objectContaining({ available: false }),
+        executionSourceSnapshot: {
+          missionId: fixture.missionId,
+          companyId: fixture.companyId,
+          units: [],
+        },
+        ruleRefs: [],
+        workflowCandidates: [],
+        kbRefs: [],
+        agentRoster: [],
+        todoMarkers: [],
+        sourceRefVocabulary: expect.arrayContaining(["native_workflow_run", "native_workflow_step_run"]),
+      }),
+    );
+    // mission_main_executor_plan does not satisfy isMissionOwnerTaskIssue, so task context must be absent
+    expect(invocationContext?.paperclipMissionOwnerTaskContext).toBeUndefined();
+  });
+
+  it("does not attach mission-owner-planning context for normal workflow_execution issues", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "workflow_execution");
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "worker:normal", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionOwnerPlanningContext).toBeUndefined();
+    // Existing test already covers task context absence; included for symmetry
+    expect(invocationContext?.paperclipMissionOwnerTaskContext).toBeUndefined();
+  });
 });

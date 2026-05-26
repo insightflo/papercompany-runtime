@@ -803,9 +803,17 @@ export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
   idempotencyKey: string;
 }) => Promise<unknown> | unknown;
 
+export type MissionOwnerPlanningIssueCreatedHandler = (input: {
+  mission: MissionRow;
+  issue: typeof issues.$inferSelect;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) => Promise<unknown> | unknown;
+
 export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
+  onOwnerPlanningIssueCreated?: MissionOwnerPlanningIssueCreatedHandler;
 }
 
 export function missionService(db: Db, deps: MissionServiceDeps = {}) {
@@ -2176,6 +2184,17 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         missionId: mission.id,
         refs: planningIssue?.id ? { planningIssueId: planningIssue.id } : {},
       });
+      if (deps.onOwnerPlanningIssueCreated && planningIssue?.assigneeAgentId) {
+        const idempotencyKey = `mission-owner-planning-wakeup:${mission.id}:${planningIssue.id}`;
+        void Promise.resolve(deps.onOwnerPlanningIssueCreated({
+          mission,
+          issue: planningIssue,
+          targetAgentId: planningIssue.assigneeAgentId,
+          idempotencyKey,
+        })).catch((err) => {
+          logger.warn({ err, missionId: mission.id, issueId: planningIssue.id }, "failed to notify owner about mission planning issue");
+        });
+      }
     }
 
     return getById(mission.id);

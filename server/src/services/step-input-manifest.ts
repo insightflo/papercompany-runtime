@@ -89,6 +89,14 @@ export interface StepInputManifest {
       ruleModes: string[];
       refs: Record<string, unknown> | null;
     };
+    missionOwnerPlanningContext: {
+      available: boolean;
+      planningIssueId: string | null;
+      missionId: string | null;
+      activePlanAvailable: boolean;
+      selectedExecutionUnitCount: number;
+      executionSourceUnitCount: number;
+    };
     fileViews: {
       available: boolean;
       count: number;
@@ -134,6 +142,13 @@ export function buildStepInputManifest(input: {
     : [];
   const maintenanceDecision = parseObject(context.paperclipMaintenanceDecision);
   const missionPlan = parseObject(context.paperclipMissionPlan);
+  const missionOwnerPlanningContext = parseObject(context.paperclipMissionOwnerPlanningContext);
+  const missionOwnerPlanningMission = parseObject(missionOwnerPlanningContext.mission);
+  const missionOwnerPlanningActivePlan = parseObject(missionOwnerPlanningContext.activePlan);
+  const missionOwnerPlanningExecutionSourceSnapshot = parseObject(missionOwnerPlanningContext.executionSourceSnapshot);
+  const missionOwnerPlanningExecutionUnits = Array.isArray(missionOwnerPlanningExecutionSourceSnapshot.units)
+    ? missionOwnerPlanningExecutionSourceSnapshot.units.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+    : [];
   const maintenanceRequiredInputs = Array.isArray(maintenanceDecision.requiredInputs)
     ? maintenanceDecision.requiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -260,6 +275,14 @@ export function buildStepInputManifest(input: {
         ruleNames: readStringArray(missionPlan.ruleNames),
         ruleModes: readStringArray(missionPlan.ruleModes),
         refs: parseObject(missionPlan.refs),
+      },
+      missionOwnerPlanningContext: {
+        available: Object.keys(missionOwnerPlanningContext).length > 0,
+        planningIssueId: readString(missionOwnerPlanningContext.planningIssueId) || null,
+        missionId: readString(missionOwnerPlanningMission.id) || readString(missionOwnerPlanningContext.missionId) || null,
+        activePlanAvailable: missionOwnerPlanningActivePlan.available === true,
+        selectedExecutionUnitCount: readNumber(missionOwnerPlanningActivePlan.selectedExecutionUnitCount) ?? 0,
+        executionSourceUnitCount: missionOwnerPlanningExecutionUnits.length,
       },
       fileViews: {
         available: fileViews.length > 0,
