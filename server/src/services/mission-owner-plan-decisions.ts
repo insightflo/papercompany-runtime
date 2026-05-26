@@ -607,7 +607,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const service = missionPlanArtifactService(db);
   const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
   const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
-  if (activeOwnerDecision?.commentId === collected.commentId && activeOwnerDecision.decisionHash === decisionHash) {
+  if (activeOwnerDecision?.decisionHash === decisionHash) {
     return {
       status: "noop",
       reason: "already_recorded",

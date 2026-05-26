@@ -10,8 +10,11 @@ import {
   issueComments,
   issueInboxArchives,
   issues,
+  missionPlanArtifacts,
+  missions,
   srbIssuePairs,
   srbLinks,
+  workflowDefinitions,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -22,6 +25,13 @@ import { createSrbPairSync } from "../services/srb/pair-sync.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+function decisionComment(decision: Record<string, unknown>) {
+  return `### Mission owner plan decision
+\`\`\`json
+${JSON.stringify(decision)}
+\`\`\``;
+}
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -640,5 +650,267 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
         parentId: randomUUID(),
       }),
     ).rejects.toThrow("Parent issue not found");
+  });
+});
+
+describeEmbeddedPostgres("issueService.addComment mission owner planning ingestion", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-owner-plan-comments-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 60_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(issueComments);
+    await db.delete(missionPlanArtifacts);
+    await db.delete(issues);
+    await db.delete(workflowDefinitions);
+    await db.delete(missions);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedPlanningFixture() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const otherAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+    const normalIssueId = randomUUID();
+    const workflowDefinitionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Issue Plan Company",
+      issuePrefix: `IP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: otherAgentId,
+        companyId,
+        name: "Other Agent",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Planning mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowDefinitionId,
+      companyId,
+      name: "Smoke workflow",
+    });
+    await db.insert(issues).values([
+      {
+        id: planningIssueId,
+        companyId,
+        missionId,
+        title: "Mission owner planning",
+        originKind: "mission_main_executor_plan",
+        status: "todo",
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+      {
+        id: normalIssueId,
+        companyId,
+        missionId,
+        title: "Normal workflow issue",
+        originKind: "workflow_execution",
+        status: "todo",
+      },
+    ]);
+
+    return { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId, normalIssueId, workflowDefinitionId };
+  }
+
+  function validDecision(missionId: string, workflowDefinitionId: string, title = "Run smoke") {
+    return {
+      missionId,
+      missionGoal: "Ship controlled rollout",
+      selectedExecutionUnits: [
+        {
+          id: `wf:${workflowDefinitionId}:step:smoke`,
+          kind: "workflow_definition_step",
+          title,
+          selectionState: "selected",
+          reason: "Required for validation",
+          sourceRef: { type: "workflow_definition_step", id: workflowDefinitionId, stepId: "smoke" },
+        },
+      ],
+      ruleRefs: ["rule:security"],
+      kbRefs: ["kb:rollout"],
+      requiredInputs: ["stagingUrl"],
+      successCriteria: ["smoke passes"],
+      steps: [{ id: "step-1", title: "Verify staging" }],
+    };
+  }
+
+  async function activePlans(missionId: string) {
+    return db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId))
+      .then((rows) => rows.filter((row) => row.status === "active"));
+  }
+
+  async function recordedActivities() {
+    return db.select().from(activityLog).where(eq(activityLog.action, "mission.owner_plan.recorded"));
+  }
+
+  it("records an authorized owner planning decision comment as the active mission plan and audit activity", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+    const decision = validDecision(missionId, workflowDefinitionId);
+
+    const comment = await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+
+    expect(comment).toEqual(expect.objectContaining({ issueId: planningIssueId, authorAgentId: ownerAgentId }));
+    const plans = await activePlans(missionId);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toEqual(expect.objectContaining({
+      companyId,
+      missionId,
+      revision: 1,
+      missionGoal: "Ship controlled rollout",
+      requiredInputs: ["stagingUrl"],
+      successCriteria: ["smoke passes"],
+      steps: [{ id: "step-1", title: "Verify staging" }],
+    }));
+    expect(plans[0]!.refs).toMatchObject({
+      selectedExecutionUnits: decision.selectedExecutionUnits,
+      ownerPlanDecision: {
+        planningIssueId,
+        commentId: comment.id,
+        decisionHash: expect.any(String),
+      },
+    });
+
+    const activities = await recordedActivities();
+    expect(activities).toHaveLength(1);
+    expect(activities[0]).toEqual(expect.objectContaining({
+      companyId,
+      actorType: "agent",
+      actorId: ownerAgentId,
+      agentId: ownerAgentId,
+      entityType: "mission",
+      entityId: missionId,
+    }));
+    expect(activities[0]!.details).toMatchObject({
+      missionPlanArtifactId: plans[0]!.id,
+      revision: 1,
+      planningIssueId,
+      commentId: comment.id,
+      decisionMakerKind: "agent",
+      decisionMakerId: ownerAgentId,
+      decisionHash: expect.any(String),
+      idempotencyKey: expect.stringContaining(comment.id),
+    });
+  });
+
+  it("does not duplicate a revision or activity when the same planning decision is posted again", async () => {
+    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+    const decision = validDecision(missionId, workflowDefinitionId);
+
+    await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+    await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(1);
+    expect(await recordedActivities()).toHaveLength(1);
+  });
+
+  it("does not duplicate a revision or activity when a later planning comment repeats the same latest decision", async () => {
+    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+    const decision = validDecision(missionId, workflowDefinitionId);
+
+    await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+    await svc.addComment(planningIssueId, "Acknowledged; proceed with that plan.", { agentId: ownerAgentId });
+
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(1);
+    expect(await recordedActivities()).toHaveLength(1);
+  });
+
+  it("ignores decision-looking comments on non-planning issues", async () => {
+    const { ownerAgentId, missionId, normalIssueId, workflowDefinitionId } = await seedPlanningFixture();
+
+    await svc.addComment(normalIssueId, decisionComment(validDecision(missionId, workflowDefinitionId)), { agentId: ownerAgentId });
+
+    expect(await activePlans(missionId)).toHaveLength(0);
+    expect(await recordedActivities()).toHaveLength(0);
+  });
+
+  it("keeps unauthorized planning comments without recording a mission plan", async () => {
+    const { otherAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+
+    const comment = await svc.addComment(planningIssueId, decisionComment(validDecision(missionId, workflowDefinitionId)), {
+      agentId: otherAgentId,
+    });
+
+    expect(comment.authorAgentId).toBe(otherAgentId);
+    expect(await activePlans(missionId)).toHaveLength(0);
+    expect(await recordedActivities()).toHaveLength(0);
+  });
+
+  it("keeps invalid planning decision comments without recording a revision or activity", async () => {
+    const { ownerAgentId, missionId, planningIssueId } = await seedPlanningFixture();
+    const invalidDecision = {
+      ...validDecision(missionId, randomUUID()),
+      selectedExecutionUnits: [{ sourceRef: { type: "workflow_definition_step", id: randomUUID() } }],
+    };
+
+    const comment = await svc.addComment(planningIssueId, decisionComment(invalidDecision), { agentId: ownerAgentId });
+
+    expect(comment.body).toContain("Mission owner plan decision");
+    expect(await activePlans(missionId)).toHaveLength(0);
+    expect(await recordedActivities()).toHaveLength(0);
+  });
+
+  it("still returns the comment and updates issue updatedAt", async () => {
+    const { ownerAgentId, planningIssueId } = await seedPlanningFixture();
+    const before = await db
+      .select({ updatedAt: issues.updatedAt })
+      .from(issues)
+      .where(eq(issues.id, planningIssueId))
+      .then((rows) => rows[0]!.updatedAt);
+
+    const comment = await svc.addComment(planningIssueId, "Plain comment", { agentId: ownerAgentId });
+
+    expect(comment).toEqual(expect.objectContaining({ issueId: planningIssueId, body: "Plain comment" }));
+    const after = await db
+      .select({ updatedAt: issues.updatedAt })
+      .from(issues)
+      .where(eq(issues.id, planningIssueId))
+      .then((rows) => rows[0]!.updatedAt);
+    expect(after.getTime()).toBeGreaterThan(before.getTime());
   });
 });

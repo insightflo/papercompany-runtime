@@ -33,6 +33,8 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
+import { logger } from "../middleware/logger.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -1594,7 +1596,12 @@ export function issueService(db: Db) {
 
     addComment: async (issueId: string, body: string, actor: { agentId?: string; userId?: string }) => {
       const issue = await db
-        .select({ companyId: issues.companyId })
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          missionId: issues.missionId,
+          originKind: issues.originKind,
+        })
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
@@ -1621,6 +1628,27 @@ export function issueService(db: Db) {
         .update(issues)
         .set({ updatedAt: new Date() })
         .where(eq(issues.id, issueId));
+
+      if (issue.originKind === "mission_main_executor_plan" && issue.missionId) {
+        const requestedBy = actor.agentId
+          ? { actorType: "agent" as const, actorId: actor.agentId }
+          : actor.userId
+            ? { actorType: "user" as const, actorId: actor.userId }
+            : undefined;
+        try {
+          await recordLatestAuthorizedMissionOwnerPlanDecision({
+            db,
+            companyId: issue.companyId,
+            missionId: issue.missionId,
+            requestedBy,
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId: issue.id, companyId: issue.companyId, missionId: issue.missionId },
+            "failed to record mission owner plan decision from issue comment",
+          );
+        }
+      }
 
       return redactIssueComment(comment, currentUserRedactionOptions.enabled);
     },
