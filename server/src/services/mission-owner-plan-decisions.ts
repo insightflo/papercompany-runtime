@@ -1,6 +1,9 @@
-import { and, desc, eq } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, missions } from "@paperclipai/db";
+import { issueComments, issues, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
+import { logActivity } from "./activity-log.js";
+import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 
 export type MissionOwnerPlanDecisionPayload = {
   missionId?: unknown;
@@ -485,4 +488,291 @@ export function buildMissionOwnerPlanRevisionDraft({
   };
 
   return { ok: true, draft };
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3D – service-level owner-plan materializer
+// ---------------------------------------------------------------------------
+
+const DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID = "mission-owner-plan-materializer";
+const NATIVE_WORKFLOW_DEFINITION_SOURCE_TYPES = new Set([
+  "workflow_definition",
+  "workflow_definition_step",
+  "native_workflow_definition",
+  "native_workflow_definition_step",
+]);
+const PLUGIN_WORKFLOW_ENTITY_SOURCE_TYPES = new Map<string, string[]>([
+  ["plugin_workflow_definition", ["workflow-definition"]],
+  ["plugin_workflow_definition_step", ["workflow-definition", "workflow-step-definition"]],
+  ["plugin_workflow_run", ["workflow-run"]],
+  ["plugin_workflow_step_run", ["workflow-step-run"]],
+]);
+
+type MaterializerActor = { actorType: "system" | "user" | "agent"; actorId: string };
+
+export type RecordLatestAuthorizedMissionOwnerPlanDecisionInput = {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  requestedBy?: MaterializerActor;
+};
+
+export type RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic = {
+  code: string;
+  message: string;
+  commentId?: string;
+};
+
+export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
+  | {
+      status: "recorded";
+      missionPlanArtifact: MissionPlanArtifact;
+      revision: number;
+      planningIssueId: string;
+      commentId: string;
+      decisionHash: string;
+      diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
+    }
+  | {
+      status: "noop";
+      reason: string;
+      planningIssueId: string | null;
+      commentId?: string;
+      decisionHash?: string;
+      diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
+    }
+  | {
+      status: "invalid";
+      reason: string;
+      planningIssueId: string | null;
+      commentId?: string;
+      decisionHash?: string;
+      diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
+    };
+
+export async function recordLatestAuthorizedMissionOwnerPlanDecision({
+  db,
+  companyId,
+  missionId,
+  requestedBy,
+}: RecordLatestAuthorizedMissionOwnerPlanDecisionInput): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionResult> {
+  const collected = await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+  if (!collected.ok) {
+    const base = {
+      reason: collected.reason,
+      planningIssueId: collected.planningIssueId,
+      diagnostics: collected.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+    };
+    if (collected.reason === "mission_not_found") {
+      return { status: "invalid", ...base };
+    }
+    return { status: "noop", ...base };
+  }
+
+  const draftResult = buildMissionOwnerPlanRevisionDraft({
+    decision: collected.decision,
+    expectedMissionId: missionId,
+    planningIssueId: collected.planningIssueId,
+    commentId: collected.commentId,
+  });
+  const decisionHash = hashOwnerPlanDecision(collected.decision);
+
+  if (!draftResult.ok) {
+    return {
+      status: "invalid",
+      reason: "invalid_decision_shape",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: draftResult.diagnostics,
+    };
+  }
+
+  const sourceValidationDiagnostics = await validateSelectedExecutionUnitSourceRefs({
+    db,
+    companyId,
+    selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
+  });
+  if (sourceValidationDiagnostics.length > 0) {
+    return {
+      status: "invalid",
+      reason: "invalid_selected_execution_unit_source_ref",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: sourceValidationDiagnostics,
+    };
+  }
+
+  const service = missionPlanArtifactService(db);
+  const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
+  const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
+  if (activeOwnerDecision?.commentId === collected.commentId && activeOwnerDecision.decisionHash === decisionHash) {
+    return {
+      status: "noop",
+      reason: "already_recorded",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: [],
+    };
+  }
+
+  const refs = mergeMissionPlanRefs(activePlan?.refs, {
+    ...draftResult.draft.refs,
+    ownerPlanDecision: {
+      ...draftResult.draft.refs.ownerPlanDecision,
+      decisionHash,
+    },
+  });
+  const missionPlanArtifact = await service.createMissionPlanRevision({
+    companyId,
+    missionId,
+    ...(draftResult.draft.missionGoal ? { missionGoal: draftResult.draft.missionGoal } : {}),
+    refs,
+    requiredInputs: draftResult.draft.requiredInputs,
+    successCriteria: draftResult.draft.successCriteria,
+    steps: draftResult.draft.steps,
+  });
+  const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
+  await logActivity(db, {
+    companyId,
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    action: "mission.owner_plan.recorded",
+    entityType: "mission",
+    entityId: missionId,
+    agentId: actor.actorType === "agent" ? actor.actorId : null,
+    details: {
+      missionPlanArtifactId: missionPlanArtifact.id,
+      revision: missionPlanArtifact.revision,
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionMakerKind: collected.author.kind,
+      decisionMakerId: collected.author.id,
+      decisionHash,
+      idempotencyKey: `${collected.commentId}:${decisionHash}`,
+    },
+  });
+
+  return {
+    status: "recorded",
+    missionPlanArtifact,
+    revision: missionPlanArtifact.revision,
+    planningIssueId: collected.planningIssueId,
+    commentId: collected.commentId,
+    decisionHash,
+    diagnostics: [],
+  };
+}
+
+async function validateSelectedExecutionUnitSourceRefs({
+  db,
+  companyId,
+  selectedExecutionUnits,
+}: {
+  db: Pick<Db, "select">;
+  companyId: string;
+  selectedExecutionUnits: Record<string, unknown>[];
+}): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[]> {
+  const diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[] = [];
+  const nativeWorkflowDefinitionIds = new Set<string>();
+  const pluginEntityIdsByType = new Map<string, Set<string>>();
+
+  for (const [index, unit] of selectedExecutionUnits.entries()) {
+    const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+    const sourceType = typeof sourceRef?.type === "string" ? sourceRef.type.trim() : "";
+    const sourceId = typeof sourceRef?.id === "string" ? sourceRef.id.trim() : "";
+    if (!sourceType || !sourceId) {
+      diagnostics.push({
+        code: "missing_source_ref",
+        message: `selectedExecutionUnits[${index}] must include sourceRef.type and sourceRef.id`,
+      });
+      continue;
+    }
+
+    if (NATIVE_WORKFLOW_DEFINITION_SOURCE_TYPES.has(sourceType)) {
+      nativeWorkflowDefinitionIds.add(sourceId);
+      continue;
+    }
+
+    const pluginEntityTypes = PLUGIN_WORKFLOW_ENTITY_SOURCE_TYPES.get(sourceType);
+    if (pluginEntityTypes) {
+      for (const entityType of pluginEntityTypes) {
+        const ids = pluginEntityIdsByType.get(entityType) ?? new Set<string>();
+        ids.add(sourceId);
+        pluginEntityIdsByType.set(entityType, ids);
+      }
+      continue;
+    }
+
+    diagnostics.push({
+      code: "unsupported_source_ref_type",
+      message: `selectedExecutionUnits[${index}] has unsupported sourceRef.type ${sourceType}`,
+    });
+  }
+
+  if (diagnostics.length > 0) return diagnostics;
+
+  if (nativeWorkflowDefinitionIds.size > 0) {
+    const ids = Array.from(nativeWorkflowDefinitionIds);
+    const rows = await db
+      .select({ id: workflowDefinitions.id })
+      .from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.companyId, companyId), inArray(workflowDefinitions.id, ids)));
+    const found = new Set(rows.map((row) => row.id));
+    for (const id of ids) {
+      if (!found.has(id)) {
+        diagnostics.push({
+          code: "workflow_definition_not_found",
+          message: `Workflow definition ${id} was not found in company ${companyId}`,
+        });
+      }
+    }
+  }
+
+  for (const [entityType, idsSet] of pluginEntityIdsByType) {
+    const ids = Array.from(idsSet);
+    const rows = await db
+      .select({ id: pluginEntities.id })
+      .from(pluginEntities)
+      .where(
+        and(
+          eq(pluginEntities.entityType, entityType),
+          eq(pluginEntities.scopeKind, "company"),
+          eq(pluginEntities.scopeId, companyId),
+          inArray(pluginEntities.id, ids),
+        ),
+      );
+    const found = new Set(rows.map((row) => row.id));
+    for (const id of ids) {
+      if (!found.has(id)) {
+        diagnostics.push({
+          code: "plugin_entity_not_found",
+          message: `Plugin entity ${id} (${entityType}) was not found in company ${companyId}`,
+        });
+      }
+    }
+  }
+
+  return diagnostics;
+}
+
+function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decisionHash?: string } | null {
+  if (!isPlainObject(refs) || !isPlainObject(refs.ownerPlanDecision)) return null;
+  return {
+    commentId: typeof refs.ownerPlanDecision.commentId === "string" ? refs.ownerPlanDecision.commentId : undefined,
+    decisionHash: typeof refs.ownerPlanDecision.decisionHash === "string" ? refs.ownerPlanDecision.decisionHash : undefined,
+  };
+}
+
+function hashOwnerPlanDecision(decision: MissionOwnerPlanDecisionPayload): string {
+  return createHash("sha256").update(stableStringify(decision)).digest("hex");
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }

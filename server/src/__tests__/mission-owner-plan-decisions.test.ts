@@ -1,15 +1,28 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, issueComments, issues, missions } from "@paperclipai/db";
+import {
+  activityLog,
+  agents,
+  companies,
+  createDb,
+  issueComments,
+  issues,
+  missionPlanArtifacts,
+  missions,
+  workflowDefinitions,
+} from "@paperclipai/db";
 import {
   buildMissionOwnerPlanRevisionDraft,
   findLatestAuthorizedMissionOwnerPlanDecision,
   parseMissionOwnerPlanDecision,
+  recordLatestAuthorizedMissionOwnerPlanDecision,
 } from "../services/mission-owner-plan-decisions.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -747,5 +760,565 @@ describe("buildMissionOwnerPlanRevisionDraft", () => {
       ok: true,
       draft: expect.objectContaining({ refs: expect.objectContaining({ ruleRefs: mixed }) }),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice 3D – recordLatestAuthorizedMissionOwnerPlanDecision (DB-backed)
+// ---------------------------------------------------------------------------
+
+describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () => {
+  let db!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-record-owner-plan-");
+    db = createDb(tempDb.connectionString);
+  }, 60_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(missionPlanArtifacts);
+    await db.delete(issueComments);
+    await db.delete(issues);
+    await db.delete(workflowDefinitions);
+    await db.delete(missions);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedFullMissionFixture() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const otherAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Record Plan Company",
+      issuePrefix: `RP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: otherAgentId,
+        companyId,
+        name: "Other Agent",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Planning mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: planningIssueId,
+      companyId,
+      missionId,
+      title: "Mission owner planning",
+      originKind: "mission_main_executor_plan",
+      status: "todo",
+    });
+
+    return { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId };
+  }
+
+  // Test 1: Valid owner decision creates revision 2
+  it("creates revision 2 with selectedExecutionUnits, refs, requiredInputs, successCriteria, steps and logs mission.owner_plan.recorded", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    // Create referenced workflow definition in same company
+    const wfPlan1Id = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: wfPlan1Id,
+      companyId,
+      name: "Smoke Test Workflow",
+    });
+
+    // Create initial plan (revision 1)
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    // Add valid decision comment
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Ship controlled rollout",
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfPlan1Id}:step:smoke`,
+          kind: "workflow_definition_step",
+          title: "Run smoke",
+          selectionState: "selected",
+          reason: "Required for validation",
+          sourceRef: { type: "workflow_definition_step", id: wfPlan1Id, stepId: "smoke" },
+        },
+      ],
+      ruleRefs: ["rule:security"],
+      kbRefs: ["kb:rollout"],
+      requiredInputs: ["stagingUrl"],
+      successCriteria: ["smoke passes"],
+      steps: [{ id: "step-1", title: "Verify staging" }],
+    };
+
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    if (result.status !== "recorded") return;
+    expect(result.revision).toBe(2);
+    expect(result.commentId).toBe(commentId);
+
+    // Verify the plan artifact was created
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    const activePlan = plans.find((p) => p.status === "active");
+    expect(activePlan).toBeDefined();
+    expect(activePlan!.revision).toBe(2);
+    expect(activePlan!.missionGoal).toBe("Ship controlled rollout");
+
+    const refs = activePlan!.refs as Record<string, unknown>;
+    expect(refs.selectedExecutionUnits).toBeDefined();
+    expect(Array.isArray(refs.selectedExecutionUnits)).toBe(true);
+    expect((refs.selectedExecutionUnits as unknown[]).length).toBe(1);
+
+    expect(activePlan!.requiredInputs).toEqual(["stagingUrl"]);
+    expect(activePlan!.successCriteria).toEqual(["smoke passes"]);
+    expect(activePlan!.steps).toEqual([{ id: "step-1", title: "Verify staging" }]);
+
+    // Verify activity log
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(1);
+    expect(activities[0]!.entityType).toBe("mission");
+    expect(activities[0]!.entityId).toBe(missionId);
+    expect(activities[0]!.companyId).toBe(companyId);
+    expect(activities[0]!.details).toMatchObject({
+      missionPlanArtifactId: activePlan!.id,
+      revision: 2,
+      planningIssueId,
+      commentId,
+      decisionMakerKind: "agent",
+      decisionMakerId: ownerAgentId,
+      decisionHash: expect.any(String),
+      idempotencyKey: expect.stringContaining(commentId),
+    });
+  });
+
+  // Test 2: Invalid mission id returns invalid / no revision / no activity
+  it("returns invalid for unknown or cross-company mission with no revision or activity", async () => {
+    const { companyId, missionId } = await seedFullMissionFixture();
+    const wrongMissionId = randomUUID();
+    const wrongCompanyId = randomUUID();
+
+    // Cross-company: wrong company, correct mission id
+    const resultCross = await recordLatestAuthorizedMissionOwnerPlanDecision({
+      db,
+      companyId: wrongCompanyId,
+      missionId,
+    });
+    expect(resultCross.status).toBe("invalid");
+
+    // Unknown mission: correct company, wrong mission id
+    const resultMissing = await recordLatestAuthorizedMissionOwnerPlanDecision({
+      db,
+      companyId,
+      missionId: wrongMissionId,
+    });
+    expect(resultMissing.status).toBe("invalid");
+
+    // No revisions created
+    const plans = await db.select().from(missionPlanArtifacts);
+    expect(plans).toHaveLength(0);
+
+    // No activity logged
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(0);
+  });
+
+  // Test 3: Unknown/cross-company workflow sourceRef rejected
+  it("rejects selectedExecutionUnits with cross-company workflow sourceRef, no revision, no activity", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    // Create workflow definition in a DIFFERENT company
+    const otherCompanyId = randomUUID();
+    const wfOtherCompanyId = randomUUID();
+    await db.insert(companies).values({
+      id: otherCompanyId,
+      name: "Other Company",
+      issuePrefix: `OC${otherCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: wfOtherCompanyId,
+      companyId: otherCompanyId,
+      name: "Other Company Workflow",
+    });
+
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+    });
+
+    // Add decision with cross-company sourceRef
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfOtherCompanyId}:step:smoke`,
+          kind: "workflow_definition_step",
+          title: "Run smoke",
+          selectionState: "selected",
+          reason: "Selected",
+          sourceRef: { type: "workflow_definition_step", id: wfOtherCompanyId, stepId: "smoke" },
+        },
+      ],
+    };
+
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("invalid");
+
+    // No new revision
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(1); // only initial plan
+    expect(plans[0]!.revision).toBe(1);
+
+    // No activity
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(0);
+  });
+
+  // Test 4: Existing legacy refs preserved/merged
+  it("preserves existing v2 legacy refs and merges with v3 selectedExecutionUnits", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    // Create referenced workflow definitions
+    const wfLegacyId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: wfLegacyId,
+      companyId,
+      name: "Legacy Workflow",
+    });
+
+    // Create initial plan with v2 legacy refs
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {
+        schemaVersion: 2,
+        executionUnits: [
+          { sourceRef: { type: "native_workflow_run", id: "run-legacy-1" }, status: "completed" },
+        ],
+        ruleRefs: [{ id: "approval-before-publish", mode: "approval_gate" }],
+        oversightIssueId: "legacy-issue-1",
+      },
+      requiredInputs: [{ key: "qa-owner", status: "missing" }],
+      successCriteria: [{ description: "Legacy criterion" }],
+      steps: [{ id: "legacy-step", title: "Legacy step", status: "completed" }],
+    });
+
+    // Add valid decision with v3 selectedExecutionUnits
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Revised rollout plan",
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfLegacyId}:step:smoke`,
+          kind: "workflow_definition_step",
+          title: "Run smoke",
+          selectionState: "selected",
+          reason: "Required",
+          sourceRef: { type: "workflow_definition_step", id: wfLegacyId, stepId: "smoke" },
+        },
+      ],
+    };
+
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+    if (result.status !== "recorded") return;
+
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    const activePlan = plans.find((p) => p.status === "active");
+    expect(activePlan).toBeDefined();
+
+    const refs = activePlan!.refs as Record<string, unknown>;
+    // v2 executionUnits preserved
+    expect(Array.isArray(refs.executionUnits)).toBe(true);
+    expect((refs.executionUnits as unknown[]).length).toBe(1);
+    // v2 ruleRefs preserved
+    expect(Array.isArray(refs.ruleRefs)).toBe(true);
+    expect((refs.ruleRefs as unknown[]).length).toBe(1);
+    // v3 selectedExecutionUnits added
+    expect(Array.isArray(refs.selectedExecutionUnits)).toBe(true);
+    expect((refs.selectedExecutionUnits as unknown[]).length).toBe(1);
+    // schemaVersion upgraded to 3
+    expect(refs.schemaVersion).toBe(3);
+    // legacy arbitrary key preserved
+    expect(refs.oversightIssueId).toBe("legacy-issue-1");
+  });
+
+  // Test 5: Idempotent rerun same decision
+  it("returns noop when same authorized decision comment has already been recorded", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    const wfIdemId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: wfIdemId,
+      companyId,
+      name: "Idempotency Workflow",
+    });
+
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfIdemId}:step:run`,
+          kind: "workflow_definition_step",
+          selectionState: "selected",
+          reason: "Required",
+          sourceRef: { type: "workflow_definition_step", id: wfIdemId, stepId: "run" },
+        },
+      ],
+    };
+
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    // First call should record
+    const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result1.status).toBe("recorded");
+
+    // Second call should be noop
+    const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result2.status).toBe("noop");
+
+    // Verify only one revision was created (plus initial = 2 total plans)
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(2); // initial + one recorded revision
+
+    // Verify only one activity log entry
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(1);
+  });
+
+  // Test 6: Later valid authorized decision creates next revision
+  it("creates next revision when a newer authorized decision supersedes prior active", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    const wfV1Id = randomUUID();
+    const wfV2Id = randomUUID();
+    await db.insert(workflowDefinitions).values([
+      { id: wfV1Id, companyId, name: "Workflow V1" },
+      { id: wfV2Id, companyId, name: "Workflow V2" },
+    ]);
+
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    // First decision comment
+    const commentId1 = randomUUID();
+    const decision1 = {
+      missionId,
+      missionGoal: "V1 plan",
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfV1Id}:step:run`,
+          kind: "workflow_definition_step",
+          selectionState: "selected",
+          reason: "First decision",
+          sourceRef: { type: "workflow_definition_step", id: wfV1Id, stepId: "run" },
+        },
+      ],
+    };
+
+    await db.insert(issueComments).values({
+      id: commentId1,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision1),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result1.status).toBe("recorded");
+    if (result1.status !== "recorded") return;
+    expect(result1.revision).toBe(2);
+
+    // Second (newer) decision comment
+    const commentId2 = randomUUID();
+    const decision2 = {
+      missionId,
+      missionGoal: "V2 updated plan",
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfV2Id}:step:run`,
+          kind: "workflow_definition_step",
+          selectionState: "selected",
+          reason: "Second decision",
+          sourceRef: { type: "workflow_definition_step", id: wfV2Id, stepId: "run" },
+        },
+      ],
+    };
+
+    await db.insert(issueComments).values({
+      id: commentId2,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision2),
+      createdAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+
+    const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result2.status).toBe("recorded");
+    if (result2.status !== "recorded") return;
+    expect(result2.revision).toBe(3);
+    expect(result2.commentId).toBe(commentId2);
+
+    // Verify plan history
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(3);
+    const active = plans.find((p) => p.status === "active");
+    expect(active!.revision).toBe(3);
+    expect(active!.missionGoal).toBe("V2 updated plan");
+
+    // Verify 2 activity log entries
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(2);
+  });
+
+  // Test 7: Non-planning issue JSON-looking comment ignored via collector
+  it("ignores JSON-looking comments on non-planning issues and returns noop", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    // Create a non-planning issue
+    const workflowIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: workflowIssueId,
+      companyId,
+      missionId,
+      title: "Workflow execution issue",
+      originKind: "workflow_execution",
+      status: "in_progress",
+    });
+
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    // Add JSON-looking decision comment on NON-planning issue
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: workflowIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        selectedExecutionUnits: [
+          {
+            id: "wf:wf-fake:step:run",
+            selectionState: "selected",
+            reason: "Should be ignored",
+            sourceRef: { type: "workflow_definition_step", id: "wf-fake", stepId: "run" },
+          },
+        ],
+      }),
+      createdAt: new Date("2026-01-03T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("noop");
+    if (result.status === "noop") {
+      expect(result.reason).toBe("no_authorized_decision");
+      expect(result.planningIssueId).toBe(planningIssueId);
+    }
+
+    // No new revision
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(1); // only initial plan
+
+    // No activity
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(0);
   });
 });

@@ -106,10 +106,10 @@ type CreateInitialMissionPlanInput = {
   missionGoal?: string;
   refs?: JsonRecord;
   assumptions?: Array<JsonRecord | string>;
-  requiredInputs?: JsonRecord[];
-  successCriteria?: JsonRecord[];
-  risks?: JsonRecord[];
-  steps?: JsonRecord[];
+  requiredInputs?: MissionPlanArtifactJsonArray;
+  successCriteria?: MissionPlanArtifactJsonArray;
+  risks?: MissionPlanArtifactJsonArray;
+  steps?: MissionPlanArtifactJsonArray;
 };
 
 type CreateMissionPlanRevisionInput = CreateInitialMissionPlanInput & {
@@ -468,10 +468,10 @@ export function missionPlanArtifactService(db: Db) {
           missionGoal: goalForMission(mission, input.missionGoal ?? latest?.missionGoal),
           refs: input.refs ?? asRecord(latest?.refs),
           assumptions: input.assumptions ?? asArray(latest?.assumptions),
-          requiredInputs: input.requiredInputs ?? asRecordArray(latest?.requiredInputs),
-          successCriteria: input.successCriteria ?? asRecordArray(latest?.successCriteria),
-          risks: input.risks ?? asRecordArray(latest?.risks),
-          steps: input.steps ?? asRecordArray(latest?.steps),
+          requiredInputs: input.requiredInputs ?? asArray(latest?.requiredInputs),
+          successCriteria: input.successCriteria ?? asArray(latest?.successCriteria),
+          risks: input.risks ?? asArray(latest?.risks),
+          steps: input.steps ?? asArray(latest?.steps),
         })
         .returning();
       return created;
