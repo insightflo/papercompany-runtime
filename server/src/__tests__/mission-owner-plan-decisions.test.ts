@@ -44,6 +44,14 @@ const validDecision = {
   steps: [{ id: "step-1", title: "Verify staging" }],
 };
 
+const validAssessment = {
+  objectiveRestatement: "Ship controlled rollout after reviewing available execution assets.",
+  availableAssetsReviewed: [{ kind: "workflow", id: "workflow-smoke" }, "rule:security"],
+  assetEvaluation: [{ asset: "workflow-smoke", verdict: "fit" }],
+  gaps: [{ id: "gap-staging-url", severity: "blocked" }],
+  researchPerformed: [{ query: "existing rollout KB", result: "kb:rollout" }],
+};
+
 function decisionComment(decision: Record<string, unknown>) {
   return `### Mission owner plan decision
 \`\`\`json
@@ -749,6 +757,53 @@ describe("buildMissionOwnerPlanRevisionDraft", () => {
     });
   });
 
+  it("preserves a valid assessment under refs.ownerPlanDecision.assessment", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, assessment: validAssessment },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        refs: expect.objectContaining({
+          ownerPlanDecision: {
+            planningIssueId: "issue-99",
+            commentId: "comment-77",
+            assessment: validAssessment,
+          },
+        }),
+      }),
+    });
+  });
+
+  it("omits malformed assessment arrays without rejecting an otherwise valid draft", () => {
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, assessment: { ...validAssessment, gaps: "not-an-array" } },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        refs: expect.objectContaining({
+          ownerPlanDecision: {
+            planningIssueId: "issue-99",
+            commentId: "comment-77",
+            assessment: expect.objectContaining({
+              objectiveRestatement: validAssessment.objectiveRestatement,
+              assetEvaluation: validAssessment.assetEvaluation,
+              researchPerformed: validAssessment.researchPerformed,
+            }),
+          },
+        }),
+      }),
+    });
+    if (result.ok) {
+      expect(result.draft.refs.ownerPlanDecision.assessment).not.toHaveProperty("gaps");
+    }
+  });
+
   it("preserves mixed string and object entries in ruleRefs", () => {
     const mixed = ["rule:a", { ref: "rule:b", confidence: 0.9 }];
     const result = buildMissionOwnerPlanRevisionDraft({
@@ -886,6 +941,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       ],
       ruleRefs: ["rule:security"],
       kbRefs: ["kb:rollout"],
+      assessment: validAssessment,
       requiredInputs: ["stagingUrl"],
       successCriteria: ["smoke passes"],
       steps: [{ id: "step-1", title: "Verify staging" }],
@@ -918,6 +974,12 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(refs.selectedExecutionUnits).toBeDefined();
     expect(Array.isArray(refs.selectedExecutionUnits)).toBe(true);
     expect((refs.selectedExecutionUnits as unknown[]).length).toBe(1);
+    expect(refs.ownerPlanDecision).toMatchObject({
+      planningIssueId,
+      commentId,
+      decisionHash: expect.any(String),
+      assessment: validAssessment,
+    });
 
     expect(activePlan!.requiredInputs).toEqual(["stagingUrl"]);
     expect(activePlan!.successCriteria).toEqual(["smoke passes"]);
@@ -1043,6 +1105,58 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(activities).toHaveLength(0);
   });
 
+  it("omits malformed assessment without blocking valid plan materialization", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Assessment Workflow" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        selectedExecutionUnits: [
+          {
+            id: `wf:${wfId}:step:run`,
+            kind: "workflow_definition_step",
+            selectionState: "selected",
+            reason: "Required",
+            sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "run" },
+          },
+        ],
+        assessment: { ...validAssessment, assetEvaluation: "not-an-array" },
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+    if (result.status !== "recorded") return;
+
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(2);
+    const activePlan = plans.find((p) => p.status === "active");
+    expect(activePlan!.revision).toBe(2);
+    const refs = activePlan!.refs as Record<string, unknown>;
+    expect(refs.ownerPlanDecision).toMatchObject({
+      planningIssueId,
+      decisionHash: expect.any(String),
+      assessment: expect.objectContaining({
+        objectiveRestatement: validAssessment.objectiveRestatement,
+        gaps: validAssessment.gaps,
+      }),
+    });
+    expect((refs.ownerPlanDecision as Record<string, unknown>).assessment).not.toHaveProperty("assetEvaluation");
+
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(1);
+  });
+
   // Test 4: Existing legacy refs preserved/merged
   it("preserves existing v2 legacy refs and merges with v3 selectedExecutionUnits", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
@@ -1147,6 +1261,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
           sourceRef: { type: "workflow_definition_step", id: wfIdemId, stepId: "run" },
         },
       ],
+      assessment: validAssessment,
     };
 
     await db.insert(issueComments).values({
@@ -1162,9 +1277,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result1.status).toBe("recorded");
 
-    // Second call should be noop
+    // Second call should be noop with the same decision hash, including assessment content
     const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result2.status).toBe("noop");
+    expect(result2.decisionHash).toBe(result1.status === "recorded" ? result1.decisionHash : undefined);
 
     // Verify only one revision was created (plus initial = 2 total plans)
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
@@ -1315,6 +1431,36 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(plans).toHaveLength(1); // only initial plan
 
     // No activity
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "mission.owner_plan.recorded"));
+    expect(activities).toHaveLength(0);
+  });
+
+  it("treats Markdown-only planning comments as noop unless a structured JSON decision block exists", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: `### Mission Planning Assessment\n\nReady to plan, but this is only prose and has no accepted decision JSON block.`,
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("noop");
+    if (result.status === "noop") {
+      expect(result.reason).toBe("no_authorized_decision");
+      expect(result.planningIssueId).toBe(planningIssueId);
+    }
+
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.revision).toBe(1);
+
     const activities = await db
       .select()
       .from(activityLog)

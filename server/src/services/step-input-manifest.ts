@@ -96,6 +96,19 @@ export interface StepInputManifest {
       activePlanAvailable: boolean;
       selectedExecutionUnitCount: number;
       executionSourceUnitCount: number;
+      planningDossierAvailable: boolean;
+      planningDossierAssetCounts: {
+        workflowCandidates: number;
+        tools: number;
+        runtimeServices: number;
+        ruleRefs: number;
+        kbRefs: number;
+        agentRoster: number;
+        fileViews: number;
+        executionSourceUnits: number;
+      };
+      planningDossierGapCount: number;
+      planningDossierSevereGapCount: number;
     };
     fileViews: {
       available: boolean;
@@ -149,6 +162,21 @@ export function buildStepInputManifest(input: {
   const missionOwnerPlanningExecutionUnits = Array.isArray(missionOwnerPlanningExecutionSourceSnapshot.units)
     ? missionOwnerPlanningExecutionSourceSnapshot.units.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
     : [];
+  const planningDossier = parseObject(missionOwnerPlanningContext.planningDossier);
+  const planningDossierAssets = parseObject(planningDossier.assets);
+  const planningDossierWorkflowCandidates = readObjectArray(planningDossierAssets.workflowCandidates);
+  const planningDossierRules = readObjectArray(planningDossierAssets.ruleRefs);
+  const planningDossierKbRefs = readObjectArray(planningDossierAssets.kbRefs);
+  const planningDossierAgentRoster = readObjectArray(planningDossierAssets.agentRoster);
+  const planningDossierGaps = readObjectArray(planningDossier.gaps);
+  const planningDossierTools = parseObject(planningDossierAssets.tools);
+  const planningDossierRuntimeServices = parseObject(planningDossierAssets.runtimeServices);
+  const planningDossierFileViews = parseObject(planningDossierAssets.fileViews);
+  const planningDossierExecutionSourceSummary = parseObject(planningDossierAssets.executionSourceSummary);
+  const missionOwnerPlanningSevereGaps = planningDossierGaps.filter((gap) => {
+    const severity = readString(gap.severity);
+    return severity === "needs_research" || severity === "blocked";
+  });
   const maintenanceRequiredInputs = Array.isArray(maintenanceDecision.requiredInputs)
     ? maintenanceDecision.requiredInputs.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -283,6 +311,19 @@ export function buildStepInputManifest(input: {
         activePlanAvailable: missionOwnerPlanningActivePlan.available === true,
         selectedExecutionUnitCount: readNumber(missionOwnerPlanningActivePlan.selectedExecutionUnitCount) ?? 0,
         executionSourceUnitCount: missionOwnerPlanningExecutionUnits.length,
+        planningDossierAvailable: Object.keys(planningDossier).length > 0,
+        planningDossierAssetCounts: {
+          workflowCandidates: planningDossierWorkflowCandidates.length,
+          tools: readNumber(planningDossierTools.count) ?? 0,
+          runtimeServices: readNumber(planningDossierRuntimeServices.count) ?? 0,
+          ruleRefs: planningDossierRules.length,
+          kbRefs: planningDossierKbRefs.length,
+          agentRoster: planningDossierAgentRoster.length,
+          fileViews: readNumber(planningDossierFileViews.count) ?? 0,
+          executionSourceUnits: readNumber(planningDossierExecutionSourceSummary.unitCount) ?? 0,
+        },
+        planningDossierGapCount: planningDossierGaps.length,
+        planningDossierSevereGapCount: missionOwnerPlanningSevereGaps.length,
       },
       fileViews: {
         available: fileViews.length > 0,
@@ -309,6 +350,12 @@ function readNumber(value: unknown) {
 function readStringArray(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function readObjectArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
     : [];
 }
 

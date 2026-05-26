@@ -78,6 +78,40 @@ export type MissionOwnerPlanningTodoMarker = {
   reason: string;
 };
 
+export type MissionOwnerPlanningBoundedAssetSummary = {
+  available: boolean;
+  count: number;
+  labels: string[];
+  note?: string;
+};
+
+export type MissionOwnerPlanningDossier = {
+  objective: {
+    title: string;
+    description: string | null;
+    extractedDeliverables: string[];
+    successCriteriaSeeds: string[];
+  };
+  assets: {
+    workflowCandidates: Array<{
+      id: string;
+      name: string;
+      source: string;
+      matchReason: string;
+      fit: "candidate" | "weak";
+    }>;
+    tools: MissionOwnerPlanningBoundedAssetSummary;
+    runtimeServices: MissionOwnerPlanningBoundedAssetSummary;
+    ruleRefs: Array<Pick<MissionRuleRef, "id" | "key" | "name" | "mode" | "severity" | "action" | "reason">>;
+    kbRefs: Array<{ id: string; name: string; type: string; reason: string }>;
+    agentRoster: Array<{ agentId: string; name: string | null; role: string; capabilities: string | null }>;
+    fileViews: MissionOwnerPlanningBoundedAssetSummary;
+    executionSourceSummary: { unitCount: number; labels: string[] };
+  };
+  gaps: Array<{ key: string; severity: "info" | "needs_research" | "blocked"; reason: string }>;
+  requiredAssessmentChecklist: string[];
+};
+
 export type MissionOwnerPlanningContext = {
   mission: MissionOwnerPlanningMission;
   planningIssueId: string | null;
@@ -88,6 +122,7 @@ export type MissionOwnerPlanningContext = {
   kbRefs: MissionOwnerPlanningKbRef[];
   agentRoster: MissionOwnerPlanningAgentRosterEntry[];
   todoMarkers: MissionOwnerPlanningTodoMarker[];
+  planningDossier: MissionOwnerPlanningDossier;
   sourceRefVocabulary: MissionOwnerPlanningSourceRefType[];
 };
 
@@ -97,6 +132,9 @@ const MAX_WORKFLOW_CANDIDATES = 12;
 const MAX_KB_REFS = 20;
 const MAX_PURPOSE_TOKENS = 10;
 const PURPOSE_TOKEN_MIN_LENGTH = 3;
+const MAX_DOSSIER_OBJECTIVE_FRAGMENTS = 5;
+const MAX_DOSSIER_LABELS = 10;
+const SUCCESS_CRITERIA_MARKER_RE = /\b(deliverable|delivery|output|result|report|summary|publish|send|channel|date|deadline|by|png|markdown|telegram|slack|email|완료|전송|발행|게시|보고|요약|산출|결과|채널|날짜|오늘|마감)\b|산출물|결과물|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2}/iu;
 
 function stripRawRefs(summary: MissionPlanRuntimeSummary): MissionOwnerPlanningActivePlan {
   const { refs: _refs, ...safeSummary } = summary;
@@ -130,6 +168,128 @@ function matchedPurposeTokens(candidateName: string, purposeTokens: string[]): s
 
 function countWorkflowSteps(steps: unknown): number {
   return Array.isArray(steps) ? steps.length : 0;
+}
+
+function boundedLabel(value: string | null | undefined): string | null {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>, limit = MAX_DOSSIER_LABELS): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const label = boundedLabel(value);
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    result.push(label);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function splitObjectiveFragments(...values: Array<string | null | undefined>): string[] {
+  const text = values.filter((value): value is string => typeof value === "string" && value.trim().length > 0).join("\n");
+  if (!text) return [];
+
+  return uniqueStrings(
+    text
+      .replace(/(?:^|\n)\s*[-*•]\s+/gu, "\n")
+      .split(/(?:[.;]|\n+|[。！？!?]|다\.|요\.|니다\.|함\.|됨\.)/u)
+      .map((fragment) => fragment.replace(/^\s*\d+[.)]\s+/u, "").trim())
+      .filter((fragment) => fragment.length >= 3),
+    MAX_DOSSIER_OBJECTIVE_FRAGMENTS,
+  );
+}
+
+function unavailableSummary(note: string): MissionOwnerPlanningBoundedAssetSummary {
+  return { available: false, count: 0, labels: [], note };
+}
+
+function workflowCandidateMatchReason(candidate: MissionOwnerPlanningWorkflowCandidate): string {
+  if (candidate.matchedPurposeTokens.length > 0) {
+    return `Matched mission tokens: ${candidate.matchedPurposeTokens.join(", ")}.`;
+  }
+  return "No direct mission-token match; retained as a weak native workflow candidate for manual review.";
+}
+
+function executionUnitLabel(unit: MissionExecutionSourceSnapshot["units"][number]): string | null {
+  return boundedLabel(unit.title ?? unit.workflowName ?? `${unit.kind}:${unit.id}`);
+}
+
+function buildPlanningDossier(input: {
+  mission: MissionOwnerPlanningMission;
+  executionSourceSnapshot: MissionExecutionSourceSnapshot;
+  ruleRefs: MissionRuleRef[];
+  workflowCandidates: MissionOwnerPlanningWorkflowCandidate[];
+  kbRefs: MissionOwnerPlanningKbRef[];
+  agentRoster: MissionOwnerPlanningAgentRosterEntry[];
+  todoMarkers: MissionOwnerPlanningTodoMarker[];
+}): MissionOwnerPlanningDossier {
+  const extractedDeliverables = splitObjectiveFragments(input.mission.title, input.mission.description);
+  const successCriteriaSeeds = extractedDeliverables.filter((fragment) => SUCCESS_CRITERIA_MARKER_RE.test(fragment));
+  const workflowCandidates = input.workflowCandidates.map((candidate) => ({
+    id: candidate.id,
+    name: candidate.name,
+    source: candidate.source,
+    matchReason: workflowCandidateMatchReason(candidate),
+    fit: candidate.purposeMatched ? "candidate" as const : "weak" as const,
+  }));
+  const gaps: MissionOwnerPlanningDossier["gaps"] = input.todoMarkers.map((marker) => ({
+    key: marker.key,
+    severity: "info" as const,
+    reason: marker.reason,
+  }));
+
+  if (!input.workflowCandidates.some((candidate) => candidate.purposeMatched)) {
+    gaps.push({
+      key: "manual_planning_required",
+      severity: "needs_research",
+      reason: "No native workflow candidate matched mission objective tokens; owner should research or draft an explicit execution plan before claiming control-plane readiness.",
+    });
+  }
+  if (input.agentRoster.length === 0) {
+    gaps.push({
+      key: "agent_roster_empty",
+      severity: "blocked",
+      reason: "No mission agents are assigned; the owner must assign or confirm an executor before planning execution units.",
+    });
+  }
+
+  return {
+    objective: {
+      title: input.mission.title,
+      description: input.mission.description,
+      extractedDeliverables,
+      successCriteriaSeeds,
+    },
+    assets: {
+      workflowCandidates,
+      tools: unavailableSummary("No tool summary is available inside MissionOwnerPlanningContext; Slice 4B does not inspect tools outside already-provided runtime manifest data."),
+      runtimeServices: unavailableSummary("No runtime-service summary is available inside MissionOwnerPlanningContext; Slice 4B does not start or discover services."),
+      ruleRefs: input.ruleRefs.map(({ id, key, name, mode, severity, action, reason }) => ({ id, key, name, mode, severity, action, reason })),
+      kbRefs: input.kbRefs.map(({ id, name, type, agentId }) => ({
+        id,
+        name,
+        type,
+        reason: `Granted to mission agent ${agentId}.`,
+      })),
+      agentRoster: input.agentRoster.map(({ agentId, name, role, capabilities }) => ({ agentId, name, role, capabilities })),
+      fileViews: unavailableSummary("No file-view summary is available inside MissionOwnerPlanningContext; Slice 4B does not scan repositories or files."),
+      executionSourceSummary: {
+        unitCount: input.executionSourceSnapshot.units.length,
+        labels: uniqueStrings(input.executionSourceSnapshot.units.map(executionUnitLabel)),
+      },
+    },
+    gaps,
+    requiredAssessmentChecklist: [
+      "Restate the mission objective and expected deliverables before selecting execution units.",
+      "Assess workflow candidates, rules, KB refs, agent roster, execution sources, tools, runtime services, and file views explicitly.",
+      "Mark each gap as info, needs_research, or blocked and resolve blocked gaps before claiming readiness.",
+      "Post a structured Mission owner plan decision JSON comment; Markdown-only comments are behavioral notes, not structured control-plane success.",
+    ],
+  };
 }
 
 async function loadMission(db: Db, input: BuildMissionOwnerPlanningContextInput): Promise<MissionOwnerPlanningMission> {
@@ -315,6 +475,16 @@ export async function buildMissionOwnerPlanningContext(
     });
   }
 
+  const planningDossier = buildPlanningDossier({
+    mission,
+    executionSourceSnapshot,
+    ruleRefs: ruleContext.ruleRefs,
+    workflowCandidates,
+    kbRefs,
+    agentRoster,
+    todoMarkers,
+  });
+
   return {
     mission,
     planningIssueId: planningIssue?.id ?? null,
@@ -325,6 +495,7 @@ export async function buildMissionOwnerPlanningContext(
     kbRefs,
     agentRoster,
     todoMarkers,
+    planningDossier,
     sourceRefVocabulary: [...MISSION_OWNER_PLANNING_SOURCE_REF_VOCABULARY],
   };
 }

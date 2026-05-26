@@ -75,6 +75,27 @@ describe("buildPaperclipRuntimeBrief", () => {
             ruleModes: ["approval_gate", "observation"],
             refs: { planningIssueId: "issue-plan-1", workflowRunIds: ["run-1"] },
           },
+          missionOwnerPlanningContext: {
+            available: true,
+            planningIssueId: "issue-plan-1",
+            missionId: "mission-1",
+            activePlanAvailable: true,
+            selectedExecutionUnitCount: 4,
+            executionSourceUnitCount: 7,
+            planningDossierAvailable: true,
+            planningDossierAssetCounts: {
+              workflowCandidates: 2,
+              tools: 0,
+              runtimeServices: 0,
+              ruleRefs: 2,
+              kbRefs: 1,
+              agentRoster: 3,
+              fileViews: 0,
+              executionSourceUnits: 7,
+            },
+            planningDossierGapCount: 2,
+            planningDossierSevereGapCount: 1,
+          },
           fileViews: { available: true, count: 2, source: "wake_comment" },
           sessionHandoff: { available: true, previousSessionId: "sess-1", rotationReason: "budget" },
         },
@@ -112,6 +133,23 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Mission selected units: 4 total — selected 1, candidate 1, excluded 1, satisfied 1; blocked 1, failed 0, cancelled 1 — Run preflight smoke | Collect candidate QA owner | Deploy production");
     expect(brief).not.toContain("Ignored fourth");
     expect(brief).toContain("Mission rules: 2 refs — Approval before publish, Observe budget (approval_gate, observation)");
+    expect(brief).toContain("Owner planning protocol:");
+    expect(brief).toContain("Before executing, produce a Mission Planning Assessment.");
+    expect(brief).toContain("You must inspect: objective; available workflows, tools, runtime services, rules, KB, agents, and files; active plan and prior execution refs; gaps and todo markers.");
+    expect(brief).toContain("`research_needed`: list missing evidence and create/request research/delegation steps.");
+    expect(brief).toContain("`blocked`: list required user input/approval.");
+    expect(brief).toContain("`ready_to_plan`: emit the structured JSON block below.");
+    expect(brief).toContain("### Mission owner plan decision");
+    expect(brief).toContain("```json");
+    expect(brief).toContain('"decisionType": "mission_owner_plan"');
+    expect(brief).toContain('"missionId": "mission-1"');
+    expect(brief).toContain('"assessment"');
+    expect(brief).toContain('"selectedExecutionUnits": []');
+    expect(brief).toContain("do not mark the planning issue done until a structured plan decision has been posted and materialized");
+    expect(brief).toContain("This brief does not impose a hard completion block.");
+    expect(brief).toContain("Asset counts and severe gap count are summaries only; tools/runtimeServices/fileViews may be bounded unavailable summaries, not actual discovery.");
+    expect(brief).toContain("Planning dossier asset-count summary: workflows 2, tools 0, runtime services 0, rules 2, KB 1, agents 3, files 0, execution source units 7.");
+    expect(brief).toContain("Planning dossier gaps: 2 total, 1 severe/blocking-or-research gaps.");
     expect(brief).not.toContain("private assumption");
     expect(brief).toContain("customer_response");
     expect(brief).toContain("maintenance_triage");

@@ -5,10 +5,19 @@ import { issueComments, issues, missions, pluginEntities, workflowDefinitions } 
 import { logActivity } from "./activity-log.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 
+export type MissionOwnerPlanAssessment = {
+  objectiveRestatement?: string;
+  availableAssetsReviewed?: unknown[];
+  assetEvaluation?: unknown[];
+  gaps?: unknown[];
+  researchPerformed?: unknown[];
+};
+
 export type MissionOwnerPlanDecisionPayload = {
   missionId?: unknown;
   goal?: unknown;
   missionGoal?: unknown;
+  assessment?: unknown;
   selectedExecutionUnits?: unknown;
   ruleRefs?: unknown;
   kbRefs?: unknown;
@@ -338,7 +347,12 @@ export type PlanRevisionDraft = {
     selectedExecutionUnits: Record<string, unknown>[];
     ruleRefs: (string | Record<string, unknown>)[];
     kbRefs: (string | Record<string, unknown>)[];
-    ownerPlanDecision: { planningIssueId: string; commentId: string };
+    ownerPlanDecision: {
+      planningIssueId: string;
+      commentId: string;
+      decisionHash?: string;
+      assessment?: MissionOwnerPlanAssessment;
+    };
   };
   requiredInputs: (string | Record<string, unknown>)[];
   successCriteria: (string | Record<string, unknown>)[];
@@ -405,6 +419,34 @@ function validateArrayOfStringsOrObjects(
   return value as (string | Record<string, unknown>)[];
 }
 
+function validateAssessmentArray(value: unknown): unknown[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  if (value.length > MAX_ARRAY_LENGTH) return undefined;
+  return value;
+}
+
+function validateMissionOwnerPlanAssessment(value: unknown): MissionOwnerPlanAssessment | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) return undefined;
+
+  const assessment: MissionOwnerPlanAssessment = {};
+  if (typeof value.objectiveRestatement === "string" && value.objectiveRestatement.trim() !== "") {
+    assessment.objectiveRestatement = value.objectiveRestatement;
+  }
+
+  const availableAssetsReviewed = validateAssessmentArray(value.availableAssetsReviewed);
+  const assetEvaluation = validateAssessmentArray(value.assetEvaluation);
+  const gaps = validateAssessmentArray(value.gaps);
+  const researchPerformed = validateAssessmentArray(value.researchPerformed);
+  if (availableAssetsReviewed !== undefined) assessment.availableAssetsReviewed = availableAssetsReviewed;
+  if (assetEvaluation !== undefined) assessment.assetEvaluation = assetEvaluation;
+  if (gaps !== undefined) assessment.gaps = gaps;
+  if (researchPerformed !== undefined) assessment.researchPerformed = researchPerformed;
+
+  return Object.keys(assessment).length > 0 ? assessment : undefined;
+}
+
 export function buildMissionOwnerPlanRevisionDraft({
   decision,
   expectedMissionId,
@@ -458,6 +500,7 @@ export function buildMissionOwnerPlanRevisionDraft({
   const requiredInputs = validateArrayOfStringsOrObjects(decision.requiredInputs, "requiredInputs", diagnostics);
   const successCriteria = validateArrayOfStringsOrObjects(decision.successCriteria, "successCriteria", diagnostics);
   const steps = validateArrayOfStringsOrObjects(decision.steps, "steps", diagnostics);
+  const assessment = validateMissionOwnerPlanAssessment(decision.assessment);
 
   // If any diagnostics accumulated, return failure
   if (diagnostics.length > 0) {
@@ -480,7 +523,11 @@ export function buildMissionOwnerPlanRevisionDraft({
       selectedExecutionUnits,
       ruleRefs,
       kbRefs,
-      ownerPlanDecision: { planningIssueId, commentId },
+      ownerPlanDecision: {
+        planningIssueId,
+        commentId,
+        ...(assessment !== undefined ? { assessment } : {}),
+      },
     },
     requiredInputs,
     successCriteria,

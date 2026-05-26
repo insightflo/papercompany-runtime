@@ -26,6 +26,62 @@ function summarizeMarkdownHandoff(markdown: string | null) {
   return summary.length > 220 ? `${summary.slice(0, 217)}...` : summary;
 }
 
+function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<string, unknown> | null) {
+  if (missionOwnerPlanningContext?.available !== true) return null;
+
+  const planningDossierAssetCounts = asRecord(missionOwnerPlanningContext.planningDossierAssetCounts);
+  const missionId = asString(missionOwnerPlanningContext.missionId) ?? "unknown";
+  const planningIssueId = asString(missionOwnerPlanningContext.planningIssueId) ?? "none";
+  const activePlanState = missionOwnerPlanningContext.activePlanAvailable === true ? "yes" : "no";
+  const planningDossierState = missionOwnerPlanningContext.planningDossierAvailable === true ? "available" : "unavailable";
+  const assetCountsLine = planningDossierAssetCounts
+    ? `- Planning dossier asset-count summary: workflows ${asNumber(planningDossierAssetCounts.workflowCandidates)}, tools ${asNumber(planningDossierAssetCounts.tools)}, runtime services ${asNumber(planningDossierAssetCounts.runtimeServices)}, rules ${asNumber(planningDossierAssetCounts.ruleRefs)}, KB ${asNumber(planningDossierAssetCounts.kbRefs)}, agents ${asNumber(planningDossierAssetCounts.agentRoster)}, files ${asNumber(planningDossierAssetCounts.fileViews)}, execution source units ${asNumber(planningDossierAssetCounts.executionSourceUnits)}.`
+    : "- Planning dossier asset-count summary: unavailable.";
+
+  return joinPromptSections([
+    `Mission owner planning context: mission ${missionId}, planning issue ${planningIssueId}, active plan ${activePlanState}, selected units ${asNumber(missionOwnerPlanningContext.selectedExecutionUnitCount)}, execution source units ${asNumber(missionOwnerPlanningContext.executionSourceUnitCount)}.`,
+    "Owner planning protocol:",
+    "Before executing, produce a Mission Planning Assessment.",
+    "You must inspect: objective; available workflows, tools, runtime services, rules, KB, agents, and files; active plan and prior execution refs; gaps and todo markers.",
+    `Planning dossier summary is ${planningDossierState}. Asset counts and severe gap count are summaries only; tools/runtimeServices/fileViews may be bounded unavailable summaries, not actual discovery.`,
+    assetCountsLine,
+    `- Planning dossier gaps: ${asNumber(missionOwnerPlanningContext.planningDossierGapCount)} total, ${asNumber(missionOwnerPlanningContext.planningDossierSevereGapCount)} severe/blocking-or-research gaps.`,
+    "Choose exactly one branch:",
+    "1. `research_needed`: list missing evidence and create/request research/delegation steps.",
+    "2. `blocked`: list required user input/approval.",
+    "3. `ready_to_plan`: emit the structured JSON block below.",
+    "Fail-open policy: do not mark the planning issue done until a structured plan decision has been posted and materialized, or the mission is explicitly completed with evidence and a final completion comment. This brief does not impose a hard completion block.",
+    "If you must execute directly in this run, still post the structured plan decision first unless the mission is trivial and explicitly marked `direct_execution_with_plan_comment`; prefer the structured artifact.",
+    "Accepted marker and JSON block:",
+    "### Mission owner plan decision",
+    "```json",
+    JSON.stringify(
+      {
+        decisionType: "mission_owner_plan",
+        missionId,
+        summary: "...",
+        assessment: {
+          objectiveRestatement: "...",
+          availableAssetsReviewed: [],
+          assetEvaluation: [],
+          gaps: [],
+          researchPerformed: [],
+        },
+        steps: [],
+        requiredInputs: [],
+        successCriteria: [],
+        risks: [],
+        selectedExecutionUnits: [],
+        ruleRefs: [],
+        kbRefs: [],
+      },
+      null,
+      2,
+    ),
+    "```",
+  ], "\n");
+}
+
 export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const manifest = asRecord(context.paperclipStepInputManifest);
   const handoff = asRecord(context.paperclipSessionHandoff);
@@ -192,10 +248,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlan?.available === true && Number(missionPlan.ruleRefCount ?? 0) > 0
       ? `- Mission rules: ${Number(missionPlan.ruleRefCount ?? 0)} refs${missionPlanRuleNames.length > 0 ? ` — ${missionPlanRuleNames.join(", ")}` : ""}${missionPlanRuleModes.length > 0 ? ` (${missionPlanRuleModes.join(", ")})` : ""}`
       : null;
-  const missionOwnerPlanningContextLine =
-    missionOwnerPlanningContext?.available === true
-      ? `- Mission owner planning context: mission ${asString(missionOwnerPlanningContext.missionId) ?? "unknown"}, planning issue ${asString(missionOwnerPlanningContext.planningIssueId) ?? "none"}, active plan ${missionOwnerPlanningContext.activePlanAvailable === true ? "yes" : "no"}, selected units ${asNumber(missionOwnerPlanningContext.selectedExecutionUnitCount)}, execution source units ${asNumber(missionOwnerPlanningContext.executionSourceUnitCount)}`
-      : null;
+  const missionOwnerPlanningContextLine = buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext);
 
   const guardrailLine =
     guardrails?.broadScanAllowed === false

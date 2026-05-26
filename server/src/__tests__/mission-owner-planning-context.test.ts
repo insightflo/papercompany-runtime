@@ -7,6 +7,7 @@ import {
   agents,
   companies,
   createDb,
+  issueComments,
   issues,
   knowledgeBases,
   missionAgents,
@@ -52,6 +53,7 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     await db.delete(agentKbGrants);
     await db.delete(knowledgeBases);
     await db.delete(missionPlanArtifacts);
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missionAgents);
     await db.delete(missions);
@@ -368,6 +370,32 @@ describeEmbeddedPostgres("mission owner planning context", () => {
       "native_workflow_run",
       "plugin_workflow_run",
     ]));
+    expect(context.planningDossier.objective).toEqual(expect.objectContaining({
+      title: "오늘자 tech news, tech scout 취합",
+      description: "Collect AI tech news and scout implementation signals.",
+      extractedDeliverables: expect.arrayContaining([
+        "오늘자 tech news, tech scout 취합",
+        "Collect AI tech news and scout implementation signals",
+      ]),
+    }));
+    expect(context.planningDossier.assets.workflowCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: nativeTechNewsWorkflowId, name: "Tech News Daily Workflow", fit: "candidate", matchReason: expect.stringContaining("tech") }),
+      expect.objectContaining({ id: nativeTechScoutWorkflowId, name: "Tech Scout Intake Workflow", fit: "candidate" }),
+    ]));
+    expect(context.planningDossier.assets.ruleRefs).toEqual([expect.objectContaining({ name: "Approval before publish", mode: "approval_gate" })]);
+    expect(context.planningDossier.assets.kbRefs).toEqual([expect.objectContaining({ id: kbId, name: "Tech News Static KB", reason: expect.stringContaining(first.ownerAgentId) })]);
+    expect(context.planningDossier.assets.agentRoster).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentId: first.ownerAgentId, role: "executor", capabilities: "planning,workflow,tech news" }),
+      expect.objectContaining({ agentId: first.helperAgentId, role: "observer", capabilities: "tech scout,research" }),
+    ]));
+    expect(context.planningDossier.assets.executionSourceSummary).toEqual(expect.objectContaining({ unitCount: 2 }));
+    expect(context.planningDossier.assets.tools).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not inspect tools/) }));
+    expect(context.planningDossier.assets.runtimeServices).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not start or discover services/) }));
+    expect(context.planningDossier.assets.fileViews).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not scan repositories or files/) }));
+    expect(context.planningDossier.gaps).toEqual([expect.objectContaining({ key: "plugin_workflow_definition_reader_unconfirmed", severity: "info" })]);
+    expect(context.planningDossier.requiredAssessmentChecklist).toEqual(expect.arrayContaining([
+      expect.stringMatching(/Markdown-only comments are behavioral notes/),
+    ]));
   });
 
   it("returns stable empty arrays and TODO markers when optional workflow/rule/KB substrates are absent", async () => {
@@ -382,6 +410,17 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     expect(context.ruleRefs).toEqual([]);
     expect(context.kbRefs).toEqual([]);
     expect(context.todoMarkers).toEqual([expect.objectContaining({ key: "kb_refs_unavailable" })]);
+    expect(context.planningDossier.assets.workflowCandidates).toEqual([]);
+    expect(context.planningDossier.assets.ruleRefs).toEqual([]);
+    expect(context.planningDossier.assets.kbRefs).toEqual([]);
+    expect(context.planningDossier.assets.agentRoster).toHaveLength(2);
+    expect(context.planningDossier.assets.tools).toEqual(expect.objectContaining({ available: false, count: 0, labels: [] }));
+    expect(context.planningDossier.assets.runtimeServices).toEqual(expect.objectContaining({ available: false, count: 0, labels: [] }));
+    expect(context.planningDossier.assets.fileViews).toEqual(expect.objectContaining({ available: false, count: 0, labels: [] }));
+    expect(context.planningDossier.gaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "kb_refs_unavailable", severity: "info" }),
+      expect.objectContaining({ key: "manual_planning_required", severity: "needs_research" }),
+    ]));
   });
 
   it("enforces company isolation for mission lookup", async () => {
@@ -403,5 +442,62 @@ describeEmbeddedPostgres("mission owner planning context", () => {
       "plugin_workflow_run",
       "plugin_workflow_step_run",
     ]);
+  });
+
+  it("extracts objective deliverable and success criteria seeds with deterministic bounded heuristics", async () => {
+    const seeded = await seedCompany("MOPHEUR");
+    await db.update(missions)
+      .set({
+        title: "Telegram PNG output for daily AI scout",
+        description: "- Collect sources by 09:00\n- Send Markdown summary to Telegram channel; include date 2026-05-26. Extra sentence beyond limit. Another extra output. More extra output.",
+      })
+      .where(eq(missions.id, seeded.missionId));
+
+    const context = await buildMissionOwnerPlanningContext(db, { companyId: seeded.companyId, missionId: seeded.missionId });
+
+    expect(context.planningDossier.objective.extractedDeliverables).toEqual([
+      "Telegram PNG output for daily AI scout",
+      "Collect sources by 09:00",
+      "Send Markdown summary to Telegram channel",
+      "include date 2026-05-26",
+      "Extra sentence beyond limit",
+    ]);
+    expect(context.planningDossier.objective.successCriteriaSeeds).toEqual([
+      "Telegram PNG output for daily AI scout",
+      "Collect sources by 09:00",
+      "Send Markdown summary to Telegram channel",
+      "include date 2026-05-26",
+    ]);
+  });
+
+  it("does not treat Markdown-only planning comments as structured control-plane success", async () => {
+    const seeded = await seedCompany("MOPMARK");
+    const planningIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: planningIssueId,
+      companyId: seeded.companyId,
+      missionId: seeded.missionId,
+      title: "Plan mission",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: seeded.ownerAgentId,
+      originKind: "mission_main_executor_plan",
+      issueNumber: 1,
+    });
+    await db.insert(issueComments).values({
+      companyId: seeded.companyId,
+      issueId: planningIssueId,
+      authorAgentId: seeded.ownerAgentId,
+      body: "### Mission owner plan\n- collect sources\n- summarize in Markdown\n- mark done",
+    });
+
+    const context = await buildMissionOwnerPlanningContext(db, { companyId: seeded.companyId, missionId: seeded.missionId });
+
+    expect(context.planningIssueId).toBe(planningIssueId);
+    expect(context.activePlan).toEqual({ available: false });
+    expect(context.planningDossier.requiredAssessmentChecklist).toEqual(expect.arrayContaining([
+      expect.stringMatching(/structured Mission owner plan decision JSON comment/),
+      expect.stringMatching(/Markdown-only comments are behavioral notes/),
+    ]));
   });
 });
