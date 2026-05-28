@@ -414,6 +414,37 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/plugins/knowledge-base:
+    dependencies:
+      '@paperclipai/plugin-sdk':
+        specifier: 2026.325.0
+        version: 2026.325.0(react@19.2.4)
+      '@paperclipai/shared':
+        specifier: 2026.325.0
+        version: 2026.325.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.0
+      '@types/react':
+        specifier: ^19.0.8
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.3
+        version: 19.2.3(@types/react@19.2.14)
+      esbuild:
+        specifier: ^0.27.3
+        version: 0.27.3
+      react:
+        specifier: ^19.0.0
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.4(react@19.2.4)
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/plugins/sdk:
     dependencies:
       '@paperclipai/shared':
@@ -432,6 +463,37 @@ importers:
       '@types/react':
         specifier: ^19.0.8
         version: 19.2.14
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/plugins/service-request-bridge:
+    dependencies:
+      '@paperclipai/plugin-sdk':
+        specifier: 2026.325.0
+        version: 2026.325.0(react@19.2.4)
+      '@paperclipai/shared':
+        specifier: 2026.325.0
+        version: 2026.325.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.0
+      '@types/react':
+        specifier: ^19.0.8
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.3
+        version: 19.2.3(@types/react@19.2.14)
+      esbuild:
+        specifier: ^0.27.3
+        version: 0.27.3
+      react:
+        specifier: ^19.0.0
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.4(react@19.2.4)
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -481,6 +543,68 @@ importers:
       vitest:
         specifier: ^3.0.5
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.12.0)(jiti@2.6.1)(jsdom@28.1.0(@noble/hashes@2.0.1))(lightningcss@1.30.2)(tsx@4.21.0)
+
+  packages/plugins/tool-registry:
+    dependencies:
+      '@paperclipai/plugin-sdk':
+        specifier: 2026.325.0
+        version: 2026.325.0(react@19.2.4)
+      '@paperclipai/shared':
+        specifier: 2026.325.0
+        version: 2026.325.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.0
+      '@types/react':
+        specifier: ^19.0.8
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.3
+        version: 19.2.3(@types/react@19.2.14)
+      esbuild:
+        specifier: ^0.27.3
+        version: 0.27.3
+      react:
+        specifier: ^19.0.0
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.4(react@19.2.4)
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/plugins/workflow-engine:
+    dependencies:
+      '@paperclipai/plugin-sdk':
+        specifier: 2026.325.0
+        version: 2026.325.0(react@19.2.4)
+      '@paperclipai/shared':
+        specifier: 2026.325.0
+        version: 2026.325.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.0
+      '@types/react':
+        specifier: ^19.0.8
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.3
+        version: 19.2.3(@types/react@19.2.14)
+      esbuild:
+        specifier: ^0.27.3
+        version: 0.27.3
+      react:
+        specifier: ^19.0.0
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.4(react@19.2.4)
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
 
   packages/shared:
     dependencies:
@@ -2138,6 +2262,18 @@ packages:
 
   '@paperclipai/adapter-utils@0.3.1':
     resolution: {integrity: sha512-W66k+hJkQE8ma0asM/Sd90AC8HHy/BLG/sd0aOC+rDWw+gOasQyUkTnDoPv1zhQuTyKEEvLFV6ByOOKqEiAz/A==}
+
+  '@paperclipai/plugin-sdk@2026.325.0':
+    resolution: {integrity: sha512-axAIK90QVrRihlCXcGoePDc0qaf0weqOwUagWsp88v6T2NXAWXALCzFtY4IipPnaVli6xZe5ZsuC+gTlPXhMKQ==}
+    hasBin: true
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+
+  '@paperclipai/shared@2026.325.0':
+    resolution: {integrity: sha512-l0ZeaQhswxjAyJ6G/TdgyrfbEgFKqdkly4zn4QgOPCu+x8j8Gma51Xf45M2Br3ILJlIx93HhT3hAzWKChdxgMg==}
 
   '@paralleldrive/cuid2@2.3.1':
     resolution: {integrity: sha512-XO7cAxhnTZl0Yggq6jOgjiOHhbgcO4NqFqwSmQpjK3b6TEE6Uj/jfSk6wzYyemh3+I0sHirKSetjQwn5cZktFw==}
@@ -8021,6 +8157,17 @@ snapshots:
   '@opentelemetry/api@1.9.1': {}
 
   '@paperclipai/adapter-utils@0.3.1': {}
+
+  '@paperclipai/plugin-sdk@2026.325.0(react@19.2.4)':
+    dependencies:
+      '@paperclipai/shared': 2026.325.0
+      zod: 3.25.76
+    optionalDependencies:
+      react: 19.2.4
+
+  '@paperclipai/shared@2026.325.0':
+    dependencies:
+      zod: 3.25.76
 
   '@paralleldrive/cuid2@2.3.1':
     dependencies:

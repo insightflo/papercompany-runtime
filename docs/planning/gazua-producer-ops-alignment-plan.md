@@ -93,7 +93,7 @@ Verified locally on 2026-05-06 11:51 KST:
 | `gazua-morning` / `collect-signals` | `collect-signals` | `python3 /Users/kwak/Projects/ai/alpha-prime-personal/scripts/automation/paperclip_run.py collect --mode signals` | `/Users/kwak/Projects/ai/alpha-prime-personal` | canonical cwd OK; must become KR-aware or call new `run_market_signals.py --market KR` |
 | `gazua-evening` / `collect-us-market` | `collect-evening` | `python3 /Users/kwak/Projects/ai/alpha-prime-personal/scripts/automation/paperclip_run.py collect --mode evening` | `/Users/kwak/Projects/ai/alpha-prime-personal` | canonical cwd OK; not yet market-param aware |
 | `gazua-evening` / `collect-us-signals` | `collect-signals` | same as above | `/Users/kwak/Projects/ai/alpha-prime-personal` | canonical cwd OK; must become US-aware or call new `run_market_signals.py --market US` |
-| multiple workflows / `gazua-oracle-data-sync` | `gazua.oracle-data-sync` | `/Users/kwak/Projects/paperclip/paperclip-addon/scripts/gazua_oracle_data_sync.sh` | `/Users/kwak/Projects/paperclip/paperclip-addon` | non-canonical legacy addon path; safety gate required before destructive sync |
+| multiple workflows / `gazua-oracle-data-sync` | `gazua.oracle-data-sync` | `/Users/kwak/Projects/ai/papercompany/papercompany-operations/scripts/paperclip-addon/gazua_oracle_data_sync.sh` | `/Users/kwak/Projects/ai/papercompany/papercompany-operations` | non-canonical legacy addon path; safety gate required before destructive sync |
 
 #### Related but not primary producer split targets
 
@@ -106,7 +106,7 @@ Verified locally on 2026-05-06 11:51 KST:
 **Current high-risk path findings:**
 
 - Active producer-adjacent configs mostly already use `/Users/kwak/Projects/ai/alpha-prime-personal` as `workingDirectory`.
-- `gazua.oracle-data-sync` still uses legacy `/Users/kwak/Projects/paperclip/paperclip-addon` script/cwd and is therefore the main Papercompany-side risk.
+- `gazua.oracle-data-sync` still uses legacy `/Users/kwak/Projects/ai/papercompany/papercompany-operations` script/cwd and is therefore the main Papercompany-side risk.
 - Existing sync telemetry shows `papercompany_overlay data/market_signals`, `papercompany_overlay data/macro`, and `papercompany_overlay reports/blog`, confirming operations/addon overlay still participates in staging.
 - No active tool-config currently calls `scripts/run_market_signals.py --market ...`; this must be added only after the Alpha-Prime canonical script supports the market contract.
 

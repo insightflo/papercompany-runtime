@@ -40,8 +40,8 @@ Runtime diff stat:
 - server/src/services/workflow/engine.ts: +55 / - 일부
 
 Plugin repo 주의:
-- papercompany-runtime/packages/plugins/workflow-engine 경로는 외부 plugin repo /Users/kwak/Projects/paperclip/paperclip-addon/plugins/workflow-engine 쪽과 연결되어 있다.
-- /Users/kwak/Projects/paperclip/paperclip-addon 는 작업 전부터 매우 dirty하다. 이번 작업과 무관한 변경이 많으므로 전체 repo 단위 커밋/정리는 위험하다.
+- papercompany-runtime/packages/plugins/workflow-engine 경로는 외부 plugin repo /Users/kwak/Projects/ai/papercompany/papercompany-runtime/packages/plugins/workflow-engine 쪽과 연결되어 있다.
+- /Users/kwak/Projects/ai/papercompany/papercompany-operations 는 작업 전부터 매우 dirty하다. 이번 작업과 무관한 변경이 많으므로 전체 repo 단위 커밋/정리는 위험하다.
 - 이번 작업에서 확인/수정한 관련 plugin 파일만 범위 제한해서 다룰 것:
   - plugins/workflow-engine/src/worker.ts
   - plugins/workflow-engine/src/reconciler.ts
@@ -93,8 +93,8 @@ Plugin repo 주의:
 ### 2.3 Workflow-engine plugin API URL fallback 정리
 
 파일:
-- /Users/kwak/Projects/paperclip/paperclip-addon/plugins/workflow-engine/src/worker.ts
-- /Users/kwak/Projects/paperclip/paperclip-addon/plugins/workflow-engine/src/reconciler.ts
+- /Users/kwak/Projects/ai/papercompany/papercompany-runtime/packages/plugins/workflow-engine/src/worker.ts
+- /Users/kwak/Projects/ai/papercompany/papercompany-runtime/packages/plugins/workflow-engine/src/reconciler.ts
 
 수정:
 - PAPERCLIP_API_URL env var를 우선 사용한다.
@@ -253,7 +253,7 @@ git diff --stat
 
 Plugin repo 관련 파일만 확인:
 ```sh
-cd /Users/kwak/Projects/paperclip/paperclip-addon
+cd /Users/kwak/Projects/ai/papercompany/papercompany-operations
 git diff -- plugins/workflow-engine/src/worker.ts plugins/workflow-engine/src/reconciler.ts
 git diff --stat -- plugins/workflow-engine/src/worker.ts plugins/workflow-engine/src/reconciler.ts plugins/workflow-engine/dist/worker.js plugins/workflow-engine/dist/reconciler.js
 ```
