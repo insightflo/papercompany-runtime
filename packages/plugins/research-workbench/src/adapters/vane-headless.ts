@@ -188,19 +188,14 @@ export function createVaneHeadlessAdapter(
           }
         }
 
-        const result: VaneHeadlessSearchOutput = {
+        return {
           ok: false,
           error: `Vane server error: HTTP ${response.status}`,
           retryable: true,
+          retryAfterSeconds,
           engine: { name: "vane-headless" },
           retrievedAt: new Date().toISOString(),
         };
-
-        // Attach retryAfterSeconds via the raw output for the worker
-        (result as VaneHeadlessSearchOutput & { retryAfterSeconds?: number }).retryAfterSeconds =
-          retryAfterSeconds;
-
-        return result;
       }
 
       // Other non-ok statuses → non-retryable
@@ -253,19 +248,14 @@ export function createVaneHeadlessAdapter(
             ? `Vane network error: ${err.message}`
             : `Vane unknown error: ${String(err)}`;
 
-      const result: VaneHeadlessSearchOutput = {
+      return {
         ok: false,
         error: message,
         retryable: true,
+        retryAfterSeconds,
         engine: { name: "vane-headless" },
         retrievedAt: new Date().toISOString(),
       };
-
-      // Attach retryAfterSeconds for the worker
-      (result as VaneHeadlessSearchOutput & { retryAfterSeconds?: number }).retryAfterSeconds =
-        retryAfterSeconds;
-
-      return result;
     } finally {
       clearTimeout(timeoutId);
     }

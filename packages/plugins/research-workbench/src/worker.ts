@@ -109,6 +109,52 @@ function resolveConfig(raw: Record<string, unknown>): InstanceConfig {
   };
 }
 
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const strings = value.filter((item): item is string => typeof item === "string");
+  return strings.length > 0 ? strings : undefined;
+}
+
+function buildSearchInput(
+  p: Record<string, unknown>,
+  query: string,
+  maxResults: number,
+): ResearchSearchInput {
+  const input: ResearchSearchInput = { query, maxResults };
+
+  if (typeof p.profile === "string") {
+    input.profile = p.profile as ResearchSearchInput["profile"];
+  }
+
+  if (typeof p.futureProfile === "string") {
+    input.futureProfile = p.futureProfile as ResearchSearchInput["futureProfile"];
+  }
+
+  const sourceScope = stringArray(p.sourceScope);
+  if (sourceScope) {
+    input.sourceScope = sourceScope as ResearchSearchInput["sourceScope"];
+  }
+
+  const domainHints = stringArray(p.domainHints);
+  if (domainHints) {
+    input.domainHints = domainHints;
+  }
+
+  const excludeDomains = stringArray(p.excludeDomains);
+  if (excludeDomains) {
+    input.excludeDomains = excludeDomains;
+  }
+
+  if (typeof p.freshness === "string") {
+    input.freshness = p.freshness as ResearchSearchInput["freshness"];
+  }
+
+  return input;
+}
+
 // ---------------------------------------------------------------------------
 // Vane headless adapter integration
 // ---------------------------------------------------------------------------
@@ -154,10 +200,11 @@ async function handleResearchSearch(
   const maxResults = typeof p.maxResults === "number"
     ? Math.min(MAX_MAX_RESULTS, Math.max(MIN_MAX_RESULTS, p.maxResults))
     : config.defaultMaxResults;
+  const searchInput = buildSearchInput(p, query, maxResults);
 
   // Determine which adapter path to use
   if (config.backend === "vane-headless" && !adapterOverridden) {
-    return handleVaneHeadlessSearch(ctx, config, query, maxResults);
+    return handleVaneHeadlessSearch(ctx, config, searchInput);
   }
 
   // Fallback to the legacy adapter path (used by B1 tests with setAdapter)
@@ -190,15 +237,15 @@ async function handleResearchSearch(
 async function handleVaneHeadlessSearch(
   ctx: PluginContext,
   config: InstanceConfig,
-  query: string,
-  maxResults: number,
+  input: ResearchSearchInput,
 ): Promise<ToolResult> {
   const vane = getOrCreateVaneAdapter(ctx, config);
+  const query = input.query;
+  const maxResults = input.maxResults ?? config.defaultMaxResults;
 
-  const searchInput: ResearchSearchInput = { query, maxResults };
-  const profileResolution = resolveResearchProfile(searchInput);
+  const profileResolution = resolveResearchProfile(input);
   const scopeMapping = resolveSourceScopeCategories(
-    profileResolution.profile.sourceScope,
+    input.sourceScope ?? profileResolution.profile.sourceScope,
     { discussionsSupported: true },
   );
 
@@ -211,17 +258,24 @@ async function handleVaneHeadlessSearch(
 
   if (!output.ok) {
     const retryable = output.retryable;
-    const retryAfter = (output as any).retryAfterSeconds;
+    const retryAfter = output.retryAfterSeconds;
     const errorDetail = retryable
       ? `${output.error} (retryable, retryAfter=${retryAfter ?? 60}s)`
       : output.error;
-    return { error: `Research search failed: ${errorDetail}` };
+    return {
+      error: `Research search failed: ${errorDetail}`,
+      data: {
+        retryable,
+        ...(retryAfter != null ? { retryAfterSeconds: retryAfter } : {}),
+        error: output.error,
+      },
+    };
   }
 
   // Build the evidence bundle from raw Vane results
   const retrievedAt = output.retrievedAt;
   const bundle = buildEvidenceBundle({
-    input: searchInput,
+    input,
     rawResults: output.results,
     profile: profileResolution.profile,
     retrievedAt,
@@ -234,8 +288,12 @@ async function handleVaneHeadlessSearch(
     warnings: [...profileResolution.warnings, ...scopeMapping.warnings],
   });
 
+  const sourceCount = bundle.sources.length;
+  const warningCount = bundle.warnings.length;
+  const content = `Research search completed for "${query}": ${sourceCount} sources, ${warningCount} warnings. Use \`data.sources\`, \`data.warnings\`, and \`data.gaps\` for synthesis; do not treat this as final analysis.`;
+
   return {
-    content: JSON.stringify(bundle, null, 2),
+    content,
     data: bundle,
   };
 }

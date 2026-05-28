@@ -82,6 +82,7 @@ export type VaneHeadlessSearchOutput =
       ok: false;
       error: string;
       retryable: boolean;
+      retryAfterSeconds?: number;
       engine: VaneHeadlessSearchEngineInfo;
       retrievedAt: string;
     };
