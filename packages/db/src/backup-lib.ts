@@ -1,6 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { createGzip, gunzip } from "node:zlib";
+import { promisify } from "node:util";
 import postgres from "postgres";
 
 export type RunDatabaseBackupOptions = {
@@ -49,6 +52,14 @@ const DRIZZLE_SCHEMA = "drizzle";
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+const gunzipAsync = promisify(gunzip);
+
+async function* sqlBackupLineStream(lines: string[]): AsyncGenerator<string> {
+  for (const line of lines) {
+    yield line;
+    yield "\n";
+  }
+}
 
 function sanitizeRestoreErrorMessage(error: unknown): string {
   if (error && typeof error === "object") {
@@ -76,7 +87,7 @@ function pruneOldBackups(backupDir: string, retentionDays: number, filenamePrefi
   let pruned = 0;
 
   for (const name of readdirSync(backupDir)) {
-    if (!name.startsWith(`${filenamePrefix}-`) || !name.endsWith(".sql")) continue;
+    if (!name.startsWith(`${filenamePrefix}-`) || !(name.endsWith(".sql") || name.endsWith(".sql.gz"))) continue;
     const fullPath = resolve(backupDir, name);
     const stat = statSync(fullPath);
     if (stat.mtimeMs < cutoff) {
@@ -505,8 +516,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
     // Write the backup file
     mkdirSync(opts.backupDir, { recursive: true });
-    const backupFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql`);
-    await writeFile(backupFile, lines.join("\n"), "utf8");
+    const backupFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql.gz`);
+    await pipeline(sqlBackupLineStream(lines), createGzip(), createWriteStream(backupFile));
 
     const sizeBytes = statSync(backupFile).size;
     const prunedCount = pruneOldBackups(opts.backupDir, retentionDays, filenamePrefix);
@@ -527,7 +538,10 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
 
   try {
     await sql`SELECT 1`;
-    const contents = await readFile(opts.backupFile, "utf8");
+    const backupBuffer = await readFile(opts.backupFile);
+    const contents = opts.backupFile.endsWith(".gz")
+      ? (await gunzipAsync(backupBuffer)).toString("utf8")
+      : backupBuffer.toString("utf8");
     const statements = contents
       .split(STATEMENT_BREAKPOINT)
       .map((statement) => statement.trim())

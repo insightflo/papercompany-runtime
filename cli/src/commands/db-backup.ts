@@ -58,7 +58,7 @@ export async function dbBackupCommand(opts: DbBackupOptions): Promise<void> {
   const backupDir = resolveBackupDir(configuredDir);
   const retentionDays = normalizeRetentionDays(
     opts.retentionDays,
-    config?.database.backup.retentionDays ?? 30,
+    config?.database.backup.retentionDays ?? 3,
   );
   const filenamePrefix = opts.filenamePrefix?.trim() || "paperclip";
 

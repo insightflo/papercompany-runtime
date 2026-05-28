@@ -20,8 +20,8 @@ export const llmConfigSchema = z.object({
 
 export const databaseBackupConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  intervalMinutes: z.number().int().min(1).max(7 * 24 * 60).default(60),
-  retentionDays: z.number().int().min(1).max(3650).default(30),
+  intervalMinutes: z.number().int().min(1).max(7 * 24 * 60).default(24 * 60),
+  retentionDays: z.number().int().min(1).max(3650).default(3),
   dir: z.string().default("~/.paperclip/instances/default/data/backups"),
 });
 
@@ -32,8 +32,8 @@ export const databaseConfigSchema = z.object({
   embeddedPostgresPort: z.number().int().min(1).max(65535).default(54329),
   backup: databaseBackupConfigSchema.default({
     enabled: true,
-    intervalMinutes: 60,
-    retentionDays: 30,
+    intervalMinutes: 24 * 60,
+    retentionDays: 3,
     dir: "~/.paperclip/instances/default/data/backups",
   }),
 });
