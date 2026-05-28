@@ -426,8 +426,9 @@ function buildWorkflowParentIssueTerminalComment(input: {
     "",
     "Main executor diagnosis required:",
     "- Identify the failed step/output and decide whether retry is safe.",
+    "- Try `rerun-step` for the failed step or `resume-run` for the workflow run when retry is safe.",
     "- If retry is unsafe, write the recovery/replan path before restarting the workflow.",
-    "- Keep this parent oversight issue as the operator-facing record of the abort.",
+    "- Keep this parent oversight issue open as the operator-facing recovery record until retry, replan, or escalation is complete.",
   ].join("\n");
 }
 
@@ -2672,13 +2673,13 @@ async function handleToolExecutionResultPayload(
                 ctx,
                 typedRun,
                 companyId,
-                "cancelled",
+                "blocked",
                 buildWorkflowParentIssueTerminalComment({
                   workflowRun: typedRun,
-                  status: "cancelled",
+                  status: "blocked",
                   failedBy: "tool_failure",
                   stepId: updatedStepRun.data.stepId,
-                  reason: `The workflow parent oversight issue was marked cancelled because tool step ${updatedStepRun.data.stepId} failed and the workflow policy is abort_workflow.`,
+                  reason: `The workflow parent oversight issue was left blocked because tool step ${updatedStepRun.data.stepId} failed and needs owner recovery before the mission can close.`,
                 }),
               );
             }

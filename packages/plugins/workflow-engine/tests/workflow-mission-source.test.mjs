@@ -15,7 +15,10 @@ test("workflow-created issues keep origin metadata for mission work traceability
   assert.match(source, /originRunId:\s*liveStepRun\.data\.runId/);
 });
 
-test("workflow terminal failures synchronize the parent oversight issue", () => {
+test("workflow terminal tool failures synchronize the parent oversight issue as blocked", () => {
   assert.match(source, /async function markWorkflowParentIssueTerminal/);
-  assert.match(source, /markWorkflowParentIssueTerminal\(\s*ctx,\s*typedRun,\s*companyId,\s*"cancelled"/);
+  const toolFailureIndex = source.indexOf('failedBy: "tool_failure"');
+  assert.notEqual(toolFailureIndex, -1);
+  const toolFailureBlock = source.slice(Math.max(0, toolFailureIndex - 600), toolFailureIndex + 600);
+  assert.match(toolFailureBlock, /markWorkflowParentIssueTerminal\([\s\S]*?"blocked"/);
 });
