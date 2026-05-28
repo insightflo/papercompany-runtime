@@ -2609,6 +2609,16 @@ async function handleToolExecutionResultPayload(
         : "";
       const stdoutExcerpt = buildTextExcerpt(payload.stdout);
       const stderrExcerpt = buildTextExcerpt(payload.stderr);
+
+      // Safely extract retryable metadata from payload.data if present
+      const payloadData = (typeof payload.data === "object" && payload.data !== null && !Array.isArray(payload.data))
+        ? payload.data as Record<string, unknown>
+        : null;
+      const retryable = typeof (payloadData?.retryable) === "boolean" ? payloadData.retryable : null;
+      const retryAfterSeconds = (typeof (payloadData?.retryAfterSeconds) === "number" && Number.isFinite(payloadData.retryAfterSeconds))
+        ? payloadData.retryAfterSeconds as number
+        : null;
+
       try {
         await ctx.issues.createComment(
           updatedStepRun.data.issueId,
@@ -2619,6 +2629,8 @@ async function handleToolExecutionResultPayload(
             `- Duration: ${duration}`,
             `- Exit code: ${payload.exitCode ?? "N/A"}`,
             ...(errorSummary ? [`- Error: ${errorSummary}`] : []),
+            ...(retryable !== null ? [`- Retryable: ${retryable}`] : []),
+            ...(retryAfterSeconds !== null ? [`- Retry after: ${retryAfterSeconds}s`] : []),
             ...(stdoutExcerpt ? ["", "#### stdout", "```", stdoutExcerpt, "```"] : []),
             ...(stderrExcerpt ? ["", "#### stderr", "```", stderrExcerpt, "```"] : []),
           ].join("\n"),

@@ -39,3 +39,42 @@ test("terminal parent issue comments are still written for already-cancelled ove
   assert.match(source, /parentIssue\.status !== status && parentIssue\.status !== "cancelled"/);
   assert.match(source, /await ctx\.issues\.createComment\(parentIssueId, comment, companyId\)/);
 });
+
+test("tool result payload.error is preserved in step issue comment for recoverable diagnostics", () => {
+  // Verify that handleToolExecutionResultPayload extracts payload.error
+  // and includes it in the step issue comment when the tool fails.
+  const handlerIndex = source.indexOf("async function handleToolExecutionResultPayload(");
+  assert.notEqual(handlerIndex, -1);
+
+  const handlerBlock = source.slice(handlerIndex, handlerIndex + 4000);
+
+  // payload.error is extracted as a string and trimmed
+  assert.match(handlerBlock, /typeof payload\.error === "string" && payload\.error\.trim\(\)/);
+
+  // The first line of the error is used as errorSummary
+  assert.match(handlerBlock, /payload\.error\.trim\(\)\.split\("\\n"\)\[0\]/);
+
+  // errorSummary is conditionally included in the step issue comment
+  assert.match(handlerBlock, /errorSummary \? \[/);
+
+  // On failure (!success), the step is marked failed
+  assert.match(handlerBlock, /const nextStatus = success \? STEP_STATUSES\.done : STEP_STATUSES\.failed/);
+});
+
+test("tool result handler consumes payload.data.retryable and retryAfterSeconds in step issue comment", () => {
+  const handlerIndex = source.indexOf("async function handleToolExecutionResultPayload(");
+  assert.notEqual(handlerIndex, -1);
+
+  const handlerBlock = source.slice(handlerIndex, handlerIndex + 4500);
+
+  // payload.data is safely inspected as a record
+  assert.match(handlerBlock, /typeof payload\.data === "object" && payload\.data !== null/);
+
+  // retryable boolean is extracted and rendered as a diagnostic line
+  assert.match(handlerBlock, /typeof \(payloadData\?\.retryable\) === "boolean"/);
+  assert.match(handlerBlock, /retryable !== null \? \[`- Retryable: \$\{retryable\}`\]/);
+
+  // retryAfterSeconds is extracted when a finite number and rendered
+  assert.match(handlerBlock, /typeof \(payloadData\?\.retryAfterSeconds\) === "number" && Number\.isFinite\(payloadData\.retryAfterSeconds\)/);
+  assert.match(handlerBlock, /retryAfterSeconds !== null \? \[`- Retry after: \$\{retryAfterSeconds\}s`\]/);
+});
