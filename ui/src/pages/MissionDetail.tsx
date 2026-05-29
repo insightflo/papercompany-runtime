@@ -63,6 +63,14 @@ function sourceRefLabel(record: JsonRecord): string | null {
   return sourceType ?? sourceId;
 }
 
+function proposedEditLabel(record: JsonRecord): string | null {
+  const proposedEdit = isRecord(record.proposedEdit) ? record.proposedEdit : null;
+  const operation = textValue(proposedEdit?.operation);
+  const section = textValue(proposedEdit?.section);
+  if (operation && section) return `${operation} · ${section}`;
+  return operation ?? section;
+}
+
 function statusTone(status: string | null): string {
   switch (status?.toLowerCase()) {
     case "completed":
@@ -107,6 +115,7 @@ function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: Mission
   const ruleRefs = getPlanRefArray(plan, "ruleRefs");
   const kbRefs = getPlanRefArray(plan, "kbRefs");
   const executionUnits = getPlanRefArray(plan, "executionUnits");
+  const selfImprovementCandidates = getPlanRefArray(plan, "selfImprovementCandidates");
   const openRequiredInputs = plan?.openRequiredInputs ?? [];
   const ruleNames = plan?.ruleNames ?? [];
   const ruleModes = plan?.ruleModes ?? [];
@@ -272,6 +281,41 @@ function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: Mission
           )}
         </section>
       </div>
+
+      <section className="rounded-md border border-border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Self-improvement candidates</p>
+          <span className="text-xs text-muted-foreground">{selfImprovementCandidates.length} candidates</span>
+        </div>
+        {selfImprovementCandidates.length > 0 ? (
+          <ul className="mt-3 space-y-2 text-sm">
+            {selfImprovementCandidates.slice(0, 8).map((candidate, index) => {
+              const assetType = textValue(candidate.assetType);
+              const assetRef = textValue(candidate.assetRef) ?? labelForRecord(candidate, `Candidate ${index + 1}`);
+              const result = textValue(candidate.autoAdoptionResult);
+              const edit = proposedEditLabel(candidate);
+              const gateOwner = textValue(candidate.gateOwner);
+              const pattern = textValue(candidate.pattern);
+              return (
+                <li key={`${assetRef}-${index}`} className="rounded border border-border/70 p-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium">{assetRef}</span>
+                    {result && <span className={`text-xs ${statusTone(result)}`}>{result}</span>}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    {assetType && <span>{assetType}</span>}
+                    {edit && <span>{edit}</span>}
+                    {gateOwner && <span>gate: {gateOwner}</span>}
+                  </div>
+                  {pattern && <p className="mt-2 text-xs text-muted-foreground">{pattern}</p>}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="mt-3 text-sm text-muted-foreground">No self-improvement candidates attached to this active plan.</p>
+        )}
+      </section>
 
       <section className="rounded-md border border-border p-4">
         <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Required inputs</p>

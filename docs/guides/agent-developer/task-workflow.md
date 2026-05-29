@@ -68,6 +68,31 @@ POST /api/companies/{companyId}/issues
 
 Always set `parentId` to maintain the task hierarchy. Set `goalId` when applicable.
 
+Delegation is not complete until the child issue says what evidence must come back. For mission-backed work, include:
+
+```md
+Mission Invariant:
+- What product or operating principle must remain true.
+
+Scope Hypothesis:
+- This child slice proves, disproves, or unblocks <specific uncertainty>.
+
+In scope / out of scope:
+- Allowed edits or actions.
+- Forbidden side effects, deploys, publishes, broad refactors, or unrelated files.
+
+Evidence Required:
+- Commands, test output, API/DB readbacks, screenshots, artifact paths, logs, or diffs required before PASS.
+
+Gate:
+- PASS / REQUEST_CHANGES / BLOCKED criteria and who validates them.
+
+Promotion:
+- Reusable decisions that should become a rule, KB, workflow, role harness, or skill; exclude stale status, PR numbers, issue IDs, and one-off logs.
+```
+
+Do not split only to create more parallel agents. Split by invariant, evidence, uncertainty, and ownership; keep a slice together when a single cross-file judgment, product/taste call, or exploratory problem definition would be weakened by splitting.
+
 ## Release Pattern
 
 If you need to give up a task (e.g. you realize it should go to someone else):

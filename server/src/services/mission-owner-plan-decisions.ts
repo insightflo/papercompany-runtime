@@ -353,6 +353,8 @@ export type PlanRevisionDraft = {
       decisionHash?: string;
       assessment?: MissionOwnerPlanAssessment;
     };
+    dynamicMissionPlanning?: Record<string, unknown>;
+    selfImprovementCandidates?: Record<string, unknown>[];
   };
   requiredInputs: (string | Record<string, unknown>)[];
   successCriteria: (string | Record<string, unknown>)[];
@@ -447,6 +449,143 @@ function validateMissionOwnerPlanAssessment(value: unknown): MissionOwnerPlanAss
   return Object.keys(assessment).length > 0 ? assessment : undefined;
 }
 
+function validateDynamicMissionArray(value: unknown): (string | Record<string, unknown>)[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_ARRAY_LENGTH) return undefined;
+  return value.every(isStringOrObject) ? (value as (string | Record<string, unknown>)[]) : undefined;
+}
+
+function validateDynamicMissionSection(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined || value === null || !isPlainObject(value)) return undefined;
+  const section: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const normalized = validateDynamicMissionArray(entry);
+    if (normalized !== undefined) {
+      section[key] = normalized;
+    } else if (typeof entry === "string" && entry.trim() !== "") {
+      section[key] = entry.trim();
+    }
+  }
+  return Object.keys(section).length > 0 ? section : undefined;
+}
+
+function validateDynamicMissionPlanning(decision: MissionOwnerPlanDecisionPayload): Record<string, unknown> | undefined {
+  const dynamicMissionPlanning: Record<string, unknown> = {};
+  const missionInvariant = validateDynamicMissionArray(decision.missionInvariant);
+  const evidenceRequired = validateDynamicMissionArray(decision.evidenceRequired);
+  const executionSlice = validateDynamicMissionSection(decision.executionSlice);
+  const gate = validateDynamicMissionSection(decision.gate);
+  const promotion = validateDynamicMissionSection(decision.promotion);
+
+  if (missionInvariant !== undefined) dynamicMissionPlanning.missionInvariant = missionInvariant;
+  if (typeof decision.scopeHypothesis === "string" && decision.scopeHypothesis.trim() !== "") {
+    dynamicMissionPlanning.scopeHypothesis = decision.scopeHypothesis.trim();
+  }
+  if (executionSlice !== undefined) dynamicMissionPlanning.executionSlice = executionSlice;
+  if (evidenceRequired !== undefined) dynamicMissionPlanning.evidenceRequired = evidenceRequired;
+  if (gate !== undefined) dynamicMissionPlanning.gate = gate;
+  if (promotion !== undefined) dynamicMissionPlanning.promotion = promotion;
+
+  return Object.keys(dynamicMissionPlanning).length > 0 ? dynamicMissionPlanning : undefined;
+}
+
+const SELF_IMPROVEMENT_ASSET_TYPES = new Set(["skill", "rule", "kb", "workflow", "role_harness"]);
+const SELF_IMPROVEMENT_EDIT_OPERATIONS = new Set(["add", "delete", "replace"]);
+const SELF_IMPROVEMENT_RESULTS = new Set(["accepted", "rejected", "queued_for_validation", "repair_needed"]);
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function validateSelfImprovementCandidateContract(
+  candidate: Record<string, unknown>,
+  index: number,
+  diagnostics: BuildMissionOwnerPlanRevisionDraftDiagnostic[],
+): void {
+  const prefix = `selfImprovementCandidates[${index}]`;
+
+  if (!isNonEmptyString(candidate.assetType) || !SELF_IMPROVEMENT_ASSET_TYPES.has(candidate.assetType)) {
+    diagnostics.push({
+      code: "invalid_candidate_contract",
+      message: `${prefix}.assetType must be one of skill, rule, kb, workflow, role_harness`,
+    });
+  }
+  if (!isNonEmptyString(candidate.assetRef)) {
+    diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.assetRef is required` });
+  }
+  if (!Array.isArray(candidate.evidenceSource) || candidate.evidenceSource.length === 0) {
+    diagnostics.push({
+      code: "invalid_candidate_contract",
+      message: `${prefix}.evidenceSource must be a non-empty array`,
+    });
+  } else if (!candidate.evidenceSource.every(isStringOrObject)) {
+    diagnostics.push({
+      code: "invalid_candidate_contract",
+      message: `${prefix}.evidenceSource entries must be strings or objects`,
+    });
+  }
+  if (!isNonEmptyString(candidate.pattern)) {
+    diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.pattern is required` });
+  }
+  if (!isPlainObject(candidate.proposedEdit)) {
+    diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.proposedEdit must be an object` });
+  } else {
+    const operation = candidate.proposedEdit.operation;
+    if (!isNonEmptyString(operation) || !SELF_IMPROVEMENT_EDIT_OPERATIONS.has(operation)) {
+      diagnostics.push({
+        code: "invalid_candidate_contract",
+        message: `${prefix}.proposedEdit.operation must be one of add, delete, replace`,
+      });
+    }
+    if (!isNonEmptyString(candidate.proposedEdit.section)) {
+      diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.proposedEdit.section is required` });
+    }
+  }
+  if (!isNonEmptyString(candidate.validationPlan)) {
+    diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.validationPlan is required` });
+  }
+  if (!isNonEmptyString(candidate.gateOwner)) {
+    diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.gateOwner is required` });
+  }
+  if (!isNonEmptyString(candidate.autoAdoptionResult) || !SELF_IMPROVEMENT_RESULTS.has(candidate.autoAdoptionResult)) {
+    diagnostics.push({
+      code: "invalid_candidate_contract",
+      message: `${prefix}.autoAdoptionResult must be one of accepted, rejected, queued_for_validation, repair_needed`,
+    });
+  }
+}
+
+function validateSelfImprovementCandidates(
+  value: unknown,
+  diagnostics: BuildMissionOwnerPlanRevisionDraftDiagnostic[],
+): Record<string, unknown>[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    diagnostics.push({ code: "invalid_field_shape", message: "selfImprovementCandidates must be an array" });
+    return undefined;
+  }
+  if (value.length > MAX_ARRAY_LENGTH) {
+    diagnostics.push({
+      code: "array_too_large",
+      message: `selfImprovementCandidates exceeds maximum length of ${MAX_ARRAY_LENGTH} (got ${value.length})`,
+    });
+    return undefined;
+  }
+  const candidates: Record<string, unknown>[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (!isPlainObject(entry)) {
+      diagnostics.push({
+        code: "invalid_entry_type",
+        message: `selfImprovementCandidates entries must be objects, got ${typeof entry}`,
+      });
+      return undefined;
+    }
+    validateSelfImprovementCandidateContract(entry, index, diagnostics);
+    candidates.push(entry);
+  }
+  return diagnostics.some((diagnostic) => diagnostic.message.includes("selfImprovementCandidates")) ? undefined : candidates;
+}
+
 export function buildMissionOwnerPlanRevisionDraft({
   decision,
   expectedMissionId,
@@ -501,6 +640,8 @@ export function buildMissionOwnerPlanRevisionDraft({
   const successCriteria = validateArrayOfStringsOrObjects(decision.successCriteria, "successCriteria", diagnostics);
   const steps = validateArrayOfStringsOrObjects(decision.steps, "steps", diagnostics);
   const assessment = validateMissionOwnerPlanAssessment(decision.assessment);
+  const dynamicMissionPlanning = validateDynamicMissionPlanning(decision);
+  const selfImprovementCandidates = validateSelfImprovementCandidates(decision.selfImprovementCandidates, diagnostics);
 
   // If any diagnostics accumulated, return failure
   if (diagnostics.length > 0) {
@@ -528,6 +669,8 @@ export function buildMissionOwnerPlanRevisionDraft({
         commentId,
         ...(assessment !== undefined ? { assessment } : {}),
       },
+      ...(dynamicMissionPlanning !== undefined ? { dynamicMissionPlanning } : {}),
+      ...(selfImprovementCandidates !== undefined ? { selfImprovementCandidates } : {}),
     },
     requiredInputs,
     successCriteria,

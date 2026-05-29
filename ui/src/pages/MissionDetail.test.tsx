@@ -75,6 +75,27 @@ vi.mock("@tanstack/react-query", () => ({
                   evidenceRefs: [{ ref: "PRIVATE-EVIDENCE" }],
                 },
               ],
+              selfImprovementCandidates: [
+                {
+                  assetType: "skill",
+                  assetRef: "papercompany-self-improvement-operations",
+                  pattern: "Accepted candidates need operator-visible evidence.",
+                  autoAdoptionResult: "accepted",
+                  gateOwner: "peer-validator",
+                  proposedEdit: { operation: "replace", section: "Candidate lifecycle" },
+                  evidenceSource: ["mission closeout", { label: "peer PASS" }],
+                },
+                {
+                  assetType: "kb",
+                  assetRef: "mission-owner-kb",
+                  pattern: "Rejected candidates keep diagnostics instead of silent omission.",
+                  autoAdoptionResult: "repair_needed",
+                  gateOwner: "mission-owner",
+                  proposedEdit: { operation: "add", section: "Diagnostics" },
+                  evidenceSource: ["invalid_candidate_contract"],
+                  sensitiveBody: "PRIVATE CANDIDATE BODY SHOULD NOT RENDER",
+                },
+              ],
             },
           },
         },
@@ -260,5 +281,18 @@ describe("MissionDetail", () => {
     expect(html).toContain("mission.supervision.run");
     expect(html).toContain("1 findings · 1 recommendations · 0 applied");
     expect(html).toContain("1 blocked/failed");
+    expect(html).toContain("Self-improvement candidates");
+    expect(html).toContain("2 candidates");
+    expect(html).toContain("papercompany-self-improvement-operations");
+    expect(html).toContain("skill");
+    expect(html).toContain("accepted");
+    expect(html).toContain("Accepted candidates need operator-visible evidence.");
+    expect(html).toContain("replace · Candidate lifecycle");
+    expect(html).toContain("peer-validator");
+    expect(html).toContain("mission-owner-kb");
+    expect(html).toContain("repair_needed");
+    expect(html).toContain("add · Diagnostics");
+    expect(html).toContain("mission-owner");
+    expect(html).not.toContain("PRIVATE CANDIDATE BODY SHOULD NOT RENDER");
   });
 });
