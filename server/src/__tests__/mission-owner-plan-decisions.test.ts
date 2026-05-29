@@ -731,6 +731,50 @@ describe("buildMissionOwnerPlanRevisionDraft", () => {
     }
   });
 
+  it("requires rejectedEditNote only when self-improvement candidates are rejected", () => {
+    const validBaseCandidate = {
+      assetType: "skill",
+      assetRef: "research-news-synthesis",
+      evidenceSource: ["issue:planning-1"],
+      pattern: "Repeatedly missed source freshness labels.",
+      proposedEdit: { operation: "add", section: "Validation checklist" },
+      validationPlan: "Replay against reference notes.",
+      gateOwner: "peer:validator",
+    };
+
+    const queuedResult = buildMissionOwnerPlanRevisionDraft({
+      decision: {
+        ...baseDecision,
+        selfImprovementCandidates: [{ ...validBaseCandidate, autoAdoptionResult: "queued_for_validation" }],
+      },
+      ...baseArgs,
+    });
+    expect(queuedResult).toEqual({ ok: true, draft: expect.anything() });
+
+    const rejectedMissingNote = buildMissionOwnerPlanRevisionDraft({
+      decision: {
+        ...baseDecision,
+        selfImprovementCandidates: [{ ...validBaseCandidate, autoAdoptionResult: "rejected" }],
+      },
+      ...baseArgs,
+    });
+    expect(rejectedMissingNote).not.toEqual({ ok: true, draft: expect.anything() });
+    if (!rejectedMissingNote.ok) {
+      expect(rejectedMissingNote.diagnostics.some((d) => /rejectedEditNote/i.test(d.message))).toBe(true);
+    }
+
+    const rejectedWithNote = buildMissionOwnerPlanRevisionDraft({
+      decision: {
+        ...baseDecision,
+        selfImprovementCandidates: [
+          { ...validBaseCandidate, autoAdoptionResult: "rejected", rejectedEditNote: "Too broad for one bounded patch." },
+        ],
+      },
+      ...baseArgs,
+    });
+    expect(rejectedWithNote).toEqual({ ok: true, draft: expect.anything() });
+  });
+
   // 2. goal fallback: uses decision.goal when decision.missionGoal is absent
   it("falls back to decision.goal when missionGoal is absent", () => {
     const { missionGoal: _, ...withoutGoal } = baseDecision;

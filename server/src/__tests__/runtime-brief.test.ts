@@ -170,6 +170,7 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain('"selfImprovementCandidates": []');
     expect(brief).toContain("Self-improvement candidate contract:");
     expect(brief).toContain("autoAdoptionResult must be accepted/rejected/queued_for_validation/repair_needed");
+    expect(brief).toContain("rejectedEditNote is required only when autoAdoptionResult is rejected");
     expect(brief).toContain('"scopeHypothesis": "..."');
     expect(brief).toContain('"evidenceRequired": []');
     expect(brief).toContain('"approvalGates": []');

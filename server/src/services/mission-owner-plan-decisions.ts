@@ -552,6 +552,11 @@ function validateSelfImprovementCandidateContract(
       code: "invalid_candidate_contract",
       message: `${prefix}.autoAdoptionResult must be one of accepted, rejected, queued_for_validation, repair_needed`,
     });
+  } else if (candidate.autoAdoptionResult === "rejected" && !isNonEmptyString(candidate.rejectedEditNote)) {
+    diagnostics.push({
+      code: "invalid_candidate_contract",
+      message: `${prefix}.rejectedEditNote is required when autoAdoptionResult is rejected`,
+    });
   }
 }
 
