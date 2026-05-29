@@ -122,12 +122,25 @@ Self-improvement candidate:
 - Evidence source: <issue/run/test/screenshot/user correction>
 - Proposed bounded edit: <add/delete/replace, exact section>
 - Validation plan: <reference task/check/test/readback>
-- Rejected-edit note: <if this was tried and failed before>
+- Rejected-edit note: <required when Auto-adoption result is rejected; optional otherwise>
 - Gate owner: <agent/peer validator responsible for automatic validation>
 - Auto-adoption result: <accepted | rejected | queued_for_validation | repair_needed>
 ```
 
 Agents may propose these candidates during closeout. For bounded internal asset updates, adoption should be automatic once evidence, bounded patch, and validation gate pass; do not wait for user approval. Agents still must not silently mutate skills, rules, KB, workflow definitions, role harnesses, publish targets, or adapter configuration outside the current issue scope or without an agent/peer gate verdict. External side effects such as push, deploy, publish, credentials, or destructive cleanup remain outside this automatic adoption path.
+
+### Adoption state and executor boundary
+
+Candidate storage and Mission Detail display are read-only surfaces. They do not apply patches. A future adoption executor should be a separate, approval-bounded runtime path with these gates:
+
+1. Select only candidates with `autoAdoptionResult: accepted` and a current agent/peer gate PASS.
+2. Resolve exactly one internal asset from `assetType` + `assetRef`; fail closed if the asset cannot be resolved or the candidate tries to touch multiple assets.
+3. Apply the bounded `proposedEdit` as add/delete/replace against a temporary patch target first.
+4. Run the asset-specific validation plan and read back the resulting diff/content.
+5. Record adopted/rejected/repair diagnostics before mutating the durable asset.
+6. Keep external side effects out of scope: no push, deploy, publish, credential changes, destructive cleanup, or adapter reconfiguration.
+
+This executor must be implemented and verified independently from candidate parsing, diagnostics, and read-only UI display.
 
 ## Reporting rule
 
