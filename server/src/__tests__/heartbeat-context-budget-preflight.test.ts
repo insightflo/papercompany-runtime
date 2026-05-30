@@ -385,6 +385,91 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
+  it("fail-closes a successful run that exits without finalizing its checked-out issue lifecycle", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Lifecycle Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Work the checked out issue." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "PAP-LIFE",
+      title: "Issue lifecycle must be explicit",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: runId,
+          executionRunId: runId,
+        })
+        .where(eq(issues.id, issueId));
+      await db.insert(issueComments).values({
+        companyId,
+        issueId,
+        authorAgentId: agentId,
+        body: "I completed this in the run, but did not PATCH the issue status.",
+      });
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("issue lifecycle was not finalized"))).toBe(true);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "issue.lifecycle_gap_blocked",
+          entityType: "issue",
+          entityId: issueId,
+        }),
+      ]),
+    );
+  });
+
   it("blocks execution before adapter.execute when the estimated context budget is exceeded", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

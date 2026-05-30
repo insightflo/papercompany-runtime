@@ -10,6 +10,7 @@ import {
   agentRuntimeState,
   agentTaskSessions,
   agentWakeupRequests,
+  activityLog,
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
@@ -3978,12 +3979,63 @@ export function heartbeatService(db: Db) {
         .select({
           id: issues.id,
           companyId: issues.companyId,
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+          checkoutRunId: issues.checkoutRunId,
         })
         .from(issues)
         .where(and(eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)))
         .then((rows) => rows[0] ?? null);
 
       if (!issue) return;
+
+      if (
+        run.status === "succeeded" &&
+        issue.status === "in_progress" &&
+        issue.assigneeAgentId === run.agentId &&
+        issue.checkoutRunId === run.id
+      ) {
+        const now = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "blocked",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: [
+            "## 자동 차단: issue lifecycle was not finalized",
+            `- 실행 runId: \`${run.id}\``,
+            "- 감지: adapter run은 succeeded로 종료됐지만 checked-out issue가 여전히 in_progress 상태였습니다.",
+            "- 해석: agent self-report/comment는 완료 증거가 아니며, issue status 전이는 명시적으로 수행되어야 합니다.",
+            "- 다음 조치: 산출물/evidence를 확인한 뒤 issue를 done으로 전이하거나, 필요한 후속 작업을 지정해 재개하세요.",
+          ].join("\n"),
+        });
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.lifecycle_gap_blocked",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: "in_progress",
+            nextStatus: "blocked",
+            reason: "successful_run_without_issue_lifecycle_finalization",
+          },
+        });
+        return null;
+      }
 
       await tx
         .update(issues)
