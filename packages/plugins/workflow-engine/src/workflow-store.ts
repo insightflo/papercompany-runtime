@@ -2,7 +2,7 @@ import type { PluginContext, PluginEntityRecord } from "@paperclipai/plugin-sdk"
 import { randomUUID } from "node:crypto";
 
 import { ENTITY_TYPES } from "./constants.js";
-import type { WorkflowStep } from "./dag-engine.js";
+import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 import type { CreateParentIssuePolicy } from "./workflow-parent-policy.js";
 
 export interface WorkflowDefinition extends Record<string, unknown> {
@@ -25,6 +25,13 @@ export interface WorkflowDefinition extends Record<string, unknown> {
   projectId?: string;
   goalId?: string;
   createParentIssuePolicy?: CreateParentIssuePolicy;
+  /**
+   * static_dag: create/advance all declared DAG steps.
+   * dynamic_owner_plan: launch only root planning steps; the plan issue owns
+   * child issue creation and the workflow run completes after launched steps end.
+   */
+  executionMode?: WorkflowExecutionMode;
+  dynamicPlanBootstrapOnly?: boolean;
 }
 
 export interface WorkflowRun extends Record<string, unknown> {

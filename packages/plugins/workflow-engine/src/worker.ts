@@ -11,6 +11,9 @@ import {
   getEscalationTarget,
   getNextSteps,
   getRetryInfo,
+  getWorkflowLaunchSteps,
+  isDynamicOwnerPlanWorkflowDefinition,
+  type WorkflowExecutionMode,
   type WorkflowStep,
 } from "./dag-engine.js";
 import {
@@ -719,6 +722,30 @@ function parseOptionalTrimmedString(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function parseWorkflowExecutionMode(value: unknown): WorkflowExecutionMode | undefined {
+  if (value === "static_dag" || value === "dynamic_owner_plan") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function parseOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (value === "true" || value === "1") {
+    return true;
+  }
+
+  if (value === "false" || value === "0") {
+    return false;
+  }
+
+  return undefined;
 }
 
 type WorkflowIssueCreateInput = IssueCreateInput & Record<string, unknown> & {
@@ -1951,8 +1978,10 @@ async function startWorkflow(
     agentsByName.set(agent.name, agent);
   }
 
+  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(typedWorkflowDefinition.data);
+  const launchSteps = getWorkflowLaunchSteps(typedWorkflowDefinition.data.steps, { dynamicOwnerPlan });
   const pendingRootSteps: Array<{ stepDef: WorkflowStep; stepRun: WorkflowStepRunRecord }> = [];
-  for (const stepDef of typedWorkflowDefinition.data.steps) {
+  for (const stepDef of launchSteps) {
     const agentNameHint = getStepAgentNameHint(stepDef);
     const matchedAgent = agentNameHint ? agentsByName.get(agentNameHint) ?? null : null;
     const resolvedAgent = matchedAgent
@@ -2095,11 +2124,23 @@ async function advanceWorkflow(
     }
   }
 
+  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(typedWorkflowDefinition.data);
+  const bootstrapStepIds = new Set(
+    getWorkflowLaunchSteps(typedWorkflowDefinition.data.steps, { dynamicOwnerPlan }).map((step) => step.id),
+  );
+  const launchedStepIds = dynamicOwnerPlan
+    ? new Set(stepRuns
+      .filter(
+        (candidate) => candidate.data.status !== STEP_STATUSES.backlog || bootstrapStepIds.has(candidate.data.stepId),
+      )
+      .map((candidate) => candidate.data.stepId))
+    : new Set(stepRuns.map((candidate) => candidate.data.stepId));
   const nextSteps = getNextSteps(
     typedWorkflowDefinition.data.steps,
     completed,
     failed,
     skipped,
+    { dynamicOwnerPlan, launchedStepIds },
   );
   const stepRunsById = new Map(stepRuns.map((candidate) => [candidate.data.stepId, candidate]));
 
@@ -2156,6 +2197,19 @@ async function advanceWorkflow(
         },
       },
     );
+  }
+
+  if (dynamicOwnerPlan && nextSteps.isWorkflowComplete) {
+    for (const stepRun of stepRuns) {
+      if (launchedStepIds.has(stepRun.data.stepId) || stepRun.data.status !== STEP_STATUSES.backlog) {
+        continue;
+      }
+
+      await updateStepRun(ctx, stepRun.id, {
+        completedAt: stepRun.data.completedAt ?? new Date().toISOString(),
+        status: STEP_STATUSES.skipped,
+      });
+    }
   }
 
   if (!nextSteps.isWorkflowComplete || (typedWorkflowRun.data.status as string) === RUN_STATUSES.completed) {
@@ -3191,6 +3245,12 @@ const plugin = definePlugin({
       if ("createParentIssuePolicy" in source) {
         patch.createParentIssuePolicy = normalizeCreateParentIssuePolicy(source.createParentIssuePolicy);
       }
+      if ("executionMode" in source) {
+        patch.executionMode = parseWorkflowExecutionMode(source.executionMode);
+      }
+      if ("dynamicPlanBootstrapOnly" in source) {
+        patch.dynamicPlanBootstrapOnly = parseOptionalBoolean(source.dynamicPlanBootstrapOnly);
+      }
       const updated = await updateWorkflowDefinition(ctx, workflowId, patch);
       return { id: updated.id, ...updated.data };
     });
@@ -3326,6 +3386,8 @@ const plugin = definePlugin({
         projectId: typeof workflow.projectId === "string" ? workflow.projectId.trim() || undefined : undefined,
         goalId: typeof workflow.goalId === "string" ? workflow.goalId.trim() || undefined : undefined,
         createParentIssuePolicy: normalizeCreateParentIssuePolicy(workflow.createParentIssuePolicy),
+        executionMode: parseWorkflowExecutionMode(workflow.executionMode),
+        dynamicPlanBootstrapOnly: parseOptionalBoolean(workflow.dynamicPlanBootstrapOnly),
       };
       const created = await createWorkflowDefinition(ctx, def);
       return { id: created.id, ...def };
@@ -3361,6 +3423,12 @@ const plugin = definePlugin({
       }
       if ("createParentIssuePolicy" in source) {
         patch.createParentIssuePolicy = normalizeCreateParentIssuePolicy(source.createParentIssuePolicy);
+      }
+      if ("executionMode" in source) {
+        patch.executionMode = parseWorkflowExecutionMode(source.executionMode);
+      }
+      if ("dynamicPlanBootstrapOnly" in source) {
+        patch.dynamicPlanBootstrapOnly = parseOptionalBoolean(source.dynamicPlanBootstrapOnly);
       }
       const updated = await updateWorkflowDefinition(ctx, workflowId, patch);
       return { id: updated.id, ...updated.data };

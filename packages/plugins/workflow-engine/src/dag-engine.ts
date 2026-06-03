@@ -12,6 +12,29 @@ export interface WorkflowStep {
   maxRetries?: number;
   triggerOn?: "normal" | "escalation";
   timeoutSeconds?: number;
+  /**
+   * Marks a root planning step as the bootstrap for an owner-led dynamic
+   * mission. The workflow engine launches this step only; the plan issue owns
+   * the concrete child issues instead of the static DAG activating them again.
+   */
+  dynamicChildren?: boolean;
+  ownerPlanBootstrapOnly?: boolean;
+  bootstrapOnly?: boolean;
+}
+
+export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
+
+export interface WorkflowExecutionOptions {
+  dynamicOwnerPlan?: boolean;
+  launchedStepIds?: Set<string>;
+}
+
+export interface WorkflowDefinitionExecutionShape {
+  name?: unknown;
+  executionMode?: unknown;
+  dynamicPlanBootstrapOnly?: unknown;
+  workflowMode?: unknown;
+  steps?: WorkflowStep[];
 }
 
 export interface DagValidationResult {
@@ -27,6 +50,77 @@ export interface NextStepsResult {
 
 function getNormalTriggerSteps(steps: WorkflowStep[]): WorkflowStep[] {
   return steps.filter((step) => step.triggerOn !== "escalation");
+}
+
+function isTruthyBooleanMarker(value: unknown): boolean {
+  return value === true || value === "true" || value === "1";
+}
+
+function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
+  const meta = step as WorkflowStep & { executionMode?: unknown; workflowMode?: unknown };
+  return isTruthyBooleanMarker(step.dynamicChildren)
+    || isTruthyBooleanMarker(step.ownerPlanBootstrapOnly)
+    || isTruthyBooleanMarker(step.bootstrapOnly)
+    || meta.executionMode === "dynamic_owner_plan"
+    || meta.workflowMode === "dynamic_owner_plan";
+}
+
+function hasRootPlanningStep(steps: WorkflowStep[]): boolean {
+  return steps.some((step) => {
+    if (step.triggerOn === "escalation" || step.dependsOn.length > 0) {
+      return false;
+    }
+
+    const id = step.id.toLowerCase();
+    const title = step.title.toLowerCase();
+    return id === "plan" || id.endsWith("-plan") || title.includes("plan");
+  });
+}
+
+function isLegacyResearchDailyWorkflowName(name: unknown): boolean {
+  if (typeof name !== "string") {
+    return false;
+  }
+
+  const normalized = name.trim().toLowerCase();
+  return normalized === "tech-scout"
+    || normalized === "tech-ai-news"
+    || normalized === "daily-tech-scout"
+    || normalized === "daily-tech-ai-news";
+}
+
+export function isDynamicOwnerPlanWorkflowDefinition(
+  definition: WorkflowDefinitionExecutionShape,
+): boolean {
+  if (definition.executionMode === "static_dag" || definition.workflowMode === "static_dag") {
+    return false;
+  }
+
+  if (
+    definition.executionMode === "dynamic_owner_plan"
+    || definition.workflowMode === "dynamic_owner_plan"
+    || isTruthyBooleanMarker(definition.dynamicPlanBootstrapOnly)
+  ) {
+    return true;
+  }
+
+  const steps = Array.isArray(definition.steps) ? definition.steps : [];
+  if (steps.some(isDynamicOwnerPlanStep)) {
+    return true;
+  }
+
+  return isLegacyResearchDailyWorkflowName(definition.name) && hasRootPlanningStep(steps);
+}
+
+export function getWorkflowLaunchSteps(
+  steps: WorkflowStep[],
+  options: WorkflowExecutionOptions = {},
+): WorkflowStep[] {
+  if (!options.dynamicOwnerPlan) {
+    return steps;
+  }
+
+  return steps.filter((step) => step.triggerOn !== "escalation" && step.dependsOn.length === 0);
 }
 
 export function validateDag(steps: WorkflowStep[]): DagValidationResult {
@@ -137,8 +231,14 @@ export function getNextSteps(
   completedStepIds: Set<string>,
   failedStepIds: Set<string>,
   skippedStepIds: Set<string>,
+  options: WorkflowExecutionOptions = {},
 ): NextStepsResult {
-  const readyStepIds = steps
+  const launchedStepIds = options.dynamicOwnerPlan ? options.launchedStepIds : undefined;
+  const executableSteps = launchedStepIds
+    ? steps.filter((step) => launchedStepIds.has(step.id))
+    : steps;
+
+  const readyStepIds = executableSteps
     .filter((step) => step.triggerOn !== "escalation")
     .filter((step) => !completedStepIds.has(step.id))
     .filter((step) => !failedStepIds.has(step.id))
@@ -151,7 +251,7 @@ export function getNextSteps(
     )
     .map((step) => step.id);
 
-  const isWorkflowComplete = getNormalTriggerSteps(steps).every(
+  const isWorkflowComplete = getNormalTriggerSteps(executableSteps).every(
     (step) =>
       completedStepIds.has(step.id) ||
       skippedStepIds.has(step.id) ||
