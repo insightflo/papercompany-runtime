@@ -2895,7 +2895,10 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: Heartb
     },
     onSuccess: (newRun) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(run.companyId, run.agentId) });
-      navigate(`/agents/${agentRouteId}/runs/${newRun.id}`);
+      if (newRun.agentId !== run.agentId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(run.companyId, newRun.agentId) });
+      }
+      navigate(`/agents/${newRun.agentId}/runs/${newRun.id}`);
     },
   });
 

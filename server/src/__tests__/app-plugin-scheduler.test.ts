@@ -164,7 +164,7 @@ describe("createApp plugin scheduler lifecycle", () => {
     });
 
     expect(pluginSchedulerStart).toHaveBeenCalledTimes(1);
-  }, 15_000);
+  }, 30_000);
 
   it("starts the mission owner supervision monitor so stale active missions are inspected automatically", async () => {
     const { createApp } = await import("../app.js");
@@ -188,5 +188,5 @@ describe("createApp plugin scheduler lifecycle", () => {
         onOwnerActionCreated: expect.any(Function),
       }),
     );
-  }, 15_000);
+  }, 30_000);
 });

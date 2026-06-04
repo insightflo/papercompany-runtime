@@ -28,12 +28,12 @@ export function missionRoutes(db: Db) {
   const router = Router();
   const heartbeat = heartbeatService(db);
   const svc = missionService(db, {
-    onOwnerActionCreated: ({ mission, issue, sourceIssue }) => {
+    onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
       if (!issue.assigneeAgentId) return null;
       return heartbeat.wakeup(issue.assigneeAgentId, {
         source: "assignment",
         triggerDetail: "system",
-        reason: "mission_unblock_action_created",
+        reason: reason ?? "mission_unblock_action_created",
         payload: {
           issueId: issue.id,
           mutation: "mission_main_executor_unblock",
@@ -66,6 +66,60 @@ export function missionRoutes(db: Db) {
           issueId: issue.id,
           missionId: mission.id,
           source: "mission_owner_planning_issue_created",
+        },
+      });
+    },
+    onOwnerDecisionRetrySourceIssueApplied: ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
+      return heartbeat.wakeup(targetAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_owner_retry_source_issue",
+        idempotencyKey,
+        payload: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          ownerActionIssueId: ownerActionIssue.id,
+          mutation: "mission_owner_retry_source_issue",
+          sourceIssueId: sourceIssue.id,
+          wakeCommentId,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision",
+        contextSnapshot: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          source: "mission_owner_retry_source_issue",
+          ownerActionIssueId: ownerActionIssue.id,
+          sourceIssueId: sourceIssue.id,
+          wakeCommentId,
+        },
+      });
+    },
+    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, targetAgentId, failedRun, idempotencyKey, wakeCommentId }) => {
+      return heartbeat.wakeup(targetAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_stale_source_issue_wakeup",
+        idempotencyKey,
+        payload: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          mutation: "mission_stale_source_issue_wakeup",
+          sourceIssueId: sourceIssue.id,
+          failedRunId: failedRun.id,
+          failedRunStatus: failedRun.status,
+          wakeCommentId,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision",
+        contextSnapshot: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          source: "mission_stale_source_issue_wakeup",
+          sourceIssueId: sourceIssue.id,
+          failedRunId: failedRun.id,
+          failedRunStatus: failedRun.status,
+          wakeCommentId,
         },
       });
     },
@@ -158,7 +212,7 @@ export function missionRoutes(db: Db) {
     }
     assertCompanyAccess(req, companyId);
 
-    const { staleAfterMinutes, applySafeActions } = req.body ?? {};
+    const { staleAfterMinutes, applySafeActions, applyOwnerDecisionActions, dispatchOwnerDecisionWakeups, dispatchStaleSourceIssueWakeups } = req.body ?? {};
     let parsedStaleAfterMinutes: number | undefined;
     if (staleAfterMinutes !== undefined) {
       parsedStaleAfterMinutes = typeof staleAfterMinutes === "number"
@@ -174,6 +228,9 @@ export function missionRoutes(db: Db) {
       missionIds: [missionId],
       staleAfterMinutes: parsedStaleAfterMinutes,
       applySafeActions: applySafeActions === true,
+      applyOwnerDecisionActions: applyOwnerDecisionActions === true,
+      dispatchOwnerDecisionWakeups: dispatchOwnerDecisionWakeups === true,
+      dispatchStaleSourceIssueWakeups: dispatchStaleSourceIssueWakeups === true,
     });
 
     const actor = getActorInfo(req);
@@ -195,6 +252,9 @@ export function missionRoutes(db: Db) {
       details: {
         staleAfterMinutes: parsedStaleAfterMinutes ?? null,
         applySafeActions: applySafeActions === true,
+        applyOwnerDecisionActions: applyOwnerDecisionActions === true,
+        dispatchOwnerDecisionWakeups: dispatchOwnerDecisionWakeups === true,
+        dispatchStaleSourceIssueWakeups: dispatchStaleSourceIssueWakeups === true,
         missionCount: missionResults.length,
         findingCount: countNestedItems("findings"),
         recommendationCount: countNestedItems("recommendations"),
@@ -226,6 +286,22 @@ export function missionRoutes(db: Db) {
     assertCompanyAccess(req, existing.companyId);
 
     const { title, description, status, goalId, startedAt, completedAt } = req.body;
+    if (status === "cancelled") {
+      const issueTree = await svc.getIssueTree(req.params.id);
+      const candidateRunIds = new Set<string>();
+      for (const issue of issueTree) {
+        if (issue.executionRunId) candidateRunIds.add(issue.executionRunId);
+        if (issue.checkoutRunId) candidateRunIds.add(issue.checkoutRunId);
+      }
+      for (const runId of candidateRunIds) {
+        const run = await heartbeat.getRun(runId);
+        if (!run || run.companyId !== existing.companyId) continue;
+        if (run.status === "queued" || run.status === "running") {
+          await heartbeat.cancelRun(run.id);
+        }
+      }
+    }
+
     const updated = await svc.update(req.params.id, {
       title,
       description,

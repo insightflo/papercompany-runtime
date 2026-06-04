@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { missionService, type MissionOwnerActionCreatedHandler } from "./missions.js";
+import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionStaleSourceIssueWakeupRequestedHandler } from "./missions.js";
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MINUTES = 30;
@@ -11,6 +11,8 @@ export interface MissionOwnerSupervisionMonitorOptions {
   runImmediately?: boolean;
   applySafeActions?: boolean;
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
+  onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
+  onStaleSourceIssueWakeupRequested?: MissionStaleSourceIssueWakeupRequestedHandler;
 }
 
 export function createMissionOwnerSupervisionMonitor(
@@ -30,9 +32,14 @@ export function createMissionOwnerSupervisionMonitor(
     try {
       const result = await missionService(db, {
         onOwnerActionCreated: options.onOwnerActionCreated,
+        onOwnerDecisionRetrySourceIssueApplied: options.onOwnerDecisionRetrySourceIssueApplied,
+        onStaleSourceIssueWakeupRequested: options.onStaleSourceIssueWakeupRequested,
       }).runActiveMissionOwnerSupervision({
         staleAfterMinutes,
         applySafeActions,
+        applyOwnerDecisionActions: true,
+        dispatchOwnerDecisionWakeups: true,
+        dispatchStaleSourceIssueWakeups: false,
       });
       const findingsCount = result.missions.reduce((total, mission) => total + mission.findings.length, 0);
       const commentedCount = result.missions.filter((mission) => mission.commented).length;

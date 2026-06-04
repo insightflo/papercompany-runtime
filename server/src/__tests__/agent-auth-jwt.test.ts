@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLocalAgentJwt, verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 
@@ -12,7 +15,10 @@ describe("agent local JWT", () => {
     ttl: process.env[ttlEnv],
     issuer: process.env[issuerEnv],
     audience: process.env[audienceEnv],
+    paperclipConfig: process.env.PAPERCLIP_CONFIG,
   };
+
+  let tempDir: string | null = null;
 
   beforeEach(() => {
     process.env[secretEnv] = "test-secret";
@@ -32,6 +38,12 @@ describe("agent local JWT", () => {
     else process.env[issuerEnv] = originalEnv.issuer;
     if (originalEnv.audience === undefined) delete process.env[audienceEnv];
     else process.env[audienceEnv] = originalEnv.audience;
+    if (originalEnv.paperclipConfig === undefined) delete process.env.PAPERCLIP_CONFIG;
+    else process.env.PAPERCLIP_CONFIG = originalEnv.paperclipConfig;
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
   });
 
   it("creates and verifies a token", () => {
@@ -50,7 +62,35 @@ describe("agent local JWT", () => {
     });
   });
 
+  it("loads PAPERCLIP_AGENT_JWT_SECRET from the Paperclip env file when it is absent from process env", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "paperclip-agent-jwt-"));
+    const configDir = join(tempDir, ".paperclip");
+    mkdirSync(configDir, { recursive: true });
+    const configPath = join(configDir, "config.json");
+    writeFileSync(configPath, "{}", "utf-8");
+    writeFileSync(join(configDir, ".env"), "PAPERCLIP_AGENT_JWT_SECRET=file-secret\n", "utf-8");
+    process.env.PAPERCLIP_CONFIG = configPath;
+    delete process.env[secretEnv];
+
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const token = createLocalAgentJwt("agent-1", "company-1", "hermes_local", "run-1");
+
+    expect(typeof token).toBe("string");
+    expect(verifyLocalAgentJwt(token!)).toMatchObject({
+      sub: "agent-1",
+      company_id: "company-1",
+      adapter_type: "hermes_local",
+      run_id: "run-1",
+    });
+  });
+
   it("returns null when secret is missing", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "paperclip-agent-jwt-missing-"));
+    const configDir = join(tempDir, ".paperclip");
+    mkdirSync(configDir, { recursive: true });
+    const configPath = join(configDir, "config.json");
+    writeFileSync(configPath, "{}", "utf-8");
+    process.env.PAPERCLIP_CONFIG = configPath;
     process.env[secretEnv] = "";
     const token = createLocalAgentJwt("agent-1", "company-1", "claude_local", "run-1");
     expect(token).toBeNull();

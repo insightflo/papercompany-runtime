@@ -3,6 +3,7 @@ import {
   buildAntigravityArgs,
   extractLatestAntigravityResponse,
   readConversationIdForCwdFromCache,
+  resolveAntigravityFailure,
 } from "./execute.js";
 
 describe("antigravity_local argument builder", () => {
@@ -48,6 +49,50 @@ describe("antigravity_local argument builder", () => {
     expect(args[args.indexOf("--conversation") + 1]).toBe("conv-123");
     expect(args.indexOf("--conversation")).toBeLessThan(args.indexOf("--print"));
   });
+
+  it("adds an adapter-owned diagnostic log file before --print", () => {
+    const args = buildAntigravityArgs({
+      cwd: "/tmp/work",
+      prompt: "diagnose",
+      printTimeout: "30s",
+      bypassPermissions: false,
+      sandbox: false,
+      sessionId: null,
+      extraArgs: [],
+      diagnosticLogFilePath: "/tmp/antigravity.log",
+    });
+
+    expect(args).toContain("--log-file");
+    expect(args[args.indexOf("--log-file") + 1]).toBe("/tmp/antigravity.log");
+    expect(args.indexOf("--log-file")).toBeLessThan(args.indexOf("--print"));
+  });
+
+  it("deduplicates user-provided log-file args when adapter-owned diagnostics are enabled", () => {
+    const args = buildAntigravityArgs({
+      cwd: "/tmp/work",
+      prompt: "diagnose",
+      printTimeout: "30s",
+      bypassPermissions: false,
+      sandbox: false,
+      sessionId: null,
+      extraArgs: ["--model", "auto", "--log-file", "/tmp/user.log", "--flag"],
+      diagnosticLogFilePath: "/tmp/adapter.log",
+    });
+
+    expect(args).toEqual([
+      "--print-timeout",
+      "30s",
+      "--add-dir",
+      "/tmp/work",
+      "--model",
+      "auto",
+      "--flag",
+      "--log-file",
+      "/tmp/adapter.log",
+      "--print",
+      "diagnose",
+    ]);
+  });
 });
 
 describe("antigravity_local output/session helpers", () => {
@@ -73,5 +118,53 @@ describe("antigravity_local output/session helpers", () => {
     });
     const id = await readConversationIdForCwdFromCache("/tmp/work", async () => cache);
     expect(id).toBe("conv-work");
+  });
+
+  it("treats Antigravity print response timeout text as an adapter failure even when the process exits zero", () => {
+    expect(
+      resolveAntigravityFailure({
+        exitCode: 0,
+        timedOut: false,
+        stdout: "Error: timed out waiting for response\n",
+        stderr: "",
+        latestResponse: "Error: timed out waiting for response",
+      }),
+    ).toEqual({
+      errorMessage: "Error: timed out waiting for response",
+      errorCode: "adapter_failed",
+    });
+  });
+
+  it("treats an empty Antigravity print response as an adapter failure", () => {
+    expect(
+      resolveAntigravityFailure({
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        latestResponse: "",
+      }),
+    ).toEqual({
+      errorMessage: "Antigravity CLI exited without producing a response",
+      errorCode: "adapter_failed",
+    });
+  });
+
+  it("promotes quota exhaustion from the Antigravity diagnostic log when print output is empty", () => {
+    expect(
+      resolveAntigravityFailure({
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        latestResponse: "",
+        diagnosticLog:
+          "agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Contact your administrator to enable overages. Resets in 2h57m51s.",
+      }),
+    ).toEqual({
+      errorMessage:
+        "Antigravity provider quota exhausted: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Contact your administrator to enable overages. Resets in 2h57m51s.",
+      errorCode: "provider_quota_exhausted",
+    });
   });
 });

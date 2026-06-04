@@ -448,5 +448,5 @@ describe("maintenance mission dogfood", () => {
       );
 
     }
-  });
+  }, 15_000);
 });

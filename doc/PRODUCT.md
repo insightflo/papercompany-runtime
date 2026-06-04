@@ -106,7 +106,9 @@ This means the product should increasingly speak in company-operating terms, whi
 
 5. **Control plane, not execution plane.** Paperclip orchestrates. The actual work is carried out through external work systems and execution infrastructure.
 
-6. **Budgets, approvals, and auditability are core features.** They are not optional enterprise add-ons.
+6. **Mission operating kernel, not bespoke micromanagement.** Papercompany-specific autonomy should stay bounded by the concise mission-first/evidence-first/recovery-action contract in `doc/spec/mission-operating-kernel.md`.
+
+7. **Budgets, approvals, and auditability are core features.** They are not optional enterprise add-ons.
 
 ## User Flow (Dream Scenario)
 

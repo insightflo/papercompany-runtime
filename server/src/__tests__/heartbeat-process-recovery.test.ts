@@ -139,6 +139,7 @@ describe("heartbeat orphaned process recovery", () => {
     includeIssue?: boolean;
     runErrorCode?: string | null;
     runError?: string | null;
+    updatedAt?: Date;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -194,7 +195,7 @@ describe("heartbeat orphaned process recovery", () => {
       errorCode: input?.runErrorCode ?? null,
       error: input?.runError ?? null,
       startedAt: now,
-      updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+      updatedAt: input?.updatedAt ?? new Date("2026-03-19T00:00:00.000Z"),
     });
 
     if (input?.includeIssue !== false) {
@@ -273,6 +274,28 @@ describe("heartbeat orphaned process recovery", () => {
       .then((rows) => rows[0] ?? null);
     expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
     expect(issue?.checkoutRunId).toBe(runId);
+  });
+
+  it("does not reap a running run that reported recent activity", async () => {
+    const { runId, wakeupRequestId } = await seedRunFixture({
+      includeIssue: false,
+      updatedAt: new Date(),
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(0);
+
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+    expect(run?.errorCode).toBeNull();
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("claimed");
   });
 
   it("preserves issue linkage from heartbeatRuns.issueId even when the original context snapshot omits issueId", async () => {
@@ -359,5 +382,41 @@ describe("heartbeat orphaned process recovery", () => {
     const run = await heartbeat.getRun(runId);
     expect(run?.errorCode).toBeNull();
     expect(run?.error).toBeNull();
+  });
+
+  it("expires queued heartbeat runs that exceed an explicit queued staleness threshold", async () => {
+    const { runId, issueId, wakeupRequestId } = await seedRunFixture({
+      runStatus: "queued",
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        createdAt: new Date("2026-03-19T00:00:00.000Z"),
+        updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("stale_queued");
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBeNull();
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("failed");
   });
 });

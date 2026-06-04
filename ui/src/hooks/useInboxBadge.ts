@@ -82,6 +82,12 @@ export function useInboxBadge(companyId: string | null | undefined) {
     enabled: !!companyId,
   });
 
+  const { data: issues = [] } = useQuery({
+    queryKey: queryKeys.issues.list(companyId!),
+    queryFn: () => issuesApi.list(companyId!),
+    enabled: !!companyId,
+  });
+
   const unreadIssues = useMemo(
     () => getUnreadTouchedIssues(getRecentTouchedIssues(touchedIssues)),
     [touchedIssues],
@@ -100,9 +106,10 @@ export function useInboxBadge(companyId: string | null | undefined) {
         joinRequests,
         dashboard,
         heartbeatRuns,
+        issues,
         unreadIssues,
         dismissed,
       }),
-    [approvals, joinRequests, dashboard, heartbeatRuns, unreadIssues, dismissed],
+    [approvals, joinRequests, dashboard, heartbeatRuns, issues, unreadIssues, dismissed],
   );
 }

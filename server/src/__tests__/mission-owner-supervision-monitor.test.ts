@@ -29,24 +29,33 @@ describe("createMissionOwnerSupervisionMonitor", () => {
     vi.useRealTimers();
   });
 
-  it("passes owner-action wakeup dependency into mission supervision sweeps", async () => {
+  it("passes owner-action and source wakeup dependencies into active supervision sweeps", async () => {
     const { createMissionOwnerSupervisionMonitor } = await import("../services/mission-owner-supervision-monitor.js");
     const onOwnerActionCreated = vi.fn();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn();
+    const onStaleSourceIssueWakeupRequested = vi.fn();
     const db = {} as never;
 
     const monitor = createMissionOwnerSupervisionMonitor(db, {
       runImmediately: false,
       onOwnerActionCreated,
+      onOwnerDecisionRetrySourceIssueApplied,
+      onStaleSourceIssueWakeupRequested,
     });
 
     await monitor.run();
 
     expect(missionServiceMock).toHaveBeenCalledWith(db, {
       onOwnerActionCreated,
+      onOwnerDecisionRetrySourceIssueApplied,
+      onStaleSourceIssueWakeupRequested,
     });
     expect(runActiveMissionOwnerSupervision).toHaveBeenCalledWith({
       staleAfterMinutes: 30,
       applySafeActions: true,
+      applyOwnerDecisionActions: true,
+      dispatchOwnerDecisionWakeups: true,
+      dispatchStaleSourceIssueWakeups: false,
     });
   });
 });

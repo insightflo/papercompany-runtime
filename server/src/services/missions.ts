@@ -11,11 +11,14 @@ import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  agentRuntimeState,
   heartbeatRuns,
   issueComments,
   issues,
   missionAgents,
+  missionAgentRuntimes,
   missionPlanArtifacts,
+  missionRollingState,
   missionSessions,
   missions,
   pluginEntities,
@@ -35,9 +38,34 @@ import {
   type MissionExecutionUnit,
 } from "./missions/mission-execution-sources.js";
 import { buildMissionRuleContext } from "./missions/mission-rule-context.js";
-import { buildMissionSupervisionContext } from "./missions/mission-supervision-context.js";
-import type { MissionGovernanceThreadSummary } from "./missions/governance-thread.js";
+import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionPlanArtifact } from "./missions/mission-supervision-context.js";
+import {
+  formatGovernanceThreadEvidenceLines,
+  governanceThreadReasonSuffix,
+} from "./missions/mission-owner-recovery-governance-format.js";
+import {
+  buildOwnerActionExplanations,
+  type MissionOwnerActionExplanation,
+} from "./missions/mission-owner-recovery-explanations.js";
 import { syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
+import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
+import {
+  buildMissionOwnerDecisionWakeupIdempotencyKey,
+  hasMissionOwnerDecisionAppliedMarker,
+  hasMissionOwnerDecisionWakeupDispatchedMarker,
+  hasStaleSourceIssueWakeupDispatchedMarker,
+  type ExtractedMissionOwnerDecision,
+} from "./missions/mission-owner-recovery-events.js";
+import {
+  buildMissionOwnerUnblockDescription,
+  buildRetrySourceIssueComment,
+  buildRetrySourceIssueWakeupDispatchedComment,
+  buildStaleSourceIssueWakeupDispatchedComment,
+  buildValidatorRetryEvidenceComment,
+  extractLatestMissionOwnerDecision,
+  isTerminalIssueStatus,
+  summarizeOwnerDecisionNotApplied,
+} from "./missions/mission-owner-recovery-comments.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,241 +88,13 @@ export type MissionRow = typeof missions.$inferSelect;
 
 type IssueRow = typeof issues.$inferSelect;
 
-export type MissionOwnerDecisionOption =
-  | "request_input"
-  | "retry_source_issue"
-  | "reassign_source_issue"
-  | "replan_mission"
-  | "escalate"
-  | "report_impossible"
-  | "recover_artifact"
-  | "no_action_waiting";
-
-export const MISSION_OWNER_DECISION_OPTIONS: MissionOwnerDecisionOption[] = [
-  "request_input",
-  "retry_source_issue",
-  "reassign_source_issue",
-  "replan_mission",
-  "escalate",
-  "report_impossible",
-  "recover_artifact",
-  "no_action_waiting",
-];
-
-function buildMissionOwnerActionMarker(input: {
-  missionId: string;
-  sourceIssueId: string;
-  actionType: "unblock";
-  status: "decision_required";
-}): string {
-  return `<!-- mission-owner-action:${JSON.stringify({
-    missionId: input.missionId,
-    sourceIssueId: input.sourceIssueId,
-    actionType: input.actionType,
-    status: input.status,
-  })} -->`;
-}
-
-function buildMissionOwnerDecisionFormat(): string {
-  return [
-    "Required output format:",
-    "### Mission owner decision",
-    "Decision: <one of the allowed decision options>",
-    "Source issue: <source issue identifier or id>",
-    "Reason: <why this decision is appropriate>",
-    "Next action: <specific next action or waiting condition>",
-    "Evidence: <compact evidence used for the decision>",
-  ].join("\n");
-}
-
-export type ExtractedMissionOwnerDecision = {
-  decision: MissionOwnerDecisionOption;
-  sourceIssueRef?: string;
-  reason?: string;
-  nextAction?: string;
-  evidence?: string;
-} | {
-  decision: null;
-  invalidDecision: string;
-  sourceIssueRef?: string;
-  reason?: string;
-  nextAction?: string;
-  evidence?: string;
-};
-
-const MISSION_OWNER_DECISION_BLOCK_HEADING = "### Mission owner decision";
-
-function firstNonEmptyLine(value: string | undefined): string | undefined {
-  const normalized = value?.trim();
-  if (!normalized) return undefined;
-  return normalized.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-}
-
-function readDecisionField(block: string, field: string): string | undefined {
-  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^${escapedField}\\s*:\\s*([\\s\\S]*?)(?=^\\w[\\w ]*\\s*:|^###\\s+|(?![\\s\\S]))`, "im");
-  return firstNonEmptyLine(pattern.exec(block)?.[1]);
-}
-
-export function extractMissionOwnerDecisionFromText(text: string): ExtractedMissionOwnerDecision | null {
-  const headingIndex = text.toLowerCase().lastIndexOf(MISSION_OWNER_DECISION_BLOCK_HEADING.toLowerCase());
-  if (headingIndex < 0) return null;
-
-  const blockStart = headingIndex + MISSION_OWNER_DECISION_BLOCK_HEADING.length;
-  const rest = text.slice(blockStart);
-  const nextHeading = rest.search(/^###\s+/m);
-  const block = nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
-  const rawDecision = readDecisionField(block, "Decision")?.toLowerCase();
-  if (!rawDecision) return null;
-
-  const sourceIssueRef = readDecisionField(block, "Source issue");
-  const reason = readDecisionField(block, "Reason");
-  const nextAction = readDecisionField(block, "Next action");
-  const evidence = readDecisionField(block, "Evidence");
-
-  if (!MISSION_OWNER_DECISION_OPTIONS.includes(rawDecision as MissionOwnerDecisionOption)) {
-    return { decision: null, invalidDecision: rawDecision, sourceIssueRef, reason, nextAction, evidence };
-  }
-
-  return { decision: rawDecision as MissionOwnerDecisionOption, sourceIssueRef, reason, nextAction, evidence };
-}
-
-function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMissionOwnerDecision | null {
-  for (const text of texts.slice().reverse()) {
-    const decision = extractMissionOwnerDecisionFromText(text);
-    if (decision) return decision;
-  }
-  return null;
-}
-
-function buildMissionOwnerDecisionAppliedMarker(input: {
-  ownerActionIssueId: string;
-  sourceIssueId: string;
-  decision: "retry_source_issue";
-}): string {
-  return `<!-- mission-owner-decision-applied:${JSON.stringify(input)} -->`;
-}
-
-function hasMissionOwnerDecisionAppliedMarker(comments: string[], input: {
-  ownerActionIssueId: string;
-  sourceIssueId: string;
-  decision: "retry_source_issue";
-}): boolean {
-  const marker = buildMissionOwnerDecisionAppliedMarker(input);
-  return comments.some((comment) => comment.includes(marker));
-}
-
-function buildMissionOwnerDecisionWakeupIdempotencyKey(input: {
-  missionId: string;
-  ownerActionIssueId: string;
-  sourceIssueId: string;
-}): string {
-  return `mission-owner-decision-wakeup:${input.missionId}:${input.ownerActionIssueId}:${input.sourceIssueId}:retry_source_issue`;
-}
-
-function buildMissionOwnerDecisionWakeupDispatchedMarker(input: {
-  missionId: string;
-  ownerActionIssueId: string;
-  sourceIssueId: string;
-  decision: "retry_source_issue";
-  idempotencyKey: string;
-}): string {
-  return `<!-- mission-owner-decision-wakeup-dispatched:${JSON.stringify(input)} -->`;
-}
-
-function buildRetrySourceIssueWakeupDispatchedComment(input: {
-  missionId: string;
-  ownerActionIssueId: string;
-  ownerActionLabel: string;
-  sourceIssueId: string;
-  sourceLabel: string;
-  targetAgentId: string;
-  idempotencyKey: string;
-}) {
-  return [
-    "### Mission owner retry wakeup dispatched",
-    buildMissionOwnerDecisionWakeupDispatchedMarker({
-      missionId: input.missionId,
-      ownerActionIssueId: input.ownerActionIssueId,
-      sourceIssueId: input.sourceIssueId,
-      decision: "retry_source_issue",
-      idempotencyKey: input.idempotencyKey,
-    }),
-    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
-    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
-    `Target agent: ${input.targetAgentId}`,
-    `Idempotency key: ${input.idempotencyKey}`,
-  ].join("\n");
-}
-
-function isTerminalIssueStatus(status: string): boolean {
-  return status === "done" || status === "cancelled";
-}
-
-function summarizeOwnerDecisionNotApplied(input: {
-  ownerActionLabel: string;
-  sourceLabel: string;
-  reason: string;
-}) {
-  return `owner_action_decision_not_applied: ${input.ownerActionLabel} retry_source_issue source=${input.sourceLabel} — ${input.reason}`;
-}
-
-function buildRetrySourceIssueComment(input: {
-  ownerActionIssueId: string;
-  ownerActionLabel: string;
-  sourceIssueId: string;
-  sourceLabel: string;
-  decisionReason?: string;
-}) {
-  return [
-    "### Mission owner retry applied",
-    buildMissionOwnerDecisionAppliedMarker({
-      ownerActionIssueId: input.ownerActionIssueId,
-      sourceIssueId: input.sourceIssueId,
-      decision: "retry_source_issue",
-    }),
-    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
-    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
-    "Decision: retry_source_issue",
-    "Action: explicit mission-owner retry action moved the source issue back to todo; wakeup dispatch, if requested, is recorded separately.",
-    `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
-  ].join("\n");
-}
-
-function buildMissionOwnerUnblockDescription(mission: MissionRow, blockedIssue: IssueRow): string {
-  const sourceLabel = blockedIssue.identifier ?? blockedIssue.id;
-  return [
-    buildMissionOwnerActionMarker({
-      missionId: mission.id,
-      sourceIssueId: blockedIssue.id,
-      actionType: "unblock",
-      status: "decision_required",
-    }),
-    "Resolve the mission-level blocker without taking over the delegated execution issue.",
-    "",
-    `Mission id: ${mission.id}`,
-    `Mission title: ${mission.title}`,
-    `Source issue id: ${blockedIssue.id}`,
-    `Source issue identifier: ${sourceLabel}`,
-    `Source issue title: ${blockedIssue.title}`,
-    `Source issue status: ${blockedIssue.status}`,
-    `Original assignee agent: ${blockedIssue.assigneeAgentId ?? "unassigned"}`,
-    "",
-    "Mission owner duties:",
-    "- Manage the mission outcome boundary: diagnose blockers, decide recovery direction, and keep the mission moving.",
-    "- Do not perform the delegated source work by default; coordinate, decide, and record the next owner action.",
-    "- Preserve the source issue assignee unless an explicit reassignment decision is made.",
-    "- Use Governance Thread information only as read-only evidence for this owner decision.",
-    "",
-    "Allowed decision options:",
-    ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => `- ${decision}`),
-    "",
-    buildMissionOwnerDecisionFormat(),
-    "",
-    "Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.",
-    "Governance evidence: latest evidence unavailable for this owner action template.",
-  ].join("\n");
-}
+export {
+  MISSION_OWNER_DECISION_OPTIONS,
+  buildMissionOwnerDecisionFormat,
+  extractMissionOwnerDecisionFromText,
+} from "./missions/mission-owner-recovery-events.js";
+export type { ExtractedMissionOwnerDecision, MissionOwnerDecisionOption } from "./missions/mission-owner-recovery-events.js";
+export type { MissionOwnerActionExplanation, MissionOwnerActionExplanationStatus } from "./missions/mission-owner-recovery-explanations.js";
 
 /**
  * MissionAgent row type.
@@ -410,21 +210,14 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
   wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
   idempotencyKey?: string;
-};
-
-export type MissionOwnerActionExplanationStatus =
-  | "decision_required"
-  | "decision_recorded_read_only"
-  | "retry_applied_no_wakeup"
-  | "not_applicable_or_invalid";
-
-export type MissionOwnerActionExplanation = {
-  ownerActionIssue: Pick<IssueRow, "id" | "identifier" | "title" | "status" | "originKind">;
-  sourceIssue: Pick<IssueRow, "id" | "identifier" | "title" | "status" | "assigneeAgentId"> | null;
-  latestDecision: ExtractedMissionOwnerDecision | null;
-  retryApplied: boolean;
-  status: MissionOwnerActionExplanationStatus;
-  explanation: string;
+} | {
+  type: "stale_source_issue_wakeup";
+  missionId: string;
+  sourceIssueId: string;
+  failedRunId: string;
+  resultStatus: string;
+  wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus;
+  idempotencyKey: string;
 };
 
 export type MissionOwnerSupervisionResult = {
@@ -461,123 +254,42 @@ async function buildMissionOwnerActionExplanations(db: Db, mission: MissionRow):
       isNull(issues.hiddenAt),
     ));
 
-  const explanations: MissionOwnerActionExplanation[] = [];
+  const commentsByIssueId = new Map<string, string[]>();
   for (const ownerActionIssue of ownerActionIssues) {
     const ownerActionCommentRows = await db
       .select({ body: issueComments.body })
       .from(issueComments)
       .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, ownerActionIssue.id)))
       .orderBy(asc(issueComments.createdAt));
-    const latestDecision = extractLatestMissionOwnerDecision(ownerActionCommentRows.map((comment) => comment.body));
-    const sourceIssue = ownerActionIssue.originId
-      ? await db
-        .select({
-          id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          assigneeAgentId: issues.assigneeAgentId,
-        })
-        .from(issues)
-        .where(and(
-          eq(issues.id, ownerActionIssue.originId),
-          eq(issues.companyId, mission.companyId),
-          eq(issues.missionId, mission.id),
-          isNull(issues.hiddenAt),
-        ))
-        .limit(1)
-        .then((rows) => rows[0] ?? null)
-      : null;
-    const sourceComments = sourceIssue
-      ? await db
-        .select({ body: issueComments.body })
-        .from(issueComments)
-        .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssue.id)))
-      : [];
-    const retryApplied = Boolean(sourceIssue && hasMissionOwnerDecisionAppliedMarker(sourceComments.map((comment) => comment.body), {
-      ownerActionIssueId: ownerActionIssue.id,
-      sourceIssueId: sourceIssue.id,
-      decision: "retry_source_issue",
-    }));
-    const invalidDecision = latestDecision?.decision === null;
-    const terminalSource = Boolean(sourceIssue && isTerminalIssueStatus(sourceIssue.status));
-    const status: MissionOwnerActionExplanationStatus = retryApplied
-      ? "retry_applied_no_wakeup"
-      : invalidDecision || terminalSource || !sourceIssue
-        ? "not_applicable_or_invalid"
-        : latestDecision
-          ? "decision_recorded_read_only"
-          : "decision_required";
-    const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerActionIssue.originId ?? "unknown source");
-    const explanation = status === "retry_applied_no_wakeup"
-      ? `Retry was explicitly applied for source issue ${sourceLabel}; it is queued again and no heartbeat wakeup was created by this status surface.`
-      : status === "decision_recorded_read_only"
-        ? `Mission owner decision ${latestDecision?.decision ?? "unknown"} was recorded but not applied; source issue ${sourceLabel} remains assigned to its current assignee.`
-        : status === "decision_required"
-          ? `Owner decision required for source issue ${sourceLabel}; source issue remains assigned to its current assignee.`
-          : invalidDecision
-            ? `Mission owner decision is invalid (${latestDecision.invalidDecision}); no execution action was taken.`
-            : terminalSource
-              ? `Source issue ${sourceLabel} is terminal; owner-action status is informational only and no execution action was taken.`
-              : `Source issue ${sourceLabel} is unavailable for this mission; owner-action status is informational only and no execution action was taken.`;
-    explanations.push({
-      ownerActionIssue: {
-        id: ownerActionIssue.id,
-        identifier: ownerActionIssue.identifier,
-        title: ownerActionIssue.title,
-        status: ownerActionIssue.status,
-        originKind: ownerActionIssue.originKind,
-      },
-      sourceIssue,
-      latestDecision,
-      retryApplied,
-      status,
-      explanation,
-    });
+    commentsByIssueId.set(ownerActionIssue.id, ownerActionCommentRows.map((comment) => comment.body));
   }
 
-  return explanations;
-}
-
-type GovernanceSummaryEvent = MissionGovernanceThreadSummary["latestEvents"][number];
-
-const GOVERNANCE_THREAD_COMMENT_EVENT_LIMIT = 5;
-
-function formatGovernanceEventSummary(event: GovernanceSummaryEvent): string {
-  const source = `${event.sourceRef.type}:${event.sourceRef.id}`;
-  return `${event.eventType}: ${event.title} — ${event.summary} [${source}]`;
-}
-
-function governanceThreadReasonSuffix(summary: MissionGovernanceThreadSummary | null | undefined): string | null {
-  if (!summary || summary.totalEventCount === 0) return null;
-  const decisionEvent = summary.openDecisions[0];
-  const failedOrBlockedEvent = [...summary.latestEvents]
-    .reverse()
-    .find((event) => event.severity === "failed" || event.severity === "blocked" || event.severity === "attention");
-  const event = decisionEvent ?? failedOrBlockedEvent ?? summary.latestEvents.at(-1);
-  if (!event) return `governance thread observed ${summary.totalEventCount} event(s)`;
-  return `${event.eventType}: ${event.summary}`;
-}
-
-function formatGovernanceThreadEvidenceLines(summary: MissionGovernanceThreadSummary | null | undefined): string[] {
-  if (!summary || summary.totalEventCount === 0) return [];
-  const latestEventLines = summary.latestEvents
-    .slice(-GOVERNANCE_THREAD_COMMENT_EVENT_LIMIT)
-    .map((event) => `- ${formatGovernanceEventSummary(event)}`);
-  const openDecisionLines = summary.openDecisions.length > 0
-    ? [
-      "- Open decisions:",
-      ...summary.openDecisions
-        .slice(0, GOVERNANCE_THREAD_COMMENT_EVENT_LIMIT)
-        .map((event) => `  - ${formatGovernanceEventSummary(event)}`),
-    ]
-    : [];
-  return [
-    "Governance thread evidence:",
-    `- Total governance events observed: ${summary.totalEventCount}`,
-    ...latestEventLines,
-    ...openDecisionLines,
-  ];
+  return buildOwnerActionExplanations({
+    ownerActionIssues,
+    commentsByIssueId,
+    resolveSourceIssue: async (sourceIssueId) => db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+      })
+      .from(issues)
+      .where(and(
+        eq(issues.id, sourceIssueId),
+        eq(issues.companyId, mission.companyId),
+        eq(issues.missionId, mission.id),
+        isNull(issues.hiddenAt),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
+    resolveSourceComments: async (sourceIssueId) => db
+      .select({ body: issueComments.body })
+      .from(issueComments)
+      .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssueId)))
+      .then((rows) => rows.map((comment) => comment.body)),
+  });
 }
 
 /**
@@ -648,6 +360,10 @@ function validateRole(role: string): asserts role is MissionAgentRole {
   if (!VALID_ROLES.includes(role as MissionAgentRole)) {
     throw badRequest(`Invalid role: ${role}. Must be one of: ${VALID_ROLES.join(", ")}`);
   }
+}
+
+function isTerminalMissionStatus(status: MissionStatus | undefined): status is "completed" | "cancelled" {
+  return status === "completed" || status === "cancelled";
 }
 
 function assertMissionId(value: string): void {
@@ -793,6 +509,7 @@ export type MissionOwnerActionCreatedHandler = (input: {
   mission: MissionRow;
   issue: typeof issues.$inferSelect;
   sourceIssue: typeof issues.$inferSelect;
+  reason?: "mission_unblock_action_created" | "mission_unblock_action_stalled";
 }) => Promise<unknown> | unknown;
 
 export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
@@ -801,6 +518,16 @@ export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
   sourceIssue: typeof issues.$inferSelect;
   targetAgentId: string;
   idempotencyKey: string;
+  wakeCommentId?: string;
+}) => Promise<unknown> | unknown;
+
+export type MissionStaleSourceIssueWakeupRequestedHandler = (input: {
+  mission: MissionRow;
+  sourceIssue: typeof issues.$inferSelect;
+  targetAgentId: string;
+  failedRun: MissionSupervisionHeartbeatRun;
+  idempotencyKey: string;
+  wakeCommentId?: string;
 }) => Promise<unknown> | unknown;
 
 export type MissionOwnerPlanningIssueCreatedHandler = (input: {
@@ -813,18 +540,22 @@ export type MissionOwnerPlanningIssueCreatedHandler = (input: {
 export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
+  onStaleSourceIssueWakeupRequested?: MissionStaleSourceIssueWakeupRequestedHandler;
   onOwnerPlanningIssueCreated?: MissionOwnerPlanningIssueCreatedHandler;
 }
 
 export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   const activeWorkflowRunStatuses = new Set(["pending", "queued", "running", "in_progress"]);
-  const failedWorkflowRunStatuses = new Set(["aborted", "failed", "cancelled", "canceled", "error"]);
+  const recoverableFailedWorkflowRunStatuses = new Set(["failed", "error"]);
+  const cancelledWorkflowRunStatuses = new Set(["aborted", "cancelled", "canceled"]);
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
 
   async function reconcileMissionStatusFromWorkflowRuns(mission: MissionRow): Promise<MissionRow> {
+    if (mission.status === "cancelled") return mission;
+
     const isWorkflowCreatedMission = mission.description?.startsWith("Created automatically for workflow run:") ?? false;
     const canReconcileTerminalWorkflowMission =
-      isWorkflowCreatedMission && (mission.status === "completed" || mission.status === "cancelled");
+      isWorkflowCreatedMission && mission.status === "completed";
     if (mission.status !== "active" && !canReconcileTerminalWorkflowMission) return mission;
 
     const linkedRuns: Array<{ status: string; completedAt: Date | null }> = [];
@@ -869,11 +600,24 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         ...updates,
       };
     }
-    if (normalizedStatuses.some((status) => !failedWorkflowRunStatuses.has(status) && !completedWorkflowRunStatuses.has(status))) {
+    if (normalizedStatuses.some((status) => recoverableFailedWorkflowRunStatuses.has(status))) {
+      if (mission.status === "active" && mission.completedAt === null) return mission;
+      const updates: Partial<MissionRow> = {
+        status: "active",
+        completedAt: null,
+        updatedAt: new Date(),
+      };
+      await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+      return {
+        ...mission,
+        ...updates,
+      };
+    }
+    if (normalizedStatuses.some((status) => !cancelledWorkflowRunStatuses.has(status) && !completedWorkflowRunStatuses.has(status))) {
       return mission;
     }
 
-    const nextStatus: MissionStatus = normalizedStatuses.some((status) => failedWorkflowRunStatuses.has(status))
+    const nextStatus: MissionStatus = normalizedStatuses.some((status) => cancelledWorkflowRunStatuses.has(status))
       ? "cancelled"
       : "completed";
     const completedAt = linkedRuns
@@ -1099,8 +843,9 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   async function ensureMainExecutorUnblockIssue(
     mission: MissionRow,
     blockedIssue: typeof issues.$inferSelect,
+    options: { renewAfterNoActionWaiting?: boolean; governanceEvidence?: string[] } = {},
   ): Promise<typeof issues.$inferSelect> {
-    const existing = await db
+    const existingRows = await db
       .select()
       .from(issues)
       .where(and(
@@ -1110,15 +855,26 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         eq(issues.originId, blockedIssue.id),
         isNull(issues.hiddenAt),
       ))
-      .orderBy(asc(issues.createdAt), asc(issues.id))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (existing) return existing;
+      .orderBy(asc(issues.createdAt), asc(issues.id));
+    for (const existing of existingRows) {
+      if (options.renewAfterNoActionWaiting && isTerminalIssueStatus(existing.status)) {
+        const existingComments = await db
+          .select({ body: issueComments.body })
+          .from(issueComments)
+          .where(eq(issueComments.issueId, existing.id))
+          .orderBy(asc(issueComments.createdAt), asc(issueComments.id));
+        const latestDecision = extractLatestMissionOwnerDecision(existingComments.map((comment) => comment.body));
+        if (latestDecision?.decision === "no_action_waiting") continue;
+      }
+      return existing;
+    }
 
     const blockedLabel = blockedIssue.identifier ?? blockedIssue.id;
     const unblockIssue = await issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
-      description: buildMissionOwnerUnblockDescription(mission, blockedIssue),
+      description: buildMissionOwnerUnblockDescription(mission, blockedIssue, {
+        governanceEvidence: options.governanceEvidence,
+      }),
       missionId: mission.id,
       originKind: "mission_main_executor_unblock",
       originId: blockedIssue.id,
@@ -1132,6 +888,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         mission,
         issue: unblockIssue,
         sourceIssue: blockedIssue,
+        reason: "mission_unblock_action_created",
       })).catch((err) => {
         logger.warn({ err, missionId: mission.id, issueId: unblockIssue.id }, "failed to notify owner about mission unblock action");
       });
@@ -1286,6 +1043,61 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       || body.includes("failed_unit_without_diagnosis");
   }
 
+  function jsonArrayLength(value: unknown): number {
+    return Array.isArray(value) ? value.length : 0;
+  }
+
+  function sourceRefMatchesIssue(sourceRef: unknown, issue: Pick<IssueRow, "id">): boolean {
+    const ref = asRecord(sourceRef);
+    const type = trimmedString(ref.type);
+    const id = trimmedString(ref.id);
+    const issueId = trimmedString(ref.issueId);
+    return issueId === issue.id || (type === "mission_issue" && id === issue.id);
+  }
+
+  function materializedRefMatchesIssue(materializedRef: unknown, issue: Pick<IssueRow, "id">): boolean {
+    const ref = asRecord(materializedRef);
+    return trimmedString(ref.type) === "mission_issue" && trimmedString(ref.id) === issue.id;
+  }
+
+  function activePlanRecoveryGateReason(activePlan: MissionSupervisionPlanArtifact | null, issue: IssueRow): string | null {
+    if (!activePlan) return null;
+    if (issue.originKind === "mission_main_executor_plan" || issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock") {
+      return null;
+    }
+
+    const stepCount = jsonArrayLength(activePlan.steps);
+    if (stepCount === 0) {
+      return `active plan revision=${activePlan.revision} has no high-level step skeleton; mission owner must finish the plan before source/QA recovery can execute`;
+    }
+
+    const refs = asRecord(activePlan.refs);
+    const selectedExecutionUnits = asRecordArray(refs.selectedExecutionUnits);
+    if (selectedExecutionUnits.length > 0) {
+      const selectedUnit = selectedExecutionUnits.find((unit) => (
+        sourceRefMatchesIssue(unit.sourceRef, issue) || materializedRefMatchesIssue(unit.materializedRef, issue)
+      ));
+      if (!selectedUnit) {
+        return `active plan revision=${activePlan.revision} does not select this issue as an execution unit; blocked status alone is not enough to launch recovery`;
+      }
+      const selectionState = normalizedPlanStatus(selectedUnit.selectionState);
+      if (selectionState !== "selected") {
+        return `active plan revision=${activePlan.revision} marks this issue selectionState=${selectionState || "unknown"}; only selected units can be unblocked or retried`;
+      }
+      const dependencyTreatment = normalizedPlanStatus(selectedUnit.dependencyTreatment);
+      if (dependencyTreatment === "blocked") {
+        return `active plan revision=${activePlan.revision} says this issue's prerequisites are blocked; wait for the upstream artifact/decision before running QA or recovery`;
+      }
+      const executionState = normalizedPlanStatus(selectedUnit.executionState);
+      if (executionState === "not_materialized" || executionState === "completed" || executionState === "cancelled" || executionState === "canceled") {
+        return `active plan revision=${activePlan.revision} marks this issue executionState=${executionState}; recovery is not runnable at this point`;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
   function hasArtifactMissingSignal(...bodies: string[]): boolean {
     const body = bodies.join("\n").toLowerCase();
     return body.includes("required workflow artifact missing")
@@ -1302,6 +1114,61 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     return hasArtifactMissingSignal(body)
       && (lower.includes(".md") || lower.includes("markdown"))
       && /^#{1,3}\s+\S+/m.test(body);
+  }
+
+  function buildCorrectedArtifactValidatorRetryEvidence(input: {
+    sourceIssue: IssueRow;
+    sourceLabel: string;
+    missionIssues: IssueRow[];
+    commentsByIssueId: Map<string, string[]>;
+  }): { comment: string; childIssueId: string } | null {
+    const childCandidates = input.missionIssues
+      .filter((issue) => issue.parentId === input.sourceIssue.id && isTerminalIssueStatus(issue.status))
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+
+    for (const child of childCandidates) {
+      const comments = input.commentsByIssueId.get(child.id) ?? [];
+      const combined = comments.join("\n");
+      const lower = combined.toLowerCase();
+      const hasCorrectedArtifact = lower.includes("corrected")
+        && (lower.includes(".png") || lower.includes("png path") || lower.includes("corrected png"));
+      const mentionsValidatorCriteria = lower.includes("res-148")
+        || lower.includes("repair spec")
+        || lower.includes("panel 3")
+        || lower.includes("panel 5")
+        || lower.includes("request_changes");
+      if (!hasCorrectedArtifact || !mentionsValidatorCriteria) continue;
+
+      const evidenceLines = combined
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .filter((line) => {
+          const normalized = line.toLowerCase();
+          return normalized.includes("corrected")
+            || normalized.includes(".png")
+            || normalized.includes("res-148")
+            || normalized.includes("repair spec")
+            || normalized.includes("panel 3")
+            || normalized.includes("panel 5")
+            || normalized.includes("request_changes")
+            || normalized.includes("pass")
+            || normalized.includes("telegram")
+            || normalized.includes("send");
+        })
+        .slice(0, 12);
+
+      return {
+        childIssueId: child.id,
+        comment: buildValidatorRetryEvidenceComment({
+          sourceLabel: input.sourceLabel,
+          childLabel: `${child.identifier ?? child.id} (${child.id})`,
+          evidenceLines: evidenceLines.length > 0 ? evidenceLines : [`Correction issue ${child.identifier ?? child.id} recorded corrected artifact evidence.`],
+        }),
+      };
+    }
+
+    return null;
   }
 
   async function listRecurringArtifactMissingIssueRefs(input: {
@@ -1343,6 +1210,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     applySafeActions?: boolean;
     applyOwnerDecisionActions?: boolean;
     dispatchOwnerDecisionWakeups?: boolean;
+    dispatchStalledOwnerActionWakeups?: boolean;
+    dispatchStaleSourceIssueWakeups?: boolean;
   }): Promise<MissionOwnerSupervisionResult> {
     const context = await buildMissionSupervisionContext(db, { missionId: input.missionId });
     const {
@@ -1392,6 +1261,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       });
     };
     const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
+    const missionHasActiveHeartbeat = [...heartbeatRunsByIssueId.values()]
+      .some((runs) => runs.some((run) => run.status === "queued" || run.status === "running"));
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
@@ -1402,14 +1273,170 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       const comments = commentsByIssueId.get(issue.id) ?? [];
       const stepRowsForIssue = stepRowsByIssueId.get(issue.id) ?? [];
       const hasActiveHeartbeat = runsForIssue.some((run) => run.status === "queued" || run.status === "running");
-      const failedRunsForIssue = runsForIssue.filter((run) => run.status === "failed" || run.error || run.errorCode || run.exitCode != null);
-      const hasCheckoutOrExecution = Boolean(issue.checkoutRunId || issue.executionRunId || issue.startedAt || runCount > 0);
+      const failedRunsForIssue = runsForIssue.filter((run) => run.status === "failed" || run.status === "timed_out" || run.error || run.errorCode || (run.exitCode != null && run.exitCode !== 0));
       const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
+      const isRecoverableQueueSource = isStaleQueueStatus && issue.originKind !== "mission_main_executor_unblock";
+      const isStaleInProgressSource = issue.status === "in_progress" && issue.originKind !== "mission_main_executor_unblock";
+      const activePlanGateReason = activePlanRecoveryGateReason(activePlan, issue);
 
-      if (isStaleQueueStatus && ageMs >= staleAfterMs && !hasCheckoutOrExecution) {
-        findings.push(`stale_todo: ${label} ${issue.status} with no checkout/execution/heartbeat run_count=${runCount} — ${issue.title}`);
+      if (activePlanGateReason) {
+        findings.push(`plan_gate_not_ready: ${label} ${activePlanGateReason} — ${issue.title}`);
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          issueId: issue.id,
+          reason: `Execution timing is not satisfied for ${label}: ${activePlanGateReason}`,
+          safeToAutoApply: false,
+        });
+        continue;
       }
-      if (isStaleQueueStatus && ageMs >= staleAfterMs && failedRunsForIssue.length > 0 && !hasActiveHeartbeat) {
+
+      if (isStaleInProgressSource && ageMs >= staleAfterMs && !missionHasActiveHeartbeat) {
+        const latestFailedRun = failedRunsForIssue
+          .slice()
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+        if (latestFailedRun && !hasActiveHeartbeat) {
+          const idempotencyKey = `mission-stale-source-wakeup:${mission.id}:${issue.id}:${latestFailedRun.id}`;
+          const markerInput = {
+            missionId: mission.id,
+            sourceIssueId: issue.id,
+            failedRunId: latestFailedRun.id,
+            idempotencyKey,
+          };
+          let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchStaleSourceIssueWakeups ? "skipped_no_assignee" : "not_requested";
+          let wakeCommentId: string | undefined;
+          const alreadyDispatched = hasStaleSourceIssueWakeupDispatchedMarker(comments, markerInput);
+          const hasSourceDiagnosis = hasDiagnosisSignal(...comments);
+          if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
+            findings.push(`stale_source_wakeup_requires_diagnosis: ${label} terminal heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}; diagnose root cause before choosing same-issue wakeup or recovery issue`);
+            wakeupDispatchStatus = "not_requested";
+          } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched) {
+            if (!issue.assigneeAgentId) {
+              findings.push(`stale_source_wakeup_skipped: ${label} in_progress source has terminal heartbeat run=${latestFailedRun.id} but no assignee; wakeup dispatch skipped`);
+              wakeupDispatchStatus = "skipped_no_assignee";
+            } else if (deps.onStaleSourceIssueWakeupRequested) {
+              try {
+                const wakeComment = await issueService(db).addComment(
+                  issue.id,
+                  buildStaleSourceIssueWakeupDispatchedComment({
+                    missionId: mission.id,
+                    sourceIssueId: issue.id,
+                    sourceLabel: label,
+                    failedRunId: latestFailedRun.id,
+                    failedRunStatus: latestFailedRun.status,
+                    targetAgentId: issue.assigneeAgentId,
+                    idempotencyKey,
+                  }),
+                  { agentId: mission.ownerAgentId },
+                );
+                wakeCommentId = wakeComment.id;
+                await deps.onStaleSourceIssueWakeupRequested({
+                  mission,
+                  sourceIssue: issue,
+                  targetAgentId: issue.assigneeAgentId,
+                  failedRun: latestFailedRun,
+                  idempotencyKey,
+                  wakeCommentId,
+                });
+                wakeupDispatchStatus = "dispatched";
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                findings.push(`stale_source_wakeup_failed: ${label} in_progress source wakeup callback failed — ${message}`);
+                wakeupDispatchStatus = "failed";
+              }
+            } else {
+              findings.push(`stale_source_wakeup_skipped: ${label} dispatchStaleSourceIssueWakeups enabled but no wakeup callback configured`);
+              wakeupDispatchStatus = "failed";
+            }
+            appliedActions.push({
+              type: "stale_source_issue_wakeup",
+              missionId: mission.id,
+              sourceIssueId: issue.id,
+              failedRunId: latestFailedRun.id,
+              resultStatus: issue.status,
+              wakeupDispatchStatus,
+              idempotencyKey,
+            });
+          }
+          findings.push(`stale_in_progress_after_failed_run: ${label} in_progress has terminal heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}${latestFailedRun.exitCode != null ? ` exitCode=${latestFailedRun.exitCode}` : ""}; no mission issue has queued/running execution — ${issue.title}; ${alreadyDispatched || wakeupDispatchStatus === "dispatched" ? "recovery_dispatched" : "diagnosed_only"}`);
+          addRecommendation({
+            type: "retry_unit_if_safe",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: hasSourceDiagnosis
+              ? `Source issue ${label} is still in_progress after diagnosed terminal heartbeat ${latestFailedRun.status}; choose same-issue wakeup only when the diagnosis says retry is safe`
+              : `Source issue ${label} is still in_progress after terminal heartbeat ${latestFailedRun.status}; diagnose root cause before choosing same-issue wakeup or a recovery issue`,
+            safeToAutoApply: false,
+          });
+        }
+      }
+
+      if (input.dispatchStalledOwnerActionWakeups && issue.originKind === "mission_main_executor_unblock" && isStaleQueueStatus && ageMs >= staleAfterMs && !missionHasActiveHeartbeat) {
+        const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
+        const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (issue.originId ?? "unknown-source");
+        const latestFailedRun = failedRunsForIssue
+          .slice()
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+        if (runsForIssue.length === 0) {
+          findings.push(`owner_action_stalled_no_execution: ${label} ${issue.status} is an owner unblock action for ${sourceLabel} but has no heartbeat run and no mission issue has queued/running execution — ${issue.title}`);
+        } else if (latestFailedRun && !hasActiveHeartbeat) {
+          findings.push(`owner_action_stalled_after_failed_run: ${label} ${issue.status} is an owner unblock action for ${sourceLabel} after failed heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}${latestFailedRun.exitCode != null ? ` exitCode=${latestFailedRun.exitCode}` : ""}; no mission issue has queued/running execution — ${issue.title}`);
+        }
+        if ((runsForIssue.length === 0 || latestFailedRun) && !hasActiveHeartbeat) {
+          addRecommendation({
+            type: "request_approval",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Owner unblock action ${label} is stale while source ${sourceLabel} remains unresolved; re-wake the existing owner-action issue instead of creating a duplicate`,
+            safeToAutoApply: false,
+          });
+          addRecommendation({
+            type: "request_replan",
+            missionId: mission.id,
+            issueId: sourceIssue?.id ?? issue.originId ?? issue.id,
+            reason: `Mission recovery is blocked because owner-action issue ${label} is not live; owner should recover, replan, or escalate if re-wake fails`,
+            safeToAutoApply: false,
+          });
+          if (sourceIssue && deps.onOwnerActionCreated && input.dispatchStalledOwnerActionWakeups) {
+            void Promise.resolve(deps.onOwnerActionCreated({
+              mission,
+              issue,
+              sourceIssue,
+              reason: "mission_unblock_action_stalled",
+            })).catch((err) => {
+              logger.warn({ err, missionId: mission.id, issueId: issue.id }, "failed to notify owner about stalled mission unblock action");
+            });
+          }
+        }
+      }
+
+      if (isRecoverableQueueSource && ageMs >= staleAfterMs && !missionHasActiveHeartbeat && failedRunsForIssue.length === 0) {
+        findings.push(`stale_todo_no_active_execution: ${label} ${issue.status} while no mission issue has queued/running execution — ${issue.title}`);
+        addRecommendation({
+          type: "retry_unit_if_safe",
+          missionId: mission.id,
+          issueId: issue.id,
+          reason: `Queued issue ${label} remains ${issue.status} while no mission issue has active execution; owner should diagnose before retry/re-dispatch`,
+          safeToAutoApply: false,
+        });
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          issueId: issue.id,
+          reason: `Mission has stale queued work but no active execution; owner should recover, replan, or escalate`,
+          safeToAutoApply: false,
+        });
+        if (issue.originKind !== "mission_main_executor_unblock" && !issue.hiddenAt && !isTerminalIssueStatus(issue.status)) {
+          await ensureMainExecutorUnblockIssue(mission, issue, {
+            renewAfterNoActionWaiting: true,
+            governanceEvidence: [
+              `stale_todo_no_active_execution: ${label} is ${issue.status}; no queued/running heartbeat run is active for any mission issue.`,
+              "Preferred recovery boundary: choose retry_source_issue when this source issue is still non-terminal and assigned to the original executor; todo status alone does not prove the work is running.",
+            ],
+          });
+        }
+      }
+      if (isRecoverableQueueSource && ageMs >= staleAfterMs && failedRunsForIssue.length > 0 && !hasActiveHeartbeat) {
         const latestFailedRun = failedRunsForIssue
           .slice()
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
@@ -1428,6 +1455,15 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           reason: `Queued issue ${label} remains ${issue.status} after failed execution; owner should recover, replan, or escalate`,
           safeToAutoApply: false,
         });
+        if (issue.originKind !== "mission_main_executor_unblock" && !issue.hiddenAt && !isTerminalIssueStatus(issue.status)) {
+          await ensureMainExecutorUnblockIssue(mission, issue, {
+            renewAfterNoActionWaiting: true,
+            governanceEvidence: [
+              `stale_todo_after_failed_run: ${label} is ${issue.status} after terminal heartbeat run ${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}${latestFailedRun.exitCode != null ? ` exitCode=${latestFailedRun.exitCode}` : ""}; no queued/running heartbeat run is active.`,
+              "Preferred recovery boundary: choose retry_source_issue when the source issue is still non-terminal and assigned to the original executor; do not choose no_action_waiting merely because the issue is todo.",
+            ],
+          });
+        }
       }
       if (isStaleQueueStatus && stepRowsForIssue.some((row) => row.stepRun.status === "pending") && runCount === 0 && ageMs >= staleAfterMs) {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
@@ -1479,26 +1515,102 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is already terminal status=${sourceCandidate.status}` }));
                   break;
                 }
-                if (sourceCandidate.status !== "blocked") {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked` }));
+                const sourcePlanGateReason = activePlanRecoveryGateReason(activePlan, sourceCandidate);
+                if (sourcePlanGateReason) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: sourcePlanGateReason }));
+                  break;
+                }
+                const sourceRuns = heartbeatRunsByIssueId.get(sourceCandidate.id) ?? [];
+                const sourceHasActiveHeartbeat = sourceRuns.some((run) => run.status === "queued" || run.status === "running");
+                const sourceHasFailedRun = sourceRuns.some((run) => run.status === "failed" || run.status === "timed_out" || run.error || run.errorCode || (run.exitCode != null && run.exitCode !== 0));
+                const sourceCorrectionEvidence = buildCorrectedArtifactValidatorRetryEvidence({
+                  sourceIssue: sourceCandidate,
+                  sourceLabel: sourceCandidateLabel,
+                  missionIssues,
+                  commentsByIssueId,
+                });
+                const sourceHasCompletedCorrectionEvidence = Boolean(sourceCorrectionEvidence);
+                const sourceIsRetryableStaleQueue = (sourceCandidate.status === "todo" || sourceCandidate.status === "backlog")
+                  && !sourceHasActiveHeartbeat
+                  && (sourceHasFailedRun || sourceHasCompletedCorrectionEvidence);
+                if (sourceCandidate.status !== "blocked" && !sourceIsRetryableStaleQueue) {
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked, stale queue after failed execution, or stale queue with completed correction evidence` }));
                   break;
                 }
                 const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
                 const markerInput = { ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id, decision: "retry_source_issue" as const };
-                if (hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput)) {
-                  findings.push(`owner_action_decision_already_applied: ${label} retry_source_issue source=${sourceCandidateLabel}`);
-                  break;
-                }
                 const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
                   missionId: mission.id,
                   ownerActionIssueId: issue.id,
                   sourceIssueId: sourceCandidate.id,
                 });
+                const wakeupMarkerInput = {
+                  missionId: mission.id,
+                  ownerActionIssueId: issue.id,
+                  sourceIssueId: sourceCandidate.id,
+                  decision: "retry_source_issue" as const,
+                  idempotencyKey,
+                };
+                if (hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput)) {
+                  if (input.dispatchOwnerDecisionWakeups && !hasMissionOwnerDecisionWakeupDispatchedMarker(sourceComments, wakeupMarkerInput)) {
+                    let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = "skipped_no_assignee";
+                    if (!sourceCandidate.assigneeAgentId) {
+                      findings.push(`owner_action_wakeup_skipped: ${sourceCandidateLabel} source issue has no assignee; wakeup dispatch skipped`);
+                    } else if (deps.onOwnerDecisionRetrySourceIssueApplied) {
+                      try {
+                        const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
+                          ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
+                          : null;
+                        await deps.onOwnerDecisionRetrySourceIssueApplied({
+                          mission,
+                          ownerActionIssue: issue,
+                          sourceIssue: sourceCandidate,
+                          targetAgentId: sourceCandidate.assigneeAgentId,
+                          idempotencyKey,
+                          wakeCommentId: wakeEvidenceComment?.id,
+                        });
+                        await issueService(db).addComment(
+                          sourceCandidate.id,
+                          buildRetrySourceIssueWakeupDispatchedComment({
+                            missionId: mission.id,
+                            ownerActionIssueId: issue.id,
+                            ownerActionLabel: label,
+                            sourceIssueId: sourceCandidate.id,
+                            sourceLabel: sourceCandidateLabel,
+                            targetAgentId: sourceCandidate.assigneeAgentId,
+                            idempotencyKey,
+                          }),
+                          { agentId: mission.ownerAgentId },
+                        );
+                        wakeupDispatchStatus = "dispatched";
+                      } catch (err) {
+                        const message = err instanceof Error ? err.message : String(err);
+                        findings.push(`owner_action_wakeup_failed: ${sourceCandidateLabel} retry_source_issue wakeup callback failed — ${message}`);
+                        wakeupDispatchStatus = "failed";
+                      }
+                    } else {
+                      findings.push(`owner_action_wakeup_skipped: ${sourceCandidateLabel} dispatchOwnerDecisionWakeups enabled but no wakeup callback configured`);
+                      wakeupDispatchStatus = "failed";
+                    }
+                    appliedActions.push({
+                      type: "owner_decision_retry_source_issue",
+                      missionId: mission.id,
+                      ownerActionIssueId: issue.id,
+                      sourceIssueId: sourceCandidate.id,
+                      resultStatus: "todo",
+                      wakeupDispatchStatus,
+                      idempotencyKey,
+                    });
+                  } else {
+                    findings.push(`owner_action_decision_already_applied: ${label} retry_source_issue source=${sourceCandidateLabel}`);
+                  }
+                  break;
+                }
                 let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchOwnerDecisionWakeups ? "skipped_no_assignee" : "not_requested";
                 await db
                   .update(issues)
                   .set({ status: "todo", updatedAt: now })
-                  .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), eq(issues.status, "blocked"), isNull(issues.hiddenAt)));
+                  .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, ["blocked", "todo", "backlog"]), isNull(issues.hiddenAt)));
                 await issueService(db).addComment(
                   sourceCandidate.id,
                   buildRetrySourceIssueComment({
@@ -1516,12 +1628,16 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                     wakeupDispatchStatus = "skipped_no_assignee";
                   } else if (deps.onOwnerDecisionRetrySourceIssueApplied) {
                     try {
+                      const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
+                        ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
+                        : null;
                       await deps.onOwnerDecisionRetrySourceIssueApplied({
                         mission,
                         ownerActionIssue: issue,
                         sourceIssue: sourceCandidate,
                         targetAgentId: sourceCandidate.assigneeAgentId,
                         idempotencyKey,
+                        wakeCommentId: wakeEvidenceComment?.id,
                       });
                       await issueService(db).addComment(
                         sourceCandidate.id,
@@ -1817,6 +1933,12 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           reason: `Execution unit ${unit.sourceRef.type}:${unit.sourceRef.id} is still ${unit.status} after ${input.staleAfterMinutes ?? 120} minutes; owner should recover/replan/escalate`,
           safeToAutoApply: false,
         });
+        if (unit.issueId) {
+          const linkedIssue = missionIssueById.get(unit.issueId);
+          if (linkedIssue && linkedIssue.originKind !== "mission_main_executor_unblock" && !linkedIssue.hiddenAt && !isTerminalIssueStatus(linkedIssue.status)) {
+            await ensureMainExecutorUnblockIssue(mission, linkedIssue, { renewAfterNoActionWaiting: true });
+          }
+        }
       }
       if (unit.issueId && unit.status === "running") {
         const linkedIssue = missionIssueById.get(unit.issueId);
@@ -1880,71 +2002,36 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
     }
 
-    const ownerActionExplanations: MissionOwnerActionExplanation[] = [];
-    for (const ownerActionIssue of missionIssues.filter((issue) => issue.originKind === "mission_main_executor_unblock")) {
-      const ownerActionComments = commentsByIssueId.get(ownerActionIssue.id) ?? [];
-      const latestDecision = extractLatestMissionOwnerDecision(ownerActionComments);
-      const sourceIssue = ownerActionIssue.originId
-        ? await db
-          .select({
-            id: issues.id,
-            identifier: issues.identifier,
-            title: issues.title,
-            status: issues.status,
-            assigneeAgentId: issues.assigneeAgentId,
-          })
-          .from(issues)
-          .where(and(eq(issues.id, ownerActionIssue.originId), eq(issues.companyId, mission.companyId), eq(issues.missionId, mission.id), isNull(issues.hiddenAt)))
-          .limit(1)
-          .then((rows) => rows[0] ?? null)
-        : null;
-      const sourceComments = sourceIssue
-        ? await db
-          .select({ body: issueComments.body })
-          .from(issueComments)
-          .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssue.id)))
-        : [];
-      const retryApplied = Boolean(sourceIssue && hasMissionOwnerDecisionAppliedMarker(sourceComments.map((comment) => comment.body), {
-        ownerActionIssueId: ownerActionIssue.id,
-        sourceIssueId: sourceIssue.id,
-        decision: "retry_source_issue",
-      }));
-      const invalidDecision = latestDecision?.decision === null;
-      const terminalSource = Boolean(sourceIssue && isTerminalIssueStatus(sourceIssue.status));
-      const status: MissionOwnerActionExplanationStatus = retryApplied
-        ? "retry_applied_no_wakeup"
-        : invalidDecision || terminalSource || !sourceIssue
-          ? "not_applicable_or_invalid"
-          : latestDecision
-            ? "decision_recorded_read_only"
-            : "decision_required";
-      const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerActionIssue.originId ?? "unknown source");
-      const explanation = status === "retry_applied_no_wakeup"
-        ? `Retry was explicitly applied for source issue ${sourceLabel}; it is queued again and no heartbeat wakeup was created by this status surface.`
-        : status === "decision_recorded_read_only"
-          ? `Mission owner decision ${latestDecision?.decision ?? "unknown"} was recorded but not applied; source issue ${sourceLabel} remains assigned to its current assignee.`
-          : status === "decision_required"
-            ? `Owner decision required for source issue ${sourceLabel}; source issue remains assigned to its current assignee.`
-            : invalidDecision
-              ? `Mission owner decision is invalid (${latestDecision.invalidDecision}); no execution action was taken.`
-              : terminalSource
-                ? `Source issue ${sourceLabel} is terminal; owner-action status is informational only and no execution action was taken.`
-                : `Source issue ${sourceLabel} is unavailable for this mission; owner-action status is informational only and no execution action was taken.`;
-      ownerActionExplanations.push({
-        ownerActionIssue: {
-          id: ownerActionIssue.id,
-          identifier: ownerActionIssue.identifier,
-          title: ownerActionIssue.title,
-          status: ownerActionIssue.status,
-          originKind: ownerActionIssue.originKind,
-        },
-        sourceIssue,
-        latestDecision,
-        retryApplied,
-        status,
-        explanation,
-      });
-    }
+    const ownerActionExplanations = await buildOwnerActionExplanations({
+      ownerActionIssues: missionIssues
+        .filter((issue) => issue.originKind === "mission_main_executor_unblock" && !issue.hiddenAt)
+        .map((issue) => ({
+          id: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          status: issue.status,
+          originKind: issue.originKind,
+          originId: issue.originId,
+        })),
+      commentsByIssueId,
+      resolveSourceIssue: async (sourceIssueId) => db
+        .select({
+          id: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, mission.companyId), eq(issues.missionId, mission.id), isNull(issues.hiddenAt)))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      resolveSourceComments: async (sourceIssueId) => db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssueId)))
+        .then((rows) => rows.map((comment) => comment.body)),
+    });
 
     const uniqueFindings = Array.from(new Set(findings));
     const safeDispatchRecommendations = recommendations.filter((recommendation) => recommendation.type === "dispatch_missing_step" && recommendation.safeToAutoApply && recommendation.workflowRunId);
@@ -2008,7 +2095,9 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         ...(appliedActions.length > 0
           ? appliedActions.map((action) => action.type === "dispatch_missing_step"
             ? `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`
-            : `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus}`)
+            : action.type === "owner_decision_retry_source_issue"
+              ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus}`
+              : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
           : ["- None"]),
         "",
         "Main executor action:",
@@ -2035,6 +2124,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     applySafeActions?: boolean;
     applyOwnerDecisionActions?: boolean;
     dispatchOwnerDecisionWakeups?: boolean;
+    dispatchStaleSourceIssueWakeups?: boolean;
   } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
     const filters = [eq(missions.status, "active")];
     if (input.companyId) filters.push(eq(missions.companyId, input.companyId));
@@ -2072,19 +2162,91 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
             .where(and(
               eq(issues.companyId, companyId),
               inArray(issues.missionId, rowMissionIds),
+              isNull(issues.hiddenAt),
               inArray(issues.status, ["todo", "backlog"]),
               lte(issues.createdAt, staleCutoff),
-              eq(heartbeatRuns.status, "failed"),
+              inArray(heartbeatRuns.status, ["failed", "timed_out"]),
             )))
             .map((row) => row.missionId)
             .filter((missionId): missionId is string => Boolean(missionId))
           : [],
       );
+      const staleQueueIssueRows = rowMissionIds.length > 0
+        ? await db
+          .select({ missionId: issues.missionId, issueId: issues.id })
+          .from(issues)
+          .where(and(
+            eq(issues.companyId, companyId),
+            inArray(issues.missionId, rowMissionIds),
+            isNull(issues.hiddenAt),
+            inArray(issues.status, ["todo", "backlog"]),
+            lte(issues.createdAt, staleCutoff),
+            sql`${issues.originKind} not in ('mission_main_executor_oversight', 'mission_main_executor_unblock')`,
+          ))
+        : [];
+      const staleOwnerActionIssueRows = rowMissionIds.length > 0
+        ? await db
+          .select({ missionId: issues.missionId, issueId: issues.id })
+          .from(issues)
+          .where(and(
+            eq(issues.companyId, companyId),
+            inArray(issues.missionId, rowMissionIds),
+            isNull(issues.hiddenAt),
+            inArray(issues.status, ["todo", "backlog"]),
+            lte(issues.createdAt, staleCutoff),
+            eq(issues.originKind, "mission_main_executor_unblock"),
+          ))
+        : [];
+      const activeHeartbeatMissionIds = rowMissionIds.length > 0
+        ? new Set((await db
+          .select({ missionId: issues.missionId })
+          .from(issues)
+          .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
+          .where(and(
+            eq(issues.companyId, companyId),
+            inArray(issues.missionId, rowMissionIds),
+            inArray(heartbeatRuns.status, ["queued", "running"]),
+          )))
+          .map((row) => row.missionId)
+          .filter((missionId): missionId is string => Boolean(missionId)))
+        : new Set<string>();
+      const staleInProgressFailedHeartbeatMissionIds = new Set(
+        rowMissionIds.length > 0
+          ? (await db
+            .select({ missionId: issues.missionId })
+            .from(issues)
+            .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
+            .where(and(
+              eq(issues.companyId, companyId),
+              inArray(issues.missionId, rowMissionIds),
+              isNull(issues.hiddenAt),
+              eq(issues.status, "in_progress"),
+              lte(issues.createdAt, staleCutoff),
+              inArray(heartbeatRuns.status, ["failed", "timed_out"]),
+              sql`${issues.originKind} not in ('mission_main_executor_oversight', 'mission_main_executor_unblock')`,
+            )))
+            .map((row) => row.missionId)
+            .filter((missionId): missionId is string => Boolean(missionId))
+            .filter((missionId) => !activeHeartbeatMissionIds.has(missionId))
+          : [],
+      );
+      const staleQueueNoActiveExecutionMissionIds = new Set(
+        staleQueueIssueRows
+          .map((row) => row.missionId)
+          .filter((missionId): missionId is string => Boolean(missionId))
+          .filter((missionId) => !activeHeartbeatMissionIds.has(missionId)),
+      );
+      const stalledOwnerActionMissionIds = new Set(
+        staleOwnerActionIssueRows
+          .map((row) => row.missionId)
+          .filter((missionId): missionId is string => Boolean(missionId))
+          .filter((missionId) => !activeHeartbeatMissionIds.has(missionId)),
+      );
 
       for (const row of rows) {
         const snapshot = snapshots[row.id];
         const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id)) missionIds.push(row.id);
+        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id)) missionIds.push(row.id);
       }
     }
 
@@ -2097,6 +2259,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         applySafeActions: input.applySafeActions,
         applyOwnerDecisionActions: input.applyOwnerDecisionActions,
         dispatchOwnerDecisionWakeups: input.dispatchOwnerDecisionWakeups,
+        dispatchStalledOwnerActionWakeups: true,
+        dispatchStaleSourceIssueWakeups: input.dispatchStaleSourceIssueWakeups,
       }));
     }
 
@@ -2107,6 +2271,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
    */
   async function create(input: CreateMissionInput): Promise<MissionDetail> {
     if (input.status) validateStatus(input.status);
+    const missionSource = input.source === "workflow" ? "workflow" : "manual";
 
     // Verify owner agent exists
     const [ownerRow] = await db
@@ -2116,7 +2281,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .limit(1);
     if (!ownerRow) throw notFound(`Agent not found: ${input.ownerAgentId}`);
 
-    if ((input.source ?? "manual") === "workflow" && (input.status ?? "planning") === "active") {
+    if (missionSource === "workflow" && (input.status ?? "planning") === "active") {
       const existingActiveWorkflowMission = await db
         .select({ id: missions.id })
         .from(missions)
@@ -2173,16 +2338,36 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
     }
 
-    if ((input.source ?? "manual") === "workflow") {
+    if (missionSource === "workflow") {
       await ensureMainExecutorOversightIssue(mission, input.title);
     }
 
-    if ((input.source ?? "manual") === "manual") {
+    if (missionSource === "manual") {
       const planningIssue = await ensureMainExecutorPlanningIssue(mission);
       await missionPlanArtifactService(db).createInitialMissionPlan({
         companyId: mission.companyId,
         missionId: mission.id,
         refs: planningIssue?.id ? { planningIssueId: planningIssue.id } : {},
+        assumptions: [
+          "Manual mission: the mission owner must finish the source/synthesis/QA execution skeleton before delegated child issues are treated as runnable recovery targets.",
+        ],
+        requiredInputs: [
+          { key: "mission-owner-execution-plan", status: "pending", source: "mission_main_executor_plan" },
+        ],
+        successCriteria: [
+          { description: "The active plan contains the source, synthesis, and QA gates needed to decide execution order." },
+          { description: "QA or validation work starts only after its upstream source or synthesis artifact exists." },
+          { description: "Timeout/process_lost recovery records root-cause judgement before choosing same-issue wakeup or a recovery issue." },
+        ],
+        risks: [
+          { description: "Child issues can multiply if blocked status is treated as sufficient reason to create unblock/recovery work.", category: "issue_explosion", severity: "high" },
+        ],
+        steps: [
+          { id: "plan-skeleton", title: "Define the source, synthesis, and QA execution skeleton", status: "planned", intendedRole: "mission_owner" },
+          { id: "source-artifacts", title: "Collect bounded source artifacts before downstream QA starts", status: "planned", intendedRole: "source_research" },
+          { id: "synthesis-artifact", title: "Synthesize completed sources into the requested output artifact", status: "planned", intendedRole: "synthesis" },
+          { id: "qa-after-artifact", title: "Run QA only after the upstream artifact is present", status: "planned", intendedRole: "qa" },
+        ],
       });
       if (deps.onOwnerPlanningIssueCreated && planningIssue?.assigneeAgentId) {
         const idempotencyKey = `mission-owner-planning-wakeup:${mission.id}:${planningIssue.id}`;
@@ -2344,6 +2529,95 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .set(updates)
       .where(eq(missions.id, id));
 
+    if (isTerminalMissionStatus(input.status)) {
+      const now = new Date();
+      const terminalPlanStatus = input.status === "completed" ? "completed" : "archived";
+
+      if (input.status === "cancelled") {
+        await db
+          .update(issues)
+          .set({ status: "cancelled", cancelledAt: now, updatedAt: now })
+          .where(and(
+            eq(issues.missionId, id),
+            sql`${issues.status} not in ('done', 'cancelled')`,
+          ));
+      }
+
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          error: `Cancelled because mission was ${input.status}`,
+          errorCode: "cancelled",
+          updatedAt: now,
+        })
+        .where(and(
+          eq(heartbeatRuns.companyId, existing.companyId),
+          inArray(
+            heartbeatRuns.issueId,
+            db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(eq(issues.missionId, id)),
+          ),
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+        ));
+
+      await stopMissionRuntimesForMission(db, {
+        companyId: existing.companyId,
+        missionId: id,
+        reason: `mission.${input.status}`,
+      });
+
+      await db
+        .update(missionPlanArtifacts)
+        .set({ status: terminalPlanStatus, updatedAt: now })
+        .where(and(
+          eq(missionPlanArtifacts.companyId, existing.companyId),
+          eq(missionPlanArtifacts.missionId, id),
+          eq(missionPlanArtifacts.status, "active"),
+        ));
+
+      await db
+        .update(missionSessions)
+        .set({ status: "closed", lastActiveAt: now })
+        .where(and(
+          eq(missionSessions.companyId, existing.companyId),
+          eq(missionSessions.missionId, id),
+          eq(missionSessions.status, "active"),
+        ));
+
+      const missionAgentRows = await db
+        .select({ agentId: missionAgents.agentId })
+        .from(missionAgents)
+        .where(eq(missionAgents.missionId, id));
+      const issueAssigneeRows = await db
+        .select({ agentId: issues.assigneeAgentId })
+        .from(issues)
+        .where(and(eq(issues.missionId, id), sql`${issues.assigneeAgentId} is not null`));
+      const affectedAgentIds = Array.from(new Set([
+        existing.ownerAgentId,
+        ...missionAgentRows.map((row) => row.agentId),
+        ...issueAssigneeRows.map((row) => row.agentId).filter((agentId): agentId is string => Boolean(agentId)),
+      ]));
+
+      if (affectedAgentIds.length > 0) {
+        await db
+          .update(agents)
+          .set({ status: "idle", updatedAt: now })
+          .where(and(
+            inArray(agents.id, affectedAgentIds),
+            inArray(agents.status, ["running", "error"]),
+          ));
+
+        await db
+          .update(agentRuntimeState)
+          .set({ lastError: null, sessionId: null, updatedAt: now })
+          .where(inArray(agentRuntimeState.agentId, affectedAgentIds));
+      }
+    }
+
     return getById(id);
   }
 
@@ -2467,7 +2741,25 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
 
     const issuesSvc = issueService(db);
     await ensureWorkflowIssuesLinkedToMission(mission);
-    return issuesSvc.list(mission.companyId, { missionId });
+
+    const allCompanyIssues = await issuesSvc.list(mission.companyId);
+    const includedIssueIds = new Set(
+      allCompanyIssues.filter((issue) => issue.missionId === missionId).map((issue) => issue.id),
+    );
+
+    let addedDescendant = true;
+    while (addedDescendant) {
+      addedDescendant = false;
+      for (const issue of allCompanyIssues) {
+        if (includedIssueIds.has(issue.id)) continue;
+        if (issue.parentId && includedIssueIds.has(issue.parentId)) {
+          includedIssueIds.add(issue.id);
+          addedDescendant = true;
+        }
+      }
+    }
+
+    return allCompanyIssues.filter((issue) => includedIssueIds.has(issue.id));
   }
 
   /**

@@ -170,6 +170,7 @@ function getOrCreateVaneAdapter(
       vaneBaseUrl: config.vaneBaseUrl,
       timeoutMs: config.timeoutMs,
       http: ctx.http,
+      directFetch: fetch,
     });
   }
   return vaneAdapter;

@@ -508,7 +508,7 @@ export function pluginRoutes(
    * Request body:
    * - `tool`: Fully namespaced tool name (e.g., "acme.linear:search-issues")
    * - `parameters`: Parameters matching the tool's declared JSON Schema
-   * - `runContext`: Agent run context with agentId, runId, companyId, projectId
+   * - `runContext`: Agent run context with agentId, runId, companyId, and optional projectId
    *
    * Response: `ToolExecutionResult`
    * Errors:
@@ -544,9 +544,9 @@ export function pluginRoutes(
       return;
     }
 
-    if (!runContext.agentId || !runContext.runId || !runContext.companyId || !runContext.projectId) {
+    if (!runContext.agentId || !runContext.runId || !runContext.companyId) {
       res.status(400).json({
-        error: '"runContext" must include agentId, runId, companyId, and projectId',
+        error: '"runContext" must include agentId, runId, and companyId',
       });
       return;
     }

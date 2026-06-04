@@ -58,6 +58,8 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(srbLinks);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
+    await db.delete(missionPlanArtifacts);
+    await db.delete(missions);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -437,6 +439,8 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
 
     const released = await svc.release(sourceIssueId, sourceAgentId, runId);
     expect(released?.status).toBe("todo");
+    expect(released?.checkoutRunId).toBeNull();
+    expect(released?.executionRunId).toBeNull();
 
     const mirrorReleased = await db
       .select()
@@ -553,6 +557,7 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     await db.delete(srbLinks);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
+    await db.delete(missions);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -632,6 +637,72 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     });
   });
 
+  it("adopts stale terminal execution locks with no checkout lock during checkout", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const staleRunId = randomUUID();
+    const nextRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Research Worker",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values([
+      {
+        id: staleRunId,
+        companyId,
+        agentId,
+        invocationSource: "targeted_wakeup",
+        status: "cancelled",
+        contextSnapshot: {},
+        finishedAt: new Date(),
+      },
+      {
+        id: nextRunId,
+        companyId,
+        agentId,
+        invocationSource: "targeted_wakeup",
+        status: "running",
+        contextSnapshot: {},
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Issue with stale execution lock only",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: staleRunId,
+      executionLockedAt: new Date(),
+    });
+
+    const checkedOut = await svc.checkout(issueId, agentId, ["todo"], nextRunId);
+
+    expect(checkedOut).toEqual(expect.objectContaining({
+      id: issueId,
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      checkoutRunId: nextRunId,
+      executionRunId: nextRunId,
+    }));
+  });
+
   it("rejects missing parent issues before insert", async () => {
     const companyId = randomUUID();
 
@@ -650,6 +721,640 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
         parentId: randomUUID(),
       }),
     ).rejects.toThrow("Parent issue not found");
+  });
+
+  it("inherits the parent mission when creating a sub-issue without missionId", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Mission Owner",
+      role: "owner",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      missionId,
+      title: "Mission issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Mission child issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    expect(child).toEqual(expect.objectContaining({
+      parentId: parentIssueId,
+      missionId,
+    }));
+  });
+
+  it("rejects creating issues for terminal missions", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Worker",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Cancelled mission",
+      status: "cancelled",
+    });
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        assigneeAgentId,
+        title: "Late recovery source task",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Cannot create issues for a completed or cancelled mission");
+  });
+
+  it("rejects reopening an issue inside a terminal mission", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "owner",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Cancelled mission",
+      status: "cancelled",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      title: "Cancelled mission issue",
+      status: "cancelled",
+      priority: "medium",
+    });
+
+    await expect(svc.update(issueId, { status: "todo" })).rejects.toThrow(
+      "Cannot reopen or execute issues for a completed or cancelled mission",
+    );
+  });
+
+  it("rejects mission-owner planned downstream child issues before upstream artifacts", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const sourceAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Report Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: sourceAgentId,
+        companyId,
+        name: "Source Researcher",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      missionId,
+      assigneeAgentId,
+      originKind: "research_director_plan",
+      title: "[Dossier-A] Source dossiers for candidates",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        assigneeAgentId,
+        originKind: "research_director_plan",
+        title: "[Validation] Independent QA of evidence, claims, and HTML file",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+    const sourceIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: sourceAgentId,
+      originKind: "research_director_plan",
+      title: "[Dossier-A] Source dossiers for candidates",
+      status: "todo",
+      priority: "medium",
+    });
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        parentId: parentIssueId,
+        assigneeAgentId,
+        createdByAgentId: assigneeAgentId,
+        title: "[RES-458][QA] Independent URL/status and claim-evidence check",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+    await expect(
+      svc.create(companyId, {
+        parentId: parentIssueId,
+        assigneeAgentId,
+        createdByAgentId: assigneeAgentId,
+        title: "[Synthesis] HTML report compilation",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+    const agentSourceChildIssue = await svc.create(companyId, {
+      parentId: parentIssueId,
+      assigneeAgentId: sourceAgentId,
+      createdByAgentId: sourceAgentId,
+      title: "[RES-458][Source] Direct URL harvest",
+      status: "backlog",
+      priority: "medium",
+    });
+
+    expect(sourceIssue.status).toBe("todo");
+    expect(agentSourceChildIssue.status).toBe("todo");
+  });
+
+  it("rejects hyphenated research director downstream issues before upstream artifacts", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Synthesis Editor",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        assigneeAgentId,
+        originKind: "research-director-plan",
+        title: "Synthesis + HTML authoring: verified packets only",
+        status: "todo",
+        priority: "high",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        assigneeAgentId,
+        originKind: "research-director-plan",
+        title: "[Source] Evidence matrix and HTML shell draft",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+  });
+
+  it("rejects mission owner plan child downstream issues before upstream artifacts", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Report Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        assigneeAgentId,
+        originKind: "research_director_plan_child",
+        title: "[Validation Gate] HTML file independent verification",
+        status: "todo",
+        priority: "high",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+  });
+
+  it("rejects nested mission child issues created by workers", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planIssueId = randomUUID();
+    const sourceIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Research Worker",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: planIssueId,
+        companyId,
+        missionId,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_plan",
+        title: "[Plan] Mission",
+        status: "done",
+        priority: "medium",
+      },
+      {
+        id: sourceIssueId,
+        companyId,
+        missionId,
+        parentId: planIssueId,
+        assigneeAgentId: workerAgentId,
+        originKind: "manual",
+        title: "[Source] First wave packet",
+        status: "in_progress",
+        priority: "medium",
+      },
+    ]);
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        parentId: sourceIssueId,
+        assigneeAgentId: workerAgentId,
+        createdByAgentId: workerAgentId,
+        title: "[Source Audit] Worker-created subpacket",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission nested child issue creation is not allowed");
+  });
+
+  it("limits system-created mission child issue bursts without createdByAgentId", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Researcher",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_plan",
+      title: "[Plan] Mission",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await svc.create(companyId, {
+        missionId,
+        parentId: parentIssueId,
+        assigneeAgentId,
+        title: `[Source] System packet ${index + 1}`,
+        status: "todo",
+        priority: "medium",
+      });
+    }
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        parentId: parentIssueId,
+        assigneeAgentId,
+        title: "[Source] System packet 7",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission child issue burst limit exceeded");
+  });
+
+  it("limits agent-created mission child issue bursts per parent", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Researcher",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_plan",
+      title: "[Plan] Mission",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      const issue = await svc.create(companyId, {
+        missionId,
+        parentId: parentIssueId,
+        assigneeAgentId,
+        createdByAgentId: ownerAgentId,
+        title: `[Source] Packet ${index + 1}`,
+        status: "todo",
+        priority: "medium",
+      });
+      expect(issue.status).toBe("todo");
+    }
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        parentId: parentIssueId,
+        assigneeAgentId,
+        createdByAgentId: ownerAgentId,
+        title: "[Source] Packet 7",
+        status: "todo",
+        priority: "medium",
+      }),
+    ).rejects.toThrow("Mission child issue burst limit exceeded");
   });
 });
 

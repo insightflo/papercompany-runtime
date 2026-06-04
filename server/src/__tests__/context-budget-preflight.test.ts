@@ -419,6 +419,7 @@ describe("evaluateContextBudgetPreflight", () => {
 
     const expectedKeys = [
       "PAPERCLIP_AGENT_ID",
+      "PAPERCLIP_API_BASE_URL",
       "PAPERCLIP_API_URL",
       "PAPERCLIP_COMPANY_ID",
       "PAPERCLIP_RUN_ID",

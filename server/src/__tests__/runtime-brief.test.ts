@@ -2,6 +2,52 @@ import { describe, expect, it } from "vitest";
 import { buildPaperclipRuntimeBrief } from "@paperclipai/adapter-utils";
 
 describe("buildPaperclipRuntimeBrief", () => {
+  it("surfaces exact workflow tool-call contract and recent controller comments", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipWorkflowStepToolContract: {
+        workflowRunId: "workflow-run-1",
+        workflowId: "workflow-1",
+        stepId: "collect",
+        stepName: "Collect Tech Scout Top25",
+        toolNames: ["generic-cli-executor"],
+        tools: [
+          {
+            name: "generic-cli-executor",
+            description: "Execute an approved CLI tool registered in Tool Registry.",
+            adapterType: "plugin",
+          },
+        ],
+      },
+      paperclipIssueRecentComments: [
+        {
+          id: "comment-2",
+          authorType: "controller",
+          body: "Use generic-cli-executor with toolName=daily-tech-scout and args { command: daily-tech-scout }. Force fresh session.",
+        },
+      ],
+      paperclipStepInputManifest: {
+        version: 1,
+        taskKey: "issue:tech-scout",
+        issueId: "issue-tech-scout",
+        projectId: null,
+        allowedContextKeys: ["paperclipWorkflowStepToolContract", "paperclipIssueRecentComments"],
+        guardrails: { broadScanAllowed: false },
+        inputs: {
+          workspace: { available: true, source: "project_primary", workspaceId: "ws-1", projectId: "project-1" },
+          runtimeServices: { available: false, count: 0, primaryUrl: null },
+          tools: { available: true, count: 1, names: ["generic-cli-executor"] },
+        },
+      },
+    });
+
+    expect(brief).toContain("Workflow tool-call contract:");
+    expect(brief).toContain("Step: Collect Tech Scout Top25");
+    expect(brief).toContain("generic-cli-executor");
+    expect(brief).toContain('{"toolName":"<registered-tool-name>","args":{...}}');
+    expect(brief).toContain("Recent issue comments:");
+    expect(brief).toContain("Use generic-cli-executor with toolName=daily-tech-scout");
+  });
+
   it("renders a compact brief from manifest and structured handoff", () => {
     const brief = buildPaperclipRuntimeBrief({
       issueId: "issue-1",

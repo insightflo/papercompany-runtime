@@ -38,6 +38,7 @@ import { logger } from "../middleware/logger.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
+const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
@@ -116,6 +117,68 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const MISSION_OWNER_CHILD_ISSUE_BURST_LIMIT = 6;
+
+const MISSION_OWNER_PLANNED_DOWNSTREAM_RE =
+  /\b(synthesis|synthesize|validation|validator|validate|qa|quality\s+assurance|director\s+gate|gate|close\s+mission|final\s+review|final\s+report|write\s+(?:korean\s+)?(?:html\s+)?report)\b|종합|합성|검증|품질\s*검사|최종\s*검토|보고서\s*작성/iu;
+
+const MISSION_OWNER_PLANNED_SOURCE_RE =
+  /\b(scout|source|sources|dossier|roster|evidence|research|candidate|lead\s+map|discovery|collect|fact|facts|issues?-\d+|issues?)\b|자료|출처|근거|후보|쟁점|조사|수집/iu;
+
+const MISSION_OWNER_PLANNED_DOWNSTREAM_PREFIX_RE =
+  /^\s*\[(?:synthesis|validation|validator|qa|director\s+gate|gate)\]/iu;
+
+const MISSION_OWNER_PLANNED_DOWNSTREAM_TITLE_RE =
+  /\b(review\s+gate|independent\s+(?:evidence\s+)?review|evidence\s+matrix\s+validation|validation|validate|validator|qa|gate)\b|검증|품질\s*검사|최종\s*검토/iu;
+
+const MISSION_OWNER_DOWNSTREAM_AGENT_NAME_RE =
+  /\b(?:synthesis|validator|validation|qa)\b|종합|합성|검증/iu;
+
+function isMissionOwnerPlanOriginKind(originKind: string) {
+  return originKind === "research_director_plan" ||
+    originKind === "research-director-plan" ||
+    originKind === "research_director_plan_child" ||
+    originKind === "research-director-plan-child";
+}
+
+function isMissionPlannedDownstreamIssue(data: {
+  missionId?: string | null;
+  parentId?: string | null;
+  originKind?: string | null;
+  status?: string | null;
+  title?: string | null;
+  description?: string | null;
+  createdByUserId?: string | null;
+}) {
+  if (!data.missionId) return false;
+  const originKind = data.originKind ?? "manual";
+  const isOwnerPlanIssue = isMissionOwnerPlanOriginKind(originKind);
+  const isAgentPlannedChildIssue = !!data.parentId && !data.createdByUserId;
+  if (!isOwnerPlanIssue && !isAgentPlannedChildIssue) return false;
+  if (data.status === "done" || data.status === "cancelled") return false;
+
+  const text = [data.title, data.description].filter((value): value is string => typeof value === "string").join("\n");
+  if (!MISSION_OWNER_PLANNED_DOWNSTREAM_RE.test(text)) return false;
+
+  const firstLine = data.title ?? "";
+  if (MISSION_OWNER_PLANNED_DOWNSTREAM_PREFIX_RE.test(firstLine)) return true;
+  if (MISSION_OWNER_PLANNED_DOWNSTREAM_TITLE_RE.test(firstLine)) return true;
+  return !MISSION_OWNER_PLANNED_SOURCE_RE.test(firstLine);
+}
+
+async function isMissionDownstreamAssignee(
+  db: Db,
+  companyId: string,
+  assigneeAgentId: string | null | undefined,
+) {
+  if (!assigneeAgentId) return false;
+  const agent = await db
+    .select({ name: agents.name })
+    .from(agents)
+    .where(and(eq(agents.id, assigneeAgentId), eq(agents.companyId, companyId)))
+    .then((rows) => rows[0] ?? null);
+  return MISSION_OWNER_DOWNSTREAM_AGENT_NAME_RE.test(agent?.name ?? "");
+}
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
@@ -525,15 +588,89 @@ export function issueService(db: Db) {
     }
   }
 
-  async function assertValidParentIssue(companyId: string, parentId: string) {
+  async function getValidParentIssue(companyId: string, parentId: string) {
     const parent = await db
-      .select({ id: issues.id, companyId: issues.companyId })
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        missionId: issues.missionId,
+        parentId: issues.parentId,
+      })
       .from(issues)
       .where(eq(issues.id, parentId))
       .then((rows) => rows[0] ?? null);
     if (!parent) throw notFound("Parent issue not found");
     if (parent.companyId !== companyId) {
       throw unprocessable("Parent issue must belong to same company");
+    }
+    return parent;
+  }
+
+  async function assertMissionChildIssueCreationAllowed(
+    companyId: string,
+    data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+  ) {
+    if (!data.parentId || data.createdByUserId) return;
+
+    const parent = await getValidParentIssue(companyId, data.parentId);
+    const missionId = data.missionId ?? parent.missionId;
+    if (!missionId) return;
+
+    if (parent.parentId) {
+      throw unprocessable(
+        "Mission nested child issue creation is not allowed: complete the assigned issue artifact instead of delegating sub-issues",
+      );
+    }
+
+    const missionChildData = { ...data, missionId };
+    if (isMissionPlannedDownstreamIssue(missionChildData) || await isMissionDownstreamAssignee(db, companyId, data.assigneeAgentId)) {
+      throw unprocessable(
+        "Mission downstream issue creation is not allowed before its upstream artifact is complete; record the gate in the active plan instead",
+      );
+    }
+
+    const [countRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.missionId, missionId),
+          eq(issues.parentId, data.parentId),
+          sql`${issues.status} not in ('done', 'cancelled')`,
+        ),
+      );
+    const siblingCount = Number(countRow?.count ?? 0);
+    if (siblingCount >= MISSION_OWNER_CHILD_ISSUE_BURST_LIMIT) {
+      throw unprocessable(
+        `Mission child issue burst limit exceeded: at most ${MISSION_OWNER_CHILD_ISSUE_BURST_LIMIT} active child issues can be created for one parent before upstream work is reviewed`,
+      );
+    }
+  }
+
+  async function inheritParentMissionId(
+    companyId: string,
+    data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+  ) {
+    if (!data.parentId) return data;
+    const parent = await getValidParentIssue(companyId, data.parentId);
+    if (parent.missionId && !data.missionId) {
+      data.missionId = parent.missionId;
+    }
+    return data;
+  }
+
+  function normalizeMissionChildIssueStatusForExecution(
+    data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
+  ) {
+    if (
+      data.missionId &&
+      data.parentId &&
+      data.assigneeAgentId &&
+      !data.createdByUserId &&
+      data.status === "backlog"
+    ) {
+      data.status = "todo";
     }
   }
 
@@ -615,6 +752,51 @@ export function issueService(db: Db) {
     return adopted;
   }
 
+  async function adoptStaleExecutionRunWithoutCheckout(input: {
+    issueId: string;
+    actorAgentId: string;
+    actorRunId: string;
+    expectedExecutionRunId: string;
+    expectedStatuses?: string[];
+  }) {
+    const stale = await isTerminalOrMissingHeartbeatRun(input.expectedExecutionRunId);
+    if (!stale) return null;
+
+    const now = new Date();
+    const statusCondition = input.expectedStatuses
+      ? inArray(issues.status, input.expectedStatuses)
+      : eq(issues.status, "in_progress");
+    return await db
+      .update(issues)
+      .set({
+        assigneeAgentId: input.actorAgentId,
+        assigneeUserId: null,
+        checkoutRunId: input.actorRunId,
+        executionRunId: input.actorRunId,
+        executionLockedAt: now,
+        status: "in_progress",
+        startedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(issues.id, input.issueId),
+          statusCondition,
+          eq(issues.assigneeAgentId, input.actorAgentId),
+          isNull(issues.checkoutRunId),
+          eq(issues.executionRunId, input.expectedExecutionRunId),
+        ),
+      )
+      .returning({
+        id: issues.id,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function repairMalformedSameRunCheckoutLock(input: {
     issueId: string;
     actorAgentId: string;
@@ -668,17 +850,30 @@ export function issueService(db: Db) {
       await assertValidExecutionWorkspace(companyId, data.projectId, data.executionWorkspaceId);
     }
     if (data.parentId) {
-      await assertValidParentIssue(companyId, data.parentId);
+      await getValidParentIssue(companyId, data.parentId);
+      await assertMissionChildIssueCreationAllowed(companyId, data);
     }
     if (data.missionId) {
       const [mission] = await db
-        .select({ id: missions.id, companyId: missions.companyId })
+        .select({ id: missions.id, companyId: missions.companyId, status: missions.status })
         .from(missions)
         .where(eq(missions.id, data.missionId))
         .limit(1);
       if (!mission) throw notFound(`Mission not found: ${data.missionId}`);
       if (mission.companyId !== companyId) {
         throw unprocessable("Mission must belong to the same company");
+      }
+      if (TERMINAL_MISSION_STATUSES.has(mission.status)) {
+        throw unprocessable("Cannot create issues for a completed or cancelled mission");
+      }
+      if (
+        !data.createdByUserId &&
+        (isMissionPlannedDownstreamIssue(data) ||
+          await isMissionDownstreamAssignee(db, companyId, data.assigneeAgentId))
+      ) {
+        throw unprocessable(
+          "Mission downstream issue creation is not allowed before its upstream artifact is complete; record the gate in the active plan instead",
+        );
       }
     }
     if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
@@ -1033,9 +1228,11 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }
-      await assertValidCreateInput(companyId, data);
+      await inheritParentMissionId(companyId, issueData);
+      normalizeMissionChildIssueStatusForExecution(issueData);
+      await assertValidCreateInput(companyId, issueData);
       return db.transaction(async (tx: IssueWriteDb) =>
-        await createIssueRecord(tx, companyId, data, isolatedWorkspacesEnabled)
+        await createIssueRecord(tx, companyId, issueData, isolatedWorkspacesEnabled)
       );
     },
 
@@ -1050,6 +1247,8 @@ export function issueService(db: Db) {
         delete data.executionWorkspacePreference;
         delete data.executionWorkspaceSettings;
       }
+      await inheritParentMissionId(companyId, data);
+      normalizeMissionChildIssueStatusForExecution(data);
       await assertValidCreateInput(companyId, data);
       return await createIssueRecord(dbOrTx, companyId, data, isolatedWorkspacesEnabled);
     },
@@ -1072,6 +1271,17 @@ export function issueService(db: Db) {
 
       if (issueData.status) {
         assertTransition(existing.status, issueData.status);
+      }
+
+      if (existing.missionId && issueData.status && issueData.status !== "done" && issueData.status !== "cancelled") {
+        const [mission] = await db
+          .select({ id: missions.id, status: missions.status })
+          .from(missions)
+          .where(and(eq(missions.id, existing.missionId), eq(missions.companyId, existing.companyId)))
+          .limit(1);
+        if (mission && TERMINAL_MISSION_STATUSES.has(mission.status)) {
+          throw unprocessable("Cannot reopen or execute issues for a completed or cancelled mission");
+        }
       }
 
       const patch: Partial<typeof issues.$inferInsert> = {
@@ -1099,13 +1309,16 @@ export function issueService(db: Db) {
       if (issueData.missionId !== undefined) {
         if (issueData.missionId !== null) {
           const [mission] = await db
-            .select({ id: missions.id, companyId: missions.companyId })
+            .select({ id: missions.id, companyId: missions.companyId, status: missions.status })
             .from(missions)
             .where(eq(missions.id, issueData.missionId))
             .limit(1);
           if (!mission) throw notFound(`Mission not found: ${issueData.missionId}`);
           if (mission.companyId !== existing.companyId) {
             throw unprocessable("Mission must belong to the same company");
+          }
+          if (TERMINAL_MISSION_STATUSES.has(mission.status) && issueData.status !== "done" && issueData.status !== "cancelled") {
+            throw unprocessable("Cannot move issues into a completed or cancelled mission");
           }
         }
       }
@@ -1322,6 +1535,27 @@ export function issueService(db: Db) {
         }
       }
 
+      if (
+        checkoutRunId &&
+        current.assigneeAgentId === agentId &&
+        current.checkoutRunId == null &&
+        current.executionRunId &&
+        current.executionRunId !== checkoutRunId
+      ) {
+        const adopted = await adoptStaleExecutionRunWithoutCheckout({
+          issueId: id,
+          actorAgentId: agentId,
+          actorRunId: checkoutRunId,
+          expectedExecutionRunId: current.executionRunId,
+          expectedStatuses,
+        });
+        if (adopted) {
+          const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0]!);
+          const [enriched] = await withIssueLabels(db, [row]);
+          return enriched;
+        }
+      }
+
       // If this run already owns it and it's in_progress, return it (no self-409)
       if (
         current.assigneeAgentId === agentId &&
@@ -1414,6 +1648,30 @@ export function issueService(db: Db) {
         }
       }
 
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId == null &&
+        current.executionRunId &&
+        current.executionRunId !== actorRunId
+      ) {
+        const adopted = await adoptStaleExecutionRunWithoutCheckout({
+          issueId: id,
+          actorAgentId,
+          actorRunId,
+          expectedExecutionRunId: current.executionRunId,
+        });
+
+        if (adopted) {
+          return {
+            ...adopted,
+            adoptedFromRunId: current.executionRunId,
+            repairedMalformedExecutionLock: false,
+          };
+        }
+      }
+
       throw conflict("Issue run ownership conflict", {
         issueId: current.id,
         status: current.status,
@@ -1456,6 +1714,8 @@ export function issueService(db: Db) {
           status: "todo",
           assigneeAgentId: null,
           checkoutRunId: null,
+          executionRunId: null,
+          executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))

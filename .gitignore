@@ -68,6 +68,9 @@ tmp/
 tmp-*
 cli/tmp/
 data/
+/.hermes/
+/outputs/
+/working.md
 
 # Scratch / seed scripts
 check-*.mjs

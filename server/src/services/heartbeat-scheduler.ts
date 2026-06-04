@@ -1,6 +1,10 @@
 type HeartbeatSchedulerHeartbeat = {
   tickTimers(now: Date): Promise<{ enqueued?: number }>;
-  reapOrphanedRuns(opts?: { staleThresholdMs?: number }): Promise<unknown>;
+  reapOrphanedRuns(opts?: {
+    staleThresholdMs?: number;
+    activeExecutionTimeoutMs?: number;
+    queuedStaleThresholdMs?: number;
+  }): Promise<unknown>;
   resumeQueuedRuns(): Promise<unknown>;
 };
 
@@ -36,6 +40,8 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
   const routineIntervalMs = opts.routineIntervalMs ?? opts.timerIntervalMs;
   const recoveryIntervalMs = opts.recoveryIntervalMs ?? Math.max(opts.timerIntervalMs * 10, 5 * 60 * 1000);
   const recoveryStaleThresholdMs = opts.recoveryStaleThresholdMs ?? 5 * 60 * 1000;
+  const activeExecutionTimeoutMs = Math.max(recoveryStaleThresholdMs * 3, 15 * 60 * 1000);
+  const queuedStaleThresholdMs = Math.max(recoveryStaleThresholdMs * 3, 15 * 60 * 1000);
 
   let running = false;
   let timerHandle: ReturnType<typeof setInterval> | null = null;
@@ -88,7 +94,11 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
     if (staleThresholdMs === undefined) {
       await opts.heartbeat.reapOrphanedRuns();
     } else {
-      await opts.heartbeat.reapOrphanedRuns({ staleThresholdMs });
+      await opts.heartbeat.reapOrphanedRuns({
+        staleThresholdMs,
+        activeExecutionTimeoutMs,
+        queuedStaleThresholdMs,
+      });
     }
     await opts.heartbeat.resumeQueuedRuns();
   };

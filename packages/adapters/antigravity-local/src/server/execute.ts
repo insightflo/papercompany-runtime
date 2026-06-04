@@ -29,6 +29,7 @@ export interface BuildAntigravityArgsInput {
   sandbox: boolean;
   sessionId: string | null;
   extraArgs: string[];
+  diagnosticLogFilePath?: string;
 }
 
 export function buildAntigravityArgs(input: BuildAntigravityArgsInput): string[] {
@@ -38,7 +39,12 @@ export function buildAntigravityArgs(input: BuildAntigravityArgsInput): string[]
   if (input.sandbox) args.push("--sandbox");
   args.push("--add-dir", input.cwd);
   if (input.sessionId) args.push("--conversation", input.sessionId);
-  if (input.extraArgs.length > 0) args.push(...input.extraArgs);
+  const diagnosticLogFilePath = input.diagnosticLogFilePath?.trim();
+  const extraArgs = diagnosticLogFilePath
+    ? input.extraArgs.filter((arg, index, all) => arg !== "--log-file" && all[index - 1] !== "--log-file")
+    : input.extraArgs;
+  if (extraArgs.length > 0) args.push(...extraArgs);
+  if (diagnosticLogFilePath) args.push("--log-file", diagnosticLogFilePath);
   args.push("--print", input.prompt);
   return args;
 }
@@ -56,6 +62,49 @@ export function extractLatestAntigravityResponse(stdout: string): string {
     return lines[lines.length - 1]?.trim() ?? "";
   }
   return lines.join("\n").trim();
+}
+
+export interface ResolveAntigravityFailureInput {
+  exitCode: number | null | undefined;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  latestResponse: string;
+  diagnosticLog?: string;
+}
+
+function extractAntigravityQuotaMessage(diagnosticLog: string): string | null {
+  const match = diagnosticLog.match(/RESOURCE_EXHAUSTED \(code 429\):\s*([^\n]+)/i);
+  if (!match) return null;
+  return `RESOURCE_EXHAUSTED (code 429): ${match[1]?.trim() ?? "quota exhausted"}`;
+}
+
+export function resolveAntigravityFailure(
+  input: ResolveAntigravityFailureInput,
+): { errorMessage: string; errorCode: string } | null {
+  if (input.timedOut) {
+    return { errorMessage: input.latestResponse || "Antigravity CLI timed out", errorCode: "adapter_failed" };
+  }
+  if ((input.exitCode ?? 0) !== 0) {
+    return {
+      errorMessage: extractLatestAntigravityResponse(input.stderr) || input.latestResponse || "Antigravity CLI failed",
+      errorCode: "adapter_failed",
+    };
+  }
+  if (/^Error:\s*timed out waiting for response\s*$/i.test(input.latestResponse.trim())) {
+    return { errorMessage: input.latestResponse.trim(), errorCode: "adapter_failed" };
+  }
+  if (!input.latestResponse.trim() && !input.stdout.trim() && !input.stderr.trim()) {
+    const quotaMessage = extractAntigravityQuotaMessage(input.diagnosticLog ?? "");
+    if (quotaMessage) {
+      return {
+        errorMessage: `Antigravity provider quota exhausted: ${quotaMessage}`,
+        errorCode: "provider_quota_exhausted",
+      };
+    }
+    return { errorMessage: "Antigravity CLI exited without producing a response", errorCode: "adapter_failed" };
+  }
+  return null;
 }
 
 function antigravityConversationCachePath(): string {
@@ -152,7 +201,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return asStringArray(config.args);
   })();
   const sessionId = readRuntimeSession(runtime, cwd);
-  const args = buildAntigravityArgs({ cwd, prompt, printTimeout, bypassPermissions, sandbox, sessionId, extraArgs });
+  const diagnosticLogFilePath = path.join(os.tmpdir(), `paperclip-antigravity-${runId}.log`);
+  await fs.rm(diagnosticLogFilePath, { force: true });
+  const args = buildAntigravityArgs({
+    cwd,
+    prompt,
+    printTimeout,
+    bypassPermissions,
+    sandbox,
+    sessionId,
+    extraArgs,
+    diagnosticLogFilePath,
+  });
 
   await onMeta?.({
     adapterType: "antigravity_local",
@@ -176,7 +236,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
 
   const nextSessionId = await readConversationIdForCwdFromCache(cwd);
+  let diagnosticLog = "";
+  try {
+    diagnosticLog = await fs.readFile(diagnosticLogFilePath, "utf8");
+  } catch {
+    diagnosticLog = "";
+  }
   const summary = extractLatestAntigravityResponse(child.stdout);
+  const failure = resolveAntigravityFailure({
+    exitCode: child.exitCode,
+    timedOut: child.timedOut,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    latestResponse: summary,
+    diagnosticLog,
+  });
+  await fs.rm(diagnosticLogFilePath, { force: true });
   if (nextSessionId) {
     await ctx.onSessionUpdate?.({
       sessionId: nextSessionId,
@@ -204,9 +279,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       stdout: child.stdout,
       stderr: child.stderr,
       latestResponse: summary,
+      diagnosticLogExcerpt: diagnosticLog.slice(-4000),
     },
-    ...((child.exitCode ?? 0) === 0
-      ? {}
-      : { errorMessage: extractLatestAntigravityResponse(child.stderr) || summary || "Antigravity CLI failed", errorCode: "adapter_failed" }),
+    ...(failure ?? {}),
   };
 }

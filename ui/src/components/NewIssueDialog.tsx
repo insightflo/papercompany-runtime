@@ -668,6 +668,8 @@ export function NewIssueDialog() {
       ...(selectedAssigneeAgentId ? { assigneeAgentId: selectedAssigneeAgentId } : {}),
       ...(selectedAssigneeUserId ? { assigneeUserId: selectedAssigneeUserId } : {}),
       ...(projectId ? { projectId } : {}),
+      ...(newIssueDefaults.missionId ? { missionId: newIssueDefaults.missionId } : {}),
+      ...(newIssueDefaults.parentId ? { parentId: newIssueDefaults.parentId } : {}),
       ...(projectWorkspaceId ? { projectWorkspaceId } : {}),
       ...(assigneeAdapterOverrides ? { assigneeAdapterOverrides } : {}),
       ...(executionWorkspacePolicy?.enabled ? { executionWorkspacePreference: executionWorkspaceMode } : {}),

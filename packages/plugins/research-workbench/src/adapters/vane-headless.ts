@@ -53,6 +53,15 @@ export interface VaneHeadlessAdapterOptions {
   timeoutMs?: number;
   /** Minimal HTTP client matching ctx.http.fetch signature */
   http: { fetch(url: string, init?: RequestInit): Promise<Response> };
+  /**
+   * Vane-only escape hatch for local headless backends.
+   *
+   * The plugin host HTTP client intentionally blocks loopback/private IPs for
+   * generic outbound requests. Vane headless is a repo-local backend controlled
+   * by this adapter, so localhost/private backend URLs may use direct fetch here
+   * without weakening the global plugin SSRF guard.
+   */
+  directFetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +118,7 @@ export interface VaneHeadlessAdapter {
 export function createVaneHeadlessAdapter(
   options: VaneHeadlessAdapterOptions,
 ): VaneHeadlessAdapter {
-  const { vaneBaseUrl, http } = options;
+  const { vaneBaseUrl, http, directFetch } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
   const cache = new Map<string, CacheEntry>();
 
@@ -120,7 +129,12 @@ export function createVaneHeadlessAdapter(
   }
 
   // Ensure no trailing slash for URL construction
+  const parsedBaseUrl = new URL(vaneBaseUrl);
   const baseUrl = vaneBaseUrl.replace(/\/+$/, "");
+  const isLocalVaneBackend =
+    parsedBaseUrl.hostname === "127.0.0.1" ||
+    parsedBaseUrl.hostname === "::1";
+  const fetchVane = isLocalVaneBackend && directFetch ? directFetch : http.fetch.bind(http);
 
   async function search(
     input: VaneHeadlessAdapterSearchInput,
@@ -147,7 +161,7 @@ export function createVaneHeadlessAdapter(
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await http.fetch(url, {
+      const response = await fetchVane(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

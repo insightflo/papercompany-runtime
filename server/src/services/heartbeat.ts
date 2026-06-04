@@ -64,8 +64,19 @@ import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-plann
 import {
   extractMissionOwnerDecisionFromText,
   MISSION_OWNER_DECISION_OPTIONS,
-} from "./missions.js";
+  parseMissionOwnerActionMarker,
+} from "./missions/mission-owner-recovery-events.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
+import {
+  assertMissionRuntimeAcceptsWork,
+  buildMissionIssueHandoffMarkdown,
+  completeMissionAgentRuntimeRun,
+  markMissionRuntimeBootstrapInjected,
+  persistMissionIssueHandoff,
+  updateMissionRollingStateFromHandoff,
+} from "./missions/mission-runtime-manager.js";
+import { compileMissionRunContext } from "./missions/mission-context-compiler.js";
+import { buildAssignedIssuePromptSection } from "./missions/mission-issue-envelope.js";
 import {
   buildExecutionWorkspaceAdapterConfig,
   gateProjectExecutionWorkspacePolicy,
@@ -82,6 +93,8 @@ import {
 } from "@paperclipai/adapter-utils";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
+const RUN_ACTIVITY_TOUCH_INTERVAL_MS = 15 * 1000;
+const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
@@ -242,6 +255,12 @@ function resolveHeartbeatFailureCode(error: unknown, fallback: string) {
     return (error as { code: string }).code;
   }
   return fallback;
+}
+
+const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+
+function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
+  return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
 }
 
 function refreshStepInputManifest(context: Record<string, unknown>, taskKey: string | null) {
@@ -602,28 +621,10 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-const MISSION_OWNER_ACTION_MARKER_PATTERN = /<!--\s*mission-owner-action\s*:\s*(\{[\s\S]*?\})\s*-->/i;
-
 function truncateContextText(value: string | null | undefined, max = 220) {
   const trimmed = value?.trim();
   if (!trimmed) return null;
   return trimmed.length > max ? `${trimmed.slice(0, max - 3)}...` : trimmed;
-}
-
-function parseMissionOwnerActionMarker(description: string | null | undefined) {
-  const match = description?.match(MISSION_OWNER_ACTION_MARKER_PATTERN);
-  if (!match) return null;
-  try {
-    const parsed = JSON.parse(match[1]!) as Record<string, unknown>;
-    const missionId = readNonEmptyString(parsed.missionId);
-    const sourceIssueId = readNonEmptyString(parsed.sourceIssueId);
-    const actionType = readNonEmptyString(parsed.actionType);
-    const status = readNonEmptyString(parsed.status);
-    if (!missionId || actionType !== "unblock") return null;
-    return { missionId, sourceIssueId, actionType, status };
-  } catch {
-    return null;
-  }
 }
 
 function isMissionOwnerTaskIssue(issue: {
@@ -995,7 +996,11 @@ export function shouldResetTaskSessionForWake(
   if (contextSnapshot?.forceFreshSession === true) return true;
 
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
-  if (wakeReason === "issue_assigned") return true;
+  if (
+    wakeReason === "issue_assigned" ||
+    wakeReason === "mission_unblock_action_created" ||
+    wakeReason === "mission_unblock_action_stalled"
+  ) return true;
   return false;
 }
 
@@ -1101,6 +1106,8 @@ function describeSessionResetReason(
 
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
+  if (wakeReason === "mission_unblock_action_created") return "wake reason is mission_unblock_action_created";
+  if (wakeReason === "mission_unblock_action_stalled") return "wake reason is mission_unblock_action_stalled";
   return null;
 }
 
@@ -1380,6 +1387,35 @@ function resolveNextSessionState(input: {
     displayId,
     legacySessionId,
   };
+}
+
+function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelect) {
+  const text = [run.stdoutExcerpt, run.stderrExcerpt, run.error].filter(Boolean).join("\n");
+  return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
+}
+
+function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelect) {
+  const stdout = (run.stdoutExcerpt ?? "").trim();
+  const stderr = (run.stderrExcerpt ?? "").trim();
+  const output = [stdout, stderr ? `stderr:\n${stderr}` : ""]
+    .filter((value) => value.length > 0)
+    .join("\n\n")
+    .trim();
+  const excerpt =
+    output.length > MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS
+      ? `${output.slice(output.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)}`
+      : output;
+  return [
+    "## 자동 캡처: delegated run output",
+    `- 실행 runId: \`${run.id}\``,
+    "- 감지: delegated mission issue run이 succeeded로 종료됐지만 issue lifecycle/comment가 명시적으로 마감되지 않았습니다.",
+    "- 조치: run transcript 산출물을 이 comment로 캡처하고 issue를 done으로 전이합니다.",
+    "",
+    "### Captured output",
+    "```text",
+    excerpt || "(no stdout/stderr excerpt captured)",
+    "```",
+  ].join("\n");
 }
 
 export function heartbeatService(db: Db) {
@@ -2436,6 +2472,22 @@ export function heartbeatService(db: Db) {
       return null;
     }
 
+    const missionIdForRun = readNonEmptyString(context.missionId);
+    if (missionIdForRun) {
+      try {
+        await assertMissionRuntimeAcceptsWork(db, {
+          companyId: run.companyId,
+          missionId: missionIdForRun,
+        });
+      } catch (err) {
+        await cancelRunInternal(
+          run.id,
+          err instanceof Error ? err.message : "Cancelled because mission is terminal",
+        );
+        return null;
+      }
+    }
+
     const claimedAt = new Date();
     const claimed = await db
       .update(heartbeatRuns)
@@ -2549,11 +2601,18 @@ export function heartbeatService(db: Db) {
     }
   }
 
-  async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
+  async function reapOrphanedRuns(opts?: {
+    staleThresholdMs?: number;
+    activeExecutionTimeoutMs?: number;
+    queuedStaleThresholdMs?: number;
+  }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
+    const activeExecutionTimeoutMs = opts?.activeExecutionTimeoutMs ?? 0;
+    const queuedStaleThresholdMs = opts?.queuedStaleThresholdMs ?? 0;
     const now = new Date();
 
-    // Find all runs stuck in "running" state (queued runs are legitimately waiting; resumeQueuedRuns handles them)
+    // Find all runs stuck in "running" state. Queued runs are handled below only
+    // when they have exceeded an explicit queued staleness threshold.
     const activeRuns = await db
       .select({
         run: heartbeatRuns,
@@ -2566,7 +2625,52 @@ export function heartbeatService(db: Db) {
     const reaped: string[] = [];
 
     for (const { run, adapterType } of activeRuns) {
-      if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+      const trackedProcess = runningProcesses.get(run.id) ?? null;
+      const hasActiveExecution = activeRunExecutions.has(run.id);
+      if (trackedProcess || hasActiveExecution) {
+        if (activeExecutionTimeoutMs <= 0) continue;
+        const refTime = run.startedAt ? new Date(run.startedAt).getTime() : new Date(run.updatedAt).getTime();
+        if (now.getTime() - refTime < activeExecutionTimeoutMs) continue;
+
+        if (trackedProcess) {
+          trackedProcess.child.kill("SIGTERM");
+          setTimeout(() => {
+            if (!trackedProcess.child.killed) {
+              trackedProcess.child.kill("SIGKILL");
+            }
+          }, Math.max(1, trackedProcess.graceSec) * 1000);
+          runningProcesses.delete(run.id);
+        }
+
+        const timeoutMessage = `Heartbeat execution exceeded ${Math.round(activeExecutionTimeoutMs / 1000)}s without reaching a terminal state`;
+        const timedOutRun = await setRunStatus(run.id, "timed_out", {
+          error: timeoutMessage,
+          errorCode: "execution_stale_timeout",
+          finishedAt: now,
+        });
+        await setWakeupStatus(run.wakeupRequestId, "timed_out", {
+          finishedAt: now,
+          error: timeoutMessage,
+        });
+        if (timedOutRun) {
+          await appendRunEvent(timedOutRun, await nextRunEventSeq(timedOutRun.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "error",
+            message: timeoutMessage,
+            payload: {
+              activeExecution: hasActiveExecution,
+              trackedProcess: Boolean(trackedProcess),
+              activeExecutionTimeoutMs,
+            },
+          });
+          await releaseIssueExecutionAndPromote(timedOutRun);
+        }
+        await finalizeAgentStatus(run.agentId, "timed_out");
+        await startNextQueuedRunForAgent(run.agentId);
+        reaped.push(run.id);
+        continue;
+      }
 
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
@@ -2641,6 +2745,42 @@ export function heartbeatService(db: Db) {
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
+    }
+
+    if (queuedStaleThresholdMs > 0) {
+      const queuedRuns = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.status, "queued"));
+
+      for (const run of queuedRuns) {
+        if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+        const refTime = run.createdAt ? new Date(run.createdAt).getTime() : new Date(run.updatedAt).getTime();
+        if (now.getTime() - refTime < queuedStaleThresholdMs) continue;
+
+        const staleQueuedMessage = `Queued heartbeat run exceeded ${Math.round(queuedStaleThresholdMs / 1000)}s without starting`;
+        const failedRun = await setRunStatus(run.id, "failed", {
+          error: staleQueuedMessage,
+          errorCode: "stale_queued",
+          finishedAt: now,
+        });
+        await setWakeupStatus(run.wakeupRequestId, "failed", {
+          finishedAt: now,
+          error: staleQueuedMessage,
+        });
+        if (failedRun) {
+          await appendRunEvent(failedRun, await nextRunEventSeq(failedRun.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "error",
+            message: staleQueuedMessage,
+            payload: { queuedStaleThresholdMs },
+          });
+          await releaseIssueExecutionAndPromote(failedRun);
+        }
+        await finalizeAgentStatus(run.agentId, "failed");
+        reaped.push(run.id);
+      }
     }
 
     if (reaped.length > 0) {
@@ -2803,6 +2943,7 @@ export function heartbeatService(db: Db) {
             description: issues.description,
             status: issues.status,
             priority: issues.priority,
+            parentId: issues.parentId,
             projectId: issues.projectId,
             projectWorkspaceId: issues.projectWorkspaceId,
             executionWorkspaceId: issues.executionWorkspaceId,
@@ -2810,6 +2951,7 @@ export function heartbeatService(db: Db) {
             missionId: issues.missionId,
             originKind: issues.originKind,
             originId: issues.originId,
+            requestDepth: issues.requestDepth,
             assigneeAgentId: issues.assigneeAgentId,
             assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
@@ -2890,9 +3032,48 @@ export function heartbeatService(db: Db) {
       mergedConfig,
     );
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
-    const runtimeConfig = {
+    const {
+      missionAgentRuntimeForRun,
+      missionIssueEnvelopePolicy,
+      paperclipMissionRuntime,
+    } = await compileMissionRunContext(db, {
+      companyId: agent.companyId,
+      missionId,
+      agentId: agent.id,
+      adapterType: agent.adapterType,
+      resolvedConfig,
+      workspaceId: resolvedWorkspace.workspaceId ?? null,
+      workspaceKey: resolvedWorkspace.workspaceId ?? resolvedWorkspace.cwd ?? "default",
+      currentIssueId: issueContext?.id ?? issueId ?? null,
+      runId: run.id,
+      missionSessionId,
+    });
+    if (paperclipMissionRuntime) {
+      context.paperclipMissionRuntime = paperclipMissionRuntime;
+    } else {
+      delete context.paperclipMissionRuntime;
+    }
+    const assignedTaskPromptSection = buildAssignedIssuePromptSection(issueContext);
+    const resolvedPromptTemplate = readNonEmptyString(resolvedConfig.promptTemplate);
+    const promptTemplateWithIssueTask =
+      issueContext &&
+      resolvedPromptTemplate &&
+      !resolvedPromptTemplate.includes("{{taskBody}}") &&
+      !resolvedPromptTemplate.includes("{{#taskId}}")
+        ? `${resolvedPromptTemplate}${assignedTaskPromptSection}`
+        : resolvedPromptTemplate;
+    const issueTaskAdapterConfig = issueContext
+      ? {
+          taskId: issueContext.id,
+          taskTitle: issueContext.title,
+          taskBody: issueContext.description ?? issueContext.title,
+          ...(promptTemplateWithIssueTask ? { promptTemplate: promptTemplateWithIssueTask } : {}),
+        }
+      : {};
+    let runtimeConfig: Record<string, unknown> = {
       ...resolvedConfig,
-      paperclipRuntimeSkills: runtimeSkillEntries,
+      ...issueTaskAdapterConfig,
+      ...(missionIssueEnvelopePolicy.fullContextInjection ? { paperclipRuntimeSkills: runtimeSkillEntries } : {}),
     };
     const issueRef = issueContext
       ? {
@@ -2945,20 +3126,22 @@ export function heartbeatService(db: Db) {
     } else {
       delete context.paperclipMaintenanceGuidance;
     }
-    const maintenanceDecisionContext = buildMaintenanceDecisionContext({
-      issue: issueContext
-        ? {
-            id: issueContext.id,
-            identifier: issueContext.identifier,
-            title: issueContext.title,
-            description: issueContext.description,
-            status: issueContext.status,
-            priority: issueContext.priority,
-          }
-        : null,
-      requestedStatus: readNonEmptyString(context.requestedStatus),
-      guidance: maintenanceGuidanceContext,
-    });
+    const maintenanceDecisionContext = issueContext?.missionId && !maintenanceGuidanceContext
+      ? null
+      : buildMaintenanceDecisionContext({
+          issue: issueContext
+            ? {
+                id: issueContext.id,
+                identifier: issueContext.identifier,
+                title: issueContext.title,
+                description: issueContext.description,
+                status: issueContext.status,
+                priority: issueContext.priority,
+              }
+            : null,
+          requestedStatus: readNonEmptyString(context.requestedStatus),
+          guidance: maintenanceGuidanceContext,
+        });
     if (maintenanceDecisionContext) {
       context.paperclipMaintenanceDecision = maintenanceDecisionContext;
       if (issueContext?.id) {
@@ -3221,6 +3404,34 @@ export function heartbeatService(db: Db) {
       })(),
     };
     context.paperclipWorkspaces = resolvedWorkspace.workspaceHints;
+    if (issueId) {
+      const recentIssueComments = await db
+        .select({
+          id: issueComments.id,
+          authorAgentId: issueComments.authorAgentId,
+          authorUserId: issueComments.authorUserId,
+          body: issueComments.body,
+          createdAt: issueComments.createdAt,
+        })
+        .from(issueComments)
+        .where(and(eq(issueComments.issueId, issueId), eq(issueComments.companyId, agent.companyId)))
+        .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+        .limit(5);
+      if (recentIssueComments.length > 0) {
+        context.paperclipIssueRecentComments = recentIssueComments.map((comment) => ({
+          id: comment.id,
+          authorType: comment.authorUserId ? "controller" : comment.authorAgentId ? "agent" : "unknown",
+          authorAgentId: comment.authorAgentId,
+          authorUserId: comment.authorUserId,
+          body: comment.body,
+          createdAt: comment.createdAt.toISOString(),
+        }));
+      } else {
+        delete context.paperclipIssueRecentComments;
+      }
+    } else {
+      delete context.paperclipIssueRecentComments;
+    }
     const wakeCommentId = readNonEmptyString(context.wakeCommentId);
     const wakeComment = wakeCommentId ? await issuesSvc.getComment(wakeCommentId) : null;
     const fileViews = await buildContextSafeFileViews({
@@ -3372,9 +3583,11 @@ export function heartbeatService(db: Db) {
         else stderrGuardBuffer = remaining;
         return lines.filter((line) => line.trim().length > 0);
       };
+      let lastActivityTouchMs = 0;
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
         const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
-        const ts = new Date().toISOString();
+        const now = new Date();
+        const ts = now.toISOString();
         for (const line of evaluateRuntimeGuardLines(stream, sanitizedChunk)) {
           const runtimeGuard = evaluateRuntimeBroadScanToolGuard({
             adapterType: agent.adapterType,
@@ -3397,6 +3610,13 @@ export function heartbeatService(db: Db) {
             chunk: sanitizedChunk,
             ts,
           });
+        }
+        if (now.getTime() - lastActivityTouchMs >= RUN_ACTIVITY_TOUCH_INTERVAL_MS) {
+          lastActivityTouchMs = now.getTime();
+          await db
+            .update(heartbeatRuns)
+            .set({ updatedAt: now })
+            .where(eq(heartbeatRuns.id, run.id));
         }
 
         const payloadChunk =
@@ -3521,6 +3741,15 @@ export function heartbeatService(db: Db) {
       const authToken = adapter.supportsLocalAgentJwt
         ? createLocalAgentJwt(agent.id, agent.companyId, agent.adapterType, run.id)
         : null;
+      if (authToken) {
+        runtimeConfig = {
+          ...runtimeConfig,
+          env: {
+            ...parseObject(runtimeConfig.env),
+            PAPERCLIP_API_KEY: authToken,
+          },
+        };
+      }
       if (adapter.supportsLocalAgentJwt && !authToken) {
         logger.warn(
           {
@@ -3569,9 +3798,15 @@ export function heartbeatService(db: Db) {
           { code: "manifest_broad_scan_blocked" },
         );
       }
+      if (missionAgentRuntimeForRun && missionIssueEnvelopePolicy.fullContextInjection) {
+        await markMissionRuntimeBootstrapInjected(db, missionAgentRuntimeForRun.runtime.id).catch((err) => {
+          logger.warn({ err, missionId, agentId: agent.id }, "failed to mark mission runtime bootstrap injected");
+        });
+      }
+
       const adapterResult = await adapter.execute({
         runId: run.id,
-        agent,
+        agent: { ...agent, adapterConfig: runtimeConfig },
         runtime: runtimeForAdapter,
         config: runtimeConfig,
         context,
@@ -3671,8 +3906,15 @@ export function heartbeatService(db: Db) {
 
       let outcome: "succeeded" | "failed" | "cancelled" | "timed_out";
       const latestRun = await getRun(run.id);
-      if (latestRun?.status === "cancelled") {
+      const latestTerminalRun = latestRun && isTerminalHeartbeatRunStatus(latestRun.status) ? latestRun : null;
+      if (latestTerminalRun?.status === "cancelled") {
         outcome = "cancelled";
+      } else if (latestTerminalRun?.status === "timed_out") {
+        outcome = "timed_out";
+      } else if (latestTerminalRun?.status === "failed") {
+        outcome = "failed";
+      } else if (latestTerminalRun?.status === "succeeded") {
+        outcome = "succeeded";
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
       } else if ((adapterResult.exitCode ?? 0) === 0 && !adapterResult.errorMessage) {
@@ -3820,7 +4062,7 @@ export function heartbeatService(db: Db) {
         }
       }
 
-      const finalizedRun = await setRunStatus(run.id, status, {
+      const finalizedRun = latestTerminalRun ?? await setRunStatus(run.id, status, {
         finishedAt: new Date(),
         error:
           outcome === "succeeded"
@@ -3849,22 +4091,93 @@ export function heartbeatService(db: Db) {
         logCompressed: logSummary?.compressed ?? false,
       });
 
-      await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
-        finishedAt: new Date(),
-        error: adapterResult.errorMessage ?? null,
-      });
+      if (!latestTerminalRun) {
+        await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
+          finishedAt: new Date(),
+          error: adapterResult.errorMessage ?? null,
+        });
+      }
 
       if (finalizedRun) {
-        await appendRunEvent(finalizedRun, seq++, {
-          eventType: "lifecycle",
-          stream: "system",
-          level: outcome === "succeeded" ? "info" : "error",
-          message: `run ${outcome}`,
-          payload: {
+        if (!latestTerminalRun) {
+          await appendRunEvent(finalizedRun, seq++, {
+            eventType: "lifecycle",
+            stream: "system",
+            level: outcome === "succeeded" ? "info" : "error",
+            message: `run ${outcome}`,
+            payload: {
+              status,
+              exitCode: adapterResult.exitCode,
+            },
+          });
+        }
+        if (missionAgentRuntimeForRun && missionId) {
+          const resultSummary = summarizeHeartbeatRunResultJson(adapterResult.resultJson ?? null);
+          const summaryText =
+            (typeof resultSummary?.summary === "string" ? resultSummary.summary : null) ??
+            (typeof resultSummary?.result === "string" ? resultSummary.result : null) ??
+            (typeof resultSummary?.message === "string" ? resultSummary.message : null) ??
+            (typeof resultSummary?.error === "string" ? resultSummary.error : null) ??
+            adapterResult.errorMessage ??
+            `Heartbeat run ${status}`;
+          const handoffMarkdown = buildMissionIssueHandoffMarkdown({
+            missionId,
+            issueId: issueContext?.id ?? issueId ?? null,
+            agentId: agent.id,
+            runId: finalizedRun.id,
             status,
-            exitCode: adapterResult.exitCode,
-          },
-        });
+            issueGoal: issueContext?.description ?? issueContext?.title ?? null,
+            summaryText,
+            evidenceRefs: [
+              { type: "heartbeat_run", id: finalizedRun.id, description: `Run ended with ${status}` },
+              ...(finalizedRun.logSha256 ? [{ type: "run_log", id: finalizedRun.logSha256, description: "Finalized run log sha256" }] : []),
+            ],
+          });
+          const handoff = await persistMissionIssueHandoff(db, {
+            companyId: agent.companyId,
+            missionId,
+            issueId: issueContext?.id ?? issueId ?? null,
+            agentId: agent.id,
+            runId: finalizedRun.id,
+            missionSessionId: missionSessionBinding?.session.id ?? null,
+            status,
+            handoffMarkdown,
+            handoffJson: {
+              issueGoal: issueContext?.description ?? issueContext?.title ?? undefined,
+              actionsTaken: [summaryText],
+              evidence: [
+                { type: "heartbeat_run", id: finalizedRun.id, description: `Run ended with ${status}` },
+              ],
+              importantCaveats: ["Handoff is generated from runtime result summary; verify evidence refs before relying on completion claims."],
+              stateDelta: { status, runId: finalizedRun.id },
+              recommendedNextPrompt: `Continue mission ${missionId}; reconcile handoff ${finalizedRun.id} before selecting next issue.`,
+            },
+            evidenceRefsJson: [
+              { type: "heartbeat_run", id: finalizedRun.id, description: `Run ended with ${status}` },
+            ],
+          });
+          await updateMissionRollingStateFromHandoff(db, {
+            companyId: agent.companyId,
+            missionId,
+            runId: finalizedRun.id,
+            issueId: issueContext?.id ?? issueId ?? null,
+            handoffId: handoff.id,
+            status,
+            summaryText,
+            inputTokens: normalizedUsage?.inputTokens ?? null,
+            outputTokens: normalizedUsage?.outputTokens ?? null,
+            costCents: adapterResult.costUsd == null ? null : Math.round(adapterResult.costUsd * 100),
+          });
+          await completeMissionAgentRuntimeRun(db, {
+            runtimeId: missionAgentRuntimeForRun.runtime.id,
+            status,
+            sessionId: persistedSessionIdAfter,
+            inputTokens: normalizedUsage?.inputTokens ?? null,
+            outputTokens: normalizedUsage?.outputTokens ?? null,
+            costCents: adapterResult.costUsd == null ? null : Math.round(adapterResult.costUsd * 100),
+            error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
+          });
+        }
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
       await finalizeAgentStatus(agent.id, outcome);
@@ -3906,6 +4219,16 @@ export function heartbeatService(db: Db) {
           level: "error",
           message,
         });
+        if (missionAgentRuntimeForRun) {
+          await completeMissionAgentRuntimeRun(db, {
+            runtimeId: missionAgentRuntimeForRun.runtime.id,
+            status: "failed",
+            sessionId: runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null,
+            error: message,
+          }).catch((runtimeErr) => {
+            logger.warn({ err: runtimeErr, runId, agentId: agent.id }, "failed to mark mission runtime failed");
+          });
+        }
         await releaseIssueExecutionAndPromote(failedRun);
 
         await updateRuntimeState(agent, failedRun, {
@@ -3979,6 +4302,8 @@ export function heartbeatService(db: Db) {
         .select({
           id: issues.id,
           companyId: issues.companyId,
+          missionId: issues.missionId,
+          parentId: issues.parentId,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
@@ -3988,6 +4313,53 @@ export function heartbeatService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!issue) return;
+
+      const shouldAutoCaptureMissionChildOutput =
+        run.status === "succeeded" &&
+        !!issue.missionId &&
+        !!issue.parentId &&
+        issue.assigneeAgentId === run.agentId &&
+        issue.status !== "done" &&
+        issue.status !== "cancelled" &&
+        (issue.status !== "blocked" || containsToolLimitLifecycleFailure(run));
+
+      if (shouldAutoCaptureMissionChildOutput) {
+        const now = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "done",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: buildMissionChildRunOutputComment(run),
+        });
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.lifecycle_gap_auto_completed",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: issue.status,
+            nextStatus: "done",
+            reason: "successful_mission_child_run_output_captured",
+          },
+        });
+        return null;
+      }
 
       if (
         run.status === "succeeded" &&
@@ -4195,8 +4567,24 @@ export function heartbeatService(db: Db) {
     });
     const issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
 
-    const agent = await getAgent(agentId);
+    let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+
+    if (reason === "retry_failed_run" && issueId) {
+      const currentIssueAssignee = await db
+        .select({ assigneeAgentId: issues.assigneeAgentId })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
+        .then((rows) => rows[0]?.assigneeAgentId ?? null);
+
+      if (currentIssueAssignee && currentIssueAssignee !== agentId) {
+        const assigneeAgent = await getAgent(currentIssueAssignee);
+        if (assigneeAgent && assigneeAgent.companyId === agent.companyId) {
+          agentId = currentIssueAssignee;
+          agent = assigneeAgent;
+        }
+      }
+    }
 
     const writeSkippedRequest = async (skipReason: string) => {
       await db.insert(agentWakeupRequests).values({
@@ -4221,6 +4609,29 @@ export function heartbeatService(db: Db) {
         .from(issues)
         .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
         .then((rows) => rows[0]?.projectId ?? null);
+    }
+
+    const missionIdForWake =
+      readNonEmptyString(enrichedContextSnapshot.missionId) ??
+      (issueId
+        ? await db
+            .select({ missionId: issues.missionId })
+            .from(issues)
+            .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
+            .then((rows) => rows[0]?.missionId ?? null)
+        : null);
+    if (missionIdForWake) {
+      try {
+        await assertMissionRuntimeAcceptsWork(db, {
+          companyId: agent.companyId,
+          missionId: missionIdForWake,
+        });
+      } catch (err) {
+        await writeSkippedRequest("mission.terminal");
+        throw conflict(err instanceof Error ? err.message : "Mission is terminal", {
+          missionId: missionIdForWake,
+        });
+      }
     }
 
     const budgetBlock = await budgets.getInvocationBlock(agent.companyId, agentId, {

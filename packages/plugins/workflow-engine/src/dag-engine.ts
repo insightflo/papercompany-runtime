@@ -48,6 +48,11 @@ export interface NextStepsResult {
   isWorkflowComplete: boolean;
 }
 
+export interface WorkflowLaunchabilityResult {
+  valid: boolean;
+  errors: string[];
+}
+
 function getNormalTriggerSteps(steps: WorkflowStep[]): WorkflowStep[] {
   return steps.filter((step) => step.triggerOn !== "escalation");
 }
@@ -121,6 +126,32 @@ export function getWorkflowLaunchSteps(
   }
 
   return steps.filter((step) => step.triggerOn !== "escalation" && step.dependsOn.length === 0);
+}
+
+export function validateWorkflowLaunchability(
+  definition: WorkflowDefinitionExecutionShape,
+): WorkflowLaunchabilityResult {
+  const steps = Array.isArray(definition.steps) ? definition.steps : [];
+  const dagValidation = validateDag(steps);
+  const errors = [...dagValidation.errors];
+  const normalSteps = getNormalTriggerSteps(steps);
+
+  if (normalSteps.length === 0) {
+    errors.push("Workflow has no normal steps to launch.");
+  }
+
+  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(definition);
+  const launchSteps = getWorkflowLaunchSteps(steps, { dynamicOwnerPlan })
+    .filter((step) => step.triggerOn !== "escalation" && step.dependsOn.length === 0);
+
+  if (normalSteps.length > 0 && launchSteps.length === 0) {
+    errors.push("Workflow has no activatable root step. At least one normal step must have no dependencies.");
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
 }
 
 export function validateDag(steps: WorkflowStep[]): DagValidationResult {

@@ -63,6 +63,7 @@ export async function buildMissionSupervisionContext(
       .select({ issueId: issueComments.issueId, body: issueComments.body })
       .from(issueComments)
       .where(inArray(issueComments.issueId, missionIssueIds))
+      .orderBy(asc(issueComments.createdAt))
     : [];
   const commentsByIssueId = new Map<string, string[]>();
   for (const comment of issueCommentRows) {

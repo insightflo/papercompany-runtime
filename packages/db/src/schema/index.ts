@@ -62,6 +62,19 @@ export { missions } from "./missions.js";
 export { missionPlanArtifacts } from "./mission_plan_artifacts.js";
 export { missionAgents } from "./mission_agents.js";
 export { missionSessions } from "./mission_sessions.js";
+export {
+  missionIssueHandoffs,
+  type MissionIssueHandoffEvidenceRef,
+  type MissionIssueHandoffJson,
+} from "./mission_issue_handoffs.js";
+export {
+  missionRollingState,
+  type MissionRollingStateJson,
+} from "./mission_rolling_state.js";
+export {
+  missionAgentRuntimes,
+  type MissionAgentRuntimeStateJson,
+} from "./mission_agent_runtimes.js";
 export { workflowDefinitions } from "./workflow_definitions.js";
 export { workflowRuns } from "./workflow_runs.js";
 export { workflowStepRuns } from "./workflow_step_runs.js";

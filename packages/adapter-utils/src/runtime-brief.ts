@@ -14,6 +14,68 @@ function asNumber(value: unknown) {
   return typeof value === "number" && isFinite(value) ? value : 0;
 }
 
+function asStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+}
+
+function truncateBriefLine(value: string, max = 260) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized;
+}
+
+function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null) {
+  if (!contract || Object.keys(contract).length === 0) return null;
+
+  const tools = Array.isArray(contract.tools)
+    ? contract.tools.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const toolNames = [
+    ...asStringArray(contract.toolNames),
+    ...tools.map((tool) => asString(tool.name)).filter((value): value is string => value !== null),
+  ].filter((value, index, all) => all.indexOf(value) === index);
+  if (toolNames.length === 0 && !asString(contract.stepName) && !asString(contract.stepId)) return null;
+
+  const toolLines = tools.length > 0
+    ? tools.slice(0, 8).map((tool) => {
+        const name = asString(tool.name) ?? "unknown-tool";
+        const description = asString(tool.description);
+        return `- Tool: ${name}${description ? ` — ${truncateBriefLine(description, 180)}` : ""}`;
+      })
+    : (toolNames.length > 0 ? [`- Tools: ${toolNames.join(", ")}`] : []);
+
+  return joinPromptSections([
+    "Workflow tool-call contract:",
+    asString(contract.stepName) ? `Step: ${asString(contract.stepName)}` : asString(contract.stepId) ? `Step: ${asString(contract.stepId)}` : null,
+    toolNames.length > 0 ? `Allowed workflow tools: ${toolNames.join(", ")}` : null,
+    ...toolLines,
+    'Exact generic executor invocation shape: {"toolName":"<registered-tool-name>","args":{...}}',
+  ], "\n");
+}
+
+function buildRecentIssueCommentsBrief(value: unknown) {
+  const comments = Array.isArray(value)
+    ? value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const lines = comments
+    .slice(0, 5)
+    .map((comment) => {
+      const body = asString(comment.body ?? comment.content ?? comment.text);
+      if (!body) return null;
+      const authorType = asString(comment.authorType) ?? (asString(comment.authorUserId) ? "controller" : asString(comment.authorAgentId) ? "agent" : "unknown");
+      const commentId = asString(comment.id);
+      return `- ${authorType}${commentId ? `/${commentId}` : ""}: ${truncateBriefLine(body)}`;
+    })
+    .filter((line): line is string => line !== null);
+  if (lines.length === 0) return null;
+
+  return joinPromptSections([
+    "Recent issue comments:",
+    ...lines,
+  ], "\n");
+}
+
 function summarizeMarkdownHandoff(markdown: string | null) {
   const trimmed = markdown?.trim();
   if (!trimmed) return null;
@@ -48,6 +110,11 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     `- Planning dossier gaps: ${asNumber(missionOwnerPlanningContext.planningDossierGapCount)} total, ${asNumber(missionOwnerPlanningContext.planningDossierSevereGapCount)} severe/blocking-or-research gaps.`,
     "Dynamic mission planning protocol:",
     "Dynamic workflow means reducing uncertainty with evidence gates, not adding subagents or parallelism by default.",
+    "Do not use the local agent runtime's internal subagent/delegate-task tools for mission delegation. Paperclip child issues are the delegation mechanism; create bounded child issues through the Paperclip API only.",
+    "Active-plan first: complete the high-level source/synthesis/QA skeleton and structured plan decision before treating delegated child issues as runnable work.",
+    "Do not create synthesis, QA/validation, or director-gate issues until their upstream source or synthesis artifact exists. Keep those future gates in the active plan/commentary instead of creating blocked placeholder issues.",
+    "Only source-discovery/source-dossier child issues may be runnable during the first delegated execution wave, and keep that first wave to at most 6 child issues for one parent before reviewing upstream output.",
+    "If you are assigned one delegated child issue, do not create further child issues from it; complete the assigned artifact or comment with the blocker/evidence gap.",
     "Mission Invariant: name the product, safety, and operating principles that must remain true across the mission.",
     "Scope Hypothesis: state what this execution slice proves, disproves, or unblocks.",
     "Execution Slice: list in-scope and out-of-scope work, including side-effect, push, deploy, and external publish approval boundaries.",
@@ -115,6 +182,8 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
 export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const manifest = asRecord(context.paperclipStepInputManifest);
   const handoff = asRecord(context.paperclipSessionHandoff);
+  const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
+  const recentIssueCommentsLine = buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
 
   const taskKey = asString(manifest?.taskKey ?? context.taskKey);
   const issueId = asString(manifest?.issueId ?? context.issueId);
@@ -327,6 +396,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanSelectedUnitsLine,
     missionPlanRulesLine,
     missionOwnerPlanningContextLine,
+    workflowToolContractLine,
+    recentIssueCommentsLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

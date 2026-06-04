@@ -33,6 +33,7 @@ describe("buildPaperclipEnv", () => {
     const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
 
     expect(env.PAPERCLIP_API_URL).toBe("http://localhost:4100");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://localhost:4100/api");
   });
 
   it("uses runtime listen host/port when explicit URL is not set", () => {
@@ -44,6 +45,7 @@ describe("buildPaperclipEnv", () => {
     const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
 
     expect(env.PAPERCLIP_API_URL).toBe("http://localhost:3101");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://localhost:3101/api");
   });
 
   it("formats IPv6 hosts safely in fallback URL generation", () => {
@@ -54,6 +56,7 @@ describe("buildPaperclipEnv", () => {
     const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
 
     expect(env.PAPERCLIP_API_URL).toBe("http://[::1]:3101");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://[::1]:3101/api");
   });
 
   it("defaults plugin worker API URL to the Papercompany dev server port", () => {
@@ -66,5 +69,15 @@ describe("buildPaperclipEnv", () => {
     const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
 
     expect(env.PAPERCLIP_API_URL).toBe("http://localhost:3200");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://localhost:3200/api");
+  });
+
+  it("does not duplicate /api when explicit PAPERCLIP_API_URL already points at the API base", () => {
+    process.env.PAPERCLIP_API_URL = "http://localhost:4100/api/";
+
+    const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
+
+    expect(env.PAPERCLIP_API_URL).toBe("http://localhost:4100/api/");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://localhost:4100/api");
   });
 });

@@ -41,6 +41,7 @@ const issueFields = {
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
   goalId: z.string().uuid().optional().nullable(),
+  missionId: z.string().uuid().optional().nullable(),
   parentId: z.string().uuid().optional().nullable(),
   title: z.string().min(1),
   description: z.string().optional().nullable(),

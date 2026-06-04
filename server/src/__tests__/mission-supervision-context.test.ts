@@ -162,4 +162,81 @@ describeEmbeddedPostgres("mission supervision context", () => {
     ]));
     expect(context.governanceThread?.events.some((event) => event.companyId === otherCompanyId)).toBe(false);
   });
+
+  it("orders commentsByIssueId values by createdAt ascending for each issue", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Comment Ordering Context",
+      issuePrefix: `CO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Comment ordering mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      title: "Comment ordering issue",
+      status: "blocked",
+      priority: "medium",
+      assigneeAgentId: ownerAgentId,
+      issueNumber: 2,
+    });
+    await db.insert(issueComments).values([
+      {
+        id: randomUUID(),
+        companyId,
+        issueId,
+        authorAgentId: ownerAgentId,
+        body: "second comment",
+        createdAt: new Date(now.getTime() + 2_000),
+      },
+      {
+        id: randomUUID(),
+        companyId,
+        issueId,
+        authorAgentId: ownerAgentId,
+        body: "first comment",
+        createdAt: now,
+      },
+      {
+        id: randomUUID(),
+        companyId,
+        issueId,
+        authorAgentId: ownerAgentId,
+        body: "third comment",
+        createdAt: new Date(now.getTime() + 5_000),
+      },
+    ]);
+
+    const context = await buildMissionSupervisionContext(db, { missionId });
+
+    expect(context.commentsByIssueId.get(issueId)).toEqual([
+      "first comment",
+      "second comment",
+      "third comment",
+    ]);
+  });
 });

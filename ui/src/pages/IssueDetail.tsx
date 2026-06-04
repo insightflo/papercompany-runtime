@@ -9,6 +9,7 @@ import { authApi } from "../api/auth";
 import { projectsApi } from "../api/projects";
 import { useCompany } from "../context/CompanyContext";
 import { usePanel } from "../context/PanelContext";
+import { useDialog } from "../context/DialogContext";
 import { useToast } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { assigneeValueFromSelection, suggestedCommentAssigneeValue } from "../lib/assignees";
@@ -48,6 +49,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   Paperclip,
+  Plus,
   Repeat,
   SlidersHorizontal,
   Trash2,
@@ -197,6 +199,7 @@ export function IssueDetail() {
   const { issueId } = useParams<{ issueId: string }>();
   const { selectedCompanyId } = useCompany();
   const { openPanel, closePanel, panelVisible, setPanelVisible } = usePanel();
+  const { openNewIssue } = useDialog();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const navigate = useNavigate();

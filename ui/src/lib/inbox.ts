@@ -90,6 +90,37 @@ export function getLatestFailedRunsByAgent(runs: HeartbeatRun[]): HeartbeatRun[]
   return Array.from(latestByAgent.values()).filter((run) => FAILED_RUN_STATUSES.has(run.status));
 }
 
+export function readIssueIdFromRun(run: HeartbeatRun): string | null {
+  const context = run.contextSnapshot;
+  if (!context) return null;
+
+  const issueId = context["issueId"];
+  if (typeof issueId === "string" && issueId.length > 0) return issueId;
+
+  const taskId = context["taskId"];
+  if (typeof taskId === "string" && taskId.length > 0) return taskId;
+
+  return null;
+}
+
+const RESOLVED_ISSUE_STATUSES = new Set(["done", "cancelled", "completed"]);
+
+export function getUnresolvedLatestFailedRunsByAgent(
+  runs: HeartbeatRun[],
+  issues: Issue[] = [],
+): HeartbeatRun[] {
+  const issueById = new Map<string, Issue>();
+  for (const issue of issues) issueById.set(issue.id, issue);
+
+  return getLatestFailedRunsByAgent(runs).filter((run) => {
+    const issueId = readIssueIdFromRun(run);
+    if (!issueId) return true;
+    const issue = issueById.get(issueId);
+    if (!issue) return true;
+    return !RESOLVED_ISSUE_STATUSES.has(issue.status);
+  });
+}
+
 export function normalizeTimestamp(value: string | Date | null | undefined): number {
   if (!value) return 0;
   const timestamp = new Date(value).getTime();
@@ -212,6 +243,7 @@ export function computeInboxBadgeData({
   joinRequests,
   dashboard,
   heartbeatRuns,
+  issues = [],
   unreadIssues,
   dismissed,
 }: {
@@ -219,13 +251,14 @@ export function computeInboxBadgeData({
   joinRequests: JoinRequest[];
   dashboard: DashboardSummary | undefined;
   heartbeatRuns: HeartbeatRun[];
+  issues?: Issue[];
   unreadIssues: Issue[];
   dismissed: Set<string>;
 }): InboxBadgeData {
   const actionableApprovals = approvals.filter((approval) =>
     ACTIONABLE_APPROVAL_STATUSES.has(approval.status),
   ).length;
-  const failedRuns = getLatestFailedRunsByAgent(heartbeatRuns).filter(
+  const failedRuns = getUnresolvedLatestFailedRunsByAgent(heartbeatRuns, issues).filter(
     (run) => !dismissed.has(`run:${run.id}`),
   ).length;
   const unreadTouchedIssues = unreadIssues.length;

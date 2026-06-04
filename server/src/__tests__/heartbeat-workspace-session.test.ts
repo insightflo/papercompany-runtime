@@ -127,6 +127,11 @@ describe("shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({ wakeReason: "issue_assigned" })).toBe(true);
   });
 
+  it("resets session context on mission recovery owner-action wakes", () => {
+    expect(shouldResetTaskSessionForWake({ wakeReason: "mission_unblock_action_created" })).toBe(true);
+    expect(shouldResetTaskSessionForWake({ wakeReason: "mission_unblock_action_stalled" })).toBe(true);
+  });
+
   it("preserves session context on timer heartbeats", () => {
     expect(shouldResetTaskSessionForWake({ wakeSource: "timer" })).toBe(false);
   });

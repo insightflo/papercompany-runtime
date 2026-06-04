@@ -1066,6 +1066,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (!(await assertAgentRunCheckoutOwnership(req, res, existing))) return;
 
     const actor = getActorInfo(req);
+    if (req.body.reopen === true && existing.status === "cancelled") {
+      res.status(409).json({ error: "Cancelled issues cannot be reopened by comment; create a new issue or recovery issue instead" });
+      return;
+    }
+
     const isClosed = existing.status === "done" || existing.status === "cancelled";
     const { comment: commentBody, reopen: reopenRequested, hiddenAt: hiddenAtRaw, ...updateFields } = req.body;
     if (hiddenAtRaw !== undefined) {
@@ -1476,6 +1481,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const actor = getActorInfo(req);
     const reopenRequested = req.body.reopen === true;
     const interruptRequested = req.body.interrupt === true;
+    if (reopenRequested && issue.status === "cancelled") {
+      res.status(409).json({ error: "Cancelled issues cannot be reopened by comment; create a new issue or recovery issue instead" });
+      return;
+    }
+
     const isClosed = issue.status === "done" || issue.status === "cancelled";
     let reopened = false;
     let reopenFromStatus: string | null = null;

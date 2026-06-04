@@ -514,12 +514,12 @@ export async function createApp(
   auditLogCleanup.start();
 
   const missionOwnerSupervisionMonitor = createMissionOwnerSupervisionMonitor(db, {
-    onOwnerActionCreated: ({ mission, issue, sourceIssue }) => {
+    onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
       if (!issue.assigneeAgentId) return null;
       return heartbeat.wakeup(issue.assigneeAgentId, {
         source: "assignment",
         triggerDetail: "system",
-        reason: "mission_unblock_action_created",
+        reason: reason ?? "mission_unblock_action_created",
         payload: {
           issueId: issue.id,
           missionId: mission.id,
@@ -536,6 +536,52 @@ export async function createApp(
         },
       });
     },
+    onOwnerDecisionRetrySourceIssueApplied: ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(targetAgentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "mission_owner_decision_retry_source_issue",
+      idempotencyKey,
+      payload: {
+        issueId: sourceIssue.id,
+        missionId: mission.id,
+        mutation: "mission_owner_decision_retry_source_issue",
+        ownerActionIssueId: ownerActionIssue.id,
+        wakeCommentId,
+      },
+      requestedByActorType: "system",
+      requestedByActorId: "mission-owner-supervision-monitor",
+      contextSnapshot: {
+        issueId: sourceIssue.id,
+        missionId: mission.id,
+        source: "mission_owner_decision_retry_source_issue",
+        ownerActionIssueId: ownerActionIssue.id,
+        wakeCommentId,
+      },
+    }),
+    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, targetAgentId, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(targetAgentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "mission_stale_source_issue_wakeup",
+      idempotencyKey,
+      payload: {
+        issueId: sourceIssue.id,
+        missionId: mission.id,
+        mutation: "mission_stale_source_issue_wakeup",
+        failedRunId: failedRun.id,
+        failedRunStatus: failedRun.status,
+        wakeCommentId,
+      },
+      requestedByActorType: "system",
+      requestedByActorId: "mission-owner-supervision-monitor",
+      contextSnapshot: {
+        issueId: sourceIssue.id,
+        missionId: mission.id,
+        source: "mission_stale_source_issue_wakeup",
+        failedRunId: failedRun.id,
+        failedRunStatus: failedRun.status,
+        wakeCommentId,
+      },
+    }),
   });
   missionOwnerSupervisionMonitor.start();
   process.once("exit", () => missionOwnerSupervisionMonitor.stop());

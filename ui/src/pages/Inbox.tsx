@@ -43,8 +43,9 @@ import {
   ACTIONABLE_APPROVAL_STATUSES,
   getApprovalsForTab,
   getInboxWorkItems,
-  getLatestFailedRunsByAgent,
+  getUnresolvedLatestFailedRunsByAgent,
   getRecentTouchedIssues,
+  readIssueIdFromRun,
   InboxApprovalFilter,
   saveLastInboxTab,
   shouldShowInboxSection,
@@ -76,19 +77,6 @@ function runFailureMessage(run: HeartbeatRun): string {
 
 function approvalStatusLabel(status: Approval["status"]): string {
   return status.replaceAll("_", " ");
-}
-
-function readIssueIdFromRun(run: HeartbeatRun): string | null {
-  const context = run.contextSnapshot;
-  if (!context) return null;
-
-  const issueId = context["issueId"];
-  if (typeof issueId === "string" && issueId.length > 0) return issueId;
-
-  const taskId = context["taskId"];
-  if (typeof taskId === "string" && taskId.length > 0) return taskId;
-
-  return null;
 }
 
 function FailedRunInboxRow({
@@ -400,8 +388,11 @@ export function Inbox() {
   }, [issues]);
 
   const failedRuns = useMemo(
-    () => getLatestFailedRunsByAgent(heartbeatRuns ?? []).filter((r) => !dismissed.has(`run:${r.id}`)),
-    [heartbeatRuns, dismissed],
+    () =>
+      getUnresolvedLatestFailedRunsByAgent(heartbeatRuns ?? [], issues ?? []).filter(
+        (r) => !dismissed.has(`run:${r.id}`),
+      ),
+    [heartbeatRuns, issues, dismissed],
   );
   const liveIssueIds = useMemo(() => {
     const ids = new Set<string>();
@@ -525,7 +516,10 @@ export function Inbox() {
     onSuccess: ({ newRun, originalRun }) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(originalRun.companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(originalRun.companyId, originalRun.agentId) });
-      navigate(`/agents/${originalRun.agentId}/runs/${newRun.id}`);
+      if (newRun.agentId !== originalRun.agentId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(originalRun.companyId, newRun.agentId) });
+      }
+      navigate(`/agents/${newRun.agentId}/runs/${newRun.id}`);
     },
     onSettled: (_data, _error, run) => {
       if (!run) return;

@@ -13,6 +13,7 @@ export interface RunProcessResult {
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
+  idleTimedOut?: boolean;
   stdout: string;
   stderr: string;
   pid: number | null;
@@ -188,6 +189,10 @@ export function redactEnvForLogs(env: Record<string, string>): Record<string, st
 }
 
 export function buildPaperclipEnv(agent: { id: string; companyId: string }): Record<string, string> {
+  const apiBaseUrl = (rawUrl: string): string => {
+    const trimmed = rawUrl.replace(/\/+$/, "");
+    return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+  };
   const resolveHostForUrl = (rawHost: string): string => {
     const host = rawHost.trim();
     if (!host || host === "0.0.0.0" || host === "::") return "localhost";
@@ -204,6 +209,7 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
   const apiUrl = process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`;
   vars.PAPERCLIP_API_URL = apiUrl;
+  vars.PAPERCLIP_API_BASE_URL = apiBaseUrl(apiUrl);
   return vars;
 }
 
@@ -837,6 +843,7 @@ export async function runChildProcess(
     cwd: string;
     env: Record<string, string>;
     timeoutSec: number;
+    idleTimeoutSec?: number;
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     onLogError?: (err: unknown, runId: string, message: string) => void;
@@ -890,10 +897,20 @@ export async function runChildProcess(
         runningProcesses.set(runId, { child, graceSec: opts.graceSec });
 
         let timedOut = false;
+        let idleTimedOut = false;
         let stdout = "";
         let stderr = "";
         let logError: Error | null = null;
         let logChain: Promise<void> = Promise.resolve();
+
+        const terminateChild = () => {
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (!child.killed) {
+              child.kill("SIGKILL");
+            }
+          }, Math.max(1, opts.graceSec) * 1000);
+        };
 
         const handleLogFailure = (err: unknown, stream: "stdout" | "stderr") => {
           onLogError(err, runId, `failed to append ${stream} log chunk`);
@@ -914,16 +931,30 @@ export async function runChildProcess(
           opts.timeoutSec > 0
             ? setTimeout(() => {
                 timedOut = true;
-                child.kill("SIGTERM");
-                setTimeout(() => {
-                  if (!child.killed) {
-                    child.kill("SIGKILL");
-                  }
-                }, Math.max(1, opts.graceSec) * 1000);
+                terminateChild();
               }, opts.timeoutSec * 1000)
             : null;
 
+        const idleTimeoutSec = opts.idleTimeoutSec ?? 0;
+        let idleTimeout: NodeJS.Timeout | null = null;
+        const refreshIdleTimeout = () => {
+          if (idleTimeout) clearTimeout(idleTimeout);
+          if (idleTimeoutSec <= 0) return;
+          idleTimeout = setTimeout(() => {
+            idleTimedOut = true;
+            timedOut = true;
+            const text = `[paperclip] No process output for ${idleTimeoutSec}s; terminating child process.\n`;
+            stderr = appendWithCap(stderr, text);
+            logChain = logChain
+              .then(() => opts.onLog("stderr", text))
+              .catch((err) => handleLogFailure(err, "stderr"));
+            terminateChild();
+          }, idleTimeoutSec * 1000);
+        };
+        refreshIdleTimeout();
+
         child.stdout?.on("data", (chunk: unknown) => {
+          refreshIdleTimeout();
           const text = String(chunk);
           stdout = appendWithCap(stdout, text);
           logChain = logChain
@@ -932,6 +963,7 @@ export async function runChildProcess(
         });
 
         child.stderr?.on("data", (chunk: unknown) => {
+          refreshIdleTimeout();
           const text = String(chunk);
           stderr = appendWithCap(stderr, text);
           logChain = logChain
@@ -941,6 +973,7 @@ export async function runChildProcess(
 
         child.on("error", (err: Error) => {
           if (timeout) clearTimeout(timeout);
+          if (idleTimeout) clearTimeout(idleTimeout);
           runningProcesses.delete(runId);
           const errno = (err as NodeJS.ErrnoException).code;
           const pathValue = mergedEnv.PATH ?? mergedEnv.Path ?? "";
@@ -953,6 +986,7 @@ export async function runChildProcess(
 
         child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
           if (timeout) clearTimeout(timeout);
+          if (idleTimeout) clearTimeout(idleTimeout);
           runningProcesses.delete(runId);
           void logChain.finally(() => {
             if (logError) {
@@ -963,6 +997,7 @@ export async function runChildProcess(
               exitCode: code,
               signal,
               timedOut,
+              idleTimedOut,
               stdout,
               stderr,
               pid: child.pid ?? null,

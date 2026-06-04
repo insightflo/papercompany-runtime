@@ -70,7 +70,7 @@ function createApp() {
   return app;
 }
 
-function makeIssue(status: "todo" | "done") {
+function makeIssue(status: "todo" | "done" | "cancelled") {
   return {
     id: "11111111-1111-4111-8111-111111111111",
     companyId: "company-1",
@@ -156,5 +156,31 @@ describe("issue comment reopen routes", () => {
       issueId: "11111111-1111-4111-8111-111111111111",
       status: "todo",
     });
+  });
+
+  it("does not reopen cancelled issues via the PATCH comment path", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("cancelled"));
+
+    const res = await request(createApp())
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ comment: "resume", reopen: true });
+
+    expect(res.status).toBe(409);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not reopen cancelled issues via the comment route", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("cancelled"));
+
+    const res = await request(createApp())
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "resume", reopen: true });
+
+    expect(res.status).toBe(409);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 });

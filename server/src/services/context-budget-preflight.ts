@@ -318,6 +318,10 @@ function buildEstimatedPaperclipEnv(input: {
 }
 
 function buildBasePaperclipEnv(agent: { id: string; companyId: string }) {
+  const apiBaseUrl = (rawUrl: string) => {
+    const trimmed = rawUrl.replace(/\/+$/, "");
+    return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+  };
   const resolveHostForUrl = (rawHost: string) => {
     const host = rawHost.trim();
     if (!host || host === "0.0.0.0" || host === "::") return "localhost";
@@ -329,9 +333,11 @@ function buildBasePaperclipEnv(agent: { id: string; companyId: string }) {
     process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
   );
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100";
+  const apiUrl = process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`;
   return {
     PAPERCLIP_AGENT_ID: agent.id,
     PAPERCLIP_COMPANY_ID: agent.companyId,
-    PAPERCLIP_API_URL: process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`,
+    PAPERCLIP_API_URL: apiUrl,
+    PAPERCLIP_API_BASE_URL: apiBaseUrl(apiUrl),
   };
 }

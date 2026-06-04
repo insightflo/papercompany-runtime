@@ -34,10 +34,11 @@ import {
 } from "@paperclipai/db";
 
 const executeSpy = vi.fn();
+const mockedAdapterOptions = vi.hoisted(() => ({ supportsLocalAgentJwt: false }));
 
 vi.mock("../adapters/index.js", () => ({
   getServerAdapter: vi.fn(() => ({
-    supportsLocalAgentJwt: false,
+    supportsLocalAgentJwt: mockedAdapterOptions.supportsLocalAgentJwt,
     execute: executeSpy,
   })),
   runningProcesses: new Map(),
@@ -121,6 +122,21 @@ async function waitForRunTerminal(heartbeat: ReturnType<typeof heartbeatService>
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for run ${runId} to finish`);
+}
+
+async function waitForIssueStatus(
+  db: ReturnType<typeof createDb>,
+  issueId: string,
+  predicate: (issue: typeof issues.$inferSelect) => boolean,
+) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    if (issue && predicate(issue)) return issue;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+  throw new Error(`Timed out waiting for issue ${issueId}; latest status=${issue?.status ?? "missing"}`);
 }
 
 async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
@@ -237,6 +253,11 @@ describe("heartbeat context budget preflight", () => {
 
   afterEach(async () => {
     executeSpy.mockReset();
+    mockedAdapterOptions.supportsLocalAgentJwt = false;
+    delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    delete process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS;
+    delete process.env.PAPERCLIP_AGENT_JWT_ISSUER;
+    delete process.env.PAPERCLIP_AGENT_JWT_AUDIENCE;
     await new Promise((resolve) => setTimeout(resolve, 150));
     await db.delete(agentTaskSessions);
     await cleanupHeartbeatRunRecords(db);
@@ -385,6 +406,226 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
+  it("injects the checked-out issue task into adapter config even when the agent uses a custom prompt template", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    let invocationConfig: Record<string, unknown> | undefined;
+    let invocationAgentConfig: Record<string, unknown> | undefined;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Custom Prompt Hermes Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "hermes_local",
+      adapterConfig: { promptTemplate: "Route research requests only." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "PAP-TASK",
+      title: "Plan today Tech Scout run",
+      description: "Create the concrete source plan and first research request for today.",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ config, agent }) => {
+      invocationConfig = structuredClone(config) as Record<string, unknown>;
+      invocationAgentConfig = structuredClone(agent.adapterConfig) as Record<string, unknown>;
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationAgentConfig).toEqual(expect.objectContaining(invocationConfig ?? {}));
+    expect(invocationConfig).toEqual(
+      expect.objectContaining({
+        promptTemplate: expect.stringContaining("## Assigned Task"),
+        taskId: issueId,
+        taskTitle: "Plan today Tech Scout run",
+        taskBody: "Create the concrete source plan and first research request for today.",
+      }),
+    );
+    const injectedPromptTemplate = String(invocationConfig?.promptTemplate);
+    expect(injectedPromptTemplate).toContain(`Issue ID: ${issueId}`);
+    expect(injectedPromptTemplate).toContain("Title: Plan today Tech Scout run");
+    expect(injectedPromptTemplate).toContain("Create the concrete source plan and first research request for today.");
+    expect(injectedPromptTemplate).not.toContain("{{taskId}}");
+    expect(injectedPromptTemplate).not.toContain("{{#taskId}}");
+    expect(injectedPromptTemplate).toContain("Use Paperclip API env vars for lifecycle updates or evidence/blocker comments when needed.");
+    expect(injectedPromptTemplate).toContain("Mark this issue done after its scoped evidence is posted");
+  });
+
+  it("injects a direct execution contract for delegated mission child issues", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    let invocationConfig: Record<string, unknown> | undefined;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Domain Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "hermes_local",
+      adapterConfig: {
+        promptTemplate: "For broad work, create bounded child issues with parentId and goalId where available.",
+      },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Mission child prompt contract",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      missionId,
+      identifier: "PAP-PLAN",
+      title: "Mission plan",
+      description: "Create the first execution wave.",
+      status: "done",
+      assigneeAgentId: agentId,
+      originKind: "mission_main_executor_plan",
+    });
+    await db.insert(issues).values({
+      id: childIssueId,
+      companyId,
+      missionId,
+      parentId: parentIssueId,
+      identifier: "PAP-SOURCE",
+      title: "Source dossier",
+      description: "Post a source-backed issue comment. Do not produce HTML.",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "director_plan_source",
+      requestDepth: 1,
+    });
+
+    executeSpy.mockImplementation(async ({ config }) => {
+      invocationConfig = structuredClone(config) as Record<string, unknown>;
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, childIssueId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${childIssueId}`, issueId: childIssueId, missionId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    const injectedPromptTemplate = String(invocationConfig?.promptTemplate);
+    expect(injectedPromptTemplate).toContain("## Mission Child Issue Contract");
+    expect(injectedPromptTemplate).toContain("This is a bounded mission child issue.");
+    expect(injectedPromptTemplate).toContain("Work only this issue's scoped deliverable.");
+    expect(injectedPromptTemplate).toContain("Do not create downstream, sibling, recovery, QA, synthesis, validator, or director-gate work unless this issue explicitly asks for it.");
+    expect(injectedPromptTemplate).toContain("Treat the mission final output as mission context unless this issue explicitly asks you to create it.");
+  });
+
+  it("injects local agent JWT as PAPERCLIP_API_KEY for adapters that support local agent auth", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    let invocationConfig: Record<string, unknown> | undefined;
+    let invocationAgentConfig: Record<string, unknown> | undefined;
+
+    mockedAdapterOptions.supportsLocalAgentJwt = true;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "test-local-agent-jwt-secret";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Hermes API Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "hermes_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "PAP-AUTH",
+      title: "Finalize through Paperclip API",
+      description: "Use Paperclip API to comment and complete this issue.",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ config, agent, authToken }) => {
+      invocationConfig = structuredClone(config) as Record<string, unknown>;
+      invocationAgentConfig = structuredClone(agent.adapterConfig) as Record<string, unknown>;
+      expect(authToken).toEqual(expect.any(String));
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    const configEnv = invocationConfig?.env as Record<string, unknown> | undefined;
+    const agentEnv = invocationAgentConfig?.env as Record<string, unknown> | undefined;
+    expect(configEnv?.PAPERCLIP_API_KEY).toEqual(expect.any(String));
+    expect(agentEnv?.PAPERCLIP_API_KEY).toBe(configEnv?.PAPERCLIP_API_KEY);
+    expect(String(configEnv?.PAPERCLIP_API_KEY).split(".")).toHaveLength(3);
+  });
+
   it("fail-closes a successful run that exits without finalizing its checked-out issue lifecycle", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -446,7 +687,11 @@ describe("heartbeat context budget preflight", () => {
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
     expect(finalized.status).toBe("succeeded");
 
-    const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
     expect(updatedIssue).toEqual(
       expect.objectContaining({
         status: "blocked",
@@ -468,6 +713,215 @@ describe("heartbeat context budget preflight", () => {
         }),
       ]),
     );
+  });
+
+  it("captures successful mission child run output and completes the issue when lifecycle updates were not posted", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: agentId,
+        companyId,
+        name: "Technology Research Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Work the delegated source issue." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId,
+        identifier: "PAP-PLAN",
+        title: "[Plan] Research mission",
+        status: "done",
+        assigneeAgentId: ownerAgentId,
+        originKind: "research_director_plan",
+      },
+      {
+        id: childIssueId,
+        companyId,
+        missionId,
+        parentId: parentIssueId,
+        identifier: "PAP-SOURCE",
+        title: "[Source] Evidence packet",
+        status: "todo",
+        assigneeAgentId: agentId,
+        originKind: "research_director_plan_child",
+      },
+    ]);
+
+    executeSpy.mockImplementation(async ({ runId, onLog }) => {
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, childIssueId));
+      await onLog("stdout", "Evidence packet ready: source URLs and claim matrix are complete.\n");
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${childIssueId}`, issueId: childIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      childIssueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "done",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+    expect(comments.some((comment) => comment.body.includes("자동 캡처: delegated run output"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("Evidence packet ready"))).toBe(true);
+  });
+
+  it("captures tool-limit blocked mission child output as done", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: agentId,
+        companyId,
+        name: "Technology Research Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Work the delegated source issue." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId,
+        identifier: "PAP-PLAN",
+        title: "[Plan] Research mission",
+        status: "done",
+        assigneeAgentId: ownerAgentId,
+        originKind: "research_director_plan",
+      },
+      {
+        id: childIssueId,
+        companyId,
+        missionId,
+        parentId: parentIssueId,
+        identifier: "PAP-SOURCE",
+        title: "[Source] Evidence packet",
+        status: "todo",
+        assigneeAgentId: agentId,
+        originKind: "research_director_plan_child",
+      },
+    ]);
+
+    executeSpy.mockImplementation(async ({ runId, onLog }) => {
+      await db
+        .update(issues)
+        .set({ status: "blocked", executionRunId: runId })
+        .where(eq(issues.id, childIssueId));
+      await onLog(
+        "stdout",
+        "Evidence matrix is ready.\nReached maximum iterations (60). I could not post the issue comment before the tool-call limit hit.\n",
+      );
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${childIssueId}`, issueId: childIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      childIssueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue?.status).toBe("done");
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+    expect(comments.some((comment) => comment.body.includes("Evidence matrix is ready"))).toBe(true);
   });
 
   it("blocks execution before adapter.execute when the estimated context budget is exceeded", async () => {
@@ -1119,6 +1573,71 @@ describe("heartbeat context budget preflight", () => {
         }),
       }),
     );
+  });
+
+  it("does not attach maintenance decision preflight to mission-scoped research issues", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+    let invocationContext: Record<string, unknown> | undefined;
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Research Company",
+      issuePrefix: "RES",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Follow the research issue." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Oklo SMR research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "RES-RESEARCH",
+      title: "[Research] Oklo corporate valuation and AI power demand",
+      description: "Research Oklo valuation, business model, and AI data center demand with source-backed evidence.",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "manual",
+    });
+
+    executeSpy.mockImplementation(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "on_demand", { issueId, note: "research retry" }, "manual", {
+      actorType: "system",
+      actorId: "test-suite",
+    });
+
+    expect(run).not.toBeNull();
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMaintenanceDecision).toBeUndefined();
+
+    const auditRows = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.runId, run!.id));
+    expect(auditRows.some((row) => row.action === "maintenance_decision_evaluated")).toBe(false);
   });
 
   it("records vendor maintenance decisions as heartbeat audit activity", async () => {
@@ -2003,6 +2522,81 @@ describe("heartbeat context budget preflight", () => {
         allowedContextKeys: expect.arrayContaining(["issueId", "note", "wakeSource", "wakeTriggerDetail"]),
       }),
     );
+  });
+
+  it("retries a failed issue run on the issue's current assignee instead of the original run agent", async () => {
+    const companyId = randomUUID();
+    const originalAgentId = randomUUID();
+    const currentAssigneeId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: originalAgentId,
+        companyId,
+        name: "Scout Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "antigravity_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: currentAssigneeId,
+        companyId,
+        name: "Hermes Research Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "hermes_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Retry should follow reassignment",
+      status: "todo",
+      assigneeAgentId: currentAssigneeId,
+    });
+
+    executeSpy.mockResolvedValue(successfulAdapterResult());
+
+    const heartbeat = heartbeatService(db);
+    const retriedRun = await heartbeat.wakeup(originalAgentId, {
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "retry_failed_run",
+      payload: { issueId },
+    });
+
+    expect(retriedRun?.agentId).toBe(currentAssigneeId);
+    const request = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.runId, retriedRun!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(request?.agentId).toBe(currentAssigneeId);
+    const issue = await db
+      .select({ executionRunId: issues.executionRunId, executionAgentNameKey: issues.executionAgentNameKey })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue).toEqual(
+      expect.objectContaining({
+        executionRunId: retriedRun!.id,
+        executionAgentNameKey: "hermes research agent",
+      }),
+    );
+    await waitForRunTerminal(heartbeat, retriedRun!.id);
   });
 
   it("refreshes the manifest inside deferred issue-execution wake payloads", async () => {

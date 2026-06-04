@@ -12,6 +12,7 @@ import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
+import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 
 /**
  * Workflow step definition.
@@ -383,7 +384,16 @@ async function finalizeWorkflowRunState(
     .where(eq(workflowRuns.id, context.run.id))
     .returning();
 
-  return updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+  const finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+  if (finalRun.missionId && TERMINAL_WORKFLOW_STATUSES.has(finalRun.status)) {
+    await stopMissionRuntimesForMission(db, {
+      companyId: finalRun.companyId,
+      missionId: finalRun.missionId,
+      reason: `workflow ${finalRun.id} ${finalRun.status}`,
+    });
+  }
+
+  return finalRun;
 }
 
 async function cancelOutstandingWorkflowIssues(
@@ -458,13 +468,21 @@ export async function cancelWorkflowRunWithCleanup(
       completedAt: new Date(),
     })
     .where(eq(workflowRuns.id, runId))
-    .returning({ id: workflowRuns.id });
+    .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
 
-  if (updatedRows.length === 0) {
+  const updatedRun = updatedRows[0];
+  if (!updatedRun) {
     return false;
   }
 
   await syncCancelledWorkflowRunState(db, runId);
+  if (updatedRun.missionId) {
+    await stopMissionRuntimesForMission(db, {
+      companyId: updatedRun.companyId,
+      missionId: updatedRun.missionId,
+      reason: `workflow ${runId} cancelled`,
+    });
+  }
   return true;
 }
 

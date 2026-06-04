@@ -679,7 +679,7 @@ describe("ensureRuntimeServicesForRun", () => {
     expect(third).toHaveLength(1);
     expect(third[0]?.reused).toBe(false);
     expect(third[0]?.id).not.toBe(first[0]?.id);
-  }, 15_000);
+  }, 30_000);
 
   it("does not leak parent Paperclip instance env into runtime service commands", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-env-"));

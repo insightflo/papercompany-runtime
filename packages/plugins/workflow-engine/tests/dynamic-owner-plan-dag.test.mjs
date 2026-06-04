@@ -5,6 +5,8 @@ import {
   getNextSteps,
   getWorkflowLaunchSteps,
   isDynamicOwnerPlanWorkflowDefinition,
+  validateDag,
+  validateWorkflowLaunchability,
 } from "../dist/dag-engine.js";
 
 const staticResearchSteps = [
@@ -85,4 +87,38 @@ test("legacy tech research daily workflows are treated as dynamic owner-plan boo
     }),
     true,
   );
+});
+
+test("removing a root plan step while leaving dependencies produces no activatable root", () => {
+  const steps = [
+    { id: "collect-evidence", title: "Collect Evidence", dependsOn: ["plan-scout"] },
+    { id: "synthesize-report", title: "Synthesize Report", dependsOn: ["collect-evidence"] },
+  ];
+
+  assert.equal(
+    isDynamicOwnerPlanWorkflowDefinition({ name: "tech-scout", steps }),
+    false,
+  );
+  assert.deepEqual(getWorkflowLaunchSteps(steps, { dynamicOwnerPlan: false }).filter((step) => step.dependsOn.length === 0).map((step) => step.id), []);
+
+  const validation = validateDag(steps);
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors.join("\n"), /depends on missing step "plan-scout"/);
+
+  const launchability = validateWorkflowLaunchability({ name: "tech-scout", steps });
+  assert.equal(launchability.valid, false);
+  assert.match(launchability.errors.join("\n"), /missing step "plan-scout"/);
+});
+
+test("workflow launchability rejects active workflows with no normal root step", () => {
+  const launchability = validateWorkflowLaunchability({
+    name: "rootless-static",
+    steps: [
+      { id: "collect", title: "Collect", dependsOn: ["synthesize"] },
+      { id: "synthesize", title: "Synthesize", dependsOn: ["collect"] },
+    ],
+  });
+
+  assert.equal(launchability.valid, false);
+  assert.match(launchability.errors.join("\n"), /no activatable root step/i);
 });

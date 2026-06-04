@@ -244,6 +244,32 @@ describe("inbox helpers", () => {
     });
   });
 
+  it("does not count failed runs for issues that are already resolved", () => {
+    const resolvedRun = {
+      ...makeRun("run-resolved", "failed", "2026-03-11T00:00:00.000Z"),
+      contextSnapshot: { issueId: "issue-resolved" },
+    };
+    const resolvedIssue = {
+      ...makeIssue("resolved", false),
+      id: "issue-resolved",
+      status: "done" as const,
+      completedAt: new Date("2026-03-11T00:10:00.000Z"),
+    };
+
+    const result = computeInboxBadgeData({
+      approvals: [],
+      joinRequests: [],
+      dashboard: { ...dashboard, agents: { ...dashboard.agents, error: 0 }, costs: { ...dashboard.costs, monthBudgetCents: 0 } },
+      heartbeatRuns: [resolvedRun],
+      issues: [resolvedIssue],
+      unreadIssues: [],
+      dismissed: new Set<string>(),
+    });
+
+    expect(result.failedRuns).toBe(0);
+    expect(result.inbox).toBe(0);
+  });
+
   it("keeps read issues in the touched list but excludes them from unread counts", () => {
     const issues = [makeIssue("1", true), makeIssue("2", false)];
 

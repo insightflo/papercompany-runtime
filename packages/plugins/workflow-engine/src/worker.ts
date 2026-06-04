@@ -13,6 +13,7 @@ import {
   getRetryInfo,
   getWorkflowLaunchSteps,
   isDynamicOwnerPlanWorkflowDefinition,
+  validateWorkflowLaunchability,
   type WorkflowExecutionMode,
   type WorkflowStep,
 } from "./dag-engine.js";
@@ -1863,6 +1864,17 @@ async function resumeWorkflowRunState(
   };
 }
 
+function assertWorkflowLaunchable(definition: WorkflowDefinitionRecord): void {
+  const validation = validateWorkflowLaunchability(definition.data);
+  if (validation.valid) {
+    return;
+  }
+
+  throw new Error(
+    `Workflow definition "${definition.data.name}" is not launchable: ${validation.errors.join("; ")}`,
+  );
+}
+
 async function startWorkflow(
   ctx: PluginContext,
   workflowId: string,
@@ -1889,6 +1901,7 @@ async function startWorkflow(
   if (typedWorkflowDefinition.data.companyId !== companyId) {
     throw new Error(`Workflow does not belong to company: ${workflowId}`);
   }
+  assertWorkflowLaunchable(typedWorkflowDefinition);
 
   // Build run label with date + daily run number
   const now = new Date();

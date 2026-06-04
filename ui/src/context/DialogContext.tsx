@@ -4,6 +4,8 @@ interface NewIssueDefaults {
   status?: string;
   priority?: string;
   projectId?: string;
+  missionId?: string;
+  parentId?: string;
   assigneeAgentId?: string;
   assigneeUserId?: string;
   title?: string;

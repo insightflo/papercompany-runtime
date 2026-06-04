@@ -99,6 +99,32 @@ test("adapter POSTs to /api/papercompany/search/raw", async () => {
   assert.equal(http.calls[0].init.method, "POST");
 });
 
+test("adapter can use a Vane-only direct fetch path for localhost headless backend", async () => {
+  const http = createMockHttp([]);
+  http.fetch = async () => {
+    throw new Error("All resolved IPs for 127.0.0.1 are in private/reserved ranges");
+  };
+  const directCalls = [];
+  const directFetch = async (url, init) => {
+    directCalls.push({ url, init });
+    return jsonOk({ results: makeRawResults(2), engine: { patchVersion: "pc.local" } });
+  };
+
+  const adapter = createVaneHeadlessAdapter({
+    vaneBaseUrl: "http://127.0.0.1:3310",
+    http,
+    directFetch,
+  });
+
+  const result = await adapter.search({ query: "smoke", maxResults: 2 });
+
+  assert.equal(http.calls.length, 0);
+  assert.equal(directCalls.length, 1);
+  assert.equal(directCalls[0].url, "http://127.0.0.1:3310/api/papercompany/search/raw");
+  assert.equal(result.ok, true);
+  assert.equal(result.engine.patchVersion, "pc.local");
+});
+
 // ---------------------------------------------------------------------------
 // Request body has no chatModel, embeddingModel, systemInstructions, history, stream
 // ---------------------------------------------------------------------------
