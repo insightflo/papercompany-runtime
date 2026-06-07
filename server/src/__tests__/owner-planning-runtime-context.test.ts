@@ -118,10 +118,13 @@ describe("owner planning runtime context surfaces", () => {
 
     expect(brief).toContain("Mission owner planning context: mission mission-1, planning issue issue-plan-1, active plan yes, selected units 2, execution source units 1.");
     expect(brief).toContain("Owner planning protocol:");
-    expect(brief).toContain("Before executing, produce a Mission Planning Assessment.");
-    expect(brief).toContain("objective; available workflows, tools, runtime services, rules, KB, agents, and files; active plan and prior execution refs; gaps and todo markers");
-    expect(brief).toContain("`research_needed`: list missing evidence and create/request research/delegation steps.");
-    expect(brief).toContain("`blocked`: list required user input/approval.");
+    expect(brief).toContain("Produce a Mission Planning Assessment before acting beyond status discovery.");
+    expect(brief).toContain("Missing tool/runtime-service assets do not prove that the Paperclip worker runtime is down.");
+    expect(brief).toContain("Common operating boundary:");
+    expect(brief).toContain("Director boundary:");
+    expect(brief).toContain("internal Agent/Task/WebSearch/WebFetch/Bash as a source-research or report-production substitute");
+    expect(brief).toContain("`research_needed`: name missing evidence and the intended delegation/escalation path.");
+    expect(brief).toContain("`blocked`: name the missing input, authority, runtime path, or escalation path.");
     expect(brief).toContain("`ready_to_plan`: emit the structured JSON block below.");
     expect(brief).toContain("### Mission owner plan decision");
     expect(brief).toContain("```json");
@@ -136,10 +139,10 @@ describe("owner planning runtime context surfaces", () => {
     expect(brief).toContain('"selectedExecutionUnits": []');
     expect(brief).toContain('"ruleRefs": []');
     expect(brief).toContain('"kbRefs": []');
-    expect(brief).toContain("do not mark the planning issue done until a structured plan decision has been posted and materialized");
-    expect(brief).toContain("This brief does not impose a hard completion block.");
-    expect(brief).toContain("Asset counts and severe gap count are summaries only; tools/runtimeServices/fileViews may be bounded unavailable summaries, not actual discovery.");
-    expect(brief).toContain("Planning dossier asset-count summary: workflows 2, tools 0, runtime services 0, rules 1, KB 1, agents 2, files 0, execution source units 1.");
+    expect(brief).toContain("mission-level sibling issues");
+    expect(brief).toContain("Do not mark the planning issue done until a structured plan decision has been posted and materialized as mission-level sibling issues");
+    expect(brief).toContain("Missing tool/runtime-service assets do not prove that the Paperclip worker runtime is down.");
+    expect(brief).toContain("Planning dossier asset-count summary: workflows 2, tools 0, runtime service assets 0, rules 1, KB 1, agents 2, files 0, execution source units 1.");
     expect(brief).toContain("Planning dossier gaps: 2 total, 1 severe/blocking-or-research gaps.");
     expect(JSON.stringify(brief)).not.toContain("raw private rationale");
     expect(JSON.stringify(brief)).not.toContain("raw private body");

@@ -310,7 +310,8 @@ describe("maintenance mission dogfood", () => {
     if (!invocationContext) throw new Error("Expected adapter invocation context");
 
     const brief = buildPaperclipRuntimeBrief(invocationContext);
-    const [auditRow] = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    const auditRows = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    const auditRow = auditRows.find((row) => row.action === "maintenance_decision_evaluated");
     expect(auditRow).toEqual(expect.objectContaining({ action: "maintenance_decision_evaluated" }));
 
     return {

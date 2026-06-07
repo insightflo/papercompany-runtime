@@ -11,10 +11,12 @@ import {
   createDb,
   ensurePostgresDatabase,
   agents,
+  activityLog,
   agentWakeupRequests,
   companies,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueComments,
   issues,
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.ts";
@@ -111,6 +113,8 @@ describe("heartbeat orphaned process recovery", () => {
       child.kill("SIGKILL");
     }
     childProcesses.clear();
+    await db.delete(issueComments);
+    await db.delete(activityLog);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -364,7 +368,8 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.executionRunId).toBeNull();
-    expect(issue?.checkoutRunId).toBe(runId);
+    expect(issue?.checkoutRunId).toBeNull();
+    expect(issue?.status).toBe("blocked");
   });
 
   it("clears the detached warning when the run reports activity again", async () => {

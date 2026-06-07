@@ -95,41 +95,35 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
   const missionId = asString(missionOwnerPlanningContext.missionId) ?? "unknown";
   const planningIssueId = asString(missionOwnerPlanningContext.planningIssueId) ?? "none";
   const activePlanState = missionOwnerPlanningContext.activePlanAvailable === true ? "yes" : "no";
-  const planningDossierState = missionOwnerPlanningContext.planningDossierAvailable === true ? "available" : "unavailable";
   const assetCountsLine = planningDossierAssetCounts
-    ? `- Planning dossier asset-count summary: workflows ${asNumber(planningDossierAssetCounts.workflowCandidates)}, tools ${asNumber(planningDossierAssetCounts.tools)}, runtime services ${asNumber(planningDossierAssetCounts.runtimeServices)}, rules ${asNumber(planningDossierAssetCounts.ruleRefs)}, KB ${asNumber(planningDossierAssetCounts.kbRefs)}, agents ${asNumber(planningDossierAssetCounts.agentRoster)}, files ${asNumber(planningDossierAssetCounts.fileViews)}, execution source units ${asNumber(planningDossierAssetCounts.executionSourceUnits)}.`
+    ? `- Planning dossier asset-count summary: workflows ${asNumber(planningDossierAssetCounts.workflowCandidates)}, tools ${asNumber(planningDossierAssetCounts.tools)}, runtime service assets ${asNumber(planningDossierAssetCounts.runtimeServices)}, rules ${asNumber(planningDossierAssetCounts.ruleRefs)}, KB ${asNumber(planningDossierAssetCounts.kbRefs)}, agents ${asNumber(planningDossierAssetCounts.agentRoster)}, files ${asNumber(planningDossierAssetCounts.fileViews)}, execution source units ${asNumber(planningDossierAssetCounts.executionSourceUnits)}.`
     : "- Planning dossier asset-count summary: unavailable.";
 
   return joinPromptSections([
     `Mission owner planning context: mission ${missionId}, planning issue ${planningIssueId}, active plan ${activePlanState}, selected units ${asNumber(missionOwnerPlanningContext.selectedExecutionUnitCount)}, execution source units ${asNumber(missionOwnerPlanningContext.executionSourceUnitCount)}.`,
     "Owner planning protocol:",
-    "Before executing, produce a Mission Planning Assessment.",
-    "You must inspect: objective; available workflows, tools, runtime services, rules, KB, agents, and files; active plan and prior execution refs; gaps and todo markers.",
-    `Planning dossier summary is ${planningDossierState}. Asset counts and severe gap count are summaries only; tools/runtimeServices/fileViews may be bounded unavailable summaries, not actual discovery.`,
+    "Produce a Mission Planning Assessment before acting beyond status discovery.",
+    "Use dossier asset counts as pointers only. Missing tool/runtime-service assets do not prove that the Paperclip worker runtime is down.",
     assetCountsLine,
     `- Planning dossier gaps: ${asNumber(missionOwnerPlanningContext.planningDossierGapCount)} total, ${asNumber(missionOwnerPlanningContext.planningDossierSevereGapCount)} severe/blocking-or-research gaps.`,
-    "Dynamic mission planning protocol:",
+    "Common operating boundary:",
+    "Stay within your assigned role, authority, and issue scope. Do not perform work that belongs to another role just because you can reach a tool.",
+    "When required work is outside your scope, escalate to the appropriate owner/director/mission controller if one is available, leave a concise status or handoff, and stop this run within your own scope.",
+    "If there is no valid escalation path, end blocked/error with the missing path or authority. Do not replace escalation with improvised execution.",
+    "Director boundary:",
+    "A director or mission owner plans, delegates, reviews, and decides gates; it is not a source-research or report-production worker.",
+    "Mission issue grouping is WBS-style: `[PLAN]` issues produce the work structure and then close; `[ACTION]`, `[QA]`, and `[OVERSIGHT]` issues are mission-level siblings by default, not children of the PLAN issue.",
+    "When materializing plan output, create `[ACTION] ...`, `[QA] ...`, and `[OVERSIGHT] ...` issues with missionId set and parentId empty. Use parent-child only to decompose a single ACTION into smaller action sub-issues.",
+    "After handing off bounded mission-level ACTION/QA work, do not wait by doing the child work yourself. If child runtime health is unclear or unavailable, escalate or block via OVERSIGHT instead of using internal Agent/Task/WebSearch/WebFetch/Bash as a source-research or report-production substitute.",
+    "Bash remains for in-scope Paperclip API/status/file inspection only; do not use it to bypass role boundaries.",
     "Dynamic workflow means reducing uncertainty with evidence gates, not adding subagents or parallelism by default.",
-    "Do not use the local agent runtime's internal subagent/delegate-task tools for mission delegation. Paperclip child issues are the delegation mechanism; create bounded child issues through the Paperclip API only.",
-    "Active-plan first: complete the high-level source/synthesis/QA skeleton and structured plan decision before treating delegated child issues as runnable work.",
-    "Do not create synthesis, QA/validation, or director-gate issues until their upstream source or synthesis artifact exists. Keep those future gates in the active plan/commentary instead of creating blocked placeholder issues.",
-    "Only source-discovery/source-dossier child issues may be runnable during the first delegated execution wave, and keep that first wave to at most 6 child issues for one parent before reviewing upstream output.",
-    "If you are assigned one delegated child issue, do not create further child issues from it; complete the assigned artifact or comment with the blocker/evidence gap.",
-    "Mission Invariant: name the product, safety, and operating principles that must remain true across the mission.",
-    "Scope Hypothesis: state what this execution slice proves, disproves, or unblocks.",
-    "Execution Slice: list in-scope and out-of-scope work, including side-effect, push, deploy, and external publish approval boundaries.",
-    "Evidence Required: list concrete evidence needed before PASS; ACKs and self-reported completion are not evidence.",
-    "Gate: define PASS / REQUEST_CHANGES / BLOCKED criteria and the validator or gate owner.",
-    "Promotion / Asset Update: promote repeatable judgments into workflow/tool/rule/KB/role harness/skill assets only. Do not promote stale session outcomes, PR numbers, issue IDs, commit hashes, or one-off logs.",
-    "SkillOpt-lite self-improvement: when evidence shows a repeatable failure or success pattern, propose a bounded add/delete/replace candidate for one asset with evidence source, validation plan, rejected-edit note, and agent/peer gate owner; bounded internal asset adoption is automatic after evidence, bounded patch, and validation gate pass; do not wait for user approval, and do not silently mutate skills/rules/KB/workflows/role harnesses outside the current issue scope.",
-    "Self-improvement candidate contract: assetType must be skill/rule/kb/workflow/role_harness; proposedEdit.operation must be add/delete/replace; autoAdoptionResult must be accepted/rejected/queued_for_validation/repair_needed; required fields are assetType, assetRef, evidenceSource, pattern, proposedEdit, validationPlan, gateOwner, and autoAdoptionResult. rejectedEditNote is required only when autoAdoptionResult is rejected.",
+    "Paperclip child issues are the delegation mechanism for mission work; internal local-agent delegation is not a replacement for out-of-scope work.",
     "Report slice completion separately from end-to-end completion.",
     "Choose exactly one branch:",
-    "1. `research_needed`: list missing evidence and create/request research/delegation steps.",
-    "2. `blocked`: list required user input/approval.",
+    "1. `research_needed`: name missing evidence and the intended delegation/escalation path.",
+    "2. `blocked`: name the missing input, authority, runtime path, or escalation path.",
     "3. `ready_to_plan`: emit the structured JSON block below.",
-    "Fail-open policy: do not mark the planning issue done until a structured plan decision has been posted and materialized, or the mission is explicitly completed with evidence and a final completion comment. This brief does not impose a hard completion block.",
-    "If you must execute directly in this run, still post the structured plan decision first unless the mission is trivial and explicitly marked `direct_execution_with_plan_comment`; prefer the structured artifact.",
+    "Do not mark the planning issue done until a structured plan decision has been posted and materialized as mission-level sibling issues, or the mission is explicitly completed with evidence and a final completion comment.",
     "Accepted marker and JSON block:",
     "### Mission owner plan decision",
     "```json",
@@ -214,8 +208,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
 
   const runtimeServicesLine =
     runtimeServices?.available === true
-      ? `- Runtime services: ${Number(runtimeServices.count ?? 0)} available${asString(runtimeServices.primaryUrl) ? ` (${asString(runtimeServices.primaryUrl)})` : ""}`
-      : "- Runtime services: unavailable";
+      ? `- Runtime service assets listed in dossier: ${Number(runtimeServices.count ?? 0)}${asString(runtimeServices.primaryUrl) ? ` (${asString(runtimeServices.primaryUrl)})` : ""}. This is not a Paperclip worker-runtime health signal.`
+      : "- No runtime service assets are listed in this dossier. This is not a Paperclip worker-runtime health signal.";
 
   const fileViewsLine =
     fileViews?.available === true
