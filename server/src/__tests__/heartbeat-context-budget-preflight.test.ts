@@ -21,6 +21,7 @@ import {
   knowledgeBases,
   issueComments,
   issues,
+  missionPlanArtifacts,
   missions,
   missionSessions,
   projects,
@@ -44,7 +45,7 @@ vi.mock("../adapters/index.js", () => ({
   runningProcesses: new Map(),
 }));
 
-import { heartbeatService } from "../services/heartbeat.ts";
+import { classifyHeartbeatRunFailure, heartbeatService } from "../services/heartbeat.ts";
 import { secretService } from "../services/secrets.ts";
 
 type EmbeddedPostgresInstance = {
@@ -139,6 +140,22 @@ async function waitForIssueStatus(
   throw new Error(`Timed out waiting for issue ${issueId}; latest status=${issue?.status ?? "missing"}`);
 }
 
+async function waitForActiveMissionPlanArtifact(
+  db: ReturnType<typeof createDb>,
+  missionId: string,
+  predicate: (plan: typeof missionPlanArtifacts.$inferSelect) => boolean,
+) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    const activePlan = plans.find((plan) => plan.status === "active") ?? null;
+    if (activePlan && predicate(activePlan)) return activePlan;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+  throw new Error(`Timed out waiting for active mission plan ${missionId}; count=${plans.length}`);
+}
+
 async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await db.delete(heartbeatRunEvents);
@@ -165,6 +182,44 @@ function successfulAdapterResult() {
     model: "test-model",
     resultJson: null,
     runtimeServices: [],
+  };
+}
+
+function failedAdapterResult(overrides: Partial<ReturnType<typeof successfulAdapterResult> & { errorCode: string }> = {}) {
+  return {
+    ...successfulAdapterResult(),
+    exitCode: 1,
+    timedOut: false,
+    errorMessage: "Adapter failed",
+    errorCode: "adapter_failed",
+    ...overrides,
+  };
+}
+
+function decisionComment(decision: Record<string, unknown>) {
+  return `### Mission owner plan decision
+\`\`\`json
+${JSON.stringify(decision)}
+\`\`\``;
+}
+
+function validOwnerPlanDecision(missionId: string, workflowDefinitionId: string) {
+  return {
+    missionId,
+    missionGoal: "Ship controlled rollout",
+    selectedExecutionUnits: [
+      {
+        id: `wf:${workflowDefinitionId}:step:smoke`,
+        kind: "workflow_definition_step",
+        title: "Run smoke",
+        selectionState: "selected",
+        reason: "Required for validation",
+        sourceRef: { type: "workflow_definition_step", id: workflowDefinitionId, stepId: "smoke" },
+      },
+    ],
+    requiredInputs: ["stagingUrl"],
+    successCriteria: ["smoke passes"],
+    steps: [{ id: "step-1", title: "Verify staging" }],
   };
 }
 
@@ -266,6 +321,7 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
+    await db.delete(missionPlanArtifacts);
     await db.delete(issues);
     await db.delete(toolDefinitions);
     await db.delete(agentKbGrants);
@@ -626,7 +682,7 @@ describe("heartbeat context budget preflight", () => {
     expect(String(configEnv?.PAPERCLIP_API_KEY).split(".")).toHaveLength(3);
   });
 
-  it("fail-closes a successful run that exits without finalizing its checked-out issue lifecycle", async () => {
+  it("auto-completes a successful checked-out issue when the run exits without PATCHing status", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
@@ -690,29 +746,394 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
     expect(updatedIssue).toEqual(
       expect.objectContaining({
-        status: "blocked",
+        status: "done",
         checkoutRunId: null,
         executionRunId: null,
       }),
     );
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("issue lifecycle was not finalized"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("checked-out run succeeded"))).toBe(true);
 
     const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
     expect(activities).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          action: "issue.lifecycle_gap_blocked",
+          action: "issue.run_succeeded_auto_completed",
           entityType: "issue",
           entityId: issueId,
         }),
       ]),
     );
+  });
+
+  it("records a mission owner PLAN decision when heartbeat auto-completes the checked-out planning issue", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+    const sourceWorkflowDefinitionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Plan the mission." },
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Planning mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: sourceWorkflowDefinitionId,
+      companyId,
+      name: "Source smoke workflow",
+    });
+    await db.insert(issues).values({
+      id: planningIssueId,
+      companyId,
+      missionId,
+      identifier: "PAP-PLAN",
+      title: "[PLAN] Planning mission",
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_plan",
+    });
+
+    const decision = validOwnerPlanDecision(missionId, sourceWorkflowDefinitionId);
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({ checkoutRunId: runId, executionRunId: runId })
+        .where(eq(issues.id, planningIssueId));
+      await db.insert(issueComments).values({
+        companyId,
+        issueId: planningIssueId,
+        authorAgentId: ownerAgentId,
+        body: decisionComment(decision),
+      });
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      ownerAgentId,
+      "timer",
+      { taskKey: `issue:${planningIssueId}`, issueId: planningIssueId, missionId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    await waitForIssueStatus(
+      db,
+      planningIssueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+
+    const plan = await waitForActiveMissionPlanArtifact(
+      db,
+      missionId,
+      (candidate) => {
+        const refs = candidate.refs as { paqoWorkflow?: unknown } | null;
+        return !!refs && typeof refs === "object" && !!refs.paqoWorkflow;
+      },
+    );
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans.filter((candidate) => candidate.status === "active")).toHaveLength(1);
+    expect(plan.refs).toMatchObject({
+      selectedExecutionUnits: decision.selectedExecutionUnits,
+      ownerPlanDecision: {
+        planningIssueId,
+        commentId: expect.any(String),
+        decisionHash: expect.any(String),
+      },
+      paqoWorkflow: {
+        workflowDefinitionId: expect.any(String),
+        workflowRunId: expect.any(String),
+        dependencyModel: "workflow_dag_intra_mission",
+      },
+    });
+
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Ship controlled rollout"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoRuns = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
+    expect(paqoRuns).toHaveLength(1);
+    expect(paqoRuns[0]).toMatchObject({ companyId, missionId, status: "running" });
+    const paqoStepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, paqoRuns[0]!.id));
+    expect(paqoStepRuns).toHaveLength(2);
+    const qaStepRun = paqoStepRuns.find((stepRun) => stepRun.stepId.startsWith("qa-"));
+    expect(qaStepRun).toMatchObject({ issueId: null, status: "pending" });
+  });
+
+  it("classifies quota/auth/command provider failures for oversight", () => {
+    expect(
+      classifyHeartbeatRunFailure({
+        status: "failed",
+        errorCode: "provider_403",
+        errorMessage: "HTTP 403: Kimi quota exceeded for this account",
+        provider: "kimi",
+        model: "kimi-k2",
+        command: "mimo25pro",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        category: "quota",
+        reasonCode: "PROVIDER_QUOTA_OR_AUTH_403",
+        fallbackCandidates: expect.arrayContaining([expect.stringContaining("mimo26pro")]),
+      }),
+    );
+    expect(
+      classifyHeartbeatRunFailure({ status: "failed", errorMessage: "401 Unauthorized: invalid API key" }),
+    ).toEqual(expect.objectContaining({ category: "auth", reasonCode: "PROVIDER_AUTH_FAILURE" }));
+    expect(
+      classifyHeartbeatRunFailure({ status: "failed", errorMessage: "spawn /missing/agent ENOENT" }),
+    ).toEqual(expect.objectContaining({ category: "command", reasonCode: "COMMAND_EXECUTION_FAILURE" }));
+  });
+
+  it("auto-completes a successful root/plan issue after its planning run succeeds", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const rootIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Director",
+      role: "owner",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: { command: "mimo25pro", promptTemplate: "Plan and delegate only." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Root closeout mission",
+      status: "planning",
+    });
+    await db.insert(issues).values({
+      id: rootIssueId,
+      companyId,
+      missionId,
+      identifier: "PAP-PLAN",
+      title: "[Plan] Root planning issue",
+      description: "Create child issues and stop.",
+      status: "todo",
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_plan",
+    });
+
+    executeSpy.mockImplementation(async () => successfulAdapterResult());
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      ownerAgentId,
+      "assignment",
+      { taskKey: `issue:${rootIssueId}`, issueId: rootIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      rootIssueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(expect.objectContaining({ status: "done", completedAt: expect.any(Date) }));
+  });
+
+  it("blocks a failed mission worker issue and leaves observable oversight/fallback evidence", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Director",
+        role: "owner",
+        status: "active",
+        adapterType: "claude_local",
+        adapterConfig: { command: "mimo26pro" },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Kimi Worker",
+        role: "researcher",
+        status: "active",
+        adapterType: "claude_local",
+        adapterConfig: { command: "mimo25pro", promptTemplate: "Do bounded source work." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Failure oversight mission", status: "active" });
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId,
+        identifier: "PAP-PLAN",
+        title: "[Plan] Failure oversight",
+        status: "done",
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_plan",
+      },
+      {
+        id: childIssueId,
+        companyId,
+        missionId,
+        parentId: parentIssueId,
+        identifier: "PAP-SOURCE",
+        title: "[Source] Kimi quota case",
+        status: "todo",
+        assigneeAgentId: workerAgentId,
+        originKind: "director_plan_source",
+      },
+    ]);
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stderr", "HTTP 403: Kimi provider quota exceeded. Try another model.\n");
+      return failedAdapterResult({
+        errorCode: "provider_403",
+        errorMessage: "HTTP 403: Kimi provider quota exceeded",
+        provider: "kimi",
+        model: "kimi-k2",
+      });
+    });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      workerAgentId,
+      "assignment",
+      { taskKey: `issue:${childIssueId}`, issueId: childIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("failed");
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      childIssueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue.status).toBe("blocked");
+
+    const childComments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+    expect(childComments.some((comment) => comment.body.includes("PROVIDER_QUOTA_OR_AUTH_403"))).toBe(true);
+    expect(childComments.some((comment) => comment.body.includes("mimo26pro"))).toBe(true);
+    const parentComments = await db.select().from(issueComments).where(eq(issueComments.issueId, parentIssueId));
+    expect(parentComments.some((comment) => comment.body.includes("Mission oversight: worker run failure observed"))).toBe(true);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "issue.run_failure_auto_blocked", entityId: childIssueId }),
+        expect.objectContaining({ action: "mission.worker_run_failure_observed", entityType: "mission", entityId: missionId }),
+      ]),
+    );
+    expect(JSON.stringify(activities.map((activity) => activity.details))).toContain("PROVIDER_QUOTA_OR_AUTH_403");
+  });
+
+  it("blocks a timed-out checked-out issue with a reason comment", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Timeout Worker",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Do the work." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "PAP-TIMEOUT",
+      title: "Timeout lifecycle",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async () =>
+      failedAdapterResult({ timedOut: true, errorCode: "timeout", errorMessage: "Timed out after test budget" }),
+    );
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("timed_out");
+    await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("RUN_TIMED_OUT"))).toBe(true);
   });
 
   it("captures successful mission child run output and completes the issue when lifecycle updates were not posted", async () => {
@@ -1494,22 +1915,24 @@ describe("heartbeat context budget preflight", () => {
       .select()
       .from(activityLog)
       .where(eq(activityLog.runId, run!.id));
-    expect(missingInputAuditRows).toEqual([
-      expect.objectContaining({
-        action: "maintenance_decision_evaluated",
-        entityType: "issue",
-        entityId: issueId,
-        agentId,
-        runId: run!.id,
-        details: expect.objectContaining({
-          issueId,
+    expect(missingInputAuditRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "maintenance_decision_evaluated",
+          entityType: "issue",
+          entityId: issueId,
+          agentId,
           runId: run!.id,
-          recommendedNextAction: "request_missing_input",
-          suggestedStatus: "blocked",
-          requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+          details: expect.objectContaining({
+            issueId,
+            runId: run!.id,
+            recommendedNextAction: "request_missing_input",
+            suggestedStatus: "blocked",
+            requiredInputs: expect.arrayContaining(["symptom", "timeWindow"]),
+          }),
         }),
-      }),
-    ]);
+      ]),
+    );
     expect(adapterVisibleContext.paperclipStepInputManifest).toEqual(
       expect.objectContaining({
         version: 1,
@@ -1695,27 +2118,29 @@ describe("heartbeat context budget preflight", () => {
       .select()
       .from(activityLog)
       .where(eq(activityLog.runId, run!.id));
-    expect(auditRows).toEqual([
-      expect.objectContaining({
-        action: "maintenance_decision_evaluated",
-        entityType: "issue",
-        entityId: issueId,
-        agentId,
-        runId: run!.id,
-        details: expect.objectContaining({
-          issueId,
+    expect(auditRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "maintenance_decision_evaluated",
+          entityType: "issue",
+          entityId: issueId,
+          agentId,
           runId: run!.id,
-          recommendedNextAction: "vendor_handoff",
-          suggestedStatus: "in_progress",
-          requiredInputs: [],
-          warnings: [],
-          handoffTarget: "vendor",
-          matchedRules: expect.arrayContaining([
-            expect.objectContaining({ id: "maintenance-vendor-handoff", action: "vendor_handoff" }),
-          ]),
+          details: expect.objectContaining({
+            issueId,
+            runId: run!.id,
+            recommendedNextAction: "vendor_handoff",
+            suggestedStatus: "in_progress",
+            requiredInputs: [],
+            warnings: [],
+            handoffTarget: "vendor",
+            matchedRules: expect.arrayContaining([
+              expect.objectContaining({ id: "maintenance-vendor-handoff", action: "vendor_handoff" }),
+            ]),
+          }),
         }),
-      }),
-    ]);
+      ]),
+    );
   });
 
   it("attaches workflow step tool contracts to the runtime context", async () => {

@@ -289,8 +289,14 @@ async function createWorkflowStepIssue(input: {
     ? input.step.agentId.trim()
     : undefined;
 
+  const stepName = input.step.name.trim();
+  const hasIssueGroupPrefix = /^\s*\[(?:plan|action|qa|oversight)\]/iu.test(stepName);
+  const title = hasIssueGroupPrefix
+    ? `${stepName} — ${input.definition.name}`
+    : `${input.definition.name}: ${stepName}`;
+
   const createdIssue = await issueSvc.create(input.run.companyId, {
-    title: `${input.definition.name}: ${input.step.name}`,
+    title,
     description: input.step.description || "",
     status: "todo",
     assigneeAgentId,
@@ -309,6 +315,7 @@ async function createWorkflowStepIssue(input: {
       actorId: `workflow:${input.definition.id}`,
     },
     contextSource: "workflow.dispatch",
+    waitForWakeCompletion: true,
   });
 
   return createdIssue.id;

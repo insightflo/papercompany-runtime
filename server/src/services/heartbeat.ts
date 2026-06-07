@@ -60,6 +60,7 @@ import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-gua
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import { recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
 import {
   extractMissionOwnerDecisionFromText,
@@ -258,6 +259,7 @@ function resolveHeartbeatFailureCode(error: unknown, fallback: string) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
 
 function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
@@ -1415,6 +1417,185 @@ function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelec
     "```text",
     excerpt || "(no stdout/stderr excerpt captured)",
     "```",
+  ].join("\n");
+}
+
+export type HeartbeatFailureClassification = {
+  category: "timeout" | "cancelled" | "quota" | "auth" | "command" | "adapter";
+  reasonCode: string;
+  summary: string;
+  fallbackCandidates: string[];
+};
+
+function heartbeatRunFailureText(input: {
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  stdoutExcerpt?: string | null;
+  stderrExcerpt?: string | null;
+}) {
+  return [input.errorCode, input.errorMessage, input.stdoutExcerpt, input.stderrExcerpt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n")
+    .trim();
+}
+
+export function classifyHeartbeatRunFailure(input: {
+  status: string;
+  adapterType?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  stdoutExcerpt?: string | null;
+  stderrExcerpt?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  command?: string | null;
+}): HeartbeatFailureClassification {
+  const haystack = heartbeatRunFailureText(input);
+  const normalized = haystack.toLowerCase();
+  const providerModelCommand = [input.provider, input.model, input.command, input.adapterType]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+  const fallbackCandidates: string[] = [];
+  const pushFallback = (candidate: string) => {
+    if (!fallbackCandidates.includes(candidate)) fallbackCandidates.push(candidate);
+  };
+  const looksKimiOrMimo = /\b(kimi|moonshot|mimo)\b/i.test(`${providerModelCommand}\n${haystack}`);
+  if (looksKimiOrMimo) {
+    pushFallback("mimo26pro command/model if configured with available quota");
+    pushFallback("same-role alternate agent on a non-Kimi provider");
+  }
+
+  if (input.status === "timed_out") {
+    return { category: "timeout", reasonCode: "RUN_TIMED_OUT", summary: "Heartbeat run timed out.", fallbackCandidates };
+  }
+  if (input.status === "cancelled") {
+    return { category: "cancelled", reasonCode: "RUN_CANCELLED", summary: "Heartbeat run was cancelled.", fallbackCandidates };
+  }
+  if (/\b(403|429)\b/.test(normalized) && /quota|rate.?limit|rate limit|insufficient|billing|capacity|exceeded/.test(normalized)) {
+    return {
+      category: "quota",
+      reasonCode: /\b403\b/.test(normalized) ? "PROVIDER_QUOTA_OR_AUTH_403" : "PROVIDER_QUOTA_OR_RATE_LIMIT",
+      summary: "Provider quota/rate-limit/auth-capacity failure detected from run output.",
+      fallbackCandidates,
+    };
+  }
+  if (/quota|insufficient_quota|rate.?limit|rate limit|billing hard limit|credits? exhausted|capacity exceeded/.test(normalized)) {
+    return {
+      category: "quota",
+      reasonCode: "PROVIDER_QUOTA_OR_RATE_LIMIT",
+      summary: "Provider quota or rate-limit failure detected from run output.",
+      fallbackCandidates,
+    };
+  }
+  if (/\b401\b|unauthorized|invalid api key|invalid token|authentication failed|reauth|required|login required|forbidden/.test(normalized)) {
+    return {
+      category: "auth",
+      reasonCode: /\b403\b/.test(normalized) ? "PROVIDER_AUTH_OR_FORBIDDEN_403" : "PROVIDER_AUTH_FAILURE",
+      summary: "Provider authentication/authorization failure detected from run output.",
+      fallbackCandidates,
+    };
+  }
+  if (/enoent|command not found|spawn .* enoent|no such file or directory|eacces|permission denied|not executable/.test(normalized)) {
+    return {
+      category: "command",
+      reasonCode: "COMMAND_EXECUTION_FAILURE",
+      summary: "Adapter command/path/permission failure detected from run output.",
+      fallbackCandidates,
+    };
+  }
+  return {
+    category: "adapter",
+    reasonCode: input.errorCode?.trim() || "ADAPTER_RUN_FAILED",
+    summary: "Adapter run failed without a more specific local classification.",
+    fallbackCandidates,
+  };
+}
+
+function buildSuccessfulIssueRunAutoCompletedComment(run: typeof heartbeatRuns.$inferSelect) {
+  const output = [run.stdoutExcerpt, run.stderrExcerpt ? `stderr:\n${run.stderrExcerpt}` : ""]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n\n")
+    .trim();
+  const shouldCapturePlanDecision = output.includes("### Mission owner plan decision");
+  return [
+    "## 자동 완료: checked-out run succeeded",
+    `- 실행 runId: \`${run.id}\``,
+    "- 감지: 이 issue에 연결된 heartbeat run이 succeeded로 종료되었습니다.",
+    "- 정책: 일반 issue lifecycle은 successful checked-out run 종료 시 done으로 closeout합니다.",
+    "- 참고: coordination hub로 계속 열어둘 작업은 별도 issue type/status로 분리해야 합니다.",
+    shouldCapturePlanDecision
+      ? [
+          "",
+          "### Captured PLAN decision output",
+          output.length > MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS
+            ? output.slice(output.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)
+            : output,
+        ].join("\n")
+      : "",
+  ]
+    .filter((line) => line.length > 0)
+    .join("\n");
+}
+
+async function recordMissionOwnerPlanDecisionAfterComment(
+  db: Db,
+  issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">,
+  actorAgentId: string | null,
+) {
+  if (issue.originKind !== "mission_main_executor_plan" || !issue.missionId) return;
+  try {
+    await recordLatestAuthorizedMissionOwnerPlanDecision({
+      db,
+      companyId: issue.companyId,
+      missionId: issue.missionId,
+      requestedBy: actorAgentId ? { actorType: "agent", actorId: actorAgentId } : undefined,
+    });
+  } catch (err) {
+    logger.warn(
+      { err, issueId: issue.id, companyId: issue.companyId, missionId: issue.missionId },
+      "failed to record mission owner plan decision after heartbeat issue comment",
+    );
+  }
+}
+
+function buildFailedIssueRunAutoBlockedComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  classification: HeartbeatFailureClassification;
+}) {
+  const { run, classification } = input;
+  const rawReason = (run.error ?? run.stderrExcerpt ?? run.stdoutExcerpt ?? "").trim();
+  const reasonExcerpt = rawReason.length > 1200 ? rawReason.slice(0, 1200) : rawReason;
+  return [
+    "## 자동 차단: linked run ended with failure",
+    `- 실행 runId: \`${run.id}\``,
+    `- run status: \`${run.status}\``,
+    `- 분류: \`${classification.reasonCode}\` (${classification.category})`,
+    `- 요약: ${classification.summary}`,
+    classification.fallbackCandidates.length > 0
+      ? `- fallback/대체 후보: ${classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
+      : "- fallback/대체 후보: 자동 선택 안 함 — owner/oversight 재검토 필요",
+    reasonExcerpt ? ["", "### Failure excerpt", "```text", reasonExcerpt, "```"].join("\n") : "",
+  ].filter((line) => line.length > 0).join("\n");
+}
+
+function buildMissionWorkerFailureOversightComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  sourceIssue: { id: string; identifier: string | null; title: string };
+  classification: HeartbeatFailureClassification;
+}) {
+  const issueLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
+  return [
+    "## Mission oversight: worker run failure observed",
+    `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
+    `- failed runId: \`${input.run.id}\``,
+    `- run status: \`${input.run.status}\``,
+    `- classification: \`${input.classification.reasonCode}\` (${input.classification.category})`,
+    `- summary: ${input.classification.summary}`,
+    input.classification.fallbackCandidates.length > 0
+      ? `- fallback candidates: ${input.classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
+      : "- fallback candidates: none auto-selected; owner should decide retry/reassign/escalate.",
+    "- policy: issue was moved out of in_progress so the mission owner can inspect and decide next action.",
   ].join("\n");
 }
 
@@ -4293,9 +4474,9 @@ export function heartbeatService(db: Db) {
   }
 
   async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
-    const promotedRun = await db.transaction(async (tx) => {
+    const transactionResult = await db.transaction(async (tx) => {
       await tx.execute(
-        sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
+        sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
       );
 
       const issue = await tx
@@ -4304,16 +4485,52 @@ export function heartbeatService(db: Db) {
           companyId: issues.companyId,
           missionId: issues.missionId,
           parentId: issues.parentId,
+          identifier: issues.identifier,
+          title: issues.title,
+          originKind: issues.originKind,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
+          executionRunId: issues.executionRunId,
         })
         .from(issues)
-        .where(and(eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)))
+        .where(
+          and(
+            eq(issues.companyId, run.companyId),
+            or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id)),
+          ),
+        )
         .then((rows) => rows[0] ?? null);
 
       if (!issue) return;
 
+      const runAgent = await tx
+        .select({
+          id: agents.id,
+          name: agents.name,
+          adapterType: agents.adapterType,
+          adapterConfig: agents.adapterConfig,
+          runtimeConfig: agents.runtimeConfig,
+        })
+        .from(agents)
+        .where(eq(agents.id, run.agentId))
+        .then((rows) => rows[0] ?? null);
+      const usage = parseObject(run.usageJson);
+      const agentAdapterConfig = parseObject(runAgent?.adapterConfig);
+      const agentRuntimeConfig = parseObject(runAgent?.runtimeConfig);
+      const classification = classifyHeartbeatRunFailure({
+        status: run.status,
+        adapterType: runAgent?.adapterType ?? null,
+        errorCode: run.errorCode,
+        errorMessage: run.error,
+        stdoutExcerpt: run.stdoutExcerpt,
+        stderrExcerpt: run.stderrExcerpt,
+        provider: readNonEmptyString(usage.provider),
+        model: readNonEmptyString(usage.model),
+        command: readNonEmptyString(agentAdapterConfig.command) ?? readNonEmptyString(agentRuntimeConfig.command),
+      });
+
+      const isLinkedToRun = issue.checkoutRunId === run.id || issue.executionRunId === run.id;
       const shouldAutoCaptureMissionChildOutput =
         run.status === "succeeded" &&
         !!issue.missionId &&
@@ -4321,9 +4538,14 @@ export function heartbeatService(db: Db) {
         issue.assigneeAgentId === run.agentId &&
         issue.status !== "done" &&
         issue.status !== "cancelled" &&
-        (issue.status !== "blocked" || containsToolLimitLifecycleFailure(run));
+        (issue.status === "in_progress" || (issue.status === "blocked" && containsToolLimitLifecycleFailure(run)));
+      const shouldAutoCompleteSuccessfulIssue =
+        run.status === "succeeded" &&
+        isLinkedToRun &&
+        issue.status === "in_progress" &&
+        issue.assigneeAgentId === run.agentId;
 
-      if (shouldAutoCaptureMissionChildOutput) {
+      if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
         const now = new Date();
         await tx
           .update(issues)
@@ -4341,13 +4563,17 @@ export function heartbeatService(db: Db) {
           companyId: issue.companyId,
           issueId: issue.id,
           authorAgentId: run.agentId,
-          body: buildMissionChildRunOutputComment(run),
+          body: shouldAutoCaptureMissionChildOutput
+            ? buildMissionChildRunOutputComment(run)
+            : buildSuccessfulIssueRunAutoCompletedComment(run),
         });
         await tx.insert(activityLog).values({
           companyId: issue.companyId,
           actorType: "system",
           actorId: "heartbeat",
-          action: "issue.lifecycle_gap_auto_completed",
+          action: shouldAutoCaptureMissionChildOutput
+            ? "issue.lifecycle_gap_auto_completed"
+            : "issue.run_succeeded_auto_completed",
           entityType: "issue",
           entityId: issue.id,
           agentId: run.agentId,
@@ -4355,17 +4581,22 @@ export function heartbeatService(db: Db) {
           details: {
             previousStatus: issue.status,
             nextStatus: "done",
-            reason: "successful_mission_child_run_output_captured",
+            reason: shouldAutoCaptureMissionChildOutput
+              ? "successful_mission_child_run_output_captured"
+              : "successful_checked_out_run_auto_completed",
           },
         });
-        return null;
+        return {
+          promotedRun: null,
+          postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
+        };
       }
 
       if (
-        run.status === "succeeded" &&
+        ["failed", "timed_out", "cancelled"].includes(run.status) &&
+        isLinkedToRun &&
         issue.status === "in_progress" &&
-        issue.assigneeAgentId === run.agentId &&
-        issue.checkoutRunId === run.id
+        issue.assigneeAgentId === run.agentId
       ) {
         const now = new Date();
         await tx
@@ -4383,19 +4614,13 @@ export function heartbeatService(db: Db) {
           companyId: issue.companyId,
           issueId: issue.id,
           authorAgentId: run.agentId,
-          body: [
-            "## 자동 차단: issue lifecycle was not finalized",
-            `- 실행 runId: \`${run.id}\``,
-            "- 감지: adapter run은 succeeded로 종료됐지만 checked-out issue가 여전히 in_progress 상태였습니다.",
-            "- 해석: agent self-report/comment는 완료 증거가 아니며, issue status 전이는 명시적으로 수행되어야 합니다.",
-            "- 다음 조치: 산출물/evidence를 확인한 뒤 issue를 done으로 전이하거나, 필요한 후속 작업을 지정해 재개하세요.",
-          ].join("\n"),
+          body: buildFailedIssueRunAutoBlockedComment({ run, classification }),
         });
         await tx.insert(activityLog).values({
           companyId: issue.companyId,
           actorType: "system",
           actorId: "heartbeat",
-          action: "issue.lifecycle_gap_blocked",
+          action: "issue.run_failure_auto_blocked",
           entityType: "issue",
           entityId: issue.id,
           agentId: run.agentId,
@@ -4403,15 +4628,50 @@ export function heartbeatService(db: Db) {
           details: {
             previousStatus: "in_progress",
             nextStatus: "blocked",
-            reason: "successful_run_without_issue_lifecycle_finalization",
+            reason: "terminal_run_failure",
+            runStatus: run.status,
+            classification,
           },
         });
+        if (issue.missionId) {
+          const oversightIssueId = issue.parentId ?? issue.id;
+          if (oversightIssueId !== issue.id) {
+            await tx.insert(issueComments).values({
+              companyId: issue.companyId,
+              issueId: oversightIssueId,
+              authorAgentId: run.agentId,
+              body: buildMissionWorkerFailureOversightComment({
+                run,
+                sourceIssue: { id: issue.id, identifier: issue.identifier, title: issue.title },
+                classification,
+              }),
+            });
+          }
+          await tx.insert(activityLog).values({
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "mission.worker_run_failure_observed",
+            entityType: "mission",
+            entityId: issue.missionId,
+            agentId: run.agentId,
+            runId: run.id,
+            details: {
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              oversightIssueId,
+              runStatus: run.status,
+              classification,
+            },
+          });
+        }
         return null;
       }
 
       await tx
         .update(issues)
         .set({
+          checkoutRunId: null,
           executionRunId: null,
           executionAgentNameKey: null,
           executionLockedAt: null,
@@ -4529,6 +4789,23 @@ export function heartbeatService(db: Db) {
         return newRun;
       }
     });
+
+    const hasPostTransactionMissionOwnerPlanDecision =
+      !!transactionResult &&
+      typeof transactionResult === "object" &&
+      "postTransactionMissionOwnerPlanDecision" in transactionResult;
+    const postTransactionMissionOwnerPlanDecision = hasPostTransactionMissionOwnerPlanDecision
+      ? transactionResult.postTransactionMissionOwnerPlanDecision
+      : null;
+    const promotedRun = hasPostTransactionMissionOwnerPlanDecision ? transactionResult.promotedRun : transactionResult;
+
+    if (postTransactionMissionOwnerPlanDecision) {
+      await recordMissionOwnerPlanDecisionAfterComment(
+        db,
+        postTransactionMissionOwnerPlanDecision.issue,
+        postTransactionMissionOwnerPlanDecision.actorAgentId,
+      );
+    }
 
     if (!promotedRun) return;
 
@@ -4684,6 +4961,7 @@ export function heartbeatService(db: Db) {
           .select({
             id: issues.id,
             companyId: issues.companyId,
+            status: issues.status,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
           })
@@ -4928,15 +5206,39 @@ export function heartbeatService(db: Db) {
           })
           .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
-        await tx
+        const issueRunStartedAt = new Date();
+        const startedIssue = await tx
           .update(issues)
           .set({
             executionRunId: newRun.id,
+            checkoutRunId: newRun.id,
+            status: "in_progress",
+            startedAt: issueRunStartedAt,
             executionAgentNameKey: agentNameKey,
-            executionLockedAt: new Date(),
-            updatedAt: new Date(),
+            executionLockedAt: issueRunStartedAt,
+            updatedAt: issueRunStartedAt,
           })
-          .where(eq(issues.id, issue.id));
+          .where(and(eq(issues.id, issue.id), inArray(issues.status, ISSUE_RUN_START_STATUSES)))
+          .returning({ id: issues.id })
+          .then((rows) => rows[0] ?? null);
+
+        if (startedIssue) {
+          await tx.insert(activityLog).values({
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "issue.execution_started",
+            entityType: "issue",
+            entityId: issue.id,
+            agentId,
+            runId: newRun.id,
+            details: {
+              previousStatus: issue.status,
+              nextStatus: "in_progress",
+              reason: "issue_linked_run_started",
+            },
+          });
+        }
 
         return { kind: "queued" as const, run: newRun };
       });

@@ -317,7 +317,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       assigneeAgentId: agentId,
       missionId: run!.missionId,
       status: "todo",
-      title: "[Oversight] tech-scout report 생성",
+      title: "[OVERSIGHT] tech-scout report 생성",
     });
 
     const planArtifacts = await db

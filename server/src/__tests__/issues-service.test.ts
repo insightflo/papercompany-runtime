@@ -3,9 +3,12 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
+  agentRuntimeState,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issueInboxArchives,
@@ -15,6 +18,8 @@ import {
   srbIssuePairs,
   srbLinks,
   workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -1116,6 +1121,119 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     ).rejects.toThrow("Mission downstream issue creation is not allowed");
   });
 
+  it("allows plan materialization as mission-level ACTION/QA/OVERSIGHT sibling issues", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Source Researcher",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: qaAgentId,
+        companyId,
+        name: "QA Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "planning",
+    });
+    await db.insert(issues).values({
+      id: planIssueId,
+      companyId,
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_plan",
+      title: "[PLAN] Mission work structure",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const actionIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: workerAgentId,
+      createdByAgentId: ownerAgentId,
+      originKind: "mission_action",
+      title: "[ACTION] Source dossiers for candidates",
+      status: "todo",
+      priority: "medium",
+    });
+    const qaIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: qaAgentId,
+      createdByAgentId: ownerAgentId,
+      originKind: "mission_qa",
+      title: "[QA] Independent evidence and claim verification",
+      status: "todo",
+      priority: "high",
+    });
+    const oversightIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      createdByAgentId: ownerAgentId,
+      originKind: "mission_main_executor_oversight",
+      title: "[OVERSIGHT] Failure/retry/escalation decisions",
+      status: "todo",
+      priority: "medium",
+    });
+
+    expect(actionIssue).toEqual(expect.objectContaining({ parentId: null, issueGroup: "action" }));
+    expect(qaIssue).toEqual(expect.objectContaining({ parentId: null, issueGroup: "qa" }));
+    expect(oversightIssue).toEqual(expect.objectContaining({ parentId: null, issueGroup: "oversight" }));
+
+    await expect(
+      svc.create(companyId, {
+        missionId,
+        parentId: planIssueId,
+        assigneeAgentId: qaAgentId,
+        createdByAgentId: ownerAgentId,
+        originKind: "mission_qa",
+        title: "[QA] Plan-child validation should not be allowed",
+        status: "todo",
+        priority: "high",
+      }),
+    ).rejects.toThrow("Mission downstream issue creation is not allowed");
+  });
+
   it("rejects nested mission child issues created by workers", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1372,6 +1490,12 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(issueComments);
+    await db.delete(heartbeatRunEvents);
+    await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
+    await db.delete(agentRuntimeState);
+    await db.delete(workflowStepRuns);
+    await db.delete(workflowRuns);
     await db.delete(missionPlanArtifacts);
     await db.delete(issues);
     await db.delete(workflowDefinitions);
@@ -1408,7 +1532,7 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
-        runtimeConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
         permissions: {},
       },
       {
@@ -1419,7 +1543,7 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
-        runtimeConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
         permissions: {},
       },
     ]);
@@ -1517,7 +1641,26 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
         commentId: comment.id,
         decisionHash: expect.any(String),
       },
+      paqoWorkflow: {
+        workflowDefinitionId: expect.any(String),
+        workflowRunId: expect.any(String),
+        workflowName: "PAQO WBS: Ship controlled rollout",
+        dependencyModel: "workflow_dag_intra_mission",
+      },
     });
+
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Ship controlled rollout"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoRuns = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
+    expect(paqoRuns).toHaveLength(1);
+    expect(paqoRuns[0]).toMatchObject({ companyId, missionId, status: "running" });
+    const paqoStepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, paqoRuns[0]!.id));
+    expect(paqoStepRuns).toHaveLength(2);
+    const qaStepRun = paqoStepRuns.find((stepRun) => stepRun.stepId.startsWith("qa-"));
+    expect(qaStepRun).toMatchObject({ issueId: null, status: "pending" });
 
     const activities = await recordedActivities();
     expect(activities).toHaveLength(1);

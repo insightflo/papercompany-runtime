@@ -3,14 +3,20 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
+  agentRuntimeState,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
+  heartbeatRuns,
   issueComments,
   issues,
   missionPlanArtifacts,
   missions,
   workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import {
   buildMissionOwnerPlanRevisionDraft,
@@ -201,7 +207,7 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
-        runtimeConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
         permissions: {},
       },
       {
@@ -212,7 +218,7 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
-        runtimeConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
         permissions: {},
       },
     ]);
@@ -1039,6 +1045,12 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
+    await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
+    await db.delete(agentRuntimeState);
+    await db.delete(workflowStepRuns);
+    await db.delete(workflowRuns);
     await db.delete(missionPlanArtifacts);
     await db.delete(issueComments);
     await db.delete(issues);
@@ -1074,7 +1086,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
-        runtimeConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
         permissions: {},
       },
       {
@@ -1085,7 +1097,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
-        runtimeConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
         permissions: {},
       },
     ]);
@@ -1210,6 +1222,169 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       decisionHash: expect.any(String),
       idempotencyKey: expect.stringContaining(commentId),
     });
+  });
+
+  it("materializes selected execution units into a mission-scoped PAQO workflow DAG with ACTION gated before QA", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const sourceWorkflowId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: sourceWorkflowId,
+      companyId,
+      name: "Source Research Workflow",
+    });
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Validate PAQO workflow pivot",
+      selectedExecutionUnits: [
+        {
+          id: "research-scout",
+          kind: "workflow_definition_step",
+          title: "Research current workflow surfaces",
+          reason: "Need source evidence before synthesis",
+          sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: ["workflow source evidence"],
+      successCriteria: ["QA verifies the synthesized result"],
+      steps: [{ id: "qa", title: "Verify synthesized result" }],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Validate PAQO workflow pivot"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[]; agentId: string }>;
+    expect(paqoSteps.map((step) => step.name)).toEqual([
+      "[ACTION] Research current workflow surfaces",
+      "[QA] Verify mission result",
+    ]);
+    expect(paqoSteps[0]!.agentId).toBe(ownerAgentId);
+    expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
+
+    const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ companyId, missionId, status: "running" });
+
+    const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runs[0]!.id));
+    expect(stepRuns).toHaveLength(2);
+    const actionRun = stepRuns.find((stepRun) => stepRun.stepId === paqoSteps[0]!.id);
+    const qaRun = stepRuns.find((stepRun) => stepRun.stepId === paqoSteps[1]!.id);
+    expect(actionRun?.issueId).toEqual(expect.any(String));
+    expect(actionRun?.status).toBe("pending");
+    expect(qaRun?.issueId).toBeNull();
+    expect(qaRun?.status).toBe("pending");
+
+    const actionIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, actionRun!.issueId!))
+      .then((rows) => rows[0]);
+    expect(actionIssue).toMatchObject({
+      companyId,
+      missionId,
+      title: expect.stringMatching(/^\[ACTION\]/),
+      originKind: "workflow_execution",
+      originRunId: runs[0]!.id,
+      parentId: null,
+    });
+
+    const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    expect(activePlan?.refs).toMatchObject({
+      paqoWorkflow: {
+        workflowDefinitionId: paqoDefinitions[0]!.id,
+        workflowRunId: runs[0]!.id,
+        workflowName: "PAQO WBS: Validate PAQO workflow pivot",
+        stepIds: paqoSteps.map((step) => step.id),
+        decisionHash: expect.any(String),
+        dependencyModel: "workflow_dag_intra_mission",
+      },
+    });
+
+    const oversightIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_oversight"));
+    expect(oversightIssues).toHaveLength(0);
+  });
+
+  it("materializes selected execution units with issue sourceRefs emitted by PLAN heartbeat output", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Validate live PLAN heartbeat issue refs",
+      selectedExecutionUnits: [
+        {
+          id: "live-action-1",
+          title: "Live verification action A",
+          reason: "Matches process adapter PLAN stdout shape",
+          sourceRef: { type: "issue", identifier: "PLAN-1", issueId: planningIssueId },
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: ["live heartbeat auto-complete stdout"],
+      successCriteria: ["workflowRun exists"],
+      steps: ["hold QA behind dependencies"],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T01:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    expect(activePlan?.refs).toMatchObject({
+      paqoWorkflow: {
+        workflowRunId: expect.any(String),
+        dependencyModel: "workflow_dag_intra_mission",
+      },
+    });
+    const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(runs).toHaveLength(1);
+    const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runs[0]!.id));
+    expect(stepRuns).toHaveLength(2);
+    expect(stepRuns.some((stepRun) => stepRun.issueId && stepRun.status === "pending")).toBe(true);
+    expect(stepRuns.some((stepRun) => stepRun.issueId === null && stepRun.status === "pending")).toBe(true);
   });
 
   // Test 2: Invalid mission id returns invalid / no revision / no activity

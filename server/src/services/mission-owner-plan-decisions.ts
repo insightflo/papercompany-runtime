@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
+import { issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
+import { workflowService } from "./workflow/engine.js";
+import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
+import { createWorkflowRun } from "./workflow/workflow-store.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -802,7 +805,19 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const service = missionPlanArtifactService(db);
   const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
   const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
+  const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
   if (activeOwnerDecision?.decisionHash === decisionHash) {
+    if (activePlan) {
+      await ensurePaqoWorkflowForMissionOwnerPlan({
+        db,
+        companyId,
+        missionId,
+        draft: draftResult.draft,
+        missionPlanArtifactId: activePlan.id,
+        decisionHash,
+        triggeredBy: actor.actorId,
+      });
+    }
     return {
       status: "noop",
       reason: "already_recorded",
@@ -829,7 +844,15 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     successCriteria: draftResult.draft.successCriteria,
     steps: draftResult.draft.steps,
   });
-  const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
+  await ensurePaqoWorkflowForMissionOwnerPlan({
+    db,
+    companyId,
+    missionId,
+    draft: draftResult.draft,
+    missionPlanArtifactId: missionPlanArtifact.id,
+    decisionHash,
+    triggeredBy: actor.actorId,
+  });
   await logActivity(db, {
     companyId,
     actorType: actor.actorType,
@@ -872,22 +895,33 @@ async function validateSelectedExecutionUnitSourceRefs({
 }): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[]> {
   const diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[] = [];
   const nativeWorkflowDefinitionIds = new Set<string>();
+  const issueSourceIds = new Set<string>();
   const pluginEntityIdsByType = new Map<string, Set<string>>();
 
   for (const [index, unit] of selectedExecutionUnits.entries()) {
     const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
     const sourceType = typeof sourceRef?.type === "string" ? sourceRef.type.trim() : "";
-    const sourceId = typeof sourceRef?.id === "string" ? sourceRef.id.trim() : "";
+    const sourceId =
+      typeof sourceRef?.id === "string"
+        ? sourceRef.id.trim()
+        : typeof sourceRef?.issueId === "string"
+          ? sourceRef.issueId.trim()
+          : "";
     if (!sourceType || !sourceId) {
       diagnostics.push({
         code: "missing_source_ref",
-        message: `selectedExecutionUnits[${index}] must include sourceRef.type and sourceRef.id`,
+        message: `selectedExecutionUnits[${index}] must include sourceRef.type and sourceRef.id or sourceRef.issueId`,
       });
       continue;
     }
 
     if (NATIVE_WORKFLOW_DEFINITION_SOURCE_TYPES.has(sourceType)) {
       nativeWorkflowDefinitionIds.add(sourceId);
+      continue;
+    }
+
+    if (sourceType === "issue") {
+      issueSourceIds.add(sourceId);
       continue;
     }
 
@@ -926,6 +960,23 @@ async function validateSelectedExecutionUnitSourceRefs({
     }
   }
 
+  if (issueSourceIds.size > 0) {
+    const ids = Array.from(issueSourceIds);
+    const rows = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, ids)));
+    const found = new Set(rows.map((row) => row.id));
+    for (const id of ids) {
+      if (!found.has(id)) {
+        diagnostics.push({
+          code: "issue_source_ref_not_found",
+          message: `Issue source ref ${id} was not found in company ${companyId}`,
+        });
+      }
+    }
+  }
+
   for (const [entityType, idsSet] of pluginEntityIdsByType) {
     const ids = Array.from(idsSet);
     const rows = await db
@@ -951,6 +1002,131 @@ async function validateSelectedExecutionUnitSourceRefs({
   }
 
   return diagnostics;
+}
+
+function toNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function stripIssueGroupPrefix(title: string): string {
+  return title.replace(/^\s*\[(?:plan|action|qa|oversight)\]\s*/iu, "").trim();
+}
+
+function shortStableHash(value: unknown): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 10);
+}
+
+function formatPaqoWorkflowName(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect): string {
+  const goal = toNonEmptyString(draft.missionGoal) ?? toNonEmptyString(mission.title) ?? mission.id;
+  return `PAQO WBS: ${goal}`;
+}
+
+function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect): WorkflowStep[] {
+  const selectedUnits = draft.refs.selectedExecutionUnits;
+  const actionSteps = selectedUnits.map((unit, index) => {
+    const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+    const title = stripIssueGroupPrefix(
+      toNonEmptyString(unit.title)
+        ?? toNonEmptyString(unit.name)
+        ?? toNonEmptyString(unit.id)
+        ?? `Execution unit ${index + 1}`,
+    );
+    return {
+      id: `action-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title })}`,
+      name: `[ACTION] ${title}`,
+      agentId: mission.ownerAgentId,
+      dependencies: [],
+      description: [
+        "Mission-level PAQO ACTION issue materialized from an authorized PLAN decision.",
+        "",
+        `Mission: ${mission.title}`,
+        toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
+        sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
+      ].filter(Boolean).join("\n"),
+    } satisfies WorkflowStep;
+  });
+
+  const qaStep: WorkflowStep = {
+    id: `qa-${shortStableHash({ missionId: mission.id, actions: actionSteps.map((step) => step.id), goal: draft.missionGoal })}`,
+    name: "[QA] Verify mission result",
+    agentId: mission.ownerAgentId,
+    dependencies: actionSteps.map((step) => step.id),
+    description: [
+      "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
+      "",
+      draft.successCriteria.length > 0 ? `Success criteria: ${JSON.stringify(draft.successCriteria)}` : null,
+      draft.steps.length > 0 ? `Planned steps: ${JSON.stringify(draft.steps)}` : null,
+    ].filter(Boolean).join("\n"),
+  };
+
+  return [...actionSteps, qaStep];
+}
+
+async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  draft: PlanRevisionDraft;
+  missionPlanArtifactId: string;
+  decisionHash: string;
+  triggeredBy: string;
+}): Promise<void> {
+  if (input.draft.refs.selectedExecutionUnits.length === 0) return;
+
+  const mission = await input.db
+    .select()
+    .from(missions)
+    .where(and(eq(missions.companyId, input.companyId), eq(missions.id, input.missionId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!mission) return;
+
+  const workflowName = formatPaqoWorkflowName(input.draft, mission);
+  const steps = buildPaqoWorkflowSteps(input.draft, mission);
+  const [existingDefinition] = await input.db
+    .select()
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.companyId, input.companyId), eq(workflowDefinitions.name, workflowName)))
+    .limit(1);
+  const definition = existingDefinition ?? await workflowService.createDefinition(input.db, {
+    companyId: input.companyId,
+    name: workflowName,
+    steps,
+  });
+
+  const [existingRun] = await input.db
+    .select()
+    .from(workflowRuns)
+    .where(and(eq(workflowRuns.companyId, input.companyId), eq(workflowRuns.workflowId, definition.id), eq(workflowRuns.missionId, input.missionId)))
+    .limit(1);
+  const workflowRunId = existingRun?.id ?? (await (async () => {
+    const run = await createWorkflowRun(input.db, {
+      companyId: input.companyId,
+      workflowId: definition.id,
+      missionId: input.missionId,
+      triggeredBy: input.triggeredBy,
+    });
+    await executeWorkflowRun(input.db, run.id);
+    return run.id;
+  })());
+
+  const service = missionPlanArtifactService(input.db);
+  const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
+  if (activePlan?.id !== input.missionPlanArtifactId) return;
+  const refs = mergeMissionPlanRefs(activePlan.refs, {
+    paqoWorkflow: {
+      workflowDefinitionId: definition.id,
+      workflowRunId,
+      workflowName,
+      stepIds: steps.map((step) => step.id),
+      decisionHash: input.decisionHash,
+      dependencyModel: "workflow_dag_intra_mission",
+    },
+  });
+  await input.db
+    .update(missionPlanArtifacts)
+    .set({ refs, updatedAt: new Date() })
+    .where(eq(missionPlanArtifacts.id, activePlan.id));
 }
 
 function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decisionHash?: string } | null {
