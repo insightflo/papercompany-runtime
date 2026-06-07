@@ -137,6 +137,38 @@ async function clearStalePyenvShimLock(input: {
   }
 }
 
+const DEFAULT_PLANNING_RUN_DISALLOWED_TOOLS = ["WebSearch", "WebFetch", "Task"];
+
+function hasClaudeToolFlag(args: string[], flagNames: string[]): boolean {
+  return args.some((arg) => flagNames.some((flagName) => arg === flagName || arg.startsWith(`${flagName}=`)));
+}
+
+function resolveMissionOwnerPlanningContext(context: Record<string, unknown>): Record<string, unknown> | null {
+  const manifest = parseObject(context.paperclipStepInputManifest);
+  const manifestInputs = parseObject(manifest.inputs);
+  const manifestPlanningContext = parseObject(manifestInputs.missionOwnerPlanningContext);
+  if (manifestPlanningContext.available === true) return manifestPlanningContext;
+
+  const directPlanningContext = parseObject(context.paperclipMissionOwnerPlanningContext);
+  return Object.keys(directPlanningContext).length > 0 ? directPlanningContext : null;
+}
+
+function resolvePlanningRunDisallowedTools(config: Record<string, unknown>): string[] {
+  const configured = asStringArray(config.planningRunDisallowedTools)
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+  const tools = configured.length > 0 ? configured : DEFAULT_PLANNING_RUN_DISALLOWED_TOOLS;
+  return Array.from(new Set(tools));
+}
+
+function shouldApplyPlanningRunToolRestrictions(input: {
+  config: Record<string, unknown>;
+  context: Record<string, unknown>;
+}): boolean {
+  if (asBoolean(input.config.planningRunToolRestrictions, true) !== true) return false;
+  return resolveMissionOwnerPlanningContext(input.context) !== null;
+}
+
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, authToken } = input;
 
@@ -353,7 +385,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effort = asString(config.effort, "");
   const chrome = asBoolean(config.chrome, false);
   const maxTurns = asNumber(config.maxTurnsPerRun, 0);
-  const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, false);
+  const dangerouslySkipPermissions = asBoolean(
+    config.dangerouslySkipPermissions,
+    config.dangerouslySkipPermissions !== false,
+  );
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
 
   const runtimeConfig = await buildClaudeRuntimeConfig({
@@ -391,6 +426,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `Injected agent instructions via --append-system-prompt-file ${resolvedInstructionsFilePath} (with path directive appended)`,
       ]
     : [];
+  const shouldRestrictPlanningTools = shouldApplyPlanningRunToolRestrictions({ config, context });
+  const extraArgsHaveDisallowedTools = hasClaudeToolFlag(extraArgs, ["--disallowedTools", "--disallowed-tools"]);
+  const planningRunDisallowedTools = shouldRestrictPlanningTools && !extraArgsHaveDisallowedTools
+    ? resolvePlanningRunDisallowedTools(config)
+    : [];
+  if (planningRunDisallowedTools.length > 0) {
+    commandNotes.push(
+      `Director/mission-owner planning run tool restriction: --disallowedTools ${planningRunDisallowedTools.join(",")}`,
+    );
+  } else if (shouldRestrictPlanningTools && extraArgsHaveDisallowedTools) {
+    commandNotes.push("Director/mission-owner planning run tool restriction skipped because extraArgs already define --disallowedTools.");
+  }
 
   // When instructionsFilePath is configured, create a combined temp file that
   // includes both the file content and the path directive, so we only need
@@ -465,6 +512,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
     if (effectiveInstructionsFilePath) {
       args.push("--append-system-prompt-file", effectiveInstructionsFilePath);
+    }
+    if (planningRunDisallowedTools.length > 0) {
+      args.push("--disallowedTools", planningRunDisallowedTools.join(","));
     }
     args.push("--add-dir", skillsDir);
     if (extraArgs.length > 0) args.push(...extraArgs);

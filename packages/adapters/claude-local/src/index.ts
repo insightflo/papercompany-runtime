@@ -24,6 +24,8 @@ Core fields:
 - dangerouslySkipPermissions (boolean, optional): pass --dangerously-skip-permissions to claude
 - command (string, optional): defaults to "claude"
 - extraArgs (string[], optional): additional CLI args
+- planningRunToolRestrictions (boolean, optional): defaults true; for mission-owner/director planning contexts, append --disallowedTools unless caller already provided it
+- planningRunDisallowedTools (string[], optional): tool names denied for planning contexts; defaults to WebSearch, WebFetch, Task so issue API/status work via Bash remains available
 - env (object, optional): KEY=VALUE environment variables
 - workspaceStrategy (object, optional): execution workspace strategy; currently supports { type: "git_worktree", baseRef?, branchTemplate?, worktreeParentDir? }
 - workspaceRuntime (object, optional): workspace runtime service intents; local host-managed services are realized before Claude starts and exposed back via context/env

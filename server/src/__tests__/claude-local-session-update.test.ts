@@ -120,4 +120,90 @@ describe("claude execute session updates", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("adds planning-run tool restrictions while preserving Bash for Paperclip API/status work", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-planning-tools-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "claude");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeClaudeCommand(commandPath);
+
+    try {
+      let commandArgs: string[] = [];
+      let invocationPrompt = "";
+      let commandNotes: string[] = [];
+      const result = await execute({
+        runId: "run-claude-planning-tools",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Research Director",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {
+          paperclipStepInputManifest: {
+            version: 1,
+            taskKey: "mission:mission-1",
+            issueId: "issue-plan-1",
+            projectId: null,
+            allowedContextKeys: ["paperclipMissionOwnerPlanningContext"],
+            guardrails: { broadScanAllowed: false },
+            inputs: {
+              runtimeServices: { available: false, count: 0, primaryUrl: null },
+              missionOwnerPlanningContext: {
+                available: true,
+                missionId: "mission-1",
+                planningIssueId: "issue-plan-1",
+                activePlanAvailable: false,
+                selectedExecutionUnitCount: 0,
+                executionSourceUnitCount: 0,
+                planningDossierAssetCounts: {
+                  workflowCandidates: 0,
+                  tools: 0,
+                  runtimeServices: 0,
+                  ruleRefs: 0,
+                  kbRefs: 0,
+                  agentRoster: 1,
+                  fileViews: 0,
+                  executionSourceUnits: 0,
+                },
+                planningDossierGapCount: 1,
+                planningDossierSevereGapCount: 1,
+              },
+            },
+          },
+        },
+        onLog: async () => {},
+        onMeta: async (meta) => {
+          commandArgs = meta.commandArgs ?? [];
+          invocationPrompt = meta.prompt ?? "";
+          commandNotes = meta.commandNotes ?? [];
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(commandArgs).toContain("--disallowedTools");
+      expect(commandArgs[commandArgs.indexOf("--disallowedTools") + 1]).toBe("WebSearch,WebFetch,Task");
+      expect(commandArgs[commandArgs.indexOf("--disallowedTools") + 1]).not.toContain("Bash");
+      expect(commandNotes.join("\n")).toContain("Director/mission-owner planning run tool restriction");
+      expect(invocationPrompt).toContain("Director boundary:");
+      expect(invocationPrompt).toContain("internal Agent/Task/WebSearch/WebFetch/Bash as a source-research or report-production substitute");
+      expect(invocationPrompt).toContain("No runtime service assets are listed in this dossier. This is not a Paperclip worker-runtime health signal.");
+      expect(invocationPrompt).not.toContain("Runtime services: unavailable");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
