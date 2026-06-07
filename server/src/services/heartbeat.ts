@@ -4474,6 +4474,7 @@ export function heartbeatService(db: Db) {
   }
 
   async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
+    let postTransactionWorkflowIssueSyncIssueId: string | null = null;
     const transactionResult = await db.transaction(async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
@@ -4586,6 +4587,7 @@ export function heartbeatService(db: Db) {
               : "successful_checked_out_run_auto_completed",
           },
         });
+        postTransactionWorkflowIssueSyncIssueId = issue.id;
         return {
           promotedRun: null,
           postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
@@ -4805,6 +4807,11 @@ export function heartbeatService(db: Db) {
         postTransactionMissionOwnerPlanDecision.issue,
         postTransactionMissionOwnerPlanDecision.actorAgentId,
       );
+    }
+
+    if (postTransactionWorkflowIssueSyncIssueId) {
+      const { workflowService } = await import("./workflow/engine.js");
+      await workflowService.syncRunStatusForIssue(db, postTransactionWorkflowIssueSyncIssueId);
     }
 
     if (!promotedRun) return;

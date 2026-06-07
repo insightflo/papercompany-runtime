@@ -771,6 +771,160 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
+  it("syncs workflow step runs after auto-completing a successful workflow execution issue", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const issueId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const completedStepRunId = randomUUID();
+    const followupStepRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentId,
+        companyId,
+        name: "Workflow Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Work the checked out issue." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: qaAgentId,
+        companyId,
+        name: "Workflow QA Agent",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Review the completed workflow step." },
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+        permissions: {},
+      },
+    ]);
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Two step workflow",
+      stepsJson: [
+        { id: "draft", name: "Draft", agentId, dependencies: [] },
+        { id: "review", name: "Review", agentId: qaAgentId, dependencies: ["draft"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "running",
+      startedAt: new Date(),
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "PAP-WF-1",
+      title: "Draft workflow output",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originRunId: workflowRunId,
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        id: completedStepRunId,
+        workflowRunId,
+        stepId: "draft",
+        issueId,
+        status: "running",
+        startedAt: new Date(),
+      },
+      {
+        id: followupStepRunId,
+        workflowRunId,
+        stepId: "review",
+        issueId: null,
+        status: "pending",
+      },
+    ]);
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({ checkoutRunId: runId, executionRunId: runId })
+        .where(eq(issues.id, issueId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+
+    const deadline = Date.now() + 5_000;
+    let stepRuns: (typeof workflowStepRuns.$inferSelect)[] = [];
+    while (Date.now() < deadline) {
+      stepRuns = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, workflowRunId));
+      const draft = stepRuns.find((stepRun) => stepRun.id === completedStepRunId);
+      const review = stepRuns.find((stepRun) => stepRun.id === followupStepRunId);
+      if (draft?.status === "completed" && review?.issueId) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const draftStep = stepRuns.find((stepRun) => stepRun.id === completedStepRunId);
+    const reviewStep = stepRuns.find((stepRun) => stepRun.id === followupStepRunId);
+
+    expect(draftStep).toEqual(
+      expect.objectContaining({
+        status: "completed",
+        issueId,
+      }),
+    );
+    expect(draftStep?.completedAt).toBeInstanceOf(Date);
+    expect(reviewStep).toEqual(
+      expect.objectContaining({
+        status: "pending",
+        issueId: expect.any(String),
+      }),
+    );
+    const reviewIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, reviewStep!.issueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(reviewIssue).toEqual(
+      expect.objectContaining({
+        assigneeAgentId: qaAgentId,
+        originKind: "workflow_execution",
+        originRunId: workflowRunId,
+        status: "todo",
+      }),
+    );
+  });
+
   it("records a mission owner PLAN decision when heartbeat auto-completes the checked-out planning issue", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
