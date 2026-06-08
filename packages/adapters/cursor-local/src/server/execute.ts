@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import {
   asString,
   asNumber,
@@ -303,7 +304,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let instructionsChars = 0;
   if (resolvedInstructionsFilePath) {
     try {
-      const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
+      const loadedInstructions = await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath);
+      const instructionsContents = loadedInstructions.content;
       instructionsPrefix =
         `${instructionsContents}\n\n` +
         `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +
@@ -313,6 +315,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Loaded agent instructions file: ${resolvedInstructionsFilePath}\n`,
       );
+      for (const includedPath of loadedInstructions.includedPaths) {
+        await onLog("stdout", `[paperclip] Inlined referenced agent instructions file: ${includedPath}\n`);
+      }
+      for (const warning of loadedInstructions.warnings) {
+        await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(

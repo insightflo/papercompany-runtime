@@ -8,6 +8,7 @@ import {
   type AdapterExecutionContext,
   type AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
+import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import {
   asBoolean,
   asNumber,
@@ -177,7 +178,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let instructionsPrefix = "";
   if (resolvedInstructionsFilePath) {
     try {
-      instructionsPrefix = `${await fs.readFile(resolvedInstructionsFilePath, "utf8")}\n\n`;
+      const loadedInstructions = await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath);
+      instructionsPrefix = `${loadedInstructions.content}\n\n`;
+      await onLog("stderr", `[paperclip] Loaded agent instructions file: ${resolvedInstructionsFilePath}\n`);
+      for (const includedPath of loadedInstructions.includedPaths) {
+        await onLog("stderr", `[paperclip] Inlined referenced agent instructions file: ${includedPath}\n`);
+      }
+      for (const warning of loadedInstructions.warnings) {
+        await onLog("stderr", `[paperclip] Warning: ${warning}\n`);
+      }
     } catch (err) {
       await onLog("stderr", `[paperclip] Failed to read instructions file ${resolvedInstructionsFilePath}: ${err instanceof Error ? err.message : String(err)}\n`);
     }

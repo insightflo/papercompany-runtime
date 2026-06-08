@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
   asString,
@@ -385,6 +386,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effort = asString(config.effort, "");
   const chrome = asBoolean(config.chrome, false);
   const maxTurns = asNumber(config.maxTurnsPerRun, 0);
+  const configuredVisionCommand = asString(config.visionCommand, "").trim();
+  const configuredVisionModel = asString(config.visionModel, "").trim();
   const dangerouslySkipPermissions = asBoolean(
     config.dangerouslySkipPermissions,
     config.dangerouslySkipPermissions !== false,
@@ -445,12 +448,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let effectiveInstructionsFilePath: string | undefined = resolvedInstructionsFilePath || undefined;
   if (resolvedInstructionsFilePath) {
     try {
-      const instructionsContent = await fs.readFile(resolvedInstructionsFilePath, "utf-8");
+      const loadedInstructions = await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath);
+      const instructionsContent = loadedInstructions.content;
       const pathDirective = `\nThe above agent instructions were loaded from ${resolvedInstructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}.`;
       const combinedPath = path.join(skillsDir, "agent-instructions.md");
       await fs.writeFile(combinedPath, instructionsContent + pathDirective, "utf-8");
       effectiveInstructionsFilePath = combinedPath;
       await onLog("stderr", `[paperclip] Loaded agent instructions file: ${resolvedInstructionsFilePath}\n`);
+      for (const includedPath of loadedInstructions.includedPaths) {
+        await onLog("stderr", `[paperclip] Inlined referenced agent instructions file: ${includedPath}\n`);
+      }
+      for (const warning of loadedInstructions.warnings) {
+        await onLog("stderr", `[paperclip] Warning: ${warning}\n`);
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
@@ -490,15 +500,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
   const runtimeBrief = buildPaperclipRuntimeBrief(context);
+  const visionHelperCommand = configuredVisionCommand || "$PAPERCLIP_VISION_COMMAND";
+  const visionDelegationBrief = joinPromptSections([
+    "Paperclip vision delegation (CRITICAL):",
+    "- Keep your main reasoning on the configured primary model.",
+    "- The primary model may be text-only. For image artifacts, using the Read tool sends image input to the primary model and can fail the run.",
+    "- If a path ends in .png, .jpg, .jpeg, .webp, or .gif, DO NOT use the Read tool on that path.",
+    "- Instead delegate only the visual inspection to the vision helper command via Bash, then continue from the helper's text result.",
+    `- Helper command format: ${visionHelperCommand} <image-path> "<specific visual question>"`,
+    `- Example: ${visionHelperCommand} "/absolute/path/to/artifact.png" "Validate visible text, claims, layout, and obvious rendering errors; return PASS or issues."`,
+    `- Vision model hint: ${configuredVisionModel || "$PAPERCLIP_VISION_MODEL" || "vision-capable model"}.`,
+    "- If the helper command is unavailable, block with a clear setup error instead of attempting image input on the primary model.",
+  ]);
   const prompt = joinPromptSections([
     renderedBootstrapPrompt,
     runtimeBrief,
+    visionDelegationBrief,
     renderedPrompt,
   ]);
   const promptMetrics = {
     promptChars: prompt.length,
     bootstrapPromptChars: renderedBootstrapPrompt.length,
     sessionHandoffChars: runtimeBrief.length,
+    visionDelegationPromptChars: visionDelegationBrief.length,
     heartbeatPromptChars: renderedPrompt.length,
   };
 
