@@ -12,6 +12,11 @@ export const queryKeys = {
     file: (companyId: string, skillId: string, relativePath: string) =>
       ["company-skills", companyId, skillId, "file", relativePath] as const,
   },
+  companyInstructions: {
+    bundle: (companyId: string) => ["company-instructions", companyId] as const,
+    file: (companyId: string, relativePath: string) =>
+      ["company-instructions", companyId, "file", relativePath] as const,
+  },
   agents: {
     list: (companyId: string) => ["agents", companyId] as const,
     detail: (id: string) => ["agents", "detail", id] as const,
@@ -27,7 +32,8 @@ export const queryKeys = {
       ["agents", companyId, "adapter-models", adapterType] as const,
   },
   issues: {
-    list: (companyId: string) => ["issues", companyId] as const,
+    list: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>
+      ["issues", companyId, filters ?? {}] as const,
     search: (companyId: string, q: string, projectId?: string) =>
       ["issues", companyId, "search", q, projectId ?? "__all-projects__"] as const,
     listAssignedToMe: (companyId: string) => ["issues", companyId, "assigned-to-me"] as const,

@@ -1,5 +1,6 @@
 export { companyService } from "./companies.js";
 export { companySkillService } from "./company-skills.js";
+export { companyInstructionsService } from "./company-instructions.js";
 export { agentService, deduplicateAgentName } from "./agents.js";
 export { agentInstructionsService, syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
 export { assetService } from "./assets.js";

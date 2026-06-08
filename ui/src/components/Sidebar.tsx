@@ -8,6 +8,7 @@ import {
   Search,
   SquarePen,
   Network,
+  BookOpen,
   Boxes,
   Repeat,
   Settings,
@@ -125,6 +126,7 @@ export function Sidebar() {
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
           <SidebarNavItem to="/org" label="Org" icon={Network} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
+          <SidebarNavItem to="/instructions" label="Instructions" icon={BookOpen} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />

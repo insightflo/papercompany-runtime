@@ -13,6 +13,7 @@ import { healthRoutes } from "./routes/health.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
+import { companyInstructionRoutes } from "./routes/company-instructions.js";
 import { agentRoutes } from "./routes/agents.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
@@ -309,6 +310,7 @@ export async function createApp(
   api.use(issueRoutes(db, opts.storageService));
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(companySkillRoutes(db));
+  api.use(companyInstructionRoutes(db));
   api.use(agentRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));

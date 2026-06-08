@@ -45,6 +45,7 @@ const ApprovalDetail = lazy(async () => ({ default: (await import("./pages/Appro
 const Costs = lazy(async () => ({ default: (await import("./pages/Costs")).Costs }));
 const Activity = lazy(async () => ({ default: (await import("./pages/Activity")).Activity }));
 const CompanySkills = lazy(async () => ({ default: (await import("./pages/CompanySkills")).CompanySkills }));
+const CompanyInstructions = lazy(async () => ({ default: (await import("./pages/CompanyInstructions")).CompanyInstructions }));
 const CompanyExport = lazy(async () => ({ default: (await import("./pages/CompanyExport")).CompanyExport }));
 const CompanyImport = lazy(async () => ({ default: (await import("./pages/CompanyImport")).CompanyImport }));
 const DesignGuide = lazy(async () => ({ default: (await import("./pages/DesignGuide")).DesignGuide }));
@@ -142,6 +143,7 @@ function boardRoutes() {
       <Route path="company/export/*" element={lazyRoute(<CompanyExport />)} />
       <Route path="company/import" element={lazyRoute(<CompanyImport />)} />
       <Route path="skills/*" element={lazyRoute(<CompanySkills />)} />
+      <Route path="instructions" element={lazyRoute(<CompanyInstructions />)} />
       <Route path="settings" element={<LegacySettingsRedirect />} />
       <Route path="settings/*" element={<LegacySettingsRedirect />} />
       <Route path="plugins/:pluginId" element={lazyRoute(<PluginPage />)} />
@@ -356,6 +358,7 @@ export function App() {
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />
           <Route path="skills/*" element={<UnprefixedBoardRedirect />} />
+          <Route path="instructions" element={<UnprefixedBoardRedirect />} />
           <Route path="settings" element={<LegacySettingsRedirect />} />
           <Route path="settings/*" element={<LegacySettingsRedirect />} />
           <Route path="agents" element={<UnprefixedBoardRedirect />} />

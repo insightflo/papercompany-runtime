@@ -49,6 +49,13 @@ export {
   type CompanySkillFileUpdate,
 } from "./company-skill.js";
 export {
+  companyInstructionFileSummarySchema,
+  companyInstructionFileDetailSchema,
+  companyInstructionsBundleSchema,
+  upsertCompanyInstructionFileSchema,
+  type UpsertCompanyInstructionFile,
+} from "./company-instructions.js";
+export {
   agentSkillStateSchema,
   agentSkillSyncModeSchema,
   agentSkillEntrySchema,

@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCompany } from "../context/CompanyContext";
 import { useDialog } from "../context/DialogContext";
 import { useSidebar } from "../context/SidebarContext";
-import { issuesApi } from "../api/issues";
+import { ACTIVE_ISSUE_STATUS_FILTER, issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
 import { queryKeys } from "../lib/queryKeys";
@@ -25,6 +25,7 @@ import {
   Rocket,
   LayoutDashboard,
   Inbox,
+  BookOpen,
   DollarSign,
   History,
   SquarePen,
@@ -59,8 +60,8 @@ export function CommandPalette() {
   }, [open]);
 
   const { data: issues = [] } = useQuery({
-    queryKey: queryKeys.issues.list(selectedCompanyId!),
-    queryFn: () => issuesApi.list(selectedCompanyId!),
+    queryKey: queryKeys.issues.list(selectedCompanyId!, { status: ACTIVE_ISSUE_STATUS_FILTER }),
+    queryFn: () => issuesApi.list(selectedCompanyId!, { status: ACTIVE_ISSUE_STATUS_FILTER }),
     enabled: !!selectedCompanyId && open,
   });
 
@@ -170,6 +171,10 @@ export function CommandPalette() {
           <CommandItem onSelect={() => go("/agents")}>
             <Bot className="mr-2 h-4 w-4" />
             Agents
+          </CommandItem>
+          <CommandItem onSelect={() => go("/instructions")}>
+            <BookOpen className="mr-2 h-4 w-4" />
+            Instructions
           </CommandItem>
           <CommandItem onSelect={() => go("/costs")}>
             <DollarSign className="mr-2 h-4 w-4" />

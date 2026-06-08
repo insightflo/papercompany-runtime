@@ -22,6 +22,12 @@ export type {
   CompanySkillFileUpdateRequest,
 } from "./company-skill.js";
 export type {
+  CompanyInstructionFileSummary,
+  CompanyInstructionFileDetail,
+  CompanyInstructionsBundle,
+  CompanyInstructionFileUpdateRequest,
+} from "./company-instructions.js";
+export type {
   AgentSkillSyncMode,
   AgentSkillState,
   AgentSkillOrigin,
