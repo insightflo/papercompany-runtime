@@ -2038,6 +2038,23 @@ function buildMissionWorkerFailureOversightComment(input: {
   ].join("\n");
 }
 
+function buildMissionOversightRunFailureComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  classification: HeartbeatFailureClassification;
+}) {
+  return [
+    "## Mission oversight run failed but the supervisor issue remains open",
+    `- failed runId: \`${input.run.id}\``,
+    `- run status: \`${input.run.status}\``,
+    `- classification: \`${input.classification.reasonCode}\` (${input.classification.category})`,
+    `- summary: ${input.classification.summary}`,
+    input.classification.fallbackCandidates.length > 0
+      ? `- fallback candidates: ${input.classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
+      : "- fallback candidates: none auto-selected; owner should decide retry/reassign/escalate.",
+    "- policy: mission oversight is the supervisor for this mission, so a failed oversight run releases the issue back to todo instead of blocking the supervisor itself.",
+  ].join("\n");
+}
+
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -5468,6 +5485,47 @@ export function heartbeatService(db: Db) {
         issue.status === "in_progress" &&
         issue.assigneeAgentId === run.agentId
       ) {
+        if (issue.originKind === "mission_main_executor_oversight" && issue.missionId) {
+          const now = new Date();
+          await tx
+            .update(issues)
+            .set({
+              status: "todo",
+              checkoutRunId: null,
+              executionRunId: null,
+              executionAgentNameKey: null,
+              executionLockedAt: null,
+              updatedAt: now,
+            })
+            .where(eq(issues.id, issue.id));
+          await tx.insert(issueComments).values({
+            companyId: issue.companyId,
+            issueId: issue.id,
+            authorAgentId: run.agentId,
+            body: buildMissionOversightRunFailureComment({ run, classification }),
+          });
+          await tx.insert(activityLog).values({
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "mission.oversight_run_failure_observed",
+            entityType: "mission",
+            entityId: issue.missionId,
+            agentId: run.agentId,
+            runId: run.id,
+            details: {
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              previousStatus: "in_progress",
+              nextStatus: "todo",
+              reason: "oversight_terminal_run_failure_released",
+              runStatus: run.status,
+              classification,
+            },
+          });
+          return null;
+        }
+
         const now = new Date();
         await tx
           .update(issues)

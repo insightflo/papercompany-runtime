@@ -28,6 +28,7 @@ import {
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
+import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -88,6 +89,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
   }, 60_000);
 
   afterEach(async () => {
+    setWorkflowToolStepExecutor(null);
     await db.delete(missionDelegations);
     await db.delete(issueWorkProducts);
     await db.delete(pluginEntities);
@@ -2439,6 +2441,164 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const repeatedOwnerActions = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock"));
     expect(repeatedOwnerActions).toHaveLength(1);
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("automatically retries completed issue-less tool recovery through the unified workflow engine", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const failedStepRunId = randomUUID();
+    const downstreamStepRunId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+    const now = new Date("2026-06-10T07:30:00.000Z");
+
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Tool Step Auto Recovery Company",
+      issuePrefix: `TA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const [mission] = await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Tool step auto recovery mission",
+      status: "active",
+    }).returning();
+
+    const svc = missionService(db);
+    const oversightIssue = await svc.ensureMainExecutorOversightIssue(mission!, "gazua-morning", {
+      sourceRunId: runId,
+      workflowStepIds: ["collect-signals", "signal-analysis"],
+    });
+
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "gazua-morning",
+      stepsJson: [
+        {
+          id: "collect-signals",
+          name: "Collect KR signals",
+          type: "tool",
+          dependencies: [],
+          toolNames: ["collect-signals-kr"],
+          description: "Collect market signals via external HTTP sources.",
+        },
+        {
+          id: "signal-analysis",
+          name: "Analyze signals",
+          type: "tool",
+          dependencies: ["collect-signals"],
+          toolNames: ["analyze-signals"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "test",
+      status: "failed",
+      startedAt: new Date("2026-06-10T06:21:11.582Z"),
+      completedAt: new Date("2026-06-10T06:23:53.691Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        id: failedStepRunId,
+        workflowRunId: runId,
+        stepId: "collect-signals",
+        issueId: null,
+        status: "failed",
+        startedAt: new Date("2026-06-10T06:21:11.582Z"),
+        completedAt: new Date("2026-06-10T06:23:53.691Z"),
+      },
+      {
+        id: downstreamStepRunId,
+        workflowRunId: runId,
+        stepId: "signal-analysis",
+        issueId: null,
+        status: "skipped",
+        startedAt: null,
+        completedAt: new Date("2026-06-10T06:23:53.691Z"),
+      },
+    ]);
+
+    const discovery = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now });
+    expect(discovery.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("tool_step_failed_requires_recovery"),
+    ]));
+    const recoveryIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"))
+      .then((rows) => rows[0]!);
+    expect(recoveryIssue.description).toContain(`<!-- tool-step-recovery:${runId}:collect-signals -->`);
+
+    await issueService(db).update(recoveryIssue.id, { status: "done" });
+
+    const result = await svc.runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-10T07:35:00.000Z"),
+      applyOwnerDecisionActions: true,
+    });
+
+    expect(result.missionIds).toContain(missionId);
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "native_tool_step_retry",
+        missionId,
+        ownerActionIssueId: recoveryIssue.id,
+        workflowRunId: runId,
+        stepId: "collect-signals",
+        stepRunId: failedStepRunId,
+        resultStatus: "running",
+      }),
+    ]));
+
+    const [runAfter] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(runAfter).toEqual(expect.objectContaining({
+      status: "running",
+      completedAt: null,
+    }));
+    const stepRunsAfter = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const retriedStep = stepRunsAfter.find((stepRun) => stepRun.id === failedStepRunId);
+    const downstreamStep = stepRunsAfter.find((stepRun) => stepRun.id === downstreamStepRunId);
+    expect(retriedStep).toEqual(expect.objectContaining({
+      status: "running",
+      issueId: null,
+    }));
+    expect(downstreamStep).toEqual(expect.objectContaining({
+      status: "pending",
+      issueId: null,
+      startedAt: null,
+      completedAt: null,
+    }));
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
+      companyId,
+      workflowRunId: runId,
+      stepRunId: failedStepRunId,
+      stepId: "collect-signals",
+      toolName: "collect-signals-kr",
+    }));
   });
 
   it("creates the main executor oversight substrate when a workflow mission is created", async () => {
