@@ -605,7 +605,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .filter((value): value is Date => value instanceof Date)
       .sort((left, right) => left.getTime() - right.getTime())[0] ?? new Date();
     if (normalizedStatuses.some((status) => activeWorkflowRunStatuses.has(status))) {
-      if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) return mission;
+      if (mission.status === "completed") return mission;
       if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;
       const updates: Partial<MissionRow> = {
         status: "active",

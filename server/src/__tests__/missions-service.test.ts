@@ -3442,6 +3442,72 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(stored?.completedAt).toBeNull();
   });
 
+  it("does not reactivate an operator-completed workflow-created mission while a linked native run is still active", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Operator Completed Workflow Company",
+      issuePrefix: `OC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-06-09 tech-scout",
+      description: "Created automatically for workflow run: tech-scout",
+      status: "completed",
+      startedAt: new Date("2026-06-09T07:44:21.648Z"),
+      completedAt: new Date("2026-06-09T11:39:30.000Z"),
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-scout",
+      stepsJson: [{ id: "publish", name: "Publish", agentId: ownerAgentId, dependencies: [] }],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      status: "running",
+      triggeredBy: "board",
+      startedAt: new Date("2026-06-09T07:44:21.655Z"),
+      completedAt: null,
+    });
+
+    const svc = missionService(db);
+    const detail = await svc.getById(missionId);
+    const completedList = await svc.list({ companyId, status: "completed" });
+    const activeList = await svc.list({ companyId, status: "active" });
+
+    expect(detail.status).toBe("completed");
+    expect(detail.completedAt).toEqual(new Date("2026-06-09T11:39:30.000Z"));
+    expect(completedList.find((mission) => mission.id === missionId)?.status).toBe("completed");
+    expect(activeList.find((mission) => mission.id === missionId)).toBeUndefined();
+
+    const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
+    expect(stored?.status).toBe("completed");
+    expect(stored?.completedAt).toEqual(new Date("2026-06-09T11:39:30.000Z"));
+  });
+
   it("promotes a planning mission to active when a linked plugin workflow run has failed recoverably", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
