@@ -16,10 +16,13 @@ import {
   companies,
   companySecrets,
   companySkills,
+  documentRevisions,
+  documents,
   heartbeatRunEvents,
   heartbeatRuns,
   knowledgeBases,
   issueComments,
+  issueDocuments,
   issueWorkProducts,
   issues,
   missionPlanArtifacts,
@@ -319,6 +322,9 @@ describe("heartbeat context budget preflight", () => {
     await cleanupHeartbeatRunRecords(db);
     await db.delete(workspaceRuntimeServices);
     await db.delete(issueWorkProducts);
+    await db.delete(issueDocuments);
+    await db.delete(documentRevisions);
+    await db.delete(documents);
     await db.delete(issueComments);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
@@ -1678,6 +1684,110 @@ describe("heartbeat context budget preflight", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
     expect(comments.some((comment) => comment.body.includes("20260609.md"))).toBe(true);
+  });
+
+  it("auto-registers a workProduct when an agent mistakenly records the artifact as an issue work-product document", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+    const documentId = randomUUID();
+    const outputPath = "/Users/kwak/Personal/obsidian/600. Improvements/602.Tech/202606/20260610.md";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Synthesis Editor",
+      role: "writer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Create the required artifact and register it as a workProduct." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-SYN",
+      title: "tech-scout: 기존 양식으로 Tech Scout 노트 작성",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", `Output: ${outputPath}\n`);
+      await db.insert(documents).values({
+        id: documentId,
+        companyId,
+        title: "Tech Scout — 2026-06-10 TrendShift Top25",
+        format: "markdown",
+        latestBody: `Work product: ${outputPath}`,
+        createdByAgentId: agentId,
+        updatedByAgentId: agentId,
+      });
+      await db.insert(issueDocuments).values({
+        companyId,
+        issueId,
+        documentId,
+        key: "work-product",
+      });
+      return {
+        ...successfulAdapterResult(),
+        resultJson: { outputPath },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.completedAt).not.toBeNull();
+
+    const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    expect(workProducts).toHaveLength(1);
+    expect(workProducts[0]).toEqual(expect.objectContaining({
+      type: "document",
+      provider: "local",
+      externalId: outputPath,
+      isPrimary: true,
+      createdByRunId: finalized.id,
+    }));
+    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
+      path: outputPath,
+      autoRegisteredFrom: "issue_document_work_product",
+      issueDocumentId: documentId,
+    }));
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
   it("blocks Korean artifact issues when a workProduct exists but does not reference the claimed file", async () => {

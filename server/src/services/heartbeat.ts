@@ -13,7 +13,9 @@ import {
   activityLog,
   heartbeatRunEvents,
   heartbeatRuns,
+  documents,
   issueComments,
+  issueDocuments,
   issueWorkProducts,
   issues,
   missionSessions,
@@ -690,6 +692,94 @@ function workProductReferencesClaimedArtifact(
   if (!haystack.trim()) return false;
 
   return claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
+}
+
+async function autoRegisterWorkProductFromIssueDocument(input: {
+  tx: Pick<Db, "select" | "insert">;
+  issue: {
+    id: string;
+    companyId: string;
+    projectId?: string | null;
+  };
+  run: typeof heartbeatRuns.$inferSelect;
+  claimedArtifactPaths: string[];
+}) {
+  const issueDocs = await input.tx
+    .select({
+      id: documents.id,
+      key: issueDocuments.key,
+      title: documents.title,
+      latestBody: documents.latestBody,
+    })
+    .from(issueDocuments)
+    .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
+    .where(eq(issueDocuments.issueId, input.issue.id))
+    .limit(25);
+
+  const matchingDocument = issueDocs.find((doc) => {
+    if (doc.key !== "work-product" && doc.key !== "workproduct") return false;
+    const haystack = [doc.title, doc.latestBody].filter(Boolean).join("\n");
+    return input.claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
+  });
+  if (!matchingDocument) return null;
+
+  const artifactPath = input.claimedArtifactPaths.find((candidate) => {
+    const haystack = [matchingDocument.title, matchingDocument.latestBody].filter(Boolean).join("\n");
+    return haystack.includes(candidate);
+  });
+  if (!artifactPath) return null;
+
+  const isPrimary = !(await input.tx
+    .select({ id: issueWorkProducts.id })
+    .from(issueWorkProducts)
+    .where(eq(issueWorkProducts.issueId, input.issue.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null));
+
+  const [created] = await input.tx
+    .insert(issueWorkProducts)
+    .values({
+      companyId: input.issue.companyId,
+      projectId: input.issue.projectId ?? null,
+      issueId: input.issue.id,
+      type: "document",
+      provider: "local",
+      externalId: artifactPath,
+      title: matchingDocument.title ?? path.basename(artifactPath),
+      status: "active",
+      reviewState: "none",
+      isPrimary,
+      healthStatus: "unknown",
+      summary: "Auto-registered from issue document key `work-product` after a successful run reported this artifact path.",
+      metadata: {
+        path: artifactPath,
+        autoRegisteredFrom: "issue_document_work_product",
+        issueDocumentId: matchingDocument.id,
+        issueDocumentKey: matchingDocument.key,
+        claimedArtifactPaths: input.claimedArtifactPaths,
+      },
+      createdByRunId: input.run.id,
+    })
+    .returning({ id: issueWorkProducts.id });
+
+  await input.tx.insert(activityLog).values({
+    companyId: input.issue.companyId,
+    actorType: "system",
+    actorId: "heartbeat",
+    action: "issue.work_product_auto_registered_from_document",
+    entityType: "issue",
+    entityId: input.issue.id,
+    agentId: input.run.agentId,
+    runId: input.run.id,
+    details: {
+      workProductId: created?.id ?? null,
+      issueDocumentId: matchingDocument.id,
+      issueDocumentKey: matchingDocument.key,
+      path: artifactPath,
+    },
+  });
+
+  return created ?? null;
 }
 
 function canCreateMissionOwnerUnblockForRequestChanges(issue: {
@@ -5243,7 +5333,15 @@ export function heartbeatService(db: Db) {
           },
           claimedArtifactPaths,
         ));
-        if (!hasMatchingWorkProduct) {
+        const autoRegisteredWorkProduct = hasMatchingWorkProduct
+          ? null
+          : await autoRegisterWorkProductFromIssueDocument({
+              tx,
+              issue,
+              run,
+              claimedArtifactPaths,
+            });
+        if (!hasMatchingWorkProduct && !autoRegisteredWorkProduct) {
           const now = new Date();
           await tx
             .update(issues)

@@ -586,9 +586,38 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/issues/:issueId/comments`    | List comments                                                                            |
 | GET    | `/api/issues/:issueId/comments/:commentId` | Get a specific comment by ID                                                     |
 | POST   | `/api/issues/:issueId/comments`    | Add comment (@-mentions trigger wakeups)                                                 |
+| GET    | `/api/issues/:issueId/work-products` | List official workProducts registered on this issue                                      |
+| POST   | `/api/issues/:issueId/work-products` | Register an official workProduct. Use this for generated files/reports before `done`.    |
+| PATCH  | `/api/work-products/:workProductId` | Update an official workProduct                                                          |
+| DELETE | `/api/work-products/:workProductId` | Delete an official workProduct                                                          |
+| GET    | `/api/issues/:issueId/documents`   | List issue documents. Documents are notes/plans, not official deliverable registration.  |
+| PUT    | `/api/issues/:issueId/documents/:key` | Upsert an issue document. Do not use this instead of `work-products` for deliverables.  |
 | GET    | `/api/issues/:issueId/approvals`   | List approvals linked to issue                                                           |
 | POST   | `/api/issues/:issueId/approvals`   | Link approval to issue                                                                    |
 | DELETE | `/api/issues/:issueId/approvals/:approvalId` | Unlink approval from issue                                                     |
+
+#### Register a local file workProduct
+
+If you create or update a file/report/HTML/PDF/dataset/deliverable, register it before marking the issue `done`.
+
+```bash
+curl -s -X POST "$PAPERCLIP_API_URL/api/issues/$ISSUE_ID/work-products" \
+  -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+  -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "document",
+    "provider": "local",
+    "title": "Tech Scout — 2026-06-10 TrendShift Top25",
+    "status": "active",
+    "isPrimary": true,
+    "metadata": {
+      "path": "/Users/kwak/Personal/obsidian/600. Improvements/602.Tech/202606/20260610.md"
+    }
+  }'
+```
+
+Do not use `PUT /api/issues/:issueId/documents/work-product` as a substitute. That creates an issue document only; downstream workflow gates read official `workProducts`.
 
 ### Companies, Projects, Goals
 
@@ -645,3 +674,4 @@ Terminal states: `done`, `cancelled`
 | @-mention agents for no reason              | Each mention triggers a budget-consuming heartbeat    | Only mention agents who need to act                     |
 | Sit silently on blocked work                | Nobody knows you're stuck; the task rots              | Comment the blocker and escalate immediately            |
 | Leave tasks in ambiguous states             | Others can't tell if work is progressing              | Always update status: `blocked`, `in_review`, or `done` |
+| Register a deliverable as an issue document | Documents are not official workflow deliverables      | `POST /api/issues/:issueId/work-products` with `metadata.path` |
