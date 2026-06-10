@@ -25,6 +25,7 @@ const sharedOpts = {
   ignore: "pid,hostname",
   singleLine: true,
 };
+const httpLogIgnore = "pid,hostname,req,res,responseTime";
 
 export const logger = pino({
   level: "debug",
@@ -32,12 +33,12 @@ export const logger = pino({
   targets: [
     {
       target: "pino-pretty",
-      options: { ...sharedOpts, ignore: "pid,hostname,req,res,responseTime", colorize: true, destination: 1 },
+      options: { ...sharedOpts, ignore: httpLogIgnore, colorize: true, destination: 1 },
       level: "info",
     },
     {
       target: "pino-pretty",
-      options: { ...sharedOpts, colorize: false, destination: logFile, mkdir: true },
+      options: { ...sharedOpts, ignore: httpLogIgnore, colorize: false, destination: logFile, mkdir: true },
       level: "debug",
     },
   ],

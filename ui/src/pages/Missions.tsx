@@ -1,7 +1,11 @@
 import { useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
-import { missionsApi, type MissionStatus, type MissionListFilters } from "../api/missions";
+import {
+  missionsApi,
+  type MissionStatus,
+  type MissionListFilters,
+} from "../api/missions";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useDialog } from "../context/DialogContext";
@@ -43,16 +47,22 @@ function formatDateTime(date: Date | string | null | undefined): string {
   }).format(new Date(date));
 }
 
-function formatLocalDateInputValue(date: Date): string {
+function parsePositiveInt(value: string | null, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function formatDateInputValue(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-function parsePositiveInt(value: string | null, fallback: number): number {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+function getDefaultCreatedFrom(): string {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return formatDateInputValue(date);
 }
 
 export function Missions() {
@@ -61,13 +71,16 @@ export function Missions() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const statusFilter = (searchParams.get("status") as MissionStatus | null) ?? "all";
+  const statusFilter =
+    (searchParams.get("status") as MissionStatus | null) ?? "all";
   const ownerAgentId = searchParams.get("ownerAgentId") ?? "all";
-  const sortBy = (searchParams.get("sortBy") as MissionListFilters["sortBy"]) ?? "updatedAt";
-  const sortOrder = (searchParams.get("sortOrder") as MissionListFilters["sortOrder"]) ?? "desc";
-  const defaultDate = formatLocalDateInputValue(new Date());
-  const from = searchParams.get("from") ?? defaultDate;
-  const to = searchParams.get("to") ?? defaultDate;
+  const sortBy =
+    (searchParams.get("sortBy") as MissionListFilters["sortBy"]) ?? "updatedAt";
+  const sortOrder =
+    (searchParams.get("sortOrder") as MissionListFilters["sortOrder"]) ??
+    "desc";
+  const from = searchParams.get("from") ?? getDefaultCreatedFrom();
+  const to = searchParams.get("to") ?? "";
   const pageSize = parsePositiveInt(searchParams.get("pageSize"), 25);
   const page = parsePositiveInt(searchParams.get("page"), 1);
 
@@ -75,18 +88,25 @@ export function Missions() {
     setBreadcrumbs([{ label: "Missions" }]);
   }, [setBreadcrumbs]);
 
-  const missionFilters = useMemo<MissionListFilters>(() => ({
-    status: statusFilter !== "all" ? statusFilter : undefined,
-    ownerAgentId: ownerAgentId !== "all" ? ownerAgentId : undefined,
-    from: from || undefined,
-    to: to || undefined,
-    sortBy,
-    sortOrder,
-    limit: pageSize,
-    offset: (page - 1) * pageSize,
-  }), [from, ownerAgentId, page, pageSize, sortBy, sortOrder, statusFilter, to]);
+  const missionFilters = useMemo<MissionListFilters>(
+    () => ({
+      status: statusFilter !== "all" ? statusFilter : undefined,
+      ownerAgentId: ownerAgentId !== "all" ? ownerAgentId : undefined,
+      from: from || undefined,
+      to: to || undefined,
+      sortBy,
+      sortOrder,
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    }),
+    [from, ownerAgentId, page, pageSize, sortBy, sortOrder, statusFilter, to],
+  );
 
-  const { data: missions, isLoading, error } = useQuery({
+  const {
+    data: missions,
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: queryKeys.missions.list(selectedCompanyId!, missionFilters),
     queryFn: () => missionsApi.list(selectedCompanyId!, missionFilters),
     enabled: !!selectedCompanyId,
@@ -106,7 +126,10 @@ export function Missions() {
   const hasNextPage = (missions?.length ?? 0) >= pageSize;
   const currentSortValue = `${sortBy}:${sortOrder}`;
 
-  const updateSearchParams = (updates: Record<string, string | null>, options?: { resetPage?: boolean }) => {
+  const updateSearchParams = (
+    updates: Record<string, string | null>,
+    options?: { resetPage?: boolean },
+  ) => {
     const params = new URLSearchParams(searchParams);
     for (const [key, value] of Object.entries(updates)) {
       if (!value || value === "all") {
@@ -124,7 +147,9 @@ export function Missions() {
   };
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Rocket} message="Select a company to view missions." />;
+    return (
+      <EmptyState icon={Rocket} message="Select a company to view missions." />
+    );
   }
 
   if (isLoading) {
@@ -134,7 +159,9 @@ export function Missions() {
   return (
     <div className="space-y-4">
       {error && (
-        <p className="text-sm text-destructive">{error instanceof Error ? error.message : String(error)}</p>
+        <p className="text-sm text-destructive">
+          {error instanceof Error ? error.message : String(error)}
+        </p>
       )}
 
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
@@ -145,7 +172,12 @@ export function Missions() {
                 key={tab.value}
                 size="sm"
                 variant={statusFilter === tab.value ? "default" : "ghost"}
-                onClick={() => updateSearchParams({ status: tab.value === "all" ? null : tab.value }, { resetPage: true })}
+                onClick={() =>
+                  updateSearchParams(
+                    { status: tab.value === "all" ? null : tab.value },
+                    { resetPage: true },
+                  )
+                }
                 className="h-7 text-xs"
               >
                 {tab.label}
@@ -158,12 +190,22 @@ export function Missions() {
               <span>Main executor</span>
               <select
                 value={ownerAgentId}
-                onChange={(e) => updateSearchParams({ ownerAgentId: e.target.value === "all" ? null : e.target.value }, { resetPage: true })}
+                onChange={(e) =>
+                  updateSearchParams(
+                    {
+                      ownerAgentId:
+                        e.target.value === "all" ? null : e.target.value,
+                    },
+                    { resetPage: true },
+                  )
+                }
                 className="h-8 min-w-40 rounded-md border border-input bg-background px-2 text-sm text-foreground"
               >
                 <option value="all">All executors</option>
                 {(agents ?? []).map((agent) => (
-                  <option key={agent.id} value={agent.id}>{agent.name}</option>
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
                 ))}
               </select>
             </label>
@@ -173,7 +215,12 @@ export function Missions() {
               <input
                 type="date"
                 value={from}
-                onChange={(e) => updateSearchParams({ from: e.target.value || null }, { resetPage: true })}
+                onChange={(e) =>
+                  updateSearchParams(
+                    { from: e.target.value || null },
+                    { resetPage: true },
+                  )
+                }
                 className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
               />
             </label>
@@ -183,7 +230,12 @@ export function Missions() {
               <input
                 type="date"
                 value={to}
-                onChange={(e) => updateSearchParams({ to: e.target.value || null }, { resetPage: true })}
+                onChange={(e) =>
+                  updateSearchParams(
+                    { to: e.target.value || null },
+                    { resetPage: true },
+                  )
+                }
                 className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
               />
             </label>
@@ -205,7 +257,9 @@ export function Missions() {
                 className="h-8 min-w-40 rounded-md border border-input bg-background px-2 text-sm text-foreground"
               >
                 {SORT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
                 ))}
               </select>
             </label>
@@ -214,11 +268,18 @@ export function Missions() {
               <span>Page size</span>
               <select
                 value={String(pageSize)}
-                onChange={(e) => updateSearchParams({ pageSize: e.target.value }, { resetPage: true })}
+                onChange={(e) =>
+                  updateSearchParams(
+                    { pageSize: e.target.value },
+                    { resetPage: true },
+                  )
+                }
                 className="h-8 w-24 rounded-md border border-input bg-background px-2 text-sm text-foreground"
               >
                 {PAGE_SIZE_OPTIONS.map((option) => (
-                  <option key={option} value={String(option)}>{option}</option>
+                  <option key={option} value={String(option)}>
+                    {option}
+                  </option>
                 ))}
               </select>
             </label>
@@ -253,7 +314,9 @@ export function Missions() {
                   className="flex-1 flex items-center gap-3 min-w-0 no-underline text-inherit hover:no-underline"
                 >
                   <Rocket className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate font-medium">{mission.title}</span>
+                  <span className="flex-1 truncate font-medium">
+                    {mission.title}
+                  </span>
                   <StatusBadge status={mission.status} />
                   <span className="shrink-0 text-xs text-muted-foreground">
                     Main executor: {agentMap[mission.ownerAgentId] ?? "—"}
@@ -269,7 +332,8 @@ export function Missions() {
           <div className="flex items-center justify-between gap-3 text-sm">
             <span className="text-muted-foreground">
               Page {page}
-              {missionFilters.offset !== undefined && missionFilters.limit !== undefined
+              {missionFilters.offset !== undefined &&
+              missionFilters.limit !== undefined
                 ? ` • Showing ${missionFilters.offset + 1}-${missionFilters.offset + (missions?.length ?? 0)}`
                 : ""}
             </span>

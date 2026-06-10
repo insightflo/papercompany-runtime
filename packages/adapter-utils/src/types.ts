@@ -342,6 +342,7 @@ export interface CreateConfigValues {
   search: boolean;
   dangerouslyBypassSandbox: boolean;
   command: string;
+  fallbackCommand?: string;
   args: string;
   extraArgs: string;
   envVars: string;

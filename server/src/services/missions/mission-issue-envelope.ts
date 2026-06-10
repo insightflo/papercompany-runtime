@@ -34,7 +34,9 @@ ${body}${missionChildContract}
 
 ## Workflow
 
-1. Work on the assigned issue, not just the agent role description.
-2. Use Paperclip API env vars for lifecycle updates or evidence/blocker comments when needed.
-3. Mark this issue done after its scoped evidence is posted; otherwise mark it blocked with the concrete missing input or tool/API failure.`;
+	1. Work on the assigned issue, not just the agent role description.
+	2. Use Paperclip API env vars for lifecycle updates or evidence/blocker comments when needed.
+	3. Mark this issue done after its scoped evidence is posted; otherwise mark it blocked with the concrete missing input or tool/API failure.
+	4. If you create a file/report/HTML/PDF/dataset/deliverable, register it before done with POST /api/issues/${issue.id}/work-products. For local files, use provider "local" and metadata.path with the absolute file path.
+	5. If this is a QA/validator issue, validate upstream/dependency issue workProducts rather than requiring this QA issue to have its own workProduct unless QA creates a separate deliverable.`;
 }

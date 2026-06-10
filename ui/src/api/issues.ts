@@ -18,6 +18,9 @@ import type {
 } from "@paperclipai/shared";
 import { api } from "./client";
 
+export const ACTIVE_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
+export const ACTIVE_ISSUE_STATUS_FILTER = ACTIVE_ISSUE_STATUSES.join(",");
+
 export const issuesApi = {
   list: (
     companyId: string,

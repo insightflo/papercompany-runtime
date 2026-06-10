@@ -24,6 +24,8 @@ export function queueIssueAssignmentWakeup(input: {
   reason: string;
   mutation: string;
   contextSource: string;
+  payload?: Record<string, unknown>;
+  contextSnapshot?: Record<string, unknown>;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   rethrowOnError?: boolean;
@@ -43,10 +45,10 @@ export function queueIssueAssignmentWakeup(input: {
       source: "assignment",
       triggerDetail: "system",
       reason: input.reason,
-      payload: { issueId: input.issue.id, mutation: input.mutation },
+      payload: { issueId: input.issue.id, mutation: input.mutation, ...(input.payload ?? {}) },
       requestedByActorType: input.requestedByActorType,
       requestedByActorId: input.requestedByActorId ?? null,
-      contextSnapshot: { issueId: input.issue.id, source: input.contextSource },
+      contextSnapshot: { issueId: input.issue.id, source: input.contextSource, ...(input.contextSnapshot ?? {}) },
     })
     .catch((err) => {
       logger.warn({ err, issueId: input.issue.id }, "failed to wake assignee on issue assignment");

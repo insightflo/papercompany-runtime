@@ -14,11 +14,13 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueWorkProducts,
   issues,
   missionSessions,
   missions,
   projects,
   projectWorkspaces,
+  workflowStepRuns,
   worktreeRules,
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
@@ -35,6 +37,7 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { toolService } from "./tools/registry.js";
 import { knowledgeService } from "./knowledge/base.js";
+import { finalizeHermesChatRun } from "./hermes-chat.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
@@ -101,6 +104,7 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
+const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -640,6 +644,61 @@ function isMissionOwnerTaskIssue(issue: {
   );
 }
 
+function canApplyRequestChangesValidationGate(issue: {
+  originKind: string | null;
+  title?: string | null;
+}) {
+  if (issue.originKind === "mission_main_executor_plan") return false;
+  if (issue.originKind === "mission_main_executor_oversight") return false;
+  if (issue.originKind === "mission_main_executor_unblock") return false;
+
+  const title = issue.title?.trim() ?? "";
+  return (
+    /^\s*\[QA\]/iu.test(title) ||
+    /\b(QA|validator|validation|validate)\b/iu.test(title) ||
+    title.includes("검증")
+  );
+}
+
+function canApplyMissingWorkProductRegistrationGate(issue: {
+  originKind: string | null;
+  title?: string | null;
+}) {
+  if (issue.originKind === "mission_main_executor_plan") return false;
+  if (issue.originKind === "mission_main_executor_oversight") return false;
+  if (issue.originKind === "mission_main_executor_unblock") return false;
+
+  const title = issue.title?.trim() ?? "";
+  if (/\b(lead|approval|approve|validator|validation|validate|QA|review)\b/iu.test(title)) return false;
+  return (
+    /\b(synthesi[sz]e|synthesis|generate|produce|create|draft|artifact|document|note|infographic|export|deliver|html|pdf|report)\b/iu.test(title) ||
+    /(작성|생성|제작|산출물|문서|자료|보고서|리포트|HTML|PDF)/u.test(title)
+  );
+}
+
+function workProductReferencesClaimedArtifact(
+  product: { url: string | null; externalId: string | null; metadata: Record<string, unknown> | null },
+  claimedArtifactPaths: string[],
+) {
+  const haystack = [
+    product.url,
+    product.externalId,
+    product.metadata ? JSON.stringify(product.metadata) : null,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  if (!haystack.trim()) return false;
+
+  return claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
+}
+
+function canCreateMissionOwnerUnblockForRequestChanges(issue: {
+  originKind: string | null;
+  title?: string | null;
+}) {
+  return canApplyRequestChangesValidationGate(issue);
+}
+
 export type MissionOwnerTaskContext = {
   available: true;
   gating: "originKind" | "mission-owner-action-marker";
@@ -1000,6 +1059,7 @@ export function shouldResetTaskSessionForWake(
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (
     wakeReason === "issue_assigned" ||
+    wakeReason === "mission_owner_planning_issue_created" ||
     wakeReason === "mission_unblock_action_created" ||
     wakeReason === "mission_unblock_action_stalled"
   ) return true;
@@ -1205,6 +1265,62 @@ function isTrackedLocalChildProcessAdapter(adapterType: string) {
   return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
 }
 
+function resolveAdapterFallbackConfig(adapterConfigRaw: unknown) {
+  const adapterConfig = parseObject(adapterConfigRaw);
+  const fallback = parseObject(adapterConfig.fallback);
+  const command =
+    readNonEmptyString(adapterConfig.fallbackCommand) ??
+    readNonEmptyString(fallback.command);
+  if (!command) return null;
+
+  const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
+  const triggers = rawTriggers
+    .map((value) => readNonEmptyString(value))
+    .filter((value): value is string => Boolean(value));
+  const maxAttempts = Math.max(
+    1,
+    Math.floor(asNumber(fallback.maxAttempts ?? adapterConfig.fallbackMaxAttempts, DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS)),
+  );
+
+  return {
+    command,
+    triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
+    maxAttempts,
+  };
+}
+
+function resolveAdapterFallbackAttempt(contextRaw: unknown) {
+  const context = parseObject(contextRaw);
+  const parsed = Math.floor(asNumber(context.fallbackAttempt, 0));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function shouldApplyAdapterFallbackConfig(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  context: Record<string, unknown>;
+}) {
+  return (
+    Boolean(input.run.retryOfRunId) &&
+    readNonEmptyString(input.context.wakeReason) === "adapter_fallback" &&
+    readNonEmptyString(input.context.fallbackOfRunId) === input.run.retryOfRunId &&
+    Boolean(readNonEmptyString(input.context.fallbackCommand))
+  );
+}
+
+function applyAdapterFallbackRuntimeConfig(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  context: Record<string, unknown>;
+  config: Record<string, unknown>;
+}) {
+  if (!shouldApplyAdapterFallbackConfig(input)) return input.config;
+  const command = readNonEmptyString(input.context.fallbackCommand);
+  if (!command) return input.config;
+  return {
+    ...input.config,
+    command,
+  };
+}
+
 // A positive liveness check means some process currently owns the PID.
 // On Linux, PIDs can be recycled, so this is a best-effort signal rather
 // than proof that the original child is still alive.
@@ -1217,6 +1333,16 @@ function isProcessAlive(pid: number | null | undefined) {
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
     if (code === "EPERM") return true;
     if (code === "ESRCH") return false;
+    return false;
+  }
+}
+
+function terminateRecordedProcess(pid: number | null | undefined, signal: NodeJS.Signals = "SIGTERM") {
+  if (!isProcessAlive(pid)) return false;
+  try {
+    process.kill(pid as number, signal);
+    return true;
+  } catch {
     return false;
   }
 }
@@ -1420,6 +1546,172 @@ function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelec
   ].join("\n");
 }
 
+type RequestChangesVerdict = {
+  excerpt: string;
+};
+
+function stringifyRunResultJson(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function readExplicitValidationVerdict(value: string | null | undefined): "request_changes" | "pass" | null {
+  if (!value) return null;
+  const text = value.trim();
+  if (!text) return null;
+  const compact = text
+    .replace(/[`*_#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/^REQUEST[_\s-]?CHANGES$/iu.test(compact)) return "request_changes";
+  if (/^PASS$/iu.test(compact)) return "pass";
+
+  const explicitPatterns = [
+    /^(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
+    /\b(?:verdict|decision|outcome|status)\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
+    /\bvalidation\s+complete\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
+  ];
+  for (const pattern of explicitPatterns) {
+    const match = pattern.exec(compact);
+    const label = match?.[1];
+    if (!label) continue;
+    return /^PASS$/iu.test(label) ? "pass" : "request_changes";
+  }
+  return null;
+}
+
+function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): RequestChangesVerdict | null {
+  const result = parseObject(run.resultJson);
+  const candidates = [
+    readNonEmptyString(result.verdict),
+    readNonEmptyString(result.decision),
+    readNonEmptyString(result.outcome),
+    readNonEmptyString(result.status),
+    readNonEmptyString(result.result),
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  let requestChangesCandidate: string | null = null;
+  for (const candidate of candidates) {
+    const verdict = readExplicitValidationVerdict(candidate);
+    if (verdict === "pass") return null;
+    if (verdict === "request_changes") {
+      requestChangesCandidate = candidate;
+      break;
+    }
+  }
+
+  if (!requestChangesCandidate) return null;
+
+  return {
+    excerpt:
+      requestChangesCandidate.length > MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS
+        ? requestChangesCandidate.slice(requestChangesCandidate.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)
+        : requestChangesCandidate,
+  };
+}
+
+function buildRequestChangesValidationGateComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  verdict: RequestChangesVerdict;
+}) {
+  return [
+    "## Mission validation gate: REQUEST_CHANGES",
+    `- 실행 runId: \`${input.run.id}\``,
+    "- 감지: validator/QA run은 succeeded로 종료됐지만 산출물 verdict가 `REQUEST_CHANGES`입니다.",
+    "- 조치: delivery를 통과시키지 않고 source issue를 `blocked`로 전이합니다.",
+    "- follow-up: mission owner unblock issue를 생성/재사용하고 owner agent를 wakeup합니다.",
+    "",
+    "### Verdict excerpt",
+    "```text",
+    input.verdict.excerpt || "REQUEST_CHANGES",
+    "```",
+  ].join("\n");
+}
+
+function buildRequestChangesOwnerActionDescription(input: {
+  sourceIssue: Pick<typeof issues.$inferSelect, "id" | "identifier" | "title">;
+  run: typeof heartbeatRuns.$inferSelect;
+  verdict: RequestChangesVerdict;
+}) {
+  const sourceLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
+  return [
+    "Mission validation gate returned `REQUEST_CHANGES` after a successful heartbeat run.",
+    "",
+    `Source issue: ${sourceLabel} — ${input.sourceIssue.title}`,
+    `Source runId: ${input.run.id}`,
+    "",
+    "Required owner action:",
+    "- inspect the validation excerpt below",
+    "- decide whether to retry_source_issue, reassign_source_issue, or create a targeted revision issue",
+    "- keep downstream delivery/send steps pending until the requested changes are resolved",
+    "",
+    "### Validation excerpt",
+    "```text",
+    input.verdict.excerpt || "REQUEST_CHANGES",
+    "```",
+  ].join("\n");
+}
+
+const CLAIMED_ARTIFACT_EXTENSION_PATTERN = "md|markdown|json|html|htm|pdf|png|jpg|jpeg|webp|svg|csv|txt|docx|pptx|xlsx";
+const CLAIMED_ARTIFACT_JSON_PATH_RE = new RegExp(
+  `"(?:outputPath|artifactPath|documentPath|filePath|path|url)"\\s*:\\s*"([^"]+\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))"`,
+  "giu",
+);
+const CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE = new RegExp(
+  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"])`,
+  "giu",
+);
+
+function normalizeClaimedArtifactPath(value: string): string {
+  return value
+    .trim()
+    .replace(/^[-*•]\s*/, "")
+    .replace(/^`+|`+$/g, "")
+    .replace(/[),.;:]+$/g, "")
+    .trim();
+}
+
+function extractClaimedArtifactPaths(run: typeof heartbeatRuns.$inferSelect): string[] {
+  const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  if (!text.trim()) return [];
+
+  const paths = new Set<string>();
+  for (const match of text.matchAll(CLAIMED_ARTIFACT_JSON_PATH_RE)) {
+    const value = normalizeClaimedArtifactPath(match[1] ?? "");
+    if (value) paths.add(value);
+  }
+  for (const match of text.matchAll(CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE)) {
+    const value = normalizeClaimedArtifactPath(match[1] ?? "");
+    if (value) paths.add(value);
+  }
+  return [...paths].slice(0, 10);
+}
+
+function buildMissingWorkProductRegistrationGateComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  claimedArtifactPaths: string[];
+}) {
+  const paths = input.claimedArtifactPaths.length > 0
+    ? input.claimedArtifactPaths.map((artifactPath) => `- ${artifactPath}`).join("\n")
+    : "- (artifact path not captured)";
+  return [
+    "## Mission artifact gate: workProduct registration missing",
+    `- 실행 runId: \`${input.run.id}\``,
+    "- 감지: run은 succeeded로 종료됐고 산출물 파일 경로를 보고했지만, issue에 공식 `workProduct`가 등록되어 있지 않습니다.",
+    "- 조치: downstream workflow가 비공식 comment 경로만 보고 진행하지 않도록 source issue를 `blocked`로 전이합니다.",
+    "- 복구: 아래 파일을 이 issue의 `workProduct`로 등록한 뒤 workflow를 resume하세요.",
+    "",
+    "### Claimed artifact paths",
+    paths,
+  ].join("\n");
+}
+
 export type HeartbeatFailureClassification = {
   category: "timeout" | "cancelled" | "quota" | "auth" | "command" | "adapter";
   reasonCode: string;
@@ -1517,25 +1809,82 @@ function buildSuccessfulIssueRunAutoCompletedComment(run: typeof heartbeatRuns.$
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n\n")
     .trim();
-  const shouldCapturePlanDecision = output.includes("### Mission owner plan decision");
+  const planDecisionOutput = extractMissionOwnerPlanDecisionOutput(output);
   return [
     "## 자동 완료: checked-out run succeeded",
     `- 실행 runId: \`${run.id}\``,
     "- 감지: 이 issue에 연결된 heartbeat run이 succeeded로 종료되었습니다.",
     "- 정책: 일반 issue lifecycle은 successful checked-out run 종료 시 done으로 closeout합니다.",
     "- 참고: coordination hub로 계속 열어둘 작업은 별도 issue type/status로 분리해야 합니다.",
-    shouldCapturePlanDecision
+    planDecisionOutput
       ? [
           "",
           "### Captured PLAN decision output",
-          output.length > MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS
-            ? output.slice(output.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)
-            : output,
+          planDecisionOutput,
         ].join("\n")
       : "",
   ]
     .filter((line) => line.length > 0)
     .join("\n");
+}
+
+function extractMissionOwnerPlanDecisionOutput(output: string): string | null {
+  const candidates: string[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (!parsed || typeof parsed !== "object") continue;
+      const record = parsed as Record<string, unknown>;
+      if (typeof record.result === "string") {
+        candidates.push(record.result);
+      }
+      const message = record.message;
+      if (message && typeof message === "object") {
+        const content = (message as Record<string, unknown>).content;
+        if (Array.isArray(content)) {
+          for (const entry of content) {
+            if (entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).text === "string") {
+              candidates.push((entry as Record<string, string>).text);
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-JSON log lines are expected in adapter output.
+    }
+  }
+  candidates.push(output);
+
+  for (const candidate of candidates.reverse()) {
+    const extracted = extractMissionOwnerPlanDecisionBlock(candidate);
+    if (extracted) return extracted;
+  }
+  return null;
+}
+
+function extractMissionOwnerPlanDecisionBlock(text: string): string | null {
+  const normalizedText = normalizeEscapedMissionOwnerPlanDecisionMarkdown(text);
+  const headingIndex = normalizedText.lastIndexOf("### Mission owner plan decision");
+  if (headingIndex < 0) return null;
+  const block = normalizedText.slice(headingIndex).trim();
+  const fenceIndex = block.search(/```json\s*/iu);
+  if (fenceIndex < 0) return block;
+  const openingFenceEnd = block.indexOf("\n", fenceIndex);
+  if (openingFenceEnd < 0) return block;
+  const closingFenceIndex = block.indexOf("```", openingFenceEnd + 1);
+  if (closingFenceIndex < 0) return block;
+  return block.slice(0, closingFenceIndex + 3).trim();
+}
+
+function normalizeEscapedMissionOwnerPlanDecisionMarkdown(text: string): string {
+  if (!text.includes("### Mission owner plan decision") || !text.includes("\\n")) return text;
+  return text
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, "\"")
+    .replace(/\\\\/g, "\\");
 }
 
 async function recordMissionOwnerPlanDecisionAfterComment(
@@ -1664,6 +2013,80 @@ export function heartbeatService(db: Db) {
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+  }
+
+  async function ensureMissionOwnerActionForRequestChanges(input: {
+    sourceIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "title" | "originKind">;
+    run: typeof heartbeatRuns.$inferSelect;
+    verdict: RequestChangesVerdict;
+  }) {
+    if (!input.sourceIssue.missionId) return null;
+    if (!canCreateMissionOwnerUnblockForRequestChanges(input.sourceIssue)) return null;
+    const mission = await db
+      .select({ id: missions.id, companyId: missions.companyId, ownerAgentId: missions.ownerAgentId })
+      .from(missions)
+      .where(and(eq(missions.id, input.sourceIssue.missionId), eq(missions.companyId, input.sourceIssue.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!mission?.ownerAgentId) return null;
+
+    const existing = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, input.sourceIssue.companyId),
+        eq(issues.missionId, input.sourceIssue.missionId),
+        eq(issues.originKind, "mission_main_executor_unblock"),
+        eq(issues.originId, input.sourceIssue.id),
+        sql`${issues.hiddenAt} is null`,
+        not(inArray(issues.status, ["done", "cancelled"])),
+      ))
+      .orderBy(asc(issues.createdAt), asc(issues.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    const sourceLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
+    const ownerAction = existing ?? await issuesSvc.create(input.sourceIssue.companyId, {
+      assigneeAgentId: mission.ownerAgentId,
+      description: buildRequestChangesOwnerActionDescription(input),
+      missionId: input.sourceIssue.missionId,
+      originKind: "mission_main_executor_unblock",
+      originId: input.sourceIssue.id,
+      priority: "high",
+      status: "todo",
+      title: `[Unblock] ${sourceLabel}: ${input.sourceIssue.title}`,
+    });
+
+    try {
+      await enqueueWakeup(mission.ownerAgentId, {
+        source: "automation",
+        triggerDetail: "mission_validation_request_changes",
+        reason: "mission_validation_request_changes",
+        idempotencyKey: `mission-validation-request-changes:${input.run.id}:${ownerAction.id}`,
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat",
+        payload: {
+          issueId: ownerAction.id,
+          sourceIssueId: input.sourceIssue.id,
+          sourceRunId: input.run.id,
+          verdict: "REQUEST_CHANGES",
+        },
+        contextSnapshot: {
+          taskKey: `issue:${ownerAction.id}`,
+          issueId: ownerAction.id,
+          missionId: input.sourceIssue.missionId,
+          sourceIssueId: input.sourceIssue.id,
+          sourceRunId: input.run.id,
+          wakeReason: "mission_validation_request_changes",
+        },
+      });
+    } catch (err) {
+      logger.warn(
+        { err, missionId: input.sourceIssue.missionId, issueId: ownerAction.id, sourceIssueId: input.sourceIssue.id },
+        "failed to wake mission owner after REQUEST_CHANGES validation gate",
+      );
+    }
+
+    return ownerAction;
   }
 
   async function getRuntimeState(agentId: string) {
@@ -2511,13 +2934,36 @@ export function heartbeatService(db: Db) {
   ) {
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
+    let retryMissionId = readNonEmptyString(contextSnapshot.missionId);
+    let retryWorkflowRunId = readNonEmptyString(contextSnapshot.workflowRunId);
+    let retryStepId = readNonEmptyString(contextSnapshot.workflowStepId) ?? readNonEmptyString(contextSnapshot.stepId);
+    if (issueId && (!retryMissionId || !retryWorkflowRunId || !retryStepId)) {
+      const issueContext = await db
+        .select({
+          missionId: issues.missionId,
+          workflowRunId: workflowStepRuns.workflowRunId,
+          stepId: workflowStepRuns.stepId,
+        })
+        .from(issues)
+        .leftJoin(workflowStepRuns, eq(workflowStepRuns.issueId, issues.id))
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      retryMissionId = retryMissionId ?? issueContext?.missionId ?? null;
+      retryWorkflowRunId = retryWorkflowRunId ?? issueContext?.workflowRunId ?? null;
+      retryStepId = retryStepId ?? issueContext?.stepId ?? null;
+    }
     const taskKey = deriveTaskKey(contextSnapshot, null);
     const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey, {
-      missionId: readNonEmptyString(contextSnapshot.missionId),
+      missionId: retryMissionId,
     });
     const retryContextSnapshot = {
       ...contextSnapshot,
       ...(issueId ? { issueId } : {}),
+      ...(retryMissionId ? { missionId: retryMissionId } : {}),
+      ...(retryWorkflowRunId ? { workflowRunId: retryWorkflowRunId } : {}),
+      ...(retryStepId ? { workflowStepId: retryStepId, stepId: retryStepId } : {}),
       retryOfRunId: run.id,
       wakeReason: "process_lost_retry",
       retryReason: "process_lost",
@@ -2605,6 +3051,148 @@ export function heartbeatService(db: Db) {
       message: "Queued automatic retry after orphaned child process was confirmed dead",
       payload: {
         retryOfRunId: run.id,
+      },
+    });
+
+    return queued;
+  }
+
+  async function enqueueAdapterFallbackRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    agent: typeof agents.$inferSelect,
+    now: Date,
+    input: {
+      fallbackCommand: string;
+      fallbackReason: string;
+    },
+  ) {
+    const contextSnapshot = parseObject(run.contextSnapshot);
+    const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
+    let fallbackMissionId = readNonEmptyString(contextSnapshot.missionId);
+    let fallbackWorkflowRunId = readNonEmptyString(contextSnapshot.workflowRunId);
+    let fallbackStepId = readNonEmptyString(contextSnapshot.workflowStepId) ?? readNonEmptyString(contextSnapshot.stepId);
+    if (issueId && (!fallbackMissionId || !fallbackWorkflowRunId || !fallbackStepId)) {
+      const issueContext = await db
+        .select({
+          missionId: issues.missionId,
+          workflowRunId: workflowStepRuns.workflowRunId,
+          stepId: workflowStepRuns.stepId,
+        })
+        .from(issues)
+        .leftJoin(workflowStepRuns, eq(workflowStepRuns.issueId, issues.id))
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      fallbackMissionId = fallbackMissionId ?? issueContext?.missionId ?? null;
+      fallbackWorkflowRunId = fallbackWorkflowRunId ?? issueContext?.workflowRunId ?? null;
+      fallbackStepId = fallbackStepId ?? issueContext?.stepId ?? null;
+    }
+
+    const fallbackAttempt = resolveAdapterFallbackAttempt(contextSnapshot) + 1;
+    const fallbackContextSnapshot = {
+      ...contextSnapshot,
+      ...(issueId ? { issueId } : {}),
+      ...(fallbackMissionId ? { missionId: fallbackMissionId } : {}),
+      ...(fallbackWorkflowRunId ? { workflowRunId: fallbackWorkflowRunId } : {}),
+      ...(fallbackStepId ? { workflowStepId: fallbackStepId, stepId: fallbackStepId } : {}),
+      retryOfRunId: run.id,
+      fallbackOfRunId: run.id,
+      fallbackReason: input.fallbackReason,
+      fallbackAttempt,
+      fallbackCommand: input.fallbackCommand,
+      wakeReason: "adapter_fallback",
+    };
+    const taskKey = deriveTaskKey(fallbackContextSnapshot, null);
+    const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey, {
+      missionId: fallbackMissionId,
+    });
+
+    const queued = await db.transaction(async (tx) => {
+      const wakeupRequest = await tx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: run.companyId,
+          agentId: run.agentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: "adapter_fallback",
+          payload: {
+            ...(issueId ? { issueId } : {}),
+            fallbackOfRunId: run.id,
+            fallbackReason: input.fallbackReason,
+          },
+          status: "queued",
+          requestedByActorType: "system",
+          requestedByActorId: null,
+          updatedAt: now,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      const fallbackRun = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: run.companyId,
+          agentId: run.agentId,
+          issueId,
+          invocationSource: "automation",
+          triggerDetail: "system",
+          status: "queued",
+          wakeupRequestId: wakeupRequest.id,
+          contextSnapshot: fallbackContextSnapshot,
+          sessionIdBefore: sessionBefore,
+          retryOfRunId: run.id,
+          processLossRetryCount: run.processLossRetryCount ?? 0,
+          updatedAt: now,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          runId: fallbackRun.id,
+          updatedAt: now,
+        })
+        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+
+      if (issueId) {
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: fallbackRun.id,
+            executionAgentNameKey: normalizeAgentNameKey(agent.name),
+            executionLockedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)));
+      }
+
+      return fallbackRun;
+    });
+
+    publishLiveEvent({
+      companyId: queued.companyId,
+      type: "heartbeat.run.queued",
+      payload: {
+        runId: queued.id,
+        agentId: queued.agentId,
+        invocationSource: queued.invocationSource,
+        triggerDetail: queued.triggerDetail,
+        wakeupRequestId: queued.wakeupRequestId,
+      },
+    });
+
+    await appendRunEvent(queued, 1, {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: "Queued adapter fallback after primary adapter retry was exhausted",
+      payload: {
+        fallbackOfRunId: run.id,
+        fallbackReason: input.fallbackReason,
+        fallbackAttempt,
       },
     });
 
@@ -2900,13 +3488,29 @@ export function heartbeatService(db: Db) {
       if (!finalizedRun) continue;
 
       let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
+      let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (shouldRetry) {
         const agent = await getAgent(run.agentId);
         if (agent) {
           retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
         }
       } else {
-        await releaseIssueExecutionAndPromote(finalizedRun);
+        const agent = await getAgent(run.agentId);
+        const fallback = agent ? resolveAdapterFallbackConfig(agent.adapterConfig) : null;
+        const fallbackAttempt = resolveAdapterFallbackAttempt(run.contextSnapshot);
+        const shouldFallback =
+          Boolean(agent) &&
+          Boolean(fallback) &&
+          fallback!.triggers.has("process_lost") &&
+          fallbackAttempt < fallback!.maxAttempts;
+        if (agent && fallback && shouldFallback) {
+          fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, now, {
+            fallbackCommand: fallback.command,
+            fallbackReason: "process_lost",
+          });
+        } else {
+          await releaseIssueExecutionAndPromote(finalizedRun);
+        }
       }
 
       await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
@@ -2915,10 +3519,13 @@ export function heartbeatService(db: Db) {
         level: "error",
         message: shouldRetry
           ? `${baseMessage}; queued retry ${retriedRun?.id ?? ""}`.trim()
+          : fallbackRun
+            ? `${baseMessage}; queued adapter fallback ${fallbackRun.id}`
           : baseMessage,
         payload: {
           ...(run.processPid ? { processPid: run.processPid } : {}),
           ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+          ...(fallbackRun ? { fallbackRunId: fallbackRun.id } : {}),
         },
       });
 
@@ -3256,6 +3863,7 @@ export function heartbeatService(db: Db) {
       ...issueTaskAdapterConfig,
       ...(missionIssueEnvelopePolicy.fullContextInjection ? { paperclipRuntimeSkills: runtimeSkillEntries } : {}),
     };
+    runtimeConfig = applyAdapterFallbackRuntimeConfig({ run, context, config: runtimeConfig });
     const issueRef = issueContext
       ? {
           id: issueContext.id,
@@ -4280,6 +4888,9 @@ export function heartbeatService(db: Db) {
       }
 
       if (finalizedRun) {
+        await finalizeHermesChatRun(db, finalizedRun.id).catch((err) => {
+          logger.warn({ err, runId: finalizedRun.id }, "failed to finalize Hermes chat response");
+        });
         if (!latestTerminalRun) {
           await appendRunEvent(finalizedRun, seq++, {
             eventType: "lifecycle",
@@ -4394,6 +5005,9 @@ export function heartbeatService(db: Db) {
       });
 
       if (failedRun) {
+        await finalizeHermesChatRun(db, failedRun.id).catch((finalizeErr) => {
+          logger.warn({ err: finalizeErr, runId: failedRun.id }, "failed to finalize Hermes chat failure response");
+        });
         await appendRunEvent(failedRun, seq++, {
           eventType: "error",
           stream: "system",
@@ -4498,7 +5112,9 @@ export function heartbeatService(db: Db) {
         .where(
           and(
             eq(issues.companyId, run.companyId),
-            or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id)),
+            run.issueId
+              ? or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id), eq(issues.id, run.issueId))
+              : or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id)),
           ),
         )
         .then((rows) => rows[0] ?? null);
@@ -4531,7 +5147,7 @@ export function heartbeatService(db: Db) {
         command: readNonEmptyString(agentAdapterConfig.command) ?? readNonEmptyString(agentRuntimeConfig.command),
       });
 
-      const isLinkedToRun = issue.checkoutRunId === run.id || issue.executionRunId === run.id;
+      const isLinkedToRun = issue.checkoutRunId === run.id || issue.executionRunId === run.id || issue.id === run.issueId;
       const shouldAutoCaptureMissionChildOutput =
         run.status === "succeeded" &&
         !!issue.missionId &&
@@ -4545,9 +5161,137 @@ export function heartbeatService(db: Db) {
         isLinkedToRun &&
         issue.status === "in_progress" &&
         issue.assigneeAgentId === run.agentId;
+      const requestChangesVerdict = run.status === "succeeded" ? extractRequestChangesVerdict(run) : null;
+      const shouldBlockRequestChangesVerdict =
+        !!requestChangesVerdict &&
+        isLinkedToRun &&
+        !!issue.missionId &&
+        canApplyRequestChangesValidationGate(issue) &&
+        (issue.status === "in_progress" || issue.status === "done") &&
+        issue.assigneeAgentId === run.agentId;
+      const claimedArtifactPaths =
+        run.status === "succeeded" && isLinkedToRun && !!issue.missionId
+          ? extractClaimedArtifactPaths(run)
+          : [];
+      const shouldCheckMissingWorkProductRegistration =
+        claimedArtifactPaths.length > 0 &&
+        isLinkedToRun &&
+        !!issue.missionId &&
+        canApplyMissingWorkProductRegistrationGate(issue) &&
+        (issue.status === "in_progress" || issue.status === "done") &&
+        issue.assigneeAgentId === run.agentId;
+
+      if (shouldBlockRequestChangesVerdict) {
+        const now = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "blocked",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            completedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: buildRequestChangesValidationGateComment({ run, verdict: requestChangesVerdict }),
+        });
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.validation_request_changes_auto_blocked",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: issue.status,
+            nextStatus: "blocked",
+            reason: "request_changes_verdict",
+            verdict: "REQUEST_CHANGES",
+          },
+        });
+        postTransactionWorkflowIssueSyncIssueId = issue.id;
+        return {
+          promotedRun: null,
+          postTransactionRequestChangesOwnerAction: { sourceIssue: issue, run, verdict: requestChangesVerdict },
+        };
+      }
+
+      if (shouldCheckMissingWorkProductRegistration) {
+        const existingWorkProducts = await tx
+          .select({
+            id: issueWorkProducts.id,
+            url: issueWorkProducts.url,
+            externalId: issueWorkProducts.externalId,
+            metadata: issueWorkProducts.metadata,
+          })
+          .from(issueWorkProducts)
+          .where(eq(issueWorkProducts.issueId, issue.id))
+          .limit(10);
+        const hasMatchingWorkProduct = existingWorkProducts.some((product) => workProductReferencesClaimedArtifact(
+          {
+            url: product.url,
+            externalId: product.externalId,
+            metadata: product.metadata ?? null,
+          },
+          claimedArtifactPaths,
+        ));
+        if (!hasMatchingWorkProduct) {
+          const now = new Date();
+          await tx
+            .update(issues)
+            .set({
+              status: "blocked",
+              checkoutRunId: null,
+              executionRunId: null,
+              executionAgentNameKey: null,
+              executionLockedAt: null,
+              completedAt: null,
+              updatedAt: now,
+            })
+            .where(eq(issues.id, issue.id));
+          await tx.insert(issueComments).values({
+            companyId: issue.companyId,
+            issueId: issue.id,
+            authorAgentId: run.agentId,
+            body: buildMissingWorkProductRegistrationGateComment({ run, claimedArtifactPaths }),
+          });
+          await tx.insert(activityLog).values({
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "issue.artifact_work_product_missing_auto_blocked",
+            entityType: "issue",
+            entityId: issue.id,
+            agentId: run.agentId,
+            runId: run.id,
+            details: {
+              previousStatus: issue.status,
+              nextStatus: "blocked",
+              reason: "missing_work_product_registration",
+              claimedArtifactPaths,
+            },
+          });
+          postTransactionWorkflowIssueSyncIssueId = issue.id;
+          return null;
+        }
+      }
 
       if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
         const now = new Date();
+        const latestRunForComment = await tx
+          .select()
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, run.id))
+          .limit(1)
+          .then((rows) => rows[0] ?? run);
         await tx
           .update(issues)
           .set({
@@ -4565,8 +5309,8 @@ export function heartbeatService(db: Db) {
           issueId: issue.id,
           authorAgentId: run.agentId,
           body: shouldAutoCaptureMissionChildOutput
-            ? buildMissionChildRunOutputComment(run)
-            : buildSuccessfulIssueRunAutoCompletedComment(run),
+            ? buildMissionChildRunOutputComment(latestRunForComment)
+            : buildSuccessfulIssueRunAutoCompletedComment(latestRunForComment),
         });
         await tx.insert(activityLog).values({
           companyId: issue.companyId,
@@ -4792,14 +5536,23 @@ export function heartbeatService(db: Db) {
       }
     });
 
+    const transactionObject =
+      !!transactionResult && typeof transactionResult === "object" ? transactionResult : null;
     const hasPostTransactionMissionOwnerPlanDecision =
-      !!transactionResult &&
-      typeof transactionResult === "object" &&
-      "postTransactionMissionOwnerPlanDecision" in transactionResult;
+      !!transactionObject && "postTransactionMissionOwnerPlanDecision" in transactionObject;
     const postTransactionMissionOwnerPlanDecision = hasPostTransactionMissionOwnerPlanDecision
-      ? transactionResult.postTransactionMissionOwnerPlanDecision
+      ? transactionObject.postTransactionMissionOwnerPlanDecision
       : null;
-    const promotedRun = hasPostTransactionMissionOwnerPlanDecision ? transactionResult.promotedRun : transactionResult;
+    const hasPostTransactionRequestChangesOwnerAction =
+      !!transactionObject && "postTransactionRequestChangesOwnerAction" in transactionObject;
+    const postTransactionRequestChangesOwnerAction = hasPostTransactionRequestChangesOwnerAction
+      ? transactionObject.postTransactionRequestChangesOwnerAction
+      : null;
+    const promotedRun = (
+      hasPostTransactionMissionOwnerPlanDecision || hasPostTransactionRequestChangesOwnerAction
+        ? transactionObject?.promotedRun
+        : transactionResult
+    ) as typeof heartbeatRuns.$inferSelect | null | undefined;
 
     if (postTransactionMissionOwnerPlanDecision) {
       await recordMissionOwnerPlanDecisionAfterComment(
@@ -4807,6 +5560,10 @@ export function heartbeatService(db: Db) {
         postTransactionMissionOwnerPlanDecision.issue,
         postTransactionMissionOwnerPlanDecision.actorAgentId,
       );
+    }
+
+    if (postTransactionRequestChangesOwnerAction) {
+      await ensureMissionOwnerActionForRequestChanges(postTransactionRequestChangesOwnerAction);
     }
 
     if (postTransactionWorkflowIssueSyncIssueId) {
@@ -5500,6 +6257,10 @@ export function heartbeatService(db: Db) {
           running.child.kill("SIGKILL");
         }
       }, graceMs);
+    } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
+      setTimeout(() => {
+        terminateRecordedProcess(run.processPid, "SIGKILL");
+      }, 5_000);
     }
 
     const cancelled = await setRunStatus(run.id, "cancelled", {
@@ -5551,6 +6312,10 @@ export function heartbeatService(db: Db) {
       if (running) {
         running.child.kill("SIGTERM");
         runningProcesses.delete(run.id);
+      } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
+        setTimeout(() => {
+          terminateRecordedProcess(run.processPid, "SIGKILL");
+        }, 5_000);
       }
       await releaseIssueExecutionAndPromote(run);
     }

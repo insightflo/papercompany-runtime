@@ -61,10 +61,23 @@ type WorkflowOverviewData = {
     lastScheduleErrorAt?: string;
     projectId?: string;
     createParentIssuePolicy?: CreateParentIssuePolicy;
-    steps: Array<{ id: string; title: string; type?: string; toolName?: string; agentName?: string; dependsOn: string[] }>;
+    executionMode?: string;
+    dynamicPlanBootstrapOnly?: boolean;
+    steps: Array<{
+      id: string;
+      title: string;
+      type?: string;
+      toolName?: string;
+      agentName?: string;
+      dependsOn: string[];
+      executionMode?: string;
+      ownerPlanBootstrapOnly?: boolean;
+      dynamicChildren?: boolean;
+    }>;
   }>;
   activeRuns: Array<{
     id: string;
+    workflowId?: string;
     workflowName: string;
     status: string;
     startedAt: string;
@@ -76,6 +89,7 @@ type WorkflowOverviewData = {
   }>;
   recentRuns: Array<{
     id: string;
+    workflowId?: string;
     workflowName: string;
     status: string;
     startedAt: string;
@@ -292,6 +306,7 @@ const paginationInfoStyle: CSSProperties = {
 };
 
 type StatusFilter = "active" | "archived";
+type WorkflowScopeFilter = "reusable" | "manual_mission";
 
 const filterTabStyle = (isActive: boolean): CSSProperties => ({
   padding: "6px 14px",
@@ -306,6 +321,68 @@ const filterTabStyle = (isActive: boolean): CSSProperties => ({
   fontWeight: isActive ? 700 : 500,
   opacity: isActive ? 1 : 0.7,
 });
+
+type WorkflowSummary = WorkflowOverviewData["workflows"][number];
+type WorkflowRunSummary = WorkflowOverviewData["activeRuns"][number];
+
+function hasRecurringWorkflowTrigger(workflow: WorkflowSummary): boolean {
+  return Boolean(
+    (typeof workflow.schedule === "string" && workflow.schedule.trim())
+    || (workflow.triggerLabels ?? []).length > 0,
+  );
+}
+
+function isManualMissionPlanWorkflow(workflow: WorkflowSummary): boolean {
+  const record = workflow as Record<string, unknown>;
+  const sourceKind = typeof record.sourceKind === "string" ? record.sourceKind : "";
+  const source = typeof record.source === "string" ? record.source : "";
+  if (sourceKind === "manual_mission" || source === "manual_mission") return true;
+
+  const name = workflow.name.trim();
+  if (name.startsWith("PAQO WBS:")) return true;
+
+  if (hasRecurringWorkflowTrigger(workflow)) return false;
+
+  if (workflow.executionMode === "dynamic_owner_plan" || workflow.dynamicPlanBootstrapOnly === true) {
+    return true;
+  }
+
+  return workflow.steps.some((step) => {
+    const title = step.title.trim();
+    return (
+      /^action-\d+-/i.test(step.id)
+      || /^qa-\d*-/i.test(step.id)
+      || title.startsWith("[ACTION]")
+      || title.startsWith("[QA]")
+      || title === "Verify mission result"
+      || step.executionMode === "dynamic_owner_plan"
+      || step.ownerPlanBootstrapOnly === true
+      || step.dynamicChildren === true
+    );
+  });
+}
+
+function workflowScopeLabel(scope: WorkflowScopeFilter): string {
+  return scope === "manual_mission" ? "Manual Mission Plans" : "Reusable Workflows";
+}
+
+function workflowScopeDescription(scope: WorkflowScopeFilter): string {
+  return scope === "manual_mission"
+    ? "One-off planning DAGs created from manual missions. Keep these separate from reusable workflow definitions."
+    : "Repeatable workflow definitions for scheduled, label-triggered, API, or operator-run execution.";
+}
+
+function filterRunsForWorkflows(
+  runs: WorkflowRunSummary[],
+  workflows: WorkflowSummary[],
+): WorkflowRunSummary[] {
+  const workflowIds = new Set(workflows.map((workflow) => workflow.id));
+  const workflowNames = new Set(workflows.map((workflow) => workflow.name));
+  return runs.filter((run) => {
+    if (run.workflowId && workflowIds.has(run.workflowId)) return true;
+    return workflowNames.has(run.workflowName);
+  });
+}
 
 const LABEL_COLOR_PRESETS = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#8b5cf6", "#6366f1", "#ec4899"];
 
@@ -1331,7 +1408,12 @@ function DefinitionsTable({
                     </div>
                   ) : (
                     <div style={{ display: "grid", gap: "4px" }}>
-                      <strong>{workflow.name}</strong>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                        <strong>{workflow.name}</strong>
+                        {isManualMissionPlanWorkflow(workflow) ? (
+                          <span style={statusBadgeStyle("planned")}>manual mission plan</span>
+                        ) : null}
+                      </div>
                       <span style={mutedTextStyle}>{workflow.description || "-"}</span>
                       {(workflow.triggerLabels ?? []).length > 0 && (
                         <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Labels: {workflow.triggerLabels!.join(", ")}</span>
@@ -1804,6 +1886,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
   const createWorkflow = usePluginAction("create-workflow");
   const abortRun = usePluginAction("abort-run");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [workflowScopeFilter, setWorkflowScopeFilter] = useState<WorkflowScopeFilter>("reusable");
   const [workflowStatusFilter, setWorkflowStatusFilter] = useState<StatusFilter>("active");
   const [showNewWorkflowForm, setShowNewWorkflowForm] = useState(false);
   const [newWorkflowName, setNewWorkflowName] = useState("");
@@ -1975,13 +2058,22 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
   const refreshButtonLabel = isRefreshing ? "갱신 중..." : "↻ Refresh";
 
   const allWorkflows = overview.data?.workflows ?? [];
-  const activeWorkflows = useMemo(
-    () => allWorkflows.filter((w) => w.status.trim().toLowerCase() !== "archived"),
+  const reusableWorkflows = useMemo(
+    () => allWorkflows.filter((workflow) => !isManualMissionPlanWorkflow(workflow)),
     [allWorkflows],
   );
-  const archivedWorkflows = useMemo(
-    () => allWorkflows.filter((w) => w.status.trim().toLowerCase() === "archived"),
+  const manualMissionWorkflows = useMemo(
+    () => allWorkflows.filter(isManualMissionPlanWorkflow),
     [allWorkflows],
+  );
+  const scopedWorkflows = workflowScopeFilter === "manual_mission" ? manualMissionWorkflows : reusableWorkflows;
+  const activeWorkflows = useMemo(
+    () => scopedWorkflows.filter((w) => w.status.trim().toLowerCase() !== "archived"),
+    [scopedWorkflows],
+  );
+  const archivedWorkflows = useMemo(
+    () => scopedWorkflows.filter((w) => w.status.trim().toLowerCase() === "archived"),
+    [scopedWorkflows],
   );
   const filteredWorkflows = workflowStatusFilter === "active" ? activeWorkflows : archivedWorkflows;
 
@@ -2038,6 +2130,8 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
     projects: overview.data?.projects ?? [],
     labels: overview.data?.labels ?? [],
   };
+  const scopedActiveRuns = filterRunsForWorkflows(data.activeRuns, scopedWorkflows);
+  const scopedRecentRuns = filterRunsForWorkflows(data.recentRuns, scopedWorkflows);
 
   return (
     <div data-plugin-id={PLUGIN_ID} style={pageStyle}>
@@ -2072,7 +2166,16 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
             </button>
           </div>
           <p style={mutedTextStyle}>Definitions available for this company.</p>
-          <div style={{ display: "flex", gap: "6px" }}>
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+            <button type="button" style={filterTabStyle(workflowScopeFilter === "reusable")} onClick={() => setWorkflowScopeFilter("reusable")}>
+              Reusable Workflows ({reusableWorkflows.length})
+            </button>
+            <button type="button" style={filterTabStyle(workflowScopeFilter === "manual_mission")} onClick={() => setWorkflowScopeFilter("manual_mission")}>
+              Manual Mission Plans ({manualMissionWorkflows.length})
+            </button>
+          </div>
+          <p style={{ ...mutedTextStyle, fontSize: "12px" }}>{workflowScopeDescription(workflowScopeFilter)}</p>
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
             <button type="button" style={filterTabStyle(workflowStatusFilter === "active")} onClick={() => setWorkflowStatusFilter("active")}>
               활성 ({activeWorkflows.length})
             </button>
@@ -2266,8 +2369,8 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
           projects={data.projects ?? []}
           labels={labels}
           refreshLabels={refreshLabels}
-          activeRuns={data.activeRuns}
-          recentRuns={data.recentRuns}
+          activeRuns={scopedActiveRuns}
+          recentRuns={scopedRecentRuns}
           onManualRunStarted={setHighlightedRunId}
         />
       </section>
@@ -2275,7 +2378,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
       <section style={sectionStyle}>
         <div style={{ display: "grid", gap: "10px" }}>
           <div style={{ ...headerRowStyle, justifyContent: "space-between" }}>
-            <h2 style={sectionTitleStyle}>Active Runs</h2>
+            <h2 style={sectionTitleStyle}>{workflowScopeLabel(workflowScopeFilter)} Active Runs</h2>
             <button
               type="button"
               onClick={() => {
@@ -2287,9 +2390,9 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
               {refreshButtonLabel}
             </button>
           </div>
-          <p style={mutedTextStyle}>Currently running or unresolved workflow executions.</p>
+          <p style={mutedTextStyle}>Currently running or unresolved executions for the selected workflow tab.</p>
         </div>
-        <ActiveRunsTable activeRuns={data.activeRuns} companyId={companyId} highlightedRunId={highlightedRunId} onRefreshOverview={refreshOverview} onAbort={(runId) => {
+        <ActiveRunsTable activeRuns={scopedActiveRuns} companyId={companyId} highlightedRunId={highlightedRunId} onRefreshOverview={refreshOverview} onAbort={(runId) => {
           void (async () => {
             try {
               await abortRun({ runId });
@@ -2302,7 +2405,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
       <section style={sectionStyle}>
         <div style={{ display: "grid", gap: "10px" }}>
           <div style={{ ...headerRowStyle, justifyContent: "space-between" }}>
-            <h2 style={sectionTitleStyle}>Recent Runs</h2>
+            <h2 style={sectionTitleStyle}>{workflowScopeLabel(workflowScopeFilter)} Recent Runs</h2>
             <button
               type="button"
               onClick={() => {
@@ -2314,9 +2417,9 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
               {refreshButtonLabel}
             </button>
           </div>
-          <p style={mutedTextStyle}>Recent workflow executions including manual, cron, label trigger, and API runs.</p>
+          <p style={mutedTextStyle}>Recent executions for the selected workflow tab.</p>
         </div>
-        <RecentRunsTable recentRuns={data.recentRuns} companyId={companyId} highlightedRunId={highlightedRunId} onRefreshOverview={refreshOverview} />
+        <RecentRunsTable recentRuns={scopedRecentRuns} companyId={companyId} highlightedRunId={highlightedRunId} onRefreshOverview={refreshOverview} />
       </section>
 
       <section style={sectionStyle}>

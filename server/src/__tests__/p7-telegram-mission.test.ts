@@ -61,21 +61,59 @@ vi.mock("../services/missions.js", () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock issueService and approvalService (not exercised in these tests)
+// Mock issueService, Hermes chat service, heartbeat, and approvalService
 // ---------------------------------------------------------------------------
+
+const mockIssueCreate = vi.fn().mockResolvedValue({ id: "issue-001", identifier: "ISS-1" });
+const mockIssueGetById = vi.fn().mockResolvedValue(null);
+const mockIssueGetByIdentifier = vi.fn().mockResolvedValue(null);
+const mockIssueUpdate = vi.fn().mockResolvedValue(null);
 
 vi.mock("../services/issues.js", () => ({
   issueService: (_db: unknown) => ({
-    getById: vi.fn().mockResolvedValue(null),
-    getByIdentifier: vi.fn().mockResolvedValue(null),
-    update: vi.fn().mockResolvedValue(null),
+    create: mockIssueCreate,
+    getById: mockIssueGetById,
+    getByIdentifier: mockIssueGetByIdentifier,
+    update: mockIssueUpdate,
   }),
 }));
+
+const mockFindOperationsAgent = vi.fn().mockResolvedValue({ id: "hermes-agent-1" });
+const mockGetOrCreateTelegramSession = vi.fn().mockResolvedValue({
+  id: "chat-session-1",
+  title: "Telegram chat",
+  status: "active",
+});
+const mockAddUserMessage = vi.fn().mockResolvedValue({ id: "user-message-1" });
+const mockAddAssistantPlaceholder = vi.fn().mockResolvedValue({ id: "assistant-message-1" });
+const mockRecentConversation = vi.fn().mockResolvedValue([]);
+const mockAttachRunToAssistantMessage = vi.fn().mockResolvedValue(undefined);
+const mockMarkAssistantMessage = vi.fn().mockResolvedValue(null);
+
+vi.mock("../services/hermes-chat.js", () => ({
+  hermesChatService: (_db: unknown) => ({
+    findOperationsAgent: mockFindOperationsAgent,
+    getOrCreateTelegramSession: mockGetOrCreateTelegramSession,
+    addUserMessage: mockAddUserMessage,
+    addAssistantPlaceholder: mockAddAssistantPlaceholder,
+    recentConversation: mockRecentConversation,
+    attachRunToAssistantMessage: mockAttachRunToAssistantMessage,
+    markAssistantMessage: mockMarkAssistantMessage,
+  }),
+}));
+
+const mockWakeup = vi.fn().mockResolvedValue({ id: "run-001" });
 
 vi.mock("../services/approvals.js", () => ({
   approvalService: (_db: unknown) => ({
     getById: vi.fn().mockResolvedValue(null),
     approve: vi.fn().mockResolvedValue(null),
+  }),
+}));
+
+vi.mock("../services/heartbeat.js", () => ({
+  heartbeatService: (_db: unknown) => ({
+    wakeup: mockWakeup,
   }),
 }));
 
@@ -250,6 +288,56 @@ describe("buildTelegramHandler — unknown command", () => {
     expect(mockSender).toHaveBeenCalledOnce();
     const [, text] = mockSender.mock.calls[0];
     expect(text).toMatch(/unknown command/i);
+  });
+});
+
+describe("buildTelegramHandler — free-form Hermes conversation", () => {
+  it("routes non-command Telegram text to Hermes chat without creating an issue", async () => {
+    vi.clearAllMocks();
+    const handler = buildTelegramHandler(stubDb, COMPANY_ID);
+
+    await handler(makeMessage("지금 scheduler 상태 확인해줘"), CONTEXT);
+
+    expect(mockIssueCreate).not.toHaveBeenCalled();
+    expect(mockGetOrCreateTelegramSession).toHaveBeenCalledWith(
+      COMPANY_ID,
+      expect.objectContaining({
+        chatId: CHAT_ID,
+        title: "Telegram chat",
+      }),
+    );
+    expect(mockAddUserMessage).toHaveBeenCalledWith(
+      COMPANY_ID,
+      "chat-session-1",
+      "지금 scheduler 상태 확인해줘",
+      expect.objectContaining({
+        telegram: expect.objectContaining({
+          chatId: CHAT_ID,
+          messageId: 1,
+        }),
+      }),
+    );
+    expect(mockAddAssistantPlaceholder).toHaveBeenCalledWith(COMPANY_ID, "chat-session-1", "hermes-agent-1");
+    expect(mockWakeup).toHaveBeenCalledWith(
+      "hermes-agent-1",
+      expect.objectContaining({
+        triggerDetail: "telegram_hermes_chat",
+        contextSnapshot: expect.objectContaining({
+          telegramOperatorMessage: true,
+          telegramChatId: CHAT_ID,
+          paperclipHermesChat: expect.objectContaining({
+            sessionId: "chat-session-1",
+            currentMessage: "지금 scheduler 상태 확인해줘",
+            source: "telegram",
+          }),
+        }),
+      }),
+    );
+    expect(mockAttachRunToAssistantMessage).toHaveBeenCalledWith("assistant-message-1", "run-001");
+    const [, response] = mockSender.mock.calls[0];
+    expect(response).toContain("Hermes Operations Manager");
+    expect(response).toContain("session");
+    expect(response).not.toContain("Issue");
   });
 });
 

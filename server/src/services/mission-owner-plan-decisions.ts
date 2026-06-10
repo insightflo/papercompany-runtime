@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
+import { missionDelegationService } from "./mission-delegations.js";
 import { workflowService } from "./workflow/engine.js";
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
@@ -699,6 +700,17 @@ const NATIVE_WORKFLOW_DEFINITION_SOURCE_TYPES = new Set([
   "native_workflow_definition",
   "native_workflow_definition_step",
 ]);
+const MISSION_PLAN_UNIT_SOURCE_TYPES = new Set([
+  "mission_plan_unit",
+  "mission_plan_step",
+]);
+const CROSS_COMPANY_MISSION_SOURCE_TYPES = new Set([
+  "cross_company_mission",
+  "cross_company_mission_request",
+  "company_mission",
+  "external_company_mission",
+]);
+const RUNNABLE_PLAN_ASSIGNEE_STATUSES = new Set(["active", "idle"]);
 const PLUGIN_WORKFLOW_ENTITY_SOURCE_TYPES = new Map<string, string[]>([
   ["plugin_workflow_definition", ["workflow-definition"]],
   ["plugin_workflow_definition_step", ["workflow-definition", "workflow-step-definition"]],
@@ -808,6 +820,14 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
   if (activeOwnerDecision?.decisionHash === decisionHash) {
     if (activePlan) {
+      await ensureCrossCompanyDelegationsForMissionOwnerPlan({
+        db,
+        companyId,
+        missionId,
+        draft: draftResult.draft,
+        missionPlanArtifactId: activePlan.id,
+        decisionHash,
+      });
       await ensurePaqoWorkflowForMissionOwnerPlan({
         db,
         companyId,
@@ -843,6 +863,14 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     requiredInputs: draftResult.draft.requiredInputs,
     successCriteria: draftResult.draft.successCriteria,
     steps: draftResult.draft.steps,
+  });
+  await ensureCrossCompanyDelegationsForMissionOwnerPlan({
+    db,
+    companyId,
+    missionId,
+    draft: draftResult.draft,
+    missionPlanArtifactId: missionPlanArtifact.id,
+    decisionHash,
   });
   await ensurePaqoWorkflowForMissionOwnerPlan({
     db,
@@ -896,6 +924,8 @@ async function validateSelectedExecutionUnitSourceRefs({
   const diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[] = [];
   const nativeWorkflowDefinitionIds = new Set<string>();
   const issueSourceIds = new Set<string>();
+  const assigneeAgentIds = new Set<string>();
+  const crossCompanyTargets: Array<{ index: number; targetCompanyId: string; targetOwnerAgentId: string }> = [];
   const pluginEntityIdsByType = new Map<string, Set<string>>();
 
   for (const [index, unit] of selectedExecutionUnits.entries()) {
@@ -915,8 +945,53 @@ async function validateSelectedExecutionUnitSourceRefs({
       continue;
     }
 
+    if (CROSS_COMPANY_MISSION_SOURCE_TYPES.has(sourceType) || isCrossCompanyMissionUnit(unit)) {
+      const targetCompanyId = readCrossCompanyTargetCompanyId(unit);
+      const targetOwnerAgentId = readCrossCompanyTargetOwnerAgentId(unit);
+      if (!targetCompanyId) {
+        diagnostics.push({
+          code: "missing_target_company_id",
+          message: `selectedExecutionUnits[${index}] with sourceRef.type ${sourceType} must include targetCompanyId`,
+        });
+      }
+      if (!targetOwnerAgentId) {
+        diagnostics.push({
+          code: "missing_target_owner_agent_id",
+          message: `selectedExecutionUnits[${index}] with sourceRef.type ${sourceType} must include targetOwnerAgentId`,
+        });
+      }
+      if (targetCompanyId === companyId) {
+        diagnostics.push({
+          code: "target_company_must_differ",
+          message: `selectedExecutionUnits[${index}] cross-company targetCompanyId must differ from source company ${companyId}`,
+        });
+      }
+      if (targetCompanyId && targetOwnerAgentId && targetCompanyId !== companyId) {
+        crossCompanyTargets.push({ index, targetCompanyId, targetOwnerAgentId });
+      }
+      continue;
+    }
+
     if (NATIVE_WORKFLOW_DEFINITION_SOURCE_TYPES.has(sourceType)) {
       nativeWorkflowDefinitionIds.add(sourceId);
+      continue;
+    }
+
+    if (MISSION_PLAN_UNIT_SOURCE_TYPES.has(sourceType)) {
+      const assigneeAgentId =
+        typeof unit.assigneeAgentId === "string"
+          ? unit.assigneeAgentId.trim()
+          : typeof unit.agentId === "string"
+            ? unit.agentId.trim()
+            : "";
+      if (assigneeAgentId) {
+        assigneeAgentIds.add(assigneeAgentId);
+      } else {
+        diagnostics.push({
+          code: "missing_assignee_agent_id",
+          message: `selectedExecutionUnits[${index}] with sourceRef.type ${sourceType} must include assigneeAgentId from the company roster`,
+        });
+      }
       continue;
     }
 
@@ -939,6 +1014,72 @@ async function validateSelectedExecutionUnitSourceRefs({
       code: "unsupported_source_ref_type",
       message: `selectedExecutionUnits[${index}] has unsupported sourceRef.type ${sourceType}`,
     });
+  }
+
+  if (diagnostics.length > 0) return diagnostics;
+
+  if (crossCompanyTargets.length > 0) {
+    const targetCompanyIds = Array.from(new Set(crossCompanyTargets.map((target) => target.targetCompanyId)));
+    const targetOwnerAgentIds = Array.from(new Set(crossCompanyTargets.map((target) => target.targetOwnerAgentId)));
+    const companyRows = await db
+      .select({ id: companies.id })
+      .from(companies)
+      .where(inArray(companies.id, targetCompanyIds));
+    const foundCompanyIds = new Set(companyRows.map((row) => row.id));
+    const agentRows = await db
+      .select({ id: agents.id, companyId: agents.companyId, status: agents.status })
+      .from(agents)
+      .where(inArray(agents.id, targetOwnerAgentIds));
+    const agentById = new Map(agentRows.map((row) => [row.id, row]));
+
+    for (const target of crossCompanyTargets) {
+      if (!foundCompanyIds.has(target.targetCompanyId)) {
+        diagnostics.push({
+          code: "target_company_not_found",
+          message: `selectedExecutionUnits[${target.index}] targetCompanyId ${target.targetCompanyId} was not found`,
+        });
+      }
+      const targetOwner = agentById.get(target.targetOwnerAgentId);
+      if (!targetOwner || targetOwner.companyId !== target.targetCompanyId) {
+        diagnostics.push({
+          code: "target_owner_agent_not_found",
+          message: `selectedExecutionUnits[${target.index}] targetOwnerAgentId ${target.targetOwnerAgentId} was not found in target company ${target.targetCompanyId}`,
+        });
+        continue;
+      }
+      if (!RUNNABLE_PLAN_ASSIGNEE_STATUSES.has(targetOwner.status)) {
+        diagnostics.push({
+          code: "target_owner_agent_not_runnable",
+          message: `selectedExecutionUnits[${target.index}] targetOwnerAgentId ${target.targetOwnerAgentId} is not runnable (status=${targetOwner.status || "unknown"}); choose an active or idle target company agent`,
+        });
+      }
+    }
+  }
+
+  if (assigneeAgentIds.size > 0) {
+    const ids = Array.from(assigneeAgentIds);
+    const rows = await db
+      .select({ id: agents.id, status: agents.status })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), inArray(agents.id, ids)));
+    const found = new Set(rows.map((row) => row.id));
+    const rowById = new Map(rows.map((row) => [row.id, row]));
+    for (const id of ids) {
+      if (!found.has(id)) {
+        diagnostics.push({
+          code: "assignee_agent_not_found",
+          message: `selectedExecutionUnits assigneeAgentId ${id} was not found in company ${companyId}`,
+        });
+        continue;
+      }
+      const status = rowById.get(id)?.status ?? "";
+      if (!RUNNABLE_PLAN_ASSIGNEE_STATUSES.has(status)) {
+        diagnostics.push({
+          code: "assignee_agent_not_runnable",
+          message: `selectedExecutionUnits assigneeAgentId ${id} is not runnable (status=${status || "unknown"}); choose an active or idle company agent`,
+        });
+      }
+    }
   }
 
   if (diagnostics.length > 0) return diagnostics;
@@ -1008,8 +1149,112 @@ function toNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
+function isCrossCompanyMissionUnit(unit: Record<string, unknown>): boolean {
+  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+  const sourceType = toNonEmptyString(sourceRef?.type)?.toLowerCase() ?? "";
+  const kind = toNonEmptyString(unit.kind)?.toLowerCase() ?? "";
+  return CROSS_COMPANY_MISSION_SOURCE_TYPES.has(sourceType) || CROSS_COMPANY_MISSION_SOURCE_TYPES.has(kind);
+}
+
+function localSelectedExecutionUnits(units: Record<string, unknown>[]): Record<string, unknown>[] {
+  return units.filter((unit) => !isCrossCompanyMissionUnit(unit));
+}
+
+function draftWithSelectedExecutionUnits(draft: PlanRevisionDraft, selectedExecutionUnits: Record<string, unknown>[]): PlanRevisionDraft {
+  return {
+    ...draft,
+    refs: {
+      ...draft.refs,
+      selectedExecutionUnits,
+    },
+  };
+}
+
+function readCrossCompanyTargetCompanyId(unit: Record<string, unknown>): string | null {
+  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+  return (
+    toNonEmptyString(unit.targetCompanyId) ??
+    toNonEmptyString(unit.companyId) ??
+    toNonEmptyString(unit.remoteCompanyId) ??
+    toNonEmptyString(sourceRef?.targetCompanyId) ??
+    toNonEmptyString(sourceRef?.companyId) ??
+    toNonEmptyString(sourceRef?.remoteCompanyId)
+  );
+}
+
+function readCrossCompanyTargetOwnerAgentId(unit: Record<string, unknown>): string | null {
+  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+  return (
+    toNonEmptyString(unit.targetOwnerAgentId) ??
+    toNonEmptyString(unit.targetAgentId) ??
+    toNonEmptyString(unit.ownerAgentId) ??
+    toNonEmptyString(unit.agentId) ??
+    toNonEmptyString(sourceRef?.targetOwnerAgentId) ??
+    toNonEmptyString(sourceRef?.targetAgentId) ??
+    toNonEmptyString(sourceRef?.ownerAgentId) ??
+    toNonEmptyString(sourceRef?.agentId)
+  );
+}
+
+function formatCrossCompanyDelegationTitle(unit: Record<string, unknown>, index: number): string {
+  return (
+    toNonEmptyString(unit.title) ??
+    toNonEmptyString(unit.name) ??
+    toNonEmptyString(unit.id) ??
+    `Delegated mission ${index + 1}`
+  );
+}
+
+function formatCrossCompanyDelegationDescription(unit: Record<string, unknown>, mission: typeof missions.$inferSelect): string {
+  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+  return [
+    toNonEmptyString(unit.description),
+    toNonEmptyString(unit.brief),
+    toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
+    "",
+    `Source mission: ${mission.title}`,
+    `Source mission id: ${mission.id}`,
+    sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+function crossCompanyDelegationExternalKey(input: {
+  missionId: string;
+  decisionHash: string;
+  unit: Record<string, unknown>;
+  index: number;
+}): string {
+  const sourceRef = isPlainObject(input.unit.sourceRef) ? input.unit.sourceRef : null;
+  const unitKey =
+    toNonEmptyString(input.unit.id) ??
+    toNonEmptyString(input.unit.unitId) ??
+    toNonEmptyString(input.unit.stepId) ??
+    toNonEmptyString(sourceRef?.id) ??
+    toNonEmptyString(sourceRef?.issueId) ??
+    toNonEmptyString(sourceRef?.stepId) ??
+    `index:${input.index}`;
+  return `owner-plan:${input.missionId}:${input.decisionHash}:${unitKey}`;
+}
+
 function stripIssueGroupPrefix(title: string): string {
   return title.replace(/^\s*\[(?:plan|action|qa|oversight)\]\s*/iu, "").trim();
+}
+
+type PaqoIssueGroup = "action" | "qa" | "oversight";
+
+function readIssueGroupPrefix(title: string): PaqoIssueGroup | null {
+  const match = /^\s*\[(action|qa|oversight)\]/iu.exec(title);
+  return match ? match[1]!.toLowerCase() as PaqoIssueGroup : null;
+}
+
+function inferPaqoIssueGroup(unit: Record<string, unknown>, title: string): PaqoIssueGroup {
+  const prefixed = readIssueGroupPrefix(title);
+  if (prefixed) return prefixed;
+
+  const kind = toNonEmptyString(unit.kind)?.toLowerCase() ?? "";
+  if (/\b(?:qa|quality|validation|validator|verify|verification)\b/u.test(kind)) return "qa";
+  if (/\b(?:oversight|supervision|unblock|escalation)\b/u.test(kind)) return "oversight";
+  return "action";
 }
 
 function shortStableHash(value: unknown): string {
@@ -1021,36 +1266,156 @@ function formatPaqoWorkflowName(draft: PlanRevisionDraft, mission: typeof missio
   return `PAQO WBS: ${goal}`;
 }
 
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => toNonEmptyString(entry)).filter((entry): entry is string => Boolean(entry));
+}
+
+function selectedUnitRefIds(unit: Record<string, unknown>): string[] {
+  const ids = [
+    toNonEmptyString(unit.id),
+    toNonEmptyString(unit.unitId),
+    toNonEmptyString(unit.stepId),
+  ];
+  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
+  ids.push(
+    toNonEmptyString(sourceRef?.id),
+    toNonEmptyString(sourceRef?.issueId),
+    toNonEmptyString(sourceRef?.stepId),
+  );
+  return Array.from(new Set(ids.filter((id): id is string => Boolean(id))));
+}
+
+function buildUnitStepIdMap(
+  selectedUnits: Record<string, unknown>[],
+  steps: WorkflowStep[],
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [index, unit] of selectedUnits.entries()) {
+    for (const id of selectedUnitRefIds(unit)) {
+      map.set(id, steps[index]!.id);
+    }
+  }
+  return map;
+}
+
+function planStepDependenciesByUnitId(draftSteps: (string | Record<string, unknown>)[]): Map<string, string[]> {
+  const dependenciesByUnitId = new Map<string, string[]>();
+  for (const step of draftSteps) {
+    if (!isPlainObject(step)) continue;
+
+    const unitIds = readStringArray(step.units).length > 0
+      ? readStringArray(step.units)
+      : [
+          toNonEmptyString(step.unitId),
+          toNonEmptyString(step.executionUnitId),
+          toNonEmptyString(step.selectedExecutionUnitId),
+          toNonEmptyString(step.id),
+        ].filter((id): id is string => Boolean(id));
+    if (unitIds.length === 0) continue;
+
+    const dependencies = Array.from(new Set([
+      ...readStringArray(step.dependencies),
+      ...readStringArray(step.dependsOn),
+      ...readStringArray(step.after),
+    ]));
+
+    for (const unitId of unitIds) {
+      dependenciesByUnitId.set(unitId, dependencies);
+    }
+  }
+  return dependenciesByUnitId;
+}
+
+function selectedUnitDependenciesByUnitId(selectedUnits: Record<string, unknown>[]): Map<string, string[]> {
+  const dependenciesByUnitId = new Map<string, string[]>();
+  for (const unit of selectedUnits) {
+    const dependencies = Array.from(new Set([
+      ...readStringArray(unit.dependencies),
+      ...readStringArray(unit.dependsOn),
+      ...readStringArray(unit.after),
+    ]));
+    if (dependencies.length === 0) continue;
+
+    for (const unitId of selectedUnitRefIds(unit)) {
+      dependenciesByUnitId.set(unitId, dependencies);
+    }
+  }
+  return dependenciesByUnitId;
+}
+
+function mergeDependencyMaps(...maps: Map<string, string[]>[]): Map<string, string[]> {
+  const merged = new Map<string, string[]>();
+  for (const map of maps) {
+    for (const [unitId, dependencies] of map) {
+      merged.set(unitId, Array.from(new Set([...(merged.get(unitId) ?? []), ...dependencies])));
+    }
+  }
+  return merged;
+}
+
+function applyPlanStepDependencies(
+  selectedUnits: Record<string, unknown>[],
+  steps: WorkflowStep[],
+  draftSteps: (string | Record<string, unknown>)[],
+): WorkflowStep[] {
+  const dependenciesByUnitId = mergeDependencyMaps(
+    selectedUnitDependenciesByUnitId(selectedUnits),
+    planStepDependenciesByUnitId(draftSteps),
+  );
+  if (dependenciesByUnitId.size === 0) return steps;
+
+  const unitIdToStepId = buildUnitStepIdMap(selectedUnits, steps);
+  return steps.map((step, index) => {
+    const unit = selectedUnits[index]!;
+    const unitDependencies = selectedUnitRefIds(unit).flatMap((unitId) => dependenciesByUnitId.get(unitId) ?? []);
+    const dependencies = Array.from(new Set(unitDependencies.flatMap((unitId) => {
+      const stepId = unitIdToStepId.get(unitId);
+      return stepId && stepId !== step.id ? [stepId] : [];
+    })));
+
+    return dependencies.length > 0 ? { ...step, dependencies } : step;
+  });
+}
+
 function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect): WorkflowStep[] {
   const selectedUnits = draft.refs.selectedExecutionUnits;
-  const actionSteps = selectedUnits.map((unit, index) => {
+  const selectedSteps = selectedUnits.map((unit, index) => {
     const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
-    const title = stripIssueGroupPrefix(
+    const assigneeAgentId =
+      toNonEmptyString(unit.assigneeAgentId) ??
+      toNonEmptyString(unit.agentId) ??
+      mission.ownerAgentId;
+    const rawTitle =
       toNonEmptyString(unit.title)
         ?? toNonEmptyString(unit.name)
         ?? toNonEmptyString(unit.id)
-        ?? `Execution unit ${index + 1}`,
-    );
+        ?? `Execution unit ${index + 1}`;
+    const group = inferPaqoIssueGroup(unit, rawTitle);
+    const title = stripIssueGroupPrefix(rawTitle);
+    const groupLabel = group.toUpperCase();
     return {
-      id: `action-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title })}`,
-      name: `[ACTION] ${title}`,
-      agentId: mission.ownerAgentId,
+      id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
+      name: `[${groupLabel}] ${title}`,
+      agentId: assigneeAgentId,
       dependencies: [],
       description: [
-        "Mission-level PAQO ACTION issue materialized from an authorized PLAN decision.",
+        `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
         "",
         `Mission: ${mission.title}`,
+        `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
         toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
         sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
       ].filter(Boolean).join("\n"),
     } satisfies WorkflowStep;
   });
+  const plannedSteps = applyPlanStepDependencies(selectedUnits, selectedSteps, draft.steps);
 
   const qaStep: WorkflowStep = {
-    id: `qa-${shortStableHash({ missionId: mission.id, actions: actionSteps.map((step) => step.id), goal: draft.missionGoal })}`,
+    id: `qa-${shortStableHash({ missionId: mission.id, actions: plannedSteps.map((step) => step.id), goal: draft.missionGoal })}`,
     name: "[QA] Verify mission result",
     agentId: mission.ownerAgentId,
-    dependencies: actionSteps.map((step) => step.id),
+    dependencies: plannedSteps.map((step) => step.id),
     description: [
       "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
       "",
@@ -1059,7 +1424,86 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     ].filter(Boolean).join("\n"),
   };
 
-  return [...actionSteps, qaStep];
+  return [...plannedSteps, qaStep];
+}
+
+async function ensureCrossCompanyDelegationsForMissionOwnerPlan(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  draft: PlanRevisionDraft;
+  missionPlanArtifactId: string;
+  decisionHash: string;
+}): Promise<void> {
+  const crossCompanyUnits = input.draft.refs.selectedExecutionUnits
+    .map((unit, index) => ({ unit, index }))
+    .filter(({ unit }) => isCrossCompanyMissionUnit(unit));
+  if (crossCompanyUnits.length === 0) return;
+
+  const mission = await input.db
+    .select()
+    .from(missions)
+    .where(and(eq(missions.companyId, input.companyId), eq(missions.id, input.missionId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!mission) return;
+
+  const materializedDelegations: Record<string, unknown>[] = [];
+  for (const { unit, index } of crossCompanyUnits) {
+    const targetCompanyId = readCrossCompanyTargetCompanyId(unit);
+    const targetOwnerAgentId = readCrossCompanyTargetOwnerAgentId(unit);
+    if (!targetCompanyId || !targetOwnerAgentId) continue;
+
+    const title = formatCrossCompanyDelegationTitle(unit, index);
+    const { delegation } = await missionDelegationService(input.db).create({
+      sourceMissionId: input.missionId,
+      externalKey: crossCompanyDelegationExternalKey({
+        missionId: input.missionId,
+        decisionHash: input.decisionHash,
+        unit,
+        index,
+      }),
+      targetCompanyId,
+      targetOwnerAgentId,
+      title,
+      sourceIssueTitle: `[DELEGATED] ${title}`,
+      description: formatCrossCompanyDelegationDescription(unit, mission),
+      priority: toNonEmptyString(unit.priority) ?? "medium",
+      metadata: {
+        source: "mission_owner_plan_decision",
+        missionPlanArtifactId: input.missionPlanArtifactId,
+        decisionHash: input.decisionHash,
+        selectedExecutionUnitIndex: index,
+        selectedExecutionUnit: unit,
+      },
+    });
+    materializedDelegations.push({
+      delegationId: delegation.id,
+      externalKey: delegation.externalKey,
+      sourceIssueId: delegation.sourceIssueId,
+      targetCompanyId: delegation.targetCompanyId,
+      targetMissionId: delegation.targetMissionId,
+      status: delegation.status,
+      decisionHash: input.decisionHash,
+      selectedExecutionUnitIndex: index,
+    });
+  }
+
+  if (materializedDelegations.length === 0) return;
+  const service = missionPlanArtifactService(input.db);
+  const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
+  if (activePlan?.id !== input.missionPlanArtifactId) return;
+  const refs = mergeMissionPlanRefs(activePlan.refs, {
+    crossCompanyDelegations: materializedDelegations,
+  });
+  await input.db
+    .update(missionPlanArtifacts)
+    .set({ refs, updatedAt: new Date() })
+    .where(eq(missionPlanArtifacts.id, activePlan.id));
+}
+
+function workflowStepsAreEqual(left: WorkflowStep[], right: WorkflowStep[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
@@ -1071,7 +1515,8 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   decisionHash: string;
   triggeredBy: string;
 }): Promise<void> {
-  if (input.draft.refs.selectedExecutionUnits.length === 0) return;
+  const selectedExecutionUnits = localSelectedExecutionUnits(input.draft.refs.selectedExecutionUnits);
+  if (selectedExecutionUnits.length === 0) return;
 
   const mission = await input.db
     .select()
@@ -1081,18 +1526,24 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     .then((rows) => rows[0] ?? null);
   if (!mission) return;
 
-  const workflowName = formatPaqoWorkflowName(input.draft, mission);
-  const steps = buildPaqoWorkflowSteps(input.draft, mission);
+  const localDraft = draftWithSelectedExecutionUnits(input.draft, selectedExecutionUnits);
+  const workflowName = formatPaqoWorkflowName(localDraft, mission);
+  const steps = buildPaqoWorkflowSteps(localDraft, mission);
   const [existingDefinition] = await input.db
     .select()
     .from(workflowDefinitions)
     .where(and(eq(workflowDefinitions.companyId, input.companyId), eq(workflowDefinitions.name, workflowName)))
     .limit(1);
-  const definition = existingDefinition ?? await workflowService.createDefinition(input.db, {
-    companyId: input.companyId,
-    name: workflowName,
-    steps,
-  });
+  const definition = existingDefinition
+    ? workflowStepsAreEqual(existingDefinition.stepsJson as WorkflowStep[], steps)
+      ? existingDefinition
+      : await workflowService.updateDefinition(input.db, existingDefinition.id, { steps })
+    : await workflowService.createDefinition(input.db, {
+      companyId: input.companyId,
+      name: workflowName,
+      steps,
+    });
+  if (!definition) return;
 
   const [existingRun] = await input.db
     .select()

@@ -9,10 +9,11 @@
 
 import type { Db } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
-import { channelConfigs } from "@paperclipai/db";
+import { channelConfigs, heartbeatRuns } from "@paperclipai/db";
 import { getChannelRegistry } from "../index.js";
 import { logger } from "../../middleware/logger.js";
 import { formatSuccess } from "./formatter.js";
+import { summarizeHeartbeatRunResultJson } from "../../services/heartbeat-run-summary.js";
 
 /**
  * Map of companyId → chatId for users who have messaged the bot.
@@ -38,7 +39,7 @@ export function getChatId(companyId: string): number | undefined {
 /**
  * Build the outbound handler for a specific company.
  */
-function buildOutboundHandler(companyId: string) {
+function buildOutboundHandler(db: Db, companyId: string) {
   return async function handleOutboundEvent(event: { type: string; payload?: Record<string, unknown> }): Promise<void> {
     const chatId = companyChatIds.get(companyId);
     if (chatId === undefined) {
@@ -52,6 +53,12 @@ function buildOutboundHandler(companyId: string) {
     }
 
     try {
+      const conversationReply = await formatTelegramConversationReply(db, event);
+      if (conversationReply) {
+        await sender(conversationReply.chatId, conversationReply.message);
+        return;
+      }
+
       const message = formatEventNotification(event);
       if (message) {
         await sender(chatId, message);
@@ -64,6 +71,63 @@ function buildOutboundHandler(companyId: string) {
         error: err,
       });
     }
+  };
+}
+
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function formatTelegramConversationReply(
+  db: Db,
+  event: { type: string; payload?: Record<string, unknown> },
+): Promise<{ chatId: number; message: string } | null> {
+  if (event.type !== "heartbeat.run.status") return null;
+  const status = readString(event.payload?.status);
+  if (!status || !["succeeded", "failed", "timed_out", "cancelled"].includes(status)) return null;
+
+  const runId = readString(event.payload?.runId);
+  if (!runId) return null;
+
+  const [run] = await db
+    .select({
+      id: heartbeatRuns.id,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
+      resultJson: heartbeatRuns.resultJson,
+      error: heartbeatRuns.error,
+      status: heartbeatRuns.status,
+    })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .limit(1);
+  if (!run) return null;
+
+  const context = readRecord(run.contextSnapshot);
+  if (context?.telegramOperatorMessage !== true) return null;
+  const chatId = readNumber(context.telegramChatId);
+  if (chatId === null) return null;
+
+  const summary = summarizeHeartbeatRunResultJson(run.resultJson);
+  const resultText =
+    readString(summary?.result) ??
+    readString(summary?.summary) ??
+    readString(summary?.message) ??
+    readString(run.error) ??
+    `Run ${run.status}.`;
+  const prefix = run.status === "succeeded" ? "Hermes Operations Manager" : `Hermes Operations Manager (${run.status})`;
+  return {
+    chatId,
+    message: `${prefix}\n${resultText.slice(0, 3500)}`,
   };
 }
 
@@ -189,7 +253,7 @@ export async function initOutboundNotifier(db: Db): Promise<void> {
 
   for (const config of enabledConfigs) {
     const companyId = config.companyId;
-    const handler = buildOutboundHandler(companyId);
+    const handler = buildOutboundHandler(db, companyId);
 
     try {
       getChannelRegistry().registerOutboundHandler(companyId, handler);

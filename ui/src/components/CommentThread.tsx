@@ -9,7 +9,7 @@ import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownEditor, type MarkdownEditorRef, type MentionOption } from "./MarkdownEditor";
 import { StatusBadge } from "./StatusBadge";
 import { AgentIcon } from "./AgentIconPicker";
-import { formatDateTime } from "../lib/utils";
+import { cn, formatDateTime } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
 interface CommentWithRunMeta extends IssueComment {
@@ -49,6 +49,7 @@ interface CommentThreadProps {
   suggestedAssigneeValue?: string;
   mentions?: MentionOption[];
   readOnly?: boolean;
+  timelineClassName?: string;
 }
 
 const DRAFT_DEBOUNCE_MS = 800;
@@ -272,6 +273,7 @@ export function CommentThread({
   suggestedAssigneeValue,
   mentions: providedMentions,
   readOnly = false,
+  timelineClassName,
 }: CommentThreadProps) {
   const [body, setBody] = useState("");
   const [reopen, setReopen] = useState(true);
@@ -402,15 +404,17 @@ export function CommentThread({
     <div className="space-y-4">
       <h3 className="text-sm font-semibold">Comments &amp; Runs ({timeline.length})</h3>
 
-      <TimelineList
-        timeline={timeline}
-        agentMap={agentMap}
-        companyId={companyId}
-        projectId={projectId}
-        highlightCommentId={highlightCommentId}
-      />
+      <div className={cn("space-y-4", timelineClassName)}>
+        <TimelineList
+          timeline={timeline}
+          agentMap={agentMap}
+          companyId={companyId}
+          projectId={projectId}
+          highlightCommentId={highlightCommentId}
+        />
 
-      {liveRunSlot}
+        {liveRunSlot}
+      </div>
 
       {readOnly ? null : (
       <div className="space-y-2">

@@ -110,6 +110,40 @@ A lightweight scheduler/worker in the server process handles:
 
 Separate queue infrastructure is not required for V1.
 
+## 6.4 Workflow Execution Ownership
+
+V1 workflow execution is owned by the server-native DAG engine. `workflow_definitions`,
+`workflow_runs`, and `workflow_step_runs` are the source of truth for launch,
+resume, completion synchronization, and downstream step materialization.
+
+Plugin workflow surfaces may manage workflow definitions, render UI, and bridge
+legacy metadata, but they must not run a second authoritative DAG scheduler or
+directly advance downstream steps after issue or agent-run events. Manual mission
+creation and plugin workflow creation are separate management surfaces that feed
+the same server-native workflow service.
+
+## 6.5 Cross-Company Mission Delegation
+
+Cross-company collaboration is mission-scoped, not issue-mirror scoped. A source
+mission may create a target-company mission through `mission_delegations`; the
+source company receives a blocked tracker issue, while the target company owns a
+normal mission with its own owner, plan, issues, workflows, and workProducts.
+
+The normal creation path is automatic plan materialization. When an authorized
+mission owner PLAN decision selects a unit with `sourceRef.type:
+cross_company_mission`, the server creates the mission delegation, the source
+tracker issue, and the target-company mission idempotently from that selected
+unit. Operators should not need a separate UI button to initiate this handoff.
+
+When the target mission reaches a terminal status, the server reconciles the
+delegation. Completed target missions mark the source tracker issue done and copy
+target mission issue workProducts back to that source issue with provider
+`delegated_mission`. Cancelled target missions cancel the source tracker issue
+and mark the delegation failed.
+
+The Service Request Bridge plugin remains an issue-level service bridge. It must
+not be treated as the authoritative cross-company mission execution model.
+
 ## 7. Canonical Data Model (V1)
 
 All core tables include `id`, `created_at`, `updated_at` unless noted.
@@ -212,6 +246,10 @@ Invariants:
 - task must trace to company goal chain via `goal_id`, `parent_id`, or project-goal linkage
 - `in_progress` requires assignee
 - terminal states: `done | cancelled`
+
+Deferred:
+
+- General issue-to-issue dependency storage is intentionally not part of the current V1 issue model. Mission PAQO execution ordering is modeled through workflow step dependencies (`workflow_definitions.steps_json.dependencies` and `workflow_step_runs.issue_id/status`) rather than a separate canonical `issue_dependencies` scheduler. Revisit general issue dependencies later as a distinct feature.
 
 ## 7.7 `issue_comments`
 

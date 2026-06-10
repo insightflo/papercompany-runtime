@@ -13,10 +13,16 @@ const mockRegistry = vi.hoisted(() => ({
 }));
 
 const mockWorkflowService = vi.hoisted(() => ({
+  cancelRun: vi.fn(),
   createDefinition: vi.fn(),
+  deleteDefinition: vi.fn(),
+  getDefinition: vi.fn(),
+  getRun: vi.fn(),
   listDefinitions: vi.fn(),
   listRuns: vi.fn(),
+  resumeRun: vi.fn(),
   trigger: vi.fn(),
+  updateDefinition: vi.fn(),
 }));
 
 vi.mock("../services/plugin-registry.js", () => ({
@@ -55,7 +61,7 @@ const workflowPlugin = {
   updatedAt: new Date("2026-04-01T00:00:00.000Z"),
 };
 
-function createApp(workerManager: { call: ReturnType<typeof vi.fn> }) {
+function createApp(workerManager: { call: ReturnType<typeof vi.fn> }, db: unknown = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -70,7 +76,7 @@ function createApp(workerManager: { call: ReturnType<typeof vi.fn> }) {
   app.use(
     "/api",
     pluginRoutes(
-      {} as never,
+      db as never,
       {} as never,
       undefined,
       undefined,
@@ -89,6 +95,21 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     mockRegistry.getByKey.mockResolvedValue(workflowPlugin);
     mockWorkflowService.listDefinitions.mockResolvedValue([]);
     mockWorkflowService.listRuns.mockResolvedValue([]);
+    mockWorkflowService.getDefinition.mockResolvedValue({
+      id: "workflow-1",
+      companyId: "company-1",
+      name: "Native workflow",
+      steps: [],
+      createdAt: new Date("2026-04-20T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-21T00:00:00.000Z"),
+    });
+    mockWorkflowService.getRun.mockResolvedValue({
+      id: "run-1",
+      companyId: "company-1",
+      workflowId: "workflow-1",
+      missionId: "mission-1",
+      status: "running",
+    });
   });
 
   it("merges native definitions and runs into workflow overview", async () => {
@@ -233,14 +254,9 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     ]);
   });
 
-  it("falls back to native workflow trigger when start-workflow handler is missing", async () => {
+  it("routes start-workflow to native DAG without calling the plugin worker", async () => {
     const workerManager = {
-      call: vi.fn().mockRejectedValue(
-        new JsonRpcCallError({
-          code: PLUGIN_RPC_ERROR_CODES.WORKER_ERROR,
-          message: "No action handler registered for start-workflow",
-        }),
-      ),
+      call: vi.fn(),
     };
     mockWorkflowService.trigger.mockResolvedValue({
       runId: "run-1",
@@ -265,6 +281,7 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       missionId: "mission-1",
       triggeredBy: "manual",
     });
+    expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body).toEqual({
       data: {
         run: {
@@ -281,14 +298,105 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     });
   });
 
-  it("falls back to native workflow trigger when the worker cannot find a native workflow", async () => {
+  it("refreshes stale native workflow definition from plugin entity data before start-workflow", async () => {
     const workerManager = {
-      call: vi.fn().mockRejectedValue(
-        new JsonRpcCallError({
-          code: PLUGIN_RPC_ERROR_CODES.WORKER_ERROR,
-          message: "Workflow definition not found: workflow-1",
-        }),
-      ),
+      call: vi.fn(),
+    };
+    const pluginSteps = [
+      {
+        id: "collect-ai-news-evidence",
+        title: "Collect bounded TechCrunch AI evidence",
+        agentName: "Technology Research Agent",
+        dependsOn: [],
+      },
+      {
+        id: "synthesize-ai-news-note",
+        title: "Synthesize TechCrunch AI note draft",
+        agentName: "Synthesis Editor",
+        dependsOn: ["collect-ai-news-evidence"],
+      },
+    ];
+    const where = vi.fn().mockResolvedValue([
+      {
+        id: "plugin-entity-1",
+        data: {
+          id: "workflow-1",
+          companyId: "company-1",
+          name: "tech-ai-news",
+          executionMode: "static_dag",
+          steps: pluginSteps,
+        },
+      },
+    ]);
+    const from = vi.fn(() => ({ where }));
+    const select = vi.fn(() => ({ from }));
+    const db = { select };
+    mockWorkflowService.trigger.mockResolvedValue({
+      runId: "run-refreshed-1",
+      status: "running",
+      stepRuns: [],
+    });
+
+    const res = await request(createApp(workerManager, db))
+      .post("/api/plugins/plugin-1/actions/start-workflow")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          workflowId: "workflow-1",
+          triggerSource: "manual-test",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.getDefinition).toHaveBeenCalledWith(db, "workflow-1");
+    expect(mockWorkflowService.updateDefinition).toHaveBeenCalledWith(db, "workflow-1", {
+      name: "tech-ai-news",
+      executionMode: "static_dag",
+      steps: pluginSteps,
+    });
+    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(db, {
+      companyId: "company-1",
+      workflowId: "workflow-1",
+      missionId: undefined,
+      triggeredBy: "manual-test",
+    });
+    expect(workerManager.call).not.toHaveBeenCalled();
+    expect(res.body.data.runId).toBe("run-refreshed-1");
+  });
+
+  it("routes delete-workflow to native definition management without calling the plugin worker", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    mockWorkflowService.deleteDefinition.mockResolvedValue(true);
+
+    const res = await request(createApp(workerManager))
+      .post("/api/plugins/plugin-1/actions/delete-workflow")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          workflowId: "workflow-1",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.getDefinition).toHaveBeenCalledWith(expect.anything(), "workflow-1");
+    expect(mockWorkflowService.deleteDefinition).toHaveBeenCalledWith(expect.anything(), "workflow-1");
+    expect(workerManager.call).not.toHaveBeenCalled();
+    expect(res.body).toEqual({
+      data: {
+        id: "workflow-1",
+        status: "archived",
+        deleted: true,
+      },
+    });
+  });
+
+  it("routes top-level start-workflow params through native DAG", async () => {
+    const workerManager = {
+      call: vi.fn(),
     };
     mockWorkflowService.trigger.mockResolvedValue({
       runId: "run-native-1",
@@ -311,6 +419,65 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       missionId: undefined,
       triggeredBy: "board",
     });
+    expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body.data.runId).toBe("run-native-1");
+  });
+
+  it("routes resume-run to native workflow sync without calling the plugin worker", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    mockWorkflowService.resumeRun.mockResolvedValue({
+      runId: "run-1",
+      status: "running",
+      completedAt: new Date("2026-04-26T02:00:00.000Z"),
+      stepRuns: [],
+    });
+
+    const res = await request(createApp(workerManager))
+      .post("/api/plugins/plugin-1/actions/resume-run")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          runId: "run-1",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.resumeRun).toHaveBeenCalledWith(expect.anything(), {
+      companyId: "company-1",
+      runId: "run-1",
+    });
+    expect(workerManager.call).not.toHaveBeenCalled();
+    expect(res.body.data.runId).toBe("run-1");
+  });
+
+  it("routes cancel-run to native workflow cancellation without calling the plugin worker", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    mockWorkflowService.cancelRun.mockResolvedValue(true);
+
+    const res = await request(createApp(workerManager))
+      .post("/api/plugins/plugin-1/actions/cancel-run")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          runId: "run-1",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.getRun).toHaveBeenCalledWith(expect.anything(), "run-1");
+    expect(mockWorkflowService.cancelRun).toHaveBeenCalledWith(expect.anything(), "run-1");
+    expect(workerManager.call).not.toHaveBeenCalled();
+    expect(res.body.data).toEqual({
+      id: "run-1",
+      runId: "run-1",
+      status: "cancelled",
+      cancelled: true,
+    });
   });
 });

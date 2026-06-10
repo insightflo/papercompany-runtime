@@ -22,10 +22,10 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
-import type { Request } from "express";
+import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, pluginLogs, pluginWebhookDeliveries } from "@paperclipai/db";
+import { companies, pluginEntities, pluginLogs, pluginWebhookDeliveries } from "@paperclipai/db";
 import type {
   PluginStatus,
   PaperclipPluginManifestV1,
@@ -50,6 +50,11 @@ import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sd
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 import { workflowService } from "../services/workflow/engine.js";
+import { issueService } from "../services/issues.js";
+import {
+  completeWorkflowToolStepFromResult,
+  type WorkflowExecutionMode,
+} from "../services/workflow/dag-engine.js";
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -314,6 +319,306 @@ export function pluginRoutes(
     loader,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
+
+  const nativeWorkflowActionKeys = new Set([
+    "create-workflow",
+    "update-workflow",
+    "delete-workflow",
+    "start-workflow",
+    "resume-run",
+    "cancel-run",
+    "abort-run",
+    "manual-complete",
+    "handle-tool-execution-result",
+  ]);
+
+  function normalizedWorkflowActionParams(
+    key: string,
+    body: ({
+      companyId?: string;
+      params?: Record<string, unknown>;
+      renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
+    } & Record<string, unknown>) | PluginBridgeActionRequest | undefined,
+  ): Record<string, unknown> {
+    if (body?.params && typeof body.params === "object") return body.params;
+    if (!body || !nativeWorkflowActionKeys.has(key)) return {};
+
+    const { renderEnvironment: _renderEnvironment, params: _params, key: _key, ...topLevelParams } =
+      body as Record<string, unknown>;
+    return topLevelParams;
+  }
+
+  function parseNativeWorkflowExecutionMode(value: unknown): WorkflowExecutionMode | undefined {
+    return value === "static_dag" || value === "dynamic_owner_plan" ? value : undefined;
+  }
+
+  function requiredCompanyId(
+    params: Record<string, unknown>,
+    body: { companyId?: string } | undefined,
+  ): string | null {
+    const value = typeof params.companyId === "string"
+      ? params.companyId.trim()
+      : typeof body?.companyId === "string"
+        ? body.companyId.trim()
+        : "";
+    return value || null;
+  }
+
+  async function refreshNativeWorkflowDefinitionFromPluginEntity(input: {
+    companyId: string;
+    pluginId: string;
+    workflowId: string;
+  }): Promise<void> {
+    const selectableDb = db as Db & { select?: unknown };
+    if (typeof selectableDb.select !== "function") return;
+
+    const rows = await db
+      .select({
+        id: pluginEntities.id,
+        data: pluginEntities.data,
+      })
+      .from(pluginEntities)
+      .where(and(
+        eq(pluginEntities.pluginId, input.pluginId),
+        eq(pluginEntities.entityType, "workflow-definition"),
+        eq(pluginEntities.scopeKind, "company"),
+        eq(pluginEntities.scopeId, input.companyId),
+      ));
+
+    const pluginDefinition = rows.find((row) => {
+      const data = row.data && typeof row.data === "object" ? row.data as Record<string, unknown> : {};
+      return row.id === input.workflowId || data.id === input.workflowId;
+    });
+    const data = pluginDefinition?.data && typeof pluginDefinition.data === "object"
+      ? pluginDefinition.data as Record<string, unknown>
+      : null;
+    if (!data || !Array.isArray(data.steps)) return;
+
+    const existing = await workflowService.getDefinition(db, input.workflowId);
+    if (!existing || existing.companyId !== input.companyId) return;
+
+    const name = typeof data.name === "string" && data.name.trim()
+      ? data.name.trim()
+      : existing.name;
+    const executionMode = parseNativeWorkflowExecutionMode(data.executionMode);
+    await workflowService.updateDefinition(db, input.workflowId, {
+      name,
+      steps: data.steps as never,
+      ...(executionMode ? { executionMode } : {}),
+    });
+  }
+
+  async function handleNativeWorkflowEngineAction(input: {
+    key: string;
+    pluginId: string;
+    params: Record<string, unknown>;
+    body: { companyId?: string } | undefined;
+    req: Request;
+    res: Response;
+  }): Promise<boolean> {
+    const { key, params, body, req, res } = input;
+    if (!nativeWorkflowActionKeys.has(key)) return false;
+
+    const companyId = requiredCompanyId(params, body);
+    if (!companyId) {
+      res.status(400).json({ error: "companyId is required" });
+      return true;
+    }
+    assertCompanyAccess(req, companyId);
+
+    if (key === "handle-tool-execution-result") {
+      const stepRunId = typeof params.stepRunId === "string" ? params.stepRunId.trim() : "";
+      if (!stepRunId) {
+        res.status(400).json({ error: "stepRunId is required" });
+        return true;
+      }
+
+      const run = await completeWorkflowToolStepFromResult(db, {
+        companyId,
+        stepRunId,
+        success: params.success === true,
+      });
+      if (!run) return false;
+
+      res.json({ data: { ok: true, run } });
+      return true;
+    }
+
+    if (key === "start-workflow") {
+      const workflowId = typeof params.workflowId === "string" ? params.workflowId.trim() : "";
+      if (!workflowId) {
+        res.status(400).json({ error: "workflowId is required" });
+        return true;
+      }
+
+      const missionId = typeof params.missionId === "string" && params.missionId.trim()
+        ? params.missionId.trim()
+        : undefined;
+      const triggeredBy = typeof params.triggerSource === "string" && params.triggerSource.trim()
+        ? params.triggerSource.trim()
+        : req.actor.type;
+      await refreshNativeWorkflowDefinitionFromPluginEntity({
+        companyId,
+        pluginId: input.pluginId,
+        workflowId,
+      });
+      const run = await workflowService.trigger(db, {
+        companyId,
+        workflowId,
+        missionId,
+        triggeredBy,
+      });
+      res.json({ data: { run, ...run } });
+      return true;
+    }
+
+    if (key === "resume-run") {
+      const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+      if (!runId) {
+        res.status(400).json({ error: "runId is required" });
+        return true;
+      }
+
+      const run = await workflowService.resumeRun(db, { companyId, runId });
+      res.json({ data: { run, ...run } });
+      return true;
+    }
+
+    if (key === "cancel-run" || key === "abort-run") {
+      const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+      if (!runId) {
+        res.status(400).json({ error: "runId is required" });
+        return true;
+      }
+
+      const run = await workflowService.getRun(db, runId);
+      if (!run || run.companyId !== companyId) {
+        res.status(404).json({ error: "Workflow run not found" });
+        return true;
+      }
+
+      const cancelled = await workflowService.cancelRun(db, runId);
+      res.json({ data: { id: runId, runId, status: cancelled ? "cancelled" : run.status, cancelled } });
+      return true;
+    }
+
+    if (key === "manual-complete") {
+      const issueId = typeof params.issueId === "string" ? params.issueId.trim() : "";
+      if (!issueId) {
+        res.status(400).json({ error: "issueId is required" });
+        return true;
+      }
+
+      const svc = issueService(db);
+      const existing = await svc.getById(issueId);
+      if (!existing || existing.companyId !== companyId) {
+        res.status(404).json({ error: "Issue not found" });
+        return true;
+      }
+
+      const issue = await svc.update(issueId, { status: "done" });
+      if (!issue) {
+        res.status(404).json({ error: "Issue not found" });
+        return true;
+      }
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          status: "done",
+          identifier: issue.identifier,
+          source: "workflow.manual-complete",
+          _previous: { status: existing.status },
+        },
+      });
+      const run = await workflowService.syncRunStatusForIssue(db, issue.id);
+      res.json({ data: { issue, run } });
+      return true;
+    }
+
+    if (key === "delete-workflow") {
+      const workflowId = typeof params.workflowId === "string" ? params.workflowId.trim()
+        : typeof params.id === "string" ? params.id.trim() : "";
+      if (!workflowId) {
+        res.status(400).json({ error: "workflowId is required" });
+        return true;
+      }
+
+      const workflow = await workflowService.getDefinition(db, workflowId);
+      if (!workflow || workflow.companyId !== companyId) {
+        res.status(404).json({ error: "Workflow definition not found" });
+        return true;
+      }
+
+      const deleted = await workflowService.deleteDefinition(db, workflowId);
+      res.json({ data: { id: workflowId, status: "archived", deleted } });
+      return true;
+    }
+
+    if (key === "create-workflow") {
+      const workflow = (params.workflow && typeof params.workflow === "object"
+        ? params.workflow
+        : params) as Record<string, unknown>;
+      const name = typeof workflow.name === "string" ? workflow.name.trim() : "";
+      if (!name) {
+        res.status(400).json({ error: "workflow.name is required" });
+        return true;
+      }
+      const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
+      const executionMode = parseNativeWorkflowExecutionMode(workflow.executionMode);
+      const definition = await workflowService.createDefinition(db, {
+        companyId,
+        name,
+        steps: steps as never,
+        ...(executionMode ? { executionMode } : {}),
+      });
+      res.json({ data: { workflow: definition, ...definition } });
+      return true;
+    }
+
+    if (key === "update-workflow") {
+      const workflowId = typeof params.workflowId === "string" ? params.workflowId.trim()
+        : typeof params.id === "string" ? params.id.trim() : "";
+      if (!workflowId) {
+        res.status(400).json({ error: "workflowId is required" });
+        return true;
+      }
+
+      const existing = await workflowService.getDefinition(db, workflowId);
+      if (!existing || existing.companyId !== companyId) {
+        res.status(404).json({ error: "Workflow definition not found" });
+        return true;
+      }
+
+      const source = (params.patch && typeof params.patch === "object"
+        ? params.patch
+        : params.workflow && typeof params.workflow === "object"
+          ? params.workflow
+          : params) as Record<string, unknown>;
+      const updates: Parameters<typeof workflowService.updateDefinition>[2] = {};
+      if (typeof source.name === "string") updates.name = source.name.trim();
+      if (Array.isArray(source.steps)) updates.steps = source.steps as never;
+      const executionMode = parseNativeWorkflowExecutionMode(source.executionMode);
+      if (executionMode) updates.executionMode = executionMode;
+
+      const definition = await workflowService.updateDefinition(db, workflowId, updates);
+      if (!definition) {
+        res.status(404).json({ error: "Workflow definition not found" });
+        return true;
+      }
+      res.json({ data: { workflow: definition, ...definition } });
+      return true;
+    }
+
+    return false;
+  }
 
   async function resolvePluginAuditCompanyIds(req: Request): Promise<string[]> {
     if (typeof (db as { select?: unknown }).select === "function") {
@@ -914,6 +1219,19 @@ export function pluginRoutes(
       assertCompanyAccess(req, body.companyId);
     }
 
+    const actionParams = normalizedWorkflowActionParams(body.key, body);
+    if (plugin.pluginKey === "insightflo.workflow-engine") {
+      const handledNativeAction = await handleNativeWorkflowEngineAction({
+        key: body.key,
+        pluginId: plugin.id,
+        params: actionParams,
+        body,
+        req,
+        res,
+      });
+      if (handledNativeAction) return;
+    }
+
     try {
       const result = await bridgeDeps.workerManager.call(
         plugin.id,
@@ -1050,6 +1368,7 @@ export function pluginRoutes(
               name: definition.name,
               description: "",
               status: "active",
+              executionMode: definition.executionMode,
               steps: definition.steps.map((step) => {
                 const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
                 return {
@@ -1060,6 +1379,9 @@ export function pluginRoutes(
                   toolName: toolNames[0] ?? "",
                   agentName: step.agentId,
                   dependsOn: step.dependencies,
+                  executionMode: step.executionMode,
+                  ownerPlanBootstrapOnly: step.ownerPlanBootstrapOnly,
+                  dynamicChildren: step.dynamicChildren,
                 };
               }),
               createdAt: definition.createdAt,
@@ -1154,14 +1476,19 @@ export function pluginRoutes(
       assertCompanyAccess(req, body.companyId);
     }
 
-    const actionParams = (() => {
-      if (body?.params) return body.params;
-      if (plugin.pluginKey !== "insightflo.workflow-engine" || key !== "start-workflow" || !body) {
-        return {};
-      }
-      const { renderEnvironment: _renderEnvironment, params: _params, ...topLevelParams } = body;
-      return topLevelParams;
-    })();
+    const actionParams = normalizedWorkflowActionParams(key, body);
+
+    if (plugin.pluginKey === "insightflo.workflow-engine") {
+      const handledNativeAction = await handleNativeWorkflowEngineAction({
+        key,
+        pluginId: plugin.id,
+        params: actionParams,
+        body,
+        req,
+        res,
+      });
+      if (handledNativeAction) return;
+    }
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1176,78 +1503,6 @@ export function pluginRoutes(
       res.json({ data: result });
     } catch (err) {
       const bridgeError = mapRpcErrorToBridgeError(err);
-      const shouldUseWorkflowEngineNativeFallback =
-        plugin.pluginKey === "insightflo.workflow-engine" &&
-        bridgeError.code === "WORKER_ERROR" &&
-        (bridgeError.message.includes("No action handler registered") ||
-          (key === "start-workflow" && bridgeError.message.includes("Workflow definition not found")));
-
-      if (shouldUseWorkflowEngineNativeFallback) {
-        if (key === "start-workflow") {
-          const params = actionParams;
-          const companyId = typeof params.companyId === "string"
-            ? params.companyId
-            : typeof body?.companyId === "string"
-              ? body.companyId
-              : undefined;
-          if (!companyId) {
-            res.status(400).json({ error: "companyId is required" });
-            return;
-          }
-          assertCompanyAccess(req, companyId);
-
-          const workflowId = typeof params.workflowId === "string" ? params.workflowId.trim() : "";
-          if (!workflowId) {
-            res.status(400).json({ error: "workflowId is required" });
-            return;
-          }
-
-          const missionId = typeof params.missionId === "string" && params.missionId.trim()
-            ? params.missionId.trim()
-            : undefined;
-          const triggeredBy = typeof params.triggerSource === "string" && params.triggerSource.trim()
-            ? params.triggerSource.trim()
-            : req.actor.type;
-          const run = await workflowService.trigger(db, {
-            companyId,
-            workflowId,
-            missionId,
-            triggeredBy,
-          });
-          res.json({ data: { run, ...run } });
-          return;
-        }
-
-        if (key === "create-workflow") {
-          const params = body?.params ?? {};
-          const workflow = (params.workflow && typeof params.workflow === "object"
-            ? params.workflow
-            : params) as Record<string, unknown>;
-          const companyId = typeof params.companyId === "string"
-            ? params.companyId
-            : typeof body?.companyId === "string"
-              ? body.companyId
-              : undefined;
-          if (!companyId) {
-            res.status(400).json({ error: "companyId is required" });
-            return;
-          }
-          assertCompanyAccess(req, companyId);
-          const name = typeof workflow.name === "string" ? workflow.name.trim() : "";
-          if (!name) {
-            res.status(400).json({ error: "workflow.name is required" });
-            return;
-          }
-          const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
-          const definition = await workflowService.createDefinition(db, {
-            companyId,
-            name,
-            steps: steps as never,
-          });
-          res.json({ data: { workflow: definition, ...definition } });
-          return;
-        }
-      }
       res.status(502).json(bridgeError);
     }
   });

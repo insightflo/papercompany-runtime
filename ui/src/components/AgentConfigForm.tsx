@@ -303,6 +303,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     adapterType === "hermes_local" ||
     adapterType === "antigravity_local" ||
     adapterType === "cursor";
+  const supportsAdapterFallback =
+    adapterType === "claude_local" ||
+    adapterType === "codex_local" ||
+    adapterType === "gemini_local" ||
+    adapterType === "opencode_local" ||
+    adapterType === "cursor";
   const showLegacyWorkingDirectoryField =
     isLocal && shouldShowLegacyWorkingDirectoryField({ isCreate, adapterConfig: config });
   const uiAdapter = useMemo(() => getUIAdapter(adapterType), [adapterType]);
@@ -709,6 +715,36 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   }
                 />
               </Field>
+
+              {supportsAdapterFallback && (
+                <Field label="Fallback command" hint={help.fallbackCommand}>
+                  <DraftInput
+                    value={
+                      isCreate
+                        ? (val!.fallbackCommand ?? "")
+                        : eff("adapterConfig", "fallbackCommand", String(config.fallbackCommand ?? ""))
+                    }
+                    onCommit={(v) =>
+                      isCreate
+                        ? set!({ fallbackCommand: v })
+                        : mark("adapterConfig", "fallbackCommand", v || undefined)
+                    }
+                    immediate
+                    className={inputClass}
+                    placeholder={
+                      adapterType === "codex_local"
+                        ? "e.g. cursor, gemini"
+                        : adapterType === "gemini_local"
+                          ? "e.g. codex, cursor"
+                          : adapterType === "cursor"
+                            ? "e.g. codex, gemini"
+                            : adapterType === "opencode_local"
+                              ? "e.g. codex, cursor"
+                              : "e.g. codex, cursor"
+                    }
+                  />
+                </Field>
+              )}
 
               <ModelDropdown
                 models={models}

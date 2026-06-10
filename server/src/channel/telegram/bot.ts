@@ -181,10 +181,10 @@ export class TelegramBot {
 
     // Extract command from text (e.g. "/status@BotName" → "/status")
     const text = update.message.text ?? "";
-    if (!text.startsWith("/")) return;
+    if (!text.trim()) return;
 
-    const command = text.slice(1).split(/[\s@]/)[0];
-    update.message.command = command;
+    const command = text.startsWith("/") ? text.slice(1).split(/[\s@]/)[0] : "";
+    if (command) update.message.command = command;
 
     try {
       const jwt = await this.getJwt();
@@ -195,7 +195,7 @@ export class TelegramBot {
     } catch (err) {
       logger.error({
         msg: "Message handler error",
-        command,
+        command: command || null,
         error: err,
         companyId: this.config.companyId,
       });

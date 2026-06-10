@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Moon, Settings, Sun } from "lucide-react";
+import { BookOpen, Bot, Moon, Settings, Sun } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useParams } from "@/lib/router";
 import { CompanyRail } from "./CompanyRail";
 import { Sidebar } from "./Sidebar";
 import { InstanceSidebar } from "./InstanceSidebar";
 import { BreadcrumbBar } from "./BreadcrumbBar";
 import { PropertiesPanel } from "./PropertiesPanel";
+import { HermesChatPanel } from "./HermesChatPanel";
 import { CommandPalette } from "./CommandPalette";
 import { NewIssueDialog } from "./NewIssueDialog";
 import { NewProjectDialog } from "./NewProjectDialog";
@@ -37,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 const INSTANCE_SETTINGS_MEMORY_KEY = "paperclip.lastInstanceSettingsPath";
+const HERMES_PANEL_MEMORY_KEY = "paperclip.hermesPanelOpen";
 
 function readRememberedInstanceSettingsPath(): string {
   if (typeof window === "undefined") return DEFAULT_INSTANCE_SETTINGS_PATH;
@@ -44,6 +46,24 @@ function readRememberedInstanceSettingsPath(): string {
     return normalizeRememberedInstanceSettingsPath(window.localStorage.getItem(INSTANCE_SETTINGS_MEMORY_KEY));
   } catch {
     return DEFAULT_INSTANCE_SETTINGS_PATH;
+  }
+}
+
+function readRememberedHermesPanelOpen(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(HERMES_PANEL_MEMORY_KEY);
+    return raw === null ? true : raw === "true";
+  } catch {
+    return true;
+  }
+}
+
+function writeHermesPanelPreference(open: boolean) {
+  try {
+    window.localStorage.setItem(HERMES_PANEL_MEMORY_KEY, String(open));
+  } catch {
+    // Ignore storage failures in restricted environments.
   }
 }
 
@@ -68,6 +88,7 @@ export function Layout() {
   const lastMainScrollTop = useRef(0);
   const [mobileNavVisible, setMobileNavVisible] = useState(true);
   const [instanceSettingsTarget, setInstanceSettingsTarget] = useState<string>(() => readRememberedInstanceSettingsPath());
+  const [hermesPanelOpen, setHermesPanelOpenState] = useState(() => readRememberedHermesPanelOpen());
   const nextTheme = theme === "dark" ? "light" : "dark";
   const matchedCompany = useMemo(() => {
     if (!companyPrefix) return null;
@@ -138,6 +159,16 @@ export function Layout() {
   ]);
 
   const togglePanel = togglePanelVisible;
+
+  const setHermesPanelOpen = useCallback((open: boolean) => {
+    setHermesPanelOpenState(open);
+    writeHermesPanelPreference(open);
+  }, []);
+
+  const openHermesPanel = useCallback(() => {
+    setHermesPanelOpen(true);
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, setHermesPanelOpen, setSidebarOpen]);
 
   useCompanyPageMemory();
 
@@ -293,7 +324,11 @@ export function Layout() {
           >
             <div className="flex flex-1 min-h-0 overflow-hidden">
               <CompanyRail />
-              {isInstanceSettingsRoute ? <InstanceSidebar /> : <Sidebar />}
+              {isInstanceSettingsRoute ? (
+                <InstanceSidebar />
+              ) : (
+                <Sidebar onOpenHermes={openHermesPanel} hermesPanelOpen={hermesPanelOpen} />
+              )}
             </div>
             <div className="border-t border-r border-border px-3 py-2 bg-background">
               <div className="flex items-center gap-1">
@@ -350,7 +385,11 @@ export function Layout() {
                   sidebarOpen ? "w-60" : "w-0"
                 )}
               >
-                {isInstanceSettingsRoute ? <InstanceSidebar /> : <Sidebar />}
+                {isInstanceSettingsRoute ? (
+                  <InstanceSidebar />
+                ) : (
+                  <Sidebar onOpenHermes={openHermesPanel} hermesPanelOpen={hermesPanelOpen} />
+                )}
               </div>
             </div>
             <div className="border-t border-r border-border px-3 py-2">
@@ -427,9 +466,49 @@ export function Layout() {
               )}
             </main>
             <PropertiesPanel />
+            {!isMobile && (
+              <aside
+                className={cn(
+                  "hidden min-h-0 md:flex shrink-0 overflow-hidden border-l border-border bg-background transition-[width] duration-150 ease-out",
+                  hermesPanelOpen ? "w-96" : "w-12",
+                )}
+              >
+                {hermesPanelOpen ? (
+                  <div className="h-full min-h-0 w-96 min-w-96 overflow-hidden">
+                    <HermesChatPanel mode="sidebar" onCollapse={() => setHermesPanelOpen(false)} />
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="flex h-full w-12 flex-col items-center gap-2 px-2 py-3 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+                    onClick={() => setHermesPanelOpen(true)}
+                    aria-label="Open Hermes chat"
+                    title="Open Hermes chat"
+                  >
+                    <Bot className="h-4 w-4" />
+                    <span className="text-[11px] font-medium uppercase tracking-wide [writing-mode:vertical-rl]">
+                      Hermes
+                    </span>
+                  </button>
+                )}
+              </aside>
+            )}
           </div>
         </div>
       </div>
+      {isMobile && hermesPanelOpen && (
+        <div className="fixed inset-0 z-[70] md:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setHermesPanelOpen(false)}
+            aria-label="Close Hermes chat"
+          />
+          <aside className="absolute inset-y-0 right-0 flex min-h-0 w-[min(100vw,24rem)] flex-col overflow-hidden border-l border-border bg-background shadow-lg">
+            <HermesChatPanel mode="sidebar" onCollapse={() => setHermesPanelOpen(false)} />
+          </aside>
+        </div>
+      )}
       {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
       <CommandPalette />
       <NewIssueDialog />

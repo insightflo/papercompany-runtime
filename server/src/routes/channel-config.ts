@@ -2,9 +2,58 @@ import { Router } from "express";
 import { and, eq } from "drizzle-orm";
 import { channelConfigs, type Db } from "@paperclipai/db";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
-import { logActivity } from "../services/index.js";
+import { logActivity, secretService } from "../services/index.js";
 
 type ChannelConfigRow = typeof channelConfigs.$inferSelect;
+
+interface TelegramGetMeResponse {
+  ok: boolean;
+  result?: {
+    username?: string;
+    first_name?: string;
+  };
+  description?: string;
+}
+
+export async function validateTelegramBotConnection(input: {
+  botToken: string;
+  botUsername?: string | null;
+}) {
+  const token = input.botToken.trim();
+  if (!token) {
+    return { ok: false, error: "Telegram bot token is empty" };
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+    method: "POST",
+  });
+  const data = (await response.json()) as TelegramGetMeResponse;
+  if (!data.ok) {
+    return {
+      ok: false,
+      error: data.description ?? "Telegram getMe failed",
+    };
+  }
+
+  const actualUsername = data.result?.username ?? null;
+  const expectedUsername = input.botUsername?.trim() ?? "";
+  if (
+    expectedUsername &&
+    actualUsername &&
+    expectedUsername.toLowerCase() !== actualUsername.toLowerCase()
+  ) {
+    return {
+      ok: false,
+      botUsername: actualUsername,
+      error: `Bot username mismatch: token belongs to @${actualUsername}`,
+    };
+  }
+
+  return {
+    ok: true,
+    botUsername: actualUsername ?? (expectedUsername || undefined),
+  };
+}
 
 function serializeChannelConfig(row: ChannelConfigRow) {
   const config = row.configJson ?? {};
@@ -108,7 +157,24 @@ export function channelConfigRoutes(db: Db) {
       return;
     }
 
-    res.json({ ok: false, botUsername: config.botUsername ?? undefined, error: "Live Telegram token validation is not available in this environment" });
+    try {
+      const token = await secretService(db).resolveSecretValue(
+        companyId,
+        config.botTokenSecretId,
+        "latest",
+      );
+      const result = await validateTelegramBotConnection({
+        botToken: token,
+        botUsername: config.botUsername,
+      });
+      res.json(result);
+    } catch (err) {
+      res.json({
+        ok: false,
+        botUsername: config.botUsername ?? undefined,
+        error: err instanceof Error ? err.message : "Telegram channel test failed",
+      });
+    }
   });
 
   return router;

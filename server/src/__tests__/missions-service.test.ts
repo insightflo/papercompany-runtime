@@ -9,7 +9,9 @@ import {
   createDb,
   heartbeatRuns,
   issueComments,
+  issueWorkProducts,
   issues,
+  missionDelegations,
   missionPlanArtifacts,
   missionSessions,
   missions,
@@ -25,6 +27,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
+import { missionDelegationService } from "../services/mission-delegations.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -85,6 +88,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(missionDelegations);
+    await db.delete(issueWorkProducts);
     await db.delete(pluginEntities);
     await db.delete(missionPlanArtifacts);
     await db.delete(missionSessions);
@@ -149,9 +154,174 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]);
   });
 
+  it("creates and finalizes a cross-company mission delegation", async () => {
+    const sourceCompanyId = randomUUID();
+    const targetCompanyId = randomUUID();
+    const sourceOwnerAgentId = randomUUID();
+    const targetOwnerAgentId = randomUUID();
+
+    await db.insert(companies).values([
+      {
+        id: sourceCompanyId,
+        name: "Development Company",
+        issuePrefix: `DV${sourceCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: targetCompanyId,
+        name: "Research Company",
+        issuePrefix: `RS${targetCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+
+    await db.insert(agents).values([
+      {
+        id: sourceOwnerAgentId,
+        companyId: sourceCompanyId,
+        name: "Dev CEO",
+        role: "ceo",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: targetOwnerAgentId,
+        companyId: targetCompanyId,
+        name: "Research CEO",
+        role: "ceo",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    const missionsSvc = missionService(db);
+    const sourceMission = await missionsSvc.create({
+      companyId: sourceCompanyId,
+      ownerAgentId: sourceOwnerAgentId,
+      title: "Build daily trend dashboard",
+      description: "Development mission that needs research input.",
+      status: "active",
+    });
+
+    const created = await missionDelegationService(db).create({
+      sourceMissionId: sourceMission.id,
+      targetCompanyId,
+      targetOwnerAgentId,
+      title: "Research daily trend briefing sources",
+      description: "Research and return grouped news source material.",
+    });
+
+    expect(created.delegation.sourceMissionId).toBe(sourceMission.id);
+    expect(created.delegation.targetMissionId).toBe(created.targetMission.id);
+    expect(created.sourceIssue.status).toBe("blocked");
+    expect(created.targetMission.companyId).toBe(targetCompanyId);
+    expect(created.targetMission.title).toContain("[DELEGATED]");
+
+    const [targetWorkIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, created.targetMission.id))
+      .limit(1);
+    expect(targetWorkIssue).toBeTruthy();
+
+    await db.insert(issueWorkProducts).values({
+      companyId: targetCompanyId,
+      issueId: targetWorkIssue.id,
+      type: "html_report",
+      provider: "test",
+      externalId: "research-report-1",
+      title: "Daily trend research report",
+      url: "file:///tmp/daily-trend.html",
+      status: "ready",
+      reviewState: "accepted",
+      isPrimary: true,
+      healthStatus: "healthy",
+      summary: "Grouped news research output.",
+    });
+
+    await missionsSvc.update(created.targetMission.id, { status: "completed" });
+
+    const [updatedDelegation] = await db
+      .select()
+      .from(missionDelegations)
+      .where(eq(missionDelegations.id, created.delegation.id));
+    expect(updatedDelegation.status).toBe("completed");
+    expect(updatedDelegation.completedAt).toBeInstanceOf(Date);
+
+    const [sourceIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, created.sourceIssue.id));
+    expect(sourceIssue.status).toBe("done");
+
+    const copiedProducts = await db
+      .select()
+      .from(issueWorkProducts)
+      .where(eq(issueWorkProducts.issueId, created.sourceIssue.id));
+    expect(copiedProducts).toHaveLength(1);
+    expect(copiedProducts[0]).toMatchObject({
+      companyId: sourceCompanyId,
+      provider: "delegated_mission",
+      title: "Daily trend research report",
+      url: "file:///tmp/daily-trend.html",
+    });
+  });
+
+  it("applies mission status timestamp side effects on status-only updates", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Mission Status Company",
+      issuePrefix: `MS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Status-only update mission",
+      status: "planning",
+    });
+
+    const svc = missionService(db);
+    const completed = await svc.update(missionId, { status: "completed" });
+
+    expect(completed.status).toBe("completed");
+    expect(completed.completedAt).toBeInstanceOf(Date);
+
+    const active = await svc.update(missionId, { status: "active" });
+
+    expect(active.status).toBe("active");
+    expect(active.startedAt).toBeInstanceOf(Date);
+    expect(active.completedAt).toBeNull();
+  });
+
   it("creates a main executor planning issue for a manual mission", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
+    const errorAgentId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -160,17 +330,30 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       requireBoardApprovalForNewAgents: false,
     });
 
-    await db.insert(agents).values({
-      id: ownerAgentId,
-      companyId,
-      name: "Main Executor",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Main Executor",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: errorAgentId,
+        companyId,
+        name: "Unavailable Worker",
+        role: "researcher",
+        status: "error",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
 
     const result = await missionService(db).create({
       companyId,
@@ -185,17 +368,31 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .from(issues)
       .where(eq(issues.missionId, result.id));
 
-    expect(planningIssues).toEqual([
+    expect(planningIssues).toEqual(expect.arrayContaining([
       expect.objectContaining({
         companyId,
         assigneeAgentId: ownerAgentId,
         missionId: result.id,
         originKind: "mission_main_executor_plan",
         status: "todo",
-        title: "[Plan] Customer homepage rollout",
+        title: "[PLAN] Customer homepage rollout",
       }),
-    ]);
-    expect(planningIssues[0]?.description).toContain("Plan and coordinate the mission");
+      expect.objectContaining({
+        companyId,
+        assigneeAgentId: ownerAgentId,
+        missionId: result.id,
+        originKind: "mission_main_executor_oversight",
+        status: "todo",
+        title: "[OVERSIGHT] Customer homepage rollout",
+      }),
+    ]));
+    expect(planningIssues).toHaveLength(2);
+    const planningIssue = planningIssues.find((issue) => issue.originKind === "mission_main_executor_plan");
+    expect(planningIssue?.description).toContain("Post exactly one structured `### Mission owner plan decision` JSON comment");
+    expect(planningIssue?.description).toContain("\"assigneeAgentId\": \"agent-id-from-roster\"");
+    expect(planningIssue?.description).toContain(`Main Executor (operator, active) id=${ownerAgentId} [mission owner]`);
+    expect(planningIssue?.description).not.toContain(errorAgentId);
+    expect(planningIssue?.description).not.toContain("Unavailable Worker");
   });
 
   it("creates an initial active mission plan artifact alongside the manual planning issue", async () => {
@@ -238,9 +435,10 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .from(missionPlanArtifacts)
       .where(eq(missionPlanArtifacts.missionId, result.id));
 
-    expect(planningIssues).toEqual([
+    expect(planningIssues).toEqual(expect.arrayContaining([
       expect.objectContaining({ originKind: "mission_main_executor_plan" }),
-    ]);
+      expect.objectContaining({ originKind: "mission_main_executor_oversight" }),
+    ]));
     expect(planArtifacts).toEqual([
       expect.objectContaining({
         companyId,
@@ -251,7 +449,12 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         missionGoal: expect.stringContaining("Customer homepage rollout"),
       }),
     ]);
-    expect(planArtifacts[0]?.refs).toEqual({ planningIssueId: planningIssues[0]?.id });
+    const planningIssue = planningIssues.find((issue) => issue.originKind === "mission_main_executor_plan");
+    const oversightIssue = planningIssues.find((issue) => issue.originKind === "mission_main_executor_oversight");
+    expect(planArtifacts[0]?.refs).toEqual(expect.objectContaining({
+      planningIssueId: planningIssue?.id,
+      oversightIssueId: oversightIssue?.id,
+    }));
     expect(result.activeMissionPlan).toEqual(
       expect.objectContaining({
         available: true,
@@ -312,14 +515,20 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .from(missionPlanArtifacts)
       .where(eq(missionPlanArtifacts.missionId, result.id));
 
-    expect(planningIssues).toEqual([
+    expect(planningIssues).toEqual(expect.arrayContaining([
       expect.objectContaining({
         assigneeAgentId: ownerAgentId,
         originKind: "mission_main_executor_plan",
         status: "todo",
-        title: "[Plan] Board-created active mission",
+        title: "[PLAN] Board-created active mission",
       }),
-    ]);
+      expect.objectContaining({
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_oversight",
+        status: "todo",
+        title: "[OVERSIGHT] Board-created active mission",
+      }),
+    ]));
     expect(planArtifacts).toEqual([
       expect.objectContaining({
         missionId: result.id,
@@ -426,7 +635,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(workflowIssues).toEqual([
       expect.objectContaining({
         originKind: "mission_main_executor_oversight",
-        title: "[Oversight] 2026-04-28 gazua-morning",
+        title: "[OVERSIGHT] 2026-04-28 gazua-morning",
       }),
     ]);
     expect(workflowIssues.some((issue) => issue.originKind === "mission_main_executor_plan")).toBe(false);
@@ -1953,7 +2162,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(oversightIssues).toEqual([
       expect.objectContaining({
         originKind: "mission_main_executor_oversight",
-        title: "[Oversight] Plugin Daily",
+        title: "[OVERSIGHT] Plugin Daily",
       }),
     ]);
     expect(planArtifacts).toHaveLength(1);
@@ -2158,7 +2367,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         missionId: result.id,
         originKind: "mission_main_executor_oversight",
         status: "todo",
-        title: "[Oversight] 2026-05-15 gazua-weekly",
+        title: "[OVERSIGHT] 2026-05-15 gazua-weekly",
       }),
     ]);
     expect(planArtifacts).toHaveLength(1);
@@ -2209,6 +2418,66 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     expect(second.id).toBe(first.id);
     expect(missionRows).toHaveLength(1);
+  });
+
+  it("does not reuse a workflow mission that reconciles to terminal from linked workflow runs", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workflowId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workflow Mission Terminal Dedup Company",
+      issuePrefix: `WT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "gazua-watchlist-refresh",
+      stepsJson: [],
+    });
+
+    const input = {
+      companyId,
+      ownerAgentId,
+      title: "2026-04-30 gazua-watchlist-refresh",
+      description: "Created automatically for workflow run: gazua-watchlist-refresh",
+      status: "active" as const,
+      source: "workflow" as const,
+    };
+
+    const first = await missionService(db).create(input);
+    await db.insert(workflowRuns).values({
+      id: randomUUID(),
+      companyId,
+      workflowId,
+      missionId: first.id,
+      status: "cancelled",
+      triggeredBy: "test",
+      completedAt: new Date("2026-04-30T00:05:00.000Z"),
+    });
+
+    const second = await missionService(db).create(input);
+    const missionRows = await db
+      .select({ id: missions.id })
+      .from(missions)
+      .where(eq(missions.companyId, companyId));
+
+    expect(second.id).not.toBe(first.id);
+    expect(missionRows).toHaveLength(2);
   });
 
   it("filters listed missions by inclusive created date range", async () => {
@@ -2455,6 +2724,140 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(result.find((issue) => issue.id === manualGrandchildId)?.parentId).toBe(manualSubissueId);
   });
 
+  it("returns mission issue tree with issue groups while preserving real parent-child relations", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planIssueId = randomUUID();
+    const actionIssueId = randomUUID();
+    const actionChildIssueId = randomUUID();
+    const qaIssueId = randomUUID();
+    const oversightIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Grouped Issue Tree Company",
+      issuePrefix: `GT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Action Worker",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: qaAgentId,
+        companyId,
+        name: "QA Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Grouped Mission",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: planIssueId,
+        companyId,
+        missionId,
+        parentId: null,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_plan",
+        title: "[PLAN] Grouped Mission",
+        status: "done",
+        priority: "medium",
+        identifier: "GT-1",
+      },
+      {
+        id: actionIssueId,
+        companyId,
+        missionId,
+        parentId: null,
+        assigneeAgentId: workerAgentId,
+        originKind: "mission_action",
+        title: "[ACTION] Gather source evidence",
+        status: "todo",
+        priority: "medium",
+        identifier: "GT-2",
+      },
+      {
+        id: actionChildIssueId,
+        companyId,
+        missionId: null,
+        parentId: actionIssueId,
+        assigneeAgentId: workerAgentId,
+        originKind: "mission_action",
+        title: "[ACTION] Subtask for one source packet",
+        status: "todo",
+        priority: "medium",
+        identifier: "GT-3",
+      },
+      {
+        id: qaIssueId,
+        companyId,
+        missionId,
+        parentId: null,
+        assigneeAgentId: qaAgentId,
+        originKind: "mission_qa",
+        title: "[QA] Verify action evidence",
+        status: "todo",
+        priority: "high",
+        identifier: "GT-4",
+      },
+      {
+        id: oversightIssueId,
+        companyId,
+        missionId,
+        parentId: null,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_oversight",
+        title: "[OVERSIGHT] Failure and closeout decisions",
+        status: "todo",
+        priority: "medium",
+        identifier: "GT-5",
+      },
+    ]);
+
+    const result = await missionService(db).getIssueTree(missionId);
+
+    expect(result.find((issue) => issue.id === planIssueId)).toEqual(expect.objectContaining({ parentId: null, issueGroup: "plan" }));
+    expect(result.find((issue) => issue.id === actionIssueId)).toEqual(expect.objectContaining({ parentId: null, issueGroup: "action" }));
+    expect(result.find((issue) => issue.id === actionChildIssueId)).toEqual(expect.objectContaining({ parentId: actionIssueId, issueGroup: "action" }));
+    expect(result.find((issue) => issue.id === qaIssueId)).toEqual(expect.objectContaining({ parentId: null, issueGroup: "qa" }));
+    expect(result.find((issue) => issue.id === oversightIssueId)).toEqual(expect.objectContaining({ parentId: null, issueGroup: "oversight" }));
+    const missionLevelSiblings = result.filter((issue) => issue.missionId === missionId && issue.parentId === null).map((issue) => issue.issueGroup).sort();
+    expect(missionLevelSiblings).toEqual(["action", "oversight", "plan", "qa"]);
+  });
+
   it("returns mission-linked workflow runs with step runs", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -2661,6 +3064,152 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
     expect(stored?.status).toBe("cancelled");
+  });
+
+  it("auto-completes mission oversight when a linked native workflow run completes with no remaining work", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const workflowIssueId = randomUUID();
+    const oversightIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Completed Native Workflow Company",
+      issuePrefix: `CN${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Native workflow mission",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: workflowIssueId,
+        companyId,
+        missionId,
+        title: "Finished workflow step",
+        status: "done",
+        priority: "medium",
+        originKind: "workflow_execution",
+        completedAt: new Date("2026-06-09T04:39:18.034Z"),
+      },
+      {
+        id: oversightIssueId,
+        companyId,
+        missionId,
+        title: "[OVERSIGHT] Native workflow mission",
+        status: "todo",
+        priority: "medium",
+        originKind: "mission_main_executor_oversight",
+      },
+    ]);
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Native workflow",
+      stepsJson: [{ id: "qa", name: "QA", agentId: ownerAgentId }],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      status: "completed",
+      triggeredBy: "test",
+      startedAt: new Date("2026-06-09T04:00:04.837Z"),
+      completedAt: new Date("2026-06-09T04:41:12.533Z"),
+    });
+    await db.insert(workflowStepRuns).values({
+      workflowRunId: runId,
+      stepId: "qa",
+      issueId: workflowIssueId,
+      status: "completed",
+      startedAt: new Date("2026-06-09T04:38:38.108Z"),
+      completedAt: new Date("2026-06-09T04:39:18.034Z"),
+    });
+
+    const detail = await missionService(db).getById(missionId);
+    const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
+
+    expect(detail.status).toBe("completed");
+    expect(oversight?.status).toBe("done");
+    expect(oversight?.completedAt).toEqual(new Date("2026-06-09T04:41:12.533Z"));
+  });
+
+  it("does not auto-complete mission oversight while non-oversight work remains open", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const oversightIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Open Work Oversight Company",
+      issuePrefix: `OW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Completed mission with open work",
+      status: "completed",
+      completedAt: new Date("2026-06-09T04:41:12.533Z"),
+    });
+    await db.insert(issues).values([
+      {
+        id: randomUUID(),
+        companyId,
+        missionId,
+        title: "Open follow-up",
+        status: "todo",
+        priority: "medium",
+        originKind: "workflow_execution",
+      },
+      {
+        id: oversightIssueId,
+        companyId,
+        missionId,
+        title: "[OVERSIGHT] Completed mission with open work",
+        status: "todo",
+        priority: "medium",
+        originKind: "mission_main_executor_oversight",
+      },
+    ]);
+
+    await missionService(db).getById(missionId);
+    const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
+
+    expect(oversight?.status).toBe("todo");
+    expect(oversight?.completedAt).toBeNull();
   });
 
   it("cleans up mission runtime state when a mission is cancelled", async () => {
@@ -2890,6 +3439,168 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
     expect(stored?.status).toBe("active");
+    expect(stored?.completedAt).toBeNull();
+  });
+
+  it("promotes a planning mission to active when a linked plugin workflow run has failed recoverably", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Planning Workflow Promotion Company",
+      issuePrefix: `PP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Manual mission with plugin execution",
+      status: "planning",
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values({
+      id: runId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${runId}`,
+      title: "failed workflow run",
+      status: "failed",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "manual-mission-workflow",
+        companyId,
+        missionId,
+        status: "failed",
+        triggerSource: "manual",
+        startedAt: "2026-06-09T04:00:04.837Z",
+        completedAt: "2026-06-09T04:23:25.320Z",
+      },
+    });
+
+    const svc = missionService(db);
+    const planningList = await svc.list({ companyId, status: "planning" });
+    const detail = await svc.getById(missionId);
+    const activeList = await svc.list({ companyId, status: "active" });
+
+    expect(planningList.find((mission) => mission.id === missionId)).toBeUndefined();
+    expect(detail.status).toBe("active");
+    expect(detail.startedAt).toEqual(new Date("2026-06-09T04:00:04.837Z"));
+    expect(detail.completedAt).toBeNull();
+    expect(activeList.find((mission) => mission.id === missionId)?.status).toBe("active");
+
+    const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
+    expect(stored?.status).toBe("active");
+    expect(stored?.startedAt).toEqual(new Date("2026-06-09T04:00:04.837Z"));
+    expect(stored?.completedAt).toBeNull();
+  });
+
+  it("does not complete a planning mission only because linked plugin workflow runs are terminal", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Planning Terminal Workflow Company",
+      issuePrefix: `PT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Planning mission with completed plugin run",
+      status: "planning",
+    });
+
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+
+    await db.insert(pluginEntities).values({
+      id: runId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${runId}`,
+      title: "completed workflow run",
+      status: "completed",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "manual-mission-workflow",
+        companyId,
+        missionId,
+        status: "completed",
+        triggerSource: "manual",
+        startedAt: "2026-06-09T04:00:04.837Z",
+        completedAt: "2026-06-09T04:23:25.320Z",
+      },
+    });
+
+    const svc = missionService(db);
+    const detail = await svc.getById(missionId);
+
+    expect(detail.status).toBe("planning");
+    expect(detail.startedAt).toBeNull();
+    expect(detail.completedAt).toBeNull();
+
+    const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
+    expect(stored?.status).toBe("planning");
+    expect(stored?.startedAt).toBeNull();
     expect(stored?.completedAt).toBeNull();
   });
 

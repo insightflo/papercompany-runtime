@@ -68,7 +68,7 @@ export function createAlertRules(
   let mustBlockAlertFiredAt: number | null = null;
 
   // --- Scheduler down alert state ---
-  let schedulerDownAlertFiredAt: number | null = null;
+  let schedulerDownActive = false;
 
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -94,12 +94,9 @@ export function createAlertRules(
     const now = Date.now();
 
     if (!state.running) {
-      // Scheduler not running at all — always alert (but rate-limit to once per 2 min)
-      if (
-        schedulerDownAlertFiredAt === null ||
-        now - schedulerDownAlertFiredAt >= SCHEDULER_DOWN_THRESHOLD_MS
-      ) {
-        schedulerDownAlertFiredAt = now;
+      // Scheduler not running at all. Alert once per continuous down episode.
+      if (!schedulerDownActive) {
+        schedulerDownActive = true;
         await fireAlert(
           "scheduler_down",
           "\u26A0\uFE0F *Alert: Scheduler Down*\nScheduler is not running.",
@@ -115,12 +112,9 @@ export function createAlertRules(
 
     const idleMs = now - state.lastPollAt.getTime();
     if (idleMs >= SCHEDULER_DOWN_THRESHOLD_MS) {
-      // Rate-limit: only re-fire after another 2 minutes
-      if (
-        schedulerDownAlertFiredAt === null ||
-        now - schedulerDownAlertFiredAt >= SCHEDULER_DOWN_THRESHOLD_MS
-      ) {
-        schedulerDownAlertFiredAt = now;
+      // Alert once per continuous stale-poll episode.
+      if (!schedulerDownActive) {
+        schedulerDownActive = true;
         const idleSec = Math.round(idleMs / 1000);
         await fireAlert(
           "scheduler_down",
@@ -129,7 +123,7 @@ export function createAlertRules(
       }
     } else {
       // Scheduler is healthy — reset alert state
-      schedulerDownAlertFiredAt = null;
+      schedulerDownActive = false;
     }
   }
 

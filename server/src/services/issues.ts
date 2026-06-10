@@ -16,6 +16,7 @@ import {
   issueComments,
   issueDocuments,
   issueReadStates,
+  issueWorkProducts,
   issues,
   labels,
   missions,
@@ -134,6 +135,54 @@ const MISSION_OWNER_PLANNED_DOWNSTREAM_TITLE_RE =
 const MISSION_OWNER_DOWNSTREAM_AGENT_NAME_RE =
   /\b(?:synthesis|validator|validation|qa)\b|종합|합성|검증/iu;
 
+export type IssueGroupPhase = "plan" | "action" | "qa" | "oversight";
+
+const ISSUE_GROUP_PREFIX_RE = /^\s*\[(plan|action|qa|oversight)\]/iu;
+
+export function classifyIssueGroupPhase(input: {
+  originKind?: string | null;
+  title?: string | null;
+}): IssueGroupPhase | null {
+  const prefix = ISSUE_GROUP_PREFIX_RE.exec(input.title ?? "");
+  if (prefix) return prefix[1]!.toLowerCase() as IssueGroupPhase;
+
+  const originKind = (input.originKind ?? "").toLowerCase();
+  if (originKind.includes("oversight") || originKind.includes("unblock")) return "oversight";
+  if (originKind.includes("qa") || originKind.includes("validation") || originKind.includes("validator")) return "qa";
+  if (originKind.includes("action") || originKind.includes("source") || originKind.includes("worker")) return "action";
+  if (originKind.includes("plan")) return "plan";
+  return null;
+}
+
+function isMissionLevelGroupedIssue(data: {
+  missionId?: string | null;
+  parentId?: string | null;
+  originKind?: string | null;
+  title?: string | null;
+}) {
+  if (!data.missionId || data.parentId) return false;
+  const group = classifyIssueGroupPhase(data);
+  return group === "action" || group === "qa" || group === "oversight";
+}
+
+function isServerWorkflowExecutionIssue(data: {
+  originKind?: string | null;
+  createdByAgentId?: string | null;
+  createdByUserId?: string | null;
+}) {
+  return data.originKind === "workflow_execution" && !data.createdByAgentId && !data.createdByUserId;
+}
+
+function assertAgentDoesNotCreateLooseMissionStructureIssue(data: Omit<typeof issues.$inferInsert, "companyId">) {
+  if (!data.createdByAgentId) return;
+  if (!isMissionLevelGroupedIssue(data)) return;
+
+  const group = classifyIssueGroupPhase(data);
+  throw unprocessable(
+    `Agent-created mission-level ${group?.toUpperCase() ?? "work"} issues must be materialized through the mission structure layer and server-native DAG, not created as loose issues. Post a structured Mission owner plan decision instead.`,
+  );
+}
+
 function isMissionOwnerPlanOriginKind(originKind: string) {
   return originKind === "research_director_plan" ||
     originKind === "research-director-plan" ||
@@ -178,6 +227,31 @@ async function isMissionDownstreamAssignee(
     .where(and(eq(agents.id, assigneeAgentId), eq(agents.companyId, companyId)))
     .then((rows) => rows[0] ?? null);
   return MISSION_OWNER_DOWNSTREAM_AGENT_NAME_RE.test(agent?.name ?? "");
+}
+
+async function hasCompletedSiblingUpstreamWorkProduct(
+  db: Db,
+  input: {
+    companyId: string;
+    missionId: string | null | undefined;
+    parentId: string | null | undefined;
+  },
+) {
+  if (!input.missionId || !input.parentId) return false;
+  const existing = await db
+    .select({ id: issueWorkProducts.id })
+    .from(issueWorkProducts)
+    .innerJoin(issues, eq(issueWorkProducts.issueId, issues.id))
+    .where(and(
+      eq(issueWorkProducts.companyId, input.companyId),
+      eq(issues.companyId, input.companyId),
+      eq(issues.missionId, input.missionId),
+      eq(issues.parentId, input.parentId),
+      eq(issues.status, "done"),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return !!existing;
 }
 
 function escapeLikePattern(value: string): string {
@@ -450,6 +524,8 @@ async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWith
     const issueLabels = labelsByIssueId.get(row.id) ?? [];
     return {
       ...row,
+      issueGroup: classifyIssueGroupPhase(row),
+      groupSource: classifyIssueGroupPhase(row) ? "originKind_or_title_prefix" : null,
       labels: issueLabels,
       labelIds: issueLabels.map((label) => label.id),
     };
@@ -611,6 +687,7 @@ export function issueService(db: Db) {
     data: Omit<typeof issues.$inferInsert, "companyId"> & { labelIds?: string[] },
   ) {
     if (!data.parentId || data.createdByUserId) return;
+    if (isServerWorkflowExecutionIssue(data)) return;
 
     const parent = await getValidParentIssue(companyId, data.parentId);
     const missionId = data.missionId ?? parent.missionId;
@@ -623,10 +700,20 @@ export function issueService(db: Db) {
     }
 
     const missionChildData = { ...data, missionId };
-    if (isMissionPlannedDownstreamIssue(missionChildData) || await isMissionDownstreamAssignee(db, companyId, data.assigneeAgentId)) {
-      throw unprocessable(
-        "Mission downstream issue creation is not allowed before its upstream artifact is complete; record the gate in the active plan instead",
-      );
+    const isDownstreamMissionChild =
+      isMissionPlannedDownstreamIssue(missionChildData) ||
+      await isMissionDownstreamAssignee(db, companyId, data.assigneeAgentId);
+    if (isDownstreamMissionChild) {
+      const hasUpstreamWorkProduct = await hasCompletedSiblingUpstreamWorkProduct(db, {
+        companyId,
+        missionId,
+        parentId: data.parentId,
+      });
+      if (!hasUpstreamWorkProduct) {
+        throw unprocessable(
+          "Mission downstream issue creation is not allowed before its upstream artifact is complete; record the gate in the active plan instead",
+        );
+      }
     }
 
     const [countRow] = await db
@@ -868,12 +955,22 @@ export function issueService(db: Db) {
       }
       if (
         !data.createdByUserId &&
+        !isServerWorkflowExecutionIssue(data) &&
         (isMissionPlannedDownstreamIssue(data) ||
           await isMissionDownstreamAssignee(db, companyId, data.assigneeAgentId))
       ) {
-        throw unprocessable(
-          "Mission downstream issue creation is not allowed before its upstream artifact is complete; record the gate in the active plan instead",
-        );
+        if (!isMissionLevelGroupedIssue(data)) {
+          const hasUpstreamWorkProduct = await hasCompletedSiblingUpstreamWorkProduct(db, {
+            companyId,
+            missionId: data.missionId,
+            parentId: data.parentId,
+          });
+          if (!hasUpstreamWorkProduct) {
+            throw unprocessable(
+              "Mission downstream issue creation is not allowed before its upstream artifact is complete; create [ACTION]/[QA]/[OVERSIGHT] mission-level sibling issues instead of plan-child/downstream issues",
+            );
+          }
+        }
       }
     }
     if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
@@ -888,6 +985,7 @@ export function issueService(db: Db) {
     isolatedWorkspacesEnabled: boolean,
   ) {
     const { labelIds: inputLabelIds, ...issueData } = data;
+    assertAgentDoesNotCreateLooseMissionStructureIssue(issueData);
     const defaultCompanyGoal = await getDefaultCompanyGoal(dbOrTx, companyId);
     const projectGoalId = await getProjectDefaultGoalId(dbOrTx, companyId, issueData.projectId);
     let executionWorkspaceSettings =
@@ -1343,15 +1441,21 @@ export function issueService(db: Db) {
       }
       if (issueData.status && issueData.status !== "in_progress") {
         patch.checkoutRunId = null;
+        patch.executionRunId = null;
+        patch.executionAgentNameKey = null;
+        patch.executionLockedAt = null;
       }
       if (
         (issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== existing.assigneeAgentId) ||
         (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== existing.assigneeUserId)
       ) {
         patch.checkoutRunId = null;
+        patch.executionRunId = null;
+        patch.executionAgentNameKey = null;
+        patch.executionLockedAt = null;
       }
 
-      return db.transaction(async (tx) => {
+      const updatedIssue = await db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -1385,6 +1489,28 @@ export function issueService(db: Db) {
         const [enriched] = await withIssueLabels(tx, [updated]);
         return enriched;
       });
+
+      if (
+        updatedIssue &&
+        issueData.status &&
+        issueData.status !== existing.status &&
+        (issueData.status === "done" || issueData.status === "blocked" || issueData.status === "cancelled")
+      ) {
+        try {
+          const { finalizeDelegatedWorkflowTargetIssue } = await import("./workflow-delegations.js");
+          await finalizeDelegatedWorkflowTargetIssue(db, {
+            targetIssueId: updatedIssue.id,
+            targetStatus: issueData.status,
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId: updatedIssue.id, status: issueData.status },
+            "failed to finalize delegated workflow target issue",
+          );
+        }
+      }
+
+      return updatedIssue;
     },
 
     remove: (id: string) =>

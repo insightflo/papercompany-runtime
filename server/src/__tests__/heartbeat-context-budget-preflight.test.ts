@@ -20,6 +20,7 @@ import {
   heartbeatRuns,
   knowledgeBases,
   issueComments,
+  issueWorkProducts,
   issues,
   missionPlanArtifacts,
   missions,
@@ -317,6 +318,7 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(agentTaskSessions);
     await cleanupHeartbeatRunRecords(db);
     await db.delete(workspaceRuntimeServices);
+    await db.delete(issueWorkProducts);
     await db.delete(issueComments);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
@@ -1042,6 +1044,112 @@ describe("heartbeat context budget preflight", () => {
     expect(qaStepRun).toMatchObject({ issueId: null, status: "pending" });
   });
 
+  it("records a mission owner PLAN decision captured from adapter result output", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+    const sourceWorkflowDefinitionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Plan the mission." },
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Planning mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: sourceWorkflowDefinitionId,
+      companyId,
+      name: "Source smoke workflow",
+    });
+    await db.insert(issues).values({
+      id: planningIssueId,
+      companyId,
+      missionId,
+      identifier: "PAP-PLAN",
+      title: "[PLAN] Planning mission",
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_plan",
+    });
+
+    const decision = validOwnerPlanDecision(missionId, sourceWorkflowDefinitionId);
+    executeSpy.mockImplementation(async ({ runId, onLog }) => {
+      await db
+        .update(issues)
+        .set({ checkoutRunId: runId, executionRunId: runId })
+        .where(eq(issues.id, planningIssueId));
+      await onLog("stdout", `${JSON.stringify({
+        type: "result",
+        subtype: "success",
+        result: `Planning complete.\n\n${decisionComment(decision)}\n\nSummary: proceed.`,
+      })}\n`);
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      ownerAgentId,
+      "timer",
+      { taskKey: `issue:${planningIssueId}`, issueId: planningIssueId, missionId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    await waitForIssueStatus(
+      db,
+      planningIssueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, planningIssueId));
+    const commentBodies = comments.map((comment) => comment.body).join("\n\n");
+    expect(commentBodies).toContain("### Captured PLAN decision output");
+    expect(commentBodies).toContain("### Mission owner plan decision");
+
+    const plan = await waitForActiveMissionPlanArtifact(
+      db,
+      missionId,
+      (candidate) => {
+        const refs = candidate.refs as { paqoWorkflow?: unknown } | null;
+        return !!refs && typeof refs === "object" && !!refs.paqoWorkflow;
+      },
+    );
+    expect(plan.refs).toMatchObject({
+      selectedExecutionUnits: decision.selectedExecutionUnits,
+      ownerPlanDecision: {
+        planningIssueId,
+        commentId: expect.any(String),
+        decisionHash: expect.any(String),
+      },
+      paqoWorkflow: {
+        workflowDefinitionId: expect.any(String),
+        workflowRunId: expect.any(String),
+        dependencyModel: "workflow_dag_intra_mission",
+      },
+    });
+  });
+
   it("classifies quota/auth/command provider failures for oversight", () => {
     expect(
       classifyHeartbeatRunFailure({
@@ -1393,6 +1501,762 @@ describe("heartbeat context budget preflight", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
     expect(comments.some((comment) => comment.body.includes("자동 캡처: delegated run output"))).toBe(true);
     expect(comments.some((comment) => comment.body.includes("Evidence packet ready"))).toBe(true);
+  });
+
+  it("blocks an artifact-producing mission child run when no workProduct is registered", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Synthesis Editor",
+      role: "writer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Create the required artifact and register it as a workProduct." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId,
+        identifier: "PAP-PLAN",
+        title: "[Plan] Research mission",
+        status: "done",
+        assigneeAgentId: agentId,
+        originKind: "research_director_plan",
+      },
+      {
+        id: childIssueId,
+        companyId,
+        missionId,
+        parentId: parentIssueId,
+        identifier: "PAP-SYN",
+        title: "[Synthesis] Draft note artifact",
+        status: "todo",
+        assigneeAgentId: agentId,
+        originKind: "research_director_plan_child",
+      },
+    ]);
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", "Output: /Users/kwak/Personal/obsidian/600. Improvements/603.TechNews/202606/20260608.md\n");
+      return {
+        ...successfulAdapterResult(),
+        resultJson: { outputPath: "/Users/kwak/Personal/obsidian/600. Improvements/603.TechNews/202606/20260608.md" },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${childIssueId}`, issueId: childIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      childIssueId,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(expect.objectContaining({
+      status: "blocked",
+      checkoutRunId: null,
+      executionRunId: null,
+      completedAt: null,
+    }));
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("20260608.md"))).toBe(true);
+  });
+
+  it("blocks missing workProduct registration even when the agent marks the issue done before run finalization", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const childIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Synthesis Editor",
+      role: "writer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Create the required artifact and register it as a workProduct." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: childIssueId,
+      companyId,
+      missionId,
+      identifier: "PAP-SYN",
+      title: "[Synthesis] Draft note artifact",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", "Output: /Users/kwak/Personal/obsidian/600. Improvements/603.TechNews/202606/20260609.md\n");
+      await db
+        .update(issues)
+        .set({
+          status: "done",
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(issues.id, childIssueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: { outputPath: "/Users/kwak/Personal/obsidian/600. Improvements/603.TechNews/202606/20260609.md" },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${childIssueId}`, issueId: childIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      childIssueId,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.completedAt).toBeNull();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("20260609.md"))).toBe(true);
+  });
+
+  it("blocks Korean artifact issues when a workProduct exists but does not reference the claimed file", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Technology Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "HTML 학습 자료를 작성하고 workProduct로 등록하세요." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-HTML",
+      title: "[ACTION] 초보자용 에이전틱 RAG HTML 학습 자료 작성",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      const outputPath = "/Users/kwak/Downloads/google_agentic_rag_for_beginners.html";
+      await onLog("stdout", `Deliverable: ${outputPath}\n`);
+      await db.insert(issueWorkProducts).values({
+        companyId,
+        issueId,
+        type: "document",
+        provider: "local",
+        title: "초보자용 에이전틱 RAG HTML 학습 자료",
+        status: "active",
+      });
+      return {
+        ...successfulAdapterResult(),
+        resultJson: { outputPath },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.completedAt).toBeNull();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("google_agentic_rag_for_beginners.html"))).toBe(true);
+  });
+
+  it("does not apply missing workProduct registration gate to lead approval issues", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Research Director",
+      role: "owner",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Approve the already registered artifacts." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-LEAD",
+      title: "tech-ai-news: Lead approval for TechCrunch AI note",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", "Approved existing artifact path: /Users/kwak/Personal/obsidian/600. Improvements/603.TechNews/202606/20260609.md\n");
+      return {
+        ...successfulAdapterResult(),
+        resultJson: { result: "Lead approval: APPROVED. Existing artifact path reviewed." },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.status).toBe("done");
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+  });
+
+  it("blocks a succeeded mission validator run with REQUEST_CHANGES and wakes the mission owner", async () => {
+    const companyId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const validatorIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: validatorAgentId,
+        companyId,
+        name: "Artifact Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Validate the delegated artifact." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId,
+        identifier: "PAP-PLAN",
+        title: "[Plan] Research mission",
+        status: "done",
+        assigneeAgentId: ownerAgentId,
+        originKind: "research_director_plan",
+      },
+      {
+        id: validatorIssueId,
+        companyId,
+        missionId,
+        parentId: parentIssueId,
+        identifier: "PAP-QA",
+        title: "[QA] Validate artifact before delivery",
+        status: "todo",
+        assigneeAgentId: validatorAgentId,
+        originKind: "research_director_plan_child",
+      },
+    ]);
+
+    executeSpy.mockImplementation(async ({ runId, onLog }) => {
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      if (run?.agentId === validatorAgentId) {
+        await onLog("stdout", "REQUEST_CHANGES\n- fix hallucinated label before Telegram delivery\n");
+        await db
+          .update(issues)
+          .set({ status: "done", completedAt: new Date(), updatedAt: new Date() })
+          .where(eq(issues.id, validatorIssueId));
+        return {
+          ...successfulAdapterResult(),
+          resultJson: { result: "REQUEST_CHANGES\n- fix hallucinated label before Telegram delivery" },
+        };
+      }
+      await onLog("stdout", "Mission owner received validation recovery action.\n");
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      validatorAgentId,
+      "assignment",
+      { taskKey: `issue:${validatorIssueId}`, issueId: validatorIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      validatorIssueId,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, validatorIssueId));
+    expect(comments.some((comment) => comment.body.includes("REQUEST_CHANGES"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("validation gate"))).toBe(true);
+
+    let ownerActions: Array<typeof issues.$inferSelect> = [];
+    const ownerActionDeadline = Date.now() + 5_000;
+    while (Date.now() < ownerActionDeadline) {
+      ownerActions = await db.select().from(issues).where(eq(issues.originId, validatorIssueId));
+      if (ownerActions.some((issue) => issue.originKind === "mission_main_executor_unblock")) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(ownerActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        assigneeAgentId: ownerAgentId,
+        missionId,
+        originKind: "mission_main_executor_unblock",
+        title: expect.stringContaining("[Unblock] PAP-QA"),
+      }),
+    ]));
+    const ownerAction = ownerActions.find((issue) => issue.originKind === "mission_main_executor_unblock")!;
+
+    let ownerWakeups: Array<typeof agentWakeupRequests.$inferSelect> = [];
+    const wakeupDeadline = Date.now() + 5_000;
+    while (Date.now() < wakeupDeadline) {
+      ownerWakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, ownerAgentId));
+      if (ownerWakeups.some((request) => {
+        const payload = request.payload as Record<string, unknown> | null;
+        return payload?.issueId === ownerAction.id && payload?.sourceIssueId === validatorIssueId;
+      })) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const ownerWakeup = ownerWakeups.find((request) => {
+      const payload = request.payload as Record<string, unknown> | null;
+      return payload?.issueId === ownerAction.id && payload?.sourceIssueId === validatorIssueId;
+    });
+    expect(ownerWakeup).toEqual(expect.objectContaining({
+      payload: expect.objectContaining({ issueId: ownerAction.id, sourceIssueId: validatorIssueId }),
+    }));
+    if (ownerWakeup?.runId) {
+      const ownerRun = await waitForRunTerminal(heartbeat, ownerWakeup.runId);
+      expect(ownerRun.status).toBe("succeeded");
+    }
+  });
+
+  it("does not block a validator PASS result that contains caveat text", async () => {
+    const companyId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const missionId = randomUUID();
+    const validatorIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: validatorAgentId,
+      companyId,
+      name: "Artifact Validator",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Validate the delegated artifact." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: validatorAgentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: validatorIssueId,
+      companyId,
+      missionId,
+      identifier: "PAP-QA",
+      title: "[QA] Validate artifact before delivery",
+      status: "todo",
+      assigneeAgentId: validatorAgentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", "Claim: Shopify integration - Need to verify\nVerdict: PASS\n");
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          result:
+            "**Validation Complete: PASS**\n\nShopify integration - Need to verify.\n\n**Verdict: PASS** — caveat is documented and does not require changes.",
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      validatorAgentId,
+      "assignment",
+      { taskKey: `issue:${validatorIssueId}`, issueId: validatorIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      validatorIssueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.status).toBe("done");
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, validatorIssueId));
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
+  });
+
+  it("does not apply the REQUEST_CHANGES validation gate to mission owner control issues", async () => {
+    for (const [index, originKind] of (
+      ["mission_main_executor_plan", "mission_main_executor_oversight", "mission_main_executor_unblock"] as const
+    ).entries()) {
+      const companyId = randomUUID();
+      const ownerAgentId = randomUUID();
+      const missionId = randomUUID();
+      const sourceIssueId = randomUUID();
+      const ownerIssueId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: `Paperclip ${originKind}`,
+        issuePrefix: `PC${index}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values({
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Plan and coordinate the mission." },
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(missions).values({
+        id: missionId,
+        companyId,
+        ownerAgentId,
+        title: "Research mission",
+        status: "active",
+      });
+      await db.insert(issues).values({
+        id: sourceIssueId,
+        companyId,
+        missionId,
+        identifier: `PC${index}-SOURCE`,
+        title: "Source issue awaiting owner action",
+        status: "blocked",
+        assigneeAgentId: ownerAgentId,
+        originKind: "research_director_plan_child",
+      });
+      await db.insert(issues).values({
+        id: ownerIssueId,
+        companyId,
+        missionId,
+        identifier: originKind === "mission_main_executor_plan" ? `PC${index}-PLAN` : `PC${index}-UNBLOCK`,
+        title: originKind === "mission_main_executor_plan"
+          ? "[Plan] Research mission"
+          : originKind === "mission_main_executor_oversight"
+            ? "[Oversight] Research mission"
+            : "[Unblock] PAP-SOURCE: Source issue awaiting owner action",
+        description: "Mission owner control issue that may mention validation outcomes while giving instructions.",
+        status: "todo",
+        assigneeAgentId: ownerAgentId,
+        originKind,
+        originId: originKind === "mission_main_executor_unblock" ? sourceIssueId : null,
+      });
+
+      executeSpy.mockImplementationOnce(async ({ onLog }) => {
+        await onLog("stdout", "Owner action complete. Downstream QA may later return PASS or REQUEST_CHANGES.\n");
+        await db
+          .update(issues)
+          .set({ status: "done", completedAt: new Date(), updatedAt: new Date() })
+          .where(eq(issues.id, ownerIssueId));
+        return {
+          ...successfulAdapterResult(),
+          resultJson: {
+            result: "Mission owner action complete. Allowed downstream validator outcomes include PASS or REQUEST_CHANGES.",
+          },
+        };
+      });
+
+      const heartbeat = heartbeatService(db);
+      const run = await heartbeat.invoke(
+        ownerAgentId,
+        "assignment",
+        { taskKey: `issue:${ownerIssueId}`, issueId: ownerIssueId, missionId },
+        "system",
+        { actorType: "system", actorId: "test-suite" },
+      );
+
+      const finalized = await waitForRunTerminal(heartbeat, run!.id);
+      expect(finalized.status).toBe("succeeded");
+
+      const updatedIssue = await waitForIssueStatus(db, ownerIssueId, (issue) => issue.status === "done");
+      expect(updatedIssue.status).toBe("done");
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, ownerIssueId));
+      expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
+
+      const issueActivity = await db.select().from(activityLog).where(eq(activityLog.entityId, ownerIssueId));
+      expect(issueActivity.some((entry) => entry.action === "issue.validation_request_changes_auto_blocked")).toBe(false);
+
+      const nestedOwnerActions = await db.select().from(issues).where(eq(issues.originId, ownerIssueId));
+      expect(nestedOwnerActions.some((issue) => issue.originKind === "mission_main_executor_unblock")).toBe(false);
+    }
+  });
+
+  it("does not apply the REQUEST_CHANGES validation gate to workflow lead approval issues", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const leadIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Lead Approval",
+      issuePrefix: "PLA",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Research Director",
+      role: "owner",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Approve corrected workflow output." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: leadIssueId,
+      companyId,
+      missionId,
+      identifier: "PLA-LEAD",
+      title: "Lead approval for corrected note",
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementationOnce(async ({ runId, onLog }) => {
+      await onLog("stdout", "APPROVED after checking prior REQUEST_CHANGES findings. Downstream may proceed.\n");
+      await db
+        .update(issues)
+        .set({
+          status: "done",
+          checkoutRunId: runId,
+          executionRunId: runId,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(issues.id, leadIssueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          result: "APPROVED. Prior REQUEST_CHANGES findings are fixed; do not re-block this lead approval.",
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      ownerAgentId,
+      "assignment",
+      { taskKey: `issue:${leadIssueId}`, issueId: leadIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      leadIssueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(expect.objectContaining({
+      status: "done",
+      checkoutRunId: null,
+      executionRunId: null,
+    }));
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, leadIssueId));
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
+
+    const issueActivity = await db.select().from(activityLog).where(eq(activityLog.entityId, leadIssueId));
+    expect(issueActivity.some((entry) => entry.action === "issue.validation_request_changes_auto_blocked")).toBe(false);
+
+    const nestedOwnerActions = await db.select().from(issues).where(eq(issues.originId, leadIssueId));
+    expect(nestedOwnerActions.some((issue) => issue.originKind === "mission_main_executor_unblock")).toBe(false);
   });
 
   it("captures tool-limit blocked mission child output as done", async () => {

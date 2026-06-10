@@ -2,6 +2,9 @@ import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   buildPaperclipRuntimeBrief,
   joinPromptSections,
@@ -55,8 +58,10 @@ export function buildHermesChatArgs(input: {
   model: string;
   provider?: string;
   toolsets?: string;
+  imagePaths?: string[];
   worktreeMode?: boolean;
   checkpoints?: boolean;
+  yolo?: boolean;
   quiet?: boolean;
   verbose?: boolean;
   persistSession?: boolean;
@@ -73,9 +78,13 @@ export function buildHermesChatArgs(input: {
   args.push("-m", input.model);
   if (input.provider && VALID_PROVIDERS.includes(input.provider))
     args.push("--provider", input.provider);
+  for (const imagePath of input.imagePaths ?? []) {
+    args.push("--image", imagePath);
+  }
   if (input.toolsets) args.push("-t", input.toolsets);
   if (input.worktreeMode === true) args.push("-w");
   if (input.checkpoints === true) args.push("--checkpoints");
+  if (input.yolo === true) args.push("--yolo");
   if (input.verbose !== false && input.quiet !== true) args.push("-v");
   if (input.persistSession !== false && input.prevSessionId)
     args.push("--resume", input.prevSessionId);
@@ -164,14 +173,146 @@ Check your assigned todo issues. If none exist, report briefly and exit.
   return joinPromptSections([runtimeBrief, renderTemplate(rendered, vars)]);
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function dataUrlToImage(value: string): { mime: string; bytes: Buffer } | null {
+  const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\s]+)$/);
+  if (!match?.[1] || !match?.[2]) return null;
+  return { mime: match[1], bytes: Buffer.from(match[2].replace(/\s+/g, ""), "base64") };
+}
+
+function extensionForImageMime(mime: string) {
+  if (mime === "image/jpeg") return ".jpg";
+  if (mime === "image/png") return ".png";
+  if (mime === "image/webp") return ".webp";
+  if (mime === "image/gif") return ".gif";
+  return ".img";
+}
+
+async function materializeHermesChatImages(context: Record<string, unknown>) {
+  const chat = asRecord(context.paperclipHermesChat);
+  const attachments = Array.isArray(chat?.attachments)
+    ? chat.attachments.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const images = attachments
+    .filter((attachment) =>
+      attachment.kind === "image" &&
+      typeof attachment.dataUrl === "string" &&
+      attachment.dataUrl.startsWith("data:image/"))
+    .slice(0, 4);
+  if (images.length === 0) return [];
+
+  const dir = await mkdtemp(path.join(tmpdir(), "paperclip-hermes-chat-images-"));
+  const paths: string[] = [];
+  for (const [index, image] of images.entries()) {
+    const decoded = dataUrlToImage(image.dataUrl as string);
+    if (!decoded) continue;
+    const filePath = path.join(dir, `attachment-${index + 1}${extensionForImageMime(decoded.mime)}`);
+    await writeFile(filePath, decoded.bytes);
+    paths.push(filePath);
+  }
+  return paths;
+}
+
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
+const SESSION_LINE_REGEX = /^Session:\s*(\S+)/m;
+const RESUME_SESSION_REGEX = /Resume this session with:\s*\n\s*hermes --resume\s+(\S+)/i;
 const SESSION_ID_REGEX_LEGACY =
   /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
 
-function parseHermesOutput(stdout: string, stderr: string) {
+function stripAnsi(value: string) {
+  return value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+function cleanHermesDisplayLine(line: string) {
+  return line
+    .replace(/^[\s│┊╭╰╮╯┌└┐┘├┤─━═]+/, "")
+    .replace(/[\s│┊╭╰╮╯┌└┐┘├┤─━═]+$/, "")
+    .trim();
+}
+
+function hermesDisplayLines(body: string) {
+  return body
+    .split(/\r?\n/)
+    .map(cleanHermesDisplayLine)
+    .filter(Boolean)
+    .filter((line) => !/^Hermes\b/i.test(line))
+    .filter((line) => !/^AI Agent initialized/i.test(line))
+    .filter((line) => !/^Conversation completed after/i.test(line));
+}
+
+function isHermesSpeakerLabel(line: string) {
+  return line.length <= 48 && /(?:^|\s)Hermes\s*$/i.test(line.replace(/[^\w\s-]/g, " ").trim());
+}
+
+function isHermesCliChromeLine(line: string) {
+  return (
+    /^✅ Tool \d+ completed\b/.test(line) ||
+    /^📞 Tool \d+:/u.test(line) ||
+    /^Args:\s*\{?/.test(line) ||
+    /^Result:\s*/.test(line) ||
+    /^💻\s*\$/.test(line) ||
+    /^Tool \d+ completed\b/.test(line) ||
+    /^Resume this session with:/i.test(line) ||
+    /^Session:\s*/i.test(line) ||
+    /^Duration:\s*/i.test(line) ||
+    /^Messages:\s*/i.test(line)
+  );
+}
+
+function looksLikeToolContinuation(line: string) {
+  return (
+    /^[{}\[\]",]/.test(line) ||
+    /^["']?(?:command|timeout|workdir|output|exit_code|error)["']?\s*:/.test(line) ||
+    /^\w+:\s*\{/.test(line) ||
+    /^null[},]?$/.test(line)
+  );
+}
+
+function responseFromDisplayLines(lines: string[]) {
+  const speakerIdx = lines.findLastIndex(isHermesSpeakerLabel);
+  const candidateLines = speakerIdx >= 0 && speakerIdx < lines.length - 1
+    ? lines.slice(speakerIdx + 1)
+    : lines.filter((line) => !isHermesSpeakerLabel(line));
+  const lastToolChromeIdx = candidateLines.findLastIndex(isHermesCliChromeLine);
+  const afterToolChrome = lastToolChromeIdx >= 0 ? candidateLines.slice(lastToolChromeIdx + 1) : candidateLines;
+  const responseLines = afterToolChrome
+    .filter((line) => !isHermesCliChromeLine(line))
+    .filter((line) => !looksLikeToolContinuation(line));
+  return responseLines.length > 0 ? responseLines.join("\n").trim() : null;
+}
+
+function parseHermesConversationResponse(stdout: string) {
+  const clean = stripAnsi(stdout);
+  const marker = "Conversation completed after";
+  const markerIdx = clean.indexOf(marker);
+
+  const beforeMarker = markerIdx >= 0 ? clean.slice(0, markerIdx) : clean;
+  const hermesBlockStart = Math.max(
+    beforeMarker.lastIndexOf("⚕ Hermes"),
+    beforeMarker.lastIndexOf("🤖 Hermes"),
+    beforeMarker.lastIndexOf("Hermes ─"),
+  );
+  if (hermesBlockStart >= 0) {
+    const response = responseFromDisplayLines(hermesDisplayLines(beforeMarker.slice(hermesBlockStart)));
+    if (response) return response;
+  }
+
+  if (markerIdx < 0) return null;
+  const afterMarkerLine = clean.slice(markerIdx).split(/\r?\n/).slice(1).join("\n");
+  const endMatch = afterMarkerLine.match(/\n(?:Resume this session with:|Session:|Duration:|Messages:|\[hermes\])/);
+  const body = (endMatch?.index !== undefined ? afterMarkerLine.slice(0, endMatch.index) : afterMarkerLine).trim();
+  return responseFromDisplayLines(hermesDisplayLines(body));
+}
+
+export function parseHermesOutput(stdout: string, stderr: string) {
   const combined = `${stdout}\n${stderr}`;
   const result: {
     sessionId?: string;
@@ -188,9 +329,12 @@ function parseHermesOutput(stdout: string, stderr: string) {
     if (sessionLineIdx > 0)
       result.response = stdout.slice(0, sessionLineIdx).trim();
   } else {
+    const resumeMatch = combined.match(RESUME_SESSION_REGEX);
+    const sessionLineMatch = combined.match(SESSION_LINE_REGEX);
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) result.sessionId = legacyMatch[1];
+    result.sessionId = resumeMatch?.[1] ?? sessionLineMatch?.[1] ?? legacyMatch?.[1];
   }
+  result.response ??= parseHermesConversationResponse(stdout) ?? undefined;
 
   const usageMatch = combined.match(TOKEN_USAGE_REGEX);
   if (usageMatch) {
@@ -234,6 +378,7 @@ export async function executeHermesLocal(
   const extraArgs = cfgStringArray(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const prompt = buildPrompt(ctx, config);
+  const imagePaths = await materializeHermesChatImages(ctx.context);
 
   const prevSessionId = cfgString(ctx.runtime?.sessionParams?.sessionId);
   const args = buildHermesChatArgs({
@@ -241,8 +386,10 @@ export async function executeHermesLocal(
     model,
     provider,
     toolsets,
+    imagePaths,
     worktreeMode: cfgBoolean(config.worktreeMode),
     checkpoints: cfgBoolean(config.checkpoints),
+    yolo: cfgBoolean(config.yolo) || cfgBoolean(config.autoApproveTools) || Boolean(ctx.context.paperclipHermesChat),
     quiet: cfgBoolean(config.quiet),
     verbose: cfgBoolean(config.verbose),
     persistSession,
@@ -313,7 +460,15 @@ export async function executeHermesLocal(
   };
   if (result.idleTimedOut)
     executionResult.errorMessage = `No process output for ${idleTimeoutSec}s`;
-  if (parsed.errorMessage) executionResult.errorMessage = parsed.errorMessage;
+  const hasSuccessfulAnswer = result.exitCode === 0 && !result.timedOut && Boolean(parsed.response?.trim());
+  if (parsed.errorMessage && !hasSuccessfulAnswer) {
+    executionResult.errorMessage = parsed.errorMessage;
+  } else if (parsed.errorMessage && hasSuccessfulAnswer) {
+    executionResult.resultJson = {
+      ...executionResult.resultJson,
+      warning: parsed.errorMessage,
+    };
+  }
   if (parsed.usage) executionResult.usage = parsed.usage;
   if (parsed.costUsd !== undefined) executionResult.costUsd = parsed.costUsd;
   if (parsed.response) executionResult.summary = parsed.response.slice(0, 2000);

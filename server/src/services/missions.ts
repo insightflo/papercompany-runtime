@@ -47,7 +47,7 @@ import {
   buildOwnerActionExplanations,
   type MissionOwnerActionExplanation,
 } from "./missions/mission-owner-recovery-explanations.js";
-import { syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
+import { normalizeWorkflowStepsForExecution, syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
@@ -556,15 +556,22 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const isWorkflowCreatedMission = mission.description?.startsWith("Created automatically for workflow run:") ?? false;
     const canReconcileTerminalWorkflowMission =
       isWorkflowCreatedMission && mission.status === "completed";
-    if (mission.status !== "active" && !canReconcileTerminalWorkflowMission) return mission;
+    const canCloseCompletedMissionOversight = mission.status === "completed";
+    const canPromoteStartedPlanningMission = mission.status === "planning";
+    if (
+      mission.status !== "active" &&
+      !canReconcileTerminalWorkflowMission &&
+      !canPromoteStartedPlanningMission &&
+      !canCloseCompletedMissionOversight
+    ) return mission;
 
-    const linkedRuns: Array<{ status: string; completedAt: Date | null }> = [];
+    const linkedRuns: Array<{ status: string; startedAt: Date | null; completedAt: Date | null }> = [];
     const nativeRuns = await db
-      .select({ status: workflowRuns.status, completedAt: workflowRuns.completedAt })
+      .select({ status: workflowRuns.status, startedAt: workflowRuns.startedAt, completedAt: workflowRuns.completedAt })
       .from(workflowRuns)
       .where(eq(workflowRuns.missionId, mission.id));
     for (const run of nativeRuns) {
-      linkedRuns.push({ status: run.status, completedAt: run.completedAt });
+      linkedRuns.push({ status: run.status, startedAt: run.startedAt, completedAt: run.completedAt });
     }
 
     const pluginRunEntities = await db
@@ -580,17 +587,29 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       if (data.companyId !== mission.companyId || data.missionId !== mission.id) continue;
       linkedRuns.push({
         status: asTrimmedString(data.status) ?? entity.status ?? "",
+        startedAt: parsePluginDate(data.startedAt) ?? entity.createdAt ?? null,
         completedAt: parsePluginDate(data.completedAt) ?? entity.updatedAt ?? null,
       });
     }
 
-    if (linkedRuns.length === 0) return mission;
+    if (linkedRuns.length === 0) {
+      if (mission.status === "completed") {
+        await completeOpenMissionOversightIfSettled(mission, mission.completedAt ?? new Date());
+      }
+      return mission;
+    }
 
     const normalizedStatuses = linkedRuns.map((run) => run.status.trim().toLowerCase()).filter(Boolean);
+    const startedAt = mission.startedAt ?? linkedRuns
+      .map((run) => run.startedAt)
+      .filter((value): value is Date => value instanceof Date)
+      .sort((left, right) => left.getTime() - right.getTime())[0] ?? new Date();
     if (normalizedStatuses.some((status) => activeWorkflowRunStatuses.has(status))) {
-      if (mission.status === "active" && mission.completedAt === null) return mission;
+      if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) return mission;
+      if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;
       const updates: Partial<MissionRow> = {
         status: "active",
+        startedAt,
         completedAt: null,
         updatedAt: new Date(),
       };
@@ -601,9 +620,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       };
     }
     if (normalizedStatuses.some((status) => recoverableFailedWorkflowRunStatuses.has(status))) {
-      if (mission.status === "active" && mission.completedAt === null) return mission;
+      if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) return mission;
+      if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;
       const updates: Partial<MissionRow> = {
         status: "active",
+        startedAt,
         completedAt: null,
         updatedAt: new Date(),
       };
@@ -614,6 +635,13 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       };
     }
     if (normalizedStatuses.some((status) => !cancelledWorkflowRunStatuses.has(status) && !completedWorkflowRunStatuses.has(status))) {
+      return mission;
+    }
+    if (mission.status === "planning") return mission;
+    if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) {
+      if (normalizedStatuses.every((status) => completedWorkflowRunStatuses.has(status))) {
+        await completeOpenMissionOversightIfSettled(mission, mission.completedAt ?? new Date());
+      }
       return mission;
     }
 
@@ -632,10 +660,46 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     };
     await db.update(missions).set(updates).where(eq(missions.id, mission.id));
 
-    return {
+    const updatedMission = {
       ...mission,
       ...updates,
     };
+    if (nextStatus === "completed") {
+      await completeOpenMissionOversightIfSettled(updatedMission, completedAt);
+    }
+    return updatedMission;
+  }
+
+  async function completeOpenMissionOversightIfSettled(mission: MissionRow, completedAt: Date): Promise<void> {
+    if (mission.status !== "completed") return;
+
+    const openWork = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(
+        eq(issues.missionId, mission.id),
+        isNull(issues.hiddenAt),
+        sql`${issues.status} not in ('done', 'cancelled')`,
+        sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (openWork) return;
+
+    const now = new Date();
+    await db
+      .update(issues)
+      .set({
+        status: "done",
+        completedAt,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(issues.missionId, mission.id),
+        eq(issues.originKind, "mission_main_executor_oversight"),
+        isNull(issues.hiddenAt),
+        sql`${issues.status} not in ('done', 'cancelled')`,
+      ));
   }
 
   async function collectWorkflowIssueIdsForMission(mission: MissionRow): Promise<string[]> {
@@ -742,25 +806,86 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   async function ensureMainExecutorPlanningIssue(mission: MissionRow) {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_plan");
     if (existing) return existing;
+    const companyAgents = await db
+      .select({ id: agents.id, name: agents.name, role: agents.role, status: agents.status })
+      .from(agents)
+      .where(eq(agents.companyId, mission.companyId))
+      .orderBy(asc(agents.name), asc(agents.id));
+    const runnableRosterLines = companyAgents
+      .filter((agent) => agent.status === "active" || agent.status === "idle")
+      .map((agent) => (
+        `- ${agent.name} (${agent.role}, ${agent.status}) id=${agent.id}${agent.id === mission.ownerAgentId ? " [mission owner]" : ""}`
+      ));
 
     return issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: [
-        "Plan and coordinate the mission before execution begins.",
+        "Plan the mission before execution begins, then close this issue when the mission-level work structure is materialized.",
         "",
         `Mission: ${mission.title}`,
         mission.description ? `Brief: ${mission.description}` : null,
         "",
         "Expected output:",
-        "- Break down the work into executable issues or workflow runs.",
+        "- Do not create mission-level `[ACTION]`, `[QA]`, or `[OVERSIGHT]` issues directly from this PLAN issue.",
+        "- Post exactly one structured `### Mission owner plan decision` JSON comment; the server materializes the selected work through the server-native DAG.",
+        "- In `selectedExecutionUnits`, define execution work units with explicit `assigneeAgentId` values from the Available runnable company roster below.",
+        "- Do not invent or reuse assignee ids that are not listed in the Available runnable company roster.",
+        "- Agents with status `paused`, `running`, `error`, `pending_approval`, or `terminated` are intentionally omitted and are not runnable execution assignees.",
+        "- Use source/research units for researcher/scout agents, synthesis/report units for synthesis/editor agents, QA units for validator/QA agents, and oversight/recovery for the mission owner.",
+        "- Express execution order with `dependsOn` arrays on each non-root `selectedExecutionUnits` entry; root units must use `dependsOn: []`.",
+        "- Use `dependsOn` values that exactly match upstream selected unit `id` or `sourceRef.id` values. The `steps` array is only human-readable phase notes and must not be the only place dependencies appear.",
+        "- Do not rely on loose issue creation order, phase text, or assignee wakeups for ordering.",
         "- Identify blockers and approval needs early.",
-        "- Keep this issue updated with the current plan.",
+        "- Do not perform ACTION/QA work from this PLAN issue; define the DAG structure, then mark this PLAN issue done after the structured decision is posted.",
+        "",
+        "Required decision comment shape:",
+        "### Mission owner plan decision",
+        "```json",
+        JSON.stringify({
+          missionId: mission.id,
+          missionGoal: "Restate the mission goal",
+          selectedExecutionUnits: [{
+            id: "unit-source-1",
+            kind: "mission_plan_unit",
+            title: "Concrete ACTION title",
+            assigneeAgentId: "agent-id-from-roster",
+            selectionState: "selected",
+            reason: "Why this work unit is required",
+            sourceRef: { type: "mission_plan_unit", id: "unit-source-1" },
+            dependsOn: [],
+          }, {
+            id: "unit-synthesis-1",
+            kind: "mission_plan_unit",
+            title: "Concrete synthesis ACTION title",
+            assigneeAgentId: "agent-id-from-roster",
+            selectionState: "selected",
+            reason: "Why this synthesis unit is required",
+            sourceRef: { type: "mission_plan_unit", id: "unit-synthesis-1" },
+            dependsOn: ["unit-source-1"],
+          }, {
+            id: "unit-qa-1",
+            kind: "mission_plan_unit",
+            title: "[QA] Concrete validation title",
+            assigneeAgentId: "agent-id-from-roster",
+            selectionState: "selected",
+            reason: "Why this validation unit is required",
+            sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" },
+            dependsOn: ["unit-synthesis-1"],
+          }],
+          requiredInputs: [],
+          successCriteria: [],
+          steps: [],
+        }, null, 2),
+        "```",
+        "",
+        "Available runnable company roster:",
+        ...runnableRosterLines,
       ].filter(Boolean).join("\n"),
       missionId: mission.id,
       originKind: "mission_main_executor_plan",
       priority: "medium",
       status: "todo",
-      title: `[Plan] ${mission.title}`,
+      title: `[PLAN] ${mission.title}`,
     });
   }
 
@@ -904,7 +1029,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   ): Promise<typeof issues.$inferSelect> {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     if (existing) {
-      const nextTitle = `[Oversight] ${workflowName}`;
+      const nextTitle = `[OVERSIGHT] ${workflowName}`;
       if (existing.title !== nextTitle) {
         await db
           .update(issues)
@@ -919,10 +1044,10 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const oversightIssue = await issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: [
-        "Monitor this workflow-created mission and keep execution moving.",
+        "Monitor this mission and keep execution moving.",
         "",
         `Mission: ${mission.title}`,
-        `Workflow: ${workflowName}`,
+        `Scope: ${workflowName}`,
         "",
         "Main executor duties:",
         "- Watch step progress and comments.",
@@ -934,7 +1059,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       originKind: "mission_main_executor_oversight",
       priority: "medium",
       status: "todo",
-      title: `[Oversight] ${workflowName}`,
+      title: `[OVERSIGHT] ${workflowName}`,
     });
     await ensureWorkflowMissionPlanArtifact(mission, oversightIssue, workflowName, metadata);
     return oversightIssue;
@@ -2297,8 +2422,10 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
 
       if (existingActiveWorkflowMission) {
         const existingMission = await getById(existingActiveWorkflowMission.id);
-        await ensureMainExecutorOversightIssue(existingMission, input.title);
-        return getById(existingActiveWorkflowMission.id);
+        if (existingMission.status === "active") {
+          await ensureMainExecutorOversightIssue(existingMission, input.title);
+          return getById(existingActiveWorkflowMission.id);
+        }
       }
     }
 
@@ -2369,6 +2496,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           { id: "qa-after-artifact", title: "Run QA only after the upstream artifact is present", status: "planned", intendedRole: "qa" },
         ],
       });
+      await ensureMainExecutorOversightIssue(mission, input.title);
       if (deps.onOwnerPlanningIssueCreated && planningIssue?.assigneeAgentId) {
         const idempotencyKey = `mission-owner-planning-wakeup:${mission.id}:${planningIssue.id}`;
         void Promise.resolve(deps.onOwnerPlanningIssueCreated({
@@ -2516,10 +2644,22 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .limit(1);
     if (!existing) throw notFound(`Mission not found: ${id}`);
 
-    const updates: Partial<MissionRow> = { updatedAt: new Date() };
+    const now = new Date();
+    const updates: Partial<MissionRow> = { updatedAt: now };
     if (input.title !== undefined) updates.title = input.title;
     if (input.description !== undefined) updates.description = input.description ?? null;
-    if (input.status !== undefined) updates.status = input.status;
+    if (input.status !== undefined) {
+      updates.status = input.status;
+      if (input.status === "active" && input.startedAt === undefined && !existing.startedAt) {
+        updates.startedAt = now;
+      }
+      if (isTerminalMissionStatus(input.status) && input.completedAt === undefined) {
+        updates.completedAt = now;
+      }
+      if (!isTerminalMissionStatus(input.status) && input.completedAt === undefined) {
+        updates.completedAt = null;
+      }
+    }
     if (input.goalId !== undefined) updates.goalId = input.goalId;
     if (input.startedAt !== undefined) updates.startedAt = input.startedAt;
     if (input.completedAt !== undefined) updates.completedAt = input.completedAt;
@@ -2530,7 +2670,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .where(eq(missions.id, id));
 
     if (isTerminalMissionStatus(input.status)) {
-      const now = new Date();
       const terminalPlanStatus = input.status === "completed" ? "completed" : "archived";
 
       if (input.status === "cancelled") {
@@ -2615,6 +2754,23 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           .update(agentRuntimeState)
           .set({ lastError: null, sessionId: null, updatedAt: now })
           .where(inArray(agentRuntimeState.agentId, affectedAgentIds));
+      }
+
+      if (input.status === "completed") {
+        await completeOpenMissionOversightIfSettled(
+          { ...existing, status: "completed", completedAt: updates.completedAt ?? existing.completedAt ?? now },
+          updates.completedAt ?? existing.completedAt ?? now,
+        );
+      }
+
+      try {
+        const { missionDelegationService } = await import("./mission-delegations.js");
+        await missionDelegationService(db).finalizeTargetMission({
+          targetMissionId: id,
+          targetStatus: input.status,
+        });
+      } catch (err) {
+        logger.warn({ err, missionId: id, status: input.status }, "failed to finalize delegated target mission");
       }
     }
 
@@ -2822,7 +2978,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     );
 
     const nativeDetails = runs.map(({ run, workflowName, workflowSteps }) => {
-      const definitionSteps = ((workflowSteps as WorkflowStep[] | null) ?? []) as WorkflowStep[];
+      const definitionSteps = normalizeWorkflowStepsForExecution(workflowSteps);
       const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
       const rawStepRuns = [...(stepRunsMap.get(run.id) ?? [])].sort((left, right) => {
         const leftIndex = definitionStepOrder.get(left.stepId) ?? Number.MAX_SAFE_INTEGER;

@@ -76,6 +76,70 @@ function buildRecentIssueCommentsBrief(value: unknown) {
   ], "\n");
 }
 
+function buildHermesChatBrief(value: unknown) {
+  const chat = asRecord(value);
+  if (!chat) return null;
+
+  const currentMessage = asString(chat.currentMessage);
+  const sessionId = asString(chat.sessionId);
+  const sessionTitle = asString(chat.sessionTitle);
+  const recentMessages = Array.isArray(chat.recentMessages)
+    ? chat.recentMessages.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const instructions = Array.isArray(chat.instructions)
+    ? chat.instructions.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+  const currentPage = asRecord(chat.currentPage);
+  const attachments = Array.isArray(chat.attachments)
+    ? chat.attachments.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+
+  if (!currentMessage && recentMessages.length === 0) return null;
+
+  const messageLines = recentMessages.slice(-14).map((message) => {
+    const role = asString(message.role) ?? "message";
+    const body = asString(message.body);
+    if (!body) return null;
+    return `- ${role}: ${truncateBriefLine(body, 420)}`;
+  }).filter((line): line is string => line !== null);
+  const currentPageFacts = asRecord(currentPage?.facts);
+  const currentPageFactsLine = currentPageFacts && Object.keys(currentPageFacts).length > 0
+    ? truncateBriefLine(JSON.stringify(currentPageFacts), 4_000)
+    : null;
+  const attachmentLines = attachments.slice(0, 6).flatMap((attachment) => {
+    const name = asString(attachment.name) ?? "attachment";
+    const contentType = asString(attachment.contentType) ?? "application/octet-stream";
+    const kind = asString(attachment.kind) ?? (contentType.startsWith("image/") ? "image" : "file");
+    const size = typeof attachment.size === "number" ? attachment.size : null;
+    const text = asString(attachment.text);
+    return [
+      `- ${kind}: ${name} (${contentType}${size !== null ? `, ${size} bytes` : ""})`,
+      text ? `  Content excerpt: ${truncateBriefLine(text, 1_500)}` : null,
+    ].filter((line): line is string => line !== null);
+  });
+
+  return joinPromptSections([
+    "Hermes web chat:",
+    sessionId ? `- Session: ${sessionId}` : null,
+    sessionTitle ? `- Title: ${sessionTitle}` : null,
+    instructions.length > 0 ? "Instructions:" : null,
+    ...instructions.slice(0, 8).map((instruction) => `- ${instruction}`),
+    currentPage ? "Current Paperclip page:" : null,
+    asString(currentPage?.kind) ? `- Kind: ${asString(currentPage?.kind)}` : null,
+    asString(currentPage?.path) ? `- Path: ${asString(currentPage?.path)}` : null,
+    asString(currentPage?.title) ? `- Title: ${asString(currentPage?.title)}` : null,
+    asString(currentPage?.status) ? `- Status: ${asString(currentPage?.status)}` : null,
+    asString(currentPage?.summary) ? `- Summary: ${truncateBriefLine(asString(currentPage?.summary)!, 420)}` : null,
+    currentPageFactsLine ? `- Facts: ${currentPageFactsLine}` : null,
+    attachmentLines.length > 0 ? "Current operator attachments:" : null,
+    ...attachmentLines,
+    messageLines.length > 0 ? "Recent conversation:" : null,
+    ...messageLines,
+    currentMessage ? "Current operator message:" : null,
+    currentMessage ? currentMessage : null,
+  ], "\n");
+}
+
 function summarizeMarkdownHandoff(markdown: string | null) {
   const trimmed = markdown?.trim();
   if (!trimmed) return null;
@@ -178,6 +242,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const handoff = asRecord(context.paperclipSessionHandoff);
   const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
   const recentIssueCommentsLine = buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
+  const hermesChatLine = buildHermesChatBrief(context.paperclipHermesChat);
 
   const taskKey = asString(manifest?.taskKey ?? context.taskKey);
   const issueId = asString(manifest?.issueId ?? context.issueId);
@@ -392,6 +457,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionOwnerPlanningContextLine,
     workflowToolContractLine,
     recentIssueCommentsLine,
+    hermesChatLine,
     fileViewsLine,
     guardrailLine,
     handoffSummary,

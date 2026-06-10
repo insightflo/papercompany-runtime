@@ -7,11 +7,12 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issues, issueComments, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
+import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 
 /**
@@ -25,10 +26,60 @@ export interface WorkflowStep {
   description?: string;
   toolNames?: string[];
   knowledgeBaseIds?: string[];
+  triggerOn?: "normal" | "escalation";
+  /**
+   * Dynamic owner-plan marker. In this mode the native workflow engine only
+   * launches bootstrap/root planning steps; the owner plan creates concrete
+   * mission child issues dynamically rather than the static DAG activating
+   * every declared downstream step.
+   */
+  dynamicChildren?: boolean | string;
+  ownerPlanBootstrapOnly?: boolean | string;
+  bootstrapOnly?: boolean | string;
+  executionMode?: "static_dag" | "dynamic_owner_plan" | string;
+  workflowMode?: "static_dag" | "dynamic_owner_plan" | string;
 }
+
+export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
+
+type PersistedWorkflowStep = WorkflowStep & {
+  title?: unknown;
+  dependsOn?: unknown;
+  tools?: unknown;
+  toolName?: unknown;
+  toolArgs?: unknown;
+  type?: unknown;
+  agentName?: unknown;
+};
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
 const WORKFLOW_STEP_SUCCESS_STATUSES = new Set(["completed"]);
+
+export type WorkflowToolStepExecutionRequest = {
+  companyId: string;
+  workflowRunId: string;
+  workflowId: string;
+  stepId: string;
+  stepRunId: string;
+  toolName: string;
+  args: unknown;
+  requestId: string;
+};
+
+export type WorkflowToolStepExecutionResult = {
+  accepted?: boolean;
+  duplicate?: boolean;
+};
+
+export type WorkflowToolStepExecutor = (
+  request: WorkflowToolStepExecutionRequest,
+) => Promise<WorkflowToolStepExecutionResult | void>;
+
+let workflowToolStepExecutor: WorkflowToolStepExecutor | null = null;
+
+export function setWorkflowToolStepExecutor(executor: WorkflowToolStepExecutor | null): void {
+  workflowToolStepExecutor = executor;
+}
 
 type WorkflowExecutionContext = {
   run: typeof workflowRuns.$inferSelect;
@@ -36,6 +87,142 @@ type WorkflowExecutionContext = {
   steps: WorkflowStep[];
   stepRuns: (typeof workflowStepRuns.$inferSelect)[];
 };
+
+type WorkflowDefinitionExecutionShape = {
+  name?: unknown;
+  executionMode?: unknown;
+  dynamicPlanBootstrapOnly?: unknown;
+  workflowMode?: unknown;
+  steps?: WorkflowStep[];
+};
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const strings = value
+      .map((item) => typeof item === "string" ? item.trim() : "")
+      .filter(Boolean);
+    return strings.length > 0 ? strings : undefined;
+  }
+  if (typeof value === "string") {
+    const strings = value.split(",").map((item) => item.trim()).filter(Boolean);
+    return strings.length > 0 ? strings : undefined;
+  }
+  return undefined;
+}
+
+export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowStep[] {
+  if (!Array.isArray(rawSteps)) return [];
+  return rawSteps.map((rawStep) => {
+    const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as PersistedWorkflowStep;
+    const dependencies = normalizeStringArray(step.dependencies) ?? normalizeStringArray(step.dependsOn) ?? [];
+    const toolNames = normalizeStringArray(step.toolNames)
+      ?? normalizeStringArray(step.tools)
+      ?? normalizeStringArray(step.toolName);
+    return {
+      ...step,
+      id: typeof step.id === "string" && step.id.trim() ? step.id.trim() : crypto.randomUUID(),
+      name: typeof step.name === "string" && step.name.trim()
+        ? step.name.trim()
+        : typeof step.title === "string" && step.title.trim()
+          ? step.title.trim()
+          : typeof step.id === "string" && step.id.trim()
+            ? step.id.trim()
+            : "Untitled step",
+      agentId: typeof step.agentId === "string" ? step.agentId : "",
+      dependencies,
+      ...(toolNames ? { toolNames } : {}),
+    };
+  });
+}
+
+function isTruthyBooleanMarker(value: unknown): boolean {
+  return value === true || value === "true" || value === "1";
+}
+
+function getNormalWorkflowSteps(steps: WorkflowStep[]): WorkflowStep[] {
+  return steps.filter((step) => step.triggerOn !== "escalation");
+}
+
+function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
+  return isTruthyBooleanMarker(step.dynamicChildren)
+    || isTruthyBooleanMarker(step.ownerPlanBootstrapOnly)
+    || isTruthyBooleanMarker(step.bootstrapOnly)
+    || step.executionMode === "dynamic_owner_plan"
+    || step.workflowMode === "dynamic_owner_plan";
+}
+
+function hasRootPlanningStep(steps: WorkflowStep[]): boolean {
+  return steps.some((step) => {
+    if (step.triggerOn === "escalation" || step.dependencies.length > 0) {
+      return false;
+    }
+    const id = step.id.toLowerCase();
+    const name = step.name.toLowerCase();
+    return id === "plan" || id.endsWith("-plan") || name.includes("plan") || name.includes("계획");
+  });
+}
+
+function isLegacyResearchDailyWorkflowName(name: unknown): boolean {
+  if (typeof name !== "string") return false;
+  const normalized = name.trim().toLowerCase();
+  return normalized === "tech-scout"
+    || normalized === "tech-ai-news"
+    || normalized === "daily-tech-scout"
+    || normalized === "daily-tech-ai-news";
+}
+
+export function isDynamicOwnerPlanWorkflowDefinition(
+  definition: WorkflowDefinitionExecutionShape,
+): boolean {
+  if (definition.executionMode === "static_dag" || definition.workflowMode === "static_dag") {
+    return false;
+  }
+
+  if (
+    definition.executionMode === "dynamic_owner_plan"
+    || definition.workflowMode === "dynamic_owner_plan"
+    || isTruthyBooleanMarker(definition.dynamicPlanBootstrapOnly)
+  ) {
+    return true;
+  }
+
+  const steps = Array.isArray(definition.steps) ? definition.steps : [];
+  if (steps.some(isDynamicOwnerPlanStep)) {
+    return true;
+  }
+
+  return isLegacyResearchDailyWorkflowName(definition.name) && hasRootPlanningStep(steps);
+}
+
+function getWorkflowLaunchSteps(
+  steps: WorkflowStep[],
+  options: { dynamicOwnerPlan?: boolean } = {},
+): WorkflowStep[] {
+  if (!options.dynamicOwnerPlan) return steps;
+  return steps.filter((step) => step.triggerOn !== "escalation" && step.dependencies.length === 0);
+}
+
+function buildWorkflowDefinitionExecutionShape(context: WorkflowExecutionContext): WorkflowDefinitionExecutionShape {
+  const definitionMeta = context.definition as typeof workflowDefinitions.$inferSelect & {
+    executionMode?: unknown;
+    dynamicPlanBootstrapOnly?: unknown;
+    workflowMode?: unknown;
+  };
+  return {
+    name: context.definition.name,
+    executionMode: definitionMeta.executionMode,
+    dynamicPlanBootstrapOnly: definitionMeta.dynamicPlanBootstrapOnly,
+    workflowMode: definitionMeta.workflowMode,
+    steps: context.steps,
+  };
+}
+
+function getDynamicLaunchStepIds(context: WorkflowExecutionContext): Set<string> | undefined {
+  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(buildWorkflowDefinitionExecutionShape(context));
+  if (!dynamicOwnerPlan) return undefined;
+  return new Set(getWorkflowLaunchSteps(context.steps, { dynamicOwnerPlan }).map((step) => step.id));
+}
+
 
 /**
  * Validates that a workflow DAG is acyclic and well-formed.
@@ -168,7 +355,7 @@ async function loadWorkflowExecutionContext(db: Db, runId: string): Promise<Work
     run: typeof workflowRuns.$inferSelect;
     definition: typeof workflowDefinitions.$inferSelect;
   };
-  const steps: WorkflowStep[] = (definition.stepsJson as WorkflowStep[]) || [];
+  const steps = normalizeWorkflowStepsForExecution(definition.stepsJson);
   const stepRuns = await db
     .select()
     .from(workflowStepRuns)
@@ -276,6 +463,28 @@ async function syncStepRunsFromIssueState(
     .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
 }
 
+async function resetSkippedUnlaunchedStepRuns(
+  db: Db,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  const skipped = stepRuns.filter((stepRun) => stepRun.status === "skipped" && stepRun.issueId == null);
+  if (skipped.length === 0) return stepRuns;
+
+  await db
+    .update(workflowStepRuns)
+    .set({
+      status: "pending",
+      startedAt: null,
+      completedAt: null,
+    })
+    .where(inArray(workflowStepRuns.id, skipped.map((stepRun) => stepRun.id)));
+
+  return db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
+}
+
 async function createWorkflowStepIssue(input: {
   db: Db;
   run: typeof workflowRuns.$inferSelect;
@@ -285,19 +494,87 @@ async function createWorkflowStepIssue(input: {
   const issueSvc = issueService(input.db);
   const heartbeat = heartbeatService(input.db);
 
-  const assigneeAgentId = typeof input.step.agentId === "string" && input.step.agentId.trim()
-    ? input.step.agentId.trim()
-    : undefined;
+  const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, input.step);
+  const dependencyIssueRows = input.step.dependencies.length > 0
+    ? await input.db
+      .select({
+        stepId: workflowStepRuns.stepId,
+        issueId: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+      })
+      .from(workflowStepRuns)
+      .innerJoin(issues, eq(workflowStepRuns.issueId, issues.id))
+      .where(and(
+        eq(workflowStepRuns.workflowRunId, input.run.id),
+        inArray(workflowStepRuns.stepId, input.step.dependencies),
+      ))
+    : [];
+  const dependencyWorkProductRows = dependencyIssueRows.length > 0
+    ? await input.db
+      .select({
+        issueId: issueWorkProducts.issueId,
+        title: issueWorkProducts.title,
+        type: issueWorkProducts.type,
+        provider: issueWorkProducts.provider,
+        url: issueWorkProducts.url,
+        externalId: issueWorkProducts.externalId,
+        metadata: issueWorkProducts.metadata,
+        status: issueWorkProducts.status,
+      })
+      .from(issueWorkProducts)
+      .where(inArray(issueWorkProducts.issueId, dependencyIssueRows.map((row) => row.issueId)))
+    : [];
+  const dependencyWorkProductsByIssueId = new Map<string, typeof dependencyWorkProductRows>();
+  for (const product of dependencyWorkProductRows) {
+    const products = dependencyWorkProductsByIssueId.get(product.issueId) ?? [];
+    products.push(product);
+    dependencyWorkProductsByIssueId.set(product.issueId, products);
+  }
+  const dependencyIssueLines = dependencyIssueRows.flatMap((row) => {
+    const label = row.identifier ?? row.issueId;
+    const products = dependencyWorkProductsByIssueId.get(row.issueId) ?? [];
+    return [
+      `- ${row.stepId}: ${label} (${row.status}) — ${row.title}`,
+      products.length > 0
+        ? `  workProducts: ${products.map((product) => {
+          const artifactRef = product.url ?? product.externalId ?? (
+            product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
+          );
+          return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
+        }).join("; ")}`
+        : "  workProducts: none registered",
+    ];
+  });
 
   const stepName = input.step.name.trim();
   const hasIssueGroupPrefix = /^\s*\[(?:plan|action|qa|oversight)\]/iu.test(stepName);
   const title = hasIssueGroupPrefix
     ? `${stepName} — ${input.definition.name}`
     : `${input.definition.name}: ${stepName}`;
+  const description = [
+    input.step.description?.trim() || null,
+    "",
+    "Workflow execution boundary:",
+    `- workflowRunId: ${input.run.id}`,
+    `- workflowDefinitionId: ${input.definition.id}`,
+    `- missionId: ${input.run.missionId ?? "none"}`,
+    `- stepId: ${input.step.id}`,
+    `- dependencyStepIds: ${JSON.stringify(input.step.dependencies)}`,
+    dependencyIssueLines.length > 0 ? "Dependency issue inputs:" : null,
+    ...dependencyIssueLines,
+    "- Treat issue ids from other missions or workflow runs as out of scope, even when their titles are similar.",
+    "",
+    "Official workProduct contract:",
+    "- If this step creates or updates a file/report/HTML/PDF/dataset/deliverable, register it on this assigned issue with `POST /api/issues/{issueId}/work-products` before marking done.",
+    "- For local file artifacts, include `provider: \"local\"`, an appropriate `type`, a title, and `metadata.path` with the absolute file path; set `isPrimary: true` for the main deliverable.",
+    "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
+  ].filter((line) => line !== null).join("\n");
 
   const createdIssue = await issueSvc.create(input.run.companyId, {
     title,
-    description: input.step.description || "",
+    description,
     status: "todo",
     assigneeAgentId,
     missionId: input.run.missionId ?? null,
@@ -321,6 +598,75 @@ async function createWorkflowStepIssue(input: {
   return createdIssue.id;
 }
 
+async function wakeExistingWorkflowStepIssue(input: {
+  db: Db;
+  run: typeof workflowRuns.$inferSelect;
+  definition: typeof workflowDefinitions.$inferSelect;
+  step: WorkflowStep;
+  issueId: string;
+}) {
+  const [issue] = await input.db
+    .select({
+      id: issues.id,
+      assigneeAgentId: issues.assigneeAgentId,
+      status: issues.status,
+    })
+    .from(issues)
+    .where(eq(issues.id, input.issueId))
+    .limit(1);
+  if (!issue || issue.status !== "todo") return;
+
+  await queueIssueAssignmentWakeup({
+    heartbeat: heartbeatService(input.db),
+    issue,
+    reason: "workflow_step_runnable",
+    mutation: "workflow_resume",
+    contextSource: "workflow.resume",
+    payload: {
+      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
+      workflowRunId: input.run.id,
+      workflowDefinitionId: input.definition.id,
+      stepId: input.step.id,
+    },
+    contextSnapshot: {
+      issueId: issue.id,
+      taskId: issue.id,
+      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
+      workflowRunId: input.run.id,
+      workflowDefinitionId: input.definition.id,
+      workflowStepId: input.step.id,
+      stepId: input.step.id,
+      source: "workflow.resume",
+      wakeReason: "workflow_step_runnable",
+    },
+    requestedByActorType: "system",
+    requestedByActorId: `workflow:${input.definition.id}`,
+  });
+}
+
+async function resolveWorkflowStepAssigneeAgentId(
+  db: Db,
+  companyId: string,
+  step: WorkflowStep,
+): Promise<string | undefined> {
+  if (typeof step.agentId === "string" && step.agentId.trim()) {
+    return step.agentId.trim();
+  }
+
+  const rawAgentName = (step as PersistedWorkflowStep).agentName;
+  const agentName = typeof rawAgentName === "string"
+    ? rawAgentName.trim()
+    : "";
+  if (!agentName) return undefined;
+
+  const [agent] = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), eq(agents.name, agentName)))
+    .limit(1);
+  return agent?.id;
+}
+
 function buildStepRunMap(
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
 ): Map<string, typeof workflowStepRuns.$inferSelect> {
@@ -330,10 +676,13 @@ function buildStepRunMap(
 function findRunnableSteps(
   steps: WorkflowStep[],
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
+  options: { launchedStepIds?: Set<string> } = {},
 ): WorkflowStep[] {
   return steps.filter((step) => {
+    if (options.launchedStepIds && !options.launchedStepIds.has(step.id)) return false;
+    if (step.triggerOn === "escalation") return false;
     const stepRun = stepRunMap.get(step.id);
-    if (!stepRun || stepRun.issueId || stepRun.status !== "pending") return false;
+    if (!stepRun || stepRun.status !== "pending") return false;
     return step.dependencies.every((dependencyId) => {
       const dependencyRun = stepRunMap.get(dependencyId);
       return dependencyRun ? WORKFLOW_STEP_SUCCESS_STATUSES.has(dependencyRun.status) : false;
@@ -345,10 +694,24 @@ function isIssueLessToolStep(step: WorkflowStep): boolean {
   const hasToolNames = Array.isArray(step.toolNames)
     && step.toolNames.some((toolName) => typeof toolName === "string" && toolName.trim().length > 0);
   const agentId = typeof step.agentId === "string" ? step.agentId.trim() : "";
+  const persistedStep = step as PersistedWorkflowStep;
+  const stepType = typeof persistedStep.type === "string" ? persistedStep.type.trim().toLowerCase() : "";
+  const agentName = typeof persistedStep.agentName === "string" ? persistedStep.agentName.trim() : "";
+  if (stepType === "agent" || agentName.length > 0) return false;
   return hasToolNames && agentId.length === 0;
 }
 
-async function completeIssueLessStepRun(
+function getSingleToolStepName(step: WorkflowStep): string {
+  const toolNames = Array.isArray(step.toolNames)
+    ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
+    : [];
+  if (toolNames.length !== 1) {
+    throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received ${toolNames.length}.`);
+  }
+  return toolNames[0]!;
+}
+
+async function failToolStepRun(
   db: Db,
   stepRun: typeof workflowStepRuns.$inferSelect,
   now: Date,
@@ -356,11 +719,106 @@ async function completeIssueLessStepRun(
   await db
     .update(workflowStepRuns)
     .set({
-      status: "completed",
+      status: "failed",
       startedAt: stepRun.startedAt ?? now,
-      completedAt: stepRun.completedAt ?? now,
+      completedAt: now,
     })
     .where(eq(workflowStepRuns.id, stepRun.id));
+}
+
+async function startIssueLessToolStepRun(input: {
+  db: Db;
+  run: typeof workflowRuns.$inferSelect;
+  definition: typeof workflowDefinitions.$inferSelect;
+  step: WorkflowStep;
+  stepRun: typeof workflowStepRuns.$inferSelect;
+  now: Date;
+}): Promise<boolean> {
+  const { db, run, definition, step, stepRun, now } = input;
+
+  const toolName = getSingleToolStepName(step);
+  if (toolName === "delegate_to_company") {
+    const { startDelegatedWorkflowStep } = await import("../workflow-delegations.js");
+    const delegated = await startDelegatedWorkflowStep({
+      db,
+      run,
+      definition,
+      step,
+      stepRun,
+      args: (step as PersistedWorkflowStep).toolArgs ?? {},
+      now,
+    });
+    if (!delegated) {
+      await failToolStepRun(db, stepRun, now);
+    }
+    return delegated;
+  }
+
+  if (!workflowToolStepExecutor) {
+    await failToolStepRun(db, stepRun, now);
+    return false;
+  }
+
+  const requestId = `${run.id}:${step.id}:${Date.now()}`;
+
+  await db
+    .update(workflowStepRuns)
+    .set({
+      status: "running",
+      startedAt: stepRun.startedAt ?? now,
+      completedAt: null,
+    })
+    .where(eq(workflowStepRuns.id, stepRun.id));
+
+  try {
+    await workflowToolStepExecutor({
+      companyId: run.companyId,
+      workflowRunId: run.id,
+      workflowId: definition.id,
+      stepId: step.id,
+      stepRunId: stepRun.id,
+      toolName,
+      args: (step as PersistedWorkflowStep).toolArgs ?? {},
+      requestId,
+    });
+    return true;
+  } catch {
+    await failToolStepRun(db, stepRun, now);
+    return false;
+  }
+}
+
+export async function completeWorkflowToolStepFromResult(
+  db: Db,
+  input: {
+    companyId: string;
+    stepRunId: string;
+    success: boolean;
+  },
+): Promise<WorkflowExecutionResult | null> {
+  const row = await db
+    .select({ stepRun: workflowStepRuns, run: workflowRuns })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .where(eq(workflowStepRuns.id, input.stepRunId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  if (!row || row.run.companyId !== input.companyId) return null;
+
+  if (!WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status)) {
+    const now = new Date();
+    await db
+      .update(workflowStepRuns)
+      .set({
+        status: input.success ? "completed" : "failed",
+        startedAt: row.stepRun.startedAt ?? now,
+        completedAt: now,
+      })
+      .where(eq(workflowStepRuns.id, row.stepRun.id));
+  }
+
+  return syncWorkflowRunState(db, row.run.id);
 }
 
 async function finalizeWorkflowRunState(
@@ -370,7 +828,14 @@ async function finalizeWorkflowRunState(
 ): Promise<typeof workflowRuns.$inferSelect> {
   const hasFailedStep = stepRuns.some((stepRun) => stepRun.status === "failed");
   const hasActiveStep = stepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
-  const allStepsTerminal = stepRuns.length === context.steps.length && !hasActiveStep;
+  const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
+  const executableStepRuns = dynamicLaunchStepIds
+    ? stepRuns.filter((stepRun) => dynamicLaunchStepIds.has(stepRun.stepId))
+    : stepRuns;
+  const executableHasActiveStep = executableStepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
+  const allStepsTerminal = dynamicLaunchStepIds
+    ? executableStepRuns.length === dynamicLaunchStepIds.size && !executableHasActiveStep
+    : stepRuns.length === context.steps.length && !hasActiveStep;
   const nextStatus =
     context.run.status === "cancelled"
       ? "cancelled"
@@ -392,10 +857,15 @@ async function finalizeWorkflowRunState(
     .returning();
 
   const finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
-  if (finalRun.missionId && TERMINAL_WORKFLOW_STATUSES.has(finalRun.status)) {
+  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(buildWorkflowDefinitionExecutionShape(context));
+  const missionId = finalRun.missionId;
+  const shouldStopMissionRuntimes = missionId !== null
+    && TERMINAL_WORKFLOW_STATUSES.has(finalRun.status)
+    && !(dynamicOwnerPlan && finalRun.status === "completed");
+  if (shouldStopMissionRuntimes) {
     await stopMissionRuntimesForMission(db, {
       companyId: finalRun.companyId,
-      missionId: finalRun.missionId,
+      missionId,
       reason: `workflow ${finalRun.id} ${finalRun.status}`,
     });
   }
@@ -554,6 +1024,10 @@ export async function syncWorkflowRunState(
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns);
 
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
+  const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
+  if (!hasFailure && !dynamicLaunchStepIds && context.run.status !== "cancelled") {
+    stepRuns = await resetSkippedUnlaunchedStepRuns(db, stepRuns);
+  }
   if (hasFailure) {
     const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
     if (unlaunchedPendingSteps.length > 0) {
@@ -575,17 +1049,37 @@ export async function syncWorkflowRunState(
     while (shouldContinue) {
       shouldContinue = false;
       const stepRunMap = buildStepRunMap(stepRuns);
-      const runnableSteps = findRunnableSteps(context.steps, stepRunMap);
+      const runnableSteps = findRunnableSteps(context.steps, stepRunMap, {
+        launchedStepIds: dynamicLaunchStepIds,
+      });
       if (runnableSteps.length === 0) break;
 
-      let completedIssueLessStep = false;
+      let failedIssueLessToolStep = false;
       for (const step of runnableSteps) {
         const stepRun = stepRunMap.get(step.id);
         if (!stepRun) continue;
 
         if (isIssueLessToolStep(step)) {
-          await completeIssueLessStepRun(db, stepRun, new Date());
-          completedIssueLessStep = true;
+          const started = await startIssueLessToolStepRun({
+            db,
+            run: context.run,
+            definition: context.definition,
+            step,
+            stepRun,
+            now: new Date(),
+          });
+          failedIssueLessToolStep = failedIssueLessToolStep || !started;
+          continue;
+        }
+
+        if (stepRun.issueId) {
+          await wakeExistingWorkflowStepIssue({
+            db,
+            run: context.run,
+            definition: context.definition,
+            step,
+            issueId: stepRun.issueId,
+          });
           continue;
         }
 
@@ -606,7 +1100,48 @@ export async function syncWorkflowRunState(
         .from(workflowStepRuns)
         .where(eq(workflowStepRuns.workflowRunId, runId));
 
-      shouldContinue = completedIssueLessStep;
+      shouldContinue = failedIssueLessToolStep;
+    }
+  }
+
+  const hasFailureAfterLaunch = stepRuns.some((stepRun) => stepRun.status === "failed");
+  if (!hasFailure && hasFailureAfterLaunch) {
+    const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
+    if (unlaunchedPendingSteps.length > 0) {
+      const now = new Date();
+      for (const stepRun of unlaunchedPendingSteps) {
+        await db
+          .update(workflowStepRuns)
+          .set({ status: "skipped", completedAt: now })
+          .where(eq(workflowStepRuns.id, stepRun.id));
+      }
+      stepRuns = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, runId));
+    }
+    await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
+  }
+
+  if (dynamicLaunchStepIds && !hasFailure) {
+    const launchedStepRuns = stepRuns.filter((stepRun) => dynamicLaunchStepIds.has(stepRun.stepId));
+    const launchedStepsTerminal = launchedStepRuns.length === dynamicLaunchStepIds.size
+      && launchedStepRuns.every((stepRun) => WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
+    const unlaunchedPendingSteps = stepRuns.filter((stepRun) =>
+      !dynamicLaunchStepIds.has(stepRun.stepId) && stepRun.status === "pending" && stepRun.issueId == null
+    );
+    if (launchedStepsTerminal && unlaunchedPendingSteps.length > 0) {
+      const now = new Date();
+      for (const stepRun of unlaunchedPendingSteps) {
+        await db
+          .update(workflowStepRuns)
+          .set({ status: "skipped", completedAt: now })
+          .where(eq(workflowStepRuns.id, stepRun.id));
+      }
+      stepRuns = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, runId));
     }
   }
 
@@ -614,8 +1149,10 @@ export async function syncWorkflowRunState(
 
   return {
     runId,
+    workflowId: updatedRun.workflowId,
+    missionId: updatedRun.missionId,
     status: updatedRun.status as "running" | "completed" | "failed" | "cancelled",
-    completedAt: updatedRun.completedAt ?? new Date(),
+    completedAt: updatedRun.completedAt,
     error: updatedRun.status === "failed" ? "One or more workflow steps failed" : undefined,
     stepRuns: stepRuns.map((stepRun) => ({
       id: stepRun.id,
@@ -643,11 +1180,22 @@ export async function syncWorkflowRunForIssue(
     .limit(1)
     .then((rows) => rows[0] ?? null);
 
-  if (!issue || issue.originKind !== "workflow_execution" || !issue.originRunId) {
+  if (issue?.originKind === "workflow_execution" && issue.originRunId) {
+    return syncWorkflowRunState(db, issue.originRunId);
+  }
+
+  const linkedStepRun = await db
+    .select({ workflowRunId: workflowStepRuns.workflowRunId })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.issueId, issueId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  if (!linkedStepRun?.workflowRunId) {
     return null;
   }
 
-  return syncWorkflowRunState(db, issue.originRunId);
+  return syncWorkflowRunState(db, linkedStepRun.workflowRunId);
 }
 
 /**

@@ -48,6 +48,51 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Use generic-cli-executor with toolName=daily-tech-scout");
   });
 
+  it("surfaces Hermes web chat sessions as free-form operator context", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      taskKey: "hermes-chat:session-1",
+      paperclipHermesChat: {
+        sessionId: "session-1",
+        sessionTitle: "Find old report",
+        instructions: [
+          "Answer the operator directly and concisely.",
+          "This is a free-form operations chat, not a mission or issue assignment.",
+        ],
+        recentMessages: [
+          { role: "user", body: "spaceX 리포트 만든거 어디있지?", status: "sent" },
+          { role: "assistant", body: "이전 산출물을 확인해볼게요.", status: "succeeded" },
+        ],
+        currentPage: {
+          kind: "mission",
+          path: "/RES/missions/mission-1",
+          title: "SpaceX report mission",
+          status: "active",
+          summary: "Mission \"SpaceX report mission\" is active. 3 issues (1 open, 0 blocked).",
+          facts: {
+            missionId: "mission-1",
+            issues: { total: 3, openCount: 1, blockedCount: 0 },
+          },
+          loadedAt: "2026-06-09T00:00:00.000Z",
+        },
+        currentMessage: "찾으면 경로랑 관련 issue도 같이 알려줘.",
+      },
+    });
+
+    expect(brief).toContain("Hermes web chat:");
+    expect(brief).toContain("- Session: session-1");
+    expect(brief).toContain("- Title: Find old report");
+    expect(brief).toContain("This is a free-form operations chat, not a mission or issue assignment.");
+    expect(brief).toContain("Current Paperclip page:");
+    expect(brief).toContain("- Kind: mission");
+    expect(brief).toContain("- Path: /RES/missions/mission-1");
+    expect(brief).toContain("Mission \"SpaceX report mission\" is active.");
+    expect(brief).toContain("\"missionId\":\"mission-1\"");
+    expect(brief).toContain("- user: spaceX 리포트 만든거 어디있지?");
+    expect(brief).toContain("- assistant: 이전 산출물을 확인해볼게요.");
+    expect(brief).toContain("Current operator message:");
+    expect(brief).toContain("찾으면 경로랑 관련 issue도 같이 알려줘.");
+  });
+
   it("renders a compact brief from manifest and structured handoff", () => {
     const brief = buildPaperclipRuntimeBrief({
       issueId: "issue-1",

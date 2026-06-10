@@ -34,4 +34,29 @@ describe("queueIssueAssignmentWakeup", () => {
       payload: { issueId: "issue-1", mutation: "create" },
     }));
   });
+
+  it("merges workflow context into assignment wakeups", async () => {
+    const wakeup = vi.fn().mockResolvedValue({ id: "run-1" });
+
+    await queueIssueAssignmentWakeup({
+      heartbeat: { wakeup },
+      issue: { id: "issue-1", assigneeAgentId: "agent-1", status: "todo" },
+      reason: "workflow_step_runnable",
+      mutation: "workflow_resume",
+      contextSource: "workflow.resume",
+      payload: { missionId: "mission-1" },
+      contextSnapshot: { missionId: "mission-1", workflowRunId: "run-1", stepId: "step-1" },
+    });
+
+    expect(wakeup).toHaveBeenCalledWith("agent-1", expect.objectContaining({
+      payload: expect.objectContaining({ issueId: "issue-1", mutation: "workflow_resume", missionId: "mission-1" }),
+      contextSnapshot: expect.objectContaining({
+        issueId: "issue-1",
+        source: "workflow.resume",
+        missionId: "mission-1",
+        workflowRunId: "run-1",
+        stepId: "step-1",
+      }),
+    }));
+  });
 });

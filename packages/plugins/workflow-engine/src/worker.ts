@@ -9,7 +9,6 @@ import {
 import { JOB_KEYS, RUN_STATUSES, STEP_STATUSES } from "./constants.js";
 import {
   getEscalationTarget,
-  getNextSteps,
   getRetryInfo,
   getWorkflowLaunchSteps,
   isDynamicOwnerPlanWorkflowDefinition,
@@ -89,7 +88,6 @@ type ReconcilerModule = {
 };
 const OPEN_ISSUE_STATUSES = new Set(["backlog", "todo", "in_progress", "in_review", "blocked"]);
 const inflightToolResultKeys = new Set<string>();
-const inflightAdvanceWorkflowKeys = new Set<string>();
 const inflightStepActivationKeys = new Set<string>();
 const TOOL_REGISTRY_ACTION_MAX_ATTEMPTS = 3;
 const TOOL_REGISTRY_ACTION_RETRY_DELAYS_MS = [1000, 3000];
@@ -197,10 +195,6 @@ function buildToolResultIdempotencyKey(
   }
 
   return `tool-result:${stepRunId}:${success ? "success" : "failure"}`;
-}
-
-function buildAdvanceWorkflowIdempotencyKey(workflowRunId: string, stepRunId: string): string {
-  return `advance-workflow:${workflowRunId}:${stepRunId}`;
 }
 
 function buildStepActivationKey(runId: string, stepId: string): string {
@@ -2063,217 +2057,12 @@ async function advanceWorkflow(
   companyId: string,
 ): Promise<void> {
   const completedStepRun = toWorkflowStepRunRecord(stepRunRecord);
-  const advanceKey = buildAdvanceWorkflowIdempotencyKey(completedStepRun.data.runId, completedStepRun.id);
-
-  if (inflightAdvanceWorkflowKeys.has(advanceKey)) {
-    ctx.logger.info("Skipped duplicate in-flight advanceWorkflow", {
-      companyId,
-      runId: completedStepRun.data.runId,
-      stepId: completedStepRun.data.stepId,
-      stepRunId: completedStepRun.id,
-    });
-    return;
-  }
-
-  if (await checkIdempotency(ctx, advanceKey, companyId)) {
-    ctx.logger.info("Skipped already-processed advanceWorkflow", {
-      companyId,
-      runId: completedStepRun.data.runId,
-      stepId: completedStepRun.data.stepId,
-      stepRunId: completedStepRun.id,
-    });
-    return;
-  }
-
-  inflightAdvanceWorkflowKeys.add(advanceKey);
-
-  try {
-  const workflowRun = await getWorkflowRun(ctx, completedStepRun.data.runId);
-
-  if (!workflowRun) {
-    ctx.logger.warn("Workflow run not found while advancing workflow", {
-      companyId,
-      runId: completedStepRun.data.runId,
-      stepId: completedStepRun.data.stepId,
-    });
-    return;
-  }
-
-  const typedWorkflowRun = toWorkflowRunRecord(workflowRun);
-  if (typedWorkflowRun.data.status !== RUN_STATUSES.running) {
-    return;
-  }
-
-  const workflowDefinition = await getWorkflowDefinition(ctx, typedWorkflowRun.data.workflowId);
-  if (!workflowDefinition) {
-    ctx.logger.warn("Workflow definition not found while advancing workflow", {
-      companyId,
-      runId: typedWorkflowRun.id,
-      stepId: completedStepRun.data.stepId,
-      workflowId: typedWorkflowRun.data.workflowId,
-    });
-    return;
-  }
-
-  const typedWorkflowDefinition = toWorkflowDefinitionRecord(workflowDefinition);
-  const stepRuns = (await listStepRuns(ctx, typedWorkflowRun.id, companyId)).map(toWorkflowStepRunRecord);
-  const completed = new Set<string>();
-  const failed = new Set<string>();
-  const skipped = new Set<string>();
-
-  for (const candidate of stepRuns) {
-    if (candidate.data.status === STEP_STATUSES.done) {
-      completed.add(candidate.data.stepId);
-      continue;
-    }
-
-    if (candidate.data.status === STEP_STATUSES.failed) {
-      failed.add(candidate.data.stepId);
-      continue;
-    }
-
-    if (candidate.data.status === STEP_STATUSES.skipped) {
-      skipped.add(candidate.data.stepId);
-    }
-  }
-
-  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(typedWorkflowDefinition.data);
-  const bootstrapStepIds = new Set(
-    getWorkflowLaunchSteps(typedWorkflowDefinition.data.steps, { dynamicOwnerPlan }).map((step) => step.id),
-  );
-  const launchedStepIds = dynamicOwnerPlan
-    ? new Set(stepRuns
-      .filter(
-        (candidate) => candidate.data.status !== STEP_STATUSES.backlog || bootstrapStepIds.has(candidate.data.stepId),
-      )
-      .map((candidate) => candidate.data.stepId))
-    : new Set(stepRuns.map((candidate) => candidate.data.stepId));
-  const nextSteps = getNextSteps(
-    typedWorkflowDefinition.data.steps,
-    completed,
-    failed,
-    skipped,
-    { dynamicOwnerPlan, launchedStepIds },
-  );
-  const stepRunsById = new Map(stepRuns.map((candidate) => [candidate.data.stepId, candidate]));
-
-  for (const stepId of nextSteps.readyStepIds) {
-    const stepDef = findStepDefinition(typedWorkflowDefinition, stepId);
-    if (!stepDef) {
-      ctx.logger.warn("Ready workflow step definition not found", {
-        companyId,
-        runId: typedWorkflowRun.id,
-        stepId,
-      });
-      continue;
-    }
-
-    let stepRun = stepRunsById.get(stepId) ?? null;
-    if (!stepRun) {
-      const resolvedAgent = await resolveStepAgent(ctx, companyId, stepDef);
-      if (!resolvedAgent.agentName) {
-        ctx.logger.warn("Unable to create missing step run without agent assignment", {
-          companyId,
-          runId: typedWorkflowRun.id,
-          stepId,
-        });
-        continue;
-      }
-
-      stepRun = toWorkflowStepRunRecord(await createStepRun(ctx, companyId, {
-        agentName: resolvedAgent.agentName,
-        retryCount: 0,
-        runId: typedWorkflowRun.id,
-        status: STEP_STATUSES.backlog,
-        stepId,
-      }));
-      stepRunsById.set(stepId, stepRun);
-    }
-
-    await activateBacklogStep(
-      ctx,
-      stepRun,
-      stepDef,
-      typedWorkflowRun.data.workflowName,
-      companyId,
-      {
-        parentIssueId: typedWorkflowRun.data.parentIssueId,
-        projectId: typedWorkflowDefinition.data.projectId,
-        goalId: typedWorkflowDefinition.data.goalId,
-        labelIds: typedWorkflowDefinition.data.labelIds as string[] | undefined,
-        runLabel: typedWorkflowRun.data.runLabel,
-        templateVars: {
-          date: resolveWorkflowRunDate(typedWorkflowRun, typedWorkflowDefinition),
-          runNumber: resolveWorkflowRunNumber(typedWorkflowRun),
-          runLabel: typedWorkflowRun.data.runLabel ?? "",
-          workflowName: typedWorkflowRun.data.workflowName,
-        },
-      },
-    );
-  }
-
-  if (dynamicOwnerPlan && nextSteps.isWorkflowComplete) {
-    for (const stepRun of stepRuns) {
-      if (launchedStepIds.has(stepRun.data.stepId) || stepRun.data.status !== STEP_STATUSES.backlog) {
-        continue;
-      }
-
-      await updateStepRun(ctx, stepRun.id, {
-        completedAt: stepRun.data.completedAt ?? new Date().toISOString(),
-        status: STEP_STATUSES.skipped,
-      });
-    }
-  }
-
-  if (!nextSteps.isWorkflowComplete || (typedWorkflowRun.data.status as string) === RUN_STATUSES.completed) {
-    await markIdempotency(ctx, advanceKey, companyId);
-    return;
-  }
-
-  await updateWorkflowRun(ctx, typedWorkflowRun.id, {
-    completedAt: typedWorkflowRun.data.completedAt ?? new Date().toISOString(),
-    status: RUN_STATUSES.completed,
-  });
-
-  const parentIssueId = typeof typedWorkflowRun.data.parentIssueId === "string"
-    ? typedWorkflowRun.data.parentIssueId.trim()
-    : "";
-  if (parentIssueId) {
-    try {
-      const parentIssue = await ctx.issues.get(parentIssueId, companyId);
-      if (parentIssue && parentIssue.status !== "done" && parentIssue.status !== "cancelled") {
-        await ctx.issues.update(parentIssueId, { status: "done" } as IssueUpdatePatch, companyId);
-        await ctx.issues.createComment(
-          parentIssueId,
-          [
-            "### Workflow run completed",
-            "",
-            `Workflow \`${typedWorkflowRun.data.workflowName}\` finished successfully.`,
-            `Run: \`${typedWorkflowRun.data.runLabel ?? typedWorkflowRun.id}\``,
-          ].join("\n"),
-          companyId,
-        );
-      }
-    } catch (error) {
-      ctx.logger.warn("Failed to mark workflow parent issue done during completion", {
-        companyId,
-        error: summarizeError(error),
-        parentIssueId,
-        runId: typedWorkflowRun.id,
-      });
-    }
-  }
-
-  ctx.logger.info("Workflow completed", {
+  ctx.logger.info("Skipped legacy plugin workflow advancement; server native DAG owns execution", {
     companyId,
-    runId: typedWorkflowRun.id,
-    workflowId: typedWorkflowRun.data.workflowId,
-    workflowName: typedWorkflowRun.data.workflowName,
+    runId: completedStepRun.data.runId,
+    stepId: completedStepRun.data.stepId,
+    stepRunId: completedStepRun.id,
   });
-  await markIdempotency(ctx, advanceKey, companyId);
-  } finally {
-    inflightAdvanceWorkflowKeys.delete(advanceKey);
-  }
 }
 
 async function activateEscalationStep(

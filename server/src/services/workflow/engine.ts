@@ -8,7 +8,7 @@
 import type { Db } from "@paperclipai/db";
 import { agents } from "@paperclipai/db";
 import { eq, asc } from "drizzle-orm";
-import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
+import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { missionService } from "../missions.js";
 import {
   createWorkflowDefinition,
@@ -22,6 +22,7 @@ import {
   listWorkflowStepRuns,
   getWorkflowStepExecutionContractForIssue,
   updateWorkflowRunStatus,
+  resumeWorkflowRun,
 } from "./workflow-store.js";
 import type {
   WorkflowDefinition,
@@ -33,42 +34,47 @@ import type {
   WorkflowExecutionResult,
   WorkflowStepExecutionContract,
 } from "./types.js";
-import type { WorkflowStep } from "./dag-engine.js";
+import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 
 type WorkflowStepLike = WorkflowStep & {
   title?: unknown;
   dependsOn?: unknown;
   tools?: unknown;
+  toolName?: unknown;
   agentName?: unknown;
 };
 
-function normalizeWorkflowSteps(steps: unknown[]): WorkflowStep[] {
-  return steps.map((rawStep) => {
+function normalizeWorkflowSteps(
+  steps: unknown[],
+  options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown } = {},
+): WorkflowStep[] {
+  const normalizedSteps = steps.map((rawStep) => {
     const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as WorkflowStepLike;
-    const dependencies = Array.isArray(step.dependencies)
-      ? step.dependencies
-      : Array.isArray(step.dependsOn)
-        ? step.dependsOn
-        : [];
-    const toolNames = Array.isArray(step.toolNames)
-      ? step.toolNames
-      : typeof step.tools === "string"
-        ? step.tools.split(",").map((tool) => tool.trim()).filter(Boolean)
-        : undefined;
+    const normalized = normalizeWorkflowStepsForExecution([step])[0]!;
+    const toolNames = normalized.toolNames;
 
     return {
       ...step,
-      id: typeof step.id === "string" ? step.id : crypto.randomUUID(),
-      name: typeof step.name === "string"
-        ? step.name
-        : typeof step.title === "string"
-          ? step.title
-          : typeof step.id === "string"
-            ? step.id
-            : "Untitled step",
-      agentId: typeof step.agentId === "string" ? step.agentId : "",
-      dependencies,
+      id: normalized.id,
+      name: normalized.name,
+      agentId: normalized.agentId,
+      dependencies: normalized.dependencies,
       ...(toolNames ? { toolNames } : {}),
+    };
+  });
+
+  const dynamicOwnerPlan = options.executionMode === "dynamic_owner_plan"
+    || options.dynamicPlanBootstrapOnly === true
+    || options.dynamicPlanBootstrapOnly === "true";
+  if (!dynamicOwnerPlan) return normalizedSteps;
+
+  return normalizedSteps.map((step) => {
+    if (step.triggerOn === "escalation" || step.dependencies.length > 0) return step;
+    return {
+      ...step,
+      dynamicChildren: step.dynamicChildren ?? true,
+      ownerPlanBootstrapOnly: step.ownerPlanBootstrapOnly ?? true,
+      executionMode: step.executionMode ?? "dynamic_owner_plan",
     };
   });
 }
@@ -137,7 +143,9 @@ export const workflowService = {
     db: Db,
     input: CreateWorkflowDefinitionInput,
   ): Promise<WorkflowDefinition> {
-    const steps = normalizeWorkflowSteps(input.steps as unknown[]);
+    const steps = normalizeWorkflowSteps(input.steps as unknown[], {
+      executionMode: input.executionMode,
+    });
     // Validate DAG structure
     const validation = validateDag(steps);
     if (!validation.valid) {
@@ -170,7 +178,9 @@ export const workflowService = {
     updates: Partial<Omit<WorkflowDefinition, "id" | "createdAt" | "updatedAt">>,
   ): Promise<WorkflowDefinition | null> {
     if (updates.steps) {
-      const steps = normalizeWorkflowSteps(updates.steps as unknown[]);
+      const steps = normalizeWorkflowSteps(updates.steps as unknown[], {
+        executionMode: updates.executionMode,
+      });
       const validation = validateDag(steps);
       if (!validation.valid) {
         throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
@@ -195,19 +205,37 @@ export const workflowService = {
     db: Db,
     input: CreateWorkflowRunInput,
   ): Promise<WorkflowExecutionResult> {
+    const workflow = await getWorkflowDefinitionById(db, input.workflowId);
+    if (!workflow) {
+      throw new Error(`Workflow definition not found: ${input.workflowId}`);
+    }
+    if (workflow.companyId !== input.companyId) {
+      throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
+    }
     const runInput = await ensureMissionForWorkflowRun(db, input);
     const run = await createWorkflowRun(db, runInput);
     if (run.missionId) {
-      const workflow = await getWorkflowDefinitionById(db, run.workflowId);
-      if (workflow) {
-        const mission = await missionService(db).getById(run.missionId);
-        if (mission) {
-          await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
-            sourceRunId: run.id,
-            workflowStepIds: workflow.steps.map((step) => step.id),
-          });
-        }
+      const mission = await missionService(db).getById(run.missionId);
+      if (mission) {
+        await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
+          sourceRunId: run.id,
+          workflowStepIds: workflow.steps.map((step) => step.id),
+        });
       }
+    }
+    return executeWorkflowRun(db, run.id);
+  },
+
+  /**
+   * Resume a workflow run through the native server DAG execution path.
+   */
+  async resumeRun(
+    db: Db,
+    input: { runId: string; companyId: string },
+  ): Promise<WorkflowExecutionResult> {
+    const run = await resumeWorkflowRun(db, input.runId, input.companyId);
+    if (!run) {
+      throw new Error(`Workflow run not found: ${input.runId}`);
     }
     return executeWorkflowRun(db, run.id);
   },

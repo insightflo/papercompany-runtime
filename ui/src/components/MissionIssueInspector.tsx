@@ -172,6 +172,7 @@ export function MissionIssueInspector({ issueId }: MissionIssueInspectorProps) {
             issueStatus={issue.status}
             onAdd={async () => {}}
             readOnly
+            timelineClassName="max-h-[min(42rem,calc(100vh-22rem))] overflow-y-auto overscroll-contain pr-2"
           />
         </div>
 

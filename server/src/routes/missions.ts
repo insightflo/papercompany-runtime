@@ -18,6 +18,7 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { missionService } from "../services/missions.js";
+import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest } from "../errors.js";
@@ -27,6 +28,7 @@ import { listMissionGovernanceThread } from "../services/missions/governance-thr
 export function missionRoutes(db: Db) {
   const router = Router();
   const heartbeat = heartbeatService(db);
+  const delegationSvc = missionDelegationService(db);
   const svc = missionService(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
       if (!issue.assigneeAgentId) return null;
@@ -66,6 +68,8 @@ export function missionRoutes(db: Db) {
           issueId: issue.id,
           missionId: mission.id,
           source: "mission_owner_planning_issue_created",
+          wakeReason: "mission_owner_planning_issue_created",
+          forceFreshSession: true,
         },
       });
     },
@@ -263,6 +267,75 @@ export function missionRoutes(db: Db) {
     });
 
     res.json(result);
+  });
+
+  /**
+   * GET /missions/:id/delegations
+   *
+   * List cross-company mission delegations created from this mission.
+   */
+  router.get("/missions/:id/delegations", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+
+    const delegations = await delegationSvc.listForMission(req.params.id);
+    res.json(delegations);
+  });
+
+  /**
+   * POST /missions/:id/delegations
+   *
+   * Create a target-company mission from this source mission and track it with
+   * a source-side blocked issue until the target mission reaches a terminal status.
+   */
+  router.post("/missions/:id/delegations", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+
+    const {
+      targetCompanyId,
+      targetOwnerAgentId,
+      title,
+      description,
+      sourceIssueTitle,
+      priority,
+      metadata,
+    } = req.body ?? {};
+    if (!targetCompanyId || !targetOwnerAgentId) {
+      throw badRequest("targetCompanyId and targetOwnerAgentId are required");
+    }
+    assertCompanyAccess(req, targetCompanyId);
+
+    const result = await delegationSvc.create({
+      sourceMissionId: req.params.id,
+      targetCompanyId,
+      targetOwnerAgentId,
+      title,
+      description,
+      sourceIssueTitle,
+      priority,
+      metadata,
+    });
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: mission.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "mission.delegation.created",
+      entityType: "mission",
+      entityId: mission.id,
+      details: {
+        delegationId: result.delegation.id,
+        targetCompanyId,
+        targetMissionId: result.targetMission.id,
+        sourceIssueId: result.sourceIssue.id,
+      },
+    });
+
+    res.status(201).json(result);
   });
 
   /**

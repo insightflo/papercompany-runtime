@@ -151,6 +151,7 @@ vi.mock("@tanstack/react-query", () => ({
 
 vi.mock("@/lib/router", () => ({
   useParams: () => ({ missionId: "mission-1" }),
+  useSearchParams: () => [new URLSearchParams(), vi.fn()],
   Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
 }));
 

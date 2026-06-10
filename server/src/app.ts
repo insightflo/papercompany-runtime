@@ -29,6 +29,7 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
 import { channelConfigRoutes } from "./routes/channel-config.js";
+import { hermesChatRoutes } from "./routes/hermes-chat.js";
 import { activityRoutes } from "./routes/activity.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
@@ -64,8 +65,10 @@ import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
 import { createMissionOwnerSupervisionMonitor } from "./services/mission-owner-supervision-monitor.js";
 import { createAlertRules, setAlertRules } from "./services/alert-rules.js";
 import { createChannelRegistry } from "./channel/index.js";
+import { registerTelegramCommands } from "./channel/telegram/commands.js";
 import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
+import { setWorkflowToolStepExecutor } from "./services/workflow/dag-engine.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -159,6 +162,7 @@ export async function createApp(
   const app = express();
 
   app.use(express.json({
+    limit: "10mb",
     verify: (req, _res, buf) => {
       (req as unknown as { rawBody: Buffer }).rawBody = buf;
     },
@@ -309,6 +313,7 @@ export async function createApp(
   api.use("/metrics", metricsRoutes());
   api.use(issueRoutes(db, opts.storageService));
   api.use("/companies", companyRoutes(db, opts.storageService));
+  api.use(hermesChatRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(companyInstructionRoutes(db));
   api.use(agentRoutes(db));
@@ -347,6 +352,34 @@ export async function createApp(
     workerManager,
     lifecycleManager: lifecycle,
     db,
+  });
+  setWorkflowToolStepExecutor(async (request) => {
+    const toolRegistryPlugin = await pluginRegistry.getByKey("insightflo.tool-registry");
+    if (!toolRegistryPlugin) {
+      throw new Error("Tool Registry plugin is not installed.");
+    }
+    if (toolRegistryPlugin.status !== "ready") {
+      throw new Error(`Tool Registry plugin is not ready (current status: ${toolRegistryPlugin.status}).`);
+    }
+    if (!workerManager.isRunning(toolRegistryPlugin.id)) {
+      throw new Error("Tool Registry plugin worker is not running.");
+    }
+
+    const result = await workerManager.call(toolRegistryPlugin.id, "performAction", {
+      key: "tool-registry.execute-workflow-tool",
+      params: {
+        requestId: request.requestId,
+        toolName: request.toolName,
+        args: request.args ?? {},
+        companyId: request.companyId,
+        workflowRunId: request.workflowRunId,
+        workflowId: request.workflowId,
+        stepId: request.stepId,
+        stepRunId: request.stepRunId,
+      },
+      renderEnvironment: null,
+    });
+    return result && typeof result === "object" ? result : undefined;
   });
   const jobCoordinator = createPluginJobCoordinator({
     db,
@@ -478,9 +511,15 @@ export async function createApp(
 
   // Initialize channel registry (Telegram bots)
   const channelRegistry = createChannelRegistry(db);
-  void channelRegistry.start().catch((err) => {
-    logger.error({ err }, "Failed to start channel registry");
-  });
+  void channelRegistry.start()
+    .then(() => {
+      for (const companyId of channelRegistry.getActiveCompanyIds()) {
+        registerTelegramCommands(db, companyId);
+      }
+    })
+    .catch((err) => {
+      logger.error({ err }, "Failed to start channel registry");
+    });
 
   // Initialize alert rules — broadcast to all registered Telegram chats
   const alertRules = createAlertRules(

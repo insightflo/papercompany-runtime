@@ -8,11 +8,13 @@ import {
   createDb,
   heartbeatRuns,
   issueComments,
+  issueWorkProducts,
   issues,
   missionPlanArtifacts,
   missions,
   pluginEntities,
   plugins,
+  workflowDelegations,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -32,7 +34,13 @@ vi.mock("../services/heartbeat.js", () => ({
 
 import { issueService } from "../services/issues.ts";
 import { missionService } from "../services/missions.js";
-import { executeWorkflowRun, syncWorkflowRunForIssue } from "../services/workflow/dag-engine.js";
+import {
+  completeWorkflowToolStepFromResult,
+  executeWorkflowRun,
+  normalizeWorkflowStepsForExecution,
+  setWorkflowToolStepExecutor,
+  syncWorkflowRunForIssue,
+} from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -43,6 +51,42 @@ if (!embeddedPostgresSupport.supported) {
     `Skipping embedded Postgres workflow DAG tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
 }
+
+describe("normalizeWorkflowStepsForExecution", () => {
+  it("normalizes legacy plugin workflow step payloads for native DAG execution", () => {
+    expect(
+      normalizeWorkflowStepsForExecution([
+        {
+          id: "generate-infographic",
+          title: "Tech Scout 교육만화 생성",
+          tools: ["generate-tech-scout-knowledge-comic"],
+          dependsOn: ["scout-and-report"],
+        },
+        {
+          id: "send-telegram",
+          title: "텔레그램으로 PNG 전송",
+          toolName: "send-telegram",
+          dependsOn: ["generate-infographic"],
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "generate-infographic",
+        name: "Tech Scout 교육만화 생성",
+        agentId: "",
+        dependencies: ["scout-and-report"],
+        toolNames: ["generate-tech-scout-knowledge-comic"],
+      }),
+      expect.objectContaining({
+        id: "send-telegram",
+        name: "텔레그램으로 PNG 전송",
+        agentId: "",
+        dependencies: ["generate-infographic"],
+        toolNames: ["send-telegram"],
+      }),
+    ]);
+  });
+});
 
 describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
   let db!: ReturnType<typeof createDb>;
@@ -55,8 +99,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
   afterEach(async () => {
     heartbeatWakeup.mockReset();
+    setWorkflowToolStepExecutor(null);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
+    await db.delete(issueWorkProducts);
+    await db.delete(workflowDelegations);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
@@ -178,6 +225,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue).toMatchObject({
       companyId,
       title: "Roadmap Workflow: Draft plan",
+      description: expect.stringContaining(`workflowRunId: ${runId}`),
       status: "todo",
       assigneeAgentId: agentId,
       missionId: null,
@@ -186,6 +234,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       originRunId: runId,
     });
     expect(createdIssue?.identifier).toMatch(/^WF[A-Z0-9]+-1$/);
+    expect(createdIssue?.description).toContain(`workflowDefinitionId: ${workflowId}`);
+    expect(createdIssue?.description).toContain("missionId: none");
+    expect(createdIssue?.description).toContain(`stepId: ${stepId}`);
+    expect(createdIssue?.description).toContain("dependencyStepIds: []");
+    expect(createdIssue?.description).toContain("Treat issue ids from other missions or workflow runs as out of scope");
+    expect(createdIssue?.description).toContain("Official workProduct contract:");
+    expect(createdIssue?.description).toContain(`POST /api/issues/{issueId}/work-products`);
 
     const activity = await db
       .select()
@@ -221,6 +276,113 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .where(eq(workflowRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     expect(workflowRun?.status).toBe("running");
+  });
+
+  it("wakes an existing todo workflow step issue when a run is resumed", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const stepId = "deliver-report";
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-resume" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Resume Workflow",
+      issuePrefix: `RW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Resume Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Resume Mission",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Resume Workflow",
+      stepsJson: [
+        {
+          id: stepId,
+          name: "Deliver report",
+          agentId,
+          dependencies: [],
+          description: "Deliver the report",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+    });
+    const existingIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: agentId,
+      missionId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+      status: "todo",
+      title: "Resume Workflow: Deliver report",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: randomUUID(),
+      workflowRunId: runId,
+      stepId,
+      issueId: existingIssue.id,
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("running");
+    const issueRows = await db.select().from(issues).where(eq(issues.originRunId, runId));
+    expect(issueRows.map((issue) => issue.id)).toEqual([existingIssue.id]);
+    expect(heartbeatWakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: existingIssue.id,
+        mutation: "workflow_resume",
+        missionId,
+        workflowRunId: runId,
+        workflowDefinitionId: workflowId,
+        stepId,
+      }),
+      requestedByActorType: "system",
+      requestedByActorId: `workflow:${workflowId}`,
+      contextSnapshot: expect.objectContaining({
+        issueId: existingIssue.id,
+        taskId: existingIssue.id,
+        missionId,
+        workflowRunId: runId,
+        workflowDefinitionId: workflowId,
+        workflowStepId: stepId,
+        stepId,
+        source: "workflow.resume",
+        wakeReason: "workflow_step_runnable",
+      }),
+    }));
   });
 
   it("creates a mission for a workflow trigger without an existing mission and links run and step issues", async () => {
@@ -370,8 +532,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       {
         id: agentBId,
         companyId,
-        name: "Workflow Agent B",
-        role: "engineer",
+        name: "Synthesis Editor",
+        role: "pm",
         status: "active",
         adapterType: "codex_local",
         adapterConfig: {},
@@ -407,6 +569,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const issueSvc = issueService(db);
     const initial = await executeWorkflowRun(db, runId);
     expect(initial.status).toBe("running");
+    expect(initial.completedAt).toBeNull();
     expect(initial.stepRuns).toHaveLength(2);
 
     const initialStepRuns = await db
@@ -428,6 +591,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await issueSvc.update(planIssue!.id, { status: "done" });
     const afterPlan = await syncWorkflowRunForIssue(db, planIssue!.id);
     expect(afterPlan?.status).toBe("running");
+    expect(afterPlan?.completedAt).toBeNull();
 
     const progressedStepRuns = await db
       .select()
@@ -449,6 +613,108 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .then((rows) => rows[0] ?? null);
     expect(workflowRun?.status).toBe("completed");
     expect(workflowRun?.completedAt).toBeTruthy();
+  });
+
+  it("advances dependent steps when a linked workflow step issue lost workflow origin metadata", async () => {
+    const companyId = randomUUID();
+    const agentAId = randomUUID();
+    const agentBId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-originless-step" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Originless Workflow",
+      issuePrefix: `WO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentAId,
+        companyId,
+        name: "Collector Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: agentBId,
+        companyId,
+        name: "Synthesis Agent",
+        role: "writer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Originless Step Workflow",
+      stepsJson: [
+        { id: "collect", name: "Collect", agentId: agentAId, dependencies: [], description: "Collect evidence" },
+        { id: "synthesize", name: "Synthesize", agentId: agentBId, dependencies: ["collect"], description: "Write report" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const issueSvc = issueService(db);
+    await executeWorkflowRun(db, runId);
+    const initialStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const collectStepRun = initialStepRuns.find((stepRun) => stepRun.stepId === "collect");
+    const synthesizeStepRun = initialStepRuns.find((stepRun) => stepRun.stepId === "synthesize");
+    expect(collectStepRun?.issueId).toBeTruthy();
+    expect(synthesizeStepRun?.issueId).toBeNull();
+
+    await db
+      .update(issues)
+      .set({
+        originKind: "manual",
+        originId: null,
+        originRunId: null,
+      })
+      .where(eq(issues.id, collectStepRun!.issueId!));
+
+    await issueSvc.update(collectStepRun!.issueId!, { status: "done" });
+    const afterCollect = await syncWorkflowRunForIssue(db, collectStepRun!.issueId!);
+    expect(afterCollect?.status).toBe("running");
+
+    const progressedStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const progressedCollect = progressedStepRuns.find((stepRun) => stepRun.stepId === "collect");
+    const progressedSynthesize = progressedStepRuns.find((stepRun) => stepRun.stepId === "synthesize");
+    expect(progressedCollect?.status).toBe("completed");
+    expect(progressedSynthesize?.issueId).toBeTruthy();
+
+    const createdSynthesisIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, progressedSynthesize!.issueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(createdSynthesisIssue).toMatchObject({
+      title: "Originless Step Workflow: Synthesize",
+      assigneeAgentId: agentBId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+    });
   });
 
   it("creates unassigned issues for workflow steps without an agent", async () => {
@@ -498,13 +764,102 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(heartbeatWakeup).not.toHaveBeenCalled();
   });
 
-  it("completes issue-less tool steps and advances dependent agent steps", async () => {
+  it("resolves legacy plugin workflow step agentName to the company agent assignee", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
 
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-agent-name" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Agent Name Workflow",
+      issuePrefix: `WN${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Technology Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      stepsJson: [
+        {
+          id: "collect-ai-news-evidence",
+          title: "TechCrunch AI 데일리 브리핑",
+          type: "agent",
+          agentName: "Technology Research Agent",
+          tools: ["techcrunch-ai-scan"],
+          dependsOn: [],
+          description: "Collect AI funding and product news.",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+    expect(result.status).toBe("running");
+
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId))
+      .limit(1);
+    expect(stepRun).toMatchObject({
+      stepId: "collect-ai-news-evidence",
+      status: "pending",
+    });
+    expect(stepRun?.issueId).toBeTruthy();
+
+    const [createdIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, stepRun!.issueId!))
+      .limit(1);
+    expect(createdIssue).toMatchObject({
+      title: "tech-ai-news: TechCrunch AI 데일리 브리핑",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+    });
+    const contract = await workflowService.getStepExecutionContractForIssue(db, createdIssue!.id);
+    expect(contract).toMatchObject({
+      workflowRunId: runId,
+      stepId: "collect-ai-news-evidence",
+      stepName: "TechCrunch AI 데일리 브리핑",
+      toolNames: [],
+    });
+    expect(heartbeatWakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
+      source: "assignment",
+      reason: "issue_assigned",
+    }));
+  });
+
+  it("dispatches issue-less tool steps and advances dependent agent steps after tool result", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
     heartbeatWakeup.mockResolvedValue({ id: "queued-run-tool-agent" });
+    setWorkflowToolStepExecutor(executeToolStep);
 
     await db.insert(companies).values({
       id: companyId,
@@ -535,6 +890,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
           description: "Load context through a workflow tool",
           toolNames: ["search-docs"],
+          toolArgs: { query: "mission context" },
         },
         {
           id: "summarize",
@@ -565,12 +921,43 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     expect(toolStep).toMatchObject({
       issueId: null,
-      status: "completed",
+      status: "running",
     });
     expect(toolStep?.startedAt).toBeTruthy();
-    expect(toolStep?.completedAt).toBeTruthy();
-    expect(agentStep?.issueId).toBeTruthy();
+    expect(toolStep?.completedAt).toBeNull();
+    expect(agentStep?.issueId).toBeNull();
     expect(agentStep?.status).toBe("pending");
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
+      companyId,
+      workflowRunId: runId,
+      workflowId,
+      stepId: "fetch-context",
+      stepRunId: toolStep!.id,
+      toolName: "search-docs",
+      args: { query: "mission context" },
+    }));
+
+    const afterToolResult = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: toolStep!.id,
+      success: true,
+    });
+    expect(afterToolResult?.status).toBe("running");
+
+    const updatedStepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const completedToolStep = updatedStepRuns.find((stepRun) => stepRun.stepId === "fetch-context");
+    const launchedAgentStep = updatedStepRuns.find((stepRun) => stepRun.stepId === "summarize");
+    expect(completedToolStep).toMatchObject({
+      issueId: null,
+      status: "completed",
+    });
+    expect(completedToolStep?.completedAt).toBeTruthy();
+    expect(launchedAgentStep?.issueId).toBeTruthy();
+    expect(launchedAgentStep?.status).toBe("pending");
 
     const createdIssues = await db.select().from(issues);
     expect(createdIssues).toHaveLength(1);
@@ -583,10 +970,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
   });
 
-  it("completes all-tool workflows without creating issues", async () => {
+  it("completes all-tool workflows from tool execution results without creating issues", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
+    setWorkflowToolStepExecutor(executeToolStep);
 
     await db.insert(companies).values({
       id: companyId,
@@ -623,14 +1013,55 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       status: "pending",
     });
 
-    const result = await executeWorkflowRun(db, runId);
-    expect(result.status).toBe("completed");
+    const initial = await executeWorkflowRun(db, runId);
+    expect(initial.status).toBe("running");
 
-    const stepRuns = await db
+    let stepRuns = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
     expect(stepRuns).toHaveLength(2);
+    expect(stepRuns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ stepId: "fetch", issueId: null, status: "running" }),
+        expect.objectContaining({ stepId: "extract", issueId: null, status: "pending" }),
+      ]),
+    );
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+    expect(executeToolStep).toHaveBeenLastCalledWith(expect.objectContaining({
+      stepId: "fetch",
+      toolName: "search-docs",
+    }));
+
+    const fetchStep = stepRuns.find((stepRun) => stepRun.stepId === "fetch")!;
+    const afterFetch = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: fetchStep.id,
+      success: true,
+    });
+    expect(afterFetch?.status).toBe("running");
+    expect(executeToolStep).toHaveBeenCalledTimes(2);
+    expect(executeToolStep).toHaveBeenLastCalledWith(expect.objectContaining({
+      stepId: "extract",
+      toolName: "extract-facts",
+    }));
+
+    stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const extractStep = stepRuns.find((stepRun) => stepRun.stepId === "extract")!;
+    const afterExtract = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: extractStep.id,
+      success: true,
+    });
+    expect(afterExtract?.status).toBe("completed");
+
+    stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
     expect(stepRuns).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ stepId: "fetch", issueId: null, status: "completed" }),
@@ -649,6 +1080,187 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .then((rows) => rows[0] ?? null);
     expect(workflowRun?.status).toBe("completed");
     expect(workflowRun?.completedAt).toBeTruthy();
+  });
+
+  it("delegates native workflow steps to another company and resumes with copied workProducts", async () => {
+    const sourceCompanyId = randomUUID();
+    const targetCompanyId = randomUUID();
+    const sourceAgentId = randomUUID();
+    const targetAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-delegation-target" });
+
+    await db.insert(companies).values([
+      {
+        id: sourceCompanyId,
+        name: "Source Company",
+        issuePrefix: `SC${sourceCompanyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: targetCompanyId,
+        name: "Target Company",
+        issuePrefix: `TC${targetCompanyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+    await db.insert(agents).values([
+      {
+        id: sourceAgentId,
+        companyId: sourceCompanyId,
+        name: "Source Synthesizer",
+        role: "Synthesis",
+        adapter: "mock",
+        adapterConfig: {},
+        status: "active",
+      },
+      {
+        id: targetAgentId,
+        companyId: targetCompanyId,
+        name: "Target Researcher",
+        role: "Research",
+        adapter: "mock",
+        adapterConfig: {},
+        status: "active",
+      },
+    ]);
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId: sourceCompanyId,
+      name: "Cross Company Workflow",
+      stepsJson: [
+        {
+          id: "request-research",
+          name: "Request Research",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["delegate_to_company"],
+          toolArgs: {
+            targetCompanyId,
+            targetAssigneeAgentId: targetAgentId,
+            title: "Research delegated input",
+            description: "Produce the research artifact for the source workflow.",
+          },
+        },
+        {
+          id: "synthesize",
+          name: "Synthesize",
+          agentId: sourceAgentId,
+          dependencies: ["request-research"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId: sourceCompanyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const initial = await executeWorkflowRun(db, runId);
+    expect(initial.status).toBe("running");
+
+    let stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const delegateStep = stepRuns.find((stepRun) => stepRun.stepId === "request-research")!;
+    const synthesizeStep = stepRuns.find((stepRun) => stepRun.stepId === "synthesize")!;
+    expect(delegateStep).toMatchObject({ status: "running" });
+    expect(delegateStep.issueId).toBeTruthy();
+    expect(synthesizeStep).toMatchObject({ status: "pending", issueId: null });
+
+    const [delegation] = await db
+      .select()
+      .from(workflowDelegations)
+      .where(eq(workflowDelegations.sourceWorkflowStepRunId, delegateStep.id));
+    expect(delegation).toMatchObject({
+      sourceCompanyId,
+      targetCompanyId,
+      status: "active",
+    });
+    expect(delegation.sourceIssueId).toBe(delegateStep.issueId);
+    expect(delegation.targetIssueId).toBeTruthy();
+
+    const [targetIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, delegation.targetIssueId));
+    expect(targetIssue).toMatchObject({
+      companyId: targetCompanyId,
+      assigneeAgentId: targetAgentId,
+      status: "todo",
+      originKind: "workflow_delegation_target",
+      originId: delegateStep.id,
+    });
+
+    await db.insert(issueWorkProducts).values({
+      companyId: targetCompanyId,
+      issueId: targetIssue.id,
+      type: "report",
+      provider: "local",
+      externalId: "target-report.html",
+      title: "Target research report",
+      status: "ready",
+      reviewState: "approved",
+      isPrimary: true,
+      healthStatus: "healthy",
+      summary: "Delegated research is complete.",
+      metadata: { path: "/tmp/target-report.html" },
+    });
+
+    const updatedTarget = await issueService(db).update(targetIssue.id, { status: "done" });
+    expect(updatedTarget?.status).toBe("done");
+
+    const [completedDelegation] = await db
+      .select()
+      .from(workflowDelegations)
+      .where(eq(workflowDelegations.id, delegation.id));
+    expect(completedDelegation.status).toBe("completed");
+    expect(completedDelegation.completedAt).toBeTruthy();
+
+    const sourceProducts = await db
+      .select()
+      .from(issueWorkProducts)
+      .where(eq(issueWorkProducts.issueId, delegation.sourceIssueId!));
+    expect(sourceProducts).toEqual([
+      expect.objectContaining({
+        companyId: sourceCompanyId,
+        issueId: delegation.sourceIssueId,
+        provider: "delegated",
+        externalId: `delegated:${sourceProducts[0]!.metadata && (sourceProducts[0]!.metadata as any).delegatedFrom.workProductId}`,
+        title: "Target research report",
+        isPrimary: true,
+      }),
+    ]);
+    expect(sourceProducts[0]!.metadata).toMatchObject({
+      delegatedFrom: {
+        companyId: targetCompanyId,
+        issueId: targetIssue.id,
+      },
+      originalProvider: "local",
+      originalExternalId: "target-report.html",
+    });
+
+    stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const completedDelegateStep = stepRuns.find((stepRun) => stepRun.stepId === "request-research")!;
+    const launchedSynthesizeStep = stepRuns.find((stepRun) => stepRun.stepId === "synthesize")!;
+    expect(completedDelegateStep).toMatchObject({ status: "completed", issueId: delegation.sourceIssueId });
+    expect(launchedSynthesizeStep.issueId).toBeTruthy();
+    expect(launchedSynthesizeStep.status).toBe("pending");
+
+    const [synthesisIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, launchedSynthesizeStep.issueId!));
+    expect(synthesisIssue.description).toContain("Dependency issue inputs:");
+    expect(synthesisIssue.description).toContain("Target research report [report/ready]");
+    expect(synthesisIssue.description).toContain("delegated:");
   });
 
   it("fails the workflow and skips dependent steps when a prerequisite execution issue fails", async () => {
@@ -763,6 +1375,107 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(supervisionCommentBody).toContain("Workflow step reached terminal status failed.");
     expect(supervisionCommentBody).toContain("workflow_step_failed: Workflow step failed");
     expect(supervisionCommentBody).not.toContain("wake_agent");
+  });
+
+  it("reactivates skipped downstream steps when a failed prerequisite issue is reopened", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-reactivate" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Workflow Reactivation",
+      issuePrefix: `WR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Workflow Reactivation Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Reactivation Workflow Mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Reactivation Workflow",
+      stepsJson: [
+        { id: "collect", name: "Collect", agentId, dependencies: [], description: "Collect evidence" },
+        { id: "synthesize", name: "Synthesize", agentId, dependencies: ["collect"], description: "Synthesize evidence" },
+        { id: "validate", name: "Validate", agentId, dependencies: ["synthesize"], description: "Validate synthesis" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    await executeWorkflowRun(db, runId);
+    const collectStepRun = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId))
+      .then((rows) => rows.find((row) => row.stepId === "collect") ?? null);
+
+    const issueSvc = issueService(db);
+    await issueSvc.update(collectStepRun!.issueId!, { status: "blocked" });
+    await syncWorkflowRunForIssue(db, collectStepRun!.issueId!);
+
+    let stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "collect")?.status).toBe("failed");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.status).toBe("skipped");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.status).toBe("skipped");
+
+    await issueSvc.update(collectStepRun!.issueId!, { status: "todo" });
+    const reopened = await syncWorkflowRunForIssue(db, collectStepRun!.issueId!);
+    expect(reopened?.status).toBe("running");
+
+    stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "collect")?.status).toBe("pending");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.status).toBe("pending");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.issueId).toBeNull();
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.status).toBe("pending");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.issueId).toBeNull();
+
+    await issueSvc.update(collectStepRun!.issueId!, { status: "done" });
+    const progressed = await syncWorkflowRunForIssue(db, collectStepRun!.issueId!);
+    expect(progressed?.status).toBe("running");
+
+    stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const synthesizeStepRun = stepRuns.find((stepRun) => stepRun.stepId === "synthesize");
+    const validateStepRun = stepRuns.find((stepRun) => stepRun.stepId === "validate");
+    expect(synthesizeStepRun?.status).toBe("pending");
+    expect(synthesizeStepRun?.issueId).toBeTruthy();
+    expect(validateStepRun?.status).toBe("pending");
+    expect(validateStepRun?.issueId).toBeNull();
   });
 
   it("observes stale workflow todo dispatch omissions without hard-blocking", async () => {

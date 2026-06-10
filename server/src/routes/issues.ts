@@ -1,6 +1,8 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { workflowStepRuns } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -69,6 +71,42 @@ export function issueRoutes(db: Db, storage: StorageService) {
     return {
       ...attachment,
       contentPath: `/api/attachments/${attachment.id}/content`,
+    };
+  }
+
+  async function getIssueWorkflowWakeContext(issueId: string) {
+    if (typeof db.select !== "function") return {};
+    try {
+      const stepRun = await db
+        .select({
+          workflowRunId: workflowStepRuns.workflowRunId,
+          stepId: workflowStepRuns.stepId,
+        })
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.issueId, issueId))
+        .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!stepRun) return {};
+      return {
+        workflowRunId: stepRun.workflowRunId,
+        workflowStepId: stepRun.stepId,
+        stepId: stepRun.stepId,
+      };
+    } catch (err) {
+      logger.warn({ err, issueId }, "failed to resolve workflow wake context for issue");
+      return {};
+    }
+  }
+
+  async function buildIssueWakeContext(issue: { id: string; missionId?: string | null }, source: string) {
+    const workflowContext = await getIssueWorkflowWakeContext(issue.id);
+    return {
+      issueId: issue.id,
+      taskId: issue.id,
+      source,
+      ...(issue.missionId ? { missionId: issue.missionId } : {}),
+      ...workflowContext,
     };
   }
 
@@ -1206,16 +1244,23 @@ export function issueRoutes(db: Db, storage: StorageService) {
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
       const wakeups = new Map<string, Parameters<typeof heartbeat.wakeup>[1]>();
+      const issueWakeContext = await buildIssueWakeContext(issue, "issue.update");
+      const issueWakePayload = {
+        issueId: issue.id,
+        ...(issue.missionId ? { missionId: issue.missionId } : {}),
+        ...(typeof issueWakeContext.workflowRunId === "string" ? { workflowRunId: issueWakeContext.workflowRunId } : {}),
+        ...(typeof issueWakeContext.stepId === "string" ? { stepId: issueWakeContext.stepId } : {}),
+      };
 
       if (assigneeChanged && issue.assigneeAgentId && issue.status !== "backlog") {
         wakeups.set(issue.assigneeAgentId, {
           source: "assignment",
           triggerDetail: "system",
           reason: "issue_assigned",
-          payload: { issueId: issue.id, mutation: "update" },
+          payload: { ...issueWakePayload, mutation: "update" },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
-          contextSnapshot: { issueId: issue.id, source: "issue.update" },
+          contextSnapshot: issueWakeContext,
         });
       }
 
@@ -1224,10 +1269,10 @@ export function issueRoutes(db: Db, storage: StorageService) {
           source: "automation",
           triggerDetail: "system",
           reason: "issue_status_changed",
-          payload: { issueId: issue.id, mutation: "update" },
+          payload: { ...issueWakePayload, mutation: "update" },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
-          contextSnapshot: { issueId: issue.id, source: "issue.status_change" },
+          contextSnapshot: { ...issueWakeContext, source: "issue.status_change" },
         });
       }
 
@@ -1246,10 +1291,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
             source: "automation",
             triggerDetail: "system",
             reason: "issue_comment_mentioned",
-            payload: { issueId: id, commentId: comment.id },
+            payload: { ...issueWakePayload, issueId: id, commentId: comment.id },
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
+              ...issueWakeContext,
               issueId: id,
               taskId: id,
               commentId: comment.id,
@@ -1605,6 +1651,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
     // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
     void (async () => {
       const wakeups = new Map<string, Parameters<typeof heartbeat.wakeup>[1]>();
+      const issueWakeContext = await buildIssueWakeContext(currentIssue, "issue.comment");
+      const issueWakePayload = {
+        issueId: currentIssue.id,
+        ...(currentIssue.missionId ? { missionId: currentIssue.missionId } : {}),
+        ...(typeof issueWakeContext.workflowRunId === "string" ? { workflowRunId: issueWakeContext.workflowRunId } : {}),
+        ...(typeof issueWakeContext.stepId === "string" ? { stepId: issueWakeContext.stepId } : {}),
+      };
       const assigneeId = currentIssue.assigneeAgentId;
       const actorIsAgent = actor.actorType === "agent";
       const selfComment = actorIsAgent && actor.actorId === assigneeId;
@@ -1616,7 +1669,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
             triggerDetail: "system",
             reason: "issue_reopened_via_comment",
             payload: {
-              issueId: currentIssue.id,
+              ...issueWakePayload,
               commentId: comment.id,
               reopenedFrom: reopenFromStatus,
               mutation: "comment",
@@ -1625,9 +1678,9 @@ export function issueRoutes(db: Db, storage: StorageService) {
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: currentIssue.id,
-              taskId: currentIssue.id,
+              ...issueWakeContext,
               commentId: comment.id,
+              wakeCommentId: comment.id,
               source: "issue.comment.reopen",
               wakeReason: "issue_reopened_via_comment",
               reopenedFrom: reopenFromStatus,
@@ -1640,7 +1693,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
             triggerDetail: "system",
             reason: "issue_commented",
             payload: {
-              issueId: currentIssue.id,
+              ...issueWakePayload,
               commentId: comment.id,
               mutation: "comment",
               ...(interruptedRunId ? { interruptedRunId } : {}),
@@ -1648,9 +1701,9 @@ export function issueRoutes(db: Db, storage: StorageService) {
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: currentIssue.id,
-              taskId: currentIssue.id,
+              ...issueWakeContext,
               commentId: comment.id,
+              wakeCommentId: comment.id,
               source: "issue.comment",
               wakeReason: "issue_commented",
               ...(interruptedRunId ? { interruptedRunId } : {}),
@@ -1673,10 +1726,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
           source: "automation",
           triggerDetail: "system",
           reason: "issue_comment_mentioned",
-          payload: { issueId: id, commentId: comment.id },
+          payload: { ...issueWakePayload, issueId: id, commentId: comment.id },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
+            ...issueWakeContext,
             issueId: id,
             taskId: id,
             commentId: comment.id,

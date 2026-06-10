@@ -11,6 +11,9 @@ import {
   createDb,
   ensurePostgresDatabase,
   agents,
+  agentRuntimeState,
+  companySkills,
+  companySecrets,
   activityLog,
   agentWakeupRequests,
   companies,
@@ -18,6 +21,11 @@ import {
   heartbeatRuns,
   issueComments,
   issues,
+  missionSessions,
+  missions,
+  workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
@@ -94,11 +102,55 @@ function spawnAliveProcess() {
   });
 }
 
+function isPidAlive(pid: number | null | undefined) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code === "EPERM";
+  }
+}
+
+async function waitForPidExit(pid: number, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !isPidAlive(pid);
+}
+
+async function waitForRunStatus(
+  db: ReturnType<typeof createDb>,
+  runId: string,
+  status: string,
+  timeoutMs = 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const run = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (run?.status === status) return run;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return db
+    .select()
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .then((rows) => rows[0] ?? null);
+}
+
 describe("heartbeat orphaned process recovery", () => {
   let db!: ReturnType<typeof createDb>;
   let instance: EmbeddedPostgresInstance | null = null;
   let dataDir = "";
   const childProcesses = new Set<ChildProcess>();
+  const tempDirs = new Set<string>();
 
   beforeAll(async () => {
     const started = await startTempDatabase();
@@ -113,13 +165,25 @@ describe("heartbeat orphaned process recovery", () => {
       child.kill("SIGKILL");
     }
     childProcesses.clear();
+    for (const dir of tempDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.clear();
     await db.delete(issueComments);
     await db.delete(activityLog);
+    await db.delete(workflowStepRuns);
     await db.delete(issues);
+    await db.delete(workflowRuns);
+    await db.delete(workflowDefinitions);
+    await db.delete(missionSessions);
+    await db.delete(missions);
+    await db.delete(companySecrets);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(agentRuntimeState);
     await db.delete(agents);
+    await db.delete(companySkills);
     await db.delete(companies);
   });
 
@@ -137,6 +201,7 @@ describe("heartbeat orphaned process recovery", () => {
 
   async function seedRunFixture(input?: {
     adapterType?: string;
+    adapterConfig?: Record<string, unknown>;
     runStatus?: "running" | "queued" | "failed";
     processPid?: number | null;
     processLossRetryCount?: number;
@@ -167,7 +232,7 @@ describe("heartbeat orphaned process recovery", () => {
       role: "engineer",
       status: "paused",
       adapterType: input?.adapterType ?? "codex_local",
-      adapterConfig: {},
+      adapterConfig: input?.adapterConfig ?? {},
       runtimeConfig: {},
       permissions: {},
     });
@@ -245,6 +310,29 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(agentWakeupRequests.id, wakeupRequestId))
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("claimed");
+  });
+
+  it("terminates a detached recorded pid when cancelling the run", async () => {
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    expect(child.pid).toBeTypeOf("number");
+
+    const { runId, issueId } = await seedRunFixture({
+      processPid: child.pid ?? null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cancelled = await heartbeat.cancelRun(runId);
+
+    expect(cancelled?.status).toBe("cancelled");
+    expect(await waitForPidExit(child.pid as number)).toBe(true);
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.checkoutRunId).toBeNull();
+    expect(issue?.executionRunId).toBeNull();
   });
 
   it("queues exactly one retry when the recorded local pid is dead", async () => {
@@ -344,6 +432,67 @@ describe("heartbeat orphaned process recovery", () => {
     });
   });
 
+  it("restores mission and workflow run context on process-loss retry from the issue graph", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+    });
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const stepRunId = randomUUID();
+
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Workflow mission",
+      status: "active",
+    });
+    await db.update(issues).set({ missionId }).where(eq(issues.id, issueId));
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "daily-news",
+      stepsJson: [],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      missionId,
+      status: "running",
+      triggeredBy: "test",
+      startedAt: new Date(),
+    });
+    await db.insert(workflowStepRuns).values({
+      id: stepRunId,
+      workflowRunId,
+      stepId: "validate-note",
+      issueId,
+      status: "running",
+      startedAt: new Date(),
+    });
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+
+    const retryRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId))
+      .then((rows) => rows[0] ?? null);
+
+    expect(retryRun?.contextSnapshot).toMatchObject({
+      issueId,
+      missionId,
+      workflowRunId,
+      workflowStepId: "validate-note",
+      stepId: "validate-note",
+      retryOfRunId: runId,
+      wakeReason: "process_lost_retry",
+    });
+  });
+
   it("does not queue a second retry after the first process-loss retry was already used", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       processPid: 999_999_999,
@@ -370,6 +519,146 @@ describe("heartbeat orphaned process recovery", () => {
     expect(issue?.executionRunId).toBeNull();
     expect(issue?.checkoutRunId).toBeNull();
     expect(issue?.status).toBe("blocked");
+  });
+
+  it("queues an adapter fallback run after process-loss retry is exhausted", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+      processLossRetryCount: 1,
+      adapterConfig: {
+        command: "primary-agent",
+        fallbackCommand: "fallback-agent",
+      },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(2);
+
+    const failedRun = runs.find((row) => row.id === runId);
+    const fallbackRun = runs.find((row) => row.id !== runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+    expect(fallbackRun?.status).toBe("queued");
+    expect(fallbackRun?.retryOfRunId).toBe(runId);
+    expect(fallbackRun?.processLossRetryCount).toBe(1);
+    expect(fallbackRun?.contextSnapshot).toMatchObject({
+      issueId,
+      fallbackOfRunId: runId,
+      fallbackReason: "process_lost",
+      fallbackAttempt: 1,
+      fallbackCommand: "fallback-agent",
+      wakeReason: "adapter_fallback",
+    });
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBe(fallbackRun?.id ?? null);
+    expect(issue?.checkoutRunId).toBe(runId);
+    expect(issue?.status).toBe("in_progress");
+  });
+
+  it("executes queued adapter fallback runs with the fallback command", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const failedRunId = randomUUID();
+    const fallbackRunId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-fallback-bin-"));
+    tempDirs.add(binDir);
+    const primaryCommand = path.join(binDir, "primary.js");
+    const fallbackCommand = path.join(binDir, "fallback.js");
+    fs.writeFileSync(primaryCommand, "#!/usr/bin/env node\nprocess.exit(99);\n", "utf8");
+    fs.writeFileSync(fallbackCommand, "#!/usr/bin/env node\nconsole.log('fallback ran');\n", "utf8");
+    fs.chmodSync(primaryCommand, 0o755);
+    fs.chmodSync(fallbackCommand, 0o755);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Fallback Runner",
+      role: "engineer",
+      status: "idle",
+      adapterType: "process",
+      adapterConfig: {
+        command: primaryCommand,
+        fallbackCommand,
+      },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: failedRunId,
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "failed",
+      errorCode: "process_lost",
+      error: "Process lost",
+      processLossRetryCount: 1,
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "adapter_fallback",
+      payload: { fallbackOfRunId: failedRunId, fallbackReason: "process_lost" },
+      status: "queued",
+      runId: fallbackRunId,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: fallbackRunId,
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId,
+      retryOfRunId: failedRunId,
+      contextSnapshot: {
+        retryOfRunId: failedRunId,
+        fallbackOfRunId: failedRunId,
+        fallbackReason: "process_lost",
+        fallbackAttempt: 1,
+        fallbackCommand,
+        wakeReason: "adapter_fallback",
+      },
+    });
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+
+    const completed = await waitForRunStatus(db, fallbackRunId, "succeeded");
+    expect(completed?.status).toBe("succeeded");
+
+    const invokeEvent = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, fallbackRunId))
+      .then((rows) => rows.find((row) => row.eventType === "adapter.invoke") ?? null);
+    expect(invokeEvent?.payload).toMatchObject({
+      command: fallbackCommand,
+    });
+    expect(JSON.stringify(invokeEvent?.payload)).not.toContain(primaryCommand);
   });
 
   it("clears the detached warning when the run reports activity again", async () => {

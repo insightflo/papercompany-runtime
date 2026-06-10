@@ -24,6 +24,8 @@ Core fields:
 - dangerouslySkipPermissions (boolean, optional): pass --dangerously-skip-permissions to claude
 - command (string, optional): defaults to "claude"
 - extraArgs (string[], optional): additional CLI args
+- visionCommand (string, optional): command agents should use to delegate image inspection when PAPERCLIP_VISION_COMMAND is not set
+- visionModel (string, optional): display hint for the delegated vision model; defaults to PAPERCLIP_VISION_MODEL when set
 - planningRunToolRestrictions (boolean, optional): defaults true; for mission-owner/director planning contexts, append --disallowedTools unless caller already provided it
 - planningRunDisallowedTools (string[], optional): tool names denied for planning contexts; defaults to WebSearch, WebFetch, Task so issue API/status work via Bash remains available
 - env (object, optional): KEY=VALUE environment variables

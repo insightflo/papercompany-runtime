@@ -40,6 +40,7 @@ export { documentRevisions } from "./document_revisions.js";
 export { issueDocuments } from "./issue_documents.js";
 export { heartbeatRuns } from "./heartbeat_runs.js";
 export { heartbeatRunEvents } from "./heartbeat_run_events.js";
+export { hermesChatSessions, hermesChatMessages } from "./hermes_chats.js";
 export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";
@@ -59,6 +60,7 @@ export { pluginLogs } from "./plugin_logs.js";
 
 // papercompany core tables
 export { missions } from "./missions.js";
+export { missionDelegations, type MissionDelegationMetadata } from "./mission_delegations.js";
 export { missionPlanArtifacts } from "./mission_plan_artifacts.js";
 export { missionAgents } from "./mission_agents.js";
 export { missionSessions } from "./mission_sessions.js";
@@ -78,6 +80,7 @@ export {
 export { workflowDefinitions } from "./workflow_definitions.js";
 export { workflowRuns } from "./workflow_runs.js";
 export { workflowStepRuns } from "./workflow_step_runs.js";
+export { workflowDelegations } from "./workflow_delegations.js";
 export { toolDefinitions } from "./tool_definitions.js";
 export { toolAuditLog } from "./tool_audit_log.js";
 export { knowledgeBases } from "./knowledge_bases.js";

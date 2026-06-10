@@ -278,6 +278,36 @@ export interface MissionDetailItem extends MissionListItem {
   ownerActionExplanations?: MissionOwnerActionExplanation[];
 }
 
+export interface MissionDelegation {
+  id: string;
+  sourceCompanyId: string;
+  sourceMissionId: string;
+  sourceIssueId: string | null;
+  targetCompanyId: string;
+  targetMissionId: string;
+  status: "active" | "completed" | "failed" | string;
+  metadata: Record<string, unknown>;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateMissionDelegationInput {
+  targetCompanyId: string;
+  targetOwnerAgentId: string;
+  title?: string;
+  description?: string | null;
+  sourceIssueTitle?: string;
+  priority?: "low" | "medium" | "high" | "urgent";
+  metadata?: Record<string, unknown>;
+}
+
+export interface CreateMissionDelegationResponse {
+  delegation: MissionDelegation;
+  sourceIssue: Issue;
+  targetMission: MissionDetailItem;
+}
+
 export interface CreateMissionInput {
   ownerAgentId: string;
   title: string;
@@ -312,6 +342,9 @@ export const missionsApi = {
     return api.get<MissionListItem[]>(`/companies/${companyId}/missions${qs ? `?${qs}` : ""}`);
   },
   get: (id: string) => api.get<MissionDetailItem>(`/missions/${id}`),
+  listDelegations: (id: string) => api.get<MissionDelegation[]>(`/missions/${id}/delegations`),
+  createDelegation: (id: string, data: CreateMissionDelegationInput) =>
+    api.post<CreateMissionDelegationResponse>(`/missions/${id}/delegations`, data),
   listAgents: (id: string) => api.get<MissionAgentEntry[]>(`/missions/${id}/agents`),
   listIssues: (id: string) => api.get<Issue[]>(`/missions/${id}/issues`),
   listWorkflowRuns: (id: string) => api.get<MissionWorkflowRun[]>(`/missions/${id}/workflow-runs`),

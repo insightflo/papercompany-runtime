@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { Missions } from "./Missions";
@@ -42,8 +42,18 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@/lib/router", () => ({
-  Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => (
-    <a href={to} className={className}>{children}</a>
+  Link: ({
+    to,
+    children,
+    className,
+  }: {
+    to: string;
+    children: ReactNode;
+    className?: string;
+  }) => (
+    <a href={to} className={className}>
+      {children}
+    </a>
   ),
   useSearchParams: () => [currentSearchParams, vi.fn()],
 }));
@@ -69,7 +79,9 @@ vi.mock("../components/PageSkeleton", () => ({
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
+  Button: ({ children }: { children: ReactNode }) => (
+    <button>{children}</button>
+  ),
 }));
 
 vi.mock("@/components/StatusBadge", () => ({
@@ -83,8 +95,14 @@ vi.mock("lucide-react", () => ({
 
 describe("Missions", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 30, 12, 0, 0));
     currentSearchParams = new URLSearchParams();
     observedQueryKeys.length = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("links mission rows to the company-relative mission detail route", () => {
@@ -132,28 +150,21 @@ describe("Missions", () => {
     ]);
   });
 
-  it("defaults created date filters to today's local date when URL params are absent", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-30T09:15:00+09:00"));
+  it("defaults the created-from filter to yesterday when URL params are absent", () => {
+    const html = renderToStaticMarkup(<Missions />);
 
-    try {
-      renderToStaticMarkup(<Missions />);
-
-      expect(observedQueryKeys).toContainEqual([
-        "missions",
-        "company-1",
-        {
-          from: "2026-04-30",
-          to: "2026-04-30",
-          sortBy: "updatedAt",
-          sortOrder: "desc",
-          limit: 25,
-          offset: 0,
-        },
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(html).toContain('value="2026-04-29"');
+    expect(observedQueryKeys).toContainEqual([
+      "missions",
+      "company-1",
+      {
+        from: "2026-04-29",
+        sortBy: "updatedAt",
+        sortOrder: "desc",
+        limit: 25,
+        offset: 0,
+      },
+    ]);
   });
 
   it("renders mission list controls for filtering, sorting, and paging", () => {

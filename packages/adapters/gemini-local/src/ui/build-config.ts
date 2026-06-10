@@ -71,6 +71,7 @@ export function buildGeminiLocalConfig(v: CreateConfigValues): Record<string, un
   ac.sandbox = !v.dangerouslyBypassSandbox;
 
   if (v.command) ac.command = v.command;
+  if (v.fallbackCommand) ac.fallbackCommand = v.fallbackCommand;
   if (v.extraArgs) ac.extraArgs = parseCommaArgs(v.extraArgs);
   return ac;
 }

@@ -5,7 +5,7 @@
  * These align with the database schema in packages/db/src/schema/workflow_*.ts
  */
 
-import type { WorkflowStep } from "./dag-engine.js";
+import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 
 /**
  * A workflow definition defines a DAG of steps to execute.
@@ -15,6 +15,7 @@ export interface WorkflowDefinition {
   companyId: string;
   name: string;
   steps: WorkflowStep[];
+  executionMode: WorkflowExecutionMode;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +27,7 @@ export interface CreateWorkflowDefinitionInput {
   companyId: string;
   name: string;
   steps: WorkflowStep[];
+  executionMode?: WorkflowExecutionMode;
 }
 
 /**
@@ -81,8 +83,10 @@ export interface WorkflowStepExecutionContract {
  */
 export interface WorkflowExecutionResult {
   runId: string;
+  workflowId: string;
+  missionId: string | null;
   status: "running" | "completed" | "failed" | "cancelled";
-  completedAt: Date;
+  completedAt: Date | null;
   error?: string;
   stepRuns: WorkflowStepRun[];
 }

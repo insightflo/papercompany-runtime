@@ -15,7 +15,12 @@ import type {
   WorkflowStepExecutionContract,
 } from "./types.js";
 import type { CreateWorkflowDefinitionInput, CreateWorkflowRunInput } from "./types.js";
-import type { WorkflowStep } from "./dag-engine.js";
+import { isDynamicOwnerPlanWorkflowDefinition, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
+
+function inferWorkflowExecutionMode(name: string, steps: WorkflowStep[]): WorkflowExecutionMode {
+  return isDynamicOwnerPlanWorkflowDefinition({ name, steps }) ? "dynamic_owner_plan" : "static_dag";
+}
 
 /**
  * Create a new workflow definition.
@@ -55,14 +60,16 @@ export async function getWorkflowDefinitionById(
   if (!result[0]) return null;
 
   const def = result[0];
-    return {
-      id: def.id,
-      companyId: def.companyId,
-      name: def.name,
-      steps: def.stepsJson as WorkflowStep[],
-      createdAt: def.createdAt,
-      updatedAt: def.updatedAt,
-    };
+  const steps = normalizeWorkflowStepsForExecution(def.stepsJson);
+  return {
+    id: def.id,
+    companyId: def.companyId,
+    name: def.name,
+    steps,
+    executionMode: inferWorkflowExecutionMode(def.name, steps),
+    createdAt: def.createdAt,
+    updatedAt: def.updatedAt,
+  };
 }
 
 /**
@@ -78,14 +85,18 @@ export async function listWorkflowDefinitions(
     .where(eq(workflowDefinitions.companyId, companyId))
     .orderBy(desc(workflowDefinitions.createdAt));
 
-  return results.map((def) => ({
-    id: def.id,
-    companyId: def.companyId,
-    name: def.name,
-    steps: def.stepsJson as WorkflowStep[],
-    createdAt: def.createdAt,
-    updatedAt: def.updatedAt,
-  }));
+  return results.map((def) => {
+    const steps = normalizeWorkflowStepsForExecution(def.stepsJson);
+    return {
+      id: def.id,
+      companyId: def.companyId,
+      name: def.name,
+      steps,
+      executionMode: inferWorkflowExecutionMode(def.name, steps),
+      createdAt: def.createdAt,
+      updatedAt: def.updatedAt,
+    };
+  });
 }
 
 /**
@@ -96,10 +107,12 @@ export async function updateWorkflowDefinition(
   id: string,
   updates: Partial<Omit<WorkflowDefinition, "id" | "createdAt" | "updatedAt">>,
 ): Promise<WorkflowDefinition | null> {
+  const { steps, executionMode: _executionMode, ...definitionUpdates } = updates;
   await db
     .update(workflowDefinitions)
     .set({
-      ...updates,
+      ...definitionUpdates,
+      ...(steps ? { stepsJson: steps } : {}),
       updatedAt: new Date(),
     })
     .where(eq(workflowDefinitions.id, id));
@@ -221,8 +234,15 @@ export async function getWorkflowStepExecutionContractForIssue(
   const row = result[0];
   if (!row) return null;
 
-  const steps = (row.definition.stepsJson as WorkflowStep[]) ?? [];
+  const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+  const rawStep = step as (WorkflowStep & { agentName?: unknown; type?: unknown }) | undefined;
+  const stepType = typeof rawStep?.type === "string" ? rawStep.type.trim().toLowerCase() : "";
+  const agentName = typeof rawStep?.agentName === "string" ? rawStep.agentName.trim() : "";
+  const isAgentBackedStep = stepType === "agent" || agentName.length > 0;
+  const toolNames = !isAgentBackedStep && Array.isArray(step?.toolNames)
+    ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
 
   return {
     workflowRunId: row.run.id,
@@ -230,9 +250,7 @@ export async function getWorkflowStepExecutionContractForIssue(
     missionId: row.run.missionId,
     stepId: row.stepRun.stepId,
     stepName: step?.name ?? row.stepRun.stepId,
-    toolNames: Array.isArray(step?.toolNames)
-      ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-      : [],
+    toolNames,
     knowledgeBaseIds: Array.isArray(step?.knowledgeBaseIds)
       ? step.knowledgeBaseIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [],
@@ -259,6 +277,27 @@ export async function updateWorkflowRunStatus(
     .update(workflowRuns)
     .set(updates)
     .where(eq(workflowRuns.id, id));
+}
+
+/**
+ * Resume a workflow run through the native server DAG engine.
+ */
+export async function resumeWorkflowRun(
+  db: Db,
+  id: string,
+  companyId: string,
+): Promise<WorkflowRun | null> {
+  const [run] = await db
+    .update(workflowRuns)
+    .set({
+      status: "running",
+      startedAt: new Date(),
+      completedAt: null,
+    })
+    .where(and(eq(workflowRuns.id, id), eq(workflowRuns.companyId, companyId)))
+    .returning();
+
+  return (run as WorkflowRun | undefined) ?? null;
 }
 
 /**

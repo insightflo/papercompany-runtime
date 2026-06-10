@@ -80,6 +80,7 @@ export const queryKeys = {
     issues: (id: string) => ["missions", "detail", id, "issues"] as const,
     workflowRuns: (id: string) => ["missions", "detail", id, "workflow-runs"] as const,
     governanceThread: (id: string) => ["missions", "detail", id, "governance-thread"] as const,
+    delegations: (id: string) => ["missions", "detail", id, "delegations"] as const,
     activity: (id: string) => ["missions", "activity", id] as const,
   },
   budgets: {
@@ -133,6 +134,13 @@ export const queryKeys = {
     ["usage-quota-windows", companyId] as const,
   heartbeats: (companyId: string, agentId?: string) =>
     ["heartbeats", companyId, agentId] as const,
+  hermesChat: {
+    sessions: (companyId: string) => ["hermes-chat", companyId, "sessions"] as const,
+    detail: (companyId: string, sessionId: string) =>
+      ["hermes-chat", companyId, "sessions", sessionId] as const,
+    pageContext: (companyId: string, path: string, search: string) =>
+      ["hermes-chat", companyId, "page-context", path, search] as const,
+  },
   runDetail: (runId: string) => ["heartbeat-run", runId] as const,
   runWorkspaceOperations: (runId: string) => ["heartbeat-run", runId, "workspace-operations"] as const,
   liveRuns: (companyId: string) => ["live-runs", companyId] as const,

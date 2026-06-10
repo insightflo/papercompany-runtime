@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{TITLE}}</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --accent:#0f6e7e;
+  --accent-soft:#e6f0f2;
+  --accent-strong:#074a55;
+  --ink:#1a2126;
+  --ink-mute:#4a5760;
+  --ink-faint:#8a95a0;
+  --line:#d7dee3;
+  --line-soft:#eef1f3;
+  --bg:#fcfcfd;
+  --bg-tint:#f7f9fa;
+  --card:#fff;
+  --warn:#b45309;
+  --warn-soft:#fef3c7;
+  --danger:#b91c1c;
+  --danger-soft:#fee2e2;
+  --ok:#047857;
+  --ok-soft:#d1fae5;
+  --serif:'Noto Serif KR',serif;
+  --sans:'Pretendard Variable',Pretendard,system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:var(--sans);
+  line-height:1.72;
+  color:var(--ink);
+  background:var(--bg);
+  max-width:920px;
+  margin:0 auto;
+  padding:64px 32px 96px;
+  -webkit-font-smoothing:antialiased;
+}
+header{border-bottom:1px solid var(--line);padding-bottom:32px;margin-bottom:48px}
+.kicker{font-size:.78rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:16px}
+h1{font-family:var(--serif);font-size:2.4rem;font-weight:700;line-height:1.28;letter-spacing:-.01em;margin-bottom:18px}
+.subtitle{font-size:1.05rem;color:var(--ink-mute);line-height:1.7;margin-bottom:24px}
+.meta-row{display:flex;flex-wrap:wrap;gap:14px;font-size:.85rem;color:var(--ink-faint)}
+.meta-row span{padding:6px 10px;background:var(--bg-tint);border:1px solid var(--line-soft);border-radius:4px}
+.meta-row strong{color:var(--ink-mute)}
+h2{font-family:var(--serif);font-size:1.5rem;font-weight:700;color:var(--accent-strong);margin:56px 0 20px;padding-top:24px;border-top:1px solid var(--line);position:relative}
+h2::before{content:'';position:absolute;left:0;top:-1px;width:48px;height:3px;background:var(--accent)}
+h3{font-size:1.12rem;font-weight:700;margin:28px 0 10px;color:var(--ink)}
+p{margin:12px 0;color:var(--ink-mute);font-size:.98rem}
+p.lead{font-size:1.08rem;color:var(--ink-mute)}
+strong{color:var(--ink);font-weight:700}
+em{font-style:normal;color:var(--accent-strong);font-weight:700}
+.footnote-ref{display:inline-block;font-size:.72em;color:var(--accent);vertical-align:super;margin-left:1px}
+.badge{display:inline-block;font-size:.72rem;font-weight:800;padding:2px 8px;border-radius:12px;letter-spacing:.04em;white-space:nowrap}
+.badge-A{background:var(--ok-soft);color:var(--ok)}
+.badge-B{background:var(--accent-soft);color:var(--accent-strong)}
+.badge-C{background:var(--warn-soft);color:var(--warn)}
+.badge-X{background:var(--danger-soft);color:var(--danger)}
+.callout,.explain{background:var(--bg-tint);border-left:4px solid var(--accent);padding:18px 22px;margin:22px 0;border-radius:5px}
+.explain{background:#f0f4f8;border-left-color:#5e8aa8}
+.label,.callout-title{font-size:.78rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:7px}
+.kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:22px 0}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:16px}
+.kpi-label{font-size:.78rem;color:var(--ink-faint);font-weight:700;margin-bottom:4px}
+.kpi-value{font-size:1.7rem;font-weight:800;color:var(--accent-strong);letter-spacing:-.02em}
+.kpi p{font-size:.86rem;margin-bottom:0}
+.table-scroll{width:100%;overflow-x:auto;margin:20px 0;border:1px solid var(--line);border-radius:6px;background:#fff}
+table{width:100%;border-collapse:collapse;font-size:.92rem;min-width:640px}
+thead{background:var(--accent-soft)}
+th{text-align:left;padding:12px 15px;font-weight:800;color:var(--accent-strong);font-size:.84rem;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:12px 15px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink)}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.chart-card,.chart-wrap{background:#fff;border:1px solid var(--line);border-radius:6px;margin:28px 0;padding:20px}
+.bar-row{display:grid;grid-template-columns:110px 1fr 72px;gap:12px;align-items:center;margin:10px 0;font-size:.92rem}
+.bar-track{height:14px;background:var(--line-soft);border-radius:999px;overflow:hidden}
+.bar{height:100%;background:var(--accent);border-radius:999px}
+.chart-caption{font-size:.82rem;color:var(--ink-faint);margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)}
+.risk-grid,.scenario-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:22px 0}
+.risk,.scenario{background:#fff;border:1px solid var(--line);border-radius:6px;padding:16px}
+.risk-high{border-top:4px solid var(--danger)}
+.risk-mid{border-top:4px solid var(--warn)}
+.risk-low{border-top:4px solid var(--ok)}
+.risk-level,.scenario-label{font-size:.75rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint)}
+.references{margin-top:56px;padding-top:32px;border-top:2px solid var(--line)}
+.references h2{margin-top:0;border-top:none;padding-top:0}
+.references h2::before{display:none}
+.references ol{list-style:none;counter-reset:ref;margin:0;padding:0}
+.references li{counter-increment:ref;position:relative;padding:10px 0 10px 34px;border-bottom:1px solid var(--line-soft);font-size:.86rem;color:var(--ink-mute)}
+.references li::before{content:'[' counter(ref) ']';position:absolute;left:0;color:var(--accent);font-weight:800}
+.references a{color:var(--accent);text-decoration:none}
+.references a:hover{text-decoration:underline}
+@media (max-width:720px){
+  body{padding:40px 20px 72px}
+  h1{font-size:2rem}
+  .kpi-grid,.risk-grid,.scenario-grid{grid-template-columns:1fr}
+  .bar-row{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker">{{KICKER}}</div>
+  <h1>{{TITLE}}</h1>
+  <p class="subtitle">{{SUBTITLE}}</p>
+  <div class="meta-row">
+    <span><strong>검토 범위</strong> {{SCOPE}}</span>
+    <span><strong>신뢰도</strong> <span class="badge badge-A">A</span> <span class="badge badge-B">B</span> <span class="badge badge-C">C</span></span>
+  </div>
+</header>
+
+<section>
+  <h2>1. 핵심 요약</h2>
+  <p class="lead">{{BEGINNER_SUMMARY}}</p>
+</section>
+
+<section class="references">
+  <h2>References</h2>
+  <ol>
+    <li>{{REFERENCE}}</li>
+  </ol>
+</section>
+</body>
+</html>

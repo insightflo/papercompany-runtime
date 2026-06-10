@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "@/lib/router";
+import { Link, useParams, useSearchParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { missionsApi, type MissionPlanRuntimeSummary, type MissionStatus } from "../api/missions";
 import { activityApi } from "../api/activity";
@@ -14,7 +14,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
-import { Rocket, ListTree, GitBranch, Settings, User } from "lucide-react";
+import { GitBranch, ListTree, Rocket, Settings, User } from "lucide-react";
 import { MissionIssueTree } from "../components/MissionIssueTree";
 import { MissionIssueInspector } from "../components/MissionIssueInspector";
 import { MissionExecutionOverview } from "../components/MissionExecutionOverview";
@@ -357,10 +357,11 @@ function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: Mission
 
 export function MissionDetail() {
   const { missionId } = useParams<{ missionId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
-  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
+  const [selectedIssueId, setSelectedIssueIdState] = useState<string | null>(() => searchParams.get("issue"));
 
   const {
     data: mission,
@@ -407,8 +408,18 @@ export function MissionDetail() {
   }, [setBreadcrumbs, mission, missionId]);
 
   useEffect(() => {
-    setSelectedIssueId(null);
-  }, [missionId]);
+    setSelectedIssueIdState(searchParams.get("issue"));
+  }, [missionId, searchParams]);
+
+  function setSelectedIssueId(issueId: string | null) {
+    setSelectedIssueIdState(issueId);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (issueId) next.set("issue", issueId);
+      else next.delete("issue");
+      return next;
+    }, { replace: true });
+  }
 
   if (!missionId) {
     return <div className="p-4 text-sm text-muted-foreground">No mission selected.</div>;

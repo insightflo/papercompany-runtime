@@ -11,7 +11,10 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueDocuments,
   issueInboxArchives,
+  issueReadStates,
+  issueWorkProducts,
   issues,
   missionPlanArtifacts,
   missions,
@@ -62,6 +65,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(srbIssuePairs);
     await db.delete(srbLinks);
     await db.delete(heartbeatRuns);
+    await db.delete(issueWorkProducts);
     await db.delete(issues);
     await db.delete(missionPlanArtifacts);
     await db.delete(missions);
@@ -242,6 +246,87 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     });
 
     expect(result.map((issue) => issue.id)).toEqual([matchedIssueId]);
+  });
+
+  it("rejects agent-created loose mission-level structure issues", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Research Company",
+      issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "ceo",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Technology Research Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Research mission",
+      status: "active",
+    });
+
+    await expect(svc.create(companyId, {
+      assigneeAgentId: workerAgentId,
+      createdByAgentId: ownerAgentId,
+      missionId,
+      originKind: "manual",
+      status: "todo",
+      title: "[ACTION] Evidence collection",
+    })).rejects.toThrow(/server-native DAG/i);
+
+    await expect(svc.create(companyId, {
+      createdByUserId: "operator",
+      missionId,
+      originKind: "manual",
+      status: "todo",
+      title: "[ACTION] Operator-created unassigned issue",
+    })).resolves.toEqual(expect.objectContaining({ assigneeAgentId: null }));
+
+    const parentIssue = await svc.create(companyId, {
+      assigneeAgentId: workerAgentId,
+      createdByUserId: "operator",
+      missionId,
+      originKind: "manual",
+      status: "todo",
+      title: "[ACTION] Operator-created parent issue",
+    });
+
+    await expect(svc.create(companyId, {
+      assigneeAgentId: workerAgentId,
+      createdByAgentId: ownerAgentId,
+      missionId,
+      originKind: "manual",
+      parentId: parentIssue.id,
+      status: "todo",
+      title: "[ACTION] Assigned subtask under an existing structure issue",
+    })).resolves.toEqual(expect.objectContaining({ assigneeAgentId: workerAgentId }));
   });
 
   it("hides archived inbox issues until new external activity arrives", async () => {
@@ -561,6 +646,7 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     await db.delete(srbIssuePairs);
     await db.delete(srbLinks);
     await db.delete(heartbeatRuns);
+    await db.delete(issueWorkProducts);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agents);
@@ -706,6 +792,64 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
       checkoutRunId: nextRunId,
       executionRunId: nextRunId,
     }));
+  });
+
+  it("clears checkout and execution locks when an active issue is blocked by update", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "QA Agent",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "targeted_wakeup",
+      status: "running",
+      contextSnapshot: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Active QA gate",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      executionAgentNameKey: "qa-agent",
+      executionLockedAt: new Date(),
+    });
+
+    const updated = await svc.update(issueId, { status: "blocked" });
+
+    expect(updated).toEqual(
+      expect.objectContaining({
+        id: issueId,
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+      }),
+    );
   });
 
   it("rejects missing parent issues before insert", async () => {
@@ -1121,7 +1265,113 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     ).rejects.toThrow("Mission downstream issue creation is not allowed");
   });
 
-  it("allows plan materialization as mission-level ACTION/QA/OVERSIGHT sibling issues", async () => {
+  it("allows mission downstream child creation after a sibling upstream workProduct exists", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const sourceAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const parentIssueId = randomUUID();
+    const sourceIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: sourceAgentId,
+        companyId,
+        name: "Source Researcher",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: qaAgentId,
+        companyId,
+        name: "Report Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Mission-scoped execution",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        missionId,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_oversight",
+        title: "[OVERSIGHT] Workflow parent",
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: sourceIssueId,
+        companyId,
+        missionId,
+        parentId: parentIssueId,
+        assigneeAgentId: sourceAgentId,
+        originKind: "manual",
+        title: "[Source] Evidence packet",
+        status: "done",
+        priority: "medium",
+      },
+    ]);
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: sourceIssueId,
+      type: "document",
+      provider: "local_file",
+      title: "evidence.md",
+      status: "ready_for_review",
+      reviewState: "needs_board_review",
+      isPrimary: true,
+      metadata: { path: "/tmp/evidence.md" },
+    });
+
+    const downstream = await svc.create(companyId, {
+      parentId: parentIssueId,
+      assigneeAgentId: qaAgentId,
+      createdByAgentId: ownerAgentId,
+      title: "[Validation] Independent QA of evidence and note",
+      status: "todo",
+      priority: "medium",
+    });
+
+    expect(downstream.status).toBe("todo");
+    expect(downstream.missionId).toBe(missionId);
+    expect(downstream.parentId).toBe(parentIssueId);
+  });
+
+  it("allows only native DAG/system materialization for mission-level ACTION/QA/OVERSIGHT sibling issues", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
@@ -1188,7 +1438,7 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
       priority: "medium",
     });
 
-    const actionIssue = await svc.create(companyId, {
+    await expect(svc.create(companyId, {
       missionId,
       assigneeAgentId: workerAgentId,
       createdByAgentId: ownerAgentId,
@@ -1196,8 +1446,8 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
       title: "[ACTION] Source dossiers for candidates",
       status: "todo",
       priority: "medium",
-    });
-    const qaIssue = await svc.create(companyId, {
+    })).rejects.toThrow(/server-native DAG/i);
+    await expect(svc.create(companyId, {
       missionId,
       assigneeAgentId: qaAgentId,
       createdByAgentId: ownerAgentId,
@@ -1205,12 +1455,37 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
       title: "[QA] Independent evidence and claim verification",
       status: "todo",
       priority: "high",
-    });
-    const oversightIssue = await svc.create(companyId, {
+    })).rejects.toThrow(/server-native DAG/i);
+    await expect(svc.create(companyId, {
       missionId,
       assigneeAgentId: ownerAgentId,
       createdByAgentId: ownerAgentId,
       originKind: "mission_main_executor_oversight",
+      title: "[OVERSIGHT] Failure/retry/escalation decisions",
+      status: "todo",
+      priority: "medium",
+    })).rejects.toThrow(/server-native DAG/i);
+
+    const actionIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: workerAgentId,
+      originKind: "workflow_execution",
+      title: "[ACTION] Source dossiers for candidates",
+      status: "todo",
+      priority: "medium",
+    });
+    const qaIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: qaAgentId,
+      originKind: "workflow_execution",
+      title: "[QA] Independent evidence and claim verification",
+      status: "todo",
+      priority: "high",
+    });
+    const oversightIssue = await svc.create(companyId, {
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      originKind: "workflow_execution",
       title: "[OVERSIGHT] Failure/retry/escalation decisions",
       status: "todo",
       priority: "medium",

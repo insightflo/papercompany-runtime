@@ -27,11 +27,17 @@ import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { heartbeatsApi } from "../api/heartbeats";
 import { queryKeys } from "../lib/queryKeys";
+import { cn } from "../lib/utils";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
-export function Sidebar() {
+interface SidebarProps {
+  onOpenHermes?: () => void;
+  hermesPanelOpen?: boolean;
+}
+
+export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps) {
   const { openNewIssue, openNewMission } = useDialog();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const inboxBadge = useInboxBadge(selectedCompanyId);
@@ -127,6 +133,19 @@ export function Sidebar() {
           <SidebarNavItem to="/org" label="Org" icon={Network} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/instructions" label="Instructions" icon={BookOpen} />
+          <button
+            type="button"
+            onClick={onOpenHermes}
+            className={cn(
+              "flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium transition-colors",
+              hermesPanelOpen
+                ? "bg-accent text-foreground"
+                : "text-foreground/80 hover:bg-accent/50 hover:text-foreground",
+            )}
+          >
+            <MessageSquare className="h-4 w-4 shrink-0" />
+            <span className="flex-1 truncate text-left">Hermes</span>
+          </button>
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />

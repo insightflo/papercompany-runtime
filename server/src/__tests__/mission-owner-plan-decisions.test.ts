@@ -12,6 +12,7 @@ import {
   heartbeatRuns,
   issueComments,
   issues,
+  missionDelegations,
   missionPlanArtifacts,
   missions,
   workflowDefinitions,
@@ -1051,6 +1052,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     await db.delete(agentRuntimeState);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
+    await db.delete(missionDelegations);
     await db.delete(missionPlanArtifacts);
     await db.delete(issueComments);
     await db.delete(issues);
@@ -1331,6 +1333,390 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(oversightIssues).toHaveLength(0);
   });
 
+  it("materializes PLAN-managed mission units with explicit assignees into native DAG steps", async () => {
+    const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Validate PLAN-owned assignment structure",
+      selectedExecutionUnits: [
+        {
+          id: "unit-source-research",
+          kind: "mission_plan_unit",
+          title: "Research source evidence",
+          assigneeAgentId: otherAgentId,
+          selectionState: "selected",
+          reason: "PLAN selected the worker from the company roster",
+          sourceRef: { type: "mission_plan_unit", id: "unit-source-research" },
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["worker ACTION completes before QA"],
+      steps: [{ id: "research", title: "Research source evidence" }],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T00:30:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Validate PLAN-owned assignment structure"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[]; agentId: string; description: string }>;
+    expect(paqoSteps[0]).toMatchObject({
+      name: "[ACTION] Research source evidence",
+      agentId: otherAgentId,
+    });
+    expect(paqoSteps[0]!.description).toContain(`Assigned by PLAN decision to agentId: ${otherAgentId}`);
+    expect(paqoSteps[1]).toMatchObject({
+      name: "[QA] Verify mission result",
+      agentId: ownerAgentId,
+      dependencies: [paqoSteps[0]!.id],
+    });
+
+    const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
+    expect(runs).toHaveLength(1);
+    const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runs[0]!.id));
+    const actionRun = stepRuns.find((stepRun) => stepRun.stepId === paqoSteps[0]!.id);
+    expect(actionRun?.issueId).toEqual(expect.any(String));
+    const actionIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, actionRun!.issueId!))
+      .then((rows) => rows[0]);
+    expect(actionIssue).toMatchObject({
+      companyId,
+      missionId,
+      title: expect.stringMatching(/^\[ACTION\] Research source evidence/),
+      assigneeAgentId: otherAgentId,
+      originKind: "workflow_execution",
+      parentId: null,
+    });
+  });
+
+  it("automatically creates cross-company delegated missions from owner PLAN selected units", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const targetCompanyId = randomUUID();
+    const targetOwnerAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: targetCompanyId,
+      name: "Research Company",
+      issuePrefix: `RC${targetCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: targetOwnerAgentId,
+      companyId: targetCompanyId,
+      name: "Research Director",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Build daily briefing dashboard",
+      selectedExecutionUnits: [
+        {
+          id: "research-daily-brief-inputs",
+          kind: "cross_company_mission",
+          title: "Research daily briefing workflow inputs",
+          targetCompanyId,
+          targetOwnerAgentId,
+          reason: "Development mission needs Research Company evidence before implementation planning",
+          sourceRef: { type: "cross_company_mission", id: "research-daily-brief-inputs" },
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["delegated research mission returns official workProducts"],
+      steps: ["delegate research to Research Company before implementation planning"],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T00:45:00.000Z"),
+    });
+
+    const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result1.status).toBe("recorded");
+    expect(result2.status).toBe("noop");
+
+    const delegations = await db.select().from(missionDelegations).where(eq(missionDelegations.sourceMissionId, missionId));
+    expect(delegations).toHaveLength(1);
+    expect(delegations[0]).toMatchObject({
+      sourceCompanyId: companyId,
+      targetCompanyId,
+      status: "active",
+      externalKey: expect.stringContaining("owner-plan:"),
+    });
+
+    const sourceTracker = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, delegations[0]!.sourceIssueId!))
+      .then((rows) => rows[0]);
+    expect(sourceTracker).toMatchObject({
+      companyId,
+      missionId,
+      status: "blocked",
+      originKind: "mission_delegation_source",
+      assigneeAgentId: ownerAgentId,
+    });
+
+    const targetMission = await db
+      .select()
+      .from(missions)
+      .where(eq(missions.id, delegations[0]!.targetMissionId))
+      .then((rows) => rows[0]);
+    expect(targetMission).toMatchObject({
+      companyId: targetCompanyId,
+      ownerAgentId: targetOwnerAgentId,
+      title: "[DELEGATED] Research daily briefing workflow inputs",
+      status: "planning",
+    });
+
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Build daily briefing dashboard"));
+    expect(paqoDefinitions).toHaveLength(0);
+
+    const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    expect(activePlan?.refs).toMatchObject({
+      crossCompanyDelegations: [
+        {
+          delegationId: delegations[0]!.id,
+          sourceIssueId: delegations[0]!.sourceIssueId,
+          targetCompanyId,
+          targetMissionId: delegations[0]!.targetMissionId,
+          decisionHash: expect.any(String),
+        },
+      ],
+    });
+  });
+
+  it("preserves PLAN unit dependencies and QA grouping in the native PAQO DAG", async () => {
+    const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Validate ordered PLAN unit graph",
+      selectedExecutionUnits: [
+        {
+          id: "unit-research-a",
+          kind: "mission_plan_unit",
+          title: "Research source A",
+          assigneeAgentId: otherAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-research-a" },
+        },
+        {
+          id: "unit-research-b",
+          kind: "mission_plan_unit",
+          title: "Research source B",
+          assigneeAgentId: otherAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-research-b" },
+        },
+        {
+          id: "unit-html-synthesis",
+          kind: "mission_plan_unit",
+          title: "[ACTION] Write HTML report",
+          assigneeAgentId: ownerAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-html-synthesis" },
+          dependsOn: ["unit-research-a", "unit-research-b"],
+        },
+        {
+          id: "unit-qa-validation",
+          kind: "qa",
+          title: "[QA] Fact-check HTML report",
+          assigneeAgentId: otherAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-qa-validation" },
+          dependsOn: ["unit-html-synthesis"],
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["QA runs only after synthesis"],
+      steps: ["Phase 1: parallel research", "Phase 2: synthesis", "Phase 3: QA"],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T01:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Validate ordered PLAN unit graph"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[] }>;
+    const researchA = paqoSteps.find((step) => step.name === "[ACTION] Research source A");
+    const researchB = paqoSteps.find((step) => step.name === "[ACTION] Research source B");
+    const synthesis = paqoSteps.find((step) => step.name === "[ACTION] Write HTML report");
+    const validator = paqoSteps.find((step) => step.name === "[QA] Fact-check HTML report");
+    const ownerQa = paqoSteps.find((step) => step.name === "[QA] Verify mission result");
+
+    expect(researchA?.dependencies).toEqual([]);
+    expect(researchB?.dependencies).toEqual([]);
+    expect(synthesis?.dependencies).toEqual(expect.arrayContaining([researchA!.id, researchB!.id]));
+    expect(synthesis?.dependencies).toHaveLength(2);
+    expect(validator?.dependencies).toEqual([synthesis!.id]);
+    expect(ownerQa?.dependencies).toEqual(expect.arrayContaining([
+      researchA!.id,
+      researchB!.id,
+      synthesis!.id,
+      validator!.id,
+    ]));
+    expect(ownerQa?.dependencies).toHaveLength(4);
+
+    const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
+    expect(runs).toHaveLength(1);
+    const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runs[0]!.id));
+    expect(stepRuns.find((stepRun) => stepRun.stepId === researchA!.id)?.issueId).toEqual(expect.any(String));
+    expect(stepRuns.find((stepRun) => stepRun.stepId === researchB!.id)?.issueId).toEqual(expect.any(String));
+    expect(stepRuns.find((stepRun) => stepRun.stepId === synthesis!.id)?.issueId).toBeNull();
+    expect(stepRuns.find((stepRun) => stepRun.stepId === validator!.id)?.issueId).toBeNull();
+  });
+
+  it("refreshes an existing PAQO workflow definition when PLAN steps change", async () => {
+    const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const staleDefinitionId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: staleDefinitionId,
+      companyId,
+      name: "PAQO WBS: Validate stale PAQO definition",
+      stepsJson: [
+        {
+          id: "action-stale",
+          name: "[ACTION] Stale action",
+          agentId: ownerAgentId,
+          dependencies: [],
+        },
+        {
+          id: "qa-stale",
+          name: "[QA] Verify mission result",
+          agentId: ownerAgentId,
+          dependencies: ["action-stale"],
+        },
+      ],
+    });
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Validate stale PAQO definition",
+      selectedExecutionUnits: [
+        {
+          id: "unit-a",
+          kind: "mission_plan_unit",
+          title: "Research A",
+          assigneeAgentId: otherAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-a" },
+        },
+        {
+          id: "unit-b",
+          kind: "mission_plan_unit",
+          title: "Synthesize B",
+          assigneeAgentId: ownerAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-b" },
+          dependsOn: ["unit-a"],
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["B waits for A"],
+      steps: ["A then B"],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T01:30:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Validate stale PAQO definition"));
+    expect(paqoDefinitions).toHaveLength(1);
+    expect(paqoDefinitions[0]!.id).toBe(staleDefinitionId);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[] }>;
+    const research = paqoSteps.find((step) => step.name === "[ACTION] Research A");
+    const synthesis = paqoSteps.find((step) => step.name === "[ACTION] Synthesize B");
+    expect(research?.dependencies).toEqual([]);
+    expect(synthesis?.dependencies).toEqual([research!.id]);
+  });
+
   it("materializes selected execution units with issue sourceRefs emitted by PLAN heartbeat output", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     await missionPlanArtifactService(db).createInitialMissionPlan({
@@ -1484,6 +1870,64 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(activityLog)
       .where(eq(activityLog.action, "mission.owner_plan.recorded"));
     expect(activities).toHaveLength(0);
+  });
+
+  it("rejects PLAN mission units assigned to non-runnable agents", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const errorAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: errorAgentId,
+      companyId,
+      name: "Unavailable Agent",
+      role: "worker",
+      status: "error",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        missionGoal: "Do not dispatch to unavailable agents",
+        selectedExecutionUnits: [
+          {
+            id: "unit-error-agent",
+            kind: "mission_plan_unit",
+            title: "Should not run",
+            assigneeAgentId: errorAgentId,
+            sourceRef: { type: "mission_plan_unit", id: "unit-error-agent" },
+          },
+        ],
+        requiredInputs: [],
+        successCriteria: [],
+        steps: [],
+      }),
+      createdAt: new Date("2026-01-01T00:05:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("invalid");
+    expect(result.reason).toBe("invalid_selected_execution_unit_source_ref");
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "assignee_agent_not_runnable",
+        message: expect.stringContaining("status=error"),
+      }),
+    ]);
+
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans).toHaveLength(1);
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Do not dispatch to unavailable agents"));
+    expect(paqoDefinitions).toHaveLength(0);
   });
 
   it("omits malformed assessment without blocking valid plan materialization", async () => {
