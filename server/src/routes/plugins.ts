@@ -1360,18 +1360,10 @@ export function pluginRoutes(
           }));
           const resultRecord = result && typeof result === "object" ? result as Record<string, unknown> : {};
           const pluginWorkflows = Array.isArray(resultRecord.workflows) ? resultRecord.workflows : [];
-          const pluginActiveRuns = Array.isArray(resultRecord.activeRuns) ? resultRecord.activeRuns : [];
-          const pluginRecentRuns = Array.isArray(resultRecord.recentRuns) ? resultRecord.recentRuns : [];
           const pluginWorkflowIds = new Set(pluginWorkflows
             .map((workflow) => workflow && typeof workflow === "object" && "id" in workflow
               ? (workflow as { id?: unknown }).id
               : undefined)
-            .filter((id): id is string => typeof id === "string" && id.length > 0));
-          const pluginActiveRunIds = new Set(pluginActiveRuns
-            .map((run) => run && typeof run === "object" && "id" in run ? (run as { id?: unknown }).id : undefined)
-            .filter((id): id is string => typeof id === "string" && id.length > 0));
-          const pluginRecentRunIds = new Set(pluginRecentRuns
-            .map((run) => run && typeof run === "object" && "id" in run ? (run as { id?: unknown }).id : undefined)
             .filter((id): id is string => typeof id === "string" && id.length > 0));
           const nativeWorkflowSummaries = nativeDefinitions
             .filter((definition) => !pluginWorkflowIds.has(definition.id))
@@ -1407,14 +1399,8 @@ export function pluginRoutes(
                 ...pluginWorkflows,
                 ...nativeWorkflowSummaries,
               ],
-              activeRuns: [
-                ...pluginActiveRuns,
-                ...nativeRunSummaries.filter((run) => run.status === "running" && !pluginActiveRunIds.has(run.id)),
-              ],
-              recentRuns: [
-                ...pluginRecentRuns,
-                ...nativeRunSummaries.filter((run) => run.status !== "running" && !pluginRecentRunIds.has(run.id)).slice(0, 10),
-              ],
+              activeRuns: nativeRunSummaries.filter((run) => run.status === "running"),
+              recentRuns: nativeRunSummaries.filter((run) => run.status !== "running").slice(0, 10),
             },
           });
           return;

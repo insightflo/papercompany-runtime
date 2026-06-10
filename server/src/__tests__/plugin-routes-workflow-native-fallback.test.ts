@@ -112,7 +112,7 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     });
   });
 
-  it("merges native definitions and runs into workflow overview", async () => {
+  it("merges native definitions and uses native runs in workflow overview", async () => {
     const workerManager = {
       call: vi.fn().mockResolvedValue({
         workflows: [
@@ -237,12 +237,23 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       "workflow-2",
     ]);
     expect(res.body.data.activeRuns).toEqual([
-      { id: "run-active-1", workflowName: "Plugin active", status: "running" },
-      { id: "plugin-run-active", workflowName: "Plugin active only", status: "running" },
+      {
+        id: "run-active-1",
+        workflowName: "Native workflow",
+        status: "running",
+        startedAt: "2026-04-22T00:00:00.000Z",
+        triggerSource: "manual",
+      },
     ]);
     expect(res.body.data.recentRuns).toEqual([
-      { id: "run-recent-1", workflowName: "Plugin recent", status: "completed" },
-      { id: "plugin-run-recent", workflowName: "Plugin recent only", status: "completed" },
+      {
+        id: "run-recent-1",
+        workflowName: "Native workflow",
+        status: "completed",
+        startedAt: "2026-04-23T00:00:00.000Z",
+        completedAt: "2026-04-23T00:10:00.000Z",
+        triggerSource: "scheduler",
+      },
       {
         id: "run-recent-2",
         workflowName: "Native only workflow",
