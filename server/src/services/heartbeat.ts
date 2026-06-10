@@ -5060,6 +5060,32 @@ export function heartbeatService(db: Db) {
             error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
           });
         }
+        // exit_error fallback: when adapter exits with non-zero code and fallback triggers include "exit_error",
+        // enqueue a fallback run with the fallbackCommand before releasing the issue.
+        if (outcome === "failed" && finalizedRun && (adapterResult.exitCode ?? 0) !== 0) {
+          const exitErrorFallback = resolveAdapterFallbackConfig(agent.adapterConfig);
+          const exitErrorAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
+          const shouldExitErrorFallback =
+            Boolean(exitErrorFallback) &&
+            exitErrorFallback!.triggers.has("exit_error") &&
+            exitErrorAttempt < exitErrorFallback!.maxAttempts;
+          if (shouldExitErrorFallback) {
+            const exitErrorRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
+              fallbackCommand: exitErrorFallback!.command,
+              fallbackReason: "exit_error",
+            });
+            await appendRunEvent(finalizedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: `Adapter exited with code ${adapterResult.exitCode}; queued exit_error fallback ${exitErrorRun?.id ?? ""}`.trim(),
+              payload: {
+                exitCode: adapterResult.exitCode,
+                fallbackRunId: exitErrorRun?.id ?? null,
+              },
+            });
+          }
+        }
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
       await finalizeAgentStatus(agent.id, outcome);
