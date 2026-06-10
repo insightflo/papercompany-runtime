@@ -22,6 +22,9 @@ import {
   missions,
   projectWorkspaces,
   projects,
+  pluginEntities,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -64,6 +67,107 @@ function applyStatusSideEffects(
     patch.cancelledAt = new Date();
   }
   return patch;
+}
+
+async function assertCanCompleteMissionOversightIssue(db: Db, issue: typeof issues.$inferSelect) {
+  if (issue.originKind !== "mission_main_executor_oversight" || !issue.missionId) return;
+
+  const [mission] = await db
+    .select({ id: missions.id, status: missions.status })
+    .from(missions)
+    .where(and(eq(missions.id, issue.missionId), eq(missions.companyId, issue.companyId)))
+    .limit(1);
+  if (!mission || TERMINAL_MISSION_STATUSES.has(mission.status)) return;
+
+  const openWork = await db
+    .select({
+      id: issues.id,
+      identifier: issues.identifier,
+      title: issues.title,
+      status: issues.status,
+    })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, issue.companyId),
+      eq(issues.missionId, issue.missionId),
+      isNull(issues.hiddenAt),
+      ne(issues.id, issue.id),
+      sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
+      sql`${issues.status} not in ('done', 'cancelled')`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (openWork) {
+    throw unprocessable(
+      `Cannot complete mission oversight while mission work remains open (${openWork.identifier ?? openWork.id}: ${openWork.status}).`,
+    );
+  }
+
+  const activeWorkflowRun = await db
+    .select({
+      id: workflowRuns.id,
+      status: workflowRuns.status,
+    })
+    .from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.companyId, issue.companyId),
+      eq(workflowRuns.missionId, issue.missionId),
+      sql`${workflowRuns.status} not in ('completed', 'succeeded', 'done', 'failed', 'error', 'cancelled', 'canceled', 'aborted')`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (activeWorkflowRun) {
+    throw unprocessable(
+      `Cannot complete mission oversight while workflow run ${activeWorkflowRun.id} is ${activeWorkflowRun.status}.`,
+    );
+  }
+
+  const activePluginWorkflowRun = await db
+    .select({
+      id: pluginEntities.id,
+      data: pluginEntities.data,
+    })
+    .from(pluginEntities)
+    .where(and(
+      eq(pluginEntities.entityType, "workflow-run"),
+      eq(pluginEntities.scopeKind, "company"),
+      eq(pluginEntities.scopeId, issue.companyId),
+      sql`${pluginEntities.data} ->> 'missionId' = ${issue.missionId}`,
+      sql`coalesce(${pluginEntities.data} ->> 'status', '') not in ('completed', 'succeeded', 'done', 'failed', 'error', 'cancelled', 'canceled', 'aborted', 'timed-out')`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (activePluginWorkflowRun) {
+    const status = activePluginWorkflowRun.data
+      && typeof activePluginWorkflowRun.data === "object"
+      && !Array.isArray(activePluginWorkflowRun.data)
+      ? String((activePluginWorkflowRun.data as Record<string, unknown>).status ?? "unknown")
+      : "unknown";
+    throw unprocessable(
+      `Cannot complete mission oversight while plugin workflow run ${activePluginWorkflowRun.id} is ${status}.`,
+    );
+  }
+
+  const activeWorkflowStep = await db
+    .select({
+      runId: workflowRuns.id,
+      stepId: workflowStepRuns.stepId,
+      status: workflowStepRuns.status,
+    })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .where(and(
+      eq(workflowRuns.companyId, issue.companyId),
+      eq(workflowRuns.missionId, issue.missionId),
+      sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (activeWorkflowStep) {
+    throw unprocessable(
+      `Cannot complete mission oversight while workflow step ${activeWorkflowStep.stepId} is ${activeWorkflowStep.status}.`,
+    );
+  }
 }
 
 export interface IssueFilters {
@@ -1370,6 +1474,9 @@ export function issueService(db: Db) {
       if (issueData.status) {
         assertTransition(existing.status, issueData.status);
       }
+      if (issueData.status === "done" && existing.status !== "done") {
+        await assertCanCompleteMissionOversightIssue(db, existing);
+      }
 
       if (existing.missionId && issueData.status && issueData.status !== "done" && issueData.status !== "cancelled") {
         const [mission] = await db
@@ -1506,6 +1613,18 @@ export function issueService(db: Db) {
           logger.warn(
             { err, issueId: updatedIssue.id, status: issueData.status },
             "failed to finalize delegated workflow target issue",
+          );
+        }
+      }
+
+      if (updatedIssue && issueData.status && issueData.status !== existing.status) {
+        try {
+          const { workflowService } = await import("./workflow/engine.js");
+          await workflowService.syncRunStatusForIssue(db, updatedIssue.id);
+        } catch (err) {
+          logger.warn(
+            { err, issueId: updatedIssue.id, status: issueData.status },
+            "failed to sync workflow state after issue status update",
           );
         }
       }

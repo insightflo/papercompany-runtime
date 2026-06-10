@@ -6,12 +6,10 @@ import {
   type PluginEvent,
   type PluginJobContext,
 } from "@paperclipai/plugin-sdk";
-import { JOB_KEYS, RUN_STATUSES, STEP_STATUSES } from "./constants.js";
+import { JOB_KEYS, PLUGIN_ID, RUN_STATUSES, STEP_STATUSES } from "./constants.js";
 import {
   getEscalationTarget,
   getRetryInfo,
-  getWorkflowLaunchSteps,
-  isDynamicOwnerPlanWorkflowDefinition,
   validateWorkflowLaunchability,
   type WorkflowExecutionMode,
   type WorkflowStep,
@@ -20,8 +18,6 @@ import {
   formatDateKeyInTimezone,
   checkIdempotency,
   createWorkflowDefinition,
-  createWorkflowRun,
-  listWorkflowRunsByWorkflowId,
   updateWorkflowDefinition,
   createStepRun,
   findStepRunByIssueId,
@@ -52,7 +48,7 @@ import {
 } from "./workflow-utils.js";
 import { checkDailyRunGuard } from "./run-guards.js";
 import { ensureIssueLabels } from "./issue-labels.js";
-import { normalizeCreateParentIssuePolicy, shouldCreateParentIssueForRun } from "./workflow-parent-policy.js";
+import { normalizeCreateParentIssuePolicy } from "./workflow-parent-policy.js";
 import {
   autoCompleteWorkflowStepIssue,
   syncWorkflowStepIssueStatus,
@@ -1897,157 +1893,54 @@ async function startWorkflow(
   }
   assertWorkflowLaunchable(typedWorkflowDefinition);
 
-  // Build run label with date + daily run number
-  const now = new Date();
-  const timezone = typeof typedWorkflowDefinition.data.timezone === "string"
-    ? typedWorkflowDefinition.data.timezone.trim()
-    : "";
-  const dateStr = formatDateKeyInTimezone(now, timezone || undefined) ?? now.toISOString().slice(0, 10);
-  const existingRuns = await listWorkflowRunsByWorkflowId(ctx, companyId, workflowId);
-  const todayRuns = existingRuns.filter((r: PluginEntityRecord) => {
-    const started = (r.data as Record<string, unknown>).startedAt;
-    if (typeof started !== "string") {
-      return false;
-    }
-    const startedAt = Date.parse(started);
-    if (!Number.isFinite(startedAt)) {
-      return false;
-    }
-    return formatDateKeyInTimezone(new Date(startedAt), timezone || undefined) === dateStr;
+  const apiUrl = getPaperclipApiUrl();
+  const response = await fetch(`${apiUrl}/api/plugins/${encodeURIComponent(PLUGIN_ID)}/actions/start-workflow`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      companyId,
+      workflowId,
+      ...(typeof options?.missionId === "string" && options.missionId.trim()
+        ? { missionId: options.missionId.trim() }
+        : {}),
+      triggerSource: options?.triggerSource ?? "schedule",
+    }),
   });
-  const runNumber = todayRuns.length + 1;
-  const runLabel = `#${dateStr}-${runNumber}`;
-  const templateVars: Record<string, string> = {
-    date: dateStr,
-    runNumber: String(runNumber),
-    runLabel,
-    workflowName: typedWorkflowDefinition.data.name,
-  };
 
-  const agents = await ctx.agents.list({ companyId });
-  const missionOwnerAgentId = resolveWorkflowMissionOwnerAgentId(typedWorkflowDefinition, agents);
-  const missionId = typeof options?.missionId === "string" && options.missionId.trim()
-    ? options.missionId.trim()
-    : await createWorkflowMissionViaApi(
-      companyId,
-      missionOwnerAgentId,
-      typedWorkflowDefinition.data.name,
-      dateStr,
-    );
-
-  let parentIssueId = typeof options?.parentIssueId === "string" && options.parentIssueId.trim()
-    ? options.parentIssueId.trim()
-    : "";
-  const shouldCreateParentIssue = shouldCreateParentIssueForRun({
-    explicitCreateParentIssue: options && "createParentIssue" in options ? options.createParentIssue : undefined,
-    policy: options?.createParentIssuePolicy ?? typedWorkflowDefinition.data.createParentIssuePolicy,
-    stepCount: typedWorkflowDefinition.data.steps.length,
-  });
-  if (!parentIssueId && shouldCreateParentIssue) {
-    const parentIssue = await createIssueWithLabels(ctx, {
-      assigneeAgentId: missionOwnerAgentId,
-      companyId,
-      description: typedWorkflowDefinition.data.description || `Workflow run: ${typedWorkflowDefinition.data.name}`,
-      goalId: typedWorkflowDefinition.data.goalId || undefined,
-      originKind: "mission_main_executor_oversight",
-      projectId: typedWorkflowDefinition.data.projectId || undefined,
-      status: "backlog",
-      title: `[Oversight] ${typedWorkflowDefinition.data.name} ${runLabel}`,
-      missionId,
-    }, typedWorkflowDefinition.data.labelIds as string[] | undefined);
-    parentIssueId = parentIssue.id;
-  }
-  if (parentIssueId) {
-    await ensureIssueLabels(
-      ctx,
-      parentIssueId,
-      companyId,
-      typedWorkflowDefinition.data.labelIds as string[] | undefined,
-    );
+  if (!response.ok) {
+    throw new Error(`Native workflow start failed: ${response.status} ${await response.text()}`);
   }
 
-  const workflowRun = toWorkflowRunRecord(await createWorkflowRun(ctx, {
+  const payload = await response.json() as Record<string, unknown>;
+  const data = payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+    ? payload.data as Record<string, unknown>
+    : {};
+  const run = data.run && typeof data.run === "object" && !Array.isArray(data.run)
+    ? data.run as Record<string, unknown>
+    : data;
+  const runId = typeof run.runId === "string" ? run.runId : typeof run.id === "string" ? run.id : "";
+  if (!runId) {
+    throw new Error("Native workflow start failed: response did not include run id");
+  }
+
+  ctx.logger.info("Started workflow run through server-native DAG", {
     companyId,
-    missionId,
-    parentIssueId: parentIssueId || undefined,
-    runLabel,
-    runDate: dateStr,
-    runNumber,
-    startedAt: new Date().toISOString(),
-    status: RUN_STATUSES.running,
-    triggerSource: options?.triggerSource,
-    workflowId: typedWorkflowDefinition.id,
-    workflowName: typedWorkflowDefinition.data.name,
-  }));
-
-  const agentsByName = new Map<string, AgentRecord>();
-  for (const agent of agents) {
-    agentsByName.set(agent.name, agent);
-  }
-
-  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(typedWorkflowDefinition.data);
-  const launchSteps = getWorkflowLaunchSteps(typedWorkflowDefinition.data.steps, { dynamicOwnerPlan });
-  const pendingRootSteps: Array<{ stepDef: WorkflowStep; stepRun: WorkflowStepRunRecord }> = [];
-  for (const stepDef of launchSteps) {
-    const agentNameHint = getStepAgentNameHint(stepDef);
-    const matchedAgent = agentNameHint ? agentsByName.get(agentNameHint) ?? null : null;
-    const resolvedAgent = matchedAgent
-      ? { agentId: matchedAgent.id, agentName: matchedAgent.name }
-      : await resolveStepAgent(ctx, companyId, stepDef, agentNameHint ?? undefined);
-
-    if (!resolvedAgent.agentName && (stepDef.type ?? "agent") === "agent") {
-      throw new Error(`Unable to resolve step assignee for "${stepDef.id}"`);
-    }
-
-    const stepRun = toWorkflowStepRunRecord(await createStepRun(ctx, companyId, {
-      agentName: resolvedAgent.agentName ?? "system",
-      retryCount: 0,
-      runId: workflowRun.id,
-      status: STEP_STATUSES.backlog,
-      stepId: stepDef.id,
-    }));
-
-    if (stepDef.dependsOn.length === 0 && stepDef.triggerOn !== "escalation") {
-      pendingRootSteps.push({ stepDef, stepRun });
-    }
-  }
-
-  const activatedStepIds: string[] = [];
-  for (const pending of pendingRootSteps) {
-    await activateBacklogStep(
-      ctx,
-      pending.stepRun,
-      pending.stepDef,
-      typedWorkflowDefinition.data.name,
-      companyId,
-      {
-        parentIssueId: parentIssueId || undefined,
-        missionId,
-        runLabel,
-        templateVars,
-        projectId: typedWorkflowDefinition.data.projectId,
-        goalId: typedWorkflowDefinition.data.goalId,
-        labelIds: typedWorkflowDefinition.data.labelIds as string[] | undefined,
-      },
-    );
-    activatedStepIds.push(pending.stepDef.id);
-  }
-
-  ctx.logger.info("Started workflow run", {
-    activatedStepIds,
-    companyId,
-    parentIssueId: parentIssueId || null,
-    runLabel,
-    runId: workflowRun.id,
+    runId,
     workflowId: typedWorkflowDefinition.id,
     workflowName: typedWorkflowDefinition.data.name,
   });
 
   return {
-    activatedStepIds,
-    parentIssueId: parentIssueId || null,
-    runId: workflowRun.id,
-    workflowId: typedWorkflowDefinition.id,
+    activatedStepIds: Array.isArray(run.stepRuns)
+      ? run.stepRuns
+        .map((stepRun) => stepRun && typeof stepRun === "object" && !Array.isArray(stepRun)
+          ? String((stepRun as Record<string, unknown>).stepId ?? "")
+          : "")
+        .filter(Boolean)
+      : [],
+    parentIssueId: null,
+    runId,
+    workflowId: typeof run.workflowId === "string" ? run.workflowId : typedWorkflowDefinition.id,
   };
 }
 
@@ -2057,7 +1950,7 @@ async function advanceWorkflow(
   companyId: string,
 ): Promise<void> {
   const completedStepRun = toWorkflowStepRunRecord(stepRunRecord);
-  ctx.logger.info("Skipped legacy plugin workflow advancement; server native DAG owns execution", {
+  ctx.logger.info("Skipped legacy plugin workflow advancement; server-native DAG owns execution", {
     companyId,
     runId: completedStepRun.data.runId,
     stepId: completedStepRun.data.stepId,

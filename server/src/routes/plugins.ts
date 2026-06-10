@@ -479,6 +479,19 @@ export function pluginRoutes(
         return true;
       }
 
+      const existingRun = await workflowService.getRun(db, runId);
+      if (!existingRun) {
+        res.status(404).json({
+          error: "Native workflow run not found",
+          message: "Legacy plugin workflow-run execution is disabled; start a new server-native workflow run instead.",
+        });
+        return true;
+      }
+      if (existingRun.companyId !== companyId) {
+        res.status(404).json({ error: "Workflow run not found" });
+        return true;
+      }
+
       const run = await workflowService.resumeRun(db, { companyId, runId });
       res.json({ data: { run, ...run } });
       return true;

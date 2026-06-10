@@ -453,6 +453,28 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     expect(res.body.data.runId).toBe("run-1");
   });
 
+  it("rejects resume-run for legacy plugin runs instead of falling back to the plugin worker", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    mockWorkflowService.getRun.mockResolvedValue(null);
+
+    const res = await request(createApp(workerManager))
+      .post("/api/plugins/plugin-1/actions/resume-run")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          runId: "legacy-plugin-run-1",
+        },
+      });
+
+    expect(res.status).toBe(404);
+    expect(mockWorkflowService.resumeRun).not.toHaveBeenCalled();
+    expect(workerManager.call).not.toHaveBeenCalled();
+    expect(res.body.message).toContain("Legacy plugin workflow-run execution is disabled");
+  });
+
   it("routes cancel-run to native workflow cancellation without calling the plugin worker", async () => {
     const workerManager = {
       call: vi.fn(),
