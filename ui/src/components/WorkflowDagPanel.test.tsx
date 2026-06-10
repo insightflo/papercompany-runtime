@@ -34,7 +34,8 @@ vi.mock("@tanstack/react-query", () => ({
               {
                 stepId: "draft",
                 name: "Draft",
-                agentId: "agent-1",
+                type: "agent",
+                agentId: "",
                 dependencies: [],
                 description: "Prepare the mission brief",
                 toolNames: ["search-docs"],
@@ -115,6 +116,7 @@ describe("WorkflowDagPanel", () => {
     expect(html).toContain("9:10 AM");
     expect(html).toContain("10:05 AM");
     expect(html).toContain("Planner");
+    expect(html).not.toContain("Assignee: tool");
     expect(html).toContain("Draft");
     expect(html).toContain("Prepare the mission brief");
     expect(html).toContain("search-docs");

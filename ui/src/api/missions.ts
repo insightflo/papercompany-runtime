@@ -39,6 +39,7 @@ export interface MissionWorkflowStepIssue {
 export interface MissionWorkflowStep {
   stepId: string;
   name: string;
+  type: "agent" | "tool";
   agentId: string;
   dependencies: string[];
   description: string | null;

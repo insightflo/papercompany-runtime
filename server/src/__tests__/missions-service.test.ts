@@ -2902,7 +2902,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         {
           id: "draft",
           name: "Draft",
-          agentId: ownerAgentId,
+          type: "agent",
+          agentId: "",
+          agentName: "Workflow Owner",
           dependencies: [],
           toolNames: ["search-docs"],
           knowledgeBaseIds: ["kb-product"],
@@ -2961,6 +2963,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect.objectContaining({
         stepId: "draft",
         name: "Draft",
+        type: "agent",
         agentId: ownerAgentId,
         toolNames: ["search-docs"],
         knowledgeBaseIds: ["kb-product"],
@@ -4069,6 +4072,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect.objectContaining({
         stepId: "scheduled-step",
         name: "Scheduled E2E pass step",
+        type: "agent",
         agentId: ownerAgentId,
         dependencies: [],
         status: "running",

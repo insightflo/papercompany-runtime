@@ -138,6 +138,7 @@ export type MissionWorkflowRunProgress = {
 export type MissionWorkflowRunStep = {
   stepId: string;
   name: string;
+  type: "agent" | "tool";
   agentId: string;
   dependencies: string[];
   description: string | null;
@@ -162,6 +163,12 @@ function normalizeMissionWorkflowStepStatus(status: string): MissionWorkflowRunS
   return MISSION_WORKFLOW_STEP_STATUSES.has(status as MissionWorkflowRunStep["status"])
     ? (status as MissionWorkflowRunStep["status"])
     : "pending";
+}
+
+function normalizeMissionWorkflowStepType(value: unknown): MissionWorkflowRunStep["type"] {
+  return typeof value === "string" && value.trim().toLowerCase() === "tool"
+    ? "tool"
+    : "agent";
 }
 
 export type MissionWorkflowRunDetail = typeof workflowRuns.$inferSelect & {
@@ -2977,6 +2984,12 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       stepIssues.map((issue) => [issue.id, issue]),
     );
 
+    const companyAgents = await db
+      .select({ id: agents.id, name: agents.name })
+      .from(agents)
+      .where(eq(agents.companyId, mission.companyId));
+    const agentIdByName = new Map(companyAgents.map((agent) => [agent.name, agent.id]));
+
     const nativeDetails = runs.map(({ run, workflowName, workflowSteps }) => {
       const definitionSteps = normalizeWorkflowStepsForExecution(workflowSteps);
       const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
@@ -2989,10 +3002,17 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
 
       const steps: MissionWorkflowRunStep[] = definitionSteps.map((step) => {
         const stepRun = stepRunByStepId.get(step.id);
+        const persistedStep = step as typeof step & { agent?: unknown; agentName?: unknown; assigneeAgentName?: unknown; type?: unknown };
+        const agentName =
+          asTrimmedString(persistedStep.agentName)
+          ?? asTrimmedString(persistedStep.agent)
+          ?? asTrimmedString(persistedStep.assigneeAgentName);
+        const agentId = asTrimmedString(step.agentId) ?? (agentName ? agentIdByName.get(agentName) : undefined) ?? "";
         return {
           stepId: step.id,
           name: step.name,
-          agentId: step.agentId,
+          type: normalizeMissionWorkflowStepType(persistedStep.type),
+          agentId,
           dependencies: [...step.dependencies],
           description: step.description ?? null,
           toolNames: Array.isArray(step.toolNames)
@@ -3015,6 +3035,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         steps.push({
           stepId: stepRun.stepId,
           name: stepRun.stepId,
+          type: "agent",
           agentId: "",
           dependencies: [],
           description: null,
@@ -3100,12 +3121,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       : [];
     const pluginIssueMap = new Map<string, MissionWorkflowStepIssue>(pluginIssues.map((issue) => [issue.id, issue]));
 
-    const companyAgents = await db
-      .select({ id: agents.id, name: agents.name })
-      .from(agents)
-      .where(eq(agents.companyId, mission.companyId));
-    const agentIdByName = new Map(companyAgents.map((agent) => [agent.name, agent.id]));
-
     const pluginDefinitionMap = new Map(pluginDefinitionEntities.map((entity) => [entity.id, entity]));
     const pluginStepRunsMap = new Map<string, typeof pluginStepRuns>();
     for (const stepRun of pluginStepRuns) {
@@ -3155,6 +3170,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         return {
           stepId,
           name: asTrimmedString(step.name) ?? asTrimmedString(step.title) ?? stepId,
+          type: normalizeMissionWorkflowStepType(step.type),
           agentId,
           dependencies: asStringArray(step.dependencies).length ? asStringArray(step.dependencies) : asStringArray(step.dependsOn),
           description: asTrimmedString(step.description),
@@ -3174,6 +3190,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         steps.push({
           stepId: stepRun.stepId,
           name: stepRun.stepId,
+          type: "agent",
           agentId: "",
           dependencies: [],
           description: null,

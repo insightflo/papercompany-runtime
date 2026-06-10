@@ -296,17 +296,15 @@ function getStepAssignee(
   step: MissionWorkflowStep,
   agentMap: Record<string, string>,
 ): { kind: "agent" | "tool" | "unassigned"; label: string; title: string } {
-  const agentId = step.agentId.trim();
-  const hasToolNames = step.toolNames.some((toolName) => toolName.trim().length > 0);
-
-  if (!agentId && hasToolNames) {
+  if (step.type === "tool") {
     return {
       kind: "tool",
       label: "tool",
-      title: `Tool step: ${step.toolNames.join(", ")}`,
+      title: step.toolNames.length > 0 ? `Tool step: ${step.toolNames.join(", ")}` : "Tool step",
     };
   }
 
+  const agentId = step.agentId.trim();
   const issueAssigneeAgentId = step.issue?.assigneeAgentId?.trim() ?? "";
   const resolvedAgentId = agentId || issueAssigneeAgentId;
   if (resolvedAgentId) {
