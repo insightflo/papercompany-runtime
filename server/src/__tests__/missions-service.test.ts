@@ -2550,6 +2550,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .where(eq(issues.originKind, "mission_main_executor_unblock"))
       .then((rows) => rows[0]!);
     expect(recoveryIssue.description).toContain(`<!-- tool-step-recovery:${runId}:collect-signals -->`);
+    const duplicateRecoveryIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: ownerAgentId,
+      description: recoveryIssue.description,
+      missionId,
+      originKind: "mission_main_executor_unblock",
+      originId: oversightIssue.id,
+      priority: "high",
+      status: "todo",
+      title: "[RECOVERY] Tool step failed: collect-signals duplicate",
+    });
 
     await issueService(db).update(recoveryIssue.id, { status: "done" });
 
@@ -2571,6 +2581,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         stepRunId: failedStepRunId,
         resultStatus: "running",
       }),
+    ]));
+    expect(result.missions[0]?.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("tool_step_recovery_duplicate_closed"),
     ]));
 
     const [runAfter] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
@@ -2599,6 +2612,15 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       stepId: "collect-signals",
       toolName: "collect-signals-kr",
     }));
+    const [closedDuplicateRecoveryIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, duplicateRecoveryIssue.id));
+    expect(closedDuplicateRecoveryIssue).toEqual(expect.objectContaining({
+      status: "done",
+    }));
+    const duplicateRecoveryComments = await db.select().from(issueComments).where(eq(issueComments.issueId, duplicateRecoveryIssue.id));
+    expect(duplicateRecoveryComments.map((comment) => comment.body).join("\n")).toContain("### Duplicate native tool step recovery closed");
 
     await completeWorkflowToolStepFromResult(db, {
       companyId,

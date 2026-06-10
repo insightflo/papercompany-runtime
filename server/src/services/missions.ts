@@ -1488,6 +1488,25 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     return { runId, stepId };
   }
 
+  function toolStepRecoveryMarkerKey(marker: { runId: string; stepId: string }): string {
+    return `${marker.runId}:${marker.stepId}`;
+  }
+
+  function findCanonicalToolStepRecoveryIssue(input: {
+    marker: { runId: string; stepId: string };
+    missionIssues: IssueRow[];
+  }): IssueRow | null {
+    const markerKey = toolStepRecoveryMarkerKey(input.marker);
+    return input.missionIssues
+      .filter((candidate) =>
+        candidate.originKind === "mission_main_executor_unblock"
+        && !candidate.hiddenAt
+        && parseToolStepRecoveryMarker(candidate.description)
+        && toolStepRecoveryMarkerKey(parseToolStepRecoveryMarker(candidate.description)!) === markerKey
+      )
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))[0] ?? null;
+  }
+
   function buildNativeToolStepRetryAppliedMarker(input: {
     ownerActionIssueId: string;
     workflowRunId: string;
@@ -1523,6 +1542,30 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         `Failed at: ${input.stepRun.completedAt?.toISOString() ?? new Date().toISOString()}`,
         "",
         "The completed recovery action was applied through the unified workflow engine, but the tool step failed again. Reopening this recovery issue so the mission owner can diagnose the latest failure before another retry.",
+      ].join("\n"),
+      { agentId: input.mission.ownerAgentId },
+    );
+    return true;
+  }
+
+  async function closeDuplicateToolStepRecoveryIssue(input: {
+    issue: IssueRow;
+    mission: MissionRow;
+    canonicalIssue: IssueRow;
+    runId: string;
+    stepId: string;
+  }): Promise<boolean> {
+    if (input.issue.status === "done") return false;
+    await issueService(db).update(input.issue.id, { status: "done" });
+    await issueService(db).addComment(
+      input.issue.id,
+      [
+        "### Duplicate native tool step recovery closed",
+        `Canonical recovery issue: ${input.canonicalIssue.identifier ?? input.canonicalIssue.id}`,
+        `Workflow run: ${input.runId}`,
+        `Step: ${input.stepId}`,
+        "",
+        "This issue has the same tool-step recovery marker as the canonical issue. Automatic recovery will be handled only once through the unified workflow engine.",
       ].join("\n"),
       { agentId: input.mission.ownerAgentId },
     );
@@ -1883,6 +1926,24 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
       if (issue.originKind === "mission_main_executor_unblock") {
         const toolRecovery = parseToolStepRecoveryMarker(issue.description);
+        if (toolRecovery) {
+          const canonicalIssue = findCanonicalToolStepRecoveryIssue({ marker: toolRecovery, missionIssues });
+          if (canonicalIssue && canonicalIssue.id !== issue.id) {
+            const closed = input.applyOwnerDecisionActions
+              ? await closeDuplicateToolStepRecoveryIssue({
+                  issue,
+                  mission,
+                  canonicalIssue,
+                  runId: toolRecovery.runId,
+                  stepId: toolRecovery.stepId,
+                })
+              : false;
+            findings.push(closed
+              ? `tool_step_recovery_duplicate_closed: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${toolRecovery.runId} step=${toolRecovery.stepId}`
+              : `tool_step_recovery_duplicate_ignored: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+            continue;
+          }
+        }
         if (toolRecovery && issue.status === "done" && input.applyOwnerDecisionActions) {
           const markerInput = {
             ownerActionIssueId: issue.id,
