@@ -47,7 +47,7 @@ import {
   buildOwnerActionExplanations,
   type MissionOwnerActionExplanation,
 } from "./missions/mission-owner-recovery-explanations.js";
-import { normalizeWorkflowStepsForExecution, syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
+import { normalizeWorkflowStepsForExecution, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
@@ -217,6 +217,14 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
   wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
   idempotencyKey?: string;
+} | {
+  type: "native_tool_step_retry";
+  missionId: string;
+  ownerActionIssueId: string;
+  workflowRunId: string;
+  stepId: string;
+  stepRunId: string;
+  resultStatus: string;
 } | {
   type: "stale_source_issue_wakeup";
   missionId: string;
@@ -1471,6 +1479,56 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       && /^#{1,3}\s+\S+/m.test(body);
   }
 
+  function parseToolStepRecoveryMarker(description: string | null): { runId: string; stepId: string } | null {
+    const match = description?.match(/<!--\s*tool-step-recovery:([0-9a-f-]{36}):([\s\S]*?)\s*-->/i);
+    if (!match) return null;
+    const runId = match[1]?.trim();
+    const stepId = match[2]?.trim();
+    if (!runId || !stepId || !isUuidLike(runId)) return null;
+    return { runId, stepId };
+  }
+
+  function buildNativeToolStepRetryAppliedMarker(input: {
+    ownerActionIssueId: string;
+    workflowRunId: string;
+    stepId: string;
+  }): string {
+    return `<!-- native-tool-step-retry-applied:${JSON.stringify(input)} -->`;
+  }
+
+  function hasNativeToolStepRetryAppliedMarker(comments: string[], input: {
+    ownerActionIssueId: string;
+    workflowRunId: string;
+    stepId: string;
+  }): boolean {
+    return comments.some((comment) => comment.includes(buildNativeToolStepRetryAppliedMarker(input)));
+  }
+
+  async function reopenAppliedToolStepRecoveryIfRetryFailed(input: {
+    issue: IssueRow;
+    mission: MissionRow;
+    runId: string;
+    stepId: string;
+    stepRun: typeof workflowStepRuns.$inferSelect;
+  }): Promise<boolean> {
+    if (input.issue.status !== "done" || input.stepRun.status !== "failed") return false;
+    await issueService(db).update(input.issue.id, { status: "todo" });
+    await issueService(db).addComment(
+      input.issue.id,
+      [
+        "### Native tool step retry failed",
+        `Workflow run: ${input.runId}`,
+        `Step: ${input.stepId}`,
+        `Step run: ${input.stepRun.id}`,
+        `Failed at: ${input.stepRun.completedAt?.toISOString() ?? new Date().toISOString()}`,
+        "",
+        "The completed recovery action was applied through the unified workflow engine, but the tool step failed again. Reopening this recovery issue so the mission owner can diagnose the latest failure before another retry.",
+      ].join("\n"),
+      { agentId: input.mission.ownerAgentId },
+    );
+    return true;
+  }
+
   function buildCorrectedArtifactValidatorRetryEvidence(input: {
     sourceIssue: IssueRow;
     sourceLabel: string;
@@ -1824,6 +1882,65 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
       }
       if (issue.originKind === "mission_main_executor_unblock") {
+        const toolRecovery = parseToolStepRecoveryMarker(issue.description);
+        if (toolRecovery && issue.status === "done" && input.applyOwnerDecisionActions) {
+          const markerInput = {
+            ownerActionIssueId: issue.id,
+            workflowRunId: toolRecovery.runId,
+            stepId: toolRecovery.stepId,
+          };
+          const currentToolStepRow = stepRows.find((row) =>
+            row.run.id === toolRecovery.runId && row.stepRun.stepId === toolRecovery.stepId
+          );
+          if (hasNativeToolStepRetryAppliedMarker(comments, markerInput)) {
+            if (currentToolStepRow?.stepRun.status === "failed") {
+              const reopened = await reopenAppliedToolStepRecoveryIfRetryFailed({
+                issue,
+                mission,
+                runId: toolRecovery.runId,
+                stepId: toolRecovery.stepId,
+                stepRun: currentToolStepRow.stepRun,
+              });
+              findings.push(reopened
+                ? `tool_step_recovery_retry_failed_reopened: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`
+                : `tool_step_recovery_retry_failed: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+            } else {
+              findings.push(`tool_step_recovery_already_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+            }
+          } else {
+            const retryResult = await retryIssueLessToolWorkflowStep(db, {
+              companyId: mission.companyId,
+              runId: toolRecovery.runId,
+              stepId: toolRecovery.stepId,
+            });
+            if (!retryResult) {
+              findings.push(`tool_step_recovery_not_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} is not a retryable unified-engine issue-less tool step`);
+            } else {
+              findings.push(`tool_step_recovery_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} result=${retryResult.result.status}`);
+              await issueService(db).addComment(
+                issue.id,
+                [
+                  "### Native tool step retry applied",
+                  buildNativeToolStepRetryAppliedMarker(markerInput),
+                  `Workflow run: ${toolRecovery.runId}`,
+                  `Step: ${toolRecovery.stepId}`,
+                  `Step run: ${retryResult.stepRunId}`,
+                  `Result status: ${retryResult.result.status}`,
+                ].join("\n"),
+                { agentId: mission.ownerAgentId },
+              );
+              appliedActions.push({
+                type: "native_tool_step_retry",
+                missionId: mission.id,
+                ownerActionIssueId: issue.id,
+                workflowRunId: toolRecovery.runId,
+                stepId: toolRecovery.stepId,
+                stepRunId: retryResult.stepRunId,
+                resultStatus: retryResult.result.status,
+              });
+            }
+          }
+        }
         const ownerDecision = extractLatestMissionOwnerDecision(comments);
         if (ownerDecision?.decision === null) {
           findings.push(`owner_action_decision_invalid: ${label} has unsupported decision=${ownerDecision.invalidDecision} — ${issue.title}`);
@@ -2486,7 +2603,9 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
             ? `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`
             : action.type === "owner_decision_retry_source_issue"
               ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus}`
-              : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
+              : action.type === "native_tool_step_retry"
+                ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
+                : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
           : ["- None"]),
         "",
         "Main executor action:",

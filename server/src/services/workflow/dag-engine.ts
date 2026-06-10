@@ -827,6 +827,53 @@ export async function completeWorkflowToolStepFromResult(
   return syncWorkflowRunState(db, row.run.id);
 }
 
+export async function retryIssueLessToolWorkflowStep(
+  db: Db,
+  input: {
+    companyId: string;
+    runId: string;
+    stepId: string;
+  },
+): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
+  const context = await loadWorkflowExecutionContext(db, input.runId);
+  if (context.run.companyId !== input.companyId) return null;
+
+  const step = context.steps.find((candidate) => candidate.id === input.stepId);
+  const stepRun = context.stepRuns.find((candidate) => candidate.stepId === input.stepId);
+  if (!step || !stepRun) return null;
+  if (!isIssueLessToolStep(step) || stepRun.issueId) return null;
+  if (stepRun.status !== "failed") return null;
+
+  await db
+    .update(workflowStepRuns)
+    .set({
+      status: "pending",
+      startedAt: null,
+      completedAt: null,
+    })
+    .where(eq(workflowStepRuns.id, stepRun.id));
+
+  const refreshedStepRuns = await db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, input.runId));
+  await resetSkippedUnlaunchedStepRuns(db, refreshedStepRuns);
+
+  await db
+    .update(workflowRuns)
+    .set({
+      status: "running",
+      startedAt: context.run.startedAt ?? new Date(),
+      completedAt: null,
+    })
+    .where(and(eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId)));
+
+  return {
+    stepRunId: stepRun.id,
+    result: await syncWorkflowRunState(db, input.runId),
+  };
+}
+
 async function finalizeWorkflowRunState(
   db: Db,
   context: WorkflowExecutionContext,

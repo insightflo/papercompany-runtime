@@ -28,7 +28,7 @@ import {
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
-import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -2599,6 +2599,32 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       stepId: "collect-signals",
       toolName: "collect-signals-kr",
     }));
+
+    await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: failedStepRunId,
+      success: false,
+    });
+
+    const retryFailedResult = await svc.runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-10T07:40:00.000Z"),
+      applyOwnerDecisionActions: true,
+    });
+    expect(retryFailedResult.missions[0]?.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("tool_step_recovery_retry_failed_reopened"),
+    ]));
+    const [reopenedRecoveryIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, recoveryIssue.id));
+    expect(reopenedRecoveryIssue).toEqual(expect.objectContaining({
+      status: "todo",
+      completedAt: null,
+    }));
+    const recoveryComments = await db.select().from(issueComments).where(eq(issueComments.issueId, recoveryIssue.id));
+    expect(recoveryComments.map((comment) => comment.body).join("\n")).toContain("### Native tool step retry failed");
   });
 
   it("creates the main executor oversight substrate when a workflow mission is created", async () => {
