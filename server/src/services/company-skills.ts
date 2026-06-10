@@ -85,6 +85,11 @@ type SkillSourceMeta = {
   workspaceCwd?: string;
 };
 
+const OPTIONAL_COMPANY_SKILL_SLUGS = new Set([
+  "html-for-beginners",
+  "report-for-beginners",
+]);
+
 export type LocalSkillInventoryMode = "full" | "project_root";
 
 export type ProjectSkillScanTarget = {
@@ -217,6 +222,7 @@ function uniqueImportedSkillKey(companyId: string, baseSlug: string, usedKeys: S
 
 function buildSkillRuntimeName(key: string, slug: string) {
   if (key.startsWith("paperclipai/paperclip/")) return slug;
+  if (key === slug) return slug;
   return `${slug}--${hashSkillValue(key)}`;
 }
 
@@ -1434,20 +1440,22 @@ export function companySkillService(db: Db) {
       const stats = await fs.stat(skillsRoot).catch(() => null);
       if (!stats?.isDirectory()) continue;
       const bundledSkills = await readLocalSkillImports(companyId, skillsRoot)
-        .then((skills) => skills.map((skill) => ({
-          ...skill,
-          key: deriveCanonicalSkillKey(companyId, {
+        .then((skills) => skills
+          .filter((skill) => !OPTIONAL_COMPANY_SKILL_SLUGS.has(skill.slug))
+          .map((skill) => ({
             ...skill,
+            key: deriveCanonicalSkillKey(companyId, {
+              ...skill,
+              metadata: {
+                ...(skill.metadata ?? {}),
+                sourceKind: "paperclip_bundled",
+              },
+            }),
             metadata: {
               ...(skill.metadata ?? {}),
               sourceKind: "paperclip_bundled",
             },
-          }),
-          metadata: {
-            ...(skill.metadata ?? {}),
-            sourceKind: "paperclip_bundled",
-          },
-        })))
+          })))
         .catch(() => [] as ImportedSkill[]);
       if (bundledSkills.length === 0) continue;
       return upsertImportedSkills(companyId, bundledSkills);
