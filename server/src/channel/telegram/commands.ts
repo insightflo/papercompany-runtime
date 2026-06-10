@@ -233,8 +233,8 @@ async function cmdHermesConversation(
     chatId,
     formatSuccess(
       run
-        ? `Hermes Operations Manager에게 전달했습니다. session *${session.id.slice(0, 8)}*, run *${run.id.slice(0, 8)}*.`
-        : `Hermes Operations Manager에게 전달했습니다. session *${session.id.slice(0, 8)}*. 실행은 현재 큐 정책에 의해 보류되었습니다.`,
+        ? "Hermes가 응답을 준비 중입니다."
+        : "메시지는 저장됐지만 현재 실행 큐 정책에 의해 응답 실행이 보류되었습니다.",
     ),
   );
 }

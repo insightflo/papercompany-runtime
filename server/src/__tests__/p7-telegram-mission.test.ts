@@ -335,9 +335,10 @@ describe("buildTelegramHandler — free-form Hermes conversation", () => {
     );
     expect(mockAttachRunToAssistantMessage).toHaveBeenCalledWith("assistant-message-1", "run-001");
     const [, response] = mockSender.mock.calls[0];
-    expect(response).toContain("Hermes Operations Manager");
-    expect(response).toContain("session");
+    expect(response).toContain("Hermes");
+    expect(response).toContain("응답");
     expect(response).not.toContain("Issue");
+    expect(response).not.toContain("run-001");
   });
 });
 
