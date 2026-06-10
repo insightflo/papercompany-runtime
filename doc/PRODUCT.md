@@ -8,6 +8,9 @@ One instance of Paperclip can run multiple companies. A **company** is a first-o
 Paperclip is designed so that coding is one department, not the center of the product.
 Its purpose is to help agent teams operate more like human teams: through missions, procedures, approvals, regulated work systems, and visible outcomes.
 
+Paperclip treats a mission as more than a prompt.
+A mission is an operating loop: it turns a goal into planned work, assigns the right agents or tools, tracks execution state, retries or escalates when work fails, verifies outputs against explicit criteria, and records evidence before the work is considered complete.
+
 ## Core Concepts
 
 ### Company
@@ -41,6 +44,9 @@ Each worker has:
 
 A mission is the business purpose a company or team is pursuing.
 Goals provide the planning and alignment structure underneath that purpose.
+
+A mission should behave like a supervised execution loop, not a one-shot request.
+It should carry the goal, execution plan, work items, workflow runs, recovery rules, validation criteria, and work products that prove the outcome was actually delivered.
 
 In current V1 terms, **goals** remain the main planning object and **missions** are the newer board-facing operating object.
 The product language should move toward missions, while staying honest that the implementation still uses both.
