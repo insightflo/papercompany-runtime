@@ -451,6 +451,76 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+type ToolStepFailureClass =
+  | "transient_or_external"
+  | "input_contract"
+  | "tool_bug_or_unknown"
+  | "side_effect_risk";
+
+type ToolStepFailureClassification = {
+  className: ToolStepFailureClass;
+  rationale: string;
+  requiredAction: string;
+};
+
+function getWorkflowStepToolNames(step: WorkflowStep | Record<string, unknown> | null | undefined): string[] {
+  if (!step || !isRecord(step)) return [];
+  const toolNames = [
+    ...asStringArray(step.toolNames),
+    ...asStringArray(step.tools),
+  ];
+  const singleToolName = asTrimmedString(step.toolName);
+  if (singleToolName) toolNames.push(singleToolName);
+  return Array.from(new Set(toolNames));
+}
+
+function isIssueLessToolWorkflowStep(step: WorkflowStep | Record<string, unknown> | null | undefined, issueId: string | null): boolean {
+  if (issueId) return false;
+  if (!step || !isRecord(step)) return false;
+  const type = asTrimmedString(step.type)?.toLowerCase();
+  if (type === "tool") return true;
+  return getWorkflowStepToolNames(step).length > 0 && !asTrimmedString(step.agentId);
+}
+
+function classifyToolStepFailure(step: WorkflowStep | Record<string, unknown> | null | undefined): ToolStepFailureClassification {
+  const text = [
+    step && isRecord(step) ? asTrimmedString(step.id) : null,
+    step && isRecord(step) ? asTrimmedString(step.name) : null,
+    step && isRecord(step) ? asTrimmedString(step.description) : null,
+    ...getWorkflowStepToolNames(step),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (/\b(send|telegram|slack|email|publish|upload|post|deploy|write|mutat|trade|order)\b/.test(text)) {
+    return {
+      className: "side_effect_risk",
+      rationale: "The tool name or description suggests an external side effect, so retry can duplicate delivery or mutation.",
+      requiredAction: "Inspect tool logs and side-effect evidence first; require an explicit owner decision before retrying.",
+    };
+  }
+  if (/\b(schema|contract|input|argument|arg|payload|validation|required|missing)\b/.test(text)) {
+    return {
+      className: "input_contract",
+      rationale: "The step metadata points at a likely input or payload contract failure.",
+      requiredAction: "Repair the upstream input contract or workflow step arguments before resuming the failed step.",
+    };
+  }
+  if (/\b(fetch|collect|crawl|scrape|scan|search|api|http|network|timeout|rate|external)\b/.test(text)) {
+    return {
+      className: "transient_or_external",
+      rationale: "The step appears to depend on external collection or network access.",
+      requiredAction: "Check provider availability/rate limits and retry only with bounded backoff when the external condition is clear.",
+    };
+  }
+  return {
+    className: "tool_bug_or_unknown",
+    rationale: "The failed tool step has no linked issue and no persisted error detail that proves a safe retry path.",
+    requiredAction: "Inspect tool runtime logs; if the tool implementation failed, create/fix the tool bug before resuming the mission.",
+  };
+}
+
 function parsePluginDate(value: unknown): Date | null {
   const raw = asTrimmedString(value);
   if (!raw) return null;
@@ -516,7 +586,7 @@ export type MissionOwnerActionCreatedHandler = (input: {
   mission: MissionRow;
   issue: typeof issues.$inferSelect;
   sourceIssue: typeof issues.$inferSelect;
-  reason?: "mission_unblock_action_created" | "mission_unblock_action_stalled";
+  reason?: "mission_unblock_action_created" | "mission_unblock_action_stalled" | "tool_step_failure_recovery_created";
 }) => Promise<unknown> | unknown;
 
 export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
@@ -1104,6 +1174,82 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     }
 
     return unblockIssue;
+  }
+
+  async function ensureToolStepFailureRecoveryIssue(input: {
+    mission: MissionRow;
+    oversightIssue: IssueRow;
+    run: typeof workflowRuns.$inferSelect;
+    stepRun: typeof workflowStepRuns.$inferSelect;
+    step: WorkflowStep | null;
+    workflowName: string;
+  }): Promise<{ issue: IssueRow; created: boolean; classification: ToolStepFailureClassification; toolNames: string[] }> {
+    const marker = `tool-step-recovery:${input.run.id}:${input.stepRun.stepId}`;
+    const existingRows = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, input.mission.companyId),
+        eq(issues.missionId, input.mission.id),
+        eq(issues.originKind, "mission_main_executor_unblock"),
+        eq(issues.originId, input.oversightIssue.id),
+        isNull(issues.hiddenAt),
+      ))
+      .orderBy(asc(issues.createdAt), asc(issues.id));
+    const existing = existingRows.find((issue) => (issue.description ?? "").includes(marker));
+    const classification = classifyToolStepFailure(input.step);
+    const toolNames = getWorkflowStepToolNames(input.step);
+    if (existing) {
+      return { issue: existing, created: false, classification, toolNames };
+    }
+
+    const displayStepName = input.step?.name?.trim() || input.stepRun.stepId;
+    const toolNamesLabel = toolNames.length > 0 ? toolNames.join(", ") : "(not recorded)";
+    const recoveryIssue = await issueService(db).create(input.mission.companyId, {
+      assigneeAgentId: input.mission.ownerAgentId,
+      description: [
+        `<!-- ${marker} -->`,
+        "Tool workflow step failed without a linked execution issue.",
+        "",
+        `Mission: ${input.mission.title}`,
+        `Workflow: ${input.workflowName}`,
+        `Workflow run: ${input.run.id}`,
+        `Step: ${input.stepRun.stepId} (${displayStepName})`,
+        `Tool names: ${toolNamesLabel}`,
+        `Failure class: ${classification.className}`,
+        `Rationale: ${classification.rationale}`,
+        "",
+        "Do not blindly retry this step.",
+        "",
+        "Required diagnosis:",
+        "1. Check the tool runtime logs and captured output for the failed step.",
+        "2. If the input/payload contract is wrong, fix the workflow input or upstream step before resuming.",
+        "3. If the tool implementation is broken, create/fix the tool bug and keep this mission blocked until the tool is fixed.",
+        "4. If this is an external/transient provider failure, retry only with bounded backoff after confirming the external condition.",
+        "5. If the tool has side effects, require an explicit owner decision before retrying.",
+        "",
+        `Required action: ${classification.requiredAction}`,
+      ].join("\n"),
+      missionId: input.mission.id,
+      originKind: "mission_main_executor_unblock",
+      originId: input.oversightIssue.id,
+      priority: "high",
+      status: "todo",
+      title: `[RECOVERY] Tool step failed: ${input.stepRun.stepId}`,
+    });
+
+    if (deps.onOwnerActionCreated) {
+      void Promise.resolve(deps.onOwnerActionCreated({
+        mission: input.mission,
+        issue: recoveryIssue,
+        sourceIssue: input.oversightIssue,
+        reason: "tool_step_failure_recovery_created",
+      })).catch((err) => {
+        logger.warn({ err, missionId: input.mission.id, issueId: recoveryIssue.id }, "failed to notify owner about tool step recovery action");
+      });
+    }
+
+    return { issue: recoveryIssue, created: true, classification, toolNames };
   }
 
   async function ensureMainExecutorOversightIssue(
@@ -2051,6 +2197,40 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const oversightBodies = (commentsByIssueId.get(oversightIssue.id) ?? []).join("\n");
     const failedStepRows = stepRows.filter((row) => row.stepRun.status === "failed");
     for (const row of failedStepRows) {
+      const workflowSteps = (row.definition.stepsJson as WorkflowStep[] | null) ?? [];
+      const workflowStep = workflowSteps.find((step) => step.id === row.stepRun.stepId) ?? null;
+      if (isIssueLessToolWorkflowStep(workflowStep, row.stepRun.issueId)) {
+        const workflowName = row.definition.name || row.run.workflowId;
+        const recovery = await ensureToolStepFailureRecoveryIssue({
+          mission,
+          oversightIssue,
+          run: row.run,
+          stepRun: row.stepRun,
+          step: workflowStep,
+          workflowName,
+        });
+        const toolNamesLabel = recovery.toolNames.length > 0 ? recovery.toolNames.join(",") : "unknown";
+        findings.push(`tool_step_failed_requires_recovery: run=${row.run.id} step=${row.stepRun.stepId} tool=${toolNamesLabel} class=${recovery.classification.className}${recovery.created ? " recovery_issue_created" : " recovery_issue_exists"}`);
+        addRecommendation({
+          type: "request_replan",
+          missionId: mission.id,
+          workflowRunId: row.run.id,
+          stepId: row.stepRun.stepId,
+          issueId: recovery.issue.id,
+          sourceRef: {
+            type: "native_workflow_run",
+            id: row.run.id,
+            workflowRunId: row.run.id,
+            stepId: row.stepRun.stepId,
+            issueId: null,
+            pluginId: null,
+            externalId: null,
+          },
+          reason: `Tool step ${row.stepRun.stepId} failed as ${recovery.classification.className}; main executor must diagnose tool logs/input/external state before retry`,
+          safeToAutoApply: false,
+        });
+        continue;
+      }
       const marker = `workflow-failure:${row.run.id}:${row.stepRun.stepId}`;
       const stepIssueComments = row.stepRun.issueId ? (commentsByIssueId.get(row.stepRun.issueId) ?? []).join("\n") : "";
       const hasDiagnosis = oversightBodies.includes(marker) || hasDiagnosisSignal(stepIssueComments);
