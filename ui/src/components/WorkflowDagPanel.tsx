@@ -12,7 +12,7 @@ import { useCompany } from "../context/CompanyContext";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, formatDateTime } from "../lib/utils";
-import { GitBranch, User } from "lucide-react";
+import { GitBranch, User, Wrench } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -197,7 +197,7 @@ function WorkflowStepRow({
   const dependencyNames = step.dependencies.map(
     (dependencyId) => steps.find((candidate) => candidate.stepId === dependencyId)?.name ?? dependencyId,
   );
-  const assigneeName = step.agentId ? agentMap[step.agentId] ?? step.agentId : null;
+  const assignee = getStepAssignee(step, agentMap);
 
   return (
     <div className="rounded border border-border/70 px-3 py-2">
@@ -216,10 +216,25 @@ function WorkflowStepRow({
             </span>
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            {assigneeName ? <span>Agent: {assigneeName}</span> : null}
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 rounded border px-1.5 py-0.5",
+                assignee.kind === "tool"
+                  ? "border-cyan-500/50 text-cyan-700 dark:text-cyan-300"
+                  : assignee.kind === "agent"
+                    ? "border-blue-500/50 text-blue-700 dark:text-blue-300"
+                    : "border-border text-muted-foreground",
+              )}
+              title={assignee.title}
+            >
+              {assignee.kind === "tool" ? (
+                <Wrench className="h-3 w-3" />
+              ) : (
+                <User className="h-3 w-3" />
+              )}
+              <span>Assignee: {assignee.label}</span>
+            </span>
             {dependencyNames.length > 0 ? <span>Depends on: {dependencyNames.join(", ")}</span> : <span>Entry step</span>}
-            <span>Started: {step.startedAt ? formatDateTime(step.startedAt) : "—"}</span>
-            <span>Ended: {step.completedAt ? formatDateTime(step.completedAt) : "—"}</span>
           </div>
           {step.toolNames.length > 0 ? (
             <div className="flex flex-wrap gap-1">
@@ -247,26 +262,66 @@ function WorkflowStepRow({
           ) : null}
           {step.description ? <p className="text-xs text-muted-foreground">{step.description}</p> : null}
         </div>
-        {step.issue ? (
-          <Link
-            to={`/issues/${step.issue.identifier ?? step.issue.id}`}
-            state={createIssueDetailLocationState("Mission", `/missions/${missionId}`)}
-            className="max-w-[16rem] shrink-0 rounded border border-border px-2 py-1 text-right text-xs no-underline transition-colors hover:bg-accent/50"
-          >
-            <span className="block truncate font-mono text-muted-foreground">
-              {step.issue.identifier ?? step.issue.id}
-            </span>
-            <span className="block truncate">{step.issue.title}</span>
-            <span className="block truncate text-muted-foreground">
-              Issue: {formatStatusLabel(step.issue.status)}
-            </span>
-          </Link>
-        ) : (
-          <span className="shrink-0 text-xs text-muted-foreground">Issue pending</span>
-        )}
+        <div className="w-[16rem] shrink-0 space-y-1 text-right">
+          {step.issue ? (
+            <Link
+              to={`/issues/${step.issue.identifier ?? step.issue.id}`}
+              state={createIssueDetailLocationState("Mission", `/missions/${missionId}`)}
+              className="block rounded border border-border px-2 py-1 text-xs no-underline transition-colors hover:bg-accent/50"
+            >
+              <span className="block truncate font-mono text-muted-foreground">
+                {step.issue.identifier ?? step.issue.id}
+              </span>
+              <span className="block truncate">{step.issue.title}</span>
+              <span className="block truncate text-muted-foreground">
+                Issue: {formatStatusLabel(step.issue.status)}
+              </span>
+            </Link>
+          ) : (
+            <div className="rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
+              Issue pending
+            </div>
+          )}
+          <div className="space-y-0.5 text-[11px] leading-tight text-muted-foreground">
+            <div>Started: {step.startedAt ? formatDateTime(step.startedAt) : "—"}</div>
+            <div>Ended: {step.completedAt ? formatDateTime(step.completedAt) : "—"}</div>
+          </div>
+        </div>
       </div>
     </div>
   );
+}
+
+function getStepAssignee(
+  step: MissionWorkflowStep,
+  agentMap: Record<string, string>,
+): { kind: "agent" | "tool" | "unassigned"; label: string; title: string } {
+  const agentId = step.agentId.trim();
+  const hasToolNames = step.toolNames.some((toolName) => toolName.trim().length > 0);
+
+  if (!agentId && hasToolNames) {
+    return {
+      kind: "tool",
+      label: "tool",
+      title: `Tool step: ${step.toolNames.join(", ")}`,
+    };
+  }
+
+  const issueAssigneeAgentId = step.issue?.assigneeAgentId?.trim() ?? "";
+  const resolvedAgentId = agentId || issueAssigneeAgentId;
+  if (resolvedAgentId) {
+    return {
+      kind: "agent",
+      label: agentMap[resolvedAgentId] ?? resolvedAgentId,
+      title: resolvedAgentId,
+    };
+  }
+
+  return {
+    kind: "unassigned",
+    label: "Unassigned",
+    title: "No agent or tool is assigned to this step yet.",
+  };
 }
 
 // ---------------------------------------------------------------------------
