@@ -5,7 +5,7 @@
  * A workflow is a DAG where each step has dependencies on other steps.
  */
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
@@ -662,7 +662,13 @@ async function resolveWorkflowStepAssigneeAgentId(
   const [agent] = await db
     .select({ id: agents.id })
     .from(agents)
-    .where(and(eq(agents.companyId, companyId), eq(agents.name, agentName)))
+    .where(and(
+      eq(agents.companyId, companyId),
+      eq(agents.name, agentName),
+      ne(agents.status, "terminated"),
+      ne(agents.status, "pending_approval"),
+    ))
+    .orderBy(asc(agents.createdAt))
     .limit(1);
   return agent?.id;
 }
@@ -1239,7 +1245,7 @@ export async function reconcileWorkflowRuns(
     .where(
       and(
         eq(workflowRuns.status, "running"),
-        sql`${workflowRuns.startedAt} < ${timeout}`,
+        lt(workflowRuns.startedAt, timeout),
       ),
     );
 

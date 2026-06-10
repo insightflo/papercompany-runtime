@@ -1119,7 +1119,18 @@ export async function runScheduledWorkflows(ctx: PluginContext): Promise<void> {
           createParentIssuePolicy: def.data.createParentIssuePolicy,
         }) as { runId?: string } | undefined;
         if (runResult?.runId) {
-          await updateWorkflowRun(ctx, runResult.runId, { triggerSource: "schedule" } as Partial<WorkflowRun>);
+          try {
+            await updateWorkflowRun(ctx, runResult.runId, { triggerSource: "schedule" } as Partial<WorkflowRun>);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!message.startsWith("Workflow run not found:")) throw error;
+            ctx.logger.info("Skipped legacy plugin run update for native scheduled workflow run", {
+              companyId,
+              workflowId: def.id,
+              workflowName: def.data.name,
+              runId: runResult.runId,
+            });
+          }
         }
         ctx.logger.info("Scheduled workflow started", {
           companyId,

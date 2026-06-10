@@ -556,6 +556,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   const recoverableFailedWorkflowRunStatuses = new Set(["failed", "error"]);
   const cancelledWorkflowRunStatuses = new Set(["aborted", "cancelled", "canceled"]);
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
+  const legacyWorkflowMissionGraceMs = 5 * 60 * 1000;
 
   async function reconcileMissionStatusFromWorkflowRuns(mission: MissionRow): Promise<MissionRow> {
     if (mission.status === "cancelled") return mission;
@@ -572,36 +573,77 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       !canCloseCompletedMissionOversight
     ) return mission;
 
-    const linkedRuns: Array<{ status: string; startedAt: Date | null; completedAt: Date | null }> = [];
+    const linkedRuns: Array<{ status: string; createdAt: Date | null; startedAt: Date | null; completedAt: Date | null }> = [];
     const nativeRuns = await db
-      .select({ status: workflowRuns.status, startedAt: workflowRuns.startedAt, completedAt: workflowRuns.completedAt })
+      .select({
+        status: workflowRuns.status,
+        createdAt: workflowRuns.createdAt,
+        startedAt: workflowRuns.startedAt,
+        completedAt: workflowRuns.completedAt,
+      })
       .from(workflowRuns)
       .where(eq(workflowRuns.missionId, mission.id));
     for (const run of nativeRuns) {
-      linkedRuns.push({ status: run.status, startedAt: run.startedAt, completedAt: run.completedAt });
-    }
-
-    const pluginRunEntities = await db
-      .select()
-      .from(pluginEntities)
-      .where(and(
-        eq(pluginEntities.entityType, "workflow-run"),
-        eq(pluginEntities.scopeKind, "company"),
-        eq(pluginEntities.scopeId, mission.companyId),
-      ));
-    for (const entity of pluginRunEntities) {
-      const data = entity.data as PluginWorkflowRunData;
-      if (data.companyId !== mission.companyId || data.missionId !== mission.id) continue;
       linkedRuns.push({
-        status: asTrimmedString(data.status) ?? entity.status ?? "",
-        startedAt: parsePluginDate(data.startedAt) ?? entity.createdAt ?? null,
-        completedAt: parsePluginDate(data.completedAt) ?? entity.updatedAt ?? null,
+        status: run.status,
+        createdAt: run.createdAt,
+        startedAt: run.startedAt,
+        completedAt: run.completedAt,
       });
     }
 
     if (linkedRuns.length === 0) {
       if (mission.status === "completed") {
         await completeOpenMissionOversightIfSettled(mission, mission.completedAt ?? new Date());
+      }
+      if (
+        isWorkflowCreatedMission &&
+        mission.status === "active" &&
+        mission.startedAt &&
+        Date.now() - mission.startedAt.getTime() > legacyWorkflowMissionGraceMs
+      ) {
+        const legacyPluginRun = await db
+          .select({ id: pluginEntities.id, updatedAt: pluginEntities.updatedAt })
+          .from(pluginEntities)
+          .where(and(
+            eq(pluginEntities.entityType, "workflow-run"),
+            eq(pluginEntities.scopeKind, "company"),
+            eq(pluginEntities.scopeId, mission.companyId),
+            sql`${pluginEntities.data} ->> 'missionId' = ${mission.id}`,
+          ))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (legacyPluginRun) {
+          const openWork = await db
+            .select({ id: issues.id })
+            .from(issues)
+            .where(and(
+              eq(issues.missionId, mission.id),
+              isNull(issues.hiddenAt),
+              sql`${issues.status} not in ('done', 'cancelled')`,
+              sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
+            ))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (!openWork) {
+            const completedAt = legacyPluginRun.updatedAt ?? new Date();
+            const updates: Partial<MissionRow> = {
+              status: "cancelled",
+              completedAt,
+              updatedAt: new Date(),
+            };
+            await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+            await db
+              .update(issues)
+              .set({ status: "cancelled", cancelledAt: completedAt, updatedAt: new Date() })
+              .where(and(
+                eq(issues.missionId, mission.id),
+                isNull(issues.hiddenAt),
+                sql`${issues.status} not in ('done', 'cancelled')`,
+              ));
+            return { ...mission, ...updates };
+          }
+        }
       }
       return mission;
     }
@@ -626,6 +668,41 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         ...updates,
       };
     }
+
+    const latestRun = [...linkedRuns].sort((left, right) => {
+      const leftTime = (left.createdAt ?? left.startedAt ?? left.completedAt)?.getTime() ?? 0;
+      const rightTime = (right.createdAt ?? right.startedAt ?? right.completedAt)?.getTime() ?? 0;
+      return rightTime - leftTime;
+    })[0] ?? null;
+    const latestStatus = latestRun?.status.trim().toLowerCase() ?? null;
+    if (latestStatus && (completedWorkflowRunStatuses.has(latestStatus) || cancelledWorkflowRunStatuses.has(latestStatus))) {
+      if (mission.status === "planning") return mission;
+      if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) {
+        if (completedWorkflowRunStatuses.has(latestStatus)) {
+          await completeOpenMissionOversightIfSettled(mission, mission.completedAt ?? new Date());
+        }
+        return mission;
+      }
+
+      const nextStatus: MissionStatus = cancelledWorkflowRunStatuses.has(latestStatus) ? "cancelled" : "completed";
+      const completedAt = latestRun.completedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? new Date();
+      const updates: Partial<MissionRow> = {
+        status: nextStatus,
+        completedAt,
+        updatedAt: new Date(),
+      };
+      await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+
+      const updatedMission = {
+        ...mission,
+        ...updates,
+      };
+      if (nextStatus === "completed") {
+        await completeOpenMissionOversightIfSettled(updatedMission, completedAt);
+      }
+      return updatedMission;
+    }
+
     if (normalizedStatuses.some((status) => recoverableFailedWorkflowRunStatuses.has(status))) {
       if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) return mission;
       if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;

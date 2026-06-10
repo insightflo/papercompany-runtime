@@ -2988,7 +2988,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
   });
 
-  it("updates active workflow-created missions when all linked plugin runs are terminal", async () => {
+  it("does not terminalize active workflow-created missions from legacy plugin-only terminal runs", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -3060,13 +3060,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const detail = await svc.getById(missionId);
     const listed = await svc.list({ companyId });
 
-    expect(activeList.find((mission) => mission.id === missionId)).toBeUndefined();
-    expect(detail.status).toBe("cancelled");
-    expect(detail.completedAt).toEqual(new Date("2026-04-27T00:42:33.653Z"));
-    expect(listed.find((mission) => mission.id === missionId)?.status).toBe("cancelled");
+    expect(activeList.find((mission) => mission.id === missionId)?.status).toBe("active");
+    expect(detail.status).toBe("active");
+    expect(detail.completedAt).toBeNull();
+    expect(listed.find((mission) => mission.id === missionId)?.status).toBe("active");
 
     const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
-    expect(stored?.status).toBe("cancelled");
+    expect(stored?.status).toBe("active");
+    expect(stored?.completedAt).toBeNull();
   });
 
   it("auto-completes mission oversight when a linked native workflow run completes with no remaining work", async () => {
@@ -3361,7 +3362,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     }
   });
 
-  it("reactivates a prematurely completed workflow-created mission when its linked plugin run later fails recoverably", async () => {
+  it("does not reactivate a completed workflow-created mission from legacy plugin run state", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -3435,14 +3436,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const detail = await svc.getById(missionId);
     const activeList = await svc.list({ companyId, status: "active" });
 
-    expect(completedList.find((mission) => mission.id === missionId)).toBeUndefined();
-    expect(detail.status).toBe("active");
-    expect(detail.completedAt).toBeNull();
-    expect(activeList.find((mission) => mission.id === missionId)?.status).toBe("active");
+    expect(completedList.find((mission) => mission.id === missionId)?.status).toBe("completed");
+    expect(detail.status).toBe("completed");
+    expect(detail.completedAt).toEqual(new Date("2026-04-27T23:51:06.620Z"));
+    expect(activeList.find((mission) => mission.id === missionId)).toBeUndefined();
 
     const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
-    expect(stored?.status).toBe("active");
-    expect(stored?.completedAt).toBeNull();
+    expect(stored?.status).toBe("completed");
+    expect(stored?.completedAt).toEqual(new Date("2026-04-27T23:51:06.620Z"));
   });
 
   it("does not reactivate an operator-completed workflow-created mission while a linked native run is still active", async () => {
@@ -3511,7 +3512,209 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(stored?.completedAt).toEqual(new Date("2026-06-09T11:39:30.000Z"));
   });
 
-  it("promotes a planning mission to active when a linked plugin workflow run has failed recoverably", async () => {
+  it("completes an active workflow-created mission from the latest native run despite stale plugin run state", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const failedRunId = randomUUID();
+    const completedRunId = randomUUID();
+    const pluginId = randomUUID();
+    const pluginRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Native Workflow Reconcile Company",
+      issuePrefix: `NW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-06-10 gazua-macro-sentinel",
+      description: "Created automatically for workflow run: gazua-macro-sentinel",
+      status: "active",
+      startedAt: new Date("2026-06-10T01:00:00.000Z"),
+      completedAt: null,
+    });
+    const oversightIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: ownerAgentId,
+      missionId,
+      originKind: "mission_main_executor_oversight",
+      status: "todo",
+      title: "[OVERSIGHT] 2026-06-10 gazua-macro-sentinel",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "gazua-macro-sentinel",
+      stepsJson: [{ id: "collect", name: "Collect", agentId: ownerAgentId, dependencies: [] }],
+    });
+    await db.insert(workflowRuns).values([
+      {
+        id: failedRunId,
+        workflowId,
+        companyId,
+        missionId,
+        status: "failed",
+        triggeredBy: "schedule",
+        createdAt: new Date("2026-06-10T01:00:00.000Z"),
+        startedAt: new Date("2026-06-10T01:00:00.000Z"),
+        completedAt: new Date("2026-06-10T01:05:00.000Z"),
+      },
+      {
+        id: completedRunId,
+        workflowId,
+        companyId,
+        missionId,
+        status: "completed",
+        triggeredBy: "schedule",
+        createdAt: new Date("2026-06-10T02:00:00.000Z"),
+        startedAt: new Date("2026-06-10T02:00:00.000Z"),
+        completedAt: new Date("2026-06-10T02:08:00.000Z"),
+      },
+    ]);
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+    await db.insert(pluginEntities).values({
+      id: pluginRunId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${pluginRunId}`,
+      title: "legacy gazua-macro-sentinel run",
+      status: "running",
+      data: {
+        workflowId,
+        workflowName: "gazua-macro-sentinel",
+        companyId,
+        missionId,
+        status: "running",
+        triggerSource: "schedule",
+        startedAt: "2026-06-10T00:00:00.000Z",
+      },
+    });
+
+    const svc = missionService(db);
+    const detail = await svc.getById(missionId);
+
+    expect(detail.status).toBe("completed");
+    expect(detail.completedAt).toEqual(new Date("2026-06-10T02:08:00.000Z"));
+
+    const [storedMission] = await db.select().from(missions).where(eq(missions.id, missionId));
+    const [storedOversight] = await db.select().from(issues).where(eq(issues.id, oversightIssue.id));
+    expect(storedMission?.status).toBe("completed");
+    expect(storedMission?.completedAt).toEqual(new Date("2026-06-10T02:08:00.000Z"));
+    expect(storedOversight?.status).toBe("done");
+    expect(storedOversight?.completedAt).toEqual(new Date("2026-06-10T02:08:00.000Z"));
+  });
+
+  it("cancels stale legacy plugin-only workflow-created missions with no native run", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const pluginId = randomUUID();
+    const pluginRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Legacy Plugin Reconcile Company",
+      issuePrefix: `LP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Workflow Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-06-10 gazua-watchlist-refresh",
+      description: "Created automatically for workflow run: gazua-watchlist-refresh",
+      status: "active",
+      startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      completedAt: null,
+    });
+    const oversightIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: ownerAgentId,
+      missionId,
+      originKind: "mission_main_executor_oversight",
+      status: "todo",
+      title: "[OVERSIGHT] 2026-06-10 gazua-watchlist-refresh",
+    });
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: "insightflo.workflow-engine",
+      packageName: "@insightflo/paperclip-workflow-engine",
+      version: "1.0.0",
+      apiVersion: 1,
+      categories: [],
+      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      status: "ready",
+    });
+    await db.insert(pluginEntities).values({
+      id: pluginRunId,
+      pluginId,
+      entityType: "workflow-run",
+      scopeKind: "company",
+      scopeId: companyId,
+      externalId: `workflow-run:${pluginRunId}`,
+      title: "legacy gazua-watchlist-refresh run",
+      status: "running",
+      data: {
+        workflowId: randomUUID(),
+        workflowName: "gazua-watchlist-refresh",
+        companyId,
+        missionId,
+        status: "running",
+        triggerSource: "schedule",
+        startedAt: "2020-01-01T00:00:00.000Z",
+      },
+      updatedAt: new Date("2020-01-01T00:05:00.000Z"),
+    });
+
+    const detail = await missionService(db).getById(missionId);
+
+    expect(detail.status).toBe("cancelled");
+    expect(detail.completedAt).toEqual(new Date("2020-01-01T00:05:00.000Z"));
+
+    const [storedMission] = await db.select().from(missions).where(eq(missions.id, missionId));
+    const [storedOversight] = await db.select().from(issues).where(eq(issues.id, oversightIssue.id));
+    expect(storedMission?.status).toBe("cancelled");
+    expect(storedOversight?.status).toBe("cancelled");
+    expect(storedOversight?.cancelledAt).toEqual(new Date("2020-01-01T00:05:00.000Z"));
+  });
+
+  it("does not promote a planning mission from legacy plugin workflow run state", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -3582,15 +3785,15 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const detail = await svc.getById(missionId);
     const activeList = await svc.list({ companyId, status: "active" });
 
-    expect(planningList.find((mission) => mission.id === missionId)).toBeUndefined();
-    expect(detail.status).toBe("active");
-    expect(detail.startedAt).toEqual(new Date("2026-06-09T04:00:04.837Z"));
+    expect(planningList.find((mission) => mission.id === missionId)?.status).toBe("planning");
+    expect(detail.status).toBe("planning");
+    expect(detail.startedAt).toBeNull();
     expect(detail.completedAt).toBeNull();
-    expect(activeList.find((mission) => mission.id === missionId)?.status).toBe("active");
+    expect(activeList.find((mission) => mission.id === missionId)).toBeUndefined();
 
     const [stored] = await db.select().from(missions).where(eq(missions.id, missionId));
-    expect(stored?.status).toBe("active");
-    expect(stored?.startedAt).toEqual(new Date("2026-06-09T04:00:04.837Z"));
+    expect(stored?.status).toBe("planning");
+    expect(stored?.startedAt).toBeNull();
     expect(stored?.completedAt).toBeNull();
   });
 

@@ -309,6 +309,58 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     });
   });
 
+  it("clears stale plugin schedule errors after native start-workflow succeeds", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    const whereSelect = vi.fn().mockResolvedValue([
+      {
+        id: "workflow-1",
+        status: "active",
+        data: {
+          id: "workflow-1",
+          companyId: "company-1",
+          name: "scheduled workflow",
+          status: "active",
+          lastScheduleError: "Workflow run not found: native-run-1",
+          lastScheduleErrorAt: "2026-06-10T01:00:00.000Z",
+        },
+      },
+    ]);
+    const from = vi.fn(() => ({ where: whereSelect }));
+    const select = vi.fn(() => ({ from }));
+    const whereUpdate = vi.fn().mockResolvedValue([]);
+    const set = vi.fn(() => ({ where: whereUpdate }));
+    const update = vi.fn(() => ({ set }));
+    const db = { select, update };
+    mockWorkflowService.trigger.mockResolvedValue({
+      runId: "native-run-1",
+      status: "completed",
+      stepRuns: [],
+    });
+
+    const res = await request(createApp(workerManager, db))
+      .post("/api/plugins/plugin-1/actions/start-workflow")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          workflowId: "workflow-1",
+          triggerSource: "schedule",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.not.objectContaining({
+        lastScheduleError: expect.anything(),
+        lastScheduleErrorAt: expect.anything(),
+      }),
+      updatedAt: expect.any(Date),
+    }));
+    expect(workerManager.call).not.toHaveBeenCalled();
+  });
+
   it("refreshes stale native workflow definition from plugin entity data before start-workflow", async () => {
     const workerManager = {
       call: vi.fn(),
@@ -374,6 +426,56 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     });
     expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body.data.runId).toBe("run-refreshed-1");
+  });
+
+  it("persists update-workflow status changes to plugin workflow entity data", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    const whereSelect = vi.fn().mockResolvedValue([
+      {
+        id: "workflow-1",
+        status: "active",
+        data: {
+          id: "workflow-1",
+          companyId: "company-1",
+          name: "pausable workflow",
+          status: "active",
+          schedule: "* * * * *",
+        },
+      },
+    ]);
+    const from = vi.fn(() => ({ where: whereSelect }));
+    const select = vi.fn(() => ({ from }));
+    const whereUpdate = vi.fn().mockResolvedValue([]);
+    const set = vi.fn(() => ({ where: whereUpdate }));
+    const update = vi.fn(() => ({ set }));
+    const db = { select, update };
+
+    const res = await request(createApp(workerManager, db))
+      .post("/api/plugins/plugin-1/actions/update-workflow")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          workflowId: "workflow-1",
+          patch: { status: "paused" },
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.updateDefinition).not.toHaveBeenCalled();
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({
+      status: "paused",
+      data: expect.objectContaining({
+        id: "workflow-1",
+        status: "paused",
+        schedule: "* * * * *",
+      }),
+      updatedAt: expect.any(Date),
+    }));
+    expect(res.body.data.status).toBe("paused");
+    expect(workerManager.call).not.toHaveBeenCalled();
   });
 
   it("routes delete-workflow to native definition management without calling the plugin worker", async () => {

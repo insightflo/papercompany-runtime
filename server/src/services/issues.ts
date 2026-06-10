@@ -22,7 +22,6 @@ import {
   missions,
   projectWorkspaces,
   projects,
-  pluginEntities,
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
@@ -119,32 +118,6 @@ async function assertCanCompleteMissionOversightIssue(db: Db, issue: typeof issu
   if (activeWorkflowRun) {
     throw unprocessable(
       `Cannot complete mission oversight while workflow run ${activeWorkflowRun.id} is ${activeWorkflowRun.status}.`,
-    );
-  }
-
-  const activePluginWorkflowRun = await db
-    .select({
-      id: pluginEntities.id,
-      data: pluginEntities.data,
-    })
-    .from(pluginEntities)
-    .where(and(
-      eq(pluginEntities.entityType, "workflow-run"),
-      eq(pluginEntities.scopeKind, "company"),
-      eq(pluginEntities.scopeId, issue.companyId),
-      sql`${pluginEntities.data} ->> 'missionId' = ${issue.missionId}`,
-      sql`coalesce(${pluginEntities.data} ->> 'status', '') not in ('completed', 'succeeded', 'done', 'failed', 'error', 'cancelled', 'canceled', 'aborted', 'timed-out')`,
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (activePluginWorkflowRun) {
-    const status = activePluginWorkflowRun.data
-      && typeof activePluginWorkflowRun.data === "object"
-      && !Array.isArray(activePluginWorkflowRun.data)
-      ? String((activePluginWorkflowRun.data as Record<string, unknown>).status ?? "unknown")
-      : "unknown";
-    throw unprocessable(
-      `Cannot complete mission oversight while plugin workflow run ${activePluginWorkflowRun.id} is ${status}.`,
     );
   }
 

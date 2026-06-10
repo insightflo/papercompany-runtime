@@ -7,7 +7,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, lt, sql } from "drizzle-orm";
 
 /**
  * Reconciliation result for a single workflow run.
@@ -40,7 +40,7 @@ export async function reconcileStuckWorkflowRuns(
     .where(
       and(
         eq(workflowRuns.status, "running"),
-        sql`${workflowRuns.startedAt} < ${timeout}`,
+        lt(workflowRuns.startedAt, timeout),
       ),
     );
 

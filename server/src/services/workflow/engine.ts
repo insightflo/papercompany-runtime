@@ -7,7 +7,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { agents } from "@paperclipai/db";
-import { eq, asc } from "drizzle-orm";
+import { and, eq, asc, ne } from "drizzle-orm";
 import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { missionService } from "../missions.js";
 import {
@@ -95,7 +95,11 @@ async function resolveWorkflowMissionOwnerAgentId(
   const [agent] = await db
     .select({ id: agents.id })
     .from(agents)
-    .where(eq(agents.companyId, companyId))
+    .where(and(
+      eq(agents.companyId, companyId),
+      ne(agents.status, "terminated"),
+      ne(agents.status, "pending_approval"),
+    ))
     .orderBy(asc(agents.createdAt))
     .limit(1);
 

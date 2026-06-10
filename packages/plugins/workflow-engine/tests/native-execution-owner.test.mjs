@@ -15,7 +15,7 @@ function functionBlock(name) {
 test("plugin advanceWorkflow is legacy-isolated and does not materialize downstream DAG steps", () => {
   const block = functionBlock("advanceWorkflow");
 
-  assert.match(block, /server native DAG owns execution/);
+  assert.match(block, /server-native DAG owns execution/);
   assert.doesNotMatch(block, /getNextSteps\(/);
   assert.doesNotMatch(block, /createStepRun\(/);
   assert.doesNotMatch(block, /activateBacklogStep\(/);

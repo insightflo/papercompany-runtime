@@ -114,3 +114,35 @@ test("runScheduledWorkflows claims the scheduled slot before starting workflow w
   assert.equal(starts, 1);
   assert.match(ctx.getDefinition().data.lastScheduledRunAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
 });
+
+test("runScheduledWorkflows does not record native run ids as legacy plugin run failures", async () => {
+  const definition = {
+    id: "workflow-native",
+    entityType: "workflow-definition",
+    scopeKind: "company",
+    scopeId: "company-1",
+    externalId: "workflow-definition:company-1:workflow-native",
+    title: "native scheduled workflow",
+    status: "active",
+    data: {
+      name: "native scheduled workflow",
+      description: "test workflow",
+      companyId: "company-1",
+      status: "active",
+      schedule: "* * * * *",
+      maxDailyRuns: 0,
+      lastScheduleError: "Workflow run not found: old-native-run",
+      lastScheduleErrorAt: "2026-06-10T01:00:00.000Z",
+      steps: [],
+    },
+  };
+  const ctx = createSchedulerContext(definition);
+
+  setStartWorkflowFn(async () => ({ runId: "native-run-1" }));
+
+  await runScheduledWorkflows(ctx);
+
+  assert.equal(ctx.getDefinition().data.lastScheduleError, undefined);
+  assert.equal(ctx.getDefinition().data.lastScheduleErrorAt, undefined);
+  assert.match(ctx.getDefinition().data.lastScheduledRunAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
+});

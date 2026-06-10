@@ -352,6 +352,50 @@ export function pluginRoutes(
     return value === "static_dag" || value === "dynamic_owner_plan" ? value : undefined;
   }
 
+  function parsePluginWorkflowStatus(value: unknown): "active" | "paused" | "archived" | undefined {
+    return value === "active" || value === "paused" || value === "archived" ? value : undefined;
+  }
+
+  const pluginWorkflowPatchKeys = [
+    "name",
+    "description",
+    "status",
+    "triggerLabels",
+    "labelIds",
+    "steps",
+    "schedule",
+    "projectId",
+    "goalId",
+    "maxDailyRuns",
+    "timezone",
+    "deadlineTime",
+    "createParentIssuePolicy",
+    "executionMode",
+    "dynamicPlanBootstrapOnly",
+    "lastScheduledRunAt",
+    "lastScheduleError",
+    "lastScheduleErrorAt",
+  ] as const;
+
+  function pickPluginWorkflowPatch(source: Record<string, unknown>): Record<string, unknown> {
+    const patch: Record<string, unknown> = {};
+    for (const key of pluginWorkflowPatchKeys) {
+      if (key in source) patch[key] = source[key];
+    }
+    return patch;
+  }
+
+  function mergePluginWorkflowData(
+    current: Record<string, unknown>,
+    patch: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const merged = { ...current, ...patch };
+    for (const key of Object.keys(merged)) {
+      if (merged[key] === undefined) delete merged[key];
+    }
+    return merged;
+  }
+
   function requiredCompanyId(
     params: Record<string, unknown>,
     body: { companyId?: string } | undefined,
@@ -362,6 +406,55 @@ export function pluginRoutes(
         ? body.companyId.trim()
         : "";
     return value || null;
+  }
+
+  async function updatePluginWorkflowDefinitionEntity(input: {
+    companyId: string;
+    pluginId: string;
+    workflowId: string;
+    patch: Record<string, unknown>;
+  }): Promise<Record<string, unknown> | null> {
+    const selectableDb = db as Db & { select?: unknown; update?: unknown };
+    if (typeof selectableDb.select !== "function" || typeof selectableDb.update !== "function") return null;
+
+    const rows = await db
+      .select({
+        id: pluginEntities.id,
+        data: pluginEntities.data,
+        status: pluginEntities.status,
+      })
+      .from(pluginEntities)
+      .where(and(
+        eq(pluginEntities.pluginId, input.pluginId),
+        eq(pluginEntities.entityType, "workflow-definition"),
+        eq(pluginEntities.scopeKind, "company"),
+        eq(pluginEntities.scopeId, input.companyId),
+      ));
+
+    const pluginDefinition = rows.find((row) => {
+      const data = row.data && typeof row.data === "object" ? row.data as Record<string, unknown> : {};
+      return row.id === input.workflowId || data.id === input.workflowId;
+    });
+    if (!pluginDefinition) return null;
+
+    const currentData = pluginDefinition.data && typeof pluginDefinition.data === "object"
+      ? pluginDefinition.data as Record<string, unknown>
+      : {};
+    const data = mergePluginWorkflowData(currentData, input.patch);
+    const status = parsePluginWorkflowStatus(data.status);
+    const name = typeof data.name === "string" && data.name.trim() ? data.name.trim() : undefined;
+
+    await db
+      .update(pluginEntities)
+      .set({
+        data,
+        ...(status ? { status } : {}),
+        ...(name ? { title: name } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(pluginEntities.id, pluginDefinition.id));
+
+    return data;
   }
 
   async function refreshNativeWorkflowDefinitionFromPluginEntity(input: {
@@ -467,6 +560,15 @@ export function pluginRoutes(
         workflowId,
         missionId,
         triggeredBy,
+      });
+      await updatePluginWorkflowDefinitionEntity({
+        companyId,
+        pluginId: input.pluginId,
+        workflowId,
+        patch: {
+          lastScheduleError: undefined,
+          lastScheduleErrorAt: undefined,
+        },
       });
       res.json({ data: { run, ...run } });
       return true;
@@ -621,12 +723,28 @@ export function pluginRoutes(
       const executionMode = parseNativeWorkflowExecutionMode(source.executionMode);
       if (executionMode) updates.executionMode = executionMode;
 
-      const definition = await workflowService.updateDefinition(db, workflowId, updates);
+      const pluginPatch = pickPluginWorkflowPatch(source);
+      const pluginData = Object.keys(pluginPatch).length > 0
+        ? await updatePluginWorkflowDefinitionEntity({
+          companyId,
+          pluginId: input.pluginId,
+          workflowId,
+          patch: pluginPatch,
+        })
+        : null;
+
+      const definition = Object.keys(updates).length > 0
+        ? await workflowService.updateDefinition(db, workflowId, updates)
+        : existing;
       if (!definition) {
         res.status(404).json({ error: "Workflow definition not found" });
         return true;
       }
-      res.json({ data: { workflow: definition, ...definition } });
+      const responseDefinition = {
+        ...definition,
+        ...(pluginData ?? {}),
+      };
+      res.json({ data: { workflow: responseDefinition, ...responseDefinition } });
       return true;
     }
 

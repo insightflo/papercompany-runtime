@@ -9,10 +9,14 @@ test("workflow-created missions pass source=workflow to the mission API", () => 
   assert.match(source, /source:\s*"workflow"/);
 });
 
-test("workflow-created issues keep origin metadata for mission work traceability", () => {
-  assert.match(source, /originKind:\s*"mission_main_executor_oversight"/);
+test("workflow-created step issues keep origin metadata for legacy traceability", () => {
   assert.match(source, /originKind:\s*"workflow_step"/);
   assert.match(source, /originRunId:\s*liveStepRun\.data\.runId/);
+});
+
+test("workflow parent oversight is owned by the server-native DAG path", () => {
+  assert.match(source, /Started workflow run through server-native DAG/);
+  assert.doesNotMatch(source, /originKind:\s*"mission_main_executor_oversight"/);
 });
 
 test("workflow terminal tool failures synchronize the parent oversight issue as blocked", () => {

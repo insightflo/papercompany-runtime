@@ -121,6 +121,41 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await tempDb?.cleanup();
   });
 
+  it("reconciles stuck running workflow runs using a Date cutoff", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Stuck Workflow Company",
+      issuePrefix: `SW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "stuck-workflow",
+      stepsJson: [{ id: "step-1", name: "Step 1", agentId: "", dependencies: [] }],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      completedAt: null,
+    });
+
+    const result = await workflowService.reconcile(db, 60);
+
+    expect(result).toEqual({ recovered: 0, failed: 1 });
+    const [stored] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(stored?.status).toBe("failed");
+    expect(stored?.completedAt).toBeInstanceOf(Date);
+  });
+
   it("creates workflow definitions from plugin UI step payloads", async () => {
     const companyId = randomUUID();
 
@@ -944,6 +979,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
   it("resolves legacy plugin workflow step agentName to the company agent assignee", async () => {
     const companyId = randomUUID();
+    const terminatedAgentId = randomUUID();
     const agentId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
@@ -956,17 +992,32 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       issuePrefix: `WN${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Technology Research Agent",
-      role: "researcher",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await db.insert(agents).values([
+      {
+        id: terminatedAgentId,
+        companyId,
+        name: "Technology Research Agent",
+        role: "researcher",
+        status: "terminated",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+        createdAt: new Date("2026-04-01T00:00:00.000Z"),
+      },
+      {
+        id: agentId,
+        companyId,
+        name: "Technology Research Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+        createdAt: new Date("2026-04-02T00:00:00.000Z"),
+      },
+    ]);
     await db.insert(workflowDefinitions).values({
       id: workflowId,
       companyId,
