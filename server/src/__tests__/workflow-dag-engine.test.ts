@@ -227,10 +227,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       stepsJson: [
         {
           id: stepId,
-          name: "Draft plan",
+          name: "Draft {$date} plan",
           agentId,
           dependencies: [],
-          description: "Prepare the first implementation plan",
+          description: "Prepare the {$runDate} implementation plan",
         },
       ],
     });
@@ -241,6 +241,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       companyId,
       triggeredBy: "system",
       status: "pending",
+      runDate: "2026-06-12",
     });
 
     const result = await executeWorkflowRun(db, runId);
@@ -261,7 +262,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .then((rows) => rows[0] ?? null);
     expect(createdIssue).toMatchObject({
       companyId,
-      title: "Roadmap Workflow: Draft plan",
+      title: "Roadmap Workflow: Draft 2026-06-12 plan",
       description: expect.stringContaining(`workflowRunId: ${runId}`),
       status: "todo",
       assigneeAgentId: agentId,
@@ -271,6 +272,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       originRunId: runId,
     });
     expect(createdIssue?.identifier).toMatch(/^WF[A-Z0-9]+-1$/);
+    expect(createdIssue?.description).toContain("Prepare the 2026-06-12 implementation plan");
     expect(createdIssue?.description).toContain(`workflowDefinitionId: ${workflowId}`);
     expect(createdIssue?.description).toContain("missionId: none");
     expect(createdIssue?.description).toContain(`stepId: ${stepId}`);
@@ -293,7 +295,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       entityId: createdIssue!.id,
     });
     expect(activity?.details).toEqual({
-      title: "Roadmap Workflow: Draft plan",
+      title: "Roadmap Workflow: Draft 2026-06-12 plan",
       identifier: createdIssue!.identifier,
     });
 
@@ -1201,7 +1203,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
   });
 
-  it("injects workflow runDate into issue-less tool step args without overriding explicit dates", async () => {
+  it("renders workflow runDate placeholders in issue-less tool step args without implicit date injection", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
@@ -1226,7 +1228,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           agentId: "",
           dependencies: [],
           toolNames: ["generate-tech-scout-knowledge-comic"],
-          toolArgs: { promptOnly: true },
+          toolArgs: { promptOnly: true, date: "{$runDate}", output: "report-{$date}.png" },
         },
         {
           id: "send-telegram",
@@ -1235,6 +1237,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
           toolNames: ["send-telegram"],
           toolArgs: { date: "2026-06-10", techScoutDaily: true },
+        },
+        {
+          id: "collect-market",
+          name: "Collect market",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["collect-morning"],
         },
       ],
     });
@@ -1250,14 +1259,18 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const result = await executeWorkflowRun(db, runId);
 
     expect(result.status).toBe("running");
-    expect(executeToolStep).toHaveBeenCalledTimes(2);
+    expect(executeToolStep).toHaveBeenCalledTimes(3);
     expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
       stepId: "generate-infographic",
-      args: { promptOnly: true, date: "2026-06-11" },
+      args: { promptOnly: true, date: "2026-06-11", output: "report-2026-06-11.png" },
     }));
     expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
       stepId: "send-telegram",
       args: { date: "2026-06-10", techScoutDaily: true },
+    }));
+    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "collect-market",
+      args: {},
     }));
   });
 

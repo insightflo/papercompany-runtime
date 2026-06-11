@@ -561,13 +561,15 @@ async function createWorkflowStepIssue(input: {
     ];
   });
 
-  const stepName = input.step.name.trim();
+  const stepName = renderWorkflowRunTextTemplate(input.step.name.trim(), input.run);
   const hasIssueGroupPrefix = /^\s*\[(?:plan|action|qa|oversight)\]/iu.test(stepName);
   const title = hasIssueGroupPrefix
-    ? `${stepName} — ${input.definition.name}`
-    : `${input.definition.name}: ${stepName}`;
+    ? `${stepName} — ${renderWorkflowRunTextTemplate(input.definition.name, input.run)}`
+    : `${renderWorkflowRunTextTemplate(input.definition.name, input.run)}: ${stepName}`;
   const description = [
-    input.step.description?.trim() || null,
+    input.step.description?.trim()
+      ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
+      : null,
     "",
     "Workflow execution boundary:",
     `- workflowRunId: ${input.run.id}`,
@@ -735,13 +737,33 @@ function buildWorkflowToolStepArgs(
   run: typeof workflowRuns.$inferSelect,
 ): unknown {
   const args = step.toolArgs ?? {};
-  if (!run.runDate || !args || typeof args !== "object" || Array.isArray(args)) {
-    return args;
+  return renderWorkflowToolStepArgTemplates(args, run);
+}
+
+function renderWorkflowRunTextTemplate(
+  value: string,
+  run: typeof workflowRuns.$inferSelect,
+): string {
+  const runDate = run.runDate ?? "";
+  return value.replaceAll("{$runDate}", runDate).replaceAll("{$date}", runDate);
+}
+
+function renderWorkflowToolStepArgTemplates(
+  value: unknown,
+  run: typeof workflowRuns.$inferSelect,
+): unknown {
+  if (typeof value === "string") {
+    return renderWorkflowRunTextTemplate(value, run);
   }
-  if (Object.prototype.hasOwnProperty.call(args, "date")) {
-    return args;
+  if (Array.isArray(value)) {
+    return value.map((item) => renderWorkflowToolStepArgTemplates(item, run));
   }
-  return { ...args, date: run.runDate };
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, renderWorkflowToolStepArgTemplates(entry, run)]),
+    );
+  }
+  return value;
 }
 
 async function failToolStepRun(

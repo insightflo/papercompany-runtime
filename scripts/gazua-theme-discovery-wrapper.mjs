@@ -174,6 +174,26 @@ function themePath(root, market, date = "") {
     : latestFile(base, new RegExp(`^theme_${suffix}\\.json$`));
 }
 
+function existingThemePath(roots, market, date = "") {
+  const candidates = roots
+    .map((root) => themePath(root, market, date))
+    .filter((candidate) => candidate && fs.existsSync(candidate));
+  if (date) {
+    return candidates[0] || null;
+  }
+  return candidates
+    .sort((a, b) => {
+      const dateA = themeDateFromPath(a);
+      const dateB = themeDateFromPath(b);
+      if (dateA !== dateB) return dateB.localeCompare(dateA);
+      return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+    })[0] || null;
+}
+
+function themeDateFromPath(filePath) {
+  return path.basename(filePath).match(/^theme_(\d{4}-\d{2}-\d{2})\.json$/)?.[1] || "";
+}
+
 function normalizeFixedThemes(payload, market) {
   payload.all_themes = (payload.all_themes || []).map((item) => ({
     ...item,
@@ -412,8 +432,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   runBaseProducer(args);
 
-  const sourcePath = themePath(args.dashboardRoot, args.market, args.date)
-    || themePath(args.alphaRoot, args.market, args.date);
+  const sourcePath = existingThemePath([args.dashboardRoot, args.alphaRoot], args.market, args.date);
   if (!sourcePath || !fs.existsSync(sourcePath)) {
     fail(`theme artifact not found for market ${args.market}`);
   }

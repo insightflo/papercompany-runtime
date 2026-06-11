@@ -1,4 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
@@ -30,6 +32,25 @@ function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
   };
 }
 
+function isLocalFileProvider(provider: string) {
+  return provider === "local" || provider === "local_file";
+}
+
+function metadataPath(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const value = (metadata as Record<string, unknown>).path;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function hasValidLocalFilePath(data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) {
+  if (!isLocalFileProvider(data.provider)) return true;
+  if (data.type !== "artifact" && data.type !== "document") return true;
+
+  const localPath = metadataPath(data.metadata);
+  if (!localPath || !path.isAbsolute(localPath)) return false;
+  return existsSync(localPath);
+}
+
 export function workProductService(db: Db) {
   return {
     listForIssue: async (issueId: string) => {
@@ -51,6 +72,7 @@ export function workProductService(db: Db) {
     },
 
     createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
+      if (!hasValidLocalFilePath(data)) return null;
       const row = await db.transaction(async (tx) => {
         if (data.isPrimary) {
           await tx
