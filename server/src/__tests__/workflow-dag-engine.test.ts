@@ -1201,6 +1201,66 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
   });
 
+  it("injects workflow runDate into issue-less tool step args without overriding explicit dates", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Dated Tool Workflow",
+      issuePrefix: `WD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Dated Tool Workflow",
+      stepsJson: [
+        {
+          id: "generate-infographic",
+          name: "Generate infographic",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["generate-tech-scout-knowledge-comic"],
+          toolArgs: { promptOnly: true },
+        },
+        {
+          id: "send-telegram",
+          name: "Send Telegram",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["send-telegram"],
+          toolArgs: { date: "2026-06-10", techScoutDaily: true },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+      runDate: "2026-06-11",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("running");
+    expect(executeToolStep).toHaveBeenCalledTimes(2);
+    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "generate-infographic",
+      args: { promptOnly: true, date: "2026-06-11" },
+    }));
+    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "send-telegram",
+      args: { date: "2026-06-10", techScoutDaily: true },
+    }));
+  });
+
   it("completes all-tool workflows from tool execution results without creating issues", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();

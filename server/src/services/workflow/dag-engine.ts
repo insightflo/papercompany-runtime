@@ -730,6 +730,20 @@ function getSingleToolStepName(step: WorkflowStep): string {
   return toolNames[0]!;
 }
 
+function buildWorkflowToolStepArgs(
+  step: PersistedWorkflowStep,
+  run: typeof workflowRuns.$inferSelect,
+): unknown {
+  const args = step.toolArgs ?? {};
+  if (!run.runDate || !args || typeof args !== "object" || Array.isArray(args)) {
+    return args;
+  }
+  if (Object.prototype.hasOwnProperty.call(args, "date")) {
+    return args;
+  }
+  return { ...args, date: run.runDate };
+}
+
 async function failToolStepRun(
   db: Db,
   stepRun: typeof workflowStepRuns.$inferSelect,
@@ -764,7 +778,7 @@ async function startIssueLessToolStepRun(input: {
       definition,
       step,
       stepRun,
-      args: (step as PersistedWorkflowStep).toolArgs ?? {},
+      args: buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run),
       now,
     });
     if (!delegated) {
@@ -799,7 +813,7 @@ async function startIssueLessToolStepRun(input: {
       stepId: step.id,
       stepRunId: stepRun.id,
       toolName,
-      args: (step as PersistedWorkflowStep).toolArgs ?? {},
+      args: buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run),
       requestId,
     });
     if (dispatchResult?.accepted !== false) {

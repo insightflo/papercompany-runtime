@@ -233,6 +233,36 @@ describe("workflow routes", () => {
     expect(logActivity).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "workflow.updated" }));
   });
 
+  it("normalizes empty optional workflow step UUIDs on patch", async () => {
+    mockWorkflowService.updateDefinition.mockResolvedValue(workflowDefinition());
+
+    const res = await request(createApp())
+      .patch(`/api/workflows/${WORKFLOW_ID}`)
+      .send({
+        steps: [
+          {
+            id: "send-telegram",
+            title: "Send Telegram",
+            agentId: "",
+            assigneeAgentId: "",
+            dependencies: [],
+            toolName: "send-telegram",
+          },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.updateDefinition).toHaveBeenCalledWith(expect.anything(), WORKFLOW_ID, expect.objectContaining({
+      steps: [
+        expect.objectContaining({
+          id: "send-telegram",
+          agentId: undefined,
+          assigneeAgentId: undefined,
+        }),
+      ],
+    }));
+  });
+
   it("rejects public scheduledSlotId on trigger and triggers without it", async () => {
     const rejected = await request(createApp())
       .post(`/api/workflows/${WORKFLOW_ID}/runs`)

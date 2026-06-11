@@ -3,6 +3,10 @@ import { z } from "zod";
 const nullableUuidSchema = z.string().uuid().nullable();
 const nullableDateTimeStringSchema = z.string().datetime().nullable();
 const metadataSchema = z.record(z.unknown()).default({});
+const optionalUuidSchema = z.preprocess(
+  (value) => value === "" ? undefined : value,
+  z.string().uuid().optional(),
+);
 const stringArrayDefaultSchema = z.preprocess(
   (value) => value ?? [],
   z.array(z.string()).default([]),
@@ -33,8 +37,8 @@ export const workflowStepDefinitionSchema = z.object({
   ownerPlanBootstrapOnly: z.union([z.boolean(), z.string()]).optional(),
   bootstrapOnly: z.union([z.boolean(), z.string()]).optional(),
   agentName: z.string().optional(),
-  agentId: z.string().uuid().optional(),
-  assigneeAgentId: z.string().uuid().optional(),
+  agentId: optionalUuidSchema,
+  assigneeAgentId: optionalUuidSchema,
 }).passthrough();
 
 export const workflowDefinitionSchema = z.object({
