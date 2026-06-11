@@ -72,6 +72,7 @@ import { startAlertMonitor } from "./channel/telegram/alerts.js";
 import { setWorkflowToolStepExecutor } from "./services/workflow/dag-engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
+import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -638,6 +639,14 @@ export async function createApp(
   });
   missionOwnerSupervisionMonitor.start();
   process.once("exit", () => missionOwnerSupervisionMonitor.stop());
+
+  const nativeWorkflowScheduler = workflowSchedulerOwnership.mode === "native-shadow"
+    ? createNativeWorkflowScheduler({ db, mode: "shadow" })
+    : null;
+  nativeWorkflowScheduler?.start();
+  if (nativeWorkflowScheduler) {
+    process.once("exit", () => nativeWorkflowScheduler.stop());
+  }
 
   pluginScheduler.start();
   jobCoordinator.start();
