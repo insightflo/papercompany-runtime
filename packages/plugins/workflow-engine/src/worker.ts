@@ -10,6 +10,7 @@ import { JOB_KEYS, PLUGIN_ID, RUN_STATUSES, STEP_STATUSES } from "./constants.js
 import {
   getEscalationTarget,
   getRetryInfo,
+  normalizeStepDeps,
   validateWorkflowLaunchability,
   type WorkflowExecutionMode,
   type WorkflowStep,
@@ -110,6 +111,7 @@ function parseRunLabelParts(runLabel: string | null | undefined): { date?: strin
 function resolveWorkflowRunDate(
   workflowRun: WorkflowRunRecord,
   workflowDefinition: WorkflowDefinitionRecord,
+  companyTimezone?: string,
 ): string {
   const explicit = typeof workflowRun.data.runDate === "string" ? workflowRun.data.runDate.trim() : "";
   if (explicit) {
@@ -126,7 +128,7 @@ function resolveWorkflowRunDate(
   if (Number.isFinite(startedMs)) {
     const timezone = typeof workflowDefinition.data.timezone === "string"
       ? workflowDefinition.data.timezone.trim()
-      : "";
+      : companyTimezone || "";
     return formatDateKeyInTimezone(new Date(startedMs), timezone || undefined)
       ?? new Date(startedMs).toISOString().slice(0, 10);
   }
@@ -167,6 +169,16 @@ function extractLabelNames(payload: Record<string, unknown>): string[] {
 
 function getPaperclipApiUrl(): string {
   return process.env.PAPERCLIP_API_URL || "http://localhost:3200";
+}
+
+async function getCompanyTimezone(companyId: string): Promise<string | null> {
+  try {
+    const apiUrl = getPaperclipApiUrl();
+    const res = await fetch(`${apiUrl}/api/companies/${companyId}`);
+    if (!res.ok) return null;
+    const company = await res.json() as Record<string, unknown>;
+    return typeof company.timezone === "string" ? company.timezone : null;
+  } catch { return null; }
 }
 
 function shouldForceFreshSessionForAgentStep(
@@ -223,9 +235,10 @@ function formatDuration(startedAt: string | null | undefined, completedAt: strin
 function buildWorkflowTemplateVars(
   workflowRun: WorkflowRunRecord,
   workflowDefinition: WorkflowDefinitionRecord,
+  companyTimezone?: string,
 ): Record<string, string> {
   return {
-    date: resolveWorkflowRunDate(workflowRun, workflowDefinition),
+    date: resolveWorkflowRunDate(workflowRun, workflowDefinition, companyTimezone),
     runNumber: resolveWorkflowRunNumber(workflowRun),
     runLabel: workflowRun.data.runLabel ?? "",
     workflowName: workflowRun.data.workflowName,
@@ -321,7 +334,7 @@ function areStepDependenciesSatisfied(
     return false;
   }
 
-  return stepDef.dependsOn.every((depId) => {
+  return normalizeStepDeps(stepDef).every((depId: string) => {
     const depRun = stepRunsById.get(depId);
     if (!depRun) {
       return false;
@@ -1477,12 +1490,12 @@ async function collectDependencyOutputs(
   runId: string,
   companyId: string,
 ): Promise<string> {
-  if (stepDef.dependsOn.length === 0) return "";
+  if (normalizeStepDeps(stepDef).length === 0) return "";
 
   const stepRuns = (await listStepRuns(ctx, runId, companyId)).map(toWorkflowStepRunRecord);
   const parts: string[] = [];
 
-  for (const depId of stepDef.dependsOn) {
+  for (const depId of normalizeStepDeps(stepDef)) {
     const depRun = stepRuns.find((sr) => sr.data.stepId === depId);
     if (!depRun?.data.issueId) continue;
 
@@ -1704,6 +1717,9 @@ async function rerunWorkflowStep(
     throw new Error(`Workflow step definition not found: ${typedStepRun.data.stepId}`);
   }
 
+  const wfTz = typeof typedWorkflowDefinition.data.timezone === "string" ? typedWorkflowDefinition.data.timezone.trim() : "";
+  const companyTz = !wfTz ? (await getCompanyTimezone(resolvedCompanyId)) ?? undefined : undefined;
+
   const stepRuns = (await listStepRuns(ctx, typedWorkflowRun.id, companyId)).map(toWorkflowStepRunRecord);
   const stepRunsById = new Map(stepRuns.map((candidate) => [candidate.data.stepId, candidate]));
   if (!areStepDependenciesSatisfied(typedWorkflowDefinition, typedStepRun.data.stepId, stepRunsById)) {
@@ -1765,7 +1781,7 @@ async function rerunWorkflowStep(
       goalId: typedWorkflowDefinition.data.goalId,
       labelIds: typedWorkflowDefinition.data.labelIds as string[] | undefined,
       runLabel: typedWorkflowRun.data.runLabel,
-      templateVars: buildWorkflowTemplateVars(typedWorkflowRun, typedWorkflowDefinition),
+      templateVars: buildWorkflowTemplateVars(typedWorkflowRun, typedWorkflowDefinition, companyTz),
     },
   );
 
@@ -2769,8 +2785,13 @@ const plugin = definePlugin({
           const triggerIssueId = typeof event.entityId === "string" && event.entityId.trim()
             ? event.entityId.trim()
             : "";
+          let labelTriggerCompanyTz: string | null | undefined;
           for (const def of matched) {
-            const timezone = typeof def.data.timezone === "string" ? def.data.timezone.trim() : "";
+            const wfTz = typeof def.data.timezone === "string" ? def.data.timezone.trim() : "";
+            if (labelTriggerCompanyTz === undefined && !wfTz) {
+              labelTriggerCompanyTz = await getCompanyTimezone(event.companyId);
+            }
+            const timezone = wfTz || labelTriggerCompanyTz || "";
             const dailyGuard = await checkDailyRunGuard(ctx, event.companyId, def.id, new Date(), timezone || undefined);
             if (dailyGuard.blocked) {
               ctx.logger.info("Skipped workflow auto-start from issue label trigger because a same-day run already exists", {

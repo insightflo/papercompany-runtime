@@ -1,6 +1,9 @@
 import type { PluginContext, PluginEntityRecord } from "@paperclipai/plugin-sdk";
 
-import { ENTITY_TYPES, RUN_STATUSES, STEP_STATUSES } from "./constants.js";
+import {
+  ENTITY_TYPES, RUN_STATUSES, STEP_STATUSES
+} from "./constants.js";
+import { normalizeStepDeps } from "./dag-engine.js";
 import { ensureIssueLabels } from "./issue-labels.js";
 import {
   formatDateKeyInTimezone,
@@ -50,6 +53,16 @@ function isStale(record: PluginEntityRecord, thresholdMs: number): boolean {
 
 function getPaperclipApiUrl(): string {
   return process.env.PAPERCLIP_API_URL || "http://localhost:3200";
+}
+
+async function getCompanyTimezone(companyId: string): Promise<string | null> {
+  try {
+    const apiUrl = getPaperclipApiUrl();
+    const res = await fetch(`${apiUrl}/api/companies/${companyId}`);
+    if (!res.ok) return null;
+    const company = await res.json() as Record<string, unknown>;
+    return typeof company.timezone === "string" ? company.timezone : null;
+  } catch { return null; }
 }
 
 function summarizeError(error: unknown): string {
@@ -470,7 +483,7 @@ function areDependenciesSatisfied(
     return false;
   }
 
-  return stepDef.dependsOn.every((depId) => {
+  return normalizeStepDeps(stepDef).every((depId) => {
     const depRun = stepRunsById.get(depId);
     if (!depRun) {
       return false;
@@ -1036,6 +1049,7 @@ export async function runScheduledWorkflows(ctx: PluginContext): Promise<void> {
 
   for (const companyId of companyIds) {
     const defs = await listWorkflowDefinitions(ctx, companyId);
+    let companyTz: string | null | undefined;
 
     for (const defRecord of defs) {
       const def = toWorkflowDefinitionRecord(defRecord);
@@ -1049,7 +1063,11 @@ export async function runScheduledWorkflows(ctx: PluginContext): Promise<void> {
       const schedule = def.data.schedule;
       if (!schedule || typeof schedule !== "string" || !schedule.trim()) continue;
 
-      const timezone = typeof def.data.timezone === "string" ? def.data.timezone.trim() : "";
+      const wfTimezone = typeof def.data.timezone === "string" ? def.data.timezone.trim() : "";
+      if (companyTz === undefined && !wfTimezone) {
+        companyTz = await getCompanyTimezone(companyId);
+      }
+      const timezone = wfTimezone || companyTz || "";
       const nowForSchedule = timezone ? getDateInTimezone(now, timezone) : null;
       const effectiveScheduleNow = nowForSchedule ?? now;
       if (timezone && !nowForSchedule) {
@@ -1176,6 +1194,7 @@ export async function reconcileStuckSteps(ctx: PluginContext): Promise<void> {
 
     for (const companyId of companyIds) {
       let activeRuns: PluginEntityRecord[] = [];
+      let companyTz: string | null | undefined;
 
       try {
         activeRuns = await listActiveRuns(ctx, companyId);
@@ -1222,9 +1241,13 @@ export async function reconcileStuckSteps(ctx: PluginContext): Promise<void> {
           const stepRunsById = new Map(stepRuns.map((stepRun) => [stepRun.data.stepId, stepRun]));
           const now = new Date();
           const nowIso = now.toISOString();
-          const timezone = typeof typedWorkflowDefinition.data.timezone === "string"
+          const wfTimezone = typeof typedWorkflowDefinition.data.timezone === "string"
             ? typedWorkflowDefinition.data.timezone.trim()
             : "";
+          if (companyTz === undefined && !wfTimezone) {
+            companyTz = await getCompanyTimezone(companyId);
+          }
+          const timezone = wfTimezone || companyTz || "";
           const nowForDeadline = timezone ? getDateInTimezone(now, timezone) : null;
           const effectiveNowForDeadline = nowForDeadline ?? now;
           if (timezone && !nowForDeadline) {

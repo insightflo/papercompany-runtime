@@ -39,7 +39,8 @@ function requiredArtifactPathForStep(
   workflowDefinition: WorkflowDefinitionRecord,
   stepDef: WorkflowStep,
 ): string | null {
-  if (workflowRun.data.workflowName !== "gazua-morning" && workflowDefinition.data.name !== "gazua-morning") {
+  const workflowName = workflowRun.data.workflowName || workflowDefinition.data.name;
+  if (workflowName !== "gazua-morning" && workflowName !== "gazua-evening") {
     return null;
   }
   if (stepDef.id !== "blog") {
@@ -48,7 +49,16 @@ function requiredArtifactPathForStep(
 
   const runDate = resolveRunDate(workflowRun);
   const monthKey = runDate.slice(0, 7).replace("-", "");
-  return join(getGazuaWorkspaceDir(), "reports", "blog", monthKey, `Public_Market_Report_${runDate}.md`);
+  const reportPrefix = workflowName === "gazua-evening" ? "US_Market_Report" : "KR_Market_Report";
+  return join(
+    getGazuaWorkspaceDir(),
+    "reports",
+    "beginner_html",
+    "dashboard",
+    "daily",
+    monthKey,
+    `${reportPrefix}_${runDate}.html`,
+  );
 }
 
 export async function validateRequiredStepArtifacts(

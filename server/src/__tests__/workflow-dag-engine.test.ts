@@ -34,6 +34,7 @@ vi.mock("../services/heartbeat.js", () => ({
 
 import { issueService } from "../services/issues.ts";
 import { missionService } from "../services/missions.js";
+import { createPluginEventBus } from "../services/plugin-event-bus.js";
 import {
   completeWorkflowToolStepFromResult,
   executeWorkflowRun,
@@ -42,6 +43,7 @@ import {
   syncWorkflowRunForIssue,
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
+import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -1263,9 +1265,51 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
 
     const fetchStep = stepRuns.find((stepRun) => stepRun.stepId === "fetch")!;
+    const fetchRequest = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+    const wrongCompanyResult = await completeWorkflowToolStepFromResult(db, {
+      companyId: randomUUID(),
+      stepRunId: fetchStep.id,
+      requestId: fetchRequest.requestId,
+      workflowRunId: runId,
+      stepId: "fetch",
+      toolName: "search-docs",
+      success: true,
+    });
+    const wrongRunResult = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: fetchStep.id,
+      requestId: fetchRequest.requestId,
+      workflowRunId: randomUUID(),
+      stepId: "fetch",
+      toolName: "search-docs",
+      success: true,
+    });
+    const wrongStepResult = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: fetchStep.id,
+      requestId: fetchRequest.requestId,
+      workflowRunId: runId,
+      stepId: "wrong-step",
+      toolName: "search-docs",
+      success: true,
+    });
+    expect(wrongCompanyResult).toBeNull();
+    expect(wrongRunResult).toBeNull();
+    expect(wrongStepResult).toBeNull();
+    expect(await db
+      .select({ status: workflowStepRuns.status })
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, fetchStep.id))
+      .then((rows) => rows[0]?.status))
+      .toBe("running");
+
     const afterFetch = await completeWorkflowToolStepFromResult(db, {
       companyId,
       stepRunId: fetchStep.id,
+      requestId: fetchRequest.requestId,
+      workflowRunId: runId,
+      stepId: "fetch",
+      toolName: "search-docs",
       success: true,
     });
     expect(afterFetch?.status).toBe("running");
@@ -1280,9 +1324,14 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
     const extractStep = stepRuns.find((stepRun) => stepRun.stepId === "extract")!;
+    const extractRequest = executeToolStep.mock.calls[1]?.[0] as { requestId: string };
     const afterExtract = await completeWorkflowToolStepFromResult(db, {
       companyId,
       stepRunId: extractStep.id,
+      requestId: extractRequest.requestId,
+      workflowRunId: runId,
+      stepId: "extract",
+      toolName: "extract-facts",
       success: true,
     });
     expect(afterExtract?.status).toBe("completed");
@@ -1302,13 +1351,206 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const createdIssues = await db.select().from(issues);
     expect(createdIssues).toHaveLength(0);
 
-    const workflowRun = await db
+    let workflowRun = await db
       .select()
       .from(workflowRuns)
       .where(eq(workflowRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     expect(workflowRun?.status).toBe("completed");
     expect(workflowRun?.completedAt).toBeTruthy();
+
+    const canonicalCompletedAt = new Date("2026-06-10T08:00:00.000Z");
+    await db
+      .update(workflowRuns)
+      .set({ completedAt: canonicalCompletedAt })
+      .where(eq(workflowRuns.id, runId));
+
+    const duplicateExtract = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: extractStep.id,
+      requestId: extractRequest.requestId,
+      workflowRunId: runId,
+      stepId: "extract",
+      toolName: "extract-facts",
+      success: true,
+    });
+    expect(duplicateExtract?.status).toBe("completed");
+    expect(executeToolStep).toHaveBeenCalledTimes(2);
+
+    workflowRun = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(workflowRun?.completedAt?.toISOString()).toBe(canonicalCompletedAt.toISOString());
+
+    const failedWorkflowId = randomUUID();
+    const failedRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: failedWorkflowId,
+      companyId,
+      name: "Tool Failure Workflow",
+      stepsJson: [
+        {
+          id: "collect",
+          name: "Collect",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["collect-data"],
+        },
+        {
+          id: "publish",
+          name: "Publish",
+          agentId: "",
+          dependencies: ["collect"],
+          toolNames: ["publish-data"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: failedRunId,
+      workflowId: failedWorkflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    await executeWorkflowRun(db, failedRunId);
+    const failedWorkflowInitialSteps = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, failedRunId));
+    const collectStep = failedWorkflowInitialSteps.find((stepRun) => stepRun.stepId === "collect")!;
+    const collectRequest = executeToolStep.mock.calls[2]?.[0] as { requestId: string };
+
+    const failedResult = await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: collectStep.id,
+      requestId: collectRequest.requestId,
+      workflowRunId: failedRunId,
+      stepId: "collect",
+      toolName: "collect-data",
+      success: false,
+      stderr: "tool exploded",
+      exitCode: 1,
+      error: "Tool failed",
+    });
+    expect(failedResult?.status).toBe("failed");
+    expect(failedResult?.error).toBe("One or more workflow steps failed");
+    expect(failedResult?.stepRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "collect", status: "failed" }),
+      expect.objectContaining({ stepId: "publish", status: "skipped" }),
+    ]));
+
+    const failedCollectStep = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, collectStep.id))
+      .then((rows) => rows[0]);
+    expect(failedCollectStep?.lastDispatchErrorSummary).toBe("Tool failed");
+    expect(failedCollectStep?.metadata).toEqual(expect.objectContaining({
+      toolResult: expect.objectContaining({
+        requestId: collectRequest.requestId,
+        toolName: "collect-data",
+        success: false,
+        stderr: "tool exploded",
+        exitCode: 1,
+        error: "Tool failed",
+      }),
+    }));
+  });
+
+  it("advances native workflow steps from the tool-registry plugin result event", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+    const eventBus = createPluginEventBus();
+
+    setWorkflowToolStepExecutor(executeToolStep);
+    registerNativeWorkflowToolResultEventHandlers(db, eventBus);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Native Event Workflow Company",
+      issuePrefix: `NE${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Native Event Tool Workflow",
+      stepsJson: [
+        {
+          id: "fetch",
+          name: "Fetch",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["fetch-context"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const initial = await executeWorkflowRun(db, runId);
+    expect(initial.status).toBe("running");
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const dispatched = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+
+    const result = await eventBus.emit({
+      eventId: randomUUID(),
+      eventType: "plugin.insightflo.tool-registry.tool-execution-result",
+      companyId,
+      occurredAt: new Date().toISOString(),
+      actorType: "plugin",
+      actorId: "insightflo.tool-registry",
+      payload: {
+        requestId: dispatched.requestId,
+        stepRunId: stepRun!.id,
+        workflowRunId: runId,
+        stepId: "fetch",
+        toolName: "fetch-context",
+        success: true,
+        stdout: "event ok",
+        exitCode: 0,
+      },
+    });
+    expect(result.errors).toEqual([]);
+
+    const storedStepRun = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, stepRun!.id))
+      .then((rows) => rows[0]);
+    expect(storedStepRun?.status).toBe("completed");
+    expect(storedStepRun?.metadata).toEqual(expect.objectContaining({
+      toolResult: expect.objectContaining({
+        requestId: dispatched.requestId,
+        toolName: "fetch-context",
+        success: true,
+        stdout: "event ok",
+        exitCode: 0,
+      }),
+    }));
+
+    const storedRun = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, runId))
+      .then((rows) => rows[0]);
+    expect(storedRun?.status).toBe("completed");
+    expect(storedRun?.completedAt).toBeTruthy();
   });
 
   it("delegates native workflow steps to another company and resumes with copied workProducts", async () => {
@@ -2525,7 +2767,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(prepareStepRun?.issueId).toBeTruthy();
     expect(shipStepRun?.issueId).toBeNull();
 
-    const cancelled = await workflowService.cancelRun(db, result.runId);
+    const cancelled = await workflowService.cancelRun(db, { runId: result.runId, companyId });
     expect(cancelled).toBe(true);
 
     const workflowRun = await db

@@ -530,6 +530,14 @@ export function pluginRoutes(
         companyId,
         stepRunId,
         success: params.success === true,
+        requestId: typeof params.requestId === "string" ? params.requestId : undefined,
+        workflowRunId: typeof params.workflowRunId === "string" ? params.workflowRunId : undefined,
+        stepId: typeof params.stepId === "string" ? params.stepId : undefined,
+        toolName: typeof params.toolName === "string" ? params.toolName : undefined,
+        stdout: typeof params.stdout === "string" ? params.stdout : undefined,
+        stderr: typeof params.stderr === "string" ? params.stderr : undefined,
+        exitCode: typeof params.exitCode === "number" ? params.exitCode : null,
+        error: typeof params.error === "string" ? params.error : undefined,
       });
       if (!run) return false;
 
@@ -612,7 +620,7 @@ export function pluginRoutes(
         return true;
       }
 
-      const cancelled = await workflowService.cancelRun(db, runId);
+      const cancelled = await workflowService.cancelRun(db, { runId, companyId });
       res.json({ data: { id: runId, runId, status: cancelled ? "cancelled" : run.status, cancelled } });
       return true;
     }

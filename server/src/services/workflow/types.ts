@@ -14,8 +14,29 @@ export interface WorkflowDefinition {
   id: string;
   companyId: string;
   name: string;
+  description?: string | null;
+  status?: string;
   steps: WorkflowStep[];
-  executionMode: WorkflowExecutionMode;
+  schedule?: string | null;
+  timezone?: string | null;
+  deadlineTime?: string | null;
+  lastScheduledRunAt?: Date | null;
+  lastScheduleError?: string | null;
+  lastScheduleErrorAt?: Date | null;
+  timeoutMinutes?: number | null;
+  maxDailyRuns?: number | null;
+  maxConcurrentRuns?: number | null;
+  triggerLabels?: string[];
+  labelIds?: string[];
+  projectId?: string | null;
+  goalId?: string | null;
+  createParentIssuePolicy?: string | null;
+  executionMode: WorkflowExecutionMode | string | null;
+  dynamicPlanBootstrapOnly?: boolean;
+  source?: string | null;
+  sourceKind?: string | null;
+  legacyPluginEntityId?: string | null;
+  legacyMetadata?: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,8 +47,26 @@ export interface WorkflowDefinition {
 export interface CreateWorkflowDefinitionInput {
   companyId: string;
   name: string;
+  description?: string | null;
   steps: WorkflowStep[];
-  executionMode?: WorkflowExecutionMode;
+  status?: string;
+  schedule?: string | null;
+  timezone?: string | null;
+  deadlineTime?: string | null;
+  timeoutMinutes?: number | null;
+  maxDailyRuns?: number | null;
+  maxConcurrentRuns?: number | null;
+  triggerLabels?: string[];
+  labelIds?: string[];
+  projectId?: string | null;
+  goalId?: string | null;
+  createParentIssuePolicy?: string | null;
+  executionMode?: WorkflowExecutionMode | string | null;
+  dynamicPlanBootstrapOnly?: boolean;
+  source?: string | null;
+  sourceKind?: string | null;
+  legacyPluginEntityId?: string | null;
+  legacyMetadata?: Record<string, unknown>;
 }
 
 /**
@@ -38,8 +77,17 @@ export interface WorkflowRun {
   workflowId: string;
   companyId: string;
   missionId: string | null;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | string;
+  originalStatus?: string | null;
   triggeredBy: string;
+  triggerSource?: string | null;
+  runDate?: string | null;
+  runNumber?: number | null;
+  runLabel?: string | null;
+  parentIssueId?: string | null;
+  scheduledSlotId?: string | null;
+  legacyPluginRunEntityId?: string | null;
+  metadata?: Record<string, unknown>;
   startedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
@@ -53,6 +101,36 @@ export interface CreateWorkflowRunInput {
   companyId: string;
   missionId?: string;
   triggeredBy: string;
+  triggerSource?: string | null;
+  runDate?: string | null;
+  runNumber?: number | null;
+  runLabel?: string | null;
+  parentIssueId?: string | null;
+  scheduledSlotId?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Internal scheduler-only input for claiming a scheduled workflow slot.
+ * Public REST trigger bodies must not accept scheduledSlotId directly.
+ */
+export interface ClaimScheduledWorkflowRunInput {
+  workflowId: string;
+  companyId: string;
+  scheduledAt: Date;
+  triggerSource?: string;
+  triggeredBy?: string;
+  runDate?: string | null;
+  runNumber?: number | null;
+  runLabel?: string | null;
+  timezone?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ClaimScheduledWorkflowRunResult {
+  claimed: boolean;
+  scheduledSlotId: string | null;
+  run: WorkflowExecutionResult | null;
 }
 
 /**
@@ -63,9 +141,33 @@ export interface WorkflowStepRun {
   workflowRunId: string;
   stepId: string;
   issueId: string | null;
-  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  status: "pending" | "running" | "completed" | "failed" | "skipped" | string;
+  originalStatus?: string | null;
+  agentName?: string | null;
+  retryCount?: number;
+  sessionId?: string | null;
+  lastDispatchAttemptAt?: Date | null;
+  lastDispatchAcceptedAt?: Date | null;
+  lastDispatchErrorAt?: Date | null;
+  lastDispatchErrorSummary?: string | null;
+  lastDispatchRequestId?: string | null;
+  legacyPluginStepEntityId?: string | null;
+  metadata?: Record<string, unknown>;
   startedAt: Date | null;
   completedAt: Date | null;
+}
+
+export interface WorkflowRunSlot {
+  id: string;
+  workflowDefinitionId: string;
+  companyId: string;
+  triggerSource?: string;
+  scheduledAt: Date;
+  runDate?: string | null;
+  timezone?: string | null;
+  claimedAt: Date;
+  status?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface WorkflowStepExecutionContract {

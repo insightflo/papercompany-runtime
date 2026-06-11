@@ -21,12 +21,25 @@ import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../mi
 export interface WorkflowStep {
   id: string;
   name: string;
+  title?: string;
   agentId: string;
+  agentName?: string;
+  assigneeAgentId?: string;
   dependencies: string[]; // step IDs this step depends on
+  dependsOn?: string[];
   description?: string;
+  type?: string;
+  toolName?: string;
+  toolArgs?: unknown;
+  tools?: string[];
   toolNames?: string[];
+  sessionMode?: string;
+  onFailure?: string;
+  escalateTo?: string;
+  maxRetries?: number;
+  timeoutSeconds?: number;
   knowledgeBaseIds?: string[];
-  triggerOn?: "normal" | "escalation";
+  triggerOn?: "normal" | "escalation" | string;
   /**
    * Dynamic owner-plan marker. In this mode the native workflow engine only
    * launches bootstrap/root planning steps; the owner plan creates concrete
@@ -773,11 +786,13 @@ async function startIssueLessToolStepRun(input: {
       status: "running",
       startedAt: stepRun.startedAt ?? now,
       completedAt: null,
+      lastDispatchAttemptAt: now,
+      lastDispatchRequestId: requestId,
     })
     .where(eq(workflowStepRuns.id, stepRun.id));
 
   try {
-    await workflowToolStepExecutor({
+    const dispatchResult = await workflowToolStepExecutor({
       companyId: run.companyId,
       workflowRunId: run.id,
       workflowId: definition.id,
@@ -787,11 +802,60 @@ async function startIssueLessToolStepRun(input: {
       args: (step as PersistedWorkflowStep).toolArgs ?? {},
       requestId,
     });
+    if (dispatchResult?.accepted !== false) {
+      await db
+        .update(workflowStepRuns)
+        .set({ lastDispatchAcceptedAt: new Date() })
+        .where(eq(workflowStepRuns.id, stepRun.id));
+    }
     return true;
   } catch {
     await failToolStepRun(db, stepRun, now);
     return false;
   }
+}
+
+function mapWorkflowExecutionResult(
+  run: typeof workflowRuns.$inferSelect,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): WorkflowExecutionResult {
+  return {
+    runId: run.id,
+    workflowId: run.workflowId,
+    missionId: run.missionId,
+    status: run.status as "running" | "completed" | "failed" | "cancelled",
+    completedAt: run.completedAt,
+    error: run.status === "failed" ? "One or more workflow steps failed" : undefined,
+    stepRuns: stepRuns.map((stepRun) => ({
+      id: stepRun.id,
+      workflowRunId: stepRun.workflowRunId,
+      stepId: stepRun.stepId,
+      issueId: stepRun.issueId,
+      status: stepRun.status as "pending" | "running" | "completed" | "failed" | "skipped",
+      startedAt: stepRun.startedAt,
+      completedAt: stepRun.completedAt,
+    })),
+  };
+}
+
+async function getWorkflowExecutionResultSnapshot(
+  db: Db,
+  runId: string,
+): Promise<WorkflowExecutionResult | null> {
+  const run = await db
+    .select()
+    .from(workflowRuns)
+    .where(eq(workflowRuns.id, runId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!run) return null;
+
+  const stepRuns = await db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, runId));
+
+  return mapWorkflowExecutionResult(run, stepRuns);
 }
 
 export async function completeWorkflowToolStepFromResult(
@@ -800,6 +864,14 @@ export async function completeWorkflowToolStepFromResult(
     companyId: string;
     stepRunId: string;
     success: boolean;
+    requestId?: string;
+    workflowRunId?: string;
+    stepId?: string;
+    toolName?: string;
+    stdout?: string;
+    stderr?: string;
+    exitCode?: number | null;
+    error?: string;
   },
 ): Promise<WorkflowExecutionResult | null> {
   const row = await db
@@ -811,18 +883,44 @@ export async function completeWorkflowToolStepFromResult(
     .then((rows) => rows[0] ?? null);
 
   if (!row || row.run.companyId !== input.companyId) return null;
-
-  if (!WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status)) {
-    const now = new Date();
-    await db
-      .update(workflowStepRuns)
-      .set({
-        status: input.success ? "completed" : "failed",
-        startedAt: row.stepRun.startedAt ?? now,
-        completedAt: now,
-      })
-      .where(eq(workflowStepRuns.id, row.stepRun.id));
+  if (input.workflowRunId && input.workflowRunId !== row.run.id) return null;
+  if (input.stepId && input.stepId !== row.stepRun.stepId) return null;
+  if (input.requestId && row.stepRun.lastDispatchRequestId && input.requestId !== row.stepRun.lastDispatchRequestId) {
+    return null;
   }
+
+  if (WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status)) {
+    return getWorkflowExecutionResultSnapshot(db, row.run.id);
+  }
+
+  const now = new Date();
+  const existingMetadata = row.stepRun.metadata && typeof row.stepRun.metadata === "object" && !Array.isArray(row.stepRun.metadata)
+    ? row.stepRun.metadata
+    : {};
+  const resultMetadata = {
+    ...existingMetadata,
+    toolResult: {
+      requestId: input.requestId ?? row.stepRun.lastDispatchRequestId ?? null,
+      toolName: input.toolName ?? null,
+      success: input.success,
+      stdout: input.stdout ?? null,
+      stderr: input.stderr ?? null,
+      exitCode: input.exitCode ?? null,
+      error: input.error ?? null,
+      completedAt: now.toISOString(),
+    },
+  };
+  await db
+    .update(workflowStepRuns)
+    .set({
+      status: input.success ? "completed" : "failed",
+      startedAt: row.stepRun.startedAt ?? now,
+      completedAt: now,
+      lastDispatchErrorAt: input.success ? row.stepRun.lastDispatchErrorAt : now,
+      lastDispatchErrorSummary: input.success ? row.stepRun.lastDispatchErrorSummary : input.error ?? input.stderr ?? null,
+      metadata: resultMetadata,
+    })
+    .where(eq(workflowStepRuns.id, row.stepRun.id));
 
   return syncWorkflowRunState(db, row.run.id);
 }
@@ -990,14 +1088,18 @@ async function syncCancelledWorkflowRunState(
 export async function cancelWorkflowRunWithCleanup(
   db: Db,
   runId: string,
+  companyId?: string,
 ): Promise<boolean> {
+  const whereClause = companyId
+    ? and(eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId))
+    : eq(workflowRuns.id, runId);
   const updatedRows = await db
     .update(workflowRuns)
     .set({
       status: "cancelled",
       completedAt: new Date(),
     })
-    .where(eq(workflowRuns.id, runId))
+    .where(whereClause)
     .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
 
   const updatedRun = updatedRows[0];

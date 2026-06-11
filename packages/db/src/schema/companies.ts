@@ -16,6 +16,7 @@ export const companies = pgTable(
     requireBoardApprovalForNewAgents: boolean("require_board_approval_for_new_agents")
       .notNull()
       .default(true),
+    timezone: text("timezone"),
     brandColor: text("brand_color"),
     companyKind: text("company_kind").notNull().default("business"),
     allowsCodeModify: boolean("allows_code_modify").notNull().default(false),

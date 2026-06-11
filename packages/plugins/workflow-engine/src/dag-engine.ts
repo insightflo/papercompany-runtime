@@ -1,7 +1,9 @@
 export interface WorkflowStep {
   id: string;
   title: string;
-  dependsOn: string[];
+  dependsOn: unknown;
+  /** Alternative field name used by some editors and the server-side normalizer. */
+  dependencies?: unknown;
   type?: "agent" | "tool";
   toolName?: string;
   toolArgs?: Record<string, unknown>;
@@ -53,6 +55,31 @@ export interface WorkflowLaunchabilityResult {
   errors: string[];
 }
 
+/**
+ * Normalise a step's dependency list from either `dependsOn` or `dependencies`.
+ * Both fields may be a string[], a comma-separated string, or undefined/null.
+ * Always returns a string[] (never undefined).
+ */
+export function normalizeStepDeps(step: WorkflowStep): string[] {
+  return normalizeStringArray(step.dependsOn)
+    ?? normalizeStringArray(step.dependencies)
+    ?? [];
+}
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const strings = value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+    return strings.length > 0 ? strings : undefined;
+  }
+  if (typeof value === "string") {
+    const strings = value.split(",").map((item) => item.trim()).filter(Boolean);
+    return strings.length > 0 ? strings : undefined;
+  }
+  return undefined;
+}
+
 function getNormalTriggerSteps(steps: WorkflowStep[]): WorkflowStep[] {
   return steps.filter((step) => step.triggerOn !== "escalation");
 }
@@ -72,7 +99,7 @@ function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
 
 function hasRootPlanningStep(steps: WorkflowStep[]): boolean {
   return steps.some((step) => {
-    if (step.triggerOn === "escalation" || step.dependsOn.length > 0) {
+    if (step.triggerOn === "escalation" || normalizeStepDeps(step).length > 0) {
       return false;
     }
 
@@ -125,7 +152,7 @@ export function getWorkflowLaunchSteps(
     return steps;
   }
 
-  return steps.filter((step) => step.triggerOn !== "escalation" && step.dependsOn.length === 0);
+  return steps.filter((step) => step.triggerOn !== "escalation" && normalizeStepDeps(step).length === 0);
 }
 
 export function validateWorkflowLaunchability(
@@ -142,7 +169,7 @@ export function validateWorkflowLaunchability(
 
   const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(definition);
   const launchSteps = getWorkflowLaunchSteps(steps, { dynamicOwnerPlan })
-    .filter((step) => step.triggerOn !== "escalation" && step.dependsOn.length === 0);
+    .filter((step) => step.triggerOn !== "escalation" && normalizeStepDeps(step).length === 0);
 
   if (normalSteps.length > 0 && launchSteps.length === 0) {
     errors.push("Workflow has no activatable root step. At least one normal step must have no dependencies.");
@@ -177,7 +204,7 @@ export function validateDag(steps: WorkflowStep[]): DagValidationResult {
       continue;
     }
 
-    for (const dependencyId of step.dependsOn) {
+    for (const dependencyId of normalizeStepDeps(step)) {
       if (!stepById.has(dependencyId)) {
         errors.push(
           `Step "${step.id}" depends on missing step "${dependencyId}".`,
@@ -202,7 +229,7 @@ export function validateDag(steps: WorkflowStep[]): DagValidationResult {
   }
 
   for (const step of uniqueSteps) {
-    for (const dependencyId of step.dependsOn) {
+    for (const dependencyId of normalizeStepDeps(step)) {
       if (!stepById.has(dependencyId) || duplicateIds.has(dependencyId)) {
         continue;
       }
@@ -275,7 +302,7 @@ export function getNextSteps(
     .filter((step) => !failedStepIds.has(step.id))
     .filter((step) => !skippedStepIds.has(step.id))
     .filter((step) =>
-      step.dependsOn.every(
+      normalizeStepDeps(step).every(
         (dependencyId) =>
           completedStepIds.has(dependencyId) || skippedStepIds.has(dependencyId),
       ),

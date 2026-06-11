@@ -440,6 +440,19 @@ if (_logFlushInterval.unref) _logFlushInterval.unref();
 /** Maximum time (ms) to keep a session event subscription alive before forcing cleanup. */
 const SESSION_EVENT_SUBSCRIPTION_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes
 
+function summarizePluginEventDeliveryErrors(errors: Array<{ pluginId: string; error: unknown }>): string {
+  return errors
+    .map(({ pluginId, error }) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return `${pluginId}: ${message}`;
+    })
+    .join("; ");
+}
+
+function shouldPropagatePluginEventDeliveryFailure(eventName: string): boolean {
+  return eventName === "tool-execution-result";
+}
+
 export function buildHostServices(
   db: Db,
   pluginId: string,
@@ -631,7 +644,10 @@ export function buildHostServices(
         if (params.companyId) {
           await ensurePluginAvailableForCompany(params.companyId);
         }
-        await scopedBus.emit(params.name, params.companyId, params.payload);
+        const result = await scopedBus.emit(params.name, params.companyId, params.payload);
+        if (shouldPropagatePluginEventDeliveryFailure(params.name) && result.errors.length > 0) {
+          throw new Error(`Workflow tool-result event delivery failed: ${summarizePluginEventDeliveryErrors(result.errors)}`);
+        }
       },
       async subscribe(params: { eventPattern: string; filter?: Record<string, unknown> | null }) {
         const handler = async (event: import("@paperclipai/plugin-sdk").PluginEvent) => {

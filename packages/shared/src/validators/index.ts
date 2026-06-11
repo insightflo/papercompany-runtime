@@ -276,6 +276,32 @@ export {
 } from "./routine.js";
 
 export {
+  workflowDefinitionStatusSchema,
+  workflowExecutionModeSchema,
+  workflowStepDefinitionSchema,
+  workflowDefinitionSchema,
+  workflowRunSchema,
+  workflowStepRunSchema,
+  workflowRunSlotSchema,
+  createWorkflowDefinitionSchema,
+  updateWorkflowDefinitionSchema,
+  triggerWorkflowRunSchema,
+  resumeWorkflowRunSchema,
+  cancelWorkflowRunSchema,
+  manualCompleteWorkflowIssueSchema,
+  type WorkflowDefinition,
+  type WorkflowRun,
+  type WorkflowStepRun,
+  type WorkflowRunSlot,
+  type CreateWorkflowDefinition,
+  type UpdateWorkflowDefinition,
+  type TriggerWorkflowRun,
+  type ResumeWorkflowRun,
+  type CancelWorkflowRun,
+  type ManualCompleteWorkflowIssue,
+} from "./workflow.js";
+
+export {
   createCostEventSchema,
   updateBudgetSchema,
   type CreateCostEvent,

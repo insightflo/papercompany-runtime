@@ -25,6 +25,8 @@ const mockWorkflowService = vi.hoisted(() => ({
   updateDefinition: vi.fn(),
 }));
 
+const mockCompleteWorkflowToolStepFromResult = vi.hoisted(() => vi.fn());
+
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
 }));
@@ -43,6 +45,10 @@ vi.mock("../services/live-events.js", () => ({
 
 vi.mock("../services/workflow/engine.js", () => ({
   workflowService: mockWorkflowService,
+}));
+
+vi.mock("../services/workflow/dag-engine.js", () => ({
+  completeWorkflowToolStepFromResult: mockCompleteWorkflowToolStepFromResult,
 }));
 
 const workflowPlugin = {
@@ -307,6 +313,60 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
         stepRuns: [],
       },
     });
+  });
+
+  it("routes tool execution results to native workflow state without calling the workflow-engine plugin worker", async () => {
+    const workerManager = {
+      call: vi.fn(),
+    };
+    mockCompleteWorkflowToolStepFromResult.mockResolvedValue({
+      runId: "run-1",
+      workflowId: "workflow-1",
+      missionId: null,
+      status: "completed",
+      completedAt: new Date("2026-04-26T03:00:00.000Z"),
+      stepRuns: [
+        { id: "step-run-1", workflowRunId: "run-1", stepId: "fetch", issueId: null, status: "completed" },
+      ],
+    });
+
+    const res = await request(createApp(workerManager))
+      .post("/api/plugins/plugin-1/actions/handle-tool-execution-result")
+      .send({
+        companyId: "company-1",
+        params: {
+          companyId: "company-1",
+          requestId: "run-1:fetch:1",
+          workflowRunId: "run-1",
+          stepRunId: "step-run-1",
+          stepId: "fetch",
+          toolName: "paperclip.echo",
+          success: true,
+          stdout: "ok",
+          stderr: "",
+          exitCode: 0,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockCompleteWorkflowToolStepFromResult).toHaveBeenCalledWith(expect.anything(), {
+      companyId: "company-1",
+      requestId: "run-1:fetch:1",
+      workflowRunId: "run-1",
+      stepRunId: "step-run-1",
+      stepId: "fetch",
+      toolName: "paperclip.echo",
+      success: true,
+      stdout: "ok",
+      stderr: "",
+      exitCode: 0,
+      error: undefined,
+    });
+    expect(workerManager.call).not.toHaveBeenCalled();
+    expect(res.body.data).toEqual(expect.objectContaining({
+      ok: true,
+      run: expect.objectContaining({ runId: "run-1", status: "completed" }),
+    }));
   });
 
   it("clears stale plugin schedule errors after native start-workflow succeeds", async () => {
@@ -606,7 +666,7 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
 
     expect(res.status).toBe(200);
     expect(mockWorkflowService.getRun).toHaveBeenCalledWith(expect.anything(), "run-1");
-    expect(mockWorkflowService.cancelRun).toHaveBeenCalledWith(expect.anything(), "run-1");
+    expect(mockWorkflowService.cancelRun).toHaveBeenCalledWith(expect.anything(), { runId: "run-1", companyId: "company-1" });
     expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body.data).toEqual({
       id: "run-1",

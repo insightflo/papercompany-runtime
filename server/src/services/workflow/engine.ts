@@ -12,6 +12,7 @@ import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRun
 import { missionService } from "../missions.js";
 import {
   createWorkflowDefinition,
+  claimWorkflowRunSlot,
   getWorkflowDefinitionById,
   listWorkflowDefinitions,
   updateWorkflowDefinition,
@@ -30,6 +31,8 @@ import type {
   WorkflowStepRun,
   CreateWorkflowDefinitionInput,
   CreateWorkflowRunInput,
+  ClaimScheduledWorkflowRunInput,
+  ClaimScheduledWorkflowRunResult,
   DagValidationResult,
   WorkflowExecutionResult,
   WorkflowStepExecutionContract,
@@ -231,6 +234,64 @@ export const workflowService = {
   },
 
   /**
+   * Internal scheduler-only entrypoint. Claims a scheduled slot before creating
+   * the run so concurrent scheduler ticks cannot create duplicate scheduled runs.
+   */
+  async claimScheduledRun(
+    db: Db,
+    input: ClaimScheduledWorkflowRunInput,
+  ): Promise<ClaimScheduledWorkflowRunResult> {
+    const workflow = await getWorkflowDefinitionById(db, input.workflowId);
+    if (!workflow) {
+      throw new Error(`Workflow definition not found: ${input.workflowId}`);
+    }
+    if (workflow.companyId !== input.companyId) {
+      throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
+    }
+
+    const triggerSource = input.triggerSource ?? "schedule";
+    const runDate = input.runDate ?? input.scheduledAt.toISOString().slice(0, 10);
+    const slot = await claimWorkflowRunSlot(db, {
+      workflowDefinitionId: input.workflowId,
+      companyId: input.companyId,
+      triggerSource,
+      scheduledAt: input.scheduledAt,
+      runDate,
+      timezone: input.timezone ?? workflow.timezone ?? null,
+      metadata: {
+        ...(input.metadata ?? {}),
+        scheduledAt: input.scheduledAt.toISOString(),
+      },
+    });
+
+    if (!slot) {
+      return {
+        claimed: false,
+        scheduledSlotId: null,
+        run: null,
+      };
+    }
+
+    const run = await workflowService.trigger(db, {
+      workflowId: input.workflowId,
+      companyId: input.companyId,
+      triggeredBy: input.triggeredBy ?? "scheduler",
+      triggerSource,
+      runDate,
+      runNumber: input.runNumber ?? null,
+      runLabel: input.runLabel ?? null,
+      scheduledSlotId: slot.id,
+      metadata: input.metadata ?? {},
+    });
+
+    return {
+      claimed: true,
+      scheduledSlotId: slot.id,
+      run,
+    };
+  },
+
+  /**
    * Resume a workflow run through the native server DAG execution path.
    */
   async resumeRun(
@@ -247,8 +308,8 @@ export const workflowService = {
   /**
    * Cancel a workflow run.
    */
-  async cancelRun(db: Db, id: string): Promise<boolean> {
-    return cancelWorkflowRunWithCleanup(db, id);
+  async cancelRun(db: Db, input: { runId: string; companyId: string }): Promise<boolean> {
+    return cancelWorkflowRunWithCleanup(db, input.runId, input.companyId);
   },
 
   /**
@@ -317,6 +378,8 @@ export type {
   WorkflowStepRun,
   CreateWorkflowDefinitionInput,
   CreateWorkflowRunInput,
+  ClaimScheduledWorkflowRunInput,
+  ClaimScheduledWorkflowRunResult,
   DagValidationResult,
   WorkflowExecutionResult,
   WorkflowStepExecutionContract,

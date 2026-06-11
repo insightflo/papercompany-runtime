@@ -18,6 +18,7 @@ export const updateCompanySchema = createCompanySchema
     status: z.enum(COMPANY_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
     requireBoardApprovalForNewAgents: z.boolean().optional(),
+    timezone: z.string().nullable().optional(),
     brandColor: brandColorSchema,
     logoAssetId: logoAssetIdSchema,
   });
@@ -28,6 +29,7 @@ export const updateCompanyBrandingSchema = z
   .object({
     name: z.string().min(1).optional(),
     description: z.string().nullable().optional(),
+    timezone: z.string().nullable().optional(),
     brandColor: brandColorSchema,
     logoAssetId: logoAssetIdSchema,
   })
@@ -36,6 +38,7 @@ export const updateCompanyBrandingSchema = z
     (value) =>
       value.name !== undefined
       || value.description !== undefined
+      || value.timezone !== undefined
       || value.brandColor !== undefined
       || value.logoAssetId !== undefined,
     "At least one branding field must be provided",

@@ -15,6 +15,7 @@ export interface Company {
   brandColor: string | null;
   logoAssetId: string | null;
   logoUrl: string | null;
+  timezone: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

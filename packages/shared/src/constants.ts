@@ -642,6 +642,8 @@ export const PLUGIN_WEBHOOK_DELIVERY_STATUSES = [
 ] as const;
 export type PluginWebhookDeliveryStatus = (typeof PLUGIN_WEBHOOK_DELIVERY_STATUSES)[number];
 
+export const WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT = "workflow-tool-execution-request" as const;
+
 /**
  * Core domain event types that plugins can subscribe to via the
  * `events.subscribe` capability.
@@ -672,6 +674,7 @@ export const PLUGIN_EVENT_TYPES = [
   "approval.decided",
   "cost_event.created",
   "activity.logged",
+  WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT,
 ] as const;
 export type PluginEventType = (typeof PLUGIN_EVENT_TYPES)[number];
 

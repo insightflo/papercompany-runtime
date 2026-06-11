@@ -101,6 +101,69 @@ describe("buildHostServices issues", () => {
     };
   }
 
+  it("propagates workflow tool-result subscriber failures so plugins can use fallback delivery", async () => {
+    const scopedEmit = vi.fn().mockResolvedValue({
+      errors: [{ pluginId: "paperclip.native-workflow-engine", error: new Error("db unavailable") }],
+    });
+    const eventBus: PluginEventBus = {
+      emit: vi.fn().mockResolvedValue({ errors: [] }),
+      forPlugin: vi.fn(() => ({
+        emit: scopedEmit,
+        subscribe: vi.fn(),
+        clear: vi.fn(),
+      })),
+      clearPlugin: vi.fn(),
+      subscriptionCount: vi.fn().mockReturnValue(0),
+    };
+
+    const services = buildHostServices(
+      {} as never,
+      "tool-registry-install-1",
+      "insightflo.tool-registry",
+      eventBus,
+    );
+
+    await expect(services.events.emit({
+      name: "tool-execution-result",
+      companyId: "company-1",
+      payload: { stepRunId: "step-run-1" },
+    })).rejects.toThrow("Workflow tool-result event delivery failed");
+    expect(scopedEmit).toHaveBeenCalledWith("tool-execution-result", "company-1", { stepRunId: "step-run-1" });
+
+    services.dispose();
+  });
+
+  it("keeps generic plugin event subscriber failures isolated", async () => {
+    const scopedEmit = vi.fn().mockResolvedValue({
+      errors: [{ pluginId: "subscriber-plugin", error: new Error("subscriber failed") }],
+    });
+    const eventBus: PluginEventBus = {
+      emit: vi.fn().mockResolvedValue({ errors: [] }),
+      forPlugin: vi.fn(() => ({
+        emit: scopedEmit,
+        subscribe: vi.fn(),
+        clear: vi.fn(),
+      })),
+      clearPlugin: vi.fn(),
+      subscriptionCount: vi.fn().mockReturnValue(0),
+    };
+
+    const services = buildHostServices(
+      {} as never,
+      "tool-registry-install-1",
+      "insightflo.tool-registry",
+      eventBus,
+    );
+
+    await expect(services.events.emit({
+      name: "tool-graph-updated",
+      companyId: "company-1",
+      payload: { ok: true },
+    })).resolves.toBeUndefined();
+
+    services.dispose();
+  });
+
   it("logs issue.created and queues assignment wake for plugin-created issues", async () => {
     mocks.issueCreate.mockResolvedValue({
       id: "issue-1",

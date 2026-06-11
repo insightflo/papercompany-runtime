@@ -19,8 +19,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@paperclipai/plugin-sdk": "2026.325.0",
-    "@paperclipai/shared": "2026.325.0"
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "@paperclipai/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

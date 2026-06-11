@@ -78,6 +78,7 @@ export {
   type MissionAgentRuntimeStateJson,
 } from "./mission_agent_runtimes.js";
 export { workflowDefinitions } from "./workflow_definitions.js";
+export { workflowRunSlots } from "./workflow_run_slots.js";
 export { workflowRuns } from "./workflow_runs.js";
 export { workflowStepRuns } from "./workflow_step_runs.js";
 export { workflowDelegations } from "./workflow_delegations.js";

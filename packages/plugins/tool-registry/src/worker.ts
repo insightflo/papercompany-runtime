@@ -1,6 +1,7 @@
 import { exec, execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
+import * as sharedConstants from "@paperclipai/shared/constants";
 import {
   definePlugin,
   runWorker,
@@ -64,6 +65,8 @@ const TOOL_FORCE_KILL_GRACE_MS = 5_000;
 const WORKFLOW_ENGINE_ACTION_MAX_ATTEMPTS = 3;
 const WORKFLOW_ENGINE_ACTION_RETRY_DELAYS_MS = [1000, 3000];
 const RETRIABLE_BRIDGE_ACTION_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT = sharedConstants.WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT;
+const LEGACY_WORKFLOW_ENGINE_TOOL_EXECUTION_REQUEST_EVENT = "plugin.insightflo.workflow-engine.execute-tool-request";
 const inflightWorkflowToolExecutionKeys = new Set<string>();
 
 function asRecord(value: unknown): JsonRecord {
@@ -1076,20 +1079,6 @@ async function runWorkflowToolExecution(
     error: result.error,
   };
 
-  let workflowEngineDelivered = false;
-  try {
-    await notifyWorkflowEngineOfToolResult(ctx, companyId, workflowResultPayload);
-    workflowEngineDelivered = true;
-  } catch (error) {
-    ctx.logger.warn("Failed to deliver workflow tool result via Workflow Engine action", {
-      requestId,
-      toolName,
-      companyId,
-      stepId,
-      error: summarizeError(error),
-    });
-  }
-
   let eventEmitted = false;
   try {
     await ctx.events.emit("tool-execution-result", companyId, workflowResultPayload);
@@ -1104,15 +1093,75 @@ async function runWorkflowToolExecution(
     });
   }
 
+  let legacyWorkflowEngineDelivered = false;
+  if (!eventEmitted) {
+    try {
+      await notifyWorkflowEngineOfToolResult(ctx, companyId, workflowResultPayload);
+      legacyWorkflowEngineDelivered = true;
+    } catch (error) {
+      ctx.logger.warn("Failed to deliver workflow tool result via Workflow Engine action", {
+        requestId,
+        toolName,
+        companyId,
+        stepId,
+        error: summarizeError(error),
+      });
+    }
+  }
+
   ctx.logger.info("Workflow tool execution completed, result emitted", {
     requestId,
     toolName,
     success: result.success,
-    workflowEngineDelivered,
     eventEmitted,
+    legacyWorkflowEngineDelivered,
   });
 
   return result;
+}
+
+function dispatchWorkflowToolExecution(ctx: PluginContext, params: Record<string, unknown>, companyId: string): { accepted: true; duplicate: boolean } {
+  const executionKey = buildWorkflowToolExecutionKey(params, companyId);
+
+  if (executionKey && inflightWorkflowToolExecutionKeys.has(executionKey)) {
+    ctx.logger.warn("Ignored duplicate workflow tool execution request", {
+      companyId,
+      executionKey,
+      requestId: asString(params.requestId),
+      stepId: asString(params.stepId),
+      stepRunId: asString(params.stepRunId),
+      toolName: asString(params.toolName),
+      workflowRunId: asString(params.workflowRunId),
+    });
+    return { accepted: true, duplicate: true };
+  }
+
+  if (executionKey) {
+    inflightWorkflowToolExecutionKeys.add(executionKey);
+  }
+
+  void (async () => {
+    try {
+      await runWorkflowToolExecution(ctx, params, companyId);
+    } catch (error) {
+      ctx.logger.error("Workflow tool execution crashed after dispatch acknowledgement", {
+        companyId,
+        error: summarizeError(error),
+        executionKey: executionKey || undefined,
+        requestId: asString(params.requestId),
+        stepId: asString(params.stepId),
+        stepRunId: asString(params.stepRunId),
+        toolName: asString(params.toolName),
+        workflowRunId: asString(params.workflowRunId),
+      });
+    } finally {
+      if (executionKey) {
+        inflightWorkflowToolExecutionKeys.delete(executionKey);
+      }
+    }
+  })();
+
+  return { accepted: true, duplicate: false };
 }
 
 async function buildPageData(
@@ -1324,47 +1373,7 @@ async function registerActionHandlers(ctx: PluginContext): Promise<void> {
   ctx.actions.register(ACTION_KEYS.executeWorkflowTool, async (rawParams) => {
     const params = asRecord(rawParams);
     const companyId = asString(params.companyId);
-    const executionKey = buildWorkflowToolExecutionKey(params, companyId);
-
-    if (executionKey && inflightWorkflowToolExecutionKeys.has(executionKey)) {
-      ctx.logger.warn("Ignored duplicate workflow tool execution request", {
-        companyId,
-        executionKey,
-        requestId: asString(params.requestId),
-        stepId: asString(params.stepId),
-        stepRunId: asString(params.stepRunId),
-        toolName: asString(params.toolName),
-        workflowRunId: asString(params.workflowRunId),
-      });
-      return { accepted: true, duplicate: true };
-    }
-
-    if (executionKey) {
-      inflightWorkflowToolExecutionKeys.add(executionKey);
-    }
-
-    void (async () => {
-      try {
-        await runWorkflowToolExecution(ctx, params, companyId);
-      } catch (error) {
-        ctx.logger.error("Workflow tool execution crashed after dispatch acknowledgement", {
-          companyId,
-          error: summarizeError(error),
-          executionKey: executionKey || undefined,
-          requestId: asString(params.requestId),
-          stepId: asString(params.stepId),
-          stepRunId: asString(params.stepRunId),
-          toolName: asString(params.toolName),
-          workflowRunId: asString(params.workflowRunId),
-        });
-      } finally {
-        if (executionKey) {
-          inflightWorkflowToolExecutionKeys.delete(executionKey);
-        }
-      }
-    })();
-
-    return { accepted: true, duplicate: false };
+    return dispatchWorkflowToolExecution(ctx, params, companyId);
   });
 }
 
@@ -1478,11 +1487,16 @@ const plugin = definePlugin({
       await handleRunFinished(ctx, event);
     });
 
+    const handleWorkflowToolExecutionRequest = async (event: PluginEvent) => {
+      dispatchWorkflowToolExecution(ctx, asRecord(event.payload), event.companyId);
+    };
     ctx.events.on(
-      "plugin.insightflo.workflow-engine.execute-tool-request" as Parameters<typeof ctx.events.on>[0],
-      async (event: PluginEvent) => {
-        await runWorkflowToolExecution(ctx, asRecord(event.payload), event.companyId);
-      },
+      WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT,
+      handleWorkflowToolExecutionRequest,
+    );
+    ctx.events.on(
+      LEGACY_WORKFLOW_ENGINE_TOOL_EXECUTION_REQUEST_EVENT as Parameters<typeof ctx.events.on>[0],
+      handleWorkflowToolExecutionRequest,
     );
 
     ctx.logger.info("Tool Registry plugin worker initialized");

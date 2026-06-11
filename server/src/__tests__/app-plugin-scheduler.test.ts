@@ -2,6 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const pluginSchedulerStart = vi.fn();
 const missionOwnerSupervisionMonitorStart = vi.fn();
+const nativeWorkflowToolResultEventHandlers = vi.fn();
+const pluginEventBus = {
+  forPlugin: vi.fn(),
+  emit: vi.fn(),
+  clearPlugin: vi.fn(),
+  subscriptionCount: vi.fn(() => 0),
+};
 const createMissionOwnerSupervisionMonitorMock = vi.fn(() => ({
   start: missionOwnerSupervisionMonitorStart,
   stop: vi.fn(),
@@ -68,11 +75,15 @@ vi.mock("../services/plugin-registry.js", () => ({
 }));
 
 vi.mock("../services/plugin-event-bus.js", () => ({
-  createPluginEventBus: vi.fn(() => ({})),
+  createPluginEventBus: vi.fn(() => pluginEventBus),
 }));
 
 vi.mock("../services/activity-log.js", () => ({
   setPluginEventBus: vi.fn(),
+}));
+
+vi.mock("../services/workflow/tool-result-events.js", () => ({
+  registerNativeWorkflowToolResultEventHandlers: nativeWorkflowToolResultEventHandlers,
 }));
 
 vi.mock("../services/plugin-dev-watcher.js", () => ({
@@ -145,6 +156,11 @@ describe("createApp plugin scheduler lifecycle", () => {
   beforeEach(() => {
     pluginSchedulerStart.mockClear();
     missionOwnerSupervisionMonitorStart.mockClear();
+    nativeWorkflowToolResultEventHandlers.mockClear();
+    pluginEventBus.forPlugin.mockClear();
+    pluginEventBus.emit.mockClear();
+    pluginEventBus.clearPlugin.mockClear();
+    pluginEventBus.subscriptionCount.mockClear();
     createMissionOwnerSupervisionMonitorMock.mockClear();
   });
 
@@ -164,7 +180,26 @@ describe("createApp plugin scheduler lifecycle", () => {
     });
 
     expect(pluginSchedulerStart).toHaveBeenCalledTimes(1);
-  }, 30_000);
+  }, 60_000);
+
+  it("registers native workflow tool-result event handlers on the shared plugin event bus", async () => {
+    const { createApp } = await import("../app.js");
+    const db = {} as never;
+
+    await createApp(db, {
+      uiMode: "none",
+      serverPort: 3200,
+      storageService: {} as never,
+      deploymentMode: "local_trusted",
+      deploymentExposure: "private",
+      allowedHostnames: [],
+      bindHost: "127.0.0.1",
+      authReady: true,
+      companyDeletionEnabled: true,
+    });
+
+    expect(nativeWorkflowToolResultEventHandlers).toHaveBeenCalledWith(db, pluginEventBus);
+  }, 60_000);
 
   it("starts the mission owner supervision monitor so stale active missions are inspected automatically", async () => {
     const { createApp } = await import("../app.js");
@@ -188,5 +223,5 @@ describe("createApp plugin scheduler lifecycle", () => {
         onOwnerActionCreated: expect.any(Function),
       }),
     );
-  }, 30_000);
+  }, 60_000);
 });

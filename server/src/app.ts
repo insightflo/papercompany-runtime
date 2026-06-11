@@ -21,6 +21,7 @@ import { routineRoutes } from "./routes/routines.js";
 import { schedulerRoutes } from "./routes/scheduler.js";
 import { worktreeRoutes } from "./routes/worktree.js";
 import { missionRoutes } from "./routes/missions.js";
+import { workflowRoutes } from "./routes/workflows.js";
 import { srbWebhookRoutes } from "./routes/srb-webhook.js";
 import { requireMaintenanceCompany } from "./middleware/company-kind-gate.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
@@ -69,6 +70,8 @@ import { registerTelegramCommands } from "./channel/telegram/commands.js";
 import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
 import { setWorkflowToolStepExecutor } from "./services/workflow/dag-engine.js";
+import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
+import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -322,6 +325,7 @@ export async function createApp(
   api.use(routineRoutes(db));
   api.use(schedulerRoutes(db));
   api.use(missionRoutes(db));
+  api.use(workflowRoutes(db));
   api.use(srbWebhookRoutes(db));
   api.use(executionWorkspaceRoutes(db));
   api.use(worktreeRoutes(db));
@@ -341,6 +345,14 @@ export async function createApp(
   const pluginRegistry = pluginRegistryService(db);
   const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);
+  registerNativeWorkflowToolResultEventHandlers(db, eventBus);
+  const workflowSchedulerOwnership = resolveWorkflowSchedulerOwnership();
+  logger.info({
+    mode: workflowSchedulerOwnership.mode,
+    nativeSchedulerEnabled: workflowSchedulerOwnership.nativeSchedulerEnabled,
+    pluginReconcilerDisableRequested: workflowSchedulerOwnership.pluginReconcilerDisableRequested,
+    pluginReconcilerEffectiveDisabled: workflowSchedulerOwnership.pluginReconcilerEffectiveDisabled,
+  }, "Workflow scheduler ownership mode");
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, { workerManager });
   const pluginScheduler = createPluginJobScheduler({

@@ -6,10 +6,13 @@ const workerSource = await readFile(new URL("../src/worker.ts", import.meta.url)
 const reconcilerSource = await readFile(new URL("../src/reconciler.ts", import.meta.url), "utf8");
 const artifactGuardSource = await readFile(new URL("../src/artifact-guards.ts", import.meta.url), "utf8").catch(() => "");
 
-test("gazua-morning blog completion is guarded by canonical markdown existence", () => {
-  assert.match(artifactGuardSource, /Public_Market_Report_\$\{runDate\}\.md/);
-  assert.match(artifactGuardSource, /reports["']?,\s*["']blog["']?/);
-  assert.match(artifactGuardSource, /workflowRun\.data\.workflowName !== "gazua-morning"/);
+test("gazua daily dashboard HTML completion is guarded by canonical dashboard artifact existence", () => {
+  assert.match(artifactGuardSource, /KR_Market_Report/);
+  assert.match(artifactGuardSource, /US_Market_Report/);
+  assert.match(artifactGuardSource, /beginner_html/);
+  assert.match(artifactGuardSource, /dashboard/);
+  assert.match(artifactGuardSource, /workflowName !== "gazua-morning"/);
+  assert.match(artifactGuardSource, /workflowName !== "gazua-evening"/);
   assert.match(artifactGuardSource, /stepDef\.id !== "blog"/);
 });
 
