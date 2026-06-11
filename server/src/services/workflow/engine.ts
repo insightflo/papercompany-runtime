@@ -6,7 +6,7 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { agents } from "@paperclipai/db";
+import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { missionService } from "../missions.js";
@@ -83,8 +83,32 @@ function normalizeWorkflowSteps(
   });
 }
 
-function formatWorkflowMissionTitle(workflowName: string, now = new Date()): string {
-  const yyyyMmDd = now.toISOString().slice(0, 10);
+function formatDateKeyInTimezone(date: Date, timezone: string): string | null {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const year = parts.find((part) => part.type === "year")?.value;
+    const month = parts.find((part) => part.type === "month")?.value;
+    const day = parts.find((part) => part.type === "day")?.value;
+    if (!year || !month || !day) return null;
+    return `${year}-${month}-${day}`;
+  } catch {
+    return null;
+  }
+}
+
+function formatWorkflowMissionTitle(
+  workflowName: string,
+  input: { runDate?: string | null; timezone?: string | null },
+  now = new Date(),
+): string {
+  const yyyyMmDd = typeof input.runDate === "string" && input.runDate.trim().length > 0
+    ? input.runDate.trim()
+    : (input.timezone ? formatDateKeyInTimezone(now, input.timezone) : null) ?? now.toISOString().slice(0, 10);
   return `${yyyyMmDd} ${workflowName}`;
 }
 
@@ -125,10 +149,16 @@ async function ensureMissionForWorkflowRun(
   }
 
   const ownerAgentId = await resolveWorkflowMissionOwnerAgentId(db, input.companyId, workflow);
+  const [company] = await db
+    .select({ timezone: companies.timezone })
+    .from(companies)
+    .where(eq(companies.id, input.companyId))
+    .limit(1);
+  const timezone = workflow.timezone ?? company?.timezone ?? null;
   const mission = await missionService(db).create({
     companyId: input.companyId,
     ownerAgentId,
-    title: formatWorkflowMissionTitle(workflow.name),
+    title: formatWorkflowMissionTitle(workflow.name, { runDate: input.runDate, timezone }),
     description: `Created automatically for workflow run: ${workflow.name}`,
     status: "active",
     source: "workflow",
@@ -220,7 +250,16 @@ export const workflowService = {
     if (workflow.companyId !== input.companyId) {
       throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
     }
-    const runInput = await ensureMissionForWorkflowRun(db, input);
+    const [company] = await db
+      .select({ timezone: companies.timezone })
+      .from(companies)
+      .where(eq(companies.id, input.companyId))
+      .limit(1);
+    const timezone = workflow.timezone ?? company?.timezone ?? null;
+    const runDate = input.runDate
+      ?? (timezone ? formatDateKeyInTimezone(new Date(), timezone) : null)
+      ?? new Date().toISOString().slice(0, 10);
+    const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate });
     const run = await createWorkflowRun(db, runInput);
     if (run.missionId) {
       const mission = await missionService(db).getById(run.missionId);
@@ -250,15 +289,23 @@ export const workflowService = {
       throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
     }
 
+    const [company] = await db
+      .select({ timezone: companies.timezone })
+      .from(companies)
+      .where(eq(companies.id, input.companyId))
+      .limit(1);
+    const timezone = input.timezone ?? workflow.timezone ?? company?.timezone ?? null;
     const triggerSource = input.triggerSource ?? "schedule";
-    const runDate = input.runDate ?? input.scheduledAt.toISOString().slice(0, 10);
+    const runDate = input.runDate
+      ?? (timezone ? formatDateKeyInTimezone(input.scheduledAt, timezone) : null)
+      ?? input.scheduledAt.toISOString().slice(0, 10);
     const slot = await claimWorkflowRunSlot(db, {
       workflowDefinitionId: input.workflowId,
       companyId: input.companyId,
       triggerSource,
       scheduledAt: input.scheduledAt,
       runDate,
-      timezone: input.timezone ?? workflow.timezone ?? null,
+      timezone,
       metadata: {
         ...(input.metadata ?? {}),
         scheduledAt: input.scheduledAt.toISOString(),

@@ -468,6 +468,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       companyId,
       workflowId: definition.id,
       triggeredBy: "manual",
+      runDate: "2026-06-12",
     });
 
     expect(result.status).toBe("running");
@@ -487,7 +488,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(mission).toMatchObject({
       companyId,
       ownerAgentId: agentId,
-      title: expect.stringContaining("tech-scout report 생성"),
+      title: "2026-06-12 tech-scout report 생성",
       status: "active",
     });
 
@@ -538,6 +539,71 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         }),
       }),
     ]);
+  });
+
+  it("uses workflow/company timezone, not UTC, for scheduled runDate and mission titles", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-timezone-mission" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "KST Workflow Company",
+      issuePrefix: `KST${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      timezone: "Asia/Seoul",
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "KST Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const definition = await workflowService.createDefinition(db, {
+      companyId,
+      name: "gazua-morning",
+      timezone: null,
+      steps: [
+        {
+          id: "collect-market",
+          name: "Collect market",
+          agentId,
+          dependencies: [],
+        },
+      ],
+    });
+
+    const result = await workflowService.claimScheduledRun(db, {
+      companyId,
+      workflowId: definition.id,
+      scheduledAt: new Date("2026-06-11T22:30:00.000Z"),
+      timezone: "Asia/Seoul",
+    });
+
+    expect(result.claimed).toBe(true);
+
+    const [run] = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, result.run!.runId))
+      .limit(1);
+    expect(run?.runDate).toBe("2026-06-12");
+
+    const [mission] = await db
+      .select()
+      .from(missions)
+      .where(eq(missions.id, run!.missionId!))
+      .limit(1);
+
+    expect(mission?.title).toBe("2026-06-12 gazua-morning");
   });
 
   it("progresses dependent steps and completes the workflow as execution issues complete", async () => {
