@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { companies, createDb, workflowDefinitions } from "@paperclipai/db";
+import { companies, createDb, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import {
   computeDueScheduledWorkflowCandidates,
   findRecentScheduledSlot,
@@ -124,6 +124,7 @@ describeEmbeddedPostgres("workflow native scheduler candidate readback", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(companies);
   });
@@ -178,5 +179,87 @@ describeEmbeddedPostgres("workflow native scheduler candidate readback", () => {
       runDate: "2026-06-11",
     }));
     expect(candidates[0]!.scheduledAt.toISOString()).toBe("2026-06-11T01:00:00.000Z");
+  });
+
+  it("enforces maxDailyRuns and maxConcurrentRuns before returning due candidates", async () => {
+    const companyId = randomUUID();
+    const dailyBlockedWorkflowId = randomUUID();
+    const concurrentBlockedWorkflowId = randomUUID();
+    const allowedWorkflowId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Scheduler Guard Company",
+      issuePrefix: `SGD${companyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
+      timezone: "Asia/Seoul",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values([
+      {
+        id: dailyBlockedWorkflowId,
+        companyId,
+        name: "Daily blocked workflow",
+        status: "active",
+        schedule: "0 10 * * *",
+        maxDailyRuns: 1,
+        stepsJson: [],
+      },
+      {
+        id: concurrentBlockedWorkflowId,
+        companyId,
+        name: "Concurrent blocked workflow",
+        status: "active",
+        schedule: "0 10 * * *",
+        maxConcurrentRuns: 1,
+        stepsJson: [],
+      },
+      {
+        id: allowedWorkflowId,
+        companyId,
+        name: "Allowed workflow",
+        status: "active",
+        schedule: "0 10 * * *",
+        maxDailyRuns: 2,
+        stepsJson: [],
+      },
+    ]);
+    await db.insert(workflowRuns).values([
+      {
+        id: randomUUID(),
+        workflowId: dailyBlockedWorkflowId,
+        companyId,
+        status: "completed",
+        triggeredBy: "scheduler",
+        triggerSource: "schedule",
+        runDate: "2026-06-11",
+        startedAt: new Date("2026-06-11T00:30:00.000Z"),
+      },
+      {
+        id: randomUUID(),
+        workflowId: concurrentBlockedWorkflowId,
+        companyId,
+        status: "running",
+        triggeredBy: "scheduler",
+        triggerSource: "schedule",
+        runDate: "2026-06-10",
+        startedAt: new Date("2026-06-10T01:00:00.000Z"),
+      },
+      {
+        id: randomUUID(),
+        workflowId: allowedWorkflowId,
+        companyId,
+        status: "completed",
+        triggeredBy: "scheduler",
+        triggerSource: "schedule",
+        runDate: "2026-06-11",
+        startedAt: new Date("2026-06-11T00:30:00.000Z"),
+      },
+    ]);
+
+    const candidates = await listDueScheduledWorkflowCandidates(db, {
+      now: new Date("2026-06-11T01:05:00.000Z"),
+    });
+
+    expect(candidates.map((candidate) => candidate.workflowId)).toEqual([allowedWorkflowId]);
   });
 });

@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
-import { companies, workflowDefinitions } from "@paperclipai/db";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { companies, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { parseCron, type ParsedCron } from "../cron.js";
 
 export interface ScheduledWorkflowCandidateSource {
@@ -12,6 +12,8 @@ export interface ScheduledWorkflowCandidateSource {
   timezone: string | null;
   companyTimezone: string | null;
   lastScheduledRunAt: Date | null;
+  maxDailyRuns?: number | null;
+  maxConcurrentRuns?: number | null;
 }
 
 export interface ScheduledWorkflowCandidate {
@@ -182,6 +184,89 @@ export function computeDueScheduledWorkflowCandidates(
   return candidates;
 }
 
+async function countScheduledRunsForDay(
+  db: Db,
+  input: { workflowId: string; companyId: string; runDate: string },
+): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.workflowId, input.workflowId),
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.triggerSource, "schedule"),
+      eq(workflowRuns.runDate, input.runDate),
+    ));
+
+  return Number(rows[0]?.count ?? 0);
+}
+
+async function hasBlockingSameDayRun(
+  db: Db,
+  input: { workflowId: string; companyId: string; runDate: string },
+): Promise<boolean> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.workflowId, input.workflowId),
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.runDate, input.runDate),
+      inArray(workflowRuns.status, ["running", "completed"]),
+    ));
+
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
+async function countRunningWorkflowRuns(
+  db: Db,
+  input: { workflowId: string; companyId: string },
+): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.workflowId, input.workflowId),
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.status, "running"),
+    ));
+
+  return Number(rows[0]?.count ?? 0);
+}
+
+async function passesScheduledRunGuards(
+  db: Db,
+  source: ScheduledWorkflowCandidateSource,
+  candidate: ScheduledWorkflowCandidate,
+): Promise<boolean> {
+  const maxConcurrentRuns = source.maxConcurrentRuns ?? null;
+  if (typeof maxConcurrentRuns === "number" && maxConcurrentRuns > 0) {
+    const runningCount = await countRunningWorkflowRuns(db, {
+      workflowId: candidate.workflowId,
+      companyId: candidate.companyId,
+    });
+    if (runningCount >= maxConcurrentRuns) return false;
+  }
+
+  const maxDailyRuns = source.maxDailyRuns ?? null;
+  if (maxDailyRuns === 0) return true;
+
+  if (typeof maxDailyRuns === "number" && maxDailyRuns > 0) {
+    const scheduledRunsToday = await countScheduledRunsForDay(db, {
+      workflowId: candidate.workflowId,
+      companyId: candidate.companyId,
+      runDate: candidate.runDate,
+    });
+    return scheduledRunsToday < maxDailyRuns;
+  }
+
+  return !(await hasBlockingSameDayRun(db, {
+    workflowId: candidate.workflowId,
+    companyId: candidate.companyId,
+    runDate: candidate.runDate,
+  }));
+}
+
 export async function listDueScheduledWorkflowCandidates(
   db: Db,
   options: ComputeDueScheduledWorkflowCandidatesOptions = {},
@@ -198,7 +283,7 @@ export async function listDueScheduledWorkflowCandidates(
       isNotNull(workflowDefinitions.schedule),
     ));
 
-  return computeDueScheduledWorkflowCandidates(rows.map((row) => ({
+  const sources = rows.map((row) => ({
     id: row.workflow.id,
     companyId: row.workflow.companyId,
     name: row.workflow.name,
@@ -207,5 +292,20 @@ export async function listDueScheduledWorkflowCandidates(
     timezone: row.workflow.timezone,
     companyTimezone: row.companyTimezone,
     lastScheduledRunAt: row.workflow.lastScheduledRunAt,
-  })), options);
+    maxDailyRuns: row.workflow.maxDailyRuns,
+    maxConcurrentRuns: row.workflow.maxConcurrentRuns,
+  }));
+  const sourceByWorkflowId = new Map(sources.map((source) => [source.id, source]));
+  const candidates = computeDueScheduledWorkflowCandidates(sources, options);
+  const allowedCandidates: ScheduledWorkflowCandidate[] = [];
+
+  for (const candidate of candidates) {
+    const source = sourceByWorkflowId.get(candidate.workflowId);
+    if (!source) continue;
+    if (await passesScheduledRunGuards(db, source, candidate)) {
+      allowedCandidates.push(candidate);
+    }
+  }
+
+  return allowedCandidates;
 }
