@@ -172,4 +172,74 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
       scheduledSlotId: storedSlots[0]!.id,
     }));
   });
+
+  it("marks a claimed scheduled slot as failed when native trigger creation fails", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const scheduledAt = new Date("2026-06-11T01:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Scheduler Trigger Failure Company",
+      issuePrefix: `STF${companyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
+      timezone: "Asia/Seoul",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Scheduled workflow without owner",
+      status: "active",
+      schedule: "0 10 * * *",
+      timezone: "Asia/Seoul",
+      stepsJson: [
+        {
+          id: "ownerless-step",
+          name: "Ownerless step",
+          dependencies: [],
+        },
+      ],
+    });
+
+    const claim = (workflowService as unknown as {
+      claimScheduledRun: (
+        db: typeof db,
+        input: {
+          workflowId: string;
+          companyId: string;
+          scheduledAt: Date;
+          runDate: string;
+          timezone: string;
+        },
+      ) => Promise<{ claimed: boolean }>;
+    }).claimScheduledRun;
+
+    await expect(claim(db, {
+      workflowId,
+      companyId,
+      scheduledAt,
+      runDate: "2026-06-11",
+      timezone: "Asia/Seoul",
+    })).rejects.toThrow("Cannot create workflow mission: no agent exists for company");
+
+    const storedSlots = await db
+      .select()
+      .from(workflowRunSlots)
+      .where(eq(workflowRunSlots.workflowDefinitionId, workflowId));
+    const storedRuns = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.workflowId, workflowId));
+
+    expect(storedSlots).toHaveLength(1);
+    expect(storedSlots[0]).toEqual(expect.objectContaining({
+      companyId,
+      status: "failed",
+    }));
+    expect(storedSlots[0]!.metadata).toEqual(expect.objectContaining({
+      scheduledAt: scheduledAt.toISOString(),
+      triggerError: "Cannot create workflow mission: no agent exists for company",
+    }));
+    expect(storedRuns).toHaveLength(0);
+  });
 });

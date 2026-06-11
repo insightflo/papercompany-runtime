@@ -307,6 +307,27 @@ export async function claimWorkflowRunSlot(
   return slot ? mapWorkflowRunSlot(slot) : null;
 }
 
+export async function markWorkflowRunSlotFailed(
+  db: Db,
+  slotId: string,
+  input: { error: string; metadata?: Record<string, unknown> },
+): Promise<WorkflowRunSlot | null> {
+  const [slot] = await db
+    .update(workflowRunSlots)
+    .set({
+      status: "failed",
+      metadata: {
+        ...(input.metadata ?? {}),
+        triggerError: input.error,
+        triggerFailedAt: new Date().toISOString(),
+      },
+    })
+    .where(eq(workflowRunSlots.id, slotId))
+    .returning();
+
+  return slot ? mapWorkflowRunSlot(slot) : null;
+}
+
 /**
  * Get a workflow run by ID.
  */

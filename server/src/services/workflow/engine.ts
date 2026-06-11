@@ -24,6 +24,7 @@ import {
   getWorkflowStepExecutionContractForIssue,
   updateWorkflowRunStatus,
   resumeWorkflowRun,
+  markWorkflowRunSlotFailed,
 } from "./workflow-store.js";
 import type {
   WorkflowDefinition,
@@ -272,17 +273,26 @@ export const workflowService = {
       };
     }
 
-    const run = await workflowService.trigger(db, {
-      workflowId: input.workflowId,
-      companyId: input.companyId,
-      triggeredBy: input.triggeredBy ?? "scheduler",
-      triggerSource,
-      runDate,
-      runNumber: input.runNumber ?? null,
-      runLabel: input.runLabel ?? null,
-      scheduledSlotId: slot.id,
-      metadata: input.metadata ?? {},
-    });
+    let run: WorkflowExecutionResult;
+    try {
+      run = await workflowService.trigger(db, {
+        workflowId: input.workflowId,
+        companyId: input.companyId,
+        triggeredBy: input.triggeredBy ?? "scheduler",
+        triggerSource,
+        runDate,
+        runNumber: input.runNumber ?? null,
+        runLabel: input.runLabel ?? null,
+        scheduledSlotId: slot.id,
+        metadata: input.metadata ?? {},
+      });
+    } catch (error) {
+      await markWorkflowRunSlotFailed(db, slot.id, {
+        error: error instanceof Error ? error.message : String(error),
+        metadata: slot.metadata,
+      });
+      throw error;
+    }
 
     return {
       claimed: true,
