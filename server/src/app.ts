@@ -360,6 +360,9 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
+    disabledScheduledJobs: workflowSchedulerOwnership.pluginReconcilerEffectiveDisabled
+      ? [{ pluginKey: "insightflo.workflow-engine", jobKey: "workflow-reconciler" }]
+      : [],
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,
@@ -642,6 +645,8 @@ export async function createApp(
 
   const nativeWorkflowScheduler = workflowSchedulerOwnership.mode === "native-shadow"
     ? createNativeWorkflowScheduler({ db, mode: "shadow" })
+    : workflowSchedulerOwnership.mode === "native-active-plugin-disabled"
+      ? createNativeWorkflowScheduler({ db, mode: "active" })
     : null;
   nativeWorkflowScheduler?.start();
   if (nativeWorkflowScheduler) {

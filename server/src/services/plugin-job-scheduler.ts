@@ -36,7 +36,7 @@
 
 import { and, eq, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { pluginJobs, pluginJobRuns } from "@paperclipai/db";
+import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
@@ -75,6 +75,22 @@ export interface PluginJobSchedulerOptions {
   jobTimeoutMs?: number;
   /** Maximum number of concurrent job executions (default: 10). */
   maxConcurrentJobs?: number;
+  /** Scheduled plugin jobs to suppress while another native owner handles the work. */
+  disabledScheduledJobs?: DisabledScheduledPluginJob[];
+}
+
+export interface DisabledScheduledPluginJob {
+  pluginKey: string;
+  jobKey: string;
+}
+
+export function isScheduledPluginJobDisabled(
+  job: { pluginKey: string; jobKey: string },
+  disabledScheduledJobs: DisabledScheduledPluginJob[] = [],
+): boolean {
+  return disabledScheduledJobs.some((disabled) =>
+    disabled.pluginKey === job.pluginKey && disabled.jobKey === job.jobKey
+  );
 }
 
 /**
@@ -210,6 +226,7 @@ export function createPluginJobScheduler(
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
+    disabledScheduledJobs = [],
   } = options;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
@@ -261,8 +278,12 @@ export function createPluginJobScheduler(
       // We include jobs with null nextRunAt since they may have just been
       // registered and need their first run calculated.
       const dueJobs = await db
-        .select()
+        .select({
+          job: pluginJobs,
+          pluginKey: plugins.pluginKey,
+        })
         .from(pluginJobs)
+        .innerJoin(plugins, eq(pluginJobs.pluginId, plugins.id))
         .where(
           and(
             eq(pluginJobs.status, "active"),
@@ -279,7 +300,20 @@ export function createPluginJobScheduler(
       // Dispatch each due job (respecting concurrency limits)
       const dispatches: Promise<void>[] = [];
 
-      for (const job of dueJobs) {
+      for (const dueJob of dueJobs) {
+        const job = dueJob.job;
+        if (isScheduledPluginJobDisabled(
+          { pluginKey: dueJob.pluginKey, jobKey: job.jobKey },
+          disabledScheduledJobs,
+        )) {
+          log.info(
+            { jobId: job.id, jobKey: job.jobKey, pluginId: job.pluginId, pluginKey: dueJob.pluginKey },
+            "skipping scheduled plugin job because native owner is active",
+          );
+          await advanceSchedulePointer(job);
+          continue;
+        }
+
         // Concurrency limit
         if (activeJobs.size >= maxConcurrentJobs) {
           log.warn(

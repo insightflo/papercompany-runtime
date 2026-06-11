@@ -1,8 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const pluginSchedulerStart = vi.fn();
+const nativeWorkflowSchedulerStart = vi.fn();
 const missionOwnerSupervisionMonitorStart = vi.fn();
 const nativeWorkflowToolResultEventHandlers = vi.fn();
+const createPluginJobSchedulerMock = vi.fn(() => ({
+  start: pluginSchedulerStart,
+  stop: vi.fn(),
+  registerPlugin: vi.fn(),
+  unregisterPlugin: vi.fn(),
+  triggerJob: vi.fn(),
+  tick: vi.fn(),
+  diagnostics: vi.fn(() => ({
+    running: false,
+    activeJobCount: 0,
+    activeJobIds: [],
+    tickCount: 0,
+    lastTickAt: null,
+  })),
+}));
+const createNativeWorkflowSchedulerMock = vi.fn(() => ({
+  start: nativeWorkflowSchedulerStart,
+  stop: vi.fn(),
+  tick: vi.fn(),
+  getState: vi.fn(),
+}));
 const pluginEventBus = {
   forPlugin: vi.fn(),
   emit: vi.fn(),
@@ -16,21 +38,11 @@ const createMissionOwnerSupervisionMonitorMock = vi.fn(() => ({
 }));
 
 vi.mock("../services/plugin-job-scheduler.js", () => ({
-  createPluginJobScheduler: vi.fn(() => ({
-    start: pluginSchedulerStart,
-    stop: vi.fn(),
-    registerPlugin: vi.fn(),
-    unregisterPlugin: vi.fn(),
-    triggerJob: vi.fn(),
-    tick: vi.fn(),
-    diagnostics: vi.fn(() => ({
-      running: false,
-      activeJobCount: 0,
-      activeJobIds: [],
-      tickCount: 0,
-      lastTickAt: null,
-    })),
-  })),
+  createPluginJobScheduler: createPluginJobSchedulerMock,
+}));
+
+vi.mock("../services/workflow/native-scheduler.js", () => ({
+  createNativeWorkflowScheduler: createNativeWorkflowSchedulerMock,
 }));
 
 vi.mock("../services/plugin-job-coordinator.js", () => ({
@@ -154,7 +166,13 @@ vi.mock("../services/mission-owner-supervision-monitor.js", () => ({
 
 describe("createApp plugin scheduler lifecycle", () => {
   beforeEach(() => {
+    vi.resetModules();
+    delete process.env.WORKFLOW_NATIVE_SCHEDULER_ENABLED;
+    delete process.env.WORKFLOW_PLUGIN_RECONCILER_DISABLED;
     pluginSchedulerStart.mockClear();
+    nativeWorkflowSchedulerStart.mockClear();
+    createPluginJobSchedulerMock.mockClear();
+    createNativeWorkflowSchedulerMock.mockClear();
     missionOwnerSupervisionMonitorStart.mockClear();
     nativeWorkflowToolResultEventHandlers.mockClear();
     pluginEventBus.forPlugin.mockClear();
@@ -179,6 +197,35 @@ describe("createApp plugin scheduler lifecycle", () => {
       companyDeletionEnabled: true,
     });
 
+    expect(pluginSchedulerStart).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
+  it("starts native active scheduling and disables only the workflow-engine reconciler job when cutover flags are enabled", async () => {
+    process.env.WORKFLOW_NATIVE_SCHEDULER_ENABLED = "true";
+    process.env.WORKFLOW_PLUGIN_RECONCILER_DISABLED = "true";
+    const { createApp } = await import("../app.js");
+
+    await createApp({} as never, {
+      uiMode: "none",
+      serverPort: 3200,
+      storageService: {} as never,
+      deploymentMode: "local_trusted",
+      deploymentExposure: "private",
+      allowedHostnames: [],
+      bindHost: "127.0.0.1",
+      authReady: true,
+      companyDeletionEnabled: true,
+    });
+
+    expect(createNativeWorkflowSchedulerMock).toHaveBeenCalledWith(expect.objectContaining({
+      mode: "active",
+    }));
+    expect(nativeWorkflowSchedulerStart).toHaveBeenCalledTimes(1);
+    expect(createPluginJobSchedulerMock).toHaveBeenCalledWith(expect.objectContaining({
+      disabledScheduledJobs: [
+        { pluginKey: "insightflo.workflow-engine", jobKey: "workflow-reconciler" },
+      ],
+    }));
     expect(pluginSchedulerStart).toHaveBeenCalledTimes(1);
   }, 60_000);
 
