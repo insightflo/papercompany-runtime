@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const DEFAULT_ALPHA_ROOT = "/Users/kwak/Projects/ai/alpha-prime-personal";
 const DEFAULT_DASHBOARD_ROOT = "/Users/kwak/Projects/ai/gazua-dashboard";
+const DEFAULT_PRODUCER_ROOT = "/Users/kwak/Projects/ai/papercompany/papercompany-operations/scripts/paperclip-addon/gazua-tools";
 
 const KR_PATTERNS = [
   {
@@ -83,7 +83,7 @@ const US_CROSS_THEMES = [
 function parseArgs(argv) {
   const args = {
     market: "",
-    alphaRoot: DEFAULT_ALPHA_ROOT,
+    producerRoot: process.env.GAZUA_PRODUCER_ROOT || DEFAULT_PRODUCER_ROOT,
     dashboardRoot: DEFAULT_DASHBOARD_ROOT,
     skipBase: false,
     date: "",
@@ -92,7 +92,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--market") args.market = String(argv[++i] || "").toUpperCase();
-    else if (arg === "--alpha-root") args.alphaRoot = String(argv[++i] || "");
+    else if (arg === "--producer-root" || arg === "--alpha-root") args.producerRoot = String(argv[++i] || "");
     else if (arg === "--dashboard-root") args.dashboardRoot = String(argv[++i] || "");
     else if (arg === "--date") args.date = String(argv[++i] || "");
     else if (arg === "--skip-base") args.skipBase = true;
@@ -111,8 +111,10 @@ function usage(code) {
   node scripts/gazua-theme-discovery-wrapper.mjs --market KR [--skip-base]
   node scripts/gazua-theme-discovery-wrapper.mjs --market US [--skip-base]
 
-Runs the existing Gazua market signal producer, then appends producer-owned
-discovered theme entries while preserving the dashboard theme JSON contract.`);
+Runs the Gazua market signal producer from Papercompany operations by default,
+then appends producer-owned discovered theme entries while preserving the
+dashboard theme JSON contract. Use --producer-root only for explicit migration
+or maintenance against an external producer workspace.`);
   process.exit(code);
 }
 
@@ -123,8 +125,15 @@ function fail(message) {
 
 function runBaseProducer(args) {
   if (args.skipBase) return;
-  const result = spawnSync("./venv/bin/python", ["scripts/run_market_signals.py", "--market", args.market], {
-    cwd: args.alphaRoot,
+  const pythonPath = path.join(args.producerRoot, "venv", "bin", "python");
+  const scriptPath = path.join(args.producerRoot, "scripts", "run_market_signals.py");
+  const executable = fs.existsSync(pythonPath) ? "./venv/bin/python" : "python3";
+  if (!fs.existsSync(scriptPath)) {
+    fail(`market signal producer is not available under ${args.producerRoot}; refusing implicit legacy fallback`);
+  }
+  const result = spawnSync(executable, ["scripts/run_market_signals.py", "--market", args.market], {
+    cwd: args.producerRoot,
+    env: { ...process.env, GAZUA_DASHBOARD_ROOT: args.dashboardRoot },
     encoding: "utf8",
     stdio: "inherit",
   });
@@ -233,10 +242,7 @@ function parseCsvLine(line) {
 }
 
 function loadLatestKrxRows(args) {
-  const candidates = [
-    path.join(args.dashboardRoot, "data", "metadata"),
-    path.join(args.alphaRoot, "data", "metadata"),
-  ];
+  const candidates = [path.join(args.dashboardRoot, "data", "metadata")];
   const csvPath = candidates
     .map((dir) => latestFile(dir, /^krx_metadata_\d{8}\.csv$/))
     .find(Boolean);
@@ -432,7 +438,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   runBaseProducer(args);
 
-  const sourcePath = existingThemePath([args.dashboardRoot, args.alphaRoot], args.market, args.date);
+  const sourcePath = existingThemePath([args.dashboardRoot], args.market, args.date);
   if (!sourcePath || !fs.existsSync(sourcePath)) {
     fail(`theme artifact not found for market ${args.market}`);
   }

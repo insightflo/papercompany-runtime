@@ -29,9 +29,8 @@ function resolveRunDate(workflowRun: WorkflowRunRecord): string {
 }
 
 function getGazuaWorkspaceDir(): string {
-  return process.env.GAZUA_WORKSPACE_DIR
-    || process.env.ALPHA_PRIME_WORKSPACE
-    || "/Users/kwak/Projects/ai/alpha-prime-personal";
+  return process.env.GAZUA_DASHBOARD_ROOT
+    || "/Users/kwak/Projects/ai/gazua-dashboard";
 }
 
 function requiredArtifactPathForStep(
@@ -43,7 +42,7 @@ function requiredArtifactPathForStep(
   if (workflowName !== "gazua-morning" && workflowName !== "gazua-evening") {
     return null;
   }
-  if (stepDef.id !== "blog") {
+  if (stepDef.id !== "materialize-html-report") {
     return null;
   }
 
