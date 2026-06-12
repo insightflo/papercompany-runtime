@@ -6,14 +6,19 @@ const workerSource = await readFile(new URL("../src/worker.ts", import.meta.url)
 const reconcilerSource = await readFile(new URL("../src/reconciler.ts", import.meta.url), "utf8");
 const artifactGuardSource = await readFile(new URL("../src/artifact-guards.ts", import.meta.url), "utf8").catch(() => "");
 
-test("gazua daily dashboard HTML completion is guarded by canonical dashboard artifact existence", () => {
+test("gazua dashboard HTML completion is guarded by report-for-beginners artifacts", () => {
   assert.match(artifactGuardSource, /KR_Market_Report/);
   assert.match(artifactGuardSource, /US_Market_Report/);
+  assert.match(artifactGuardSource, /Sector_Rotation_Analysis/);
+  assert.match(artifactGuardSource, /Narrative_Deep_Dive/);
   assert.match(artifactGuardSource, /beginner_html/);
   assert.match(artifactGuardSource, /dashboard/);
   assert.match(artifactGuardSource, /workflowName !== "gazua-morning"/);
   assert.match(artifactGuardSource, /workflowName !== "gazua-evening"/);
-  assert.match(artifactGuardSource, /stepDef\.id !== "blog"/);
+  assert.match(artifactGuardSource, /stepDef\.id !== "materialize-html-report"/);
+  assert.match(artifactGuardSource, /data-report-style="report-for-beginners"/);
+  assert.match(artifactGuardSource, /Legacy markdown-wrapper HTML is not acceptable/);
+  assert.match(artifactGuardSource, /Report-for-beginners structure incomplete/);
 });
 
 test("worker refuses to finalize a done issue when required artifacts are missing", () => {
