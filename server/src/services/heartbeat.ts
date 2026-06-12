@@ -1765,6 +1765,24 @@ function normalizeClaimedArtifactPath(value: string): string {
     .trim();
 }
 
+function isActionableClaimedArtifactPath(value: string): boolean {
+  if (!value.startsWith("/")) return false;
+  if (value.includes("\\n") || value.includes("\\r") || /[\r\n]/u.test(value)) return false;
+  if (/[<>]/u.test(value)) return false;
+  if (/\{\$date\}|YYYY(?:MM|-MM-DD)?|MMDD/u.test(value)) return false;
+
+  const nonDeliverablePathMarkers = [
+    "/papercompany-runtime/skills/",
+    "/papercompany-operations/scripts/paperclip-addon/agents/",
+    "/node_modules/",
+    "/.git/",
+  ];
+  if (nonDeliverablePathMarkers.some((marker) => value.includes(marker))) return false;
+  if (/(?:^|\/)SKILL\.md$/u.test(value)) return false;
+
+  return true;
+}
+
 function extractClaimedArtifactPaths(run: typeof heartbeatRuns.$inferSelect): string[] {
   const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -1774,11 +1792,11 @@ function extractClaimedArtifactPaths(run: typeof heartbeatRuns.$inferSelect): st
   const paths = new Set<string>();
   for (const match of text.matchAll(CLAIMED_ARTIFACT_JSON_PATH_RE)) {
     const value = normalizeClaimedArtifactPath(match[1] ?? "");
-    if (value) paths.add(value);
+    if (value && isActionableClaimedArtifactPath(value)) paths.add(value);
   }
   for (const match of text.matchAll(CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE)) {
     const value = normalizeClaimedArtifactPath(match[1] ?? "");
-    if (value) paths.add(value);
+    if (value && isActionableClaimedArtifactPath(value)) paths.add(value);
   }
   return [...paths].slice(0, 10);
 }

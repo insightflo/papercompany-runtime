@@ -1873,6 +1873,98 @@ describe("heartbeat context budget preflight", () => {
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
+  it("ignores prompt and instruction paths when checking registered workProducts", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+    const outputPath = "/Users/kwak/Projects/ai/gazua-dashboard/reports/beginner_html/dashboard/deep_dive/202606/Narrative_Deep_Dive_2026-06-12_US.html";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Report Writer",
+      role: "writer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Create the required report and register workProducts." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Gazua report mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-HTML",
+      title: "gazua-evening: report-for-beginners HTML 패키지 작성",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await db.insert(issueWorkProducts).values({
+        companyId,
+        issueId,
+        type: "document",
+        provider: "local",
+        title: "Narrative Deep Dive 2026-06-12 US",
+        status: "active",
+        isPrimary: true,
+        metadata: { path: outputPath },
+      });
+      await onLog(
+        "stdout",
+        [
+          "=== Narrative_Deep_Dive_2026-06-12_US.html ===",
+          "/table: 4\\nkpi-grid: 2\\nrisk-grid: 2\\nscenario-grid: 2\\nreferences: 4",
+          "/Users/kwak/Projects/ai/papercompany/papercompany-runtime/skills/report-for-beginners/SKILL.md",
+          "/Users/kwak/Projects/ai/papercompany/papercompany-operations/scripts/paperclip-addon/agents/gazua/harry.md",
+          "/Users/kwak/Projects/ai/gazua-dashboard/reports/beginner_html/dashboard/deep_dive/YYYYMM/Narrative_Deep_Dive_2026-06-12_US.html",
+        ].join("\n"),
+      );
+      return {
+        ...successfulAdapterResult(),
+        resultJson: { result: "3 workProducts registered and verified." },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.completedAt).not.toBeNull();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+  });
+
   it("blocks Korean artifact issues when a workProduct exists but does not reference the claimed file", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
