@@ -36,6 +36,7 @@ import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-rou
 
 const Missions = lazy(async () => ({ default: (await import("./pages/Missions")).Missions }));
 const MissionDetail = lazy(async () => ({ default: (await import("./pages/MissionDetail")).MissionDetail }));
+const Workflows = lazy(async () => ({ default: (await import("./pages/Workflows")).Workflows }));
 const SchedulerConfig = lazy(async () => ({ default: (await import("./pages/SchedulerConfig")).SchedulerConfig }));
 const ChannelConfig = lazy(async () => ({ default: (await import("./pages/ChannelConfig")).ChannelConfig }));
 const WorktreeRules = lazy(async () => ({ default: (await import("./pages/WorktreeRules")).WorktreeRules }));
@@ -175,6 +176,7 @@ function boardRoutes() {
       <Route path="issues/:issueId" element={<IssueDetail />} />
       <Route path="routines" element={<Routines />} />
       <Route path="routines/:routineId" element={<RoutineDetail />} />
+      <Route path="workflows" element={lazyRoute(<Workflows />)} />
       <Route path="execution-workspaces/:workspaceId" element={<ExecutionWorkspaceDetail />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />

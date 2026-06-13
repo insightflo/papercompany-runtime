@@ -17,6 +17,7 @@ import {
   MessageSquare,
   ShieldCheck,
   GitPullRequest,
+  Workflow,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
@@ -112,6 +113,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
           <PluginSlotOutlet
             slotTypes={["sidebar"]}
             context={pluginContext}
+            excludePluginKeys={["insightflo.workflow-engine"]}
             className="flex flex-col gap-0.5"
             itemClassName="text-[13px] font-medium"
             missingBehavior="placeholder"
@@ -121,6 +123,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
         <SidebarSection label="Work">
           <SidebarNavItem to="/issues" label="Work" icon={CircleDot} />
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} textBadge="Beta" textBadgeTone="amber" />
+          <SidebarNavItem to="/workflows" label="Workflows" icon={Workflow} />
           <SidebarNavItem to="/scheduler" label="Scheduler" icon={CalendarClock} />
         </SidebarSection>
 
@@ -158,6 +161,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
         <PluginSlotOutlet
           slotTypes={["sidebarPanel"]}
           context={pluginContext}
+          excludePluginKeys={["insightflo.workflow-engine"]}
           className="flex flex-col gap-3"
           itemClassName="rounded-lg border border-border p-3"
           missingBehavior="placeholder"

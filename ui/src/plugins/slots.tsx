@@ -82,6 +82,7 @@ type SlotFilters = {
   slotTypes: PluginUiSlotType[];
   entityType?: PluginUiSlotEntityType | null;
   companyId?: string | null;
+  excludePluginKeys?: string[];
   enabled?: boolean;
 };
 
@@ -548,16 +549,35 @@ export function usePluginSlots(filters: SlotFilters): UsePluginSlotsResult {
     queryFn: () => pluginsApi.listUiContributions(),
     enabled: queryEnabled,
   });
-
-  // Kick off dynamic imports for any new plugin contributions.
-  usePluginModuleLoader(data);
+  const excludedPluginKeysKey = useMemo(
+    () => [...(filters.excludePluginKeys ?? [])].sort().join("|"),
+    [filters.excludePluginKeys],
+  );
+  const filteredContributions = useMemo(() => {
+    const excludedPluginKeys = new Set(excludedPluginKeysKey.split("|").filter(Boolean));
+    if (excludedPluginKeys.size === 0) return data;
+    return (data ?? []).filter((contribution) => !excludedPluginKeys.has(contribution.pluginKey));
+  }, [data, excludedPluginKeysKey]);
 
   const slotTypesKey = useMemo(() => [...filters.slotTypes].sort().join("|"), [filters.slotTypes]);
+  const slotMatchedContributions = useMemo(() => {
+    const allowedTypes = new Set(slotTypesKey.split("|").filter(Boolean) as PluginUiSlotType[]);
+    return (filteredContributions ?? []).filter((contribution) =>
+      contribution.slots.some((slot) => {
+        if (!allowedTypes.has(slot.type)) return false;
+        if (!requiresEntityType(slot.type)) return true;
+        return Boolean(filters.entityType && slot.entityTypes?.includes(filters.entityType));
+      }),
+    );
+  }, [filteredContributions, filters.entityType, slotTypesKey]);
+
+  // Kick off dynamic imports only for plugin contributions that can render in this outlet.
+  usePluginModuleLoader(slotMatchedContributions);
 
   const slots = useMemo(() => {
     const allowedTypes = new Set(slotTypesKey.split("|").filter(Boolean) as PluginUiSlotType[]);
     const rows: ResolvedPluginSlot[] = [];
-    for (const contribution of data ?? []) {
+    for (const contribution of slotMatchedContributions) {
       for (const slot of contribution.slots) {
         if (!allowedTypes.has(slot.type)) continue;
         if (requiresEntityType(slot.type)) {
@@ -582,10 +602,10 @@ export function usePluginSlots(filters: SlotFilters): UsePluginSlotsResult {
       return a.displayName.localeCompare(b.displayName);
     });
     return rows;
-  }, [data, filters.entityType, slotTypesKey]);
+  }, [slotMatchedContributions, filters.entityType, slotTypesKey]);
 
   // Consider loading until both query and module imports are done.
-  const modulesLoaded = data ? aggregateLoadState(data) === "loaded" : true;
+  const modulesLoaded = aggregateLoadState(slotMatchedContributions) === "loaded";
   const isLoading = queryEnabled && (isQueryLoading || !modulesLoaded);
 
   return {
@@ -782,6 +802,7 @@ type PluginSlotOutletProps = {
   slotTypes: PluginUiSlotType[];
   context: PluginSlotContext;
   entityType?: PluginUiSlotEntityType | null;
+  excludePluginKeys?: string[];
   className?: string;
   itemClassName?: string;
   errorClassName?: string;
@@ -792,6 +813,7 @@ export function PluginSlotOutlet({
   slotTypes,
   context,
   entityType,
+  excludePluginKeys = [],
   className,
   itemClassName,
   errorClassName,
@@ -801,6 +823,7 @@ export function PluginSlotOutlet({
     slotTypes,
     entityType,
     companyId: context.companyId,
+    excludePluginKeys,
   });
 
   if (errorMessage) {

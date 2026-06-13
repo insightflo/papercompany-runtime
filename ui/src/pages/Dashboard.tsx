@@ -322,6 +322,7 @@ export function Dashboard() {
           <PluginSlotOutlet
             slotTypes={["dashboardWidget"]}
             context={{ companyId: selectedCompanyId }}
+            excludePluginKeys={["insightflo.workflow-engine"]}
             className="grid gap-4 md:grid-cols-2"
             itemClassName="rounded-lg border bg-card p-4 shadow-sm"
           />
