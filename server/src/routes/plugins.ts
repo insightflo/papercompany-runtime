@@ -50,7 +50,9 @@ import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sd
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 import { workflowService } from "../services/workflow/engine.js";
+import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { issueService } from "../services/issues.js";
+import { workProductService } from "../services/work-products.js";
 import {
   completeWorkflowToolStepFromResult,
   type WorkflowExecutionMode,
@@ -118,6 +120,98 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function serializeValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(serializeValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, serializeValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function nativeWorkflowStepForPlugin(step: WorkflowDefinition["steps"][number]): Record<string, unknown> {
+  const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
+  const tools = Array.isArray(step.tools) ? step.tools.filter(Boolean) : toolNames;
+  const dependencies = Array.isArray(step.dependencies)
+    ? step.dependencies
+    : Array.isArray(step.dependsOn)
+      ? step.dependsOn
+      : [];
+  const type = step.type ?? (!step.agentId && toolNames.length > 0 ? "tool" : "agent");
+  return {
+    ...(serializeValue(step) as Record<string, unknown>),
+    id: step.id,
+    title: step.title ?? step.name,
+    description: step.description ?? "",
+    type,
+    toolName: step.toolName ?? toolNames[0] ?? "",
+    agentName: step.agentName ?? step.agentId ?? "",
+    toolNames,
+    tools,
+    dependsOn: dependencies,
+    dependencies,
+  };
+}
+
+function nativeWorkflowDefinitionForPlugin(definition: WorkflowDefinition): Record<string, unknown> {
+  return {
+    ...(serializeValue(definition) as Record<string, unknown>),
+    id: definition.id,
+    companyId: definition.companyId,
+    name: definition.name,
+    description: definition.description ?? "",
+    status: definition.status ?? "active",
+    executionMode: definition.executionMode,
+    steps: definition.steps.map(nativeWorkflowStepForPlugin),
+  };
+}
+
+async function nativeWorkflowRunDetailForPlugin(
+  db: Db,
+  run: WorkflowRun,
+  definition: WorkflowDefinition | null,
+  stepRuns: WorkflowStepRun[],
+): Promise<Record<string, unknown>> {
+  const issueSvc = issueService(db);
+  const workProductsSvc = workProductService(db);
+  const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, nativeWorkflowStepForPlugin(step)]));
+  const serializedStepRuns = await Promise.all(stepRuns.map(async (stepRun) => {
+    const stepDefinition = stepDefinitionById.get(stepRun.stepId);
+    let issueIdentifier: string | undefined;
+    let workProducts: unknown[] = [];
+    if (stepRun.issueId) {
+      try {
+        const issue = await issueSvc.getById(stepRun.issueId);
+        issueIdentifier = issue && typeof issue.identifier === "string" ? issue.identifier : undefined;
+      } catch {
+        issueIdentifier = undefined;
+      }
+      try {
+        workProducts = await workProductsSvc.listForIssue(stepRun.issueId);
+      } catch {
+        workProducts = [];
+      }
+    }
+    return {
+      ...(serializeValue(stepRun) as Record<string, unknown>),
+      id: stepRun.id,
+      status: stepRun.status,
+      stepTitle: typeof stepDefinition?.title === "string" ? stepDefinition.title : stepRun.stepId,
+      stepType: typeof stepDefinition?.type === "string" ? stepDefinition.type : undefined,
+      issueIdentifier,
+      workProducts: serializeValue(workProducts),
+    };
+  }));
+
+  return {
+    run: serializeValue(run),
+    stepRuns: serializedStepRuns,
+    workflow: definition ? nativeWorkflowDefinitionForPlugin(definition) : null,
+  };
+}
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 
 const BUNDLED_PLUGIN_EXAMPLES: AvailablePluginExample[] = [
@@ -1530,6 +1624,28 @@ export function pluginRoutes(
             },
           });
           return;
+        }
+      }
+      if (plugin.pluginKey === "insightflo.workflow-engine" && key === "workflow-run-detail" && result == null) {
+        const params = body?.params ?? {};
+        const runId = typeof params.runId === "string"
+          ? params.runId.trim()
+          : typeof (body as Record<string, unknown> | undefined)?.runId === "string"
+            ? String((body as Record<string, unknown>).runId).trim()
+            : "";
+        if (runId) {
+          const nativeRun = await workflowService.getRun(db, runId);
+          if (nativeRun) {
+            assertCompanyAccess(req, nativeRun.companyId);
+            const [nativeDefinition, nativeStepRuns] = await Promise.all([
+              workflowService.getDefinition(db, nativeRun.workflowId),
+              workflowService.listStepRuns(db, nativeRun.id),
+            ]);
+            res.json({
+              data: await nativeWorkflowRunDetailForPlugin(db, nativeRun, nativeDefinition, nativeStepRuns),
+            });
+            return;
+          }
         }
       }
       res.json({ data: result });

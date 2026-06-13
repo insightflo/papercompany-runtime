@@ -29,8 +29,21 @@ Current implementation status:
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 24.x. The local dev runtime is pinned to Node 24 because the server depends on the native `re2` module, which is compiled against the active Node ABI.
 - pnpm 9+
+
+Use the repo-pinned Node before installing or running:
+
+```sh
+nvm use
+pnpm install
+```
+
+If Node was changed after dependencies were installed, rebuild `re2` under the active Node:
+
+```sh
+npm run rebuild --prefix node_modules/.pnpm/re2@1.24.0/node_modules/re2
+```
 
 ## Dependency Lockfile Policy
 
@@ -57,6 +70,13 @@ This starts:
 `pnpm dev` runs the server in watch mode and restarts on changes from workspace packages (including adapter packages). Use `pnpm dev:once` to run without file watching.
 
 `pnpm dev:once` now tracks backend-relevant file changes and pending migrations. When the current boot is stale, the board UI shows a `Restart required` banner. You can also enable guarded auto-restart in `Instance Settings > Experimental`, which waits for queued/running local agent runs to finish before restarting the dev server.
+
+Dev runner diagnostics are written to repo-local `.paperclip/` by default:
+
+- `.paperclip/dev-runner-events.ndjson` records structured lifecycle events such as runner start, server child spawn/exit, shutdown signals, health probe transitions, and nearby Node crash reports.
+- `.paperclip/dev-runner-child.log` tees the child `@paperclipai/server` stdout/stderr stream so terminal output survives after a crash or shell restart.
+
+Set `PAPERCLIP_DEV_RUNNER_LOG_DIR=/path/to/logs` to move these diagnostics, or set `PAPERCLIP_DEV_RUNNER_HEALTH_INTERVAL_MS=0` to disable the background health probe.
 
 Tailscale/private-auth dev mode:
 

@@ -1023,6 +1023,56 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     );
   });
 
+  it("rejects completing mission oversight while the mission is still active", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const oversightIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "owner",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Active mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: oversightIssueId,
+      companyId,
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_oversight",
+      title: "[OVERSIGHT] Active mission",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await expect(svc.update(oversightIssueId, { status: "done" })).rejects.toThrow(
+      /Cannot complete mission oversight while mission .* is active/,
+    );
+
+    const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
+    expect(oversight?.status).toBe("todo");
+    expect(oversight?.completedAt).toBeNull();
+  });
+
   it("rejects mission-owner planned downstream child issues before upstream artifacts", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

@@ -88,6 +88,58 @@ describe("normalizeWorkflowStepsForExecution", () => {
       }),
     ]);
   });
+
+  it("normalizes workflow graph execution controls into the native runtime contract", () => {
+    expect(
+      normalizeWorkflowStepsForExecution([
+        {
+          id: "report",
+          title: "Market report",
+          type: "agent",
+          graphConcurrencyKey: " market-report ",
+          graphConcurrencyLimit: "2",
+          graphPriority: "HIGH",
+          graphCacheEnabled: "true",
+          graphCacheTtlSeconds: "600",
+          graphDeleteAfterUse: true,
+        },
+        {
+          id: "publish",
+          title: "Publish",
+          dependsOn: ["report"],
+          executionControls: {
+            concurrencyKey: "publisher",
+            concurrencyLimit: 1,
+            priority: "critical",
+          },
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "report",
+        name: "Market report",
+        dependencies: [],
+        executionControls: {
+          concurrencyKey: "market-report",
+          concurrencyLimit: 2,
+          priority: "high",
+          cacheEnabled: true,
+          cacheTtlSeconds: 600,
+          deleteAfterUse: true,
+        },
+      }),
+      expect.objectContaining({
+        id: "publish",
+        name: "Publish",
+        dependencies: ["report"],
+        executionControls: {
+          concurrencyKey: "publisher",
+          concurrencyLimit: 1,
+          priority: "critical",
+        },
+      }),
+    ]);
+  });
 });
 
 describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
@@ -317,6 +369,81 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(workflowRun?.status).toBe("running");
   });
 
+  it("copies execution controls into workflow step run metadata when launching a step", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const stepId = "report";
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-execution-controls" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Execution Controls",
+      issuePrefix: `EC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Workflow Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Execution Controls Workflow",
+      stepsJson: [
+        {
+          id: stepId,
+          name: "Report",
+          agentId,
+          dependencies: [],
+          graphConcurrencyKey: "market-report",
+          graphConcurrencyLimit: 2,
+          graphPriority: "high",
+          graphCacheEnabled: true,
+          graphCacheTtlSeconds: 600,
+          graphDeleteAfterUse: true,
+        },
+      ],
+    });
+
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("running");
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRun?.metadata).toEqual({
+      executionControls: {
+        concurrencyKey: "market-report",
+        concurrencyLimit: 2,
+        priority: "high",
+        cacheEnabled: true,
+        cacheTtlSeconds: 600,
+        deleteAfterUse: true,
+      },
+    });
+  });
+
   it("wakes an existing todo workflow step issue when a run is resumed", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -420,6 +547,103 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         stepId,
         source: "workflow.resume",
         wakeReason: "workflow_step_runnable",
+      }),
+    }));
+  });
+
+  it("restores a released workflow step issue assignee before waking it on resume", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const stepId = "qa-report";
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-restored-assignee" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Released Workflow",
+      issuePrefix: `RL${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "QA Agent",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Released QA Mission",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Released QA Workflow",
+      stepsJson: [
+        {
+          id: stepId,
+          name: "QA report",
+          agentId,
+          dependencies: [],
+          description: "Validate the report",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+    });
+    const existingIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: null,
+      missionId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+      status: "todo",
+      title: "Released QA Workflow: QA report",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: randomUUID(),
+      workflowRunId: runId,
+      stepId,
+      issueId: existingIssue.id,
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("running");
+    const [restoredIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, existingIssue.id));
+    expect(restoredIssue?.assigneeAgentId).toBe(agentId);
+    expect(heartbeatWakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: existingIssue.id,
+        mutation: "workflow_resume",
+        missionId,
+        workflowRunId: runId,
+        workflowDefinitionId: workflowId,
+        stepId,
       }),
     }));
   });
@@ -1338,6 +1562,318 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       stepId: "collect-market",
       args: {},
     }));
+  });
+
+  it("reuses cached issue-less tool step results within the configured ttl", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Cached Tool Workflow",
+      issuePrefix: `CT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Cached Tool Workflow",
+      stepsJson: [
+        {
+          id: "fetch-market",
+          name: "Fetch market",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["collect-market"],
+          toolArgs: { market: "KR", date: "{$runDate}" },
+          executionControls: {
+            cacheEnabled: true,
+            cacheTtlSeconds: 600,
+          },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values([
+      {
+        id: firstRunId,
+        workflowId,
+        companyId,
+        triggeredBy: "system",
+        status: "pending",
+        runDate: "2026-06-12",
+      },
+      {
+        id: secondRunId,
+        workflowId,
+        companyId,
+        triggeredBy: "system",
+        status: "pending",
+        runDate: "2026-06-12",
+      },
+    ]);
+
+    const first = await executeWorkflowRun(db, firstRunId);
+    expect(first.status).toBe("running");
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+    const [firstStepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, firstRunId));
+    const firstRequest = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+    await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: firstStepRun!.id,
+      requestId: firstRequest.requestId,
+      workflowRunId: firstRunId,
+      stepId: "fetch-market",
+      toolName: "collect-market",
+      success: true,
+      stdout: "{\"items\":3}",
+    });
+
+    const second = await executeWorkflowRun(db, secondRunId);
+
+    expect(second.status).toBe("completed");
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+    const [secondStepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, secondRunId));
+    expect(secondStepRun).toMatchObject({
+      stepId: "fetch-market",
+      status: "completed",
+      issueId: null,
+    });
+    expect(secondStepRun?.metadata).toMatchObject({
+      executionControls: {
+        cacheEnabled: true,
+        cacheTtlSeconds: 600,
+      },
+      cacheHit: {
+        sourceStepRunId: firstStepRun!.id,
+        toolName: "collect-market",
+      },
+      toolResult: {
+        success: true,
+        stdout: "{\"items\":3}",
+      },
+    });
+  });
+
+  it("dispatches higher-priority tool steps first and blocks lower-priority steps at the concurrency limit", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Priority Workflow",
+      issuePrefix: `PR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Priority Tool Workflow",
+      stepsJson: [
+        {
+          id: "low-priority",
+          name: "Low priority",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["collect-low"],
+          executionControls: {
+            concurrencyKey: "market-data",
+            concurrencyLimit: 1,
+            priority: "low",
+          },
+        },
+        {
+          id: "high-priority",
+          name: "High priority",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["collect-high"],
+          executionControls: {
+            concurrencyKey: "market-data",
+            concurrencyLimit: 1,
+            priority: "high",
+          },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("running");
+    expect(executeToolStep).toHaveBeenCalledTimes(1);
+    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "high-priority",
+      toolName: "collect-high",
+    }));
+    const stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const high = stepRuns.find((stepRun) => stepRun.stepId === "high-priority");
+    const low = stepRuns.find((stepRun) => stepRun.stepId === "low-priority");
+    expect(high).toMatchObject({
+      status: "running",
+      issueId: null,
+    });
+    expect(low).toMatchObject({
+      status: "pending",
+      issueId: null,
+    });
+    expect(low?.metadata).toMatchObject({
+      executionControls: {
+        concurrencyKey: "market-data",
+        concurrencyLimit: 1,
+        priority: "low",
+      },
+      concurrencyBlocked: {
+        concurrencyKey: "market-data",
+        concurrencyLimit: 1,
+        runningCount: 1,
+      },
+    });
+
+    const highRequest = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+    await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: high!.id,
+      requestId: highRequest.requestId,
+      workflowRunId: runId,
+      stepId: "high-priority",
+      toolName: "collect-high",
+      success: true,
+    });
+
+    expect(executeToolStep).toHaveBeenCalledTimes(2);
+    expect(executeToolStep).toHaveBeenLastCalledWith(expect.objectContaining({
+      stepId: "low-priority",
+      toolName: "collect-low",
+    }));
+    const afterCapacityFreed = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const relaunchedLow = afterCapacityFreed.find((stepRun) => stepRun.stepId === "low-priority");
+    expect(relaunchedLow).toMatchObject({
+      status: "running",
+      issueId: null,
+    });
+    expect(relaunchedLow?.metadata).toMatchObject({
+      executionControls: {
+        concurrencyKey: "market-data",
+        concurrencyLimit: 1,
+        priority: "low",
+      },
+      toolInvocation: {
+        toolName: "collect-low",
+      },
+    });
+    expect((relaunchedLow?.metadata as Record<string, unknown>).concurrencyBlocked).toBeUndefined();
+  });
+
+  it("deletes tool invocation and result payloads after use when retention control is enabled", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Retention Workflow",
+      issuePrefix: `RT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Retention Tool Workflow",
+      stepsJson: [
+        {
+          id: "sensitive-tool",
+          name: "Sensitive tool",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["collect-sensitive-market-data"],
+          toolArgs: { token: "secret-token", market: "KR" },
+          executionControls: {
+            deleteAfterUse: true,
+          },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    await executeWorkflowRun(db, runId);
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const request = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+
+    await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: stepRun!.id,
+      requestId: request.requestId,
+      workflowRunId: runId,
+      stepId: "sensitive-tool",
+      toolName: "collect-sensitive-market-data",
+      success: true,
+      stdout: "{\"token\":\"secret-token\",\"items\":3}",
+      stderr: "debug secret-token",
+      exitCode: 0,
+    });
+
+    const [completedStepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, stepRun!.id));
+    const metadata = completedStepRun?.metadata as Record<string, unknown>;
+
+    expect(completedStepRun).toMatchObject({
+      status: "completed",
+    });
+    expect(JSON.stringify(metadata)).not.toContain("secret-token");
+    expect(metadata).toMatchObject({
+      executionControls: {
+        deleteAfterUse: true,
+      },
+      retentionDeleted: {
+        deleteAfterUse: true,
+        toolName: "collect-sensitive-market-data",
+        success: true,
+        exitCode: 0,
+      },
+    });
+    expect(metadata.toolInvocation).toBeUndefined();
+    expect(metadata.toolResult).toBeUndefined();
   });
 
   it("completes all-tool workflows from tool execution results without creating issues", async () => {

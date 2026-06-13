@@ -38,7 +38,7 @@ import {
   type MissionExecutionUnit,
 } from "./missions/mission-execution-sources.js";
 import { buildMissionRuleContext } from "./missions/mission-rule-context.js";
-import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionPlanArtifact } from "./missions/mission-supervision-context.js";
+import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionPlanArtifact, type MissionSupervisionWorkflowStepRow } from "./missions/mission-supervision-context.js";
 import {
   formatGovernanceThreadEvidenceLines,
   governanceThreadReasonSuffix,
@@ -66,6 +66,8 @@ import {
   isTerminalIssueStatus,
   summarizeOwnerDecisionNotApplied,
 } from "./missions/mission-owner-recovery-comments.js";
+import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
+import { logActivity } from "./activity-log.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -187,6 +189,7 @@ export type MissionOwnerSupervisionRecommendationType =
   | "request_replan"
   | "request_approval"
   | "escalate_blocked"
+  | "materialize_plan_decision"
   | "materialize_artifact_from_comment"
   | "mark_impossible_with_evidence";
 
@@ -217,6 +220,12 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
   wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
   idempotencyKey?: string;
+} | {
+  type: "materialize_plan_decision";
+  missionId: string;
+  resultStatus: string;
+  planningIssueId: string | null;
+  workflowRunId?: string;
 } | {
   type: "native_tool_step_retry";
   missionId: string;
@@ -377,7 +386,7 @@ function validateRole(role: string): asserts role is MissionAgentRole {
   }
 }
 
-function isTerminalMissionStatus(status: MissionStatus | undefined): status is "completed" | "cancelled" {
+function isTerminalMissionStatus(status: string | undefined): status is "completed" | "cancelled" {
   return status === "completed" || status === "cancelled";
 }
 
@@ -460,15 +469,31 @@ function asStringArray(value: unknown): string[] {
 }
 
 type ToolStepFailureClass =
+  | "missing_file"
+  | "permission_denied"
+  | "auth_missing"
+  | "rate_limit"
+  | "timeout"
+  | "parse_error"
   | "transient_or_external"
   | "input_contract"
   | "tool_bug_or_unknown"
   | "side_effect_risk";
 
+type ToolStepRetryPolicy =
+  | "do_not_retry_until_config_fixed"
+  | "do_not_retry_until_auth_configured"
+  | "retry_with_bounded_backoff"
+  | "manual_owner_decision_required"
+  | "fix_input_contract_before_retry"
+  | "inspect_tool_logs_before_retry";
+
 type ToolStepFailureClassification = {
   className: ToolStepFailureClass;
+  retryPolicy: ToolStepRetryPolicy;
   rationale: string;
   requiredAction: string;
+  evidence: string[];
 };
 
 function getWorkflowStepToolNames(step: WorkflowStep | Record<string, unknown> | null | undefined): string[] {
@@ -490,8 +515,33 @@ function isIssueLessToolWorkflowStep(step: WorkflowStep | Record<string, unknown
   return getWorkflowStepToolNames(step).length > 0 && !asTrimmedString(step.agentId);
 }
 
-function classifyToolStepFailure(step: WorkflowStep | Record<string, unknown> | null | undefined): ToolStepFailureClassification {
-  const text = [
+function toolStepFailureEvidence(stepRun: typeof workflowStepRuns.$inferSelect): string[] {
+  const metadata = isRecord(stepRun.metadata) ? stepRun.metadata : {};
+  const toolResult = isRecord(metadata.toolResult) ? metadata.toolResult : {};
+  const values = [
+    ["exitCode", toolResult.exitCode],
+    ["error", toolResult.error],
+    ["stderr", toolResult.stderr],
+    ["stdout", toolResult.stdout],
+    ["toolName", toolResult.toolName],
+    ["lastDispatchErrorSummary", stepRun.lastDispatchErrorSummary],
+  ];
+  return values
+    .map(([key, value]) => {
+      const text = typeof value === "string" ? value.trim() : value == null ? "" : String(value);
+      if (!text) return null;
+      return `${key}: ${text.slice(0, 2000)}`;
+    })
+    .filter((value): value is string => Boolean(value));
+}
+
+function classifyToolStepFailure(
+  step: WorkflowStep | Record<string, unknown> | null | undefined,
+  stepRun: typeof workflowStepRuns.$inferSelect,
+): ToolStepFailureClassification {
+  const evidence = toolStepFailureEvidence(stepRun);
+  const runtimeText = evidence.join("\n").toLowerCase();
+  const stepText = [
     step && isRecord(step) ? asTrimmedString(step.id) : null,
     step && isRecord(step) ? asTrimmedString(step.name) : null,
     step && isRecord(step) ? asTrimmedString(step.description) : null,
@@ -501,31 +551,94 @@ function classifyToolStepFailure(step: WorkflowStep | Record<string, unknown> | 
     .join(" ")
     .toLowerCase();
 
-  if (/\b(send|telegram|slack|email|publish|upload|post|deploy|write|mutat|trade|order)\b/.test(text)) {
+  if (/(enoent|no such file or directory|can't open file|cannot find module|module not found)/i.test(runtimeText)) {
+    return {
+      className: "missing_file",
+      retryPolicy: "do_not_retry_until_config_fixed",
+      rationale: "The captured runtime output shows a missing file/module/path, so repeating the same command cannot recover it.",
+      requiredAction: "Fix the command, cwd, tool registration, dependency install, or source path first; then verify the tool directly before resuming the workflow.",
+      evidence,
+    };
+  }
+  if (/(permission denied|eacces|operation not permitted|not executable)/i.test(runtimeText)) {
+    return {
+      className: "permission_denied",
+      retryPolicy: "do_not_retry_until_config_fixed",
+      rationale: "The captured runtime output shows a local permission/executable problem.",
+      requiredAction: "Fix file permissions, executable bits, sandbox access, or credential file access before retrying.",
+      evidence,
+    };
+  }
+  if (/(unauthorized|forbidden|authentication|auth|api key|token|credential|401|403)/i.test(runtimeText)) {
+    return {
+      className: "auth_missing",
+      retryPolicy: "do_not_retry_until_auth_configured",
+      rationale: "The captured runtime output points at missing or rejected credentials.",
+      requiredAction: "Configure or refresh the required credentials/secrets, then run a narrow credential check before retrying.",
+      evidence,
+    };
+  }
+  if (/(rate limit|too many requests|http 429|\b429\b|quota exceeded)/i.test(runtimeText)) {
+    return {
+      className: "rate_limit",
+      retryPolicy: "retry_with_bounded_backoff",
+      rationale: "The captured runtime output shows provider throttling.",
+      requiredAction: "Retry only with bounded backoff after confirming provider limits and avoiding duplicate side effects.",
+      evidence,
+    };
+  }
+  if (/(timed out|timeout|etimedout|deadline exceeded|socket hang up)/i.test(runtimeText)) {
+    return {
+      className: "timeout",
+      retryPolicy: "retry_with_bounded_backoff",
+      rationale: "The captured runtime output shows an execution or provider timeout.",
+      requiredAction: "Check whether partial side effects occurred, then retry with bounded backoff only if the step is idempotent or safe.",
+      evidence,
+    };
+  }
+  if (/(syntaxerror|json\.parse|unexpected token|invalid json|parse error|bad control character)/i.test(runtimeText)) {
+    return {
+      className: "parse_error",
+      retryPolicy: "fix_input_contract_before_retry",
+      rationale: "The captured runtime output shows parsing or serialization failure.",
+      requiredAction: "Fix the malformed input/output contract or parser expectation before retrying.",
+      evidence,
+    };
+  }
+
+  if (/\b(send|telegram|slack|email|publish|upload|post|deploy|write|mutat|trade|order)\b/.test(stepText)) {
     return {
       className: "side_effect_risk",
+      retryPolicy: "manual_owner_decision_required",
       rationale: "The tool name or description suggests an external side effect, so retry can duplicate delivery or mutation.",
       requiredAction: "Inspect tool logs and side-effect evidence first; require an explicit owner decision before retrying.",
+      evidence,
     };
   }
-  if (/\b(schema|contract|input|argument|arg|payload|validation|required|missing)\b/.test(text)) {
+  if (/\b(schema|contract|input|argument|arg|payload|validation|required|missing)\b/.test(stepText)) {
     return {
       className: "input_contract",
+      retryPolicy: "fix_input_contract_before_retry",
       rationale: "The step metadata points at a likely input or payload contract failure.",
       requiredAction: "Repair the upstream input contract or workflow step arguments before resuming the failed step.",
+      evidence,
     };
   }
-  if (/\b(fetch|collect|crawl|scrape|scan|search|api|http|network|timeout|rate|external)\b/.test(text)) {
+  if (/\b(fetch|collect|crawl|scrape|scan|search|api|http|network|timeout|rate|external)\b/.test(stepText)) {
     return {
       className: "transient_or_external",
+      retryPolicy: "retry_with_bounded_backoff",
       rationale: "The step appears to depend on external collection or network access.",
       requiredAction: "Check provider availability/rate limits and retry only with bounded backoff when the external condition is clear.",
+      evidence,
     };
   }
   return {
     className: "tool_bug_or_unknown",
+    retryPolicy: "inspect_tool_logs_before_retry",
     rationale: "The failed tool step has no linked issue and no persisted error detail that proves a safe retry path.",
     requiredAction: "Inspect tool runtime logs; if the tool implementation failed, create/fix the tool bug before resuming the mission.",
+    evidence,
   };
 }
 
@@ -1205,7 +1318,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       ))
       .orderBy(asc(issues.createdAt), asc(issues.id));
     const existing = existingRows.find((issue) => (issue.description ?? "").includes(marker));
-    const classification = classifyToolStepFailure(input.step);
+    const classification = classifyToolStepFailure(input.step, input.stepRun);
     const toolNames = getWorkflowStepToolNames(input.step);
     if (existing) {
       return { issue: existing, created: false, classification, toolNames };
@@ -1225,9 +1338,14 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         `Step: ${input.stepRun.stepId} (${displayStepName})`,
         `Tool names: ${toolNamesLabel}`,
         `Failure class: ${classification.className}`,
+        `Retry policy: ${classification.retryPolicy}`,
         `Rationale: ${classification.rationale}`,
         "",
+        "Evidence:",
+        ...(classification.evidence.length > 0 ? classification.evidence.map((line) => `- ${line}`) : ["- No runtime stderr/stdout/error evidence was captured on the workflow step run."]),
+        "",
         "Do not blindly retry this step.",
+        "The failure class is a low-level signal, not a final diagnosis; verify the evidence before choosing a recovery action.",
         "",
         "Required diagnosis:",
         "1. Check the tool runtime logs and captured output for the failed step.",
@@ -1268,6 +1386,59 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     if (existing) {
       const nextTitle = `[OVERSIGHT] ${workflowName}`;
+      if (!isTerminalMissionStatus(mission.status) && isTerminalIssueStatus(existing.status)) {
+        const now = new Date();
+        await db
+          .update(issues)
+          .set({
+            status: "todo",
+            assigneeAgentId: mission.ownerAgentId,
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            completedAt: null,
+            cancelledAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, existing.id));
+        await db.insert(issueComments).values({
+          companyId: mission.companyId,
+          issueId: existing.id,
+          authorAgentId: mission.ownerAgentId,
+          body: [
+            "## Mission oversight restored",
+            `- mission status: \`${mission.status}\``,
+            "- policy: mission oversight remains open until the mission is completed or cancelled.",
+            `- previous issue status: \`${existing.status}\``,
+          ].join("\n"),
+        });
+        await logActivity(db, {
+          companyId: mission.companyId,
+          actorType: "system",
+          actorId: "mission-owner-supervision",
+          agentId: mission.ownerAgentId,
+          action: "mission.oversight_restored",
+          entityType: "issue",
+          entityId: existing.id,
+          details: {
+            missionId: mission.id,
+            previousStatus: existing.status,
+            nextStatus: "todo",
+            missionStatus: mission.status,
+            reason: "mission_oversight_must_remain_open_until_mission_terminal",
+          },
+        });
+        existing.status = "todo";
+        existing.assigneeAgentId = mission.ownerAgentId;
+        existing.checkoutRunId = null;
+        existing.executionRunId = null;
+        existing.executionAgentNameKey = null;
+        existing.executionLockedAt = null;
+        existing.completedAt = null;
+        existing.cancelledAt = null;
+        existing.updatedAt = now;
+      }
       if (existing.title !== nextTitle) {
         await db
           .update(issues)
@@ -1423,11 +1594,28 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     return trimmedString(ref.type) === "mission_issue" && trimmedString(ref.id) === issue.id;
   }
 
-  function activePlanRecoveryGateReason(activePlan: MissionSupervisionPlanArtifact | null, issue: IssueRow): string | null {
+  function activePlanPaqoStepMatchesIssue(
+    activePlan: MissionSupervisionPlanArtifact,
+    stepRowsForIssue: MissionSupervisionWorkflowStepRow[],
+  ): boolean {
+    const refs = asRecord(activePlan.refs);
+    const paqoWorkflow = asRecord(refs.paqoWorkflow);
+    const workflowRunId = trimmedString(paqoWorkflow.workflowRunId);
+    const stepIds = new Set(asStringArray(paqoWorkflow.stepIds));
+    if (!workflowRunId || stepIds.size === 0) return false;
+    return stepRowsForIssue.some((row) => row.run.id === workflowRunId && stepIds.has(row.stepRun.stepId));
+  }
+
+  function activePlanRecoveryGateReason(
+    activePlan: MissionSupervisionPlanArtifact | null,
+    issue: IssueRow,
+    stepRowsForIssue: MissionSupervisionWorkflowStepRow[] = [],
+  ): string | null {
     if (!activePlan) return null;
     if (issue.originKind === "mission_main_executor_plan" || issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock") {
       return null;
     }
+    if (activePlanPaqoStepMatchesIssue(activePlan, stepRowsForIssue)) return null;
 
     const stepCount = jsonArrayLength(activePlan.steps);
     if (stepCount === 0) {
@@ -1441,6 +1629,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         sourceRefMatchesIssue(unit.sourceRef, issue) || materializedRefMatchesIssue(unit.materializedRef, issue)
       ));
       if (!selectedUnit) {
+        if (activePlanPaqoStepMatchesIssue(activePlan, stepRowsForIssue)) return null;
         return `active plan revision=${activePlan.revision} does not select this issue as an execution unit; blocked status alone is not enough to launch recovery`;
       }
       const selectionState = normalizedPlanStatus(selectedUnit.selectionState);
@@ -1694,6 +1883,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     if (!oversightIssue) {
       await ensureMissionExecutionPlan({ companyId: mission.companyId, missionId: mission.id });
       oversightIssue = await findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
+    } else if (!isTerminalMissionStatus(mission.status) && isTerminalIssueStatus(oversightIssue.status)) {
+      oversightIssue = await ensureMainExecutorOversightIssue(
+        mission,
+        oversightIssue.title.replace(/^\[OVERSIGHT\]\s*/, "") || mission.title,
+      );
     }
     if (!oversightIssue) {
       return { missionId: mission.id, oversightIssueId: null, findings: [], recommendations: [], appliedActions: [], ownerActionExplanations: [], commented: false };
@@ -1719,6 +1913,26 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
     const missionHasActiveHeartbeat = [...heartbeatRunsByIssueId.values()]
       .some((runs) => runs.some((run) => run.status === "queued" || run.status === "running"));
+    const activePlanRefs = asRecord(activePlan?.refs);
+    const activeOwnerPlanDecision = asRecord(activePlanRefs.ownerPlanDecision);
+    const activePaqoWorkflow = asRecord(activePlanRefs.paqoWorkflow);
+    const latestPlanDecision = await findLatestAuthorizedMissionOwnerPlanDecision({
+      db,
+      companyId: mission.companyId,
+      missionId: mission.id,
+    });
+    const hasRecordedPlanDecision = Boolean(trimmedString(activeOwnerPlanDecision.decisionHash));
+    const hasPaqoWorkflowRun = Boolean(trimmedString(activePaqoWorkflow.workflowRunId));
+    if (latestPlanDecision.ok && (!hasRecordedPlanDecision || !hasPaqoWorkflowRun)) {
+      findings.push(`plan_decision_not_materialized: planning_issue=${latestPlanDecision.planningIssueId} comment=${latestPlanDecision.commentId}`);
+      addRecommendation({
+        type: "materialize_plan_decision",
+        missionId: mission.id,
+        issueId: latestPlanDecision.planningIssueId,
+        reason: "A structured Mission owner plan decision exists, but the active mission plan has no recorded PAQO workflow/run",
+        safeToAutoApply: true,
+      });
+    }
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
@@ -1733,7 +1947,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
       const isRecoverableQueueSource = isStaleQueueStatus && issue.originKind !== "mission_main_executor_unblock";
       const isStaleInProgressSource = issue.status === "in_progress" && issue.originKind !== "mission_main_executor_unblock";
-      const activePlanGateReason = activePlanRecoveryGateReason(activePlan, issue);
+      const activePlanGateReason = activePlanRecoveryGateReason(activePlan, issue, stepRowsForIssue);
 
       if (activePlanGateReason) {
         findings.push(`plan_gate_not_ready: ${label} ${activePlanGateReason} — ${issue.title}`);
@@ -2048,7 +2262,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is already terminal status=${sourceCandidate.status}` }));
                   break;
                 }
-                const sourcePlanGateReason = activePlanRecoveryGateReason(activePlan, sourceCandidate);
+                const sourcePlanGateReason = activePlanRecoveryGateReason(
+                  activePlan,
+                  sourceCandidate,
+                  stepRowsByIssueId.get(sourceCandidate.id) ?? [],
+                );
                 if (sourcePlanGateReason) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: sourcePlanGateReason }));
                   break;
@@ -2535,6 +2753,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       const refs = asRecord(activePlan.refs);
       const planUnits = asRecordArray(refs.executionUnits);
       const planUnitKeys = new Set(planUnits.map((unit) => executionUnitKeyFromSourceRef(unit.sourceRef)).filter((key): key is string => Boolean(key)));
+      const paqoWorkflow = asRecord(refs.paqoWorkflow);
+      const paqoWorkflowRunId = trimmedString(paqoWorkflow.workflowRunId);
+      if (paqoWorkflowRunId) {
+        planUnitKeys.add(`native_workflow_run:${paqoWorkflowRunId}`);
+      }
       for (const unit of executionSnapshot.units) {
         if (!planUnitKeys.has(executionUnitKey(unit))) {
           findings.push(`plan_outdated: active execution unit missing from plan refs source=${unit.sourceRef.type} id=${unit.sourceRef.id}`);
@@ -2601,6 +2824,27 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     });
 
     const uniqueFindings = Array.from(new Set(findings));
+    const materializePlanRecommendation = recommendations.find((recommendation) => (
+      recommendation.type === "materialize_plan_decision" && recommendation.safeToAutoApply
+    ));
+    if (input.applySafeActions && materializePlanRecommendation) {
+      const result = await recordLatestAuthorizedMissionOwnerPlanDecision({
+        db,
+        companyId: mission.companyId,
+        missionId: mission.id,
+        requestedBy: { actorType: "system", actorId: "mission-owner-supervision" },
+      });
+      const refs = asRecord(result.status === "recorded" ? result.missionPlanArtifact.refs : undefined);
+      const paqoWorkflow = asRecord(refs.paqoWorkflow);
+      appliedActions.push({
+        type: "materialize_plan_decision",
+        missionId: mission.id,
+        resultStatus: result.status,
+        planningIssueId: result.planningIssueId,
+        ...(trimmedString(paqoWorkflow.workflowRunId) ? { workflowRunId: trimmedString(paqoWorkflow.workflowRunId)! } : {}),
+      });
+    }
+
     const safeDispatchRecommendations = recommendations.filter((recommendation) => recommendation.type === "dispatch_missing_step" && recommendation.safeToAutoApply && recommendation.workflowRunId);
     if (input.applySafeActions && safeDispatchRecommendations.length > 0) {
       const stepIdsByRunId = new Map<string, string[]>();
@@ -2666,6 +2910,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
               ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus}`
               : action.type === "native_tool_step_retry"
                 ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
+                : action.type === "materialize_plan_decision"
+                  ? `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}`
                 : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
           : ["- None"]),
         "",

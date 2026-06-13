@@ -4,9 +4,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   agents,
   agentRuntimeState,
+  agentWakeupRequests,
+  activityLog,
   companySecrets,
+  companySkills,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issueWorkProducts,
@@ -90,13 +94,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
   afterEach(async () => {
     setWorkflowToolStepExecutor(null);
+    await db.delete(activityLog);
     await db.delete(missionDelegations);
     await db.delete(issueWorkProducts);
     await db.delete(pluginEntities);
     await db.delete(missionPlanArtifacts);
     await db.delete(missionSessions);
     await db.delete(workflowStepRuns);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(plugins);
@@ -105,6 +112,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.delete(missions);
     await db.delete(agentRuntimeState);
     await db.delete(companySecrets);
+    await db.delete(companySkills);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -1181,6 +1189,80 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       issue: expect.objectContaining({ originKind: "mission_main_executor_unblock", originId: sourceIssue.id }),
       sourceIssue: expect.objectContaining({ id: sourceIssue.id, status: "todo" }),
     }));
+  });
+
+  it("active supervision materializes an unrecorded PLAN decision into a PAQO workflow", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({ id: companyId, name: "Plan Materialization Recovery Company", issuePrefix: `PM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "running", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Plan materialization recovery mission", status: "active" });
+    const svc = missionService(db);
+    await svc.ensureMissionExecutionPlan({ companyId, missionId, sourceHints: { workflowName: "Plan Materialization Recovery Workflow" } });
+    const [planningIssue] = await db.insert(issues).values({
+      companyId,
+      assigneeAgentId: ownerAgentId,
+      missionId,
+      originKind: "mission_main_executor_plan",
+      status: "done",
+      title: "[PLAN] Plan materialization recovery mission",
+    }).returning();
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssue!.id,
+      authorAgentId: ownerAgentId,
+      body: [
+        "### Mission owner plan decision",
+        "```json",
+        JSON.stringify({
+          missionId,
+          missionGoal: "Recover missing PAQO materialization",
+          selectedExecutionUnits: [{
+            id: "unit-recover",
+            kind: "mission_plan_unit",
+            title: "[ACTION] Recover execution",
+            assigneeAgentId: workerAgentId,
+            selectionState: "selected",
+            sourceRef: { type: "mission_plan_unit", id: "unit-recover" },
+            dependsOn: [],
+          }],
+          requiredInputs: [],
+          successCriteria: ["workflow materialized"],
+          steps: [],
+        }),
+        "```",
+      ].join("\n"),
+    });
+
+    const result = await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-02T00:10:00.000Z"),
+      applySafeActions: true,
+    });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("plan_decision_not_materialized"),
+    ]));
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "materialize_plan_decision", missionId, resultStatus: "recorded" }),
+    ]));
+    const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(runs).toEqual([expect.objectContaining({ status: "running" })]);
+
+    const followUp = await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    expect(followUp.findings.join("\n")).not.toContain("plan_gate_not_ready");
+    expect(followUp.findings.join("\n")).not.toContain("plan_outdated");
   });
 
   it("re-wakes an existing stale owner-action issue with no heartbeat instead of duplicating it", async () => {
@@ -2321,6 +2403,75 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(2);
   });
 
+  it("restores terminal mission oversight when the mission is still active", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const oversightIssueId = randomUUID();
+    const completedAt = new Date("2026-06-12T09:52:51.477Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Oversight Restore Company",
+      issuePrefix: `OR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const [mission] = await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Active mission with closed oversight",
+      status: "active",
+    }).returning();
+    await db.insert(issues).values({
+      id: oversightIssueId,
+      companyId,
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      originKind: "mission_main_executor_oversight",
+      title: "[OVERSIGHT] stale title",
+      status: "done",
+      priority: "medium",
+      completedAt,
+    });
+
+    const supervision = await missionService(db).runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 30,
+      now: new Date("2026-06-12T10:00:00.000Z"),
+    });
+
+    expect(supervision.oversightIssueId).toBe(oversightIssueId);
+    const [storedOversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
+    expect(storedOversight).toEqual(expect.objectContaining({
+      status: "todo",
+      completedAt: null,
+      assigneeAgentId: ownerAgentId,
+      title: "[OVERSIGHT] stale title",
+    }));
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, oversightIssueId));
+    expect(comments.some((comment) => comment.body.includes("Mission oversight restored"))).toBe(true);
+    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, oversightIssueId));
+    expect(activities).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "mission.oversight_restored",
+        entityType: "issue",
+        entityId: oversightIssueId,
+      }),
+    ]));
+  });
+
   it("creates and wakes a main-executor recovery issue for failed issue-less tool steps", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -2423,6 +2574,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(ownerActionIssues[0]?.description).toContain(`<!-- tool-step-recovery:${runId}:collect-signals -->`);
     expect(ownerActionIssues[0]?.description).toContain("Tool names: collect-signals-kr");
     expect(ownerActionIssues[0]?.description).toContain("Failure class: transient_or_external");
+    expect(ownerActionIssues[0]?.description).toContain("Retry policy: retry_with_bounded_backoff");
     expect(ownerActionIssues[0]?.description).toContain("Do not blindly retry this step.");
     expect(ownerActionIssues[0]?.description).toContain("If the tool implementation is broken");
 
@@ -2441,6 +2593,112 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const repeatedOwnerActions = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock"));
     expect(repeatedOwnerActions).toHaveLength(1);
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies issue-less tool recovery from captured runtime evidence before step metadata heuristics", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date("2026-06-12T06:30:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Tool Step Missing File Recovery Company",
+      issuePrefix: `MF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const [mission] = await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Missing file recovery mission",
+      status: "active",
+    }).returning();
+
+    const svc = missionService(db);
+    const oversightIssue = await svc.ensureMainExecutorOversightIssue(mission!, "gazua-macro-sentinel", {
+      sourceRunId: runId,
+      workflowStepIds: ["scan"],
+    });
+
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "gazua-macro-sentinel",
+      stepsJson: [
+        {
+          id: "scan",
+          name: "Macro event scan",
+          type: "tool",
+          dependencies: [],
+          toolNames: ["collect-macro"],
+          description: "Scan macro signals from external sources.",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "test",
+      status: "failed",
+      startedAt: new Date("2026-06-12T06:00:26.096Z"),
+      completedAt: new Date("2026-06-12T06:00:26.323Z"),
+    });
+    await db.insert(workflowStepRuns).values({
+      workflowRunId: runId,
+      stepId: "scan",
+      issueId: null,
+      status: "failed",
+      startedAt: new Date("2026-06-12T06:00:26.106Z"),
+      completedAt: new Date("2026-06-12T06:00:26.302Z"),
+      metadata: {
+        toolResult: {
+          toolName: "collect-macro",
+          success: false,
+          exitCode: 2,
+          error: "Command failed: python3 /Users/kwak/Projects/ai/alpha-prime-personal/scripts/automation/paperclip_run.py collect --mode macro",
+          stdout: "",
+          stderr: "/Users/kwak/.pyenv/versions/3.11.6/bin/python3: can't open file '/Users/kwak/Projects/ai/alpha-prime-personal/scripts/automation/paperclip_run.py': [Errno 2] No such file or directory",
+        },
+      },
+    });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("class=missing_file"),
+    ]));
+    const recoveryIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.originKind, "mission_main_executor_unblock"))
+      .then((rows) => rows.find((issue) => issue.originId === oversightIssue.id)!);
+    expect(recoveryIssue).toEqual(expect.objectContaining({
+      assigneeAgentId: ownerAgentId,
+      status: "todo",
+      title: "[RECOVERY] Tool step failed: scan",
+    }));
+    expect(recoveryIssue.description).toContain(`<!-- tool-step-recovery:${runId}:scan -->`);
+    expect(recoveryIssue.description).toContain("Failure class: missing_file");
+    expect(recoveryIssue.description).toContain("Retry policy: do_not_retry_until_config_fixed");
+    expect(recoveryIssue.description).toContain("can't open file");
+    expect(recoveryIssue.description).toContain("No such file or directory");
+    expect(recoveryIssue.description).toContain("Fix the command, cwd, tool registration");
   });
 
   it("automatically retries completed issue-less tool recovery through the unified workflow engine", async () => {

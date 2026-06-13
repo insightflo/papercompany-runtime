@@ -4,8 +4,8 @@ Session pattern: converting an existing Gazua Markdown market report into a `rep
 
 ## Source and target
 
-- Source example: `reports/deep_dive/202606/Sector_Rotation_Analysis_2026-06-08.md`
-- Target example: `reports/beginner_html/dashboard/deep_dive/202606/Sector_Rotation_Analysis_2026-06-08.html`
+- Source example pattern: Gazua deep-dive markdown under `reports/deep_dive/<YYYYMM>/`.
+- Target example pattern: beginner HTML under `reports/beginner_html/dashboard/deep_dive/<YYYYMM>/`.
 
 ## Dashboard compatibility markers
 

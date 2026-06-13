@@ -5,6 +5,7 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
+import { createDevRunnerDiagnostics, evaluateNodeRuntime, PAPERCLIP_REQUIRED_NODE_MAJOR } from "./dev-runner-diagnostics.mjs";
 
 const mode = process.argv[2] === "watch" ? "watch" : "dev";
 const cliArgs = process.argv.slice(3);
@@ -14,6 +15,14 @@ const gracefulShutdownTimeoutMs = 10_000;
 const changedPathSampleLimit = 5;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const devServerStatusFilePath = path.join(repoRoot, ".paperclip", "dev-server-status.json");
+const diagnostics = createDevRunnerDiagnostics({ repoRoot, env: process.env });
+const nodeRuntime = evaluateNodeRuntime({
+  nodeVersion: process.version,
+  nodeModuleVersion: process.versions.modules,
+  requiredMajor: PAPERCLIP_REQUIRED_NODE_MAJOR,
+});
+const healthDiagnosticsIntervalMs = Number(process.env.PAPERCLIP_DEV_RUNNER_HEALTH_INTERVAL_MS ?? "30000");
+const healthDiagnosticsEnabled = healthDiagnosticsIntervalMs > 0;
 
 const watchedDirectories = [
   ".paperclip",
@@ -77,6 +86,7 @@ const env = {
   ...process.env,
   PAPERCLIP_UI_DEV_MIDDLEWARE: "true",
 };
+env.PATH = [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter);
 
 if (mode === "dev") {
   env.PAPERCLIP_DEV_SERVER_STATUS_FILE = devServerStatusFilePath;
@@ -97,6 +107,19 @@ if (tailscaleAuth) {
   console.log("[paperclip] dev mode: local_trusted (default)");
 }
 
+if (!nodeRuntime.ok) {
+  diagnostics.logEvent("dev_runner_node_runtime_mismatch", {
+    nodeVersion: process.version,
+    nodeModuleVersion: process.versions.modules,
+    currentMajor: nodeRuntime.currentMajor,
+    expectedNodeModuleVersion: nodeRuntime.expectedNodeModuleVersion,
+    requiredMajor: PAPERCLIP_REQUIRED_NODE_MAJOR,
+    message: nodeRuntime.message,
+  });
+  process.stderr.write(`[paperclip] ${nodeRuntime.message}\n`);
+  process.exit(1);
+}
+
 const pnpmBin = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 let previousSnapshot = collectWatchedSnapshot();
 let dirtyPaths = new Set();
@@ -109,8 +132,13 @@ let shuttingDown = false;
 let childExitWasExpected = false;
 let child = null;
 let childExitPromise = null;
+let childStartedAt = null;
+let childLogStream = null;
 let scanTimer = null;
 let autoRestartTimer = null;
+let healthDiagnosticsTimer = null;
+let lastHealthDiagnosticStatus = null;
+let lastHealthDiagnosticLoggedAt = 0;
 
 function toError(error, context = "Dev runner command failed") {
   if (error instanceof Error) return error;
@@ -126,12 +154,14 @@ function toError(error, context = "Dev runner command failed") {
 
 process.on("uncaughtException", (error) => {
   const err = toError(error, "Uncaught exception in dev runner");
+  diagnostics.logEvent("dev_runner_uncaught_exception", { error: diagnostics.safeErrorPayload(err) });
   process.stderr.write(`${err.stack ?? err.message}\n`);
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
   const err = toError(reason, "Unhandled promise rejection in dev runner");
+  diagnostics.logEvent("dev_runner_unhandled_rejection", { error: diagnostics.safeErrorPayload(err) });
   process.stderr.write(`${err.stack ?? err.message}\n`);
   process.exit(1);
 });
@@ -144,6 +174,7 @@ function formatPendingMigrationSummary(migrations) {
 }
 
 function exitForSignal(signal) {
+  diagnostics.logEvent("dev_runner_exit_for_signal", { signal });
   if (signal === "SIGINT") {
     process.exit(130);
   }
@@ -242,6 +273,31 @@ function writeDevServerStatus() {
 function clearDevServerStatus() {
   if (mode !== "dev") return;
   rmSync(devServerStatusFilePath, { force: true });
+}
+
+function closeChildLogStream() {
+  if (!childLogStream) return;
+  childLogStream.end();
+  childLogStream = null;
+}
+
+function teeChildOutput(stream, target, label) {
+  stream.on("data", (chunk) => {
+    target.write(chunk);
+    if (childLogStream) {
+      childLogStream.write(chunk);
+    }
+  });
+  stream.on("error", (error) => {
+    diagnostics.logEvent("server_child_output_stream_error", {
+      stream: label,
+      error: diagnostics.safeErrorPayload(error),
+    });
+  });
+}
+
+function getServerPort() {
+  return env.PORT ?? process.env.PORT ?? "3200";
 }
 
 async function runPnpm(args, options = {}) {
@@ -420,7 +476,7 @@ async function scanForBackendChanges() {
 }
 
 async function getDevHealthPayload() {
-  const serverPort = env.PORT ?? process.env.PORT ?? "3200";
+  const serverPort = getServerPort();
   const response = await fetch(`http://127.0.0.1:${serverPort}/api/health`);
   if (!response.ok) {
     throw new Error(`Health request failed (${response.status})`);
@@ -455,16 +511,74 @@ async function startServerChild() {
   await buildPluginSdk();
 
   const serverScript = mode === "watch" ? "dev:watch" : "dev";
+  const childArgs = ["--filter", "@paperclipai/server", serverScript, ...forwardedArgs];
+  const startedAt = Date.now();
+  childStartedAt = startedAt;
+  closeChildLogStream();
+  childLogStream = diagnostics.openChildLogStream({
+    mode,
+    command: pnpmBin,
+    args: childArgs,
+    cwd: repoRoot,
+  });
   child = spawn(
     pnpmBin,
-    ["--filter", "@paperclipai/server", serverScript, ...forwardedArgs],
-    { stdio: "inherit", env, shell: process.platform === "win32" },
+    childArgs,
+    { stdio: ["ignore", "pipe", "pipe"], env, shell: process.platform === "win32" },
   );
+  diagnostics.logEvent("server_child_spawned", {
+    mode,
+    childPid: child.pid,
+    command: pnpmBin,
+    args: childArgs,
+    serverPort: getServerPort(),
+    nodeVersion: process.version,
+    nodeModuleVersion: process.versions.modules,
+    nodeExecPath: process.execPath,
+    platform: process.platform,
+    arch: process.arch,
+  });
+  if (child.stdout) teeChildOutput(child.stdout, process.stdout, "stdout");
+  if (child.stderr) teeChildOutput(child.stderr, process.stderr, "stderr");
 
   childExitPromise = new Promise((resolve, reject) => {
-    child.on("error", reject);
+    child.on("error", (error) => {
+      diagnostics.logEvent("server_child_spawn_error", {
+        mode,
+        childPid: child?.pid ?? null,
+        error: diagnostics.safeErrorPayload(error),
+      });
+      reject(error);
+    });
     child.on("exit", (code, signal) => {
       const expected = childExitWasExpected;
+      const uptimeMs = Date.now() - startedAt;
+      const recentNodeCrashReports = diagnostics.findRecentNodeCrashReports({
+        sinceMs: startedAt - 5000,
+      });
+      diagnostics.logEvent("server_child_exited", {
+        mode,
+        childPid: child?.pid ?? null,
+        code: code ?? null,
+        signal: signal ?? null,
+        expected,
+        restartInFlight,
+        shuttingDown,
+        uptimeMs,
+        recentNodeCrashReports,
+      });
+      if (childLogStream) {
+        childLogStream.write(
+          `\n[${new Date().toISOString()}] ${JSON.stringify({
+            event: "server_child_output_end",
+            code: code ?? null,
+            signal: signal ?? null,
+            expected,
+            uptimeMs,
+          })}\n`,
+        );
+      }
+      closeChildLogStream();
       childExitWasExpected = false;
       child = null;
       childExitPromise = null;
@@ -493,6 +607,13 @@ async function maybeAutoRestartChild() {
   try {
     health = await getDevHealthPayload();
   } catch {
+    diagnostics.logEvent("auto_restart_health_check_failed", {
+      mode,
+      childPid: child?.pid ?? null,
+      serverPort: getServerPort(),
+      dirtyPathCount: dirtyPaths.size,
+      pendingMigrationCount: pendingMigrations.length,
+    });
     restartInFlight = false;
     return;
   }
@@ -524,6 +645,45 @@ async function maybeAutoRestartChild() {
   }
 }
 
+async function recordHealthDiagnostics() {
+  if (!healthDiagnosticsEnabled) return;
+  const serverPort = getServerPort();
+  const now = Date.now();
+  let status = "healthy";
+  let payload = null;
+  let error = null;
+
+  try {
+    payload = await getDevHealthPayload();
+  } catch (err) {
+    status = "unhealthy";
+    error = diagnostics.safeErrorPayload(toError(err, "Dev runner health probe failed"));
+  }
+
+  const shouldLog =
+    status !== lastHealthDiagnosticStatus ||
+    (status === "unhealthy" && now - lastHealthDiagnosticLoggedAt >= Math.max(healthDiagnosticsIntervalMs * 10, 60_000));
+
+  if (!shouldLog) return;
+
+  lastHealthDiagnosticStatus = status;
+  lastHealthDiagnosticLoggedAt = now;
+  diagnostics.logEvent("dev_runner_health_probe", {
+    mode,
+    status,
+    childPid: child?.pid ?? null,
+    childStartedAt: childStartedAt ? new Date(childStartedAt).toISOString() : null,
+    serverPort,
+    error,
+    health: payload
+      ? {
+          status: payload.status ?? null,
+          devServer: payload.devServer ?? null,
+        }
+      : null,
+  });
+}
+
 function installDevIntervals() {
   if (mode !== "dev") return;
 
@@ -535,6 +695,21 @@ function installDevIntervals() {
   }, autoRestartPollIntervalMs);
 }
 
+function installHealthDiagnostics() {
+  if (!healthDiagnosticsEnabled) return;
+
+  diagnostics.logEvent("dev_runner_health_diagnostics_started", {
+    intervalMs: healthDiagnosticsIntervalMs,
+    serverPort: getServerPort(),
+  });
+  healthDiagnosticsTimer = setInterval(() => {
+    void recordHealthDiagnostics();
+  }, healthDiagnosticsIntervalMs);
+  setTimeout(() => {
+    void recordHealthDiagnostics();
+  }, Math.min(5000, healthDiagnosticsIntervalMs));
+}
+
 function clearDevIntervals() {
   if (scanTimer) {
     clearInterval(scanTimer);
@@ -544,11 +719,19 @@ function clearDevIntervals() {
     clearInterval(autoRestartTimer);
     autoRestartTimer = null;
   }
+  if (healthDiagnosticsTimer) {
+    clearInterval(healthDiagnosticsTimer);
+    healthDiagnosticsTimer = null;
+  }
 }
 
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  diagnostics.logEvent("dev_runner_shutdown_requested", {
+    signal: signal ?? null,
+    childPid: child?.pid ?? null,
+  });
   clearDevIntervals();
   clearDevServerStatus();
 
@@ -563,6 +746,10 @@ async function shutdown(signal) {
   childExitWasExpected = true;
   child.kill(signal);
   const exit = await waitForChildExit();
+  diagnostics.logEvent("dev_runner_shutdown_child_exit_observed", {
+    signal: signal ?? null,
+    exit,
+  });
   if (exit.signal) {
     exitForSignal(exit.signal);
     return;
@@ -577,9 +764,25 @@ process.on("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
+diagnostics.logEvent("dev_runner_started", {
+  mode,
+  pid: process.pid,
+  ppid: process.ppid,
+  cwd: process.cwd(),
+  repoRoot,
+  forwardedArgs,
+  serverPort: getServerPort(),
+  nodeVersion: process.version,
+  nodeModuleVersion: process.versions.modules,
+  nodeExecPath: process.execPath,
+  platform: process.platform,
+  arch: process.arch,
+});
+
 await maybePreflightMigrations();
 await startServerChild();
 installDevIntervals();
+installHealthDiagnostics();
 
 if (mode === "watch") {
   const exit = await waitForChildExit();

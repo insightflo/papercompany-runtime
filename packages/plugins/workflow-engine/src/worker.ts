@@ -752,6 +752,10 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function parseOptionalMetadata(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
 type WorkflowIssueCreateInput = IssueCreateInput & Record<string, unknown> & {
   missionId?: string | null;
   originKind?: string | null;
@@ -3104,6 +3108,7 @@ const plugin = definePlugin({
         createParentIssuePolicy: normalizeCreateParentIssuePolicy(workflow.createParentIssuePolicy),
         executionMode: parseWorkflowExecutionMode(workflow.executionMode),
         dynamicPlanBootstrapOnly: parseOptionalBoolean(workflow.dynamicPlanBootstrapOnly),
+        legacyMetadata: parseOptionalMetadata(workflow.legacyMetadata),
       };
       const created = await createWorkflowDefinition(ctx, def);
       return { id: created.id, ...def };
@@ -3145,6 +3150,9 @@ const plugin = definePlugin({
       }
       if ("dynamicPlanBootstrapOnly" in source) {
         patch.dynamicPlanBootstrapOnly = parseOptionalBoolean(source.dynamicPlanBootstrapOnly);
+      }
+      if ("legacyMetadata" in source) {
+        patch.legacyMetadata = parseOptionalMetadata(source.legacyMetadata) ?? {};
       }
       const updated = await updateWorkflowDefinition(ctx, workflowId, patch);
       return { id: updated.id, ...updated.data };
@@ -3271,12 +3279,16 @@ const plugin = definePlugin({
           const stepDefinition = stepDefinitionById.get(stepRun.data.stepId);
           const issueId = typeof stepRun.data.issueId === "string" ? stepRun.data.issueId.trim() : "";
           let issueIdentifier: string | undefined;
+          let workProducts: unknown[] = [];
           if (issueId) {
             try {
               const issue = await ctx.issues.get(issueId, typedWorkflowRun.data.companyId);
               issueIdentifier = issue && typeof issue.identifier === "string" ? issue.identifier : undefined;
+              const issueRecord = issue as unknown as Record<string, unknown> | null;
+              workProducts = Array.isArray(issueRecord?.workProducts) ? issueRecord.workProducts : [];
             } catch {
               issueIdentifier = undefined;
+              workProducts = [];
             }
           }
 
@@ -3287,6 +3299,7 @@ const plugin = definePlugin({
             stepTitle: stepDefinition?.title ?? stepRun.data.stepId,
             stepType: stepDefinition?.type ?? undefined,
             issueIdentifier,
+            workProducts,
           };
         }));
 

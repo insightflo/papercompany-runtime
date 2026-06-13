@@ -103,6 +103,7 @@ const RUN_ACTIVITY_TOUCH_INTERVAL_MS = 15 * 1000;
 const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
+const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
@@ -2023,17 +2024,38 @@ function buildFailedIssueRunAutoBlockedComment(input: {
   const { run, classification } = input;
   const rawReason = (run.error ?? run.stderrExcerpt ?? run.stdoutExcerpt ?? "").trim();
   const reasonExcerpt = rawReason.length > 1200 ? rawReason.slice(0, 1200) : rawReason;
+  const recoveryLines = buildRunRecoveryLines(run);
   return [
     "## 자동 차단: linked run ended with failure",
     `- 실행 runId: \`${run.id}\``,
     `- run status: \`${run.status}\``,
     `- 분류: \`${classification.reasonCode}\` (${classification.category})`,
     `- 요약: ${classification.summary}`,
+    ...recoveryLines,
     classification.fallbackCandidates.length > 0
       ? `- fallback/대체 후보: ${classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
       : "- fallback/대체 후보: 자동 선택 안 함 — owner/oversight 재검토 필요",
     reasonExcerpt ? ["", "### Failure excerpt", "```text", reasonExcerpt, "```"].join("\n") : "",
   ].filter((line) => line.length > 0).join("\n");
+}
+
+function buildRunRecoveryLines(run: typeof heartbeatRuns.$inferSelect) {
+  const context = parseObject(run.contextSnapshot);
+  const lines: string[] = [];
+  if (run.errorCode === "process_lost") {
+    const retryCount = run.processLossRetryCount ?? 0;
+    const fallbackAttempt = resolveAdapterFallbackAttempt(context);
+    lines.push(`- 복구 상태: process_lost retry ${retryCount}/1, adapter fallback ${fallbackAttempt}회 시도됨`);
+    if (run.retryOfRunId) lines.push(`- 이전 run: \`${run.retryOfRunId}\``);
+    const fallbackOfRunId = readNonEmptyString(context.fallbackOfRunId);
+    if (fallbackOfRunId) lines.push(`- fallback 기준 run: \`${fallbackOfRunId}\``);
+    if (retryCount >= 1 && fallbackAttempt > 0) {
+      lines.push("- 판정: 자동 retry/fallback 한도를 소진하여 동일 issue를 계속 반복 실행하지 않고 차단함");
+    } else if (retryCount >= 1) {
+      lines.push("- 판정: 자동 retry 한도를 소진하여 동일 issue를 계속 반복 실행하지 않고 차단함");
+    }
+  }
+  return lines;
 }
 
 function buildMissionWorkerFailureOversightComment(input: {
@@ -2049,6 +2071,7 @@ function buildMissionWorkerFailureOversightComment(input: {
     `- run status: \`${input.run.status}\``,
     `- classification: \`${input.classification.reasonCode}\` (${input.classification.category})`,
     `- summary: ${input.classification.summary}`,
+    ...buildRunRecoveryLines(input.run),
     input.classification.fallbackCandidates.length > 0
       ? `- fallback candidates: ${input.classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
       : "- fallback candidates: none auto-selected; owner should decide retry/reassign/escalate.",
@@ -2070,6 +2093,15 @@ function buildMissionOversightRunFailureComment(input: {
       ? `- fallback candidates: ${input.classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
       : "- fallback candidates: none auto-selected; owner should decide retry/reassign/escalate.",
     "- policy: mission oversight is the supervisor for this mission, so a failed oversight run releases the issue back to todo instead of blocking the supervisor itself.",
+  ].join("\n");
+}
+
+function buildMissionOversightRunSucceededReleaseComment(run: typeof heartbeatRuns.$inferSelect, missionStatus: string) {
+  return [
+    "## Mission oversight run succeeded and the supervisor issue remains open",
+    `- succeeded runId: \`${run.id}\``,
+    `- mission status: \`${missionStatus}\``,
+    "- policy: mission oversight stays alive until the mission is completed or cancelled, so this successful cycle releases the issue back to todo instead of closing it.",
   ].join("\n");
 }
 
@@ -5440,6 +5472,69 @@ export function heartbeatService(db: Db) {
           });
           postTransactionWorkflowIssueSyncIssueId = issue.id;
           return null;
+        }
+      }
+
+      if (
+        shouldAutoCompleteSuccessfulIssue &&
+        issue.originKind === "mission_main_executor_oversight" &&
+        issue.missionId
+      ) {
+        const [mission] = await tx
+          .select({ id: missions.id, status: missions.status })
+          .from(missions)
+          .where(and(eq(missions.id, issue.missionId), eq(missions.companyId, issue.companyId)))
+          .limit(1);
+        if (mission && !TERMINAL_MISSION_STATUSES.has(mission.status)) {
+          const now = new Date();
+          const latestRunForComment = await tx
+            .select()
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, run.id))
+            .limit(1)
+            .then((rows) => rows[0] ?? run);
+          await tx
+            .update(issues)
+            .set({
+              status: "todo",
+              checkoutRunId: null,
+              executionRunId: null,
+              executionAgentNameKey: null,
+              executionLockedAt: null,
+              completedAt: null,
+              cancelledAt: null,
+              updatedAt: now,
+            })
+            .where(eq(issues.id, issue.id));
+          await tx.insert(issueComments).values({
+            companyId: issue.companyId,
+            issueId: issue.id,
+            authorAgentId: run.agentId,
+            body: buildMissionOversightRunSucceededReleaseComment(latestRunForComment, mission.status),
+          });
+          await tx.insert(activityLog).values({
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "mission.oversight_run_succeeded_released",
+            entityType: "mission",
+            entityId: issue.missionId,
+            agentId: run.agentId,
+            runId: run.id,
+            details: {
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              previousStatus: issue.status,
+              nextStatus: "todo",
+              reason: "oversight_successful_run_kept_alive_until_mission_terminal",
+              missionStatus: mission.status,
+            },
+          });
+          postTransactionWorkflowIssueSyncIssueId = issue.id;
+          return {
+            promotedRun: null,
+            postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
+          };
         }
       }
 

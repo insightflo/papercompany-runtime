@@ -519,6 +519,14 @@ describe("heartbeat orphaned process recovery", () => {
     expect(issue?.executionRunId).toBeNull();
     expect(issue?.checkoutRunId).toBeNull();
     expect(issue?.status).toBe("blocked");
+
+    const commentBody = await db
+      .select({ body: issueComments.body })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId))
+      .then((rows) => rows.map((row) => row.body).join("\n"));
+    expect(commentBody).toContain("복구 상태: process_lost retry 1/1, adapter fallback 0회 시도됨");
+    expect(commentBody).toContain("자동 retry 한도를 소진");
   });
 
   it("queues an adapter fallback run after process-loss retry is exhausted", async () => {

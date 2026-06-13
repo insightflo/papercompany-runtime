@@ -42,7 +42,7 @@
     "vitest": "^3.0.5"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24 <25"
   },
   "packageManager": "pnpm@9.15.4"
 }

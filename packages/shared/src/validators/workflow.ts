@@ -160,6 +160,7 @@ export const createWorkflowDefinitionSchema = z.object({
   createParentIssuePolicy: z.string().nullable().optional(),
   executionMode: workflowExecutionModeSchema.nullable().optional(),
   dynamicPlanBootstrapOnly: z.boolean().optional(),
+  legacyMetadata: metadataSchema.optional(),
 }).strict();
 
 export type CreateWorkflowDefinition = z.infer<typeof createWorkflowDefinitionSchema>;

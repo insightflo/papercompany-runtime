@@ -143,42 +143,17 @@ function formatEventNotification(event: { type: string; payload?: Record<string,
       const status = payload?.status as string | undefined;
       const runId = payload?.runId as string | undefined;
       if (!status || !runId) return null;
+      // Only notify on terminal states — skip intermediate noise (queued/running)
+      if (!["succeeded", "failed", "timed_out", "cancelled"].includes(status)) return null;
       const emoji = getRunStatusEmoji(status);
       const runLabel = runId.slice(0, 8);
       return formatSuccess(`${emoji} Run *${runLabel}* — ${formatStatus(status)}`);
     }
 
-    case "heartbeat.run.queued": {
-      const runId = payload?.runId as string | undefined;
-      const runLabel = runId?.slice(0, 8) ?? "unknown";
-      return `Run *${runLabel}* queued for execution.`;
-    }
-
-    case "heartbeat.run.event": {
-      const eventType = payload?.event as string | undefined;
-      const runId = payload?.runId as string | undefined;
-      if (!eventType) return null;
-      const runLabel = runId?.slice(0, 8) ?? "unknown";
-      return `Run *${runLabel}*: ${eventType}`;
-    }
-
-    case "agent.status": {
-      const agentId = payload?.agentId as string | undefined;
-      const status = payload?.status as string | undefined;
-      if (!status) return null;
-      const agentLabel = agentId?.slice(0, 8) ?? "agent";
-      return `Agent *${agentLabel}* is now ${formatStatus(status)}`;
-    }
-
-    case "activity.logged": {
-      // High-volume event — only notify for significant activities
-      const action = payload?.action as string | undefined;
-      const entityType = payload?.entityType as string | undefined;
-      if (!action || !entityType) return null;
-      // Only notify for important entity types
-      if (!["mission", "issue", "approval"].includes(entityType)) return null;
-      return `Activity: *${entityType}* — ${action}`;
-    }
+    // heartbeat.run.queued — suppressed: intermediate noise
+    // agent.status — suppressed: intermediate noise
+    // heartbeat.run.event — suppressed: intermediate noise
+    // activity.logged — suppressed: intermediate noise
 
     case "plugin.ui.updated": {
       const action = payload?.action as string | undefined;

@@ -79,6 +79,10 @@ export async function applyIssueUpdatedSideEffects(input: {
     Object.prototype.hasOwnProperty.call(previous, "status") &&
     input.existing.status === "backlog" &&
     input.updated.status !== "backlog";
+  const statusChangedToRunnable =
+    Object.prototype.hasOwnProperty.call(previous, "status") &&
+    input.existing.status !== input.updated.status &&
+    (input.updated.status === "todo" || input.updated.status === "in_progress");
 
   if (assigneeChanged) {
     void queueIssueAssignmentWakeup({
@@ -97,7 +101,7 @@ export async function applyIssueUpdatedSideEffects(input: {
     return;
   }
 
-  if (statusChangedFromBacklog) {
+  if (statusChangedFromBacklog || statusChangedToRunnable) {
     const assigneeAgentId = input.updated.assigneeAgentId ?? null;
     if (!assigneeAgentId || input.updated.status === "backlog") return;
     void input.heartbeat.wakeup(assigneeAgentId, {

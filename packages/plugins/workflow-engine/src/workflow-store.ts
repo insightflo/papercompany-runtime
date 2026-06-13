@@ -32,6 +32,7 @@ export interface WorkflowDefinition extends Record<string, unknown> {
    */
   executionMode?: WorkflowExecutionMode;
   dynamicPlanBootstrapOnly?: boolean;
+  legacyMetadata?: Record<string, unknown>;
 }
 
 export interface WorkflowRun extends Record<string, unknown> {

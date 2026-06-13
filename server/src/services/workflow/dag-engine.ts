@@ -5,7 +5,7 @@
  * A workflow is a DAG where each step has dependencies on other steps.
  */
 
-import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
@@ -14,6 +14,7 @@ import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
+import { logActivity } from "../activity-log.js";
 
 /**
  * Workflow step definition.
@@ -51,9 +52,19 @@ export interface WorkflowStep {
   bootstrapOnly?: boolean | string;
   executionMode?: "static_dag" | "dynamic_owner_plan" | string;
   workflowMode?: "static_dag" | "dynamic_owner_plan" | string;
+  executionControls?: WorkflowStepExecutionControls;
 }
 
 export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
+
+export interface WorkflowStepExecutionControls {
+  concurrencyKey?: string;
+  concurrencyLimit?: number;
+  priority?: string;
+  cacheEnabled?: boolean;
+  cacheTtlSeconds?: number;
+  deleteAfterUse?: boolean;
+}
 
 type PersistedWorkflowStep = WorkflowStep & {
   title?: unknown;
@@ -63,6 +74,13 @@ type PersistedWorkflowStep = WorkflowStep & {
   toolArgs?: unknown;
   type?: unknown;
   agentName?: unknown;
+  executionControls?: unknown;
+  graphConcurrencyKey?: unknown;
+  graphConcurrencyLimit?: unknown;
+  graphPriority?: unknown;
+  graphCacheEnabled?: unknown;
+  graphCacheTtlSeconds?: unknown;
+  graphDeleteAfterUse?: unknown;
 };
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
@@ -123,6 +141,60 @@ function normalizeStringArray(value: unknown): string[] | undefined {
   return undefined;
 }
 
+function normalizeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function normalizeBooleanMarker(value: unknown): boolean | undefined {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") return true;
+    if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off" || normalized === "") return false;
+  }
+  return undefined;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const numberValue = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim()
+      ? Number(value.trim())
+      : NaN;
+  if (!Number.isFinite(numberValue)) return undefined;
+  const integer = Math.trunc(numberValue);
+  return integer > 0 ? integer : undefined;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeWorkflowStepExecutionControls(step: PersistedWorkflowStep): WorkflowStepExecutionControls | undefined {
+  const rawControls = normalizeRecord(step.executionControls);
+  const concurrencyKey = normalizeOptionalString(rawControls.concurrencyKey) ?? normalizeOptionalString(step.graphConcurrencyKey);
+  const concurrencyLimit = normalizePositiveInteger(rawControls.concurrencyLimit) ?? normalizePositiveInteger(step.graphConcurrencyLimit);
+  const priority = (normalizeOptionalString(rawControls.priority) ?? normalizeOptionalString(step.graphPriority))?.toLowerCase();
+  const explicitCacheEnabled = normalizeBooleanMarker(rawControls.cacheEnabled) ?? normalizeBooleanMarker(step.graphCacheEnabled);
+  const cacheTtlSeconds = normalizePositiveInteger(rawControls.cacheTtlSeconds) ?? normalizePositiveInteger(step.graphCacheTtlSeconds);
+  const deleteAfterUse = normalizeBooleanMarker(rawControls.deleteAfterUse) ?? normalizeBooleanMarker(step.graphDeleteAfterUse);
+  const controls: WorkflowStepExecutionControls = {};
+
+  if (concurrencyKey) controls.concurrencyKey = concurrencyKey;
+  if (concurrencyLimit) controls.concurrencyLimit = concurrencyLimit;
+  if (priority) controls.priority = priority;
+  if (explicitCacheEnabled === true || cacheTtlSeconds) {
+    controls.cacheEnabled = true;
+  }
+  if (controls.cacheEnabled && cacheTtlSeconds) {
+    controls.cacheTtlSeconds = cacheTtlSeconds;
+  }
+  if (deleteAfterUse === true) controls.deleteAfterUse = true;
+
+  return Object.keys(controls).length > 0 ? controls : undefined;
+}
+
 export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowStep[] {
   if (!Array.isArray(rawSteps)) return [];
   return rawSteps.map((rawStep) => {
@@ -131,6 +203,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
     const toolNames = normalizeStringArray(step.toolNames)
       ?? normalizeStringArray(step.tools)
       ?? normalizeStringArray(step.toolName);
+    const executionControls = normalizeWorkflowStepExecutionControls(step);
     return {
       ...step,
       id: typeof step.id === "string" && step.id.trim() ? step.id.trim() : crypto.randomUUID(),
@@ -144,6 +217,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       agentId: typeof step.agentId === "string" ? step.agentId : "",
       dependencies,
       ...(toolNames ? { toolNames } : {}),
+      ...(executionControls ? { executionControls } : {}),
     };
   });
 }
@@ -397,15 +471,63 @@ async function ensureStepRunRecords(
         workflowRunId: runId,
         stepId: step.id,
         status: "pending",
+        metadata: buildWorkflowStepRunMetadata(step),
       })),
     );
   }
 
-  if (missingSteps.length === 0) return existing;
-  return db
+  const stepRuns = missingSteps.length === 0
+    ? existing
+    : await db
     .select()
     .from(workflowStepRuns)
     .where(eq(workflowStepRuns.workflowRunId, runId));
+  return syncStepRunExecutionControlMetadata(db, stepRuns, steps);
+}
+
+function buildWorkflowStepRunMetadata(
+  step: WorkflowStep,
+  existingMetadata: unknown = {},
+): Record<string, unknown> {
+  const metadata = { ...normalizeRecord(existingMetadata) };
+  if (step.executionControls && Object.keys(step.executionControls).length > 0) {
+    metadata.executionControls = step.executionControls;
+  } else {
+    delete metadata.executionControls;
+  }
+  return metadata;
+}
+
+function metadataJson(value: unknown): string {
+  return JSON.stringify(value ?? {});
+}
+
+async function syncStepRunExecutionControlMetadata(
+  db: Db,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+  steps: WorkflowStep[],
+): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  if (stepRuns.length === 0) return stepRuns;
+
+  const stepById = new Map(steps.map((step) => [step.id, step]));
+  let changed = false;
+  for (const stepRun of stepRuns) {
+    const step = stepById.get(stepRun.stepId);
+    if (!step) continue;
+    const nextMetadata = buildWorkflowStepRunMetadata(step, stepRun.metadata);
+    if (metadataJson(stepRun.metadata) === metadataJson(nextMetadata)) continue;
+    changed = true;
+    await db
+      .update(workflowStepRuns)
+      .set({ metadata: nextMetadata })
+      .where(eq(workflowStepRuns.id, stepRun.id));
+  }
+
+  if (!changed) return stepRuns;
+  return db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
 }
 
 function desiredStepRunStatusFromIssueStatus(issueStatus: string): "pending" | "running" | "completed" | "failed" {
@@ -623,6 +745,7 @@ async function wakeExistingWorkflowStepIssue(input: {
   const [issue] = await input.db
     .select({
       id: issues.id,
+      companyId: issues.companyId,
       assigneeAgentId: issues.assigneeAgentId,
       status: issues.status,
     })
@@ -631,9 +754,48 @@ async function wakeExistingWorkflowStepIssue(input: {
     .limit(1);
   if (!issue || issue.status !== "todo") return;
 
+  let wakeIssue = issue;
+  if (!wakeIssue.assigneeAgentId) {
+    const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, input.step);
+    if (!assigneeAgentId) return;
+
+    const [updatedIssue] = await input.db
+      .update(issues)
+      .set({
+        assigneeAgentId,
+        updatedAt: new Date(),
+      })
+      .where(eq(issues.id, wakeIssue.id))
+      .returning({
+        id: issues.id,
+        companyId: issues.companyId,
+        assigneeAgentId: issues.assigneeAgentId,
+        status: issues.status,
+      });
+    if (!updatedIssue) return;
+
+    await logActivity(input.db, {
+      companyId: updatedIssue.companyId,
+      actorType: "system",
+      actorId: `workflow:${input.definition.id}`,
+      action: "issue.assignee_restored",
+      entityType: "issue",
+      entityId: updatedIssue.id,
+      details: {
+        assigneeAgentId,
+        reason: "workflow_step_runnable",
+        workflowRunId: input.run.id,
+        workflowDefinitionId: input.definition.id,
+        stepId: input.step.id,
+      },
+    });
+
+    wakeIssue = updatedIssue;
+  }
+
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
-    issue,
+    issue: wakeIssue,
     reason: "workflow_step_runnable",
     mutation: "workflow_resume",
     contextSource: "workflow.resume",
@@ -740,6 +902,181 @@ function buildWorkflowToolStepArgs(
   return renderWorkflowToolStepArgTemplates(args, run);
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function getMetadataRecord(value: unknown, key: string): Record<string, unknown> {
+  const metadata = normalizeRecord(value);
+  return normalizeRecord(metadata[key]);
+}
+
+function isCacheEnabled(step: WorkflowStep): boolean {
+  return step.executionControls?.cacheEnabled === true;
+}
+
+function workflowPriorityRank(priority: string | undefined): number {
+  switch (priority) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "normal":
+      return 2;
+    case "low":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function sortWorkflowStepsByPriority(steps: WorkflowStep[]): WorkflowStep[] {
+  return [...steps].sort((left, right) =>
+    workflowPriorityRank(right.executionControls?.priority) - workflowPriorityRank(left.executionControls?.priority)
+  );
+}
+
+function getCacheTtlSeconds(step: WorkflowStep): number | undefined {
+  return typeof step.executionControls?.cacheTtlSeconds === "number" && step.executionControls.cacheTtlSeconds > 0
+    ? step.executionControls.cacheTtlSeconds
+    : undefined;
+}
+
+async function findCachedToolStepRun(input: {
+  db: Db;
+  run: typeof workflowRuns.$inferSelect;
+  definition: typeof workflowDefinitions.$inferSelect;
+  step: WorkflowStep;
+  toolName: string;
+  args: unknown;
+  now: Date;
+}): Promise<typeof workflowStepRuns.$inferSelect | null> {
+  if (!isCacheEnabled(input.step)) return null;
+
+  const ttlSeconds = getCacheTtlSeconds(input.step);
+  const cutoff = ttlSeconds ? new Date(input.now.getTime() - ttlSeconds * 1000) : null;
+  const conditions = [
+    eq(workflowRuns.companyId, input.run.companyId),
+    eq(workflowRuns.workflowId, input.definition.id),
+    ne(workflowRuns.id, input.run.id),
+    eq(workflowStepRuns.stepId, input.step.id),
+    eq(workflowStepRuns.status, "completed"),
+    ...(cutoff ? [gte(workflowStepRuns.completedAt, cutoff)] : []),
+  ];
+  const rows = await input.db
+    .select({ stepRun: workflowStepRuns })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .where(and(...conditions))
+    .orderBy(desc(workflowStepRuns.completedAt))
+    .limit(25);
+  const argsKey = stableJson(input.args);
+
+  for (const row of rows) {
+    const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
+    const result = getMetadataRecord(row.stepRun.metadata, "toolResult");
+    if (result.success !== true) continue;
+    if (invocation.toolName !== input.toolName) continue;
+    if (stableJson(invocation.args ?? {}) !== argsKey) continue;
+    return row.stepRun;
+  }
+
+  return null;
+}
+
+async function getRunningConcurrencyCount(input: {
+  db: Db;
+  run: typeof workflowRuns.$inferSelect;
+  stepRun: typeof workflowStepRuns.$inferSelect;
+  concurrencyKey: string;
+}): Promise<number> {
+  const rows = await input.db
+    .select({ stepRun: workflowStepRuns })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .where(and(
+      eq(workflowRuns.companyId, input.run.companyId),
+      eq(workflowStepRuns.status, "running"),
+      ne(workflowStepRuns.id, input.stepRun.id),
+    ));
+  return rows.filter((row) => {
+    const controls = getMetadataRecord(row.stepRun.metadata, "executionControls");
+    return controls.concurrencyKey === input.concurrencyKey;
+  }).length;
+}
+
+async function blockToolStepRunForConcurrency(input: {
+  db: Db;
+  step: WorkflowStep;
+  stepRun: typeof workflowStepRuns.$inferSelect;
+  concurrencyKey: string;
+  concurrencyLimit: number;
+  runningCount: number;
+  now: Date;
+}): Promise<void> {
+  await input.db
+    .update(workflowStepRuns)
+    .set({
+      status: "pending",
+      metadata: {
+        ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
+        concurrencyBlocked: {
+          concurrencyKey: input.concurrencyKey,
+          concurrencyLimit: input.concurrencyLimit,
+          runningCount: input.runningCount,
+          checkedAt: input.now.toISOString(),
+        },
+      },
+    })
+    .where(eq(workflowStepRuns.id, input.stepRun.id));
+}
+
+async function completeToolStepRunFromCache(input: {
+  db: Db;
+  stepRun: typeof workflowStepRuns.$inferSelect;
+  sourceStepRun: typeof workflowStepRuns.$inferSelect;
+  step: WorkflowStep;
+  toolName: string;
+  args: unknown;
+  now: Date;
+}): Promise<void> {
+  const sourceMetadata = normalizeRecord(input.sourceStepRun.metadata);
+  const sourceToolResult = normalizeRecord(sourceMetadata.toolResult);
+  const metadata: Record<string, unknown> = {
+    ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
+    toolInvocation: {
+      toolName: input.toolName,
+      args: input.args,
+      cacheCheckedAt: input.now.toISOString(),
+    },
+    toolResult: sourceToolResult,
+    cacheHit: {
+      sourceStepRunId: input.sourceStepRun.id,
+      toolName: input.toolName,
+      completedAt: input.now.toISOString(),
+    },
+  };
+  delete metadata.concurrencyBlocked;
+
+  await input.db
+    .update(workflowStepRuns)
+    .set({
+      status: "completed",
+      startedAt: input.stepRun.startedAt ?? input.now,
+      completedAt: input.now,
+      metadata,
+    })
+    .where(eq(workflowStepRuns.id, input.stepRun.id));
+}
+
 function renderWorkflowRunTextTemplate(
   value: string,
   run: typeof workflowRuns.$inferSelect,
@@ -809,12 +1146,67 @@ async function startIssueLessToolStepRun(input: {
     return delegated;
   }
 
+  const requestId = `${run.id}:${step.id}:${Date.now()}`;
+  const args = buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run);
+  const concurrencyKey = step.executionControls?.concurrencyKey;
+  const concurrencyLimit = step.executionControls?.concurrencyLimit;
+  if (concurrencyKey && typeof concurrencyLimit === "number" && concurrencyLimit > 0) {
+    const runningCount = await getRunningConcurrencyCount({
+      db,
+      run,
+      stepRun,
+      concurrencyKey,
+    });
+    if (runningCount >= concurrencyLimit) {
+      await blockToolStepRunForConcurrency({
+        db,
+        step,
+        stepRun,
+        concurrencyKey,
+        concurrencyLimit,
+        runningCount,
+        now,
+      });
+      return true;
+    }
+  }
+  const cachedStepRun = await findCachedToolStepRun({
+    db,
+    run,
+    definition,
+    step,
+    toolName,
+    args,
+    now,
+  });
+  if (cachedStepRun) {
+    await completeToolStepRunFromCache({
+      db,
+      stepRun,
+      sourceStepRun: cachedStepRun,
+      step,
+      toolName,
+      args,
+      now,
+    });
+    return true;
+  }
+
   if (!workflowToolStepExecutor) {
     await failToolStepRun(db, stepRun, now);
     return false;
   }
 
-  const requestId = `${run.id}:${step.id}:${Date.now()}`;
+  const metadata: Record<string, unknown> = {
+    ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
+    toolInvocation: {
+      requestId,
+      toolName,
+      args,
+      dispatchedAt: now.toISOString(),
+    },
+  };
+  delete metadata.concurrencyBlocked;
 
   await db
     .update(workflowStepRuns)
@@ -824,6 +1216,7 @@ async function startIssueLessToolStepRun(input: {
       completedAt: null,
       lastDispatchAttemptAt: now,
       lastDispatchRequestId: requestId,
+      metadata,
     })
     .where(eq(workflowStepRuns.id, stepRun.id));
 
@@ -835,7 +1228,7 @@ async function startIssueLessToolStepRun(input: {
       stepId: step.id,
       stepRunId: stepRun.id,
       toolName,
-      args: buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run),
+      args,
       requestId,
     });
     if (dispatchResult?.accepted !== false) {
@@ -911,9 +1304,10 @@ export async function completeWorkflowToolStepFromResult(
   },
 ): Promise<WorkflowExecutionResult | null> {
   const row = await db
-    .select({ stepRun: workflowStepRuns, run: workflowRuns })
+    .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
     .from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(eq(workflowStepRuns.id, input.stepRunId))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -933,19 +1327,40 @@ export async function completeWorkflowToolStepFromResult(
   const existingMetadata = row.stepRun.metadata && typeof row.stepRun.metadata === "object" && !Array.isArray(row.stepRun.metadata)
     ? row.stepRun.metadata
     : {};
-  const resultMetadata = {
-    ...existingMetadata,
-    toolResult: {
-      requestId: input.requestId ?? row.stepRun.lastDispatchRequestId ?? null,
-      toolName: input.toolName ?? null,
-      success: input.success,
-      stdout: input.stdout ?? null,
-      stderr: input.stderr ?? null,
-      exitCode: input.exitCode ?? null,
-      error: input.error ?? null,
-      completedAt: now.toISOString(),
-    },
+  const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
+  const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+  const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
+    || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
+  const toolResult = {
+    requestId: input.requestId ?? row.stepRun.lastDispatchRequestId ?? null,
+    toolName: input.toolName ?? null,
+    success: input.success,
+    stdout: input.stdout ?? null,
+    stderr: input.stderr ?? null,
+    exitCode: input.exitCode ?? null,
+    error: input.error ?? null,
+    completedAt: now.toISOString(),
   };
+  const resultMetadata: Record<string, unknown> = deleteAfterUse
+    ? {
+      ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
+      retentionDeleted: {
+        deleteAfterUse: true,
+        toolName: input.toolName ?? null,
+        success: input.success,
+        exitCode: input.exitCode ?? null,
+        deletedAt: now.toISOString(),
+      },
+    }
+    : {
+      ...existingMetadata,
+      toolResult,
+    };
+  if (deleteAfterUse) {
+    delete resultMetadata.toolInvocation;
+    delete resultMetadata.toolResult;
+    delete resultMetadata.cacheHit;
+  }
   await db
     .update(workflowStepRuns)
     .set({
@@ -1240,9 +1655,9 @@ export async function syncWorkflowRunState(
     while (shouldContinue) {
       shouldContinue = false;
       const stepRunMap = buildStepRunMap(stepRuns);
-      const runnableSteps = findRunnableSteps(context.steps, stepRunMap, {
+      const runnableSteps = sortWorkflowStepsByPriority(findRunnableSteps(context.steps, stepRunMap, {
         launchedStepIds: dynamicLaunchStepIds,
-      });
+      }));
       if (runnableSteps.length === 0) break;
 
       let failedIssueLessToolStep = false;

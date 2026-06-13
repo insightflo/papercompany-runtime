@@ -76,7 +76,12 @@ async function assertCanCompleteMissionOversightIssue(db: Db, issue: typeof issu
     .from(missions)
     .where(and(eq(missions.id, issue.missionId), eq(missions.companyId, issue.companyId)))
     .limit(1);
-  if (!mission || TERMINAL_MISSION_STATUSES.has(mission.status)) return;
+  if (!mission) return;
+  if (!TERMINAL_MISSION_STATUSES.has(mission.status)) {
+    throw unprocessable(
+      `Cannot complete mission oversight while mission ${mission.id} is ${mission.status}.`,
+    );
+  }
 
   const openWork = await db
     .select({

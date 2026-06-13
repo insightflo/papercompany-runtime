@@ -13,6 +13,12 @@ await esbuild.build({
   format: "esm",
   platform: "browser",
   target: ["es2022"],
+  jsx: "transform",
+  tsconfigRaw: {
+    compilerOptions: {
+      jsx: "react",
+    },
+  },
   sourcemap: true,
   external: [
     "react",

@@ -1,5 +1,5 @@
 import { Link } from "@/lib/router";
-import { Menu } from "lucide-react";
+import { Menu, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useSidebar } from "../context/SidebarContext";
 import { useCompany } from "../context/CompanyContext";
@@ -32,7 +32,7 @@ function GlobalToolbarPlugins({ context }: { context: GlobalToolbarContext }) {
 
 export function BreadcrumbBar() {
   const { breadcrumbs } = useBreadcrumbs();
-  const { toggleSidebar, isMobile } = useSidebar();
+  const { sidebarOpen, toggleSidebar, isMobile } = useSidebar();
   const { selectedCompanyId, selectedCompany } = useCompany();
 
   const globalToolbarSlotContext = useMemo(
@@ -45,25 +45,35 @@ export function BreadcrumbBar() {
 
   const globalToolbarSlots = <GlobalToolbarPlugins context={globalToolbarSlotContext} />;
 
-  if (breadcrumbs.length === 0) {
-    return (
-      <div className="border-b border-border px-4 md:px-6 h-12 shrink-0 flex items-center justify-end">
-        {globalToolbarSlots}
-      </div>
-    );
-  }
-
-  const menuButton = isMobile && (
+  const menuButton = (
     <Button
       variant="ghost"
       size="icon-sm"
       className="mr-2 shrink-0"
       onClick={toggleSidebar}
-      aria-label="Open sidebar"
+      aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+      title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+      aria-expanded={sidebarOpen}
     >
-      <Menu className="h-5 w-5" />
+      {isMobile ? (
+        <Menu className="h-5 w-5" />
+      ) : sidebarOpen ? (
+        <PanelLeftClose className="h-4 w-4" />
+      ) : (
+        <PanelLeftOpen className="h-4 w-4" />
+      )}
     </Button>
   );
+
+  if (breadcrumbs.length === 0) {
+    return (
+      <div className="border-b border-border px-4 md:px-6 h-12 shrink-0 flex items-center">
+        {menuButton}
+        <div className="min-w-0 flex-1" />
+        {globalToolbarSlots}
+      </div>
+    );
+  }
 
   // Single breadcrumb = page title (uppercase)
   if (breadcrumbs.length === 1) {

@@ -1930,6 +1930,57 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(paqoDefinitions).toHaveLength(0);
   });
 
+  it("materializes PLAN mission units assigned to currently running agents", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const runningAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: runningAgentId,
+      companyId,
+      name: "Busy but runnable agent",
+      role: "worker",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        missionGoal: "Dispatch after current run",
+        selectedExecutionUnits: [
+          {
+            id: "unit-running-agent",
+            kind: "mission_plan_unit",
+            title: "Run after current assignment",
+            assigneeAgentId: runningAgentId,
+            sourceRef: { type: "mission_plan_unit", id: "unit-running-agent" },
+          },
+        ],
+        requiredInputs: [],
+        successCriteria: [],
+        steps: [],
+      }),
+      createdAt: new Date("2026-01-01T00:05:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Dispatch after current run"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ agentId: string }>;
+    expect(paqoSteps[0]?.agentId).toBe(runningAgentId);
+  });
+
   it("omits malformed assessment without blocking valid plan materialization", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     const wfId = randomUUID();

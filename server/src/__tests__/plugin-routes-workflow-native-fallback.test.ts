@@ -20,12 +20,19 @@ const mockWorkflowService = vi.hoisted(() => ({
   getRun: vi.fn(),
   listDefinitions: vi.fn(),
   listRuns: vi.fn(),
+  listStepRuns: vi.fn(),
   resumeRun: vi.fn(),
   trigger: vi.fn(),
   updateDefinition: vi.fn(),
 }));
 
 const mockCompleteWorkflowToolStepFromResult = vi.hoisted(() => vi.fn());
+const mockIssueService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+const mockWorkProductService = vi.hoisted(() => ({
+  listForIssue: vi.fn(),
+}));
 
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
@@ -45,6 +52,14 @@ vi.mock("../services/live-events.js", () => ({
 
 vi.mock("../services/workflow/engine.js", () => ({
   workflowService: mockWorkflowService,
+}));
+
+vi.mock("../services/issues.js", () => ({
+  issueService: () => mockIssueService,
+}));
+
+vi.mock("../services/work-products.js", () => ({
+  workProductService: () => mockWorkProductService,
 }));
 
 vi.mock("../services/workflow/dag-engine.js", () => ({
@@ -101,6 +116,9 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
     mockRegistry.getByKey.mockResolvedValue(workflowPlugin);
     mockWorkflowService.listDefinitions.mockResolvedValue([]);
     mockWorkflowService.listRuns.mockResolvedValue([]);
+    mockWorkflowService.listStepRuns.mockResolvedValue([]);
+    mockIssueService.getById.mockResolvedValue(null);
+    mockWorkProductService.listForIssue.mockResolvedValue([]);
     mockWorkflowService.getDefinition.mockResolvedValue({
       id: "workflow-1",
       companyId: "company-1",
@@ -269,6 +287,165 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
         triggerSource: "manual",
       },
     ]);
+  });
+
+  it("returns native workflow run detail when overview run ids come from native workflow storage", async () => {
+    const workerManager = {
+      call: vi.fn().mockResolvedValue(null),
+    };
+    mockWorkflowService.getRun.mockResolvedValue({
+      id: "native-run-1",
+      workflowId: "workflow-1",
+      companyId: "company-1",
+      missionId: "mission-1",
+      status: "completed",
+      triggeredBy: "manual",
+      triggerSource: "manual",
+      runLabel: "2026-04-26 #1",
+      parentIssueId: null,
+      startedAt: new Date("2026-04-26T00:00:00.000Z"),
+      completedAt: new Date("2026-04-26T00:10:00.000Z"),
+      createdAt: new Date("2026-04-26T00:00:00.000Z"),
+    });
+    mockWorkflowService.getDefinition.mockResolvedValue({
+      id: "workflow-1",
+      companyId: "company-1",
+      name: "Native workflow",
+      description: "native detail",
+      status: "active",
+      executionMode: "static_dag",
+      steps: [
+        {
+          id: "collect",
+          name: "Collect signals",
+          description: "collect",
+          agentId: "agent-1",
+          toolNames: [],
+          dependencies: [],
+        },
+        {
+          id: "summarize",
+          name: "Summarize",
+          description: null,
+          agentId: null,
+          toolNames: ["paperclip.echo"],
+          dependencies: ["collect"],
+        },
+      ],
+      createdAt: new Date("2026-04-20T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-21T00:00:00.000Z"),
+    });
+    const issueId = "00000000-0000-4000-8000-000000000001";
+    mockIssueService.getById.mockResolvedValue({
+      id: issueId,
+      companyId: "company-1",
+      identifier: "CMPA-123",
+    });
+    mockWorkProductService.listForIssue.mockResolvedValue([
+      {
+        id: "work-product-1",
+        companyId: "company-1",
+        projectId: null,
+        issueId,
+        executionWorkspaceId: null,
+        runtimeServiceId: null,
+        type: "document",
+        provider: "paperclip",
+        externalId: null,
+        title: "Signals brief",
+        url: "http://127.0.0.1:3200/artifacts/signals.html",
+        status: "ready_for_review",
+        reviewState: "none",
+        isPrimary: true,
+        healthStatus: "healthy",
+        summary: "Generated market signal brief.",
+        metadata: { path: "/tmp/signals.html" },
+        createdByRunId: null,
+        createdAt: new Date("2026-04-26T00:04:00.000Z"),
+        updatedAt: new Date("2026-04-26T00:04:30.000Z"),
+      },
+    ]);
+    mockWorkflowService.listStepRuns.mockResolvedValue([
+      {
+        id: "step-run-1",
+        workflowRunId: "native-run-1",
+        stepId: "collect",
+        issueId,
+        status: "completed",
+        agentName: "Researcher",
+        retryCount: 0,
+        sessionId: null,
+        lastDispatchAttemptAt: new Date("2026-04-26T00:01:00.000Z"),
+        lastDispatchAcceptedAt: new Date("2026-04-26T00:02:00.000Z"),
+        lastDispatchErrorAt: null,
+        lastDispatchErrorSummary: null,
+        lastDispatchRequestId: null,
+        metadata: {},
+        startedAt: new Date("2026-04-26T00:02:00.000Z"),
+        completedAt: new Date("2026-04-26T00:05:00.000Z"),
+      },
+    ]);
+
+    const res = await request(createApp(workerManager))
+      .post("/api/plugins/plugin-1/data/workflow-run-detail")
+      .send({ params: { runId: "native-run-1" } });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.getRun).toHaveBeenCalledWith(expect.anything(), "native-run-1");
+    expect(mockWorkflowService.getDefinition).toHaveBeenCalledWith(expect.anything(), "workflow-1");
+    expect(mockWorkflowService.listStepRuns).toHaveBeenCalledWith(expect.anything(), "native-run-1");
+    expect(mockWorkProductService.listForIssue).toHaveBeenCalledWith(issueId);
+    expect(res.body.data).toEqual(expect.objectContaining({
+      run: expect.objectContaining({
+        id: "native-run-1",
+        workflowId: "workflow-1",
+        status: "completed",
+        startedAt: "2026-04-26T00:00:00.000Z",
+        completedAt: "2026-04-26T00:10:00.000Z",
+      }),
+      workflow: expect.objectContaining({
+        id: "workflow-1",
+        name: "Native workflow",
+        steps: [
+          expect.objectContaining({
+            id: "collect",
+            title: "Collect signals",
+            type: "agent",
+            dependsOn: [],
+          }),
+          expect.objectContaining({
+            id: "summarize",
+            title: "Summarize",
+            type: "tool",
+            toolName: "paperclip.echo",
+            dependsOn: ["collect"],
+          }),
+        ],
+      }),
+      stepRuns: [
+        expect.objectContaining({
+          id: "step-run-1",
+          stepId: "collect",
+          stepTitle: "Collect signals",
+          stepType: "agent",
+          issueId,
+          issueIdentifier: "CMPA-123",
+          status: "completed",
+          agentName: "Researcher",
+          completedAt: "2026-04-26T00:05:00.000Z",
+          workProducts: [
+            expect.objectContaining({
+              id: "work-product-1",
+              title: "Signals brief",
+              type: "document",
+              url: "http://127.0.0.1:3200/artifacts/signals.html",
+              status: "ready_for_review",
+              summary: "Generated market signal brief.",
+            }),
+          ],
+        }),
+      ],
+    }));
   });
 
   it("routes start-workflow to native DAG without calling the plugin worker", async () => {

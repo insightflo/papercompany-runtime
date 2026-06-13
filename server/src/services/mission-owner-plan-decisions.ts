@@ -710,7 +710,7 @@ const CROSS_COMPANY_MISSION_SOURCE_TYPES = new Set([
   "company_mission",
   "external_company_mission",
 ]);
-const RUNNABLE_PLAN_ASSIGNEE_STATUSES = new Set(["active", "idle"]);
+const RUNNABLE_PLAN_ASSIGNEE_STATUSES = new Set(["active", "idle", "running"]);
 const PLUGIN_WORKFLOW_ENTITY_SOURCE_TYPES = new Map<string, string[]>([
   ["plugin_workflow_definition", ["workflow-definition"]],
   ["plugin_workflow_definition_step", ["workflow-definition", "workflow-step-definition"]],

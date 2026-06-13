@@ -241,6 +241,29 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     res.status(201).json(company);
   });
 
+  router.patch("/:companyId/branding", validate(updateCompanyBrandingSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await assertCanUpdateBranding(req, companyId);
+    const company = await svc.update(companyId, req.body);
+    if (!company) {
+      res.status(404).json({ error: "Company not found" });
+      return;
+    }
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "company.branding_updated",
+      entityType: "company",
+      entityId: companyId,
+      details: req.body,
+    });
+    res.json(company);
+  });
+
   router.patch("/:companyId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -279,29 +302,6 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       entityType: "company",
       entityId: companyId,
       details: body,
-    });
-    res.json(company);
-  });
-
-  router.patch("/:companyId/branding", validate(updateCompanyBrandingSchema), async (req, res) => {
-    const companyId = req.params.companyId as string;
-    await assertCanUpdateBranding(req, companyId);
-    const company = await svc.update(companyId, req.body);
-    if (!company) {
-      res.status(404).json({ error: "Company not found" });
-      return;
-    }
-    const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "company.branding_updated",
-      entityType: "company",
-      entityId: companyId,
-      details: req.body,
     });
     res.json(company);
   });
