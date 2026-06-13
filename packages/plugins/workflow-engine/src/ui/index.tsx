@@ -3587,11 +3587,8 @@ function WorkflowGraphEditor({
         <div
           key="graph-canvas-inner"
           style={{
-            position: "relative",
-            width: `${(canvasWidth + canvasPad * 2) * canvasScale}px`,
-            height: `${(canvasHeight + canvasPad * 2) * canvasScale}px`,
-            minHeight: "calc(100% + 400px)",
-            minWidth: "calc(100% + 400px)",
+            position: "absolute",
+            inset: 0,
             pointerEvents: "none",
           }}
         >
@@ -3599,13 +3596,13 @@ function WorkflowGraphEditor({
           key="graph-canvas-content"
           style={{
             position: "absolute",
-            left: canvasPad,
-            top: canvasPad,
+            left: 0,
+            top: 0,
             width: `${canvasWidth}px`,
             height: `${canvasHeight}px`,
-            transform: `scale(${canvasScale})`,
-            transformOrigin: "top left",
-            transition: draggingStepId ? "none" : "transform 140ms ease",
+            transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasScale})`,
+            transformOrigin: "0 0",
+            transition: draggingStepId || isCanvasPanning ? "none" : "transform 140ms ease",
             pointerEvents: "none",
           }}
         >
