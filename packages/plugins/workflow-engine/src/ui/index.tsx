@@ -2819,13 +2819,11 @@ function WorkflowGraphEditor({
     const rect = container.getBoundingClientRect();
     const offsetX = clientX - rect.left;
     const offsetY = clientY - rect.top;
-    const graphX = (container.scrollLeft + offsetX) / canvasScale;
-    const graphY = (container.scrollTop + offsetY) / canvasScale;
+    const graphX = (-canvasPanX + offsetX) / canvasScale;
+    const graphY = (-canvasPanY + offsetY) / canvasScale;
     setCanvasScale(normalizedScale);
-    window.requestAnimationFrame(() => {
-      container.scrollLeft = Math.max(0, graphX * normalizedScale - offsetX);
-      container.scrollTop = Math.max(0, graphY * normalizedScale - offsetY);
-    });
+    setCanvasPanX(offsetX - graphX * normalizedScale);
+    setCanvasPanY(offsetY - graphY * normalizedScale);
   }
 
   function renameSelectedStep(nextStepId: string): void {
@@ -5153,6 +5151,8 @@ function WorkflowRunGraphPreview({
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [canvasScale, setCanvasScale] = useState(1);
   const [isCanvasPanning, setIsCanvasPanning] = useState(false);
+  const [canvasPanX, setCanvasPanX] = useState(0);
+  const [canvasPanY, setCanvasPanY] = useState(0);
   const [nodeDragOffsets, setNodeDragOffsets] = useState<Record<string, { dx: number; dy: number }>>({});
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -5240,30 +5240,26 @@ function WorkflowRunGraphPreview({
       const rect = container.getBoundingClientRect();
       const offsetX = event.clientX - rect.left;
       const offsetY = event.clientY - rect.top;
-      const graphX = (container.scrollLeft + offsetX) / canvasScale;
-      const graphY = (container.scrollTop + offsetY) / canvasScale;
+      const graphX = (-canvasPanX + offsetX) / canvasScale;
+      const graphY = (-canvasPanY + offsetY) / canvasScale;
       setCanvasScale(nextScale);
-      window.requestAnimationFrame(() => {
-        container.scrollLeft = Math.max(0, graphX * nextScale - offsetX);
-        container.scrollTop = Math.max(0, graphY * nextScale - offsetY);
-      });
+      setCanvasPanX(offsetX - graphX * nextScale);
+      setCanvasPanY(offsetY - graphY * nextScale);
     };
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [canvasScale]);
+  }, [canvasScale, canvasPanX, canvasPanY]);
 
   function beginCanvasPan(event: React.PointerEvent<HTMLDivElement>): void {
     const target = event.target as HTMLElement;
-    if (target.closest("button")) return;
+    if (target.closest("[data-graph-node='true'], [data-graph-toolbar='true'], [data-graph-menu='true'], [data-graph-edge='true'], [data-graph-handle='true'], [data-graph-edge-remove='true']")) return;
     if (event.button !== 0 && event.button !== 1) return;
-    const container = canvasRef.current;
-    if (!container) return;
     canvasPanRef.current = {
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startScrollLeft: container.scrollLeft,
-      startScrollTop: container.scrollTop,
+      startPanX: canvasPanX,
+      startPanY: canvasPanY,
     };
     setIsCanvasPanning(true);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -5271,10 +5267,9 @@ function WorkflowRunGraphPreview({
 
   function handleCanvasPointerMove(event: React.PointerEvent<HTMLDivElement>): void {
     const pan = canvasPanRef.current;
-    const container = canvasRef.current;
-    if (!pan || !container || pan.pointerId !== event.pointerId) return;
-    container.scrollLeft = pan.startScrollLeft - (event.clientX - pan.startClientX);
-    container.scrollTop = pan.startScrollTop - (event.clientY - pan.startClientY);
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    setCanvasPanX(pan.startPanX + (event.clientX - pan.startClientX));
+    setCanvasPanY(pan.startPanY + (event.clientY - pan.startClientY));
   }
 
   function endCanvasPan(event: React.PointerEvent<HTMLDivElement>): void {
@@ -5311,12 +5306,12 @@ function WorkflowRunGraphPreview({
                 <button type="button" style={graphCanvasToolButtonStyle} title="Zoom out" aria-label="Zoom out" onClick={() => setCanvasScale(clampGraphCanvasScale(canvasScale - 0.1))}>&minus;</button>
                 <span style={{ fontSize: "11px", color: "var(--muted-foreground, #94a3b8)", minWidth: "32px", textAlign: "center" }}>{Math.round(canvasScale * 100)}%</span>
                 <button type="button" style={graphCanvasToolButtonStyle} title="Zoom in" aria-label="Zoom in" onClick={() => setCanvasScale(clampGraphCanvasScale(canvasScale + 0.1))}>+</button>
-                <button type="button" style={graphCanvasToolButtonStyle} title="Reset zoom" aria-label="Reset zoom" onClick={() => { setCanvasScale(1); if (canvasRef.current) { canvasRef.current.scrollTo({ left: 0, top: 0 }); } }}>&#8634;</button>
+                <button type="button" style={graphCanvasToolButtonStyle} title="Reset zoom" aria-label="Reset zoom" onClick={() => { setCanvasScale(1); setCanvasPanX(0); setCanvasPanY(0); }}>&#8634;</button>
               </div>
             </div>
           </div>
-          <div style={{ position: "relative", width: `${canvasWidth * canvasScale}px`, height: `${canvasHeight * canvasScale}px` }}>
-          <div style={{ position: "absolute", top: 0, left: 0, width: `${canvasWidth}px`, height: `${canvasHeight}px`, transform: `scale(${canvasScale})`, transformOrigin: "top left" }}>
+          <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+          <div style={{ position: "absolute", top: 0, left: 0, width: `${canvasWidth}px`, height: `${canvasHeight}px`, transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasScale})`, transformOrigin: "0 0", transition: isCanvasPanning ? "none" : "transform 140ms ease", pointerEvents: "none" }}>
           {graph.containers.map((container) => {
             const color = containerColor(container.type);
             return (
