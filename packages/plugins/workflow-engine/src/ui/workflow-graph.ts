@@ -1194,7 +1194,7 @@ function readGraphPositionValue(value: unknown): number | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value === "string" && !value.trim()) return undefined;
   const parsed = typeof value === "number" ? value : Number(String(value).trim());
-  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : undefined;
+  return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
 }
 
 function compactGraphEdgeMetadata(metadata: WorkflowGraphEdgeMetadataRecord): WorkflowGraphEdgeMetadataRecord | undefined {

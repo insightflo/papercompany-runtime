@@ -2804,8 +2804,8 @@ function WorkflowGraphEditor({
   function updateStepGraphPosition(stepId: string, x: number, y: number): void {
     onChange(steps.map((step) => (step.id === stepId ? {
       ...step,
-      graphPositionX: Math.max(0, Math.round(x)),
-      graphPositionY: Math.max(0, Math.round(y)),
+      graphPositionX: Math.round(x),
+      graphPositionY: Math.round(y),
     } : step)));
   }
 
@@ -3598,6 +3598,7 @@ function WorkflowGraphEditor({
             top: 0,
             width: `${canvasWidth}px`,
             height: `${canvasHeight}px`,
+            overflow: "visible",
             transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasScale})`,
             transformOrigin: "0 0",
             transition: draggingStepId || isCanvasPanning ? "none" : "transform 140ms ease",
@@ -3728,7 +3729,7 @@ function WorkflowGraphEditor({
             aria-hidden="true"
             width={canvasWidth}
             height={canvasHeight}
-            style={{ position: "absolute", inset: 0, pointerEvents: "auto" }}
+            style={{ position: "absolute", inset: 0, overflow: "visible", pointerEvents: "auto" }}
           >
             <defs>
               <marker id="workflow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -5311,7 +5312,7 @@ function WorkflowRunGraphPreview({
             </div>
           </div>
           <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-          <div style={{ position: "absolute", top: 0, left: 0, width: `${canvasWidth}px`, height: `${canvasHeight}px`, transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasScale})`, transformOrigin: "0 0", transition: isCanvasPanning ? "none" : "transform 140ms ease", pointerEvents: "none" }}>
+          <div style={{ position: "absolute", top: 0, left: 0, width: `${canvasWidth}px`, height: `${canvasHeight}px`, overflow: "visible", transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasScale})`, transformOrigin: "0 0", transition: isCanvasPanning ? "none" : "transform 140ms ease", pointerEvents: "none" }}>
           {graph.containers.map((container) => {
             const color = containerColor(container.type);
             return (
@@ -5399,7 +5400,7 @@ function WorkflowRunGraphPreview({
             aria-hidden="true"
             width={canvasWidth}
             height={canvasHeight}
-            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            style={{ position: "absolute", inset: 0, overflow: "visible", pointerEvents: "none" }}
           >
             <defs>
               <marker id="workflow-run-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -5450,7 +5451,7 @@ function WorkflowRunGraphPreview({
             <button
               key={node.id || node.order}
               type="button"
-              style={{ ...graphNodeStyle(selected, node.kind), left: node.x + off.dx, top: node.y + off.dy, cursor: draggingStepId === node.step.id ? "grabbing" : "grab" }}
+              style={{ ...graphNodeStyle(selected, node.kind), left: node.x + off.dx, top: node.y + off.dy, cursor: draggingStepId === node.step.id ? "grabbing" : "grab", touchAction: "none", pointerEvents: "auto" }}
               onPointerDown={(event) => beginRunNodeDrag(event, node.step.id)}
               onPointerMove={handleRunNodePointerMove}
               onPointerUp={endRunNodeDrag}
