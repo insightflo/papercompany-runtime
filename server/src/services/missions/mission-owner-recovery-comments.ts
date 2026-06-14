@@ -22,6 +22,24 @@ type MissionOwnerDescriptionIssue = {
   assigneeAgentId: string | null;
 };
 
+export function buildMainExecutorBrief(input: {
+  missionGoal: string;
+  currentSituation: string;
+}): string {
+  return [
+    "Main executor brief:",
+    `Mission goal: ${input.missionGoal}`,
+    `Current situation: ${input.currentSituation}`,
+    "Context tools/permissions:",
+    "- Read mission, workflow run, workflow step, issue, comment, work product, and run-log evidence.",
+    "Resolution tools/permissions:",
+    "- Record an owner decision/comment, request user input, wake or reassign agents, retry/resume bounded work, replan, escalate, or report impossible completion when evidence supports it.",
+    "Main executor role:",
+    "- Do: judge the situation from evidence, coordinate the next step, keep the mission moving, and record why.",
+    "- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.",
+  ].join("\n");
+}
+
 export function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMissionOwnerDecision | null {
   for (const text of texts.slice().reverse()) {
     const decision = extractMissionOwnerDecisionFromText(text);
@@ -155,7 +173,7 @@ export function buildMissionOwnerUnblockDescription(
       actionType: "unblock",
       status: "decision_required",
     }),
-    "Resolve the mission-level blocker without taking over the delegated execution issue.",
+    "Mission-owner signal. Automation has not selected a recovery action.",
     "",
     `Mission id: ${mission.id}`,
     `Mission title: ${mission.title}`,
@@ -169,13 +187,12 @@ export function buildMissionOwnerUnblockDescription(
       ? ["Mission execution digest:", ...missionExecutionDigest.map((line) => `- ${line}`)].join("\n")
       : "Mission execution digest: unavailable for this owner action template.",
     "",
-    "Mission owner duties:",
-    "- Manage the mission outcome boundary: diagnose blockers, decide recovery direction, and keep the mission moving.",
-    "- Do not perform the delegated source work by default; coordinate, decide, and record the next owner action.",
-    "- Preserve the source issue assignee unless an explicit reassignment decision is made.",
-    "- Use Governance Thread information only as read-only evidence for this owner decision.",
+    buildMainExecutorBrief({
+      missionGoal: mission.title,
+      currentSituation: `Source issue ${sourceLabel} is ${blockedIssue.status}; original assignee is ${blockedIssue.assigneeAgentId ?? "unassigned"}.`,
+    }),
     "",
-    "Allowed decision options:",
+    "Structured decision labels for control-plane actions:",
     ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => `- ${decision}`),
     "",
     buildMissionOwnerDecisionFormat(),

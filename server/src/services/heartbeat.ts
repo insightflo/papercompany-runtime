@@ -67,6 +67,8 @@ import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
+import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
+import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import {
   extractMissionOwnerDecisionFromText,
   MISSION_OWNER_DECISION_OPTIONS,
@@ -1786,21 +1788,34 @@ function buildRequestChangesValidationGateComment(input: {
 }
 
 function buildRequestChangesOwnerActionDescription(input: {
+  mission: Pick<typeof missions.$inferSelect, "title">;
   sourceIssue: Pick<typeof issues.$inferSelect, "id" | "identifier" | "title">;
   run: typeof heartbeatRuns.$inferSelect;
   verdict: RequestChangesVerdict;
+  missionExecutionDigest?: string[];
 }) {
   const sourceLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
+  const missionExecutionDigest = (input.missionExecutionDigest ?? [])
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
   return [
-    "Mission validation gate returned `REQUEST_CHANGES` after a successful heartbeat run.",
+    "Mission-owner signal from validation gate. Automation has not selected a recovery action.",
     "",
     `Source issue: ${sourceLabel} — ${input.sourceIssue.title}`,
     `Source runId: ${input.run.id}`,
     "",
-    "Required owner action:",
-    "- inspect the validation excerpt below",
-    "- decide whether to retry_source_issue, reassign_source_issue, or create a targeted revision issue",
-    "- keep downstream delivery/send steps pending until the requested changes are resolved",
+    "Signal:",
+    "- kind: validation_request_changes",
+    "- local hint only; the raw validation excerpt is preserved below",
+    "",
+    missionExecutionDigest.length > 0
+      ? ["Mission execution digest:", ...missionExecutionDigest.map((line) => `- ${line}`)].join("\n")
+      : "Mission execution digest: unavailable for this owner action template.",
+    "",
+    buildMainExecutorBrief({
+      missionGoal: input.mission.title,
+      currentSituation: `Source issue ${sourceLabel} produced REQUEST_CHANGES after run ${input.run.id}; downstream delivery remains gated until owner judgement.`,
+    }),
     "",
     "### Validation excerpt",
     "```text",
@@ -2235,18 +2250,31 @@ export function heartbeatService(db: Db) {
   }
 
   async function ensureMissionOwnerActionForRequestChanges(input: {
-    sourceIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "title" | "originKind">;
+    sourceIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "title" | "originKind" | "status" | "assigneeAgentId">;
     run: typeof heartbeatRuns.$inferSelect;
     verdict: RequestChangesVerdict;
   }) {
     if (!input.sourceIssue.missionId) return null;
     if (!canCreateMissionOwnerUnblockForRequestChanges(input.sourceIssue)) return null;
     const mission = await db
-      .select({ id: missions.id, companyId: missions.companyId, ownerAgentId: missions.ownerAgentId })
+      .select()
       .from(missions)
       .where(and(eq(missions.id, input.sourceIssue.missionId), eq(missions.companyId, input.sourceIssue.companyId)))
       .then((rows) => rows[0] ?? null);
     if (!mission?.ownerAgentId) return null;
+    let missionExecutionDigest: string[] = [];
+    try {
+      missionExecutionDigest = await buildMissionExecutionDigest(db, {
+        mission,
+        blockedIssue: input.sourceIssue,
+      });
+    } catch (err) {
+      logger.warn(
+        { err, missionId: input.sourceIssue.missionId, issueId: input.sourceIssue.id },
+        "failed to build mission execution digest for REQUEST_CHANGES owner action",
+      );
+      missionExecutionDigest = ["Mission execution digest could not be built; inspect workflow runs, step runs, work products, and source issue comments manually."];
+    }
 
     const existing = await db
       .select()
@@ -2264,9 +2292,21 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
 
     const sourceLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
+    const nextDescription = buildRequestChangesOwnerActionDescription({
+      ...input,
+      mission,
+      missionExecutionDigest,
+    });
+    if (existing && !(existing.description ?? "").includes("Mission execution digest:")) {
+      await db
+        .update(issues)
+        .set({ description: nextDescription, updatedAt: new Date() })
+        .where(eq(issues.id, existing.id));
+      existing.description = nextDescription;
+    }
     const ownerAction = existing ?? await issuesSvc.create(input.sourceIssue.companyId, {
       assigneeAgentId: mission.ownerAgentId,
-      description: buildRequestChangesOwnerActionDescription(input),
+      description: nextDescription,
       missionId: input.sourceIssue.missionId,
       originKind: "mission_main_executor_unblock",
       originId: input.sourceIssue.id,
@@ -4043,6 +4083,7 @@ export function heartbeatService(db: Db) {
       missionAgentRuntimeForRun,
       missionIssueEnvelopePolicy,
       paperclipMissionRuntime,
+      paperclipMissionWorkingNote,
     } = await compileMissionRunContext(db, {
       companyId: agent.companyId,
       missionId,
@@ -4059,6 +4100,11 @@ export function heartbeatService(db: Db) {
       context.paperclipMissionRuntime = paperclipMissionRuntime;
     } else {
       delete context.paperclipMissionRuntime;
+    }
+    if (paperclipMissionWorkingNote) {
+      context.paperclipMissionWorkingNote = paperclipMissionWorkingNote;
+    } else {
+      delete context.paperclipMissionWorkingNote;
     }
     const assignedTaskPromptSection = buildAssignedIssuePromptSection(issueContext);
     const resolvedPromptTemplate = readNonEmptyString(resolvedConfig.promptTemplate);

@@ -65,6 +65,18 @@ describe("buildStepInputManifest", () => {
           selectedExecutionUnitExecutionStateCounts: { blocked: 1, failed: 0, cancelled: 1 },
           selectedExecutionUnitLabels: ["Run preflight smoke", "Collect candidate QA owner", "Deploy production"],
         },
+        paperclipMissionWorkingNote: {
+          available: true,
+          missionId: "mission-1",
+          path: "/paperclip/mission-working-notes/company-1/mission-1/working.md",
+          fileName: "working.md",
+          role: "shared_mission_working_note",
+          instructions: [
+            "Read this working.md before acting on mission-scoped work.",
+            "Update it with mission-relevant current status, evidence, decisions, open questions, and next steps.",
+            "Do not treat working.md as a final deliverable; official outputs must still be registered as workProducts.",
+          ],
+        },
         note: "hello",
       },
     });
@@ -81,6 +93,7 @@ describe("buildStepInputManifest", () => {
         "paperclipMaintenanceDecision",
         "paperclipMaintenanceGuidance",
         "paperclipMissionPlan",
+        "paperclipMissionWorkingNote",
         "paperclipPreviousSessionId",
         "paperclipRuntimePrimaryUrl",
         "paperclipRuntimeServiceIntents",
@@ -180,6 +193,18 @@ describe("buildStepInputManifest", () => {
           ruleNames: [],
           ruleModes: [],
           refs: {},
+        },
+        missionWorkingNote: {
+          available: true,
+          missionId: "mission-1",
+          path: "/paperclip/mission-working-notes/company-1/mission-1/working.md",
+          fileName: "working.md",
+          role: "shared_mission_working_note",
+          instructions: [
+            "Read this working.md before acting on mission-scoped work.",
+            "Update it with mission-relevant current status, evidence, decisions, open questions, and next steps.",
+            "Do not treat working.md as a final deliverable; official outputs must still be registered as workProducts.",
+          ],
         },
         missionOwnerPlanningContext: {
           available: false,

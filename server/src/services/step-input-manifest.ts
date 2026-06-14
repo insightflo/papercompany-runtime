@@ -89,6 +89,14 @@ export interface StepInputManifest {
       ruleModes: string[];
       refs: Record<string, unknown> | null;
     };
+    missionWorkingNote: {
+      available: boolean;
+      missionId: string | null;
+      path: string | null;
+      fileName: string | null;
+      role: string | null;
+      instructions: string[];
+    };
     missionOwnerPlanningContext: {
       available: boolean;
       planningIssueId: string | null;
@@ -155,6 +163,7 @@ export function buildStepInputManifest(input: {
     : [];
   const maintenanceDecision = parseObject(context.paperclipMaintenanceDecision);
   const missionPlan = parseObject(context.paperclipMissionPlan);
+  const missionWorkingNote = parseObject(context.paperclipMissionWorkingNote);
   const missionOwnerPlanningContext = parseObject(context.paperclipMissionOwnerPlanningContext);
   const missionOwnerPlanningMission = parseObject(missionOwnerPlanningContext.mission);
   const missionOwnerPlanningActivePlan = parseObject(missionOwnerPlanningContext.activePlan);
@@ -188,6 +197,9 @@ export function buildStepInputManifest(input: {
     : [];
   const missionPlanStepSummary = Array.isArray(missionPlan.stepSummary)
     ? missionPlan.stepSummary.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  const missionWorkingNoteInstructions = Array.isArray(missionWorkingNote.instructions)
+    ? missionWorkingNote.instructions.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
   const fileViews = Array.isArray(context.paperclipFileViews)
     ? context.paperclipFileViews.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
@@ -303,6 +315,14 @@ export function buildStepInputManifest(input: {
         ruleNames: readStringArray(missionPlan.ruleNames),
         ruleModes: readStringArray(missionPlan.ruleModes),
         refs: parseObject(missionPlan.refs),
+      },
+      missionWorkingNote: {
+        available: missionWorkingNote.available === true && readString(missionWorkingNote.path).length > 0,
+        missionId: readString(missionWorkingNote.missionId) || null,
+        path: readString(missionWorkingNote.path) || null,
+        fileName: readString(missionWorkingNote.fileName) || null,
+        role: readString(missionWorkingNote.role) || null,
+        instructions: missionWorkingNoteInstructions,
       },
       missionOwnerPlanningContext: {
         available: Object.keys(missionOwnerPlanningContext).length > 0,

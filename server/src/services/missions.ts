@@ -14,7 +14,6 @@ import {
   agentRuntimeState,
   heartbeatRuns,
   issueComments,
-  issueWorkProducts,
   issues,
   missionAgents,
   missionAgentRuntimes,
@@ -58,6 +57,7 @@ import {
   type ExtractedMissionOwnerDecision,
 } from "./missions/mission-owner-recovery-events.js";
 import {
+  buildMainExecutorBrief,
   buildMissionOwnerUnblockDescription,
   buildRetrySourceIssueComment,
   buildRetrySourceIssueWakeupDispatchedComment,
@@ -67,6 +67,7 @@ import {
   isTerminalIssueStatus,
   summarizeOwnerDecisionNotApplied,
 } from "./missions/mission-owner-recovery-comments.js";
+import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
 import { logActivity } from "./activity-log.js";
 
@@ -469,29 +470,42 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
-function compactDigestText(value: string, maxLength = 240): string {
-  const compacted = value.replace(/\s+/g, " ").trim();
-  return compacted.length > maxLength ? `${compacted.slice(0, maxLength - 1)}...` : compacted;
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => isRecord(item));
 }
 
-function issueDigestLabel(issue: { id: string; identifier: string | null }): string {
-  return issue.identifier ?? issue.id;
+function isNativeWorkflowExecutionUnitForDifferentRun(
+  unit: Record<string, unknown>,
+  workflowName: string,
+  sourceRunId: string,
+): boolean {
+  const sourceRef = isRecord(unit.sourceRef) ? unit.sourceRef : {};
+  const type = asTrimmedString(sourceRef.type);
+  if (type === "native_workflow_step_run") {
+    const workflowRunId = asTrimmedString(sourceRef.workflowRunId);
+    return Boolean(workflowRunId && workflowRunId !== sourceRunId);
+  }
+  if (type === "native_workflow_run") {
+    const id = asTrimmedString(sourceRef.id);
+    const title = asTrimmedString(unit.title);
+    return Boolean(id && id !== sourceRunId && title === workflowName);
+  }
+  return false;
 }
 
-function metadataDigestPath(metadata: Record<string, unknown> | null | undefined): string | null {
-  if (!metadata) return null;
-  const direct = asTrimmedString(metadata.path)
-    ?? asTrimmedString(metadata.filePath)
-    ?? asTrimmedString(metadata.artifactPath)
-    ?? asTrimmedString(metadata.obsidianPath)
-    ?? asTrimmedString(metadata.outputPath);
-  if (direct) return direct;
-  const artifact = isRecord(metadata.artifact) ? metadata.artifact : null;
-  return artifact
-    ? asTrimmedString(artifact.path)
-      ?? asTrimmedString(artifact.filePath)
-      ?? asTrimmedString(artifact.artifactPath)
-    : null;
+function pruneStaleWorkflowExecutionUnits(
+  refs: Record<string, unknown>,
+  workflowName: string,
+  sourceRunId?: string,
+): Record<string, unknown> {
+  if (!sourceRunId) return refs;
+  const executionUnits = asRecordArray(refs.executionUnits);
+  if (executionUnits.length === 0) return refs;
+  return {
+    ...refs,
+    executionUnits: executionUnits.filter((unit) => !isNativeWorkflowExecutionUnitForDifferentRun(unit, workflowName, sourceRunId)),
+  };
 }
 
 type ToolStepFailureClass =
@@ -1226,10 +1240,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const planSvc = missionPlanArtifactService(db);
     const activePlan = await planSvc.getActiveMissionPlan({ companyId: mission.companyId, missionId: mission.id });
     if (activePlan) {
-      const mergedRefs = mergeMissionPlanRefs(activePlan.refs, refs);
       const currentRefs = typeof activePlan.refs === "object" && activePlan.refs !== null && !Array.isArray(activePlan.refs)
         ? activePlan.refs as Record<string, unknown>
         : {};
+      const baseRefs = pruneStaleWorkflowExecutionUnits(currentRefs, workflowName, metadata.sourceRunId);
+      const mergedRefs = mergeMissionPlanRefs(baseRefs, refs);
       const changed = JSON.stringify(currentRefs) !== JSON.stringify(mergedRefs);
       if (changed) {
         await db
@@ -1266,151 +1281,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     });
   }
 
-  async function buildMissionExecutionDigest(
-    mission: MissionRow,
-    blockedIssue: typeof issues.$inferSelect,
-  ): Promise<string[]> {
-    const lines: string[] = [];
-    lines.push(`Mission description: ${mission.description ? compactDigestText(mission.description, 320) : "(none)"}`);
-    lines.push(`Blocked source: ${issueDigestLabel(blockedIssue)} status=${blockedIssue.status} assignee=${blockedIssue.assigneeAgentId ?? "unassigned"}`);
-
-    const runRows = await db
-      .select({
-        run: workflowRuns,
-        workflowName: workflowDefinitions.name,
-        workflowSteps: workflowDefinitions.stepsJson,
-      })
-      .from(workflowRuns)
-      .leftJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-      .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, mission.id)))
-      .orderBy(desc(workflowRuns.createdAt), desc(workflowRuns.id))
-      .limit(3);
-    if (runRows.length === 0) {
-      lines.push("Workflow runs: none linked to this mission.");
-    }
-
-    const runIds = runRows.map((row) => row.run.id);
-    const stepRunRows = runIds.length
-      ? await db
-          .select()
-          .from(workflowStepRuns)
-          .where(inArray(workflowStepRuns.workflowRunId, runIds))
-      : [];
-    const stepIssueIds = Array.from(new Set(stepRunRows.map((stepRun) => stepRun.issueId).filter((issueId): issueId is string => Boolean(issueId))));
-    const stepIssues = stepIssueIds.length
-      ? await db
-          .select({ id: issues.id, identifier: issues.identifier, title: issues.title, status: issues.status })
-          .from(issues)
-          .where(inArray(issues.id, stepIssueIds))
-      : [];
-    const stepIssueById = new Map(stepIssues.map((issue) => [issue.id, issue]));
-    const stepRunsByRunId = new Map<string, Array<typeof workflowStepRuns.$inferSelect>>();
-    for (const stepRun of stepRunRows) {
-      const entries = stepRunsByRunId.get(stepRun.workflowRunId) ?? [];
-      entries.push(stepRun);
-      stepRunsByRunId.set(stepRun.workflowRunId, entries);
-    }
-
-    for (const { run, workflowName, workflowSteps } of runRows) {
-      const workflowDisplayName = workflowName ?? run.workflowId;
-      const startedAt = run.startedAt ? run.startedAt.toISOString() : "not_started";
-      const completedAt = run.completedAt ? run.completedAt.toISOString() : "open";
-      const definitionSteps = normalizeWorkflowStepsForExecution(workflowSteps);
-      const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
-      const rawStepRuns = [...(stepRunsByRunId.get(run.id) ?? [])].sort((left, right) => {
-        const leftIndex = definitionStepOrder.get(left.stepId) ?? Number.MAX_SAFE_INTEGER;
-        const rightIndex = definitionStepOrder.get(right.stepId) ?? Number.MAX_SAFE_INTEGER;
-        return leftIndex - rightIndex || left.stepId.localeCompare(right.stepId);
-      });
-      const stepRunByStepId = new Map(rawStepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
-      const steps = definitionSteps.map((step) => {
-        const stepRun = stepRunByStepId.get(step.id);
-        const toolNames = Array.isArray(step.toolNames)
-          ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-          : [];
-        return {
-          stepId: step.id,
-          name: step.name,
-          dependencies: [...step.dependencies],
-          toolNames,
-          status: normalizeMissionWorkflowStepStatus(stepRun?.status ?? "pending"),
-          issueId: stepRun?.issueId ?? null,
-          issue: stepRun?.issueId ? stepIssueById.get(stepRun.issueId) ?? null : null,
-        };
-      });
-      const knownStepIds = new Set(definitionSteps.map((step) => step.id));
-      for (const stepRun of rawStepRuns) {
-        if (knownStepIds.has(stepRun.stepId)) continue;
-        steps.push({
-          stepId: stepRun.stepId,
-          name: stepRun.stepId,
-          dependencies: [],
-          toolNames: [],
-          status: normalizeMissionWorkflowStepStatus(stepRun.status),
-          issueId: stepRun.issueId,
-          issue: stepRun.issueId ? stepIssueById.get(stepRun.issueId) ?? null : null,
-        });
-      }
-
-      lines.push(`Workflow run: ${workflowDisplayName} (${run.id}) status=${run.status} started=${startedAt} completed=${completedAt}`);
-      const remainingSteps = steps
-        .filter((step) => !["completed", "done"].includes(step.status))
-        .map((step) => `${step.stepId}:${step.status}`);
-      lines.push(`Remaining workflow steps: ${remainingSteps.length ? remainingSteps.join(", ") : "none"}`);
-      for (const step of steps.slice(0, 12)) {
-        const issuePart = step.issue
-          ? ` issue=${issueDigestLabel(step.issue)} issueStatus=${step.issue.status}`
-          : step.issueId
-            ? ` issue=${step.issueId}`
-            : "";
-        const dependencyPart = step.dependencies.length ? ` deps=[${step.dependencies.join(",")}]` : "";
-        const toolPart = step.toolNames.length ? ` tools=[${step.toolNames.join(",")}]` : "";
-        lines.push(`Step ${step.stepId} (${step.name}) status=${step.status}${issuePart}${dependencyPart}${toolPart}`);
-      }
-      if (steps.length > 12) {
-        lines.push(`Step list truncated: ${steps.length - 12} additional steps omitted.`);
-      }
-    }
-
-    const missionIssueRows = await db
-      .select({ id: issues.id, identifier: issues.identifier, title: issues.title, status: issues.status })
-      .from(issues)
-      .where(eq(issues.missionId, mission.id))
-      .orderBy(asc(issues.createdAt), asc(issues.id));
-    const missionIssueIds = missionIssueRows.map((issue) => issue.id);
-    if (missionIssueIds.length > 0) {
-      const issueById = new Map(missionIssueRows.map((issue) => [issue.id, issue]));
-      const workProducts = await db
-        .select()
-        .from(issueWorkProducts)
-        .where(inArray(issueWorkProducts.issueId, missionIssueIds))
-        .orderBy(desc(issueWorkProducts.updatedAt), desc(issueWorkProducts.createdAt), desc(issueWorkProducts.id))
-        .limit(6);
-      for (const product of workProducts) {
-        const sourceIssue = issueById.get(product.issueId);
-        const productPath = metadataDigestPath(product.metadata ?? undefined);
-        const location = product.url ?? productPath;
-        lines.push([
-          `Work product ${sourceIssue ? issueDigestLabel(sourceIssue) : product.issueId}:`,
-          `${product.title} type=${product.type} status=${product.status}`,
-          location ? `location=${location}` : null,
-        ].filter(Boolean).join(" "));
-      }
-    }
-
-    const latestComments = await db
-      .select({ body: issueComments.body, createdAt: issueComments.createdAt })
-      .from(issueComments)
-      .where(eq(issueComments.issueId, blockedIssue.id))
-      .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-      .limit(3);
-    for (const comment of latestComments) {
-      lines.push(`Latest blocker signal ${comment.createdAt.toISOString()}: ${compactDigestText(comment.body, 360)}`);
-    }
-
-    return lines.slice(0, 48);
-  }
-
   async function ensureMainExecutorUnblockIssue(
     mission: MissionRow,
     blockedIssue: typeof issues.$inferSelect,
@@ -1443,7 +1313,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const blockedLabel = blockedIssue.identifier ?? blockedIssue.id;
     let missionExecutionDigest: string[] = [];
     try {
-      missionExecutionDigest = await buildMissionExecutionDigest(mission, blockedIssue);
+      missionExecutionDigest = await buildMissionExecutionDigest(db, { mission, blockedIssue });
     } catch (error) {
       logger.warn({ err: error, missionId: mission.id, blockedIssueId: blockedIssue.id }, "Failed to build mission execution digest for owner unblock issue");
       missionExecutionDigest = ["Mission execution digest could not be built; inspect workflow runs, step runs, work products, and source issue comments manually."];
@@ -1509,38 +1379,33 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       assigneeAgentId: input.mission.ownerAgentId,
       description: [
         `<!-- ${marker} -->`,
-        "Tool workflow step failed without a linked execution issue.",
+        "Mission-owner signal. A tool workflow step failed without a linked execution issue. Automation has not selected a recovery action.",
         "",
         `Mission: ${input.mission.title}`,
         `Workflow: ${input.workflowName}`,
         `Workflow run: ${input.run.id}`,
         `Step: ${input.stepRun.stepId} (${displayStepName})`,
         `Tool names: ${toolNamesLabel}`,
-        `Failure class: ${classification.className}`,
-        `Retry policy: ${classification.retryPolicy}`,
-        `Rationale: ${classification.rationale}`,
+        `Local signal hint: ${classification.className}`,
+        `Local retry hint: ${classification.retryPolicy}`,
+        `Hint rationale: ${classification.rationale}`,
         "",
-        "Evidence:",
+        "Raw evidence:",
         ...(classification.evidence.length > 0 ? classification.evidence.map((line) => `- ${line}`) : ["- No runtime stderr/stdout/error evidence was captured on the workflow step run."]),
         "",
-        "Do not blindly retry this step.",
-        "The failure class is a low-level signal, not a final diagnosis; verify the evidence before choosing a recovery action.",
+        buildMainExecutorBrief({
+          missionGoal: input.mission.title,
+          currentSituation: `Workflow ${input.workflowName} run ${input.run.id} has failed tool step ${input.stepRun.stepId}; no linked execution issue owns the failure.`,
+        }),
         "",
-        "Required diagnosis:",
-        "1. Check the tool runtime logs and captured output for the failed step.",
-        "2. If the input/payload contract is wrong, fix the workflow input or upstream step before resuming.",
-        "3. If the tool implementation is broken, create/fix the tool bug and keep this mission blocked until the tool is fixed.",
-        "4. If this is an external/transient provider failure, retry only with bounded backoff after confirming the external condition.",
-        "5. If the tool has side effects, require an explicit owner decision before retrying.",
-        "",
-        `Required action: ${classification.requiredAction}`,
+        "No recovery action has been selected by automation.",
       ].join("\n"),
       missionId: input.mission.id,
       originKind: "mission_main_executor_unblock",
       originId: input.oversightIssue.id,
       priority: "high",
       status: "todo",
-      title: `[RECOVERY] Tool step failed: ${input.stepRun.stepId}`,
+      title: `[Owner Action] Tool step failed: ${input.stepRun.stepId}`,
     });
 
     if (deps.onOwnerActionCreated) {
@@ -1680,7 +1545,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       status: unit.status,
       sourceRef: unit.sourceRef,
     })) ?? [];
-    const executionUnits = input.sourceHints?.executionUnits ?? snapshotUnits;
+    const executionUnits = input.sourceHints?.executionUnits
+      ?? (input.sourceHints?.sourceRunId || input.sourceHints?.workflowStepIds ? undefined : snapshotUnits);
     const workflowName = input.sourceHints?.workflowName
       ?? snapshot?.units.find((unit) => unit.workflowName)?.workflowName
       ?? snapshot?.units.find((unit) => unit.title)?.title

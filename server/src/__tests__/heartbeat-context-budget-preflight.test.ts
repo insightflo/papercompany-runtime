@@ -40,6 +40,8 @@ import {
 
 const executeSpy = vi.fn();
 const mockedAdapterOptions = vi.hoisted(() => ({ supportsLocalAgentJwt: false }));
+const originalPaperclipHome = process.env.PAPERCLIP_HOME;
+const originalPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
 
 vi.mock("../adapters/index.js", () => ({
   getServerAdapter: vi.fn(() => ({
@@ -308,6 +310,8 @@ describe("heartbeat context budget preflight", () => {
     db = createDb(started.connectionString);
     instance = started.instance;
     dataDir = started.dataDir;
+    process.env.PAPERCLIP_HOME = path.join(dataDir, "paperclip-home");
+    process.env.PAPERCLIP_INSTANCE_ID = "heartbeat-test";
   }, 60_000);
 
   afterEach(async () => {
@@ -347,6 +351,10 @@ describe("heartbeat context budget preflight", () => {
 
   afterAll(async () => {
     await instance?.stop();
+    if (originalPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+    else process.env.PAPERCLIP_HOME = originalPaperclipHome;
+    if (originalPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+    else process.env.PAPERCLIP_INSTANCE_ID = originalPaperclipInstanceId;
     if (dataDir) {
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
@@ -2306,6 +2314,8 @@ describe("heartbeat context budget preflight", () => {
     const missionId = randomUUID();
     const parentIssueId = randomUUID();
     const validatorIssueId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -2365,6 +2375,48 @@ describe("heartbeat context budget preflight", () => {
         status: "todo",
         assigneeAgentId: validatorAgentId,
         originKind: "research_director_plan_child",
+      },
+    ]);
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      stepsJson: [
+        { id: "synthesize-ai-news-note", name: "Synthesize note", agentId: validatorAgentId, dependencies: [] },
+        { id: "validate-ai-news-note", name: "Validate note", agentId: validatorAgentId, dependencies: ["synthesize-ai-news-note"] },
+        { id: "send-telegram", name: "Send Telegram", agentId: ownerAgentId, dependencies: ["validate-ai-news-note"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "board",
+      status: "running",
+      startedAt: new Date("2026-06-14T06:00:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId,
+        stepId: "synthesize-ai-news-note",
+        issueId: parentIssueId,
+        status: "completed",
+        startedAt: new Date("2026-06-14T06:00:00.000Z"),
+        completedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        workflowRunId,
+        stepId: "validate-ai-news-note",
+        issueId: validatorIssueId,
+        status: "running",
+        startedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        workflowRunId,
+        stepId: "send-telegram",
+        issueId: null,
+        status: "pending",
       },
     ]);
 
@@ -2430,6 +2482,19 @@ describe("heartbeat context budget preflight", () => {
       }),
     ]));
     const ownerAction = ownerActions.find((issue) => issue.originKind === "mission_main_executor_unblock")!;
+    expect(ownerAction.description ?? "").toContain("Mission execution digest:");
+    expect(ownerAction.description ?? "").toContain("Mission description: (none)");
+    expect(ownerAction.description ?? "").toContain(`Workflow run: tech-ai-news (${workflowRunId}) status=running`);
+    expect(ownerAction.description ?? "").toContain("Remaining workflow steps: validate-ai-news-note:running, send-telegram:pending");
+    expect(ownerAction.description ?? "").toContain("Step validate-ai-news-note (Validate note) status=running");
+    expect(ownerAction.description ?? "").toContain("Step send-telegram (Send Telegram) status=pending");
+    expect(ownerAction.description ?? "").toContain("Main executor brief:");
+    expect(ownerAction.description ?? "").toContain("Mission goal: Research mission");
+    expect(ownerAction.description ?? "").toContain("Current situation: Source issue");
+    expect(ownerAction.description ?? "").toContain("Context tools/permissions:");
+    expect(ownerAction.description ?? "").toContain("Resolution tools/permissions:");
+    expect(ownerAction.description ?? "").toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
+    expect(ownerAction.description ?? "").not.toContain("decide whether to retry_source_issue, reassign_source_issue, or create a targeted revision issue");
 
     let ownerWakeups: Array<typeof agentWakeupRequests.$inferSelect> = [];
     const wakeupDeadline = Date.now() + 5_000;
@@ -4784,6 +4849,12 @@ describe("heartbeat context budget preflight", () => {
       sessionDisplayId: "mission-session-1",
     });
 
+    let invocationContext: Record<string, unknown> | undefined;
+    executeSpy.mockImplementationOnce(async ({ context }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      return successfulAdapterResult();
+    });
+
     const heartbeat = heartbeatService(db);
     const run = await heartbeat.wakeup(agentId, {
       source: "scheduler",
@@ -4802,6 +4873,25 @@ describe("heartbeat context budget preflight", () => {
         wakeTriggerDetail: "schedule:daily-sync",
       }),
     );
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMissionWorkingNote).toEqual(expect.objectContaining({
+      available: true,
+      missionId,
+      fileName: "working.md",
+      role: "shared_mission_working_note",
+    }));
+    const workingNote = invocationContext?.paperclipMissionWorkingNote as { path?: string } | undefined;
+    expect(workingNote?.path).toBe(path.join(
+      process.env.PAPERCLIP_HOME!,
+      "instances",
+      "heartbeat-test",
+      "mission-working-notes",
+      companyId,
+      missionId,
+      "working.md",
+    ));
+    expect(fs.readFileSync(workingNote!.path!, "utf8")).toContain(`- Mission ID: ${missionId}`);
   });
 
   it("creates a mission-session binding from an existing mission task session on wakeup", async () => {

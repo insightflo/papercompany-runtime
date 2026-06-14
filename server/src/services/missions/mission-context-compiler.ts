@@ -4,6 +4,7 @@ import {
   buildIssueEnvelopePolicy,
   ensureMissionAgentRuntime,
 } from "./mission-runtime-manager.js";
+import { ensureMissionWorkingNote } from "./mission-working-note.js";
 
 export const MISSION_RUNTIME_CONTEXT_INVARIANT =
   "Mission runtime context is a compact contract: inject full agent context once at bootstrap, then send issue envelopes plus mission state/handoff refs only.";
@@ -54,6 +55,12 @@ export async function compileMissionRunContext(db: Db, input: {
   missionSessionId?: string | null;
 }) {
   const supportsPersistentMissionRuntime = isPersistentMissionRuntimeEnabled(input.resolvedConfig);
+  const paperclipMissionWorkingNote = input.missionId
+    ? await ensureMissionWorkingNote({
+        companyId: input.companyId,
+        missionId: input.missionId,
+      })
+    : null;
   const missionAgentRuntimeForRun = input.missionId
     ? await ensureMissionAgentRuntime(db, {
         companyId: input.companyId,
@@ -82,5 +89,6 @@ export async function compileMissionRunContext(db: Db, input: {
           policy: missionIssueEnvelopePolicy,
         })
       : null,
+    paperclipMissionWorkingNote,
   };
 }

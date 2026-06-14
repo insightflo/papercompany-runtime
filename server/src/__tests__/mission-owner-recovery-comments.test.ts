@@ -97,7 +97,12 @@ describe("mission owner recovery comments", () => {
     expect(description).toContain("- Mission description: Daily research workflow");
     expect(description).toContain("- Workflow run: tech-ai-news status=failed");
     expect(description).toContain("- Remaining workflow steps: validate-ai-news-artifact:failed, send-telegram:skipped");
-    expect(description).toContain("Allowed decision options:");
+    expect(description).toContain("Main executor brief:");
+    expect(description).toContain("Mission goal: Mission");
+    expect(description).toContain("Current situation: Source issue SRC-1");
+    expect(description).toContain("Context tools/permissions:");
+    expect(description).toContain("Resolution tools/permissions:");
+    expect(description).toContain("Main executor role:");
     expect(description).toContain("- retry_source_issue");
     expect(description).toContain("- blocker evidence");
 

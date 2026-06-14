@@ -259,6 +259,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const maintenanceDecision = asRecord(manifestInputs?.maintenanceDecision);
   const fileViews = asRecord(manifestInputs?.fileViews);
   const missionPlan = asRecord(manifestInputs?.missionPlan);
+  const missionWorkingNote = asRecord(manifestInputs?.missionWorkingNote);
   const missionOwnerPlanningContext = asRecord(manifestInputs?.missionOwnerPlanningContext);
   const guardrails = asRecord(manifest?.guardrails);
 
@@ -406,6 +407,11 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlan?.available === true && Number(missionPlan.ruleRefCount ?? 0) > 0
       ? `- Mission rules: ${Number(missionPlan.ruleRefCount ?? 0)} refs${missionPlanRuleNames.length > 0 ? ` — ${missionPlanRuleNames.join(", ")}` : ""}${missionPlanRuleModes.length > 0 ? ` (${missionPlanRuleModes.join(", ")})` : ""}`
       : null;
+  const missionWorkingNotePath = asString(missionWorkingNote?.path);
+  const missionWorkingNoteLine =
+    missionWorkingNote?.available === true && missionWorkingNotePath
+      ? `- Mission working note: ${missionWorkingNotePath} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`
+      : null;
   const missionOwnerPlanningContextLine = buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext);
 
   const guardrailLine =
@@ -454,6 +460,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanExecutionUnitsLine,
     missionPlanSelectedUnitsLine,
     missionPlanRulesLine,
+    missionWorkingNoteLine,
     missionOwnerPlanningContextLine,
     workflowToolContractLine,
     recentIssueCommentsLine,

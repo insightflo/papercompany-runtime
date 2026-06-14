@@ -826,7 +826,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(description).toContain("- Work product");
     expect(description).toContain("20260614 Tech AI News Obsidian note");
     expect(description).toContain("REQUEST_CHANGES: regenerate the infographic before delivery");
-    expect(description).toContain("Mission owner duties:");
+    expect(description).toContain("Main executor brief:");
+    expect(description).toContain("Mission goal: Blocked workflow mission");
+    expect(description).toContain("Current situation: Source issue");
+    expect(description).toContain("Context tools/permissions:");
+    expect(description).toContain("- Read mission, workflow run, workflow step, issue, comment, work product, and run-log evidence.");
+    expect(description).toContain("Resolution tools/permissions:");
+    expect(description).toContain("- Record an owner decision/comment, request user input, wake or reassign agents, retry/resume bounded work, replan, escalate, or report impossible completion when evidence supports it.");
+    expect(description).toContain("Main executor role:");
+    expect(description).toContain("- Do: judge the situation from evidence, coordinate the next step, keep the mission moving, and record why.");
+    expect(description).toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
     for (const decision of [
       "request_input",
       "retry_source_issue",
@@ -2350,6 +2359,76 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
   });
 
+  it("replaces stale workflow run execution units when a workflow mission restarts", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const staleRunId = randomUUID();
+    const currentRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Restarted Workflow Company",
+      issuePrefix: `RW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Main Executor",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-06-14 tech-ai-news",
+      status: "active",
+    });
+
+    const svc = missionService(db);
+    await svc.ensureMissionExecutionPlan({
+      companyId,
+      missionId,
+      sourceHints: {
+        workflowName: "tech-ai-news",
+        sourceRunId: staleRunId,
+        workflowStepIds: ["collect-ai-news-evidence", "validate-ai-news-artifact"],
+      },
+    });
+    await svc.ensureMissionExecutionPlan({
+      companyId,
+      missionId,
+      sourceHints: {
+        workflowName: "tech-ai-news",
+        sourceRunId: currentRunId,
+        workflowStepIds: ["collect-ai-news-evidence", "validate-ai-news-note", "send-telegram"],
+      },
+    });
+
+    const [planArtifact] = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId));
+    const refs = planArtifact?.refs as Record<string, unknown>;
+    const executionUnits = refs.executionUnits as Array<Record<string, unknown>>;
+    const sourceRefs = executionUnits.map((unit) => unit.sourceRef as Record<string, unknown>);
+
+    expect(refs.sourceRunId).toBe(currentRunId);
+    expect(sourceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: currentRunId, type: "native_workflow_run" }),
+      expect.objectContaining({ id: "validate-ai-news-note", workflowRunId: currentRunId }),
+      expect.objectContaining({ id: "send-telegram", workflowRunId: currentRunId }),
+    ]));
+    expect(sourceRefs.some((sourceRef) => sourceRef.id === staleRunId || sourceRef.workflowRunId === staleRunId)).toBe(false);
+    expect(sourceRefs.some((sourceRef) => sourceRef.id === "validate-ai-news-artifact")).toBe(false);
+  });
+
   it("escalates stale plugin execution units into owner-action issues without retrying the source", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -2654,15 +2733,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         missionId,
         originId: oversightIssue.id,
         status: "todo",
-        title: "[RECOVERY] Tool step failed: collect-signals",
+        title: "[Owner Action] Tool step failed: collect-signals",
       }),
     ]);
     expect(ownerActionIssues[0]?.description).toContain(`<!-- tool-step-recovery:${runId}:collect-signals -->`);
     expect(ownerActionIssues[0]?.description).toContain("Tool names: collect-signals-kr");
-    expect(ownerActionIssues[0]?.description).toContain("Failure class: transient_or_external");
-    expect(ownerActionIssues[0]?.description).toContain("Retry policy: retry_with_bounded_backoff");
-    expect(ownerActionIssues[0]?.description).toContain("Do not blindly retry this step.");
-    expect(ownerActionIssues[0]?.description).toContain("If the tool implementation is broken");
+    expect(ownerActionIssues[0]?.description).toContain("Local signal hint: transient_or_external");
+    expect(ownerActionIssues[0]?.description).toContain("Local retry hint: retry_with_bounded_backoff");
+    expect(ownerActionIssues[0]?.description).toContain("Main executor brief:");
+    expect(ownerActionIssues[0]?.description).toContain("Mission goal: Tool step recovery mission");
+    expect(ownerActionIssues[0]?.description).toContain("Context tools/permissions:");
+    expect(ownerActionIssues[0]?.description).toContain("Resolution tools/permissions:");
+    expect(ownerActionIssues[0]?.description).toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
 
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
@@ -2777,14 +2859,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(recoveryIssue).toEqual(expect.objectContaining({
       assigneeAgentId: ownerAgentId,
       status: "todo",
-      title: "[RECOVERY] Tool step failed: scan",
+      title: "[Owner Action] Tool step failed: scan",
     }));
     expect(recoveryIssue.description).toContain(`<!-- tool-step-recovery:${runId}:scan -->`);
-    expect(recoveryIssue.description).toContain("Failure class: missing_file");
-    expect(recoveryIssue.description).toContain("Retry policy: do_not_retry_until_config_fixed");
+    expect(recoveryIssue.description).toContain("Local signal hint: missing_file");
+    expect(recoveryIssue.description).toContain("Local retry hint: do_not_retry_until_config_fixed");
     expect(recoveryIssue.description).toContain("can't open file");
     expect(recoveryIssue.description).toContain("No such file or directory");
-    expect(recoveryIssue.description).toContain("Fix the command, cwd, tool registration");
+    expect(recoveryIssue.description).toContain("No recovery action has been selected by automation.");
   });
 
   it("automatically retries completed issue-less tool recovery through the unified workflow engine", async () => {
@@ -2902,7 +2984,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       originId: oversightIssue.id,
       priority: "high",
       status: "todo",
-      title: "[RECOVERY] Tool step failed: collect-signals duplicate",
+      title: "[Owner Action] Tool step failed: collect-signals duplicate",
     });
 
     await issueService(db).update(recoveryIssue.id, { status: "done" });
