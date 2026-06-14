@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { BookOpen, Bot, Moon, Settings, Sun } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useParams } from "@/lib/router";
@@ -7,13 +7,7 @@ import { Sidebar } from "./Sidebar";
 import { InstanceSidebar } from "./InstanceSidebar";
 import { BreadcrumbBar } from "./BreadcrumbBar";
 import { PropertiesPanel } from "./PropertiesPanel";
-import { HermesChatPanel } from "./HermesChatPanel";
 import { CommandPalette } from "./CommandPalette";
-import { NewIssueDialog } from "./NewIssueDialog";
-import { NewProjectDialog } from "./NewProjectDialog";
-import { NewGoalDialog } from "./NewGoalDialog";
-import { NewMissionDialog } from "./NewMissionDialog";
-import { NewAgentDialog } from "./NewAgentDialog";
 import { ToastViewport } from "./ToastViewport";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
@@ -25,6 +19,7 @@ import { useSidebar } from "../context/SidebarContext";
 import { useTheme } from "../context/ThemeContext";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
 import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
+import { useAfterInitialPaint } from "../hooks/useAfterInitialPaint";
 import { healthApi } from "../api/health";
 import { shouldSyncCompanySelectionFromRoute } from "../lib/company-selection";
 import {
@@ -39,6 +34,30 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 
 const INSTANCE_SETTINGS_MEMORY_KEY = "paperclip.lastInstanceSettingsPath";
 const HERMES_PANEL_MEMORY_KEY = "paperclip.hermesPanelOpen";
+const LazyHermesChatPanel = lazy(async () => ({ default: (await import("./HermesChatPanel")).HermesChatPanel }));
+const LazyNewIssueDialog = lazy(async () => ({ default: (await import("./NewIssueDialog")).NewIssueDialog }));
+const LazyNewProjectDialog = lazy(async () => ({ default: (await import("./NewProjectDialog")).NewProjectDialog }));
+const LazyNewGoalDialog = lazy(async () => ({ default: (await import("./NewGoalDialog")).NewGoalDialog }));
+const LazyNewMissionDialog = lazy(async () => ({ default: (await import("./NewMissionDialog")).NewMissionDialog }));
+const LazyNewAgentDialog = lazy(async () => ({ default: (await import("./NewAgentDialog")).NewAgentDialog }));
+
+function DialogMounts() {
+  const { newIssueOpen, newProjectOpen, newGoalOpen, newMissionOpen, newAgentOpen } = useDialog();
+
+  if (!newIssueOpen && !newProjectOpen && !newGoalOpen && !newMissionOpen && !newAgentOpen) {
+    return null;
+  }
+
+  return (
+    <Suspense fallback={null}>
+      {newIssueOpen && <LazyNewIssueDialog />}
+      {newProjectOpen && <LazyNewProjectDialog />}
+      {newGoalOpen && <LazyNewGoalDialog />}
+      {newMissionOpen && <LazyNewMissionDialog />}
+      {newAgentOpen && <LazyNewAgentDialog />}
+    </Suspense>
+  );
+}
 
 function readRememberedInstanceSettingsPath(): string {
   if (typeof window === "undefined") return DEFAULT_INSTANCE_SETTINGS_PATH;
@@ -89,6 +108,7 @@ export function Layout() {
   const [mobileNavVisible, setMobileNavVisible] = useState(true);
   const [instanceSettingsTarget, setInstanceSettingsTarget] = useState<string>(() => readRememberedInstanceSettingsPath());
   const [hermesPanelOpen, setHermesPanelOpenState] = useState(() => readRememberedHermesPanelOpen());
+  const heavyPanelsReady = useAfterInitialPaint(900);
   const nextTheme = theme === "dark" ? "light" : "dark";
   const matchedCompany = useMemo(() => {
     if (!companyPrefix) return null;
@@ -475,7 +495,11 @@ export function Layout() {
               >
                 {hermesPanelOpen ? (
                   <div className="h-full min-h-0 w-96 min-w-96 overflow-hidden">
-                    <HermesChatPanel mode="sidebar" onCollapse={() => setHermesPanelOpen(false)} />
+                    {heavyPanelsReady && (
+                      <Suspense fallback={null}>
+                        <LazyHermesChatPanel mode="sidebar" onCollapse={() => setHermesPanelOpen(false)} />
+                      </Suspense>
+                    )}
                   </div>
                 ) : (
                   <button
@@ -505,17 +529,17 @@ export function Layout() {
             aria-label="Close Hermes chat"
           />
           <aside className="absolute inset-y-0 right-0 flex min-h-0 w-[min(100vw,24rem)] flex-col overflow-hidden border-l border-border bg-background shadow-lg">
-            <HermesChatPanel mode="sidebar" onCollapse={() => setHermesPanelOpen(false)} />
+            {heavyPanelsReady && (
+              <Suspense fallback={null}>
+                <LazyHermesChatPanel mode="sidebar" onCollapse={() => setHermesPanelOpen(false)} />
+              </Suspense>
+            )}
           </aside>
         </div>
       )}
       {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
       <CommandPalette />
-      <NewIssueDialog />
-      <NewProjectDialog />
-      <NewGoalDialog />
-      <NewMissionDialog />
-      <NewAgentDialog />
+      <DialogMounts />
       <ToastViewport />
     </div>
   );

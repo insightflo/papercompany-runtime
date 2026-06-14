@@ -22,6 +22,7 @@ import { cn } from "../lib/utils";
 import { queryKeys } from "../lib/queryKeys";
 import { sidebarBadgesApi } from "../api/sidebarBadges";
 import { heartbeatsApi } from "../api/heartbeats";
+import { useAfterInitialPaint } from "../hooks/useAfterInitialPaint";
 import { useLocation, useNavigate } from "@/lib/router";
 import {
   Tooltip,
@@ -165,11 +166,13 @@ export function CompanyRail() {
     [companies],
   );
   const companyIds = useMemo(() => sidebarCompanies.map((company) => company.id), [sidebarCompanies]);
+  const railPollingReady = useAfterInitialPaint(900);
 
   const liveRunsQueries = useQueries({
     queries: companyIds.map((companyId) => ({
       queryKey: queryKeys.liveRuns(companyId),
       queryFn: () => heartbeatsApi.liveRunsForCompany(companyId),
+      enabled: railPollingReady,
       refetchInterval: companyId === selectedCompanyId ? 10_000 : 60_000,
     })),
   });
@@ -177,6 +180,7 @@ export function CompanyRail() {
     queries: companyIds.map((companyId) => ({
       queryKey: queryKeys.sidebarBadges(companyId),
       queryFn: () => sidebarBadgesApi.get(companyId),
+      enabled: railPollingReady,
       refetchInterval: companyId === selectedCompanyId ? 15_000 : 60_000,
     })),
   });

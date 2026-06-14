@@ -30,6 +30,7 @@ import { heartbeatsApi } from "../api/heartbeats";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { useInboxBadge } from "../hooks/useInboxBadge";
+import { useAfterInitialPaint } from "../hooks/useAfterInitialPaint";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
@@ -41,11 +42,13 @@ interface SidebarProps {
 export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps) {
   const { openNewIssue, openNewMission } = useDialog();
   const { selectedCompanyId, selectedCompany } = useCompany();
-  const inboxBadge = useInboxBadge(selectedCompanyId);
+  const sidebarDataReady = useAfterInitialPaint(900);
+  const deferredCompanyId = sidebarDataReady ? selectedCompanyId : null;
+  const inboxBadge = useInboxBadge(deferredCompanyId);
   const { data: liveRuns } = useQuery({
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
+    enabled: !!selectedCompanyId && sidebarDataReady,
     refetchInterval: 10_000,
   });
   const liveRunCount = liveRuns?.length ?? 0;

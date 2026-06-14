@@ -3,26 +3,8 @@ import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/r
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Layout } from "./components/Layout";
-import { OnboardingWizard } from "./components/OnboardingWizard";
 import { authApi } from "./api/auth";
 import { healthApi } from "./api/health";
-import { Dashboard } from "./pages/Dashboard";
-import { Companies } from "./pages/Companies";
-import { Agents } from "./pages/Agents";
-import { AgentDetail } from "./pages/AgentDetail";
-import { Projects } from "./pages/Projects";
-import { ProjectDetail } from "./pages/ProjectDetail";
-import { Issues } from "./pages/Issues";
-import { IssueDetail } from "./pages/IssueDetail";
-import { Routines } from "./pages/Routines";
-import { RoutineDetail } from "./pages/RoutineDetail";
-import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
-import { Goals } from "./pages/Goals";
-import { GoalDetail } from "./pages/GoalDetail";
-import { Inbox } from "./pages/Inbox";
-import { CompanySettings } from "./pages/CompanySettings";
-import { OrgChart } from "./pages/OrgChart";
-import { NewAgent } from "./pages/NewAgent";
 import { AuthPage } from "./pages/Auth";
 import { BoardClaimPage } from "./pages/BoardClaim";
 import { CliAuthPage } from "./pages/CliAuth";
@@ -34,6 +16,24 @@ import { useDialog } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
 import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-route";
 
+const OnboardingWizard = lazy(async () => ({ default: (await import("./components/OnboardingWizard")).OnboardingWizard }));
+const Dashboard = lazy(async () => ({ default: (await import("./pages/Dashboard")).Dashboard }));
+const Companies = lazy(async () => ({ default: (await import("./pages/Companies")).Companies }));
+const Agents = lazy(async () => ({ default: (await import("./pages/Agents")).Agents }));
+const AgentDetail = lazy(async () => ({ default: (await import("./pages/AgentDetail")).AgentDetail }));
+const Projects = lazy(async () => ({ default: (await import("./pages/Projects")).Projects }));
+const ProjectDetail = lazy(async () => ({ default: (await import("./pages/ProjectDetail")).ProjectDetail }));
+const Issues = lazy(async () => ({ default: (await import("./pages/Issues")).Issues }));
+const IssueDetail = lazy(async () => ({ default: (await import("./pages/IssueDetail")).IssueDetail }));
+const Routines = lazy(async () => ({ default: (await import("./pages/Routines")).Routines }));
+const RoutineDetail = lazy(async () => ({ default: (await import("./pages/RoutineDetail")).RoutineDetail }));
+const ExecutionWorkspaceDetail = lazy(async () => ({ default: (await import("./pages/ExecutionWorkspaceDetail")).ExecutionWorkspaceDetail }));
+const Goals = lazy(async () => ({ default: (await import("./pages/Goals")).Goals }));
+const GoalDetail = lazy(async () => ({ default: (await import("./pages/GoalDetail")).GoalDetail }));
+const Inbox = lazy(async () => ({ default: (await import("./pages/Inbox")).Inbox }));
+const CompanySettings = lazy(async () => ({ default: (await import("./pages/CompanySettings")).CompanySettings }));
+const OrgChart = lazy(async () => ({ default: (await import("./pages/OrgChart")).OrgChart }));
+const NewAgent = lazy(async () => ({ default: (await import("./pages/NewAgent")).NewAgent }));
 const Missions = lazy(async () => ({ default: (await import("./pages/Missions")).Missions }));
 const MissionDetail = lazy(async () => ({ default: (await import("./pages/MissionDetail")).MissionDetail }));
 const Workflows = lazy(async () => ({ default: (await import("./pages/Workflows")).Workflows }));
@@ -63,6 +63,20 @@ function lazyRoute(element: ReactNode) {
   return (
     <Suspense fallback={<div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>}>
       {element}
+    </Suspense>
+  );
+}
+
+function OnboardingWizardMount() {
+  const { onboardingOpen } = useDialog();
+  const location = useLocation();
+  const shouldMount = onboardingOpen || /(^|\/)onboarding$/.test(location.pathname);
+
+  if (!shouldMount) return null;
+
+  return (
+    <Suspense fallback={null}>
+      <OnboardingWizard />
     </Suspense>
   );
 }
@@ -138,10 +152,10 @@ function boardRoutes() {
   return (
     <>
       <Route index element={<Navigate to="missions" replace />} />
-      <Route path="dashboard" element={<Dashboard />} />
+      <Route path="dashboard" element={lazyRoute(<Dashboard />)} />
       <Route path="onboarding" element={<OnboardingRoutePage />} />
-      <Route path="companies" element={<Companies />} />
-      <Route path="company/settings" element={<CompanySettings />} />
+      <Route path="companies" element={lazyRoute(<Companies />)} />
+      <Route path="company/settings" element={lazyRoute(<CompanySettings />)} />
       <Route path="company/export/*" element={lazyRoute(<CompanyExport />)} />
       <Route path="company/import" element={lazyRoute(<CompanyImport />)} />
       <Route path="skills/*" element={lazyRoute(<CompanySkills />)} />
@@ -150,36 +164,36 @@ function boardRoutes() {
       <Route path="settings" element={<LegacySettingsRedirect />} />
       <Route path="settings/*" element={<LegacySettingsRedirect />} />
       <Route path="plugins/:pluginId" element={lazyRoute(<PluginPage />)} />
-      <Route path="org" element={<OrgChart />} />
+      <Route path="org" element={lazyRoute(<OrgChart />)} />
       <Route path="agents" element={<Navigate to="/agents/all" replace />} />
-      <Route path="agents/all" element={<Agents />} />
-      <Route path="agents/active" element={<Agents />} />
-      <Route path="agents/paused" element={<Agents />} />
-      <Route path="agents/error" element={<Agents />} />
-      <Route path="agents/new" element={<NewAgent />} />
-      <Route path="agents/:agentId" element={<AgentDetail />} />
-      <Route path="agents/:agentId/:tab" element={<AgentDetail />} />
-      <Route path="agents/:agentId/runs/:runId" element={<AgentDetail />} />
-      <Route path="projects" element={<Projects />} />
-      <Route path="projects/:projectId" element={<ProjectDetail />} />
-      <Route path="projects/:projectId/overview" element={<ProjectDetail />} />
-      <Route path="projects/:projectId/issues" element={<ProjectDetail />} />
-      <Route path="projects/:projectId/issues/:filter" element={<ProjectDetail />} />
-      <Route path="projects/:projectId/configuration" element={<ProjectDetail />} />
-      <Route path="projects/:projectId/budget" element={<ProjectDetail />} />
-      <Route path="issues" element={<Issues />} />
+      <Route path="agents/all" element={lazyRoute(<Agents />)} />
+      <Route path="agents/active" element={lazyRoute(<Agents />)} />
+      <Route path="agents/paused" element={lazyRoute(<Agents />)} />
+      <Route path="agents/error" element={lazyRoute(<Agents />)} />
+      <Route path="agents/new" element={lazyRoute(<NewAgent />)} />
+      <Route path="agents/:agentId" element={lazyRoute(<AgentDetail />)} />
+      <Route path="agents/:agentId/:tab" element={lazyRoute(<AgentDetail />)} />
+      <Route path="agents/:agentId/runs/:runId" element={lazyRoute(<AgentDetail />)} />
+      <Route path="projects" element={lazyRoute(<Projects />)} />
+      <Route path="projects/:projectId" element={lazyRoute(<ProjectDetail />)} />
+      <Route path="projects/:projectId/overview" element={lazyRoute(<ProjectDetail />)} />
+      <Route path="projects/:projectId/issues" element={lazyRoute(<ProjectDetail />)} />
+      <Route path="projects/:projectId/issues/:filter" element={lazyRoute(<ProjectDetail />)} />
+      <Route path="projects/:projectId/configuration" element={lazyRoute(<ProjectDetail />)} />
+      <Route path="projects/:projectId/budget" element={lazyRoute(<ProjectDetail />)} />
+      <Route path="issues" element={lazyRoute(<Issues />)} />
       <Route path="issues/all" element={<Navigate to="/issues" replace />} />
       <Route path="issues/active" element={<Navigate to="/issues" replace />} />
       <Route path="issues/backlog" element={<Navigate to="/issues" replace />} />
       <Route path="issues/done" element={<Navigate to="/issues" replace />} />
       <Route path="issues/recent" element={<Navigate to="/issues" replace />} />
-      <Route path="issues/:issueId" element={<IssueDetail />} />
-      <Route path="routines" element={<Routines />} />
-      <Route path="routines/:routineId" element={<RoutineDetail />} />
+      <Route path="issues/:issueId" element={lazyRoute(<IssueDetail />)} />
+      <Route path="routines" element={lazyRoute(<Routines />)} />
+      <Route path="routines/:routineId" element={lazyRoute(<RoutineDetail />)} />
       <Route path="workflows" element={lazyRoute(<Workflows />)} />
-      <Route path="execution-workspaces/:workspaceId" element={<ExecutionWorkspaceDetail />} />
-      <Route path="goals" element={<Goals />} />
-      <Route path="goals/:goalId" element={<GoalDetail />} />
+      <Route path="execution-workspaces/:workspaceId" element={lazyRoute(<ExecutionWorkspaceDetail />)} />
+      <Route path="goals" element={lazyRoute(<Goals />)} />
+      <Route path="goals/:goalId" element={lazyRoute(<GoalDetail />)} />
       <Route path="missions" element={lazyRoute(<Missions />)} />
       <Route path="missions/:missionId" element={lazyRoute(<MissionDetail />)} />
       <Route path="scheduler" element={lazyRoute(<SchedulerConfig />)} />
@@ -193,9 +207,9 @@ function boardRoutes() {
       <Route path="costs" element={lazyRoute(<Costs />)} />
       <Route path="activity" element={lazyRoute(<Activity />)} />
       <Route path="inbox" element={<InboxRootRedirect />} />
-      <Route path="inbox/recent" element={<Inbox />} />
-      <Route path="inbox/unread" element={<Inbox />} />
-      <Route path="inbox/all" element={<Inbox />} />
+      <Route path="inbox/recent" element={lazyRoute(<Inbox />)} />
+      <Route path="inbox/unread" element={lazyRoute(<Inbox />)} />
+      <Route path="inbox/all" element={lazyRoute(<Inbox />)} />
       <Route path="inbox/new" element={<Navigate to="/inbox/recent" replace />} />
       <Route path="design-guide" element={lazyRoute(<DesignGuide />)} />
       <Route path="tests/ux/runs" element={lazyRoute(<RunTranscriptUxLab />)} />
@@ -385,7 +399,7 @@ export function App() {
           <Route path="*" element={<NotFoundPage scope="global" />} />
         </Route>
       </Routes>
-      <OnboardingWizard />
+      <OnboardingWizardMount />
     </>
   );
 }

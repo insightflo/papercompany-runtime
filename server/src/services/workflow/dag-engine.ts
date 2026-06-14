@@ -7,7 +7,7 @@
 
 import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
@@ -581,9 +581,90 @@ function desiredStepRunStatusFromIssueStatus(issueStatus: string): "pending" | "
   return "pending";
 }
 
+function isValidationGateCandidate(input: {
+  issueTitle?: string | null;
+  issueOriginKind?: string | null;
+  step?: WorkflowStep | null;
+}): boolean {
+  if (
+    input.issueOriginKind === "mission_main_executor_plan" ||
+    input.issueOriginKind === "mission_main_executor_oversight" ||
+    input.issueOriginKind === "mission_main_executor_unblock"
+  ) {
+    return false;
+  }
+
+  const text = [
+    input.issueTitle,
+    input.step?.id,
+    input.step?.name,
+    input.step?.title,
+    input.step?.type,
+    input.step?.description,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+
+  return (
+    /^\s*\[QA\]/iu.test(text) ||
+    /\b(QA|validator|validation|validate)\b/iu.test(text) ||
+    text.includes("검증")
+  );
+}
+
+function readExplicitValidationVerdict(value: string): "pass" | "request_changes" | null {
+  const compact = value
+    .replace(/[`*_#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) return null;
+  if (/^PASS\s+or\s+REQUEST[_\s-]?CHANGES\b/iu.test(compact)) return null;
+
+  const explicitPatterns = [
+    /^(REQUEST[_\s-]?CHANGES|PASS)(?:\b|[\s:：—–-])/iu,
+    /\b(?:verdict|decision|outcome|status|QA\s+verdict)\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
+    /\bvalidation\s+complete\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
+    /\bmission\s+validation\s+gate\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES)\b/iu,
+  ];
+  for (const pattern of explicitPatterns) {
+    const match = pattern.exec(compact);
+    const label = match?.[1];
+    if (!label) continue;
+    return /^PASS$/iu.test(label) ? "pass" : "request_changes";
+  }
+  return null;
+}
+
+function latestExplicitValidationVerdict(comments: string[]): "pass" | "request_changes" | null {
+  for (const comment of comments) {
+    const verdict = readExplicitValidationVerdict(comment);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
+function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" | "request_changes" | null {
+  const result = normalizeRecord(resultJson);
+  const candidates = [
+    result.verdict,
+    result.decision,
+    result.outcome,
+    result.status,
+    result.result,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const verdict = readExplicitValidationVerdict(candidate);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
 async function syncStepRunsFromIssueState(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+  steps: WorkflowStep[] = [],
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
   const issueIds = stepRuns
     .map((stepRun) => stepRun.issueId)
@@ -597,17 +678,72 @@ async function syncStepRunsFromIssueState(
       startedAt: issues.startedAt,
       completedAt: issues.completedAt,
       cancelledAt: issues.cancelledAt,
+      title: issues.title,
+      originKind: issues.originKind,
     })
     .from(issues)
     .where(inArray(issues.id, issueIds));
   const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
+  const stepById = new Map(steps.map((step) => [step.id, step]));
+  const validationCandidateIssueIds = stepRuns
+    .filter((stepRun) => {
+      if (!stepRun.issueId) return false;
+      const issue = issueById.get(stepRun.issueId);
+      if (!issue || issue.status !== "done") return false;
+      return isValidationGateCandidate({
+        issueTitle: issue.title,
+        issueOriginKind: issue.originKind,
+        step: stepById.get(stepRun.stepId) ?? null,
+      });
+    })
+    .map((stepRun) => stepRun.issueId!)
+    .filter((issueId, index, all) => all.indexOf(issueId) === index);
+  const commentsByIssueId = new Map<string, string[]>();
+  const heartbeatVerdictByIssueId = new Map<string, "pass" | "request_changes">();
+  if (validationCandidateIssueIds.length > 0) {
+    const runRows = await db
+      .select({
+        issueId: heartbeatRuns.issueId,
+        resultJson: heartbeatRuns.resultJson,
+      })
+      .from(heartbeatRuns)
+      .where(and(
+        inArray(heartbeatRuns.issueId, validationCandidateIssueIds),
+        eq(heartbeatRuns.status, "succeeded"),
+      ))
+      .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
+    for (const run of runRows) {
+      if (!run.issueId || heartbeatVerdictByIssueId.has(run.issueId)) continue;
+      const verdict = readValidationVerdictFromHeartbeatResult(run.resultJson);
+      if (verdict) heartbeatVerdictByIssueId.set(run.issueId, verdict);
+    }
+
+    const commentRows = await db
+      .select({
+        issueId: issueComments.issueId,
+        body: issueComments.body,
+      })
+      .from(issueComments)
+      .where(inArray(issueComments.issueId, validationCandidateIssueIds))
+      .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
+    for (const comment of commentRows) {
+      const comments = commentsByIssueId.get(comment.issueId) ?? [];
+      comments.push(comment.body);
+      commentsByIssueId.set(comment.issueId, comments);
+    }
+  }
 
   for (const stepRun of stepRuns) {
     if (!stepRun.issueId) continue;
     const issue = issueById.get(stepRun.issueId);
     if (!issue) continue;
 
-    const desiredStatus = desiredStepRunStatusFromIssueStatus(issue.status);
+    const validationVerdict = issue.status === "done"
+      ? heartbeatVerdictByIssueId.get(issue.id) ?? latestExplicitValidationVerdict(commentsByIssueId.get(issue.id) ?? [])
+      : null;
+    const desiredStatus = validationVerdict === "request_changes"
+      ? "failed"
+      : desiredStepRunStatusFromIssueStatus(issue.status);
     const patch: Partial<typeof workflowStepRuns.$inferInsert> = {};
     const now = new Date();
 
@@ -1726,7 +1862,7 @@ export async function syncWorkflowRunState(
 ): Promise<WorkflowExecutionResult> {
   const context = await loadWorkflowExecutionContext(db, runId);
   let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
-  stepRuns = await syncStepRunsFromIssueState(db, stepRuns);
+  stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps);
 
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
