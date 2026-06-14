@@ -493,6 +493,7 @@ export async function startServer(): Promise<StartedServer> {
     resolveSession,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
+  let heartbeatScheduler: ReturnType<typeof createHeartbeatScheduler> | null = null;
   
   if (listenPort !== config.port) {
     logger.warn(`Requested port is busy; using next free port (requestedPort=${config.port}, selectedPort=${listenPort})`);
@@ -524,19 +525,6 @@ export async function startServer(): Promise<StartedServer> {
     .catch((err) => {
       logger.error({ err }, "startup reconciliation of persisted runtime services failed");
     });
-  
-  if (config.heartbeatSchedulerEnabled) {
-    const heartbeat = heartbeatService(db as any);
-    const routines = routineService(db as any);
-    const heartbeatScheduler = createHeartbeatScheduler({
-      heartbeat,
-      routines,
-      logger,
-      timerIntervalMs: config.heartbeatSchedulerIntervalMs,
-      routineIntervalMs: config.heartbeatSchedulerIntervalMs,
-    });
-    heartbeatScheduler.start();
-  }
   
   if (config.databaseBackupEnabled) {
     const backupIntervalMs = config.databaseBackupIntervalMinutes * 60 * 1000;
@@ -645,11 +633,25 @@ export async function startServer(): Promise<StartedServer> {
       resolveListen();
     });
   });
+
+  if (config.heartbeatSchedulerEnabled) {
+    const heartbeat = heartbeatService(db as any);
+    const routines = routineService(db as any);
+    heartbeatScheduler = createHeartbeatScheduler({
+      heartbeat,
+      routines,
+      logger,
+      timerIntervalMs: config.heartbeatSchedulerIntervalMs,
+      routineIntervalMs: config.heartbeatSchedulerIntervalMs,
+    });
+    heartbeatScheduler.start();
+  }
   
   if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
       logger.info({ signal }, "Stopping embedded PostgreSQL");
       try {
+        heartbeatScheduler?.stop();
         await embeddedPostgres?.stop();
       } catch (err) {
         logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -13,6 +14,7 @@ const scanIntervalMs = 1500;
 const autoRestartPollIntervalMs = 2500;
 const gracefulShutdownTimeoutMs = 10_000;
 const changedPathSampleLimit = 5;
+const detachedServerChild = process.platform !== "win32";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const devServerStatusFilePath = path.join(repoRoot, ".paperclip", "dev-server-status.json");
 const diagnostics = createDevRunnerDiagnostics({ repoRoot, env: process.env });
@@ -88,13 +90,14 @@ const env = {
 };
 env.PATH = [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter);
 
-if (mode === "dev") {
+if (mode === "dev" || mode === "watch") {
   env.PAPERCLIP_DEV_SERVER_STATUS_FILE = devServerStatusFilePath;
 }
 
 if (mode === "watch") {
   env.PAPERCLIP_MIGRATION_PROMPT ??= "never";
   env.PAPERCLIP_MIGRATION_AUTO_APPLY ??= "true";
+  env.PAPERCLIP_DEV_RUNNER_AUTO_RESTART_WHEN_IDLE ??= "true";
 }
 
 if (tailscaleAuth) {
@@ -188,6 +191,14 @@ function toRelativePath(absolutePath) {
   return path.relative(repoRoot, absolutePath).split(path.sep).join("/");
 }
 
+function shouldIgnoreRelativePath(relativePath) {
+  if (ignoredRelativePaths.has(relativePath)) return true;
+  if (relativePath.startsWith(".paperclip/") && (relativePath.endsWith(".log") || relativePath.endsWith(".ndjson"))) {
+    return true;
+  }
+  return false;
+}
+
 function readSignature(absolutePath) {
   const stats = statSync(absolutePath);
   return `${Math.trunc(stats.mtimeMs)}:${stats.size}`;
@@ -195,7 +206,7 @@ function readSignature(absolutePath) {
 
 function addFileToSnapshot(snapshot, absolutePath) {
   const relativePath = toRelativePath(absolutePath);
-  if (ignoredRelativePaths.has(relativePath)) return;
+  if (shouldIgnoreRelativePath(relativePath)) return;
   snapshot.set(relativePath, readSignature(absolutePath));
 }
 
@@ -252,7 +263,7 @@ function ensureDevStatusDirectory() {
 }
 
 function writeDevServerStatus() {
-  if (mode !== "dev") return;
+  if (mode !== "dev" && mode !== "watch") return;
 
   ensureDevStatusDirectory();
   const changedPaths = [...dirtyPaths].sort();
@@ -271,7 +282,7 @@ function writeDevServerStatus() {
 }
 
 function clearDevServerStatus() {
-  if (mode !== "dev") return;
+  if (mode !== "dev" && mode !== "watch") return;
   rmSync(devServerStatusFilePath, { force: true });
 }
 
@@ -457,7 +468,7 @@ async function markChildAsCurrent() {
 }
 
 async function scanForBackendChanges() {
-  if (mode !== "dev" || scanInFlight || restartInFlight) return;
+  if ((mode !== "dev" && mode !== "watch") || scanInFlight || restartInFlight) return;
   scanInFlight = true;
   try {
     const nextSnapshot = collectWatchedSnapshot();
@@ -484,6 +495,53 @@ async function getDevHealthPayload() {
   return await response.json();
 }
 
+async function isServerPortOpen() {
+  const serverPort = Number(getServerPort());
+  if (!Number.isInteger(serverPort) || serverPort <= 0) return false;
+
+  return await new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port: serverPort });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.setTimeout(500, () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForServerPortToClose() {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < gracefulShutdownTimeoutMs) {
+    if (!(await isServerPortOpen())) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return !(await isServerPortOpen());
+}
+
+function signalServerChild(signal) {
+  if (!child) return;
+  if (detachedServerChild && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      diagnostics.logEvent("server_child_process_group_signal_failed", {
+        childPid: child.pid,
+        signal,
+        error: diagnostics.safeErrorPayload(toError(error, "Unable to signal server child process group")),
+      });
+    }
+  }
+  child.kill(signal);
+}
+
 async function waitForChildExit() {
   if (!childExitPromise) {
     return { code: 0, signal: null };
@@ -494,14 +552,19 @@ async function waitForChildExit() {
 async function stopChildForRestart() {
   if (!child) return { code: 0, signal: null };
   childExitWasExpected = true;
-  child.kill("SIGTERM");
+  signalServerChild("SIGTERM");
   const killTimer = setTimeout(() => {
     if (child) {
-      child.kill("SIGKILL");
+      signalServerChild("SIGKILL");
     }
   }, gracefulShutdownTimeoutMs);
   try {
-    return await waitForChildExit();
+    const exit = await waitForChildExit();
+    const portClosed = await waitForServerPortToClose();
+    if (!portClosed) {
+      throw new Error(`Server port ${getServerPort()} did not close after stopping child process`);
+    }
+    return exit;
   } finally {
     clearTimeout(killTimer);
   }
@@ -510,7 +573,7 @@ async function stopChildForRestart() {
 async function startServerChild() {
   await buildPluginSdk();
 
-  const serverScript = mode === "watch" ? "dev:watch" : "dev";
+  const serverScript = "dev";
   const childArgs = ["--filter", "@paperclipai/server", serverScript, ...forwardedArgs];
   const startedAt = Date.now();
   childStartedAt = startedAt;
@@ -524,7 +587,12 @@ async function startServerChild() {
   child = spawn(
     pnpmBin,
     childArgs,
-    { stdio: ["ignore", "pipe", "pipe"], env, shell: process.platform === "win32" },
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+      shell: process.platform === "win32",
+      detached: detachedServerChild,
+    },
   );
   diagnostics.logEvent("server_child_spawned", {
     mode,
@@ -599,7 +667,7 @@ async function startServerChild() {
 }
 
 async function maybeAutoRestartChild() {
-  if (mode !== "dev" || restartInFlight || !child) return;
+  if ((mode !== "dev" && mode !== "watch") || restartInFlight || !child) return;
   if (dirtyPaths.size === 0 && pendingMigrations.length === 0) return;
 
   restartInFlight = true;
@@ -685,7 +753,7 @@ async function recordHealthDiagnostics() {
 }
 
 function installDevIntervals() {
-  if (mode !== "dev") return;
+  if (mode !== "dev" && mode !== "watch") return;
 
   scanTimer = setInterval(() => {
     void scanForBackendChanges();
@@ -744,7 +812,7 @@ async function shutdown(signal) {
   }
 
   childExitWasExpected = true;
-  child.kill(signal);
+  signalServerChild(signal);
   const exit = await waitForChildExit();
   diagnostics.logEvent("dev_runner_shutdown_child_exit_observed", {
     signal: signal ?? null,
@@ -783,11 +851,3 @@ await maybePreflightMigrations();
 await startServerChild();
 installDevIntervals();
 installHealthDiagnostics();
-
-if (mode === "watch") {
-  const exit = await waitForChildExit();
-  if (exit.signal) {
-    exitForSignal(exit.signal);
-  }
-  process.exit(exit.code ?? 0);
-}

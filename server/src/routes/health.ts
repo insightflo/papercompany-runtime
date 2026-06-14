@@ -67,9 +67,12 @@ export function healthRoutes(
         .from(heartbeatRuns)
         .where(inArray(heartbeatRuns.status, ["queued", "running"]))
         .then((rows) => Number(rows[0]?.count ?? 0));
+      const devRunnerAutoRestartWhenIdle =
+        process.env.PAPERCLIP_DEV_RUNNER_AUTO_RESTART_WHEN_IDLE === "true";
 
       devServer = toDevServerHealthStatus(persistedDevServerStatus, {
-        autoRestartEnabled: experimentalSettings.autoRestartDevServerWhenIdle ?? false,
+        autoRestartEnabled:
+          devRunnerAutoRestartWhenIdle || (experimentalSettings.autoRestartDevServerWhenIdle ?? false),
         activeRunCount,
       });
     }

@@ -695,6 +695,68 @@ function workProductReferencesClaimedArtifact(
   return claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripArtifactTokenPunctuation(value: string) {
+  return value
+    .trim()
+    .replace(/^[`'"]+/u, "")
+    .replace(/[`'",;.)\]]+$/u, "");
+}
+
+function extractIssueDeclaredArtifactTokens(text: string | null | undefined) {
+  if (!text?.trim()) return [];
+  const matches = text.match(
+    /(?:~?\/|\.{1,2}\/|[A-Za-z0-9_{}.-]+[\\/])?[A-Za-z0-9_{}./\\@()-]+\.(?:md|markdown|html?|json|csv|pdf|txt|xlsx?|docx?|png|jpe?g|webp|ya?ml)\b/giu,
+  ) ?? [];
+  return Array.from(new Set(matches.map(stripArtifactTokenPunctuation).filter(Boolean)));
+}
+
+function artifactTokenRegexSource(token: string) {
+  return escapeRegExp(token)
+    .replace(/YYYY-MM-DD/gu, "\\d{4}-\\d{2}-\\d{2}")
+    .replace(/YYYYMMDD/gu, "\\d{8}")
+    .replace(/YYYYMM/gu, "\\d{6}")
+    .replace(/\\\{date\\\}/giu, "\\d{4}-\\d{2}-\\d{2}")
+    .replace(/\\\{runDate\\\}/gu, "\\d{4}-\\d{2}-\\d{2}");
+}
+
+function workProductSatisfiesIssueDeclaredArtifact(
+  product: {
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+    status?: string | null;
+    isPrimary?: boolean | null;
+  },
+  issue: { description?: string | null },
+) {
+  if (product.status && product.status !== "active") return false;
+  if (product.isPrimary === false) return false;
+
+  const declaredArtifactTokens = extractIssueDeclaredArtifactTokens(issue.description);
+  if (declaredArtifactTokens.length === 0) return false;
+
+  const haystack = [
+    product.url,
+    product.externalId,
+    product.metadata ? JSON.stringify(product.metadata) : null,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n")
+    .replace(/\\/gu, "/");
+  if (!haystack.trim()) return false;
+
+  return declaredArtifactTokens.some((token) => {
+    const normalizedToken = token.replace(/\\/gu, "/");
+    const basename = path.posix.basename(normalizedToken);
+    const candidates = Array.from(new Set([normalizedToken, basename].filter(Boolean)));
+    return candidates.some((candidate) => new RegExp(artifactTokenRegexSource(candidate), "u").test(haystack));
+  });
+}
+
 async function autoRegisterWorkProductFromIssueDocument(input: {
   tx: Pick<Db, "select" | "insert">;
   issue: {
@@ -5285,6 +5347,7 @@ export function heartbeatService(db: Db) {
           parentId: issues.parentId,
           identifier: issues.identifier,
           title: issues.title,
+          description: issues.description,
           originKind: issues.originKind,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
@@ -5413,6 +5476,8 @@ export function heartbeatService(db: Db) {
             id: issueWorkProducts.id,
             url: issueWorkProducts.url,
             externalId: issueWorkProducts.externalId,
+            status: issueWorkProducts.status,
+            isPrimary: issueWorkProducts.isPrimary,
             metadata: issueWorkProducts.metadata,
           })
           .from(issueWorkProducts)
@@ -5426,7 +5491,16 @@ export function heartbeatService(db: Db) {
           },
           claimedArtifactPaths,
         ));
-        const autoRegisteredWorkProduct = hasMatchingWorkProduct
+        const hasIssueDeclaredWorkProduct = existingWorkProducts.some((product) =>
+          workProductSatisfiesIssueDeclaredArtifact({
+            url: product.url,
+            externalId: product.externalId,
+            status: product.status,
+            isPrimary: product.isPrimary,
+            metadata: product.metadata ?? null,
+          }, issue),
+        );
+        const autoRegisteredWorkProduct = hasMatchingWorkProduct || hasIssueDeclaredWorkProduct
           ? null
           : await autoRegisterWorkProductFromIssueDocument({
               tx,
@@ -5434,7 +5508,7 @@ export function heartbeatService(db: Db) {
               run,
               claimedArtifactPaths,
             });
-        if (!hasMatchingWorkProduct && !autoRegisteredWorkProduct) {
+        if (!hasMatchingWorkProduct && !hasIssueDeclaredWorkProduct && !autoRegisteredWorkProduct) {
           const now = new Date();
           await tx
             .update(issues)
