@@ -34,7 +34,6 @@ import {
   type JsonRecord,
 } from "./tool-config.js";
 import { createIssuesAdapter } from "./adapters/issues-adapter.js";
-import { getPaperclipApiUrl } from "./paperclip-api-url.js";
 
 type ExecuteToolPayload = {
   toolName?: string;
@@ -62,9 +61,6 @@ type ExecutionLog = {
 const execFileAsync = promisify(execFile);
 const TOOL_EXECUTION_TIMEOUT_MS = 15 * 60 * 1000;
 const TOOL_FORCE_KILL_GRACE_MS = 5_000;
-const WORKFLOW_ENGINE_ACTION_MAX_ATTEMPTS = 3;
-const WORKFLOW_ENGINE_ACTION_RETRY_DELAYS_MS = [1000, 3000];
-const RETRIABLE_BRIDGE_ACTION_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT = sharedConstants.WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT;
 const LEGACY_WORKFLOW_ENGINE_TOOL_EXECUTION_REQUEST_EVENT = "plugin.insightflo.workflow-engine.execute-tool-request";
 const inflightWorkflowToolExecutionKeys = new Set<string>();
@@ -101,10 +97,6 @@ function summarizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function buildWorkflowToolExecutionKey(payload: Record<string, unknown>, fallbackCompanyId?: string): string {
   const companyId = asString(payload.companyId) || fallbackCompanyId || "";
   const stepRunId = asString(payload.stepRunId);
@@ -118,37 +110,6 @@ function buildWorkflowToolExecutionKey(payload: Record<string, unknown>, fallbac
   }
 
   return "";
-}
-
-function parseBridgeActionStatus(error: unknown): number | null {
-  const match = /\((\d{3})\)/.exec(summarizeError(error));
-  if (!match) {
-    return null;
-  }
-
-  const parsed = Number(match[1]);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isRetriableBridgeActionError(error: unknown): boolean {
-  const status = parseBridgeActionStatus(error);
-  if (status !== null && RETRIABLE_BRIDGE_ACTION_STATUS_CODES.has(status)) {
-    return true;
-  }
-
-  const message = summarizeError(error).toLowerCase();
-  return (
-    message.includes("workflow-engine plugin not found")
-    || message.includes("fetch failed")
-    || message.includes("networkerror")
-    || message.includes("econnrefused")
-    || message.includes("econnreset")
-    || message.includes("socket hang up")
-    || message.includes("timed out")
-    || message.includes("timeout")
-    || message.includes("terminated")
-    || message.includes("aborted")
-  );
 }
 
 function terminateChildProcessTree(
@@ -906,90 +867,6 @@ async function executeToolForSystem(
   }
 }
 
-async function notifyWorkflowEngineOfToolResult(
-  ctx: PluginContext,
-  companyId: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  const apiUrl = getPaperclipApiUrl();
-  let lastError: unknown = null;
-
-  for (let attempt = 1; attempt <= WORKFLOW_ENGINE_ACTION_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      const pluginsResponse = await fetch(`${apiUrl}/api/plugins`);
-      if (!pluginsResponse.ok) {
-        const body = await pluginsResponse.text().catch(() => "");
-        throw new Error(`plugin list failed (${pluginsResponse.status}): ${body}`.trim());
-      }
-
-      const plugins = await pluginsResponse.json() as Array<Record<string, unknown>>;
-      const workflowEngine = plugins.find((plugin) => plugin.pluginKey === "insightflo.workflow-engine");
-      const pluginId = typeof workflowEngine?.id === "string" ? workflowEngine.id : "";
-      if (!pluginId) {
-        throw new Error("workflow-engine plugin not found");
-      }
-
-      const response = await fetch(`${apiUrl}/api/plugins/${pluginId}/bridge/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: "handle-tool-execution-result",
-          params: {
-            companyId,
-            ...payload,
-          },
-          companyId,
-        }),
-      });
-
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(`workflow-engine result action failed (${response.status}): ${body}`.trim());
-      }
-
-      if (attempt > 1) {
-        ctx.logger.info("Workflow Engine result delivery succeeded after retry", {
-          apiUrl,
-          attempt,
-          companyId,
-          requestId: asString(payload.requestId),
-          stepId: asString(payload.stepId),
-          stepRunId: asString(payload.stepRunId),
-          toolName: asString(payload.toolName),
-          workflowRunId: asString(payload.workflowRunId),
-        });
-      }
-      return;
-    } catch (error) {
-      lastError = error;
-      const shouldRetry = attempt < WORKFLOW_ENGINE_ACTION_MAX_ATTEMPTS && isRetriableBridgeActionError(error);
-      ctx.logger.warn("Workflow Engine result delivery attempt failed", {
-        apiUrl,
-        attempt,
-        companyId,
-        error: summarizeError(error),
-        requestId: asString(payload.requestId),
-        shouldRetry,
-        stepId: asString(payload.stepId),
-        stepRunId: asString(payload.stepRunId),
-        toolName: asString(payload.toolName),
-        workflowRunId: asString(payload.workflowRunId),
-      });
-
-      if (!shouldRetry) {
-        break;
-      }
-
-      const delayMs = WORKFLOW_ENGINE_ACTION_RETRY_DELAYS_MS[attempt - 1]
-        ?? WORKFLOW_ENGINE_ACTION_RETRY_DELAYS_MS[WORKFLOW_ENGINE_ACTION_RETRY_DELAYS_MS.length - 1]
-        ?? 1000;
-      await sleep(delayMs);
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(summarizeError(lastError));
-}
-
 async function runWorkflowToolExecution(
   ctx: PluginContext,
   payload: Record<string, unknown>,
@@ -1093,28 +970,11 @@ async function runWorkflowToolExecution(
     });
   }
 
-  let legacyWorkflowEngineDelivered = false;
-  if (!eventEmitted) {
-    try {
-      await notifyWorkflowEngineOfToolResult(ctx, companyId, workflowResultPayload);
-      legacyWorkflowEngineDelivered = true;
-    } catch (error) {
-      ctx.logger.warn("Failed to deliver workflow tool result via Workflow Engine action", {
-        requestId,
-        toolName,
-        companyId,
-        stepId,
-        error: summarizeError(error),
-      });
-    }
-  }
-
   ctx.logger.info("Workflow tool execution completed, result emitted", {
     requestId,
     toolName,
     success: result.success,
     eventEmitted,
-    legacyWorkflowEngineDelivered,
   });
 
   return result;

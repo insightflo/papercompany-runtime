@@ -62,23 +62,11 @@ describe("tool-registry workflow result delivery", () => {
     }));
   });
 
-  it("falls back to the workflow-engine bridge when native event delivery fails", async () => {
+  it("does not fall back to the workflow-engine bridge when native event delivery fails", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
-    const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
-      const href = String(url);
-      if (href.endsWith("/api/plugins")) {
-        return new Response(JSON.stringify([
-          { id: "workflow-engine-install-1", pluginKey: "insightflo.workflow-engine" },
-        ]), { status: 200, headers: { "Content-Type": "application/json" } });
-      }
-      if (href.endsWith("/api/plugins/workflow-engine-install-1/bridge/action")) {
-        return new Response(JSON.stringify({ data: { ok: true } }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected fetch: ${href} ${init?.method ?? "GET"}`);
+    const fetchSpy = vi.fn(async (url: string | URL) => {
+      throw new Error(`workflow-engine bridge should not be required: ${String(url)}`);
     });
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -108,16 +96,7 @@ describe("tool-registry workflow result delivery", () => {
       args: {},
     });
 
-    await vi.waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledWith("http://localhost:3200/api/plugins");
-      expect(fetchSpy).toHaveBeenCalledWith(
-        "http://localhost:3200/api/plugins/workflow-engine-install-1/bridge/action",
-        expect.objectContaining({
-          method: "POST",
-          body: expect.stringContaining("\"handle-tool-execution-result\""),
-        }),
-      );
-    });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("executes workflow tools from the core workflow tool request event", async () => {

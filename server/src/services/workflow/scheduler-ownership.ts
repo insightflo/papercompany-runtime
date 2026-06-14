@@ -17,8 +17,12 @@ function isEnabled(value: string | undefined): boolean {
 export function resolveWorkflowSchedulerOwnership(
   env: Record<string, string | undefined> = process.env,
 ): WorkflowSchedulerOwnership {
-  const nativeSchedulerEnabled = isEnabled(env.WORKFLOW_NATIVE_SCHEDULER_ENABLED);
-  const pluginReconcilerDisableRequested = isEnabled(env.WORKFLOW_PLUGIN_RECONCILER_DISABLED);
+  const nativeSchedulerEnabled = env.WORKFLOW_NATIVE_SCHEDULER_ENABLED === undefined
+    ? true
+    : isEnabled(env.WORKFLOW_NATIVE_SCHEDULER_ENABLED);
+  const pluginReconcilerDisableRequested = env.WORKFLOW_PLUGIN_RECONCILER_DISABLED === undefined
+    ? true
+    : isEnabled(env.WORKFLOW_PLUGIN_RECONCILER_DISABLED);
   const pluginReconcilerEffectiveDisabled = nativeSchedulerEnabled && pluginReconcilerDisableRequested;
 
   if (nativeSchedulerEnabled && pluginReconcilerEffectiveDisabled) {

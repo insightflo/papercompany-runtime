@@ -78,6 +78,10 @@ import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 type UiMode = "none" | "static" | "vite-dev";
 type ApiAliasSurface = "work-items" | "work-contexts" | "execution-contexts" | "recurring-procedures";
 
+const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
+  "insightflo.workflow-engine",
+]);
+
 export function resolveViteHmrPort(serverPort: number): number {
   if (serverPort <= 55_535) {
     return serverPort + 10_000;
@@ -661,13 +665,22 @@ export async function createApp(
   const devWatcher = opts.uiMode === "vite-dev"
     ? createPluginDevWatcher(
       lifecycle,
-      async (pluginId) => (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
+      async (pluginId) => {
+        const plugin = await pluginRegistry.getById(pluginId);
+        if (!plugin || CORE_INTEGRATED_PLUGIN_KEYS.has(plugin.pluginKey)) return null;
+        return plugin.packagePath ?? null;
+      },
     )
     : null;
   void loader.loadAll().then((result) => {
     if (!result) return;
     for (const loaded of result.results) {
-      if (devWatcher && loaded.success && loaded.plugin.packagePath) {
+      if (
+        devWatcher
+        && loaded.success
+        && loaded.plugin.packagePath
+        && !CORE_INTEGRATED_PLUGIN_KEYS.has(loaded.plugin.pluginKey)
+      ) {
         devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
       }
     }

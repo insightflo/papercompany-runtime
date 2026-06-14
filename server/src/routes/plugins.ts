@@ -119,6 +119,10 @@ interface PluginHealthCheckResult {
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
+  "insightflo.workflow-engine",
+]);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function serializeValue(value: unknown): unknown {
@@ -983,6 +987,7 @@ export function pluginRoutes(
     const plugins = await registry.listByStatus("ready");
 
     const contributions: PluginUiContribution[] = plugins
+      .filter((plugin) => !CORE_INTEGRATED_PLUGIN_KEYS.has(plugin.pluginKey))
       .map((plugin) => {
         // Safety check: manifestJson should always exist for ready plugins, but guard against null
         const manifest = plugin.manifestJson;

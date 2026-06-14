@@ -79,6 +79,10 @@ export const DEFAULT_LOCAL_PLUGIN_DIR = path.join(
   "plugins",
 );
 
+const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
+  "insightflo.workflow-engine",
+]);
+
 export function resolveDevTsxLoaderPath(
   resolveModule: ModuleResolver = require.resolve as ModuleResolver,
   fileExists: (filePath: string) => boolean = existsSync,
@@ -1701,6 +1705,14 @@ export function pluginLoader(
         error: "No runtime services available",
         registered,
       };
+    }
+
+    if (CORE_INTEGRATED_PLUGIN_KEYS.has(pluginKey)) {
+      log.info(
+        { pluginId, pluginKey, version: plugin.version },
+        "plugin-loader: skipping core-integrated plugin runtime activation",
+      );
+      return { plugin, success: true, registered };
     }
 
     const {
