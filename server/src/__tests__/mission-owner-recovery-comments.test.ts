@@ -81,11 +81,22 @@ describe("mission owner recovery comments", () => {
         status: "blocked",
         assigneeAgentId: "worker-1",
       },
-      { governanceEvidence: ["  blocker evidence  ", ""] },
+      {
+        governanceEvidence: ["  blocker evidence  ", ""],
+        missionExecutionDigest: [
+          "Mission description: Daily research workflow",
+          "Workflow run: tech-ai-news status=failed",
+          "Remaining workflow steps: validate-ai-news-artifact:failed, send-telegram:skipped",
+        ],
+      },
     );
 
     expect(description).toContain("mission-owner-action");
     expect(description).toContain("Original assignee agent: worker-1");
+    expect(description).toContain("Mission execution digest:");
+    expect(description).toContain("- Mission description: Daily research workflow");
+    expect(description).toContain("- Workflow run: tech-ai-news status=failed");
+    expect(description).toContain("- Remaining workflow steps: validate-ai-news-artifact:failed, send-telegram:skipped");
     expect(description).toContain("Allowed decision options:");
     expect(description).toContain("- retry_source_issue");
     expect(description).toContain("- blocker evidence");

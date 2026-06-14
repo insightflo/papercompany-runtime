@@ -69,7 +69,7 @@ import { createChannelRegistry } from "./channel/index.js";
 import { registerTelegramCommands } from "./channel/telegram/commands.js";
 import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
-import { setWorkflowToolStepExecutor } from "./services/workflow/dag-engine.js";
+import { setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from "./services/workflow/dag-engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
@@ -373,7 +373,7 @@ export async function createApp(
     lifecycleManager: lifecycle,
     db,
   });
-  setWorkflowToolStepExecutor(async (request) => {
+  async function assertToolRegistryReadyForWorkflowTools(): Promise<void> {
     const toolRegistryPlugin = await pluginRegistry.getByKey("insightflo.tool-registry");
     if (!toolRegistryPlugin) {
       throw new Error("Tool Registry plugin is not installed.");
@@ -384,8 +384,33 @@ export async function createApp(
     if (!workerManager.isRunning(toolRegistryPlugin.id)) {
       throw new Error("Tool Registry plugin worker is not running.");
     }
+  }
 
-    const result = await workerManager.call(toolRegistryPlugin.id, "performAction", {
+  async function getReadyToolRegistryPluginId(): Promise<string> {
+    await assertToolRegistryReadyForWorkflowTools();
+    const toolRegistryPlugin = await pluginRegistry.getByKey("insightflo.tool-registry");
+    if (!toolRegistryPlugin) {
+      throw new Error("Tool Registry plugin is not installed.");
+    }
+    return toolRegistryPlugin.id;
+  }
+
+  setWorkflowToolStepReadinessChecker(async () => {
+    try {
+      await assertToolRegistryReadyForWorkflowTools();
+      return { available: true };
+    } catch (error) {
+      return {
+        available: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
+  setWorkflowToolStepExecutor(async (request) => {
+    const toolRegistryPluginId = await getReadyToolRegistryPluginId();
+
+    const result = await workerManager.call(toolRegistryPluginId, "performAction", {
       key: "tool-registry.execute-workflow-tool",
       params: {
         requestId: request.requestId,

@@ -171,6 +171,13 @@ export const updateWorkflowDefinitionSchema = createWorkflowDefinitionSchema.par
 
 export type UpdateWorkflowDefinition = z.infer<typeof updateWorkflowDefinitionSchema>;
 
+export const workflowToolGrantSchema = z.object({
+  agentId: z.string().uuid(),
+  toolName: z.string().min(1),
+}).strict();
+
+export type WorkflowToolGrantInput = z.infer<typeof workflowToolGrantSchema>;
+
 export const triggerWorkflowRunSchema = z.object({
   missionId: z.string().uuid().optional(),
   triggeredBy: z.string().min(1).optional(),

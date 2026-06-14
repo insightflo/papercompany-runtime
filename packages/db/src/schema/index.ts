@@ -84,6 +84,7 @@ export { workflowStepRuns } from "./workflow_step_runs.js";
 export { workflowDelegations } from "./workflow_delegations.js";
 export { toolDefinitions } from "./tool_definitions.js";
 export { toolAuditLog } from "./tool_audit_log.js";
+export { agentToolGrants } from "./agent_tool_grants.js";
 export { knowledgeBases } from "./knowledge_bases.js";
 export { agentKbGrants } from "./agent_kb_grants.js";
 export { schedules } from "./schedules.js";

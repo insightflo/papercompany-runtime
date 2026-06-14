@@ -139,9 +139,12 @@ export function buildRetrySourceIssueWakeupDispatchedComment(input: {
 export function buildMissionOwnerUnblockDescription(
   mission: MissionOwnerDescriptionMission,
   blockedIssue: MissionOwnerDescriptionIssue,
-  options: { governanceEvidence?: string[] } = {},
+  options: { governanceEvidence?: string[]; missionExecutionDigest?: string[] } = {},
 ): string {
   const sourceLabel = blockedIssue.identifier ?? blockedIssue.id;
+  const missionExecutionDigest = (options.missionExecutionDigest ?? [])
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
   const governanceEvidence = (options.governanceEvidence ?? [])
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
@@ -161,6 +164,10 @@ export function buildMissionOwnerUnblockDescription(
     `Source issue title: ${blockedIssue.title}`,
     `Source issue status: ${blockedIssue.status}`,
     `Original assignee agent: ${blockedIssue.assigneeAgentId ?? "unassigned"}`,
+    "",
+    missionExecutionDigest.length > 0
+      ? ["Mission execution digest:", ...missionExecutionDigest.map((line) => `- ${line}`)].join("\n")
+      : "Mission execution digest: unavailable for this owner action template.",
     "",
     "Mission owner duties:",
     "- Manage the mission outcome boundary: diagnose blockers, decide recovery direction, and keep the mission moving.",

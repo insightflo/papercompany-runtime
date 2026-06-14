@@ -32,9 +32,18 @@ const mockIssueService = vi.hoisted(() => ({
   update: vi.fn(),
 }));
 
+const mockWorkflowToolCatalog = vi.hoisted(() => ({
+  grantWorkflowToolToAgent: vi.fn(),
+  listWorkflowToolCatalog: vi.fn(),
+  revokeWorkflowToolFromAgent: vi.fn(),
+  syncToolRegistryToolsToCore: vi.fn(),
+}));
+
 vi.mock("../services/workflow/engine.js", () => ({
   workflowService: mockWorkflowService,
 }));
+
+vi.mock("../services/workflow/tool-catalog.js", () => mockWorkflowToolCatalog);
 
 vi.mock("../services/issues.js", () => ({
   issueService: () => mockIssueService,
@@ -154,6 +163,141 @@ describe("workflow routes", () => {
         completedAt: null,
       },
     ]);
+    mockWorkflowToolCatalog.listWorkflowToolCatalog.mockResolvedValue({
+      tools: [],
+      grants: [],
+      sources: {
+        core: { available: true, count: 0 },
+        toolRegistry: { available: false, installed: false, count: 0 },
+      },
+    });
+  });
+
+  it("lists workflow tools from the core workflow tool catalog", async () => {
+    mockWorkflowToolCatalog.listWorkflowToolCatalog.mockResolvedValue({
+      tools: [
+        {
+          name: "collect-evening",
+          displayName: "collect-evening",
+          description: "Collect evening inputs",
+          source: "tool-registry",
+          enabled: true,
+        },
+        {
+          name: "core-report",
+          displayName: "core-report",
+          description: "Core report tool",
+          source: "core",
+          enabled: true,
+        },
+      ],
+      grants: [{ agentName: "도라에몽", toolName: "collect-evening" }],
+      sources: {
+        core: { available: true, count: 1 },
+        toolRegistry: { available: true, installed: true, count: 1 },
+      },
+    });
+
+    const res = await request(createApp()).get(`/api/companies/${COMPANY_ID}/workflows/tools`);
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowToolCatalog.listWorkflowToolCatalog).toHaveBeenCalledWith(expect.anything(), COMPANY_ID);
+    expect(res.body).toEqual({
+      tools: [
+        {
+          name: "collect-evening",
+          displayName: "collect-evening",
+          description: "Collect evening inputs",
+          source: "tool-registry",
+          enabled: true,
+        },
+        {
+          name: "core-report",
+          displayName: "core-report",
+          description: "Core report tool",
+          source: "core",
+          enabled: true,
+        },
+      ],
+      grants: [{ agentName: "도라에몽", toolName: "collect-evening" }],
+      sources: {
+        core: { available: true, count: 1 },
+        toolRegistry: { available: true, installed: true, count: 1 },
+      },
+    });
+  });
+
+  it("does not expose workflow tools across company boundaries", async () => {
+    const res = await request(createApp()).get(`/api/companies/${OTHER_COMPANY_ID}/workflows/tools`);
+
+    expect(res.status).toBe(403);
+    expect(mockWorkflowToolCatalog.listWorkflowToolCatalog).not.toHaveBeenCalled();
+  });
+
+  it("grants and revokes core workflow tools through company-scoped routes", async () => {
+    mockWorkflowToolCatalog.grantWorkflowToolToAgent.mockResolvedValue({
+      agentName: "Doraemon",
+      toolName: "collect-evening",
+      source: "core",
+    });
+    mockWorkflowToolCatalog.revokeWorkflowToolFromAgent.mockResolvedValue(true);
+
+    const grant = await request(createApp())
+      .post(`/api/companies/${COMPANY_ID}/workflows/tools/grants`)
+      .send({
+        agentId: "77777777-7777-4777-8777-777777777777",
+        toolName: "collect-evening",
+      });
+
+    expect(grant.status).toBe(201);
+    expect(grant.body).toEqual({
+      agentName: "Doraemon",
+      toolName: "collect-evening",
+      source: "core",
+    });
+    expect(mockWorkflowToolCatalog.grantWorkflowToolToAgent).toHaveBeenCalledWith(expect.anything(), {
+      companyId: COMPANY_ID,
+      agentId: "77777777-7777-4777-8777-777777777777",
+      toolName: "collect-evening",
+      grantedBy: "board-user-1",
+    });
+
+    const revoke = await request(createApp())
+      .delete(`/api/companies/${COMPANY_ID}/workflows/tools/grants`)
+      .send({
+        agentId: "77777777-7777-4777-8777-777777777777",
+        toolName: "collect-evening",
+      });
+
+    expect(revoke.status).toBe(200);
+    expect(revoke.body).toEqual({ revoked: true });
+    expect(mockWorkflowToolCatalog.revokeWorkflowToolFromAgent).toHaveBeenCalledWith(expect.anything(), {
+      companyId: COMPANY_ID,
+      agentId: "77777777-7777-4777-8777-777777777777",
+      toolName: "collect-evening",
+    });
+  });
+
+  it("syncs tool-registry workflow tools into core records through a company-scoped route", async () => {
+    mockWorkflowToolCatalog.syncToolRegistryToolsToCore.mockResolvedValue({
+      createdTools: 2,
+      updatedTools: 1,
+      createdGrants: 3,
+      skippedGrants: 4,
+    });
+
+    const res = await request(createApp())
+      .post(`/api/companies/${COMPANY_ID}/workflows/tools/sync-from-tool-registry`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      createdTools: 2,
+      updatedTools: 1,
+      createdGrants: 3,
+      skippedGrants: 4,
+    });
+    expect(mockWorkflowToolCatalog.syncToolRegistryToolsToCore).toHaveBeenCalledWith(expect.anything(), COMPANY_ID);
   });
 
   it("creates a workflow definition with Phase B fields and logs activity", async () => {

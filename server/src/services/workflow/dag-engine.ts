@@ -106,10 +106,54 @@ export type WorkflowToolStepExecutor = (
   request: WorkflowToolStepExecutionRequest,
 ) => Promise<WorkflowToolStepExecutionResult | void>;
 
+export type WorkflowToolStepReadiness = {
+  available: boolean;
+  reason?: string;
+};
+
+export type WorkflowToolStepReadinessChecker = (input: {
+  companyId: string;
+  toolNames: string[];
+}) => Promise<WorkflowToolStepReadiness>;
+
 let workflowToolStepExecutor: WorkflowToolStepExecutor | null = null;
+let workflowToolStepReadinessChecker: WorkflowToolStepReadinessChecker | null = null;
 
 export function setWorkflowToolStepExecutor(executor: WorkflowToolStepExecutor | null): void {
   workflowToolStepExecutor = executor;
+}
+
+export function setWorkflowToolStepReadinessChecker(checker: WorkflowToolStepReadinessChecker | null): void {
+  workflowToolStepReadinessChecker = checker;
+}
+
+export function getWorkflowToolReferenceNames(steps: WorkflowStep[]): string[] {
+  return Array.from(new Set(
+    steps.flatMap((step) => Array.isArray(step.toolNames)
+      ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
+      : []),
+  ))
+    .filter((toolName) => toolName !== "delegate_to_company")
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export async function assertWorkflowToolStepsReady(input: {
+  companyId: string;
+  steps: WorkflowStep[];
+}): Promise<void> {
+  const toolNames = getWorkflowToolReferenceNames(input.steps);
+  if (toolNames.length === 0) return;
+
+  const readiness = workflowToolStepReadinessChecker
+    ? await workflowToolStepReadinessChecker({ companyId: input.companyId, toolNames })
+    : { available: true };
+  if (!readiness.available) {
+    throw new Error(`Workflow tools are unavailable: ${readiness.reason ?? "tool execution is not available."}`);
+  }
+
+  if (!workflowToolStepExecutor) {
+    throw new Error("Workflow tools are unavailable: Workflow tool step executor is not configured.");
+  }
 }
 
 type WorkflowExecutionContext = {
@@ -1118,6 +1162,43 @@ async function failToolStepRun(
     .where(eq(workflowStepRuns.id, stepRun.id));
 }
 
+async function failToolStepRunWithDispatchError(input: {
+  db: Db;
+  step: WorkflowStep;
+  stepRun: typeof workflowStepRuns.$inferSelect;
+  now: Date;
+  requestId: string;
+  toolName: string;
+  args: unknown;
+  error: string;
+}): Promise<void> {
+  const metadata: Record<string, unknown> = {
+    ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
+    toolInvocation: {
+      requestId: input.requestId,
+      toolName: input.toolName,
+      args: input.args,
+      dispatchedAt: input.now.toISOString(),
+      dispatchError: input.error,
+    },
+  };
+  delete metadata.concurrencyBlocked;
+
+  await input.db
+    .update(workflowStepRuns)
+    .set({
+      status: "failed",
+      startedAt: input.stepRun.startedAt ?? input.now,
+      completedAt: input.now,
+      lastDispatchAttemptAt: input.now,
+      lastDispatchErrorAt: input.now,
+      lastDispatchErrorSummary: input.error,
+      lastDispatchRequestId: input.requestId,
+      metadata,
+    })
+    .where(eq(workflowStepRuns.id, input.stepRun.id));
+}
+
 async function startIssueLessToolStepRun(input: {
   db: Db;
   run: typeof workflowRuns.$inferSelect;
@@ -1193,7 +1274,16 @@ async function startIssueLessToolStepRun(input: {
   }
 
   if (!workflowToolStepExecutor) {
-    await failToolStepRun(db, stepRun, now);
+    await failToolStepRunWithDispatchError({
+      db,
+      step,
+      stepRun,
+      now,
+      requestId,
+      toolName,
+      args,
+      error: "Workflow tool step executor is not configured.",
+    });
     return false;
   }
 
@@ -1238,8 +1328,17 @@ async function startIssueLessToolStepRun(input: {
         .where(eq(workflowStepRuns.id, stepRun.id));
     }
     return true;
-  } catch {
-    await failToolStepRun(db, stepRun, now);
+  } catch (error) {
+    await failToolStepRunWithDispatchError({
+      db,
+      step,
+      stepRun,
+      now,
+      requestId,
+      toolName,
+      args,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return false;
   }
 }
@@ -1816,6 +1915,11 @@ export async function executeWorkflowRun(
   db: Db,
   runId: string,
 ): Promise<WorkflowExecutionResult> {
+  const context = await loadWorkflowExecutionContext(db, runId);
+  await assertWorkflowToolStepsReady({
+    companyId: context.run.companyId,
+    steps: context.steps,
+  });
   await db
     .update(workflowRuns)
     .set({

@@ -9,12 +9,19 @@ import {
   resumeWorkflowRunSchema,
   triggerWorkflowRunSchema,
   updateWorkflowDefinitionSchema,
+  workflowToolGrantSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
+import {
+  grantWorkflowToolToAgent,
+  listWorkflowToolCatalog,
+  revokeWorkflowToolFromAgent,
+  syncToolRegistryToolsToCore,
+} from "../services/workflow/tool-catalog.js";
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { conflict, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -146,6 +153,9 @@ function translateWorkflowDomainError(error: unknown): never {
   if (error.message.startsWith("Cannot create workflow mission:")) {
     throw conflict(error.message);
   }
+  if (error.message.startsWith("Workflow tools are unavailable:")) {
+    throw conflict(error.message);
+  }
 
   throw error;
 }
@@ -198,6 +208,42 @@ export function workflowRoutes(db: Db) {
       activeRuns: runSummaries.filter((run) => isActiveWorkflowRunStatus(String(run.status ?? ""))),
       recentRuns: runSummaries.filter((run) => !isActiveWorkflowRunStatus(String(run.status ?? ""))).slice(0, 25),
     });
+  });
+
+  router.get("/companies/:companyId/workflows/tools", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await listWorkflowToolCatalog(db, companyId));
+  });
+
+  router.post("/companies/:companyId/workflows/tools/grants", validate(workflowToolGrantSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const actor = actorForActivity(req);
+    const grant = await grantWorkflowToolToAgent(db, {
+      companyId,
+      agentId: req.body.agentId,
+      toolName: req.body.toolName,
+      grantedBy: actor.actorId ?? actor.agentId ?? actor.actorType,
+    });
+    res.status(201).json(grant);
+  });
+
+  router.delete("/companies/:companyId/workflows/tools/grants", validate(workflowToolGrantSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const revoked = await revokeWorkflowToolFromAgent(db, {
+      companyId,
+      agentId: req.body.agentId,
+      toolName: req.body.toolName,
+    });
+    res.json({ revoked });
+  });
+
+  router.post("/companies/:companyId/workflows/tools/sync-from-tool-registry", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await syncToolRegistryToolsToCore(db, companyId));
   });
 
   router.get("/companies/:companyId/workflows", async (req, res) => {

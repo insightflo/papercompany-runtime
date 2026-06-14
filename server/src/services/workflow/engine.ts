@@ -8,7 +8,8 @@
 import type { Db } from "@paperclipai/db";
 import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
-import { validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { missionService } from "../missions.js";
 import {
   createWorkflowDefinition,
@@ -170,6 +171,15 @@ async function ensureMissionForWorkflowRun(
   return { ...input, missionId: mission.id };
 }
 
+async function assertWorkflowToolReadiness(
+  db: Db,
+  companyId: string,
+  steps: WorkflowStep[],
+): Promise<void> {
+  await assertWorkflowToolStepsReady({ companyId, steps });
+  await assertWorkflowToolReferencesSelectable(db, { companyId, steps });
+}
+
 /**
  * Workflow service singleton.
  */
@@ -189,6 +199,7 @@ export const workflowService = {
     if (!validation.valid) {
       throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
     }
+    await assertWorkflowToolReadiness(db, input.companyId, steps);
 
     return createWorkflowDefinition(db, { ...input, steps });
   },
@@ -223,6 +234,9 @@ export const workflowService = {
       if (!validation.valid) {
         throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
       }
+      const existing = await getWorkflowDefinitionById(db, id);
+      if (!existing) return null;
+      await assertWorkflowToolReadiness(db, existing.companyId, steps);
       updates = { ...updates, steps };
     }
 
@@ -250,6 +264,7 @@ export const workflowService = {
     if (workflow.companyId !== input.companyId) {
       throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
     }
+    await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
     const [company] = await db
       .select({ timezone: companies.timezone })
       .from(companies)
@@ -355,6 +370,15 @@ export const workflowService = {
     db: Db,
     input: { runId: string; companyId: string },
   ): Promise<WorkflowExecutionResult> {
+    const existingRun = await getWorkflowRunById(db, input.runId);
+    if (!existingRun || existingRun.companyId !== input.companyId) {
+      throw new Error(`Workflow run not found: ${input.runId}`);
+    }
+    const workflow = await getWorkflowDefinitionById(db, existingRun.workflowId);
+    if (!workflow || workflow.companyId !== input.companyId) {
+      throw new Error(`Workflow definition not found: ${existingRun.workflowId}`);
+    }
+    await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
     const run = await resumeWorkflowRun(db, input.runId, input.companyId);
     if (!run) {
       throw new Error(`Workflow run not found: ${input.runId}`);

@@ -3,6 +3,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, useCallback, type CSSPr
 import { useCompany } from "../context/CompanyContext";
 import { buildManualRunFeedback, buildManualRunButtonState, findNewRunId, manualRunUnavailableMessage } from "./workflows/run-feedback.js";
 import { buildIssueHref } from "./workflows/routes.js";
+import { getSelectableWorkflowTools, getWorkflowToolSystemState, type WorkflowToolSystemState } from "./workflows/tool-availability.js";
 import { appendStepAfter, applyStepRunsToGraphSteps, applyWorkflowGraphFailureRoute, assignStepsToContainer, assignStepsToGroup, buildWorkflowGraphContainerSummary, buildWorkflowGraphDataFlowMap, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphExecutionEvidenceSummary, buildWorkflowGraphExportSnapshot, buildWorkflowGraphFailureRouteSummary, buildWorkflowGraphInspectorSummary, buildWorkflowGraphIterationTestPreview, buildWorkflowGraphModel, buildWorkflowGraphRepairPlan, buildWorkflowGraphRequestFillPreview, buildWorkflowGraphRestartPreview, buildWorkflowGraphRunDebugSummary, buildWorkflowGraphSelectionSummary, buildWorkflowGraphSingleStepTestPreview, buildWorkflowGraphStructurePaletteSummary, buildWorkflowGraphTestDrawerSummary, buildWorkflowGraphTestExecutionPreview, buildWorkflowGraphTestPlan, buildWorkflowGraphTestRequestPreview, buildWorkflowGraphWorkbenchSummary, clearStepsGroup, clearWorkflowContainer, connectSteps, disconnectSteps, duplicateWorkflowContainer, duplicateWorkflowStep, expandWorkflowGraphSelection, getWorkflowGraphStepContext, insertWorkflowStepFromPalette, normalizeGraphEdgeKind, normalizeGraphRunStatus, parseDependencies, parseWorkflowGraphYamlDraft, removeWorkflowStep, renameWorkflowStep, serializeWorkflowGraphExportSnapshot, setGraphGroupCollapsed, summarizeWorkflowGraphDraftDiff, summarizeWorkflowGraphInterface, summarizeWorkflowGraphTestInputLibrary, summarizeWorkflowGraphTriggers, updateContainerMetadata, updateGraphEdgeMetadata, updateGraphGroupMetadata, updateStepAdvancedMetadata, updateStepApprovalMetadata, updateStepDataFlowMetadata, updateStepExecutionMetadata, updateStepNote, updateStepResourceMetadata, updateStepTestingMetadata, type WorkflowGraphContainerSummary, type WorkflowGraphContainerType, type WorkflowGraphDataFlowMap, type WorkflowGraphDefinitionNavigatorItem, type WorkflowGraphDraftDiff, type WorkflowGraphEdge, type WorkflowGraphEdgeKind, type WorkflowGraphEdgeMetadataRecord, type WorkflowGraphExecutionEvidenceSummary, type WorkflowGraphExportFormat, type WorkflowGraphExportSnapshot, type WorkflowGraphFailureRouteSummary, type WorkflowGraphFocusLensTone, type WorkflowGraphInspectorMode, type WorkflowGraphInspectorSummary, type WorkflowGraphInterfaceInput, type WorkflowGraphInterfaceSummary, type WorkflowGraphIssueSeverity, type WorkflowGraphIterationTestPreview, type WorkflowGraphNavigatorFilter, type WorkflowGraphPaletteNodeKind, type WorkflowGraphRepairPlan, type WorkflowGraphRequestFillPreview, type WorkflowGraphRestartPreview, type WorkflowGraphRunDebugSummary, type WorkflowGraphRunDebugTileTone, type WorkflowGraphRunStatus, type WorkflowGraphSelectionMode, type WorkflowGraphSelectionSummary, type WorkflowGraphSingleStepTestPreview, type WorkflowGraphStep, type WorkflowGraphStepContext, type WorkflowGraphStructurePaletteActionId, type WorkflowGraphStructurePaletteSummary, type WorkflowGraphTestDrawerSummary, type WorkflowGraphTestExecutionPreview, type WorkflowGraphTestInputLibrarySummary, type WorkflowGraphTestPlan, type WorkflowGraphTestRequestPreview, type WorkflowGraphTriggerSummary, type WorkflowGraphWorkbenchSummary, type WorkflowGraphWorkProduct } from "./workflows/workflow-graph.js";
 import { CREATE_PARENT_ISSUE_POLICIES, normalizeCreateParentIssuePolicy, type CreateParentIssuePolicy } from "./workflows/workflow-parent-policy.js";
 
@@ -124,6 +125,8 @@ type WorkflowToolOption = {
   displayName: string;
   description: string;
   pluginId: string;
+  source?: string;
+  enabled?: boolean;
 };
 
 type WorkflowToolGrant = {
@@ -813,59 +816,39 @@ function normalizeWorkflowToolOption(input: Record<string, unknown>): WorkflowTo
     displayName: String(input.displayName ?? name),
     description: String(input.description ?? ""),
     pluginId: String(input.pluginId ?? ""),
+    source: typeof input.source === "string" ? input.source : undefined,
+    enabled: typeof input.enabled === "boolean" ? input.enabled : true,
   };
 }
 
-async function fetchAvailableWorkflowTools(companyId: string): Promise<{ tools: WorkflowToolOption[]; grants: WorkflowToolGrant[] }> {
+async function fetchAvailableWorkflowTools(companyId: string): Promise<{ tools: WorkflowToolOption[]; grants: WorkflowToolGrant[]; toolSystem: WorkflowToolSystemState }> {
   if (!companyId.trim()) {
-    return { tools: [], grants: [] };
+    return { tools: [], grants: [], toolSystem: { available: false, reason: "No company selected." } };
   }
 
-  const pluginsRes = await fetch(`${apiBaseUrl()}/api/plugins`);
-  if (!pluginsRes.ok) {
-    return { tools: [], grants: [] };
+  const catalogRes = await fetch(`${apiBaseUrl()}/api/companies/${encodeURIComponent(companyId)}/workflows/tools`);
+  if (!catalogRes.ok) {
+    return { tools: [], grants: [], toolSystem: { available: false, reason: "Workflow tools could not be loaded." } };
   }
-  const pluginsPayload = await pluginsRes.json() as unknown;
-  const plugins = Array.isArray(pluginsPayload)
-    ? pluginsPayload.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
-    : [];
-  const toolRegistryPlugin = plugins.find((plugin) => plugin.pluginKey === "insightflo.tool-registry");
-  const toolRegistryPluginId = typeof toolRegistryPlugin?.id === "string" ? toolRegistryPlugin.id : "";
-  if (!toolRegistryPluginId) {
-    return { tools: [], grants: [] };
-  }
-
-  const pageDataRes = await fetch(`${apiBaseUrl()}/api/plugins/${encodeURIComponent(toolRegistryPluginId)}/bridge/data`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      key: "tool-registry.page-data",
-      params: { companyId },
-    }),
-  });
-  if (!pageDataRes.ok) {
-    return { tools: [], grants: [] };
-  }
-  const pageDataPayload = await pageDataRes.json() as Record<string, unknown>;
-  const pageData = pageDataPayload.data && typeof pageDataPayload.data === "object" && !Array.isArray(pageDataPayload.data)
-    ? pageDataPayload.data as Record<string, unknown>
+  const catalogPayload = await catalogRes.json() as Record<string, unknown>;
+  const pageData = catalogPayload && typeof catalogPayload === "object" && !Array.isArray(catalogPayload)
+    ? catalogPayload
+    : {};
+  const sources = pageData.sources && typeof pageData.sources === "object" && !Array.isArray(pageData.sources)
+    ? pageData.sources as Record<string, unknown>
+    : {};
+  const toolRegistry = sources.toolRegistry && typeof sources.toolRegistry === "object" && !Array.isArray(sources.toolRegistry)
+    ? sources.toolRegistry as Record<string, unknown>
     : {};
   const toolsPayload = Array.isArray(pageData.tools) ? pageData.tools : [];
-  const tools = toolsPayload
+  const allTools = toolsPayload
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
-    .map((item) => {
-      const data = item.data && typeof item.data === "object" && !Array.isArray(item.data)
-        ? item.data as Record<string, unknown>
-        : {};
-      return normalizeWorkflowToolOption({
-        name: data.name,
-        displayName: data.name,
-        description: data.description,
-        pluginId: toolRegistryPluginId,
-      });
-    })
-    .filter((tool) => tool.name.trim().length > 0)
-    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    .map(normalizeWorkflowToolOption);
+  const tools = getSelectableWorkflowTools(allTools);
+  const toolSystem = getWorkflowToolSystemState(allTools, {
+    available: toolRegistry.available === true,
+    reason: typeof toolRegistry.unavailableReason === "string" ? toolRegistry.unavailableReason : undefined,
+  });
 
   const grantsPayload = Array.isArray(pageData.grants) ? pageData.grants : [];
   const grants: WorkflowToolGrant[] = grantsPayload
@@ -880,12 +863,13 @@ async function fetchAvailableWorkflowTools(companyId: string): Promise<{ tools: 
     })
     .filter((g) => g.agentName && g.toolName);
 
-  return { tools, grants };
+  return { tools, grants, toolSystem };
 }
 
-function useAvailableWorkflowTools(companyId: string): { tools: WorkflowToolOption[]; grants: WorkflowToolGrant[] } {
+function useAvailableWorkflowTools(companyId: string): { tools: WorkflowToolOption[]; grants: WorkflowToolGrant[]; toolSystem: WorkflowToolSystemState } {
   const [tools, setTools] = useState<WorkflowToolOption[]>([]);
   const [grants, setGrants] = useState<WorkflowToolGrant[]>([]);
+  const [toolSystem, setToolSystem] = useState<WorkflowToolSystemState>({ available: false });
   useEffect(() => {
     let cancelled = false;
     void fetchAvailableWorkflowTools(companyId)
@@ -893,19 +877,21 @@ function useAvailableWorkflowTools(companyId: string): { tools: WorkflowToolOpti
         if (!cancelled) {
           setTools(result.tools);
           setGrants(result.grants);
+          setToolSystem(result.toolSystem);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setTools([]);
           setGrants([]);
+          setToolSystem({ available: false, reason: "Workflow tools could not be loaded." });
         }
       });
     return () => {
       cancelled = true;
     };
   }, [companyId]);
-  return { tools, grants };
+  return { tools, grants, toolSystem };
 }
 
 function splitCommaList(value: string): string[] {
@@ -1505,6 +1491,7 @@ function StepEditor({
                 <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Type</label>
                 <select style={selectStyle} value={step.type} onChange={(e) => {
                   const newType = e.target.value as "agent" | "tool";
+                  if (newType === "tool" && availableTools.length === 0) return;
                   if (newType === "agent" && step.agentName) {
                     const granted = new Set(availableToolGrants.filter((g) => g.agentName === step.agentName).map((g) => g.toolName));
                     const cleaned = splitCommaList(step.tools).filter((t) => granted.has(t)).join(", ");
@@ -1513,9 +1500,12 @@ function StepEditor({
                     update(i, { type: newType });
                   }
                 }}>
-                  <option value="tool">{"\uD83D\uDD27"} Tool (시스템 실행)</option>
+                  <option value="tool" disabled={availableTools.length === 0}>{"\uD83D\uDD27"} Tool (시스템 실행)</option>
                   <option value="agent">{"\uD83E\uDD16"} Agent (에이전트 작업)</option>
                 </select>
+                {availableTools.length === 0 ? (
+                  <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool steps are inactive until workflow tools are available.</span>
+                ) : null}
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
                 {step.type === "tool" ? (
@@ -1682,24 +1672,22 @@ const graphCanvasToolDockBaseStyle: CSSProperties = {
 };
 
 const graphCanvasEditToolLayerStyle: CSSProperties = {
-  position: "sticky",
+  position: "absolute",
   top: "10px",
+  right: "10px",
   zIndex: 10,
   display: "flex",
   justifyContent: "flex-end",
-  height: 0,
-  paddingRight: "10px",
   pointerEvents: "none",
 };
 
 const graphCanvasViewToolLayerStyle: CSSProperties = {
-  position: "sticky",
+  position: "absolute",
+  right: "10px",
   bottom: "10px",
   zIndex: 10,
   display: "flex",
   justifyContent: "flex-end",
-  height: 0,
-  paddingRight: "10px",
   pointerEvents: "none",
 };
 
@@ -3714,7 +3702,12 @@ function WorkflowGraphEditor({
             ) : (
               <Fragment key="canvas-menu">
                 <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("agent")}>Add Agent<span>+</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("tool")}>Add Tool<span>+</span></button>
+                <button
+                  type="button"
+                  style={availableTools.length === 0 ? { ...graphContextMenuButtonStyle, ...buttonDisabledStyle } : graphContextMenuButtonStyle}
+                  disabled={availableTools.length === 0}
+                  onClick={() => runCanvasContextAction("tool")}
+                >Add Tool<span>+</span></button>
                 <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("branch")}>Add Branch<span>B</span></button>
                 <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("loop")}>Add Loop<span>L</span></button>
                 <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("approval")}>Add Approval<span>A</span></button>
@@ -4528,6 +4521,7 @@ function WorkflowGraphEditor({
               <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Type</label>
               <select key="select" style={selectStyle} value={selectedStep.type} onChange={(event) => {
                 const newType = event.target.value as "agent" | "tool";
+                if (newType === "tool" && availableTools.length === 0) return;
                 if (newType === "agent" && selectedStep.agentName) {
                   const granted = new Set(availableToolGrants.filter((g) => g.agentName === selectedStep.agentName).map((g) => g.toolName));
                   const cleaned = splitCommaList(selectedStep.tools).filter((t) => granted.has(t)).join(", ");
@@ -4537,8 +4531,11 @@ function WorkflowGraphEditor({
                 }
               }}>
                 <option key="agent" value="agent">Agent</option>
-                <option key="tool" value="tool">Tool</option>
+                <option key="tool" value="tool" disabled={availableTools.length === 0}>Tool</option>
               </select>
+              {availableTools.length === 0 ? (
+                <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool steps are inactive until workflow tools are available.</span>
+              ) : null}
             </div>
             <div key="step-description-field" style={{ display: "grid", gap: "4px" }}>
               <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Description</label>
@@ -8589,7 +8586,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
   const hostContext = useHostContext();
   const companyId = hostContext.companyId ?? props.context?.companyId ?? "";
   const overview = useWorkflowOverview(companyId);
-  const { tools: availableTools, grants: availableToolGrants } = useAvailableWorkflowTools(companyId);
+  const { tools: availableTools, grants: availableToolGrants, toolSystem } = useAvailableWorkflowTools(companyId);
   const createWorkflow = usePluginAction("create-workflow");
   const abortRun = usePluginAction("abort-run");
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -9047,6 +9044,14 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
                 />
               </div>
             </div>
+
+            {!toolSystem.available ? (
+              <p key="tool-system-unavailable" style={{ ...mutedTextStyle, padding: "0 12px", fontSize: "12px" }}>
+                Workflow tools inactive: {toolSystem.reason ?? "no workflow tools are available."}
+              </p>
+            ) : (
+              <Fragment key="tool-system-available-placeholder" />
+            )}
 
             <div key="create-workspace" style={workflowCreateWorkspaceStyle}>
               <StepWorkspaceEditor

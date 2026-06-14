@@ -656,6 +656,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
     const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -692,6 +694,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       companyId,
       ownerAgentId,
       title: "Blocked workflow mission",
+      description: "Create the daily Tech AI News note, validate the artifact, then deliver it after approval.",
       status: "active",
     });
 
@@ -703,6 +706,80 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       originKind: "workflow_execution",
       status: "blocked",
       title: "Blocked delegated work",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      description: "Daily TechCrunch AI research workflow.",
+      stepsJson: [
+        { id: "collect-news", name: "Collect news", agentId: workerAgentId, dependencies: [] },
+        { id: "generate-infographic", name: "Generate infographic", agentId: workerAgentId, dependencies: ["collect-news"] },
+        { id: "validate-ai-news-artifact", name: "Validate AI news artifact", agentId: workerAgentId, dependencies: ["generate-infographic"] },
+        { id: "send-telegram", name: "Send Telegram", agentId: ownerAgentId, dependencies: ["validate-ai-news-artifact"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "schedule",
+      status: "failed",
+      startedAt: new Date("2026-06-14T06:00:00.000Z"),
+      completedAt: new Date("2026-06-14T06:17:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId,
+        stepId: "collect-news",
+        issueId: null,
+        status: "completed",
+        startedAt: new Date("2026-06-14T06:00:00.000Z"),
+        completedAt: new Date("2026-06-14T06:03:00.000Z"),
+      },
+      {
+        workflowRunId,
+        stepId: "generate-infographic",
+        issueId: null,
+        status: "completed",
+        startedAt: new Date("2026-06-14T06:03:00.000Z"),
+        completedAt: new Date("2026-06-14T06:12:00.000Z"),
+      },
+      {
+        workflowRunId,
+        stepId: "validate-ai-news-artifact",
+        issueId: blockedIssue.id,
+        status: "failed",
+        startedAt: new Date("2026-06-14T06:12:00.000Z"),
+        completedAt: new Date("2026-06-14T06:17:00.000Z"),
+      },
+      {
+        workflowRunId,
+        stepId: "send-telegram",
+        issueId: null,
+        status: "skipped",
+      },
+    ]);
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: blockedIssue.id,
+      type: "obsidian_note",
+      provider: "local-filesystem",
+      title: "20260614 Tech AI News Obsidian note",
+      status: "ready_for_review",
+      isPrimary: true,
+      metadata: {
+        artifactPath: "/Users/kwak/Personal/obsidian/600. Improvements/603.TechNews/202606/20260614.md",
+      },
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: blockedIssue.id,
+      authorAgentId: workerAgentId,
+      body: "REQUEST_CHANGES: regenerate the infographic before delivery; 3 hallucinated panels and 8 missing source articles remain.",
+      createdAt: new Date("2026-06-14T06:18:00.000Z"),
+      updatedAt: new Date("2026-06-14T06:18:00.000Z"),
     });
 
     await svc.runMainExecutorSupervision({
@@ -740,6 +817,15 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(description).toContain("Source issue title: Blocked delegated work");
     expect(description).toContain("Source issue status: blocked");
     expect(description).toContain(`Original assignee agent: ${workerAgentId}`);
+    expect(description).toContain("Mission execution digest:");
+    expect(description).toContain("- Mission description: Create the daily Tech AI News note, validate the artifact, then deliver it after approval.");
+    expect(description).toContain(`- Workflow run: tech-ai-news (${workflowRunId}) status=failed`);
+    expect(description).toContain("- Remaining workflow steps: validate-ai-news-artifact:failed, send-telegram:skipped");
+    expect(description).toContain("- Step validate-ai-news-artifact (Validate AI news artifact) status=failed");
+    expect(description).toContain("- Step send-telegram (Send Telegram) status=skipped");
+    expect(description).toContain("- Work product");
+    expect(description).toContain("20260614 Tech AI News Obsidian note");
+    expect(description).toContain("REQUEST_CHANGES: regenerate the infographic before delivery");
     expect(description).toContain("Mission owner duties:");
     for (const decision of [
       "request_input",

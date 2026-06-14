@@ -39,6 +39,7 @@ import {
   completeWorkflowToolStepFromResult,
   executeWorkflowRun,
   normalizeWorkflowStepsForExecution,
+  setWorkflowToolStepReadinessChecker,
   setWorkflowToolStepExecutor,
   syncWorkflowRunForIssue,
 } from "../services/workflow/dag-engine.js";
@@ -154,6 +155,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
   afterEach(async () => {
     heartbeatWakeup.mockReset();
     setWorkflowToolStepExecutor(null);
+    setWorkflowToolStepReadinessChecker(null);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issueWorkProducts);
@@ -242,6 +244,101 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         dependencies: [],
       }),
     ]);
+  });
+
+  it("rejects new workflow tool references when the tool system is unavailable", async () => {
+    const companyId = randomUUID();
+    setWorkflowToolStepReadinessChecker(vi.fn().mockResolvedValue({
+      available: false,
+      reason: "Tool Registry plugin is not installed.",
+    }));
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Toolless Workflow",
+      issuePrefix: `TL${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await expect(workflowService.createDefinition(db, {
+      companyId,
+      name: "Unavailable Tool Workflow",
+      steps: [
+        {
+          id: "collect",
+          title: "Collect",
+          type: "tool",
+          toolName: "collect-data",
+          dependsOn: [],
+        },
+      ] as never,
+    })).rejects.toThrow("Workflow tools are unavailable: Tool Registry plugin is not installed.");
+  });
+
+  it("rejects new workflow tool references that are not selectable", async () => {
+    const companyId = randomUUID();
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+    setWorkflowToolStepReadinessChecker(vi.fn().mockResolvedValue({ available: true }));
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Missing Tool Workflow",
+      issuePrefix: `MT${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await expect(workflowService.createDefinition(db, {
+      companyId,
+      name: "Missing Tool Workflow",
+      steps: [
+        {
+          id: "collect",
+          title: "Collect",
+          type: "tool",
+          toolName: "collect-data",
+          dependsOn: [],
+        },
+      ] as never,
+    })).rejects.toThrow('Workflow tool "collect-data" is unavailable.');
+  });
+
+  it("preflights existing tool workflows before creating a new run", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    setWorkflowToolStepReadinessChecker(vi.fn().mockResolvedValue({
+      available: false,
+      reason: "Tool Registry plugin worker is not running.",
+    }));
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Existing Tool Workflow",
+      issuePrefix: `ET${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Existing Tool Workflow",
+      stepsJson: [
+        {
+          id: "collect",
+          name: "Collect",
+          dependencies: [],
+          toolNames: ["collect-data"],
+        },
+      ],
+    });
+
+    await expect(workflowService.trigger(db, {
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      triggerSource: "manual",
+    })).rejects.toThrow("Workflow tools are unavailable: Tool Registry plugin worker is not running.");
+
+    const runs = await db.select().from(workflowRuns);
+    expect(runs).toEqual([]);
   });
 
   it("creates workflow entry step issues through the common lifecycle path and keeps the run active", async () => {
@@ -1278,6 +1375,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const workflowId = randomUUID();
     const runId = randomUUID();
 
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
     heartbeatWakeup.mockResolvedValue({ id: "queued-run-agent-name" });
 
     await db.insert(companies).values({
@@ -1491,6 +1589,59 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       originRunId: runId,
     });
     expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+  });
+
+  it("records issue-less tool dispatch failures on the step run", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    setWorkflowToolStepExecutor(vi.fn().mockRejectedValue(new Error("Tool Registry plugin is not installed.")));
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Tool Failure Workflow",
+      issuePrefix: `WF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Tool Failure Workflow",
+      stepsJson: [
+        {
+          id: "collect",
+          name: "Collect",
+          dependencies: [],
+          toolNames: ["collect-data"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("failed");
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRun).toMatchObject({
+      stepId: "collect",
+      status: "failed",
+      lastDispatchErrorSummary: "Tool Registry plugin is not installed.",
+    });
+    expect(stepRun?.metadata).toEqual(expect.objectContaining({
+      toolInvocation: expect.objectContaining({
+        toolName: "collect-data",
+        dispatchError: "Tool Registry plugin is not installed.",
+      }),
+    }));
   });
 
   it("renders workflow runDate placeholders in issue-less tool step args without implicit date injection", async () => {
