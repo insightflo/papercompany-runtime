@@ -804,6 +804,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect.objectContaining({
         assigneeAgentId: ownerAgentId,
         originId: blockedIssue.id,
+        parentId: null,
         status: "todo",
         title: expect.stringContaining("Blocked delegated work"),
       }),
@@ -1445,6 +1446,34 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       mission: expect.objectContaining({ id: missionId }),
       issue: expect.objectContaining({ id: ownerAction.id, originKind: "mission_main_executor_unblock", originId: sourceIssue.id }),
       sourceIssue: expect.objectContaining({ id: sourceIssue.id, status: "todo" }),
+    }));
+  });
+
+  it("keeps unblock owner actions flat when the source issue is already nested", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({ id: companyId, name: "Nested Source Unblock Company", issuePrefix: `NS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Nested source unblock mission", status: "active" });
+
+    const parentIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Parent source" });
+    const nestedSource = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, parentId: parentIssue.id, originKind: "manual", status: "blocked", title: "Nested source" });
+
+    const ownerAction = await missionService(db).ensureMainExecutorUnblockIssue(
+      (await db.select().from(missions).where(eq(missions.id, missionId)).then((rows) => rows[0]!)),
+      nestedSource,
+    );
+
+    expect(ownerAction).toEqual(expect.objectContaining({
+      originKind: "mission_main_executor_unblock",
+      originId: nestedSource.id,
+      parentId: null,
     }));
   });
 
@@ -2524,6 +2553,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect.objectContaining({
         assigneeAgentId: ownerAgentId,
         originId: sourceIssue.id,
+        parentId: sourceIssue.id,
         status: "todo",
         title: expect.stringContaining("Collect Tech Scout Top25"),
       }),
@@ -2563,7 +2593,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(renewedOwnerActions).toHaveLength(2);
     expect(renewedOwnerActions).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: ownerActionIssues[0]!.id, status: "done", originId: sourceIssue.id }),
-      expect.objectContaining({ status: "todo", originId: sourceIssue.id, title: expect.stringContaining("Collect Tech Scout Top25") }),
+      expect.objectContaining({ status: "todo", originId: sourceIssue.id, parentId: sourceIssue.id, title: expect.stringContaining("Collect Tech Scout Top25") }),
     ]));
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(2);
   });
@@ -2732,6 +2762,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         assigneeAgentId: ownerAgentId,
         missionId,
         originId: oversightIssue.id,
+        parentId: oversightIssue.id,
         status: "todo",
         title: "[Owner Action] Tool step failed: collect-signals",
       }),

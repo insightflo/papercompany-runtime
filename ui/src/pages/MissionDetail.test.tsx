@@ -170,8 +170,16 @@ vi.mock("../components/MissionExecutionOverview", () => ({
 }));
 
 vi.mock("../components/InlineEditor", () => ({
-  InlineEditor: ({ value, placeholder }: { value?: string; placeholder?: string }) => (
-    <span data-component="InlineEditor">{value || placeholder}</span>
+  InlineEditor: ({
+    value,
+    placeholder,
+    className,
+  }: {
+    value?: string;
+    placeholder?: string;
+    className?: string;
+  }) => (
+    <span data-component="InlineEditor" className={className}>{value || placeholder}</span>
   ),
 }));
 
@@ -234,6 +242,11 @@ describe("MissionDetail", () => {
 
     expect(html).toContain("Launch Mission");
     expect(html).toContain("Mission detail test");
+    expect(html).toContain("max-h-[32dvh]");
+    expect(html).toContain("overflow-y-auto");
+    expect(html).toContain("overflow-x-hidden");
+    expect(html).toContain("whitespace-pre-wrap");
+    expect(html).toContain("break-words");
     expect(html).toContain("Main executor");
     expect(html).toContain("Planner");
     expect(html).toContain("Work");

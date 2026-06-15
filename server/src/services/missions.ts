@@ -26,7 +26,7 @@ import {
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { notFound, badRequest } from "../errors.js";
+import { HttpError, notFound, badRequest } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { issueService } from "./issues.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, summarizeMissionPlanForRuntime, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
@@ -91,6 +91,7 @@ export type MissionAgentRole = "executor" | "reviewer" | "observer";
 export type MissionRow = typeof missions.$inferSelect;
 
 type IssueRow = typeof issues.$inferSelect;
+type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
 export {
   MISSION_OWNER_DECISION_OPTIONS,
@@ -791,6 +792,35 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
   const legacyWorkflowMissionGraceMs = 5 * 60 * 1000;
 
+  function isMissionOwnerActionParentPlacementRejected(error: unknown) {
+    return error instanceof HttpError &&
+      error.status === 422 &&
+      (
+        error.message.includes("Mission downstream issue creation is not allowed") ||
+        error.message.includes("Mission nested child issue creation is not allowed") ||
+        error.message.includes("Mission child issue burst limit exceeded")
+      );
+  }
+
+  async function createMissionOwnerActionIssue(companyId: string, data: IssueCreateInput) {
+    if (!data.parentId) return issueService(db).create(companyId, data);
+    try {
+      return await issueService(db).create(companyId, data);
+    } catch (error) {
+      if (!isMissionOwnerActionParentPlacementRejected(error)) throw error;
+      const { parentId: _parentId, ...flatData } = data;
+      logger.warn({
+        err: error,
+        companyId,
+        missionId: data.missionId,
+        originKind: data.originKind,
+        originId: data.originId,
+        rejectedParentId: data.parentId,
+      }, "mission owner action parent placement rejected; creating flat owner action with origin link");
+      return issueService(db).create(companyId, flatData);
+    }
+  }
+
   async function reconcileMissionStatusFromWorkflowRuns(mission: MissionRow): Promise<MissionRow> {
     if (mission.status === "cancelled") return mission;
 
@@ -1320,7 +1350,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       logger.warn({ err: error, missionId: mission.id, blockedIssueId: blockedIssue.id }, "Failed to build mission execution digest for owner unblock issue");
       missionExecutionDigest = ["Mission execution digest could not be built; inspect workflow runs, step runs, work products, and source issue comments manually."];
     }
-    const unblockIssue = await issueService(db).create(mission.companyId, {
+    const unblockParentId = blockedIssue.parentId ? undefined : blockedIssue.id;
+    const unblockIssue = await createMissionOwnerActionIssue(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: buildMissionOwnerUnblockDescription(mission, blockedIssue, {
         governanceEvidence: options.governanceEvidence,
@@ -1329,6 +1360,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       missionId: mission.id,
       originKind: "mission_main_executor_unblock",
       originId: blockedIssue.id,
+      parentId: unblockParentId,
       priority: "high",
       status: "todo",
       title: `[Unblock] ${blockedLabel}: ${blockedIssue.title}`,
@@ -1377,7 +1409,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
 
     const displayStepName = input.step?.name?.trim() || input.stepRun.stepId;
     const toolNamesLabel = toolNames.length > 0 ? toolNames.join(", ") : "(not recorded)";
-    const recoveryIssue = await issueService(db).create(input.mission.companyId, {
+    const recoveryParentId = input.oversightIssue.parentId ? undefined : input.oversightIssue.id;
+    const recoveryIssue = await createMissionOwnerActionIssue(input.mission.companyId, {
       assigneeAgentId: input.mission.ownerAgentId,
       description: [
         `<!-- ${marker} -->`,
@@ -1405,6 +1438,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       missionId: input.mission.id,
       originKind: "mission_main_executor_unblock",
       originId: input.oversightIssue.id,
+      parentId: recoveryParentId,
       priority: "high",
       status: "todo",
       title: `[Owner Action] Tool step failed: ${input.stepRun.stepId}`,
@@ -4002,6 +4036,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     listAgents,
     getIssueTree,
     listWorkflowRuns,
+    ensureMainExecutorUnblockIssue,
     ensureMainExecutorOversightIssue,
     ensureMissionExecutionPlan,
     runMainExecutorSupervision,

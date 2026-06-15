@@ -104,6 +104,8 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
       status: "active",
       schedule: "0 9 * * *",
       timezone: "Asia/Seoul",
+      lastScheduleError: "stale scheduler error",
+      lastScheduleErrorAt: new Date("2026-06-10T00:00:00.000Z"),
       stepsJson: [
         {
           id: "scheduled-step",
@@ -155,6 +157,11 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
       .select()
       .from(workflowRuns)
       .where(eq(workflowRuns.workflowId, workflowId));
+    const [storedDefinition] = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, workflowId))
+      .limit(1);
 
     expect(storedSlots).toHaveLength(1);
     expect(storedSlots[0]).toEqual(expect.objectContaining({
@@ -170,6 +177,11 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
       triggerSource: "schedule",
       runDate: "2026-06-11",
       scheduledSlotId: storedSlots[0]!.id,
+    }));
+    expect(storedDefinition).toEqual(expect.objectContaining({
+      lastScheduledRunAt: scheduledAt,
+      lastScheduleError: null,
+      lastScheduleErrorAt: null,
     }));
   });
 
@@ -230,6 +242,11 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
       .select()
       .from(workflowRuns)
       .where(eq(workflowRuns.workflowId, workflowId));
+    const [storedDefinition] = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, workflowId))
+      .limit(1);
 
     expect(storedSlots).toHaveLength(1);
     expect(storedSlots[0]).toEqual(expect.objectContaining({
@@ -241,5 +258,10 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
       triggerError: "Cannot create workflow mission: no agent exists for company",
     }));
     expect(storedRuns).toHaveLength(0);
+    expect(storedDefinition).toEqual(expect.objectContaining({
+      lastScheduledRunAt: scheduledAt,
+      lastScheduleError: "Cannot create workflow mission: no agent exists for company",
+    }));
+    expect(storedDefinition?.lastScheduleErrorAt).toBeInstanceOf(Date);
   });
 });

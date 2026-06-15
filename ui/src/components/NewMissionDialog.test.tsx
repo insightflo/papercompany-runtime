@@ -39,7 +39,9 @@ vi.mock("../context/CompanyContext", () => ({
 
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ children }: { children: ReactNode }) => <div data-testid="dialog">{children}</div>,
-  DialogContent: ({ children }: { children: ReactNode }) => <div data-testid="dialog-content">{children}</div>,
+  DialogContent: ({ children, className }: { children: ReactNode; className?: string }) => (
+    <div data-testid="dialog-content" className={className}>{children}</div>
+  ),
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -53,7 +55,19 @@ vi.mock("@/components/ui/popover", () => ({
 }));
 
 vi.mock("./MarkdownEditor", () => ({
-  MarkdownEditor: () => <textarea data-testid="markdown-editor" />,
+  MarkdownEditor: ({
+    className,
+    contentClassName,
+  }: {
+    className?: string;
+    contentClassName?: string;
+  }) => (
+    <textarea
+      data-testid="markdown-editor"
+      className={className}
+      data-content-class-name={contentClassName}
+    />
+  ),
 }));
 
 vi.mock("./StatusBadge", () => ({
@@ -73,5 +87,18 @@ describe("NewMissionDialog", () => {
 
     expect(html).toContain("Main executor");
     expect(html).not.toContain("Owner agent");
+  });
+
+  it("keeps long mission descriptions scrollable inside the dialog", () => {
+    const html = renderToStaticMarkup(<NewMissionDialog />);
+
+    expect(html).toContain("max-h-[calc(100dvh-2rem)]");
+    expect(html).toContain("overflow-hidden");
+    expect(html).not.toContain("overflow-x-auto");
+    expect(html).toContain("overflow-x-hidden");
+    expect(html).toContain("overflow-y-auto");
+    expect(html).toContain("overscroll-contain");
+    expect(html).toContain("whitespace-pre-wrap");
+    expect(html).toContain("break-words");
   });
 });

@@ -411,7 +411,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .then((rows) => rows[0] ?? null);
     expect(createdIssue).toMatchObject({
       companyId,
-      title: "Roadmap Workflow: Draft 2026-06-12 plan",
+      title: "Draft 2026-06-12 plan",
       description: expect.stringContaining(`workflowRunId: ${runId}`),
       status: "todo",
       assigneeAgentId: agentId,
@@ -444,7 +444,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       entityId: createdIssue!.id,
     });
     expect(activity?.details).toEqual({
-      title: "Roadmap Workflow: Draft 2026-06-12 plan",
+      title: "Draft 2026-06-12 plan",
       identifier: createdIssue!.identifier,
     });
 
@@ -1446,7 +1446,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .where(eq(issues.id, progressedSynthesize!.issueId!))
       .then((rows) => rows[0] ?? null);
     expect(createdSynthesisIssue).toMatchObject({
-      title: "Originless Step Workflow: Synthesize",
+      title: "Synthesize",
       assigneeAgentId: agentBId,
       originKind: "workflow_execution",
       originRunId: runId,
@@ -1544,7 +1544,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(issues)
       .where(eq(issues.id, synthesize!.issueId!));
     expect(synthesisIssue).toEqual(expect.objectContaining({
-      title: "Auto Advance Workflow: Synthesize",
+      title: "Synthesize",
       status: "todo",
       assigneeAgentId: agentBId,
     }));
@@ -1670,7 +1670,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const createdIssues = await db.select().from(issues);
     expect(createdIssues).toHaveLength(1);
     expect(createdIssues[0]).toMatchObject({
-      title: "Unassigned Workflow: Manual review",
+      title: "Manual review",
       assigneeAgentId: null,
       originKind: "workflow_execution",
       originRunId: runId,
@@ -1764,7 +1764,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .where(eq(issues.id, stepRun!.issueId!))
       .limit(1);
     expect(createdIssue).toMatchObject({
-      title: "tech-ai-news: TechCrunch AI 데일리 브리핑",
+      title: "TechCrunch AI 데일리 브리핑",
       assigneeAgentId: agentId,
       originKind: "workflow_execution",
       originRunId: runId,
@@ -1893,7 +1893,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const createdIssues = await db.select().from(issues);
     expect(createdIssues).toHaveLength(1);
     expect(createdIssues[0]).toMatchObject({
-      title: "Tool Projection Workflow: Summarize",
+      title: "Summarize",
       assigneeAgentId: agentId,
       originKind: "workflow_execution",
       originRunId: runId,

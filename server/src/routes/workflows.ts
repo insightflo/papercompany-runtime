@@ -108,12 +108,14 @@ function workflowRunSummaryForUi(
   run: WorkflowRun,
   definitionNameById: Map<string, string>,
   parentIssueIdentifierById: Map<string, string>,
+  parentIssueMissionIdById: Map<string, string>,
 ): Record<string, unknown> {
   return {
     id: run.id,
     workflowId: run.workflowId,
     workflowName: definitionNameById.get(run.workflowId) ?? run.workflowId,
     status: run.status,
+    missionId: run.missionId ?? (run.parentIssueId ? parentIssueMissionIdById.get(run.parentIssueId) : undefined),
     startedAt: (run.startedAt ?? run.createdAt).toISOString(),
     completedAt: run.completedAt?.toISOString(),
     triggerSource: run.triggerSource ?? run.triggeredBy,
@@ -189,7 +191,7 @@ export function workflowRoutes(db: Db) {
     const parentIssueIds = Array.from(new Set(runs.map((run) => run.parentIssueId).filter((id): id is string => Boolean(id))));
     const parentIssueRows = parentIssueIds.length > 0
       ? await db
-        .select({ id: issues.id, identifier: issues.identifier })
+        .select({ id: issues.id, identifier: issues.identifier, missionId: issues.missionId })
         .from(issues)
         .where(and(eq(issues.companyId, companyId), inArray(issues.id, parentIssueIds)))
       : [];
@@ -198,8 +200,13 @@ export function workflowRoutes(db: Db) {
         .filter((issue) => typeof issue.identifier === "string" && issue.identifier.trim())
         .map((issue) => [issue.id, issue.identifier as string]),
     );
+    const parentIssueMissionIdById = new Map(
+      parentIssueRows
+        .filter((issue) => typeof issue.missionId === "string" && issue.missionId.trim())
+        .map((issue) => [issue.id, issue.missionId as string]),
+    );
     const definitionNameById = new Map(definitions.map((definition) => [definition.id, definition.name]));
-    const runSummaries = runs.map((run) => workflowRunSummaryForUi(run, definitionNameById, parentIssueIdentifierById));
+    const runSummaries = runs.map((run) => workflowRunSummaryForUi(run, definitionNameById, parentIssueIdentifierById, parentIssueMissionIdById));
 
     res.json({
       projects: projectRows,

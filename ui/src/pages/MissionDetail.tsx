@@ -499,13 +499,15 @@ export function MissionDetail() {
 
       <div className="space-y-1.5">
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Description</p>
-        <InlineEditor
-          value={mission.description ?? ""}
-          onSave={(description) => updateMission.mutate({ description })}
-          className="text-sm leading-relaxed"
-          placeholder="Add a description..."
-          multiline
-        />
+        <div className="max-h-[32dvh] min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain">
+          <InlineEditor
+            value={mission.description ?? ""}
+            onSave={(description) => updateMission.mutate({ description })}
+            className="text-sm leading-relaxed max-w-full whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+            placeholder="Add a description..."
+            multiline
+          />
+        </div>
       </div>
 
       <Separator />

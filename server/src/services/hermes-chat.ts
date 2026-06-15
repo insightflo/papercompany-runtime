@@ -119,11 +119,16 @@ export function hermesChatService(db: Db) {
     return rows.find((row) => {
       if (row.status === "terminated" || row.status === "pending_approval") return false;
       const purpose = readNestedString(row.metadata, ["purpose"]);
+      const domain = readNestedString(row.runtimeConfig, ["domain"]);
       const mode = readNestedString(row.runtimeConfig, ["operatingMode"]);
       const telegram = asRecord(asRecord(row.runtimeConfig)?.telegram);
       return (
         row.name === "Hermes Operations Manager" ||
+        row.name === "Hermes Ops Manager" ||
+        domain === "operations" ||
         purpose === "research-company-hermes-management" ||
+        purpose === "gazua-hermes-management" ||
+        mode === "chief_of_staff_liaison" ||
         mode === "independent_management_operator" ||
         telegram?.directConversation === true
       );

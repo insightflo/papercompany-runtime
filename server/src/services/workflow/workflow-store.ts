@@ -307,6 +307,35 @@ export async function claimWorkflowRunSlot(
   return slot ? mapWorkflowRunSlot(slot) : null;
 }
 
+export async function recordWorkflowScheduleClaimed(
+  db: Db,
+  input: { workflowDefinitionId: string; scheduledAt: Date },
+): Promise<void> {
+  await db
+    .update(workflowDefinitions)
+    .set({
+      lastScheduledRunAt: input.scheduledAt,
+      lastScheduleError: null,
+      lastScheduleErrorAt: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(workflowDefinitions.id, input.workflowDefinitionId));
+}
+
+export async function recordWorkflowScheduleFailure(
+  db: Db,
+  input: { workflowDefinitionId: string; error: string; failedAt?: Date },
+): Promise<void> {
+  await db
+    .update(workflowDefinitions)
+    .set({
+      lastScheduleError: input.error,
+      lastScheduleErrorAt: input.failedAt ?? new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(workflowDefinitions.id, input.workflowDefinitionId));
+}
+
 export async function markWorkflowRunSlotFailed(
   db: Db,
   slotId: string,

@@ -100,11 +100,14 @@ export function NewMissionDialog() {
     >
       <DialogContent
         showCloseButton={false}
-        className={cn("p-0 gap-0", expanded ? "sm:max-w-2xl" : "sm:max-w-lg")}
+        className={cn(
+          "p-0 gap-0 flex flex-col max-h-[calc(100dvh-2rem)] overflow-hidden",
+          expanded ? "sm:max-w-2xl h-[calc(100dvh-2rem)]" : "sm:max-w-lg"
+        )}
         onKeyDown={handleKeyDown}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             {selectedCompany && (
               <span className="bg-muted px-1.5 py-0.5 rounded text-xs font-medium">
@@ -152,16 +155,19 @@ export function NewMissionDialog() {
         </div>
 
         {/* Description */}
-        <div className="px-4 pb-2">
+        <div className={cn("px-4 pb-2 min-h-0", expanded ? "flex-1" : "shrink-0")}>
           <MarkdownEditor
             ref={descriptionEditorRef}
             value={description}
             onChange={setDescription}
             placeholder="Add description..."
             bordered={false}
+            className="min-w-0 max-w-full overflow-hidden"
             contentClassName={cn(
-              "text-sm text-muted-foreground",
-              expanded ? "min-h-[220px]" : "min-h-[120px]"
+              "text-sm text-muted-foreground max-w-full overflow-x-hidden overflow-y-auto overscroll-contain whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+              expanded
+                ? "min-h-[220px] max-h-[calc(100dvh-15rem)]"
+                : "min-h-[120px] max-h-[42dvh]"
             )}
           />
         </div>

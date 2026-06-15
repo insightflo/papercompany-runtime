@@ -1308,11 +1308,12 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(actionIssue).toMatchObject({
       companyId,
       missionId,
-      title: expect.stringMatching(/^\[ACTION\]/),
+      title: "[ACTION] Research current workflow surfaces",
       originKind: "workflow_execution",
       originRunId: runs[0]!.id,
       parentId: null,
     });
+    expect(actionIssue?.title).not.toContain("PAQO WBS");
 
     const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     expect(activePlan?.refs).toMatchObject({
@@ -1331,6 +1332,79 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(issues)
       .where(eq(issues.originKind, "mission_main_executor_oversight"));
     expect(oversightIssues).toHaveLength(0);
+  });
+
+  it("does not materialize PAQO OVERSIGHT units as workflow DAG steps", async () => {
+    const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    const commentId = randomUUID();
+    const decision = {
+      missionId,
+      missionGoal: "Keep oversight outside workflow DAG",
+      selectedExecutionUnits: [
+        {
+          id: "unit-data",
+          kind: "mission_plan_unit",
+          title: "[ACTION] Collect market data",
+          assigneeAgentId: otherAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-data" },
+        },
+        {
+          id: "unit-owner-oversight",
+          kind: "oversight",
+          title: "[OVERSIGHT] Owner monitors and coordinates recovery",
+          assigneeAgentId: ownerAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-owner-oversight" },
+          dependsOn: ["unit-data"],
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["Owner oversight remains mission-level, not workflow-level"],
+      steps: [
+        { id: "collect", units: ["unit-data"] },
+        { id: "oversee", units: ["unit-owner-oversight"], dependsOn: ["unit-data"] },
+      ],
+    };
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-02T00:10:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Keep oversight outside workflow DAG"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[]; agentId: string }>;
+    expect(paqoSteps.map((step) => step.name)).toEqual([
+      "[ACTION] Collect market data",
+      "[QA] Verify mission result",
+    ]);
+    expect(paqoSteps.some((step) => step.name.includes("[OVERSIGHT]"))).toBe(false);
+    expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
+
+    const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
+    expect(runs).toHaveLength(1);
+    const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runs[0]!.id));
+    expect(stepRuns).toHaveLength(2);
+    expect(stepRuns.map((stepRun) => stepRun.stepId).sort()).toEqual(paqoSteps.map((step) => step.id).sort());
   });
 
   it("materializes PLAN-managed mission units with explicit assignees into native DAG steps", async () => {

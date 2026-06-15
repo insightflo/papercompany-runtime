@@ -129,10 +129,16 @@ async function findHermesOperationsAgent(db: Db, companyId: string, botUsername?
   const normalizedBot = botUsername?.toLowerCase() ?? null;
   return activeRows.find((row) => {
     const runtimeBot = readNestedString(row.runtimeConfig, ["telegram", "botUsername"])?.toLowerCase() ?? null;
+    const domain = readNestedString(row.runtimeConfig, ["domain"]);
+    const mode = readNestedString(row.runtimeConfig, ["operatingMode"]);
     const metadataPurpose = readNestedString(row.metadata, ["purpose"]);
     return (
       row.name === "Hermes Operations Manager" ||
+      row.name === "Hermes Ops Manager" ||
+      domain === "operations" ||
       metadataPurpose === "research-company-hermes-management" ||
+      metadataPurpose === "gazua-hermes-management" ||
+      mode === "chief_of_staff_liaison" ||
       (normalizedBot !== null && runtimeBot === normalizedBot)
     );
   }) ?? null;

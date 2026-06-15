@@ -864,10 +864,7 @@ async function createWorkflowStepIssue(input: {
   });
 
   const stepName = renderWorkflowRunTextTemplate(input.step.name.trim(), input.run);
-  const hasIssueGroupPrefix = /^\s*\[(?:plan|action|qa|oversight)\]/iu.test(stepName);
-  const title = hasIssueGroupPrefix
-    ? `${stepName} — ${renderWorkflowRunTextTemplate(input.definition.name, input.run)}`
-    : `${renderWorkflowRunTextTemplate(input.definition.name, input.run)}: ${stepName}`;
+  const title = stepName || renderWorkflowRunTextTemplate(input.definition.name, input.run);
   const description = [
     input.step.description?.trim()
       ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)

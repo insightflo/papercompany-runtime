@@ -26,6 +26,23 @@ function currentBrowserPathname(): string | undefined {
   return typeof window === "undefined" ? undefined : window.location.pathname;
 }
 
+function missionHref(missionId: string): string {
+  return `/missions/${encodeURIComponent(missionId)}`;
+}
+
+function MissionRunLink({ missionId }: { missionId?: string | null }): JSX.Element | null {
+  if (!missionId) return null;
+  return (
+    <a
+      href={missionHref(missionId)}
+      style={{ ...buttonStyle, textDecoration: "none" }}
+      title={missionId}
+    >
+      Mission
+    </a>
+  );
+}
+
 
 type StepDraft = {
   id: string;
@@ -171,6 +188,7 @@ type WorkflowOverviewData = {
   activeRuns: Array<{
     id: string;
     workflowId?: string;
+    missionId?: string;
     workflowName: string;
     status: string;
     startedAt: string;
@@ -183,6 +201,7 @@ type WorkflowOverviewData = {
   recentRuns: Array<{
     id: string;
     workflowId?: string;
+    missionId?: string;
     workflowName: string;
     status: string;
     startedAt: string;
@@ -7124,6 +7143,7 @@ function WorkflowRunTimeline({
                 </span>
               </div>
               <div key="actions" style={workflowRunTimelineActionsStyle}>
+                <MissionRunLink missionId={run.missionId} />
                 {run.parentIssueId ? (
                   <a
                     href={buildIssueHref({
@@ -8352,6 +8372,7 @@ function ActiveRunsTable({
                 <td key="started" style={tdStyle}>{formatDateTime(run.startedAt)}</td>
                 <td key="actions" style={tdStyle}>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <MissionRunLink missionId={run.missionId} />
                     <button
                       type="button"
                       style={buttonStyle}
@@ -8518,25 +8539,28 @@ function RecentRunsTable({
                 <td key="started" style={tdStyle}>{formatDateTime(run.startedAt)}</td>
                 <td key="completed" style={tdStyle}>{run.completedAt ? formatDateTime(run.completedAt) : "-"}</td>
                 <td key="actions" style={tdStyle}>
-                  <button
-                    type="button"
-                    style={buttonStyle}
-                    onClick={() => {
-                      setExpandedRunIds((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(run.id)) next.delete(run.id);
-                        else next.add(run.id);
-                        return next;
-                      });
-                    }}
-	                  >
-	                    {isExpanded ? "Hide Steps" : "View Steps"}
-	                  </button>
-	                  {onInspectRun ? (
-	                    <button type="button" style={isInspected ? primaryButtonStyle : buttonStyle} onClick={() => onInspectRun(run.id)}>
-	                      Inspect
-	                    </button>
-	                  ) : null}
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <MissionRunLink missionId={run.missionId} />
+                    <button
+                      type="button"
+                      style={buttonStyle}
+                      onClick={() => {
+                        setExpandedRunIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(run.id)) next.delete(run.id);
+                          else next.add(run.id);
+                          return next;
+                        });
+                      }}
+                    >
+                      {isExpanded ? "Hide Steps" : "View Steps"}
+                    </button>
+                    {onInspectRun ? (
+                      <button type="button" style={isInspected ? primaryButtonStyle : buttonStyle} onClick={() => onInspectRun(run.id)}>
+                        Inspect
+                      </button>
+                    ) : null}
+                  </div>
 	                </td>
               </tr>
               {isExpanded ? (

@@ -395,6 +395,117 @@ describe("heartbeat context budget preflight", () => {
     expect(serialized).not.toContain("source issue private detail should stay bounded");
   });
 
+  it("defers Hermes Ops mission issue execution to the mission main executor", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const opsAgentId = randomUUID();
+    const missionId = randomUUID();
+    const sourceIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Research Company",
+      issuePrefix: "RES",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+        permissions: {},
+      },
+      {
+        id: opsAgentId,
+        companyId,
+        name: "Hermes Operations Manager",
+        role: "pm",
+        status: "active",
+        adapterType: "hermes_local",
+        adapterConfig: {},
+        runtimeConfig: { operatingMode: "chief_of_staff_liaison" },
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Tech AI News",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: sourceIssueId,
+      companyId,
+      missionId,
+      identifier: "RES-OPS",
+      title: "Recover failed Telegram delivery",
+      description: "Ops observed this but must not directly perform mission recovery.",
+      status: "todo",
+      assigneeAgentId: opsAgentId,
+      originKind: "workflow_recovery",
+    });
+
+    executeSpy.mockResolvedValue(successfulAdapterResult());
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      opsAgentId,
+      "assignment",
+      { taskKey: `issue:${sourceIssueId}`, issueId: sourceIssueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    expect(run).toBeNull();
+    expect(executeSpy).not.toHaveBeenCalled();
+
+    const [sourceIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    expect(sourceIssue).toEqual(expect.objectContaining({
+      status: "todo",
+      assigneeAgentId: opsAgentId,
+      executionRunId: null,
+    }));
+
+    const ownerActions = await db.select().from(issues).where(eq(issues.originId, sourceIssueId));
+    expect(ownerActions).toHaveLength(1);
+    expect(ownerActions[0]).toEqual(expect.objectContaining({
+      assigneeAgentId: ownerAgentId,
+      missionId,
+      originKind: "mission_main_executor_unblock",
+      status: "todo",
+    }));
+    expect(ownerActions[0]?.description).toContain("Hermes Ops boundary");
+    expect(ownerActions[0]?.description).toContain("signal the mission main executor");
+
+    const requests = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agentId: opsAgentId,
+        status: "skipped",
+        reason: "operations_mission_issue_deferred_to_main_executor",
+      }),
+      expect.objectContaining({
+        agentId: ownerAgentId,
+        status: "skipped",
+        reason: "heartbeat.wakeOnDemand.disabled",
+      }),
+    ]));
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(activities).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "mission.ops_issue_deferred_to_main_executor",
+        agentId: opsAgentId,
+      }),
+    ]));
+  });
+
   it("attaches mission-owner-task context to mission_main_executor_oversight issues", async () => {
     const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_oversight");
     let invocationContext: Record<string, unknown> | undefined;
@@ -2478,6 +2589,7 @@ describe("heartbeat context budget preflight", () => {
         assigneeAgentId: ownerAgentId,
         missionId,
         originKind: "mission_main_executor_unblock",
+        parentId: null,
         title: expect.stringContaining("[Unblock] PAP-QA"),
       }),
     ]));

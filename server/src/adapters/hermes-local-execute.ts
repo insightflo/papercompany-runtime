@@ -170,7 +170,11 @@ Check your assigned todo issues. If none exist, report briefly and exit.
     /\{\{#noTask\}\}([\s\S]*?)\{\{\/noTask\}\}/g,
     taskId ? "" : "$1",
   );
-  return joinPromptSections([runtimeBrief, renderTemplate(rendered, vars)]);
+  return joinPromptSections([
+    isHermesOperationsLiaisonAgent(ctx) ? HERMES_OPERATIONS_LIAISON_BRIEF : null,
+    runtimeBrief,
+    renderTemplate(rendered, vars),
+  ]);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -178,6 +182,42 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown>
     : null;
 }
+
+function isHermesOperationsLiaisonAgent(ctx: AdapterExecutionContext) {
+  const agent = ctx.agent as AdapterExecutionContext["agent"] & {
+    runtimeConfig?: unknown;
+    metadata?: unknown;
+  };
+  const runtimeConfig = asRecord(agent.runtimeConfig);
+  const metadata = asRecord(agent.metadata);
+  const domain = cfgString(runtimeConfig?.domain);
+  const operatingMode = cfgString(runtimeConfig?.operatingMode);
+  const purpose = cfgString(metadata?.purpose);
+  return (
+    agent.name === "Hermes Operations Manager" ||
+    agent.name === "Hermes Ops Manager" ||
+    domain === "operations" ||
+    purpose === "research-company-hermes-management" ||
+    purpose === "gazua-hermes-management" ||
+    operatingMode === "chief_of_staff_liaison" ||
+    operatingMode === "independent_management_operator"
+  );
+}
+
+const HERMES_OPERATIONS_LIAISON_BRIEF = `## Hermes Ops Role
+
+You are the chief of staff for the chairman/operator. Your job is to report clearly to the chairman and relay the chairman's intent to the organization.
+
+Allowed:
+- Monitor company, mission, workflow, and agent state.
+- Summarize findings, risks, blockers, and recommended next actions.
+- Relay user instructions to the proper mission main executor or responsible agent.
+- Use Authorization: Bearer $PAPERCLIP_API_KEY for Paperclip API calls when the key is present; do not rely on local implicit board authority.
+
+Not allowed:
+- Do not directly perform mission work without explicit user instruction.
+- Do not directly mutate mission issues, workflow runs, artifacts, or delivery state as a substitute for the mission main executor.
+- If action is needed on a mission, signal the mission main executor and let that executor judge and coordinate recovery.`;
 
 function dataUrlToImage(value: string): { mime: string; bytes: Buffer } | null {
   const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\s]+)$/);

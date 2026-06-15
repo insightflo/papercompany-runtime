@@ -1380,7 +1380,15 @@ function applyPlanStepDependencies(
 
 function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect): WorkflowStep[] {
   const selectedUnits = draft.refs.selectedExecutionUnits;
-  const selectedSteps = selectedUnits.map((unit, index) => {
+  const executableUnits = selectedUnits.filter((unit, index) => {
+    const rawTitle =
+      toNonEmptyString(unit.title)
+        ?? toNonEmptyString(unit.name)
+        ?? toNonEmptyString(unit.id)
+        ?? `Execution unit ${index + 1}`;
+    return inferPaqoIssueGroup(unit, rawTitle) !== "oversight";
+  });
+  const selectedSteps = executableUnits.map((unit, index) => {
     const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
     const assigneeAgentId =
       toNonEmptyString(unit.assigneeAgentId) ??
@@ -1409,7 +1417,8 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
       ].filter(Boolean).join("\n"),
     } satisfies WorkflowStep;
   });
-  const plannedSteps = applyPlanStepDependencies(selectedUnits, selectedSteps, draft.steps);
+  const plannedSteps = applyPlanStepDependencies(executableUnits, selectedSteps, draft.steps);
+  if (plannedSteps.length === 0) return [];
 
   const qaStep: WorkflowStep = {
     id: `qa-${shortStableHash({ missionId: mission.id, actions: plannedSteps.map((step) => step.id), goal: draft.missionGoal })}`,
@@ -1529,6 +1538,7 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   const localDraft = draftWithSelectedExecutionUnits(input.draft, selectedExecutionUnits);
   const workflowName = formatPaqoWorkflowName(localDraft, mission);
   const steps = buildPaqoWorkflowSteps(localDraft, mission);
+  if (steps.length === 0) return;
   const [existingDefinition] = await input.db
     .select()
     .from(workflowDefinitions)

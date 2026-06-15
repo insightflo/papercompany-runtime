@@ -26,6 +26,8 @@ import {
   updateWorkflowRunStatus,
   resumeWorkflowRun,
   markWorkflowRunSlotFailed,
+  recordWorkflowScheduleClaimed,
+  recordWorkflowScheduleFailure,
 } from "./workflow-store.js";
 import type {
   WorkflowDefinition,
@@ -335,6 +337,11 @@ export const workflowService = {
       };
     }
 
+    await recordWorkflowScheduleClaimed(db, {
+      workflowDefinitionId: input.workflowId,
+      scheduledAt: input.scheduledAt,
+    });
+
     let run: WorkflowExecutionResult;
     try {
       run = await workflowService.trigger(db, {
@@ -349,9 +356,14 @@ export const workflowService = {
         metadata: input.metadata ?? {},
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       await markWorkflowRunSlotFailed(db, slot.id, {
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
         metadata: slot.metadata,
+      });
+      await recordWorkflowScheduleFailure(db, {
+        workflowDefinitionId: input.workflowId,
+        error: message,
       });
       throw error;
     }

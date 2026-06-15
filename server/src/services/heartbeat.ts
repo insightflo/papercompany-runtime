@@ -25,7 +25,7 @@ import {
   workflowStepRuns,
   worktreeRules,
 } from "@paperclipai/db";
-import { conflict, notFound } from "../errors.js";
+import { HttpError, conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
@@ -65,6 +65,7 @@ import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-gua
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
+import { missionService } from "./missions.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
@@ -99,6 +100,8 @@ import {
   resolveSessionCompactionPolicy,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
+
+type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const RUN_ACTIVITY_TOUCH_INTERVAL_MS = 15 * 1000;
@@ -630,6 +633,28 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
 
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function isHermesOperationsLiaisonAgent(agent: Pick<typeof agents.$inferSelect, "name" | "adapterType" | "runtimeConfig" | "metadata">) {
+  if (agent.adapterType !== "hermes_local") return false;
+  const runtimeConfig = parseObject(agent.runtimeConfig);
+  const metadata = parseObject(agent.metadata);
+  const domain = readNonEmptyString(runtimeConfig.domain);
+  const operatingMode = readNonEmptyString(runtimeConfig.operatingMode);
+  const purpose = readNonEmptyString(metadata.purpose);
+  return (
+    agent.name === "Hermes Operations Manager" ||
+    agent.name === "Hermes Ops Manager" ||
+    domain === "operations" ||
+    purpose === "research-company-hermes-management" ||
+    purpose === "gazua-hermes-management" ||
+    operatingMode === "chief_of_staff_liaison" ||
+    operatingMode === "independent_management_operator"
+  );
+}
+
+function isMissionOwnerControlIssue(issue: Pick<typeof issues.$inferSelect, "originKind" | "description">) {
+  return isMissionOwnerTaskIssue(issue);
 }
 
 function truncateContextText(value: string | null | undefined, max = 220) {
@@ -2233,6 +2258,35 @@ export function heartbeatService(db: Db) {
     }
   }
 
+  function isMissionOwnerActionParentPlacementRejected(error: unknown) {
+    return error instanceof HttpError &&
+      error.status === 422 &&
+      (
+        error.message.includes("Mission downstream issue creation is not allowed") ||
+        error.message.includes("Mission nested child issue creation is not allowed") ||
+        error.message.includes("Mission child issue burst limit exceeded")
+      );
+  }
+
+  async function createMissionOwnerActionIssue(companyId: string, data: IssueCreateInput) {
+    if (!data.parentId) return issuesSvc.create(companyId, data);
+    try {
+      return await issuesSvc.create(companyId, data);
+    } catch (error) {
+      if (!isMissionOwnerActionParentPlacementRejected(error)) throw error;
+      const { parentId: _parentId, ...flatData } = data;
+      logger.warn({
+        err: error,
+        companyId,
+        missionId: data.missionId,
+        originKind: data.originKind,
+        originId: data.originId,
+        rejectedParentId: data.parentId,
+      }, "mission owner action parent placement rejected; creating flat owner action with origin link");
+      return issuesSvc.create(companyId, flatData);
+    }
+  }
+
   async function getAgent(agentId: string) {
     return db
       .select()
@@ -2250,7 +2304,7 @@ export function heartbeatService(db: Db) {
   }
 
   async function ensureMissionOwnerActionForRequestChanges(input: {
-    sourceIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "title" | "originKind" | "status" | "assigneeAgentId">;
+    sourceIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "title" | "originKind" | "status" | "assigneeAgentId" | "parentId">;
     run: typeof heartbeatRuns.$inferSelect;
     verdict: RequestChangesVerdict;
   }) {
@@ -2304,12 +2358,14 @@ export function heartbeatService(db: Db) {
         .where(eq(issues.id, existing.id));
       existing.description = nextDescription;
     }
-    const ownerAction = existing ?? await issuesSvc.create(input.sourceIssue.companyId, {
+    const ownerActionParentId = input.sourceIssue.parentId ? undefined : input.sourceIssue.id;
+    const ownerAction = existing ?? await createMissionOwnerActionIssue(input.sourceIssue.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: nextDescription,
       missionId: input.sourceIssue.missionId,
       originKind: "mission_main_executor_unblock",
       originId: input.sourceIssue.id,
+      parentId: ownerActionParentId,
       priority: "high",
       status: "todo",
       title: `[Unblock] ${sourceLabel}: ${input.sourceIssue.title}`,
@@ -2346,6 +2402,79 @@ export function heartbeatService(db: Db) {
     }
 
     return ownerAction;
+  }
+
+  async function deferOperationsMissionIssueToMainExecutor(input: {
+    agent: typeof agents.$inferSelect;
+    issueId: string;
+    missionId: string;
+  }) {
+    if (!isHermesOperationsLiaisonAgent(input.agent)) return null;
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.id, input.issueId),
+        eq(issues.companyId, input.agent.companyId),
+        eq(issues.missionId, input.missionId),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!issue) return null;
+
+    const mission = await db
+      .select()
+      .from(missions)
+      .where(and(eq(missions.id, input.missionId), eq(missions.companyId, input.agent.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!mission?.ownerAgentId) return null;
+
+    const now = new Date();
+    const sourceLabel = issue.identifier ?? issue.id;
+    const roleEvidence = [
+      `Hermes Ops boundary: ${input.agent.name} is chief_of_staff_liaison; it may monitor and report, but must not directly execute mission issue ${sourceLabel}.`,
+      "Required routing: signal the mission main executor. The main executor decides recovery, re-dispatch, replan, escalation, or no action.",
+    ];
+
+    let ownerAction = issue;
+    if (isMissionOwnerControlIssue(issue)) {
+      if (issue.assigneeAgentId !== mission.ownerAgentId) {
+        ownerAction = await db
+          .update(issues)
+          .set({
+            assigneeAgentId: mission.ownerAgentId,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id))
+          .returning()
+          .then((rows) => rows[0] ?? issue);
+      }
+    } else {
+      ownerAction = await missionService(db).ensureMainExecutorUnblockIssue(mission, issue, {
+        renewAfterNoActionWaiting: true,
+        governanceEvidence: roleEvidence,
+      });
+    }
+
+    await db.insert(activityLog).values({
+      companyId: input.agent.companyId,
+      actorType: "system",
+      actorId: "heartbeat",
+      action: "mission.ops_issue_deferred_to_main_executor",
+      entityType: "issue",
+      entityId: issue.id,
+      agentId: input.agent.id,
+      details: {
+        missionId: mission.id,
+        sourceIssueId: issue.id,
+        sourceIssueIdentifier: sourceLabel,
+        ownerAgentId: mission.ownerAgentId,
+        ownerActionIssueId: ownerAction.id,
+        operationsAgentRole: "chief_of_staff_liaison",
+      },
+    });
+
+    return { mission, issue, ownerAction };
   }
 
   async function getRuntimeState(agentId: string) {
@@ -6087,6 +6216,40 @@ export function heartbeatService(db: Db) {
         throw conflict(err instanceof Error ? err.message : "Mission is terminal", {
           missionId: missionIdForWake,
         });
+      }
+    }
+
+    if (issueId && missionIdForWake) {
+      const deferredOpsIssue = await deferOperationsMissionIssueToMainExecutor({
+        agent,
+        issueId,
+        missionId: missionIdForWake,
+      });
+      if (deferredOpsIssue) {
+        await writeSkippedRequest("operations_mission_issue_deferred_to_main_executor");
+        if (deferredOpsIssue.mission.ownerAgentId !== agentId) {
+          await enqueueWakeup(deferredOpsIssue.mission.ownerAgentId, {
+            source: "automation",
+            triggerDetail: "operations_mission_boundary",
+            reason: "operations_mission_issue_deferred_to_main_executor",
+            idempotencyKey: `ops-mission-boundary:${missionIdForWake}:${issueId}:${deferredOpsIssue.ownerAction.id}`,
+            requestedByActorType: "system",
+            requestedByActorId: "heartbeat",
+            payload: {
+              issueId: deferredOpsIssue.ownerAction.id,
+              sourceIssueId: issueId,
+              operationsAgentId: agentId,
+            },
+            contextSnapshot: {
+              taskKey: `issue:${deferredOpsIssue.ownerAction.id}`,
+              issueId: deferredOpsIssue.ownerAction.id,
+              missionId: missionIdForWake,
+              sourceIssueId: issueId,
+              roleBoundary: "hermes_ops_chief_of_staff_liaison",
+            },
+          });
+        }
+        return null;
       }
     }
 
