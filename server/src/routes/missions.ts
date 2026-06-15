@@ -127,6 +127,7 @@ export function missionRoutes(db: Db) {
         },
       });
     },
+    cancelHeartbeatRun: (runId) => heartbeat.cancelRun(runId),
   });
 
   // ---------------------------------------------------------------------------

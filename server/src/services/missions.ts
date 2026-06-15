@@ -780,6 +780,8 @@ export interface MissionServiceDeps {
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
   onStaleSourceIssueWakeupRequested?: MissionStaleSourceIssueWakeupRequestedHandler;
   onOwnerPlanningIssueCreated?: MissionOwnerPlanningIssueCreatedHandler;
+  /** Cancel a heartbeat run (kills the process + updates DB + releases issue lock). */
+  cancelHeartbeatRun?: (runId: string) => Promise<unknown>;
 }
 
 export function missionService(db: Db, deps: MissionServiceDeps = {}) {
@@ -3417,6 +3419,38 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           ));
       }
 
+      // Cancel active heartbeat runs for this mission's issues.
+      // Use the heartbeat service cancel (kills the process + releases issue lock)
+      // when available, falling back to a bulk DB update for callers that don't
+      // inject the heartbeat dependency.
+      const activeRunIds = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, existing.companyId),
+          inArray(
+            heartbeatRuns.issueId,
+            db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(eq(issues.missionId, id)),
+          ),
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+        ));
+
+      if (activeRunIds.length && deps.cancelHeartbeatRun) {
+        await Promise.all(
+          activeRunIds.map((row) =>
+            deps.cancelHeartbeatRun!(row.id).catch(() => {
+              // Best-effort: cancelRunInternal already sets status, but if it
+              // throws we fall through to the bulk update below.
+            }),
+          ),
+        );
+      }
+
+      // Bulk-update any runs that are still queued/running (covers runs the
+      // per-run cancel missed or callers without the heartbeat dependency).
       await db
         .update(heartbeatRuns)
         .set({
