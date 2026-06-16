@@ -2305,10 +2305,30 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
             }
           }
         }
-        const ownerDecision = extractLatestMissionOwnerDecision(comments);
+        let ownerDecision = extractLatestMissionOwnerDecision(comments);
         if (ownerDecision?.decision === null) {
           findings.push(`owner_action_decision_invalid: ${label} has unsupported decision=${ownerDecision.invalidDecision} — ${issue.title}`);
-        } else if (ownerDecision) {
+          ownerDecision = null;
+        } else if (!ownerDecision) {
+          // [grace window] owner 가 recovery action 을 고르지 않은 채 오래되면 자동으로
+          // retry_source_issue default 로 적용한다. owner 가 heartbeat 비활성/wakeOnDemand
+          // 로 decision comment 를 안 쓰면 mission 이 무한 stall(6h+ 사례) 하므로, grace 가
+          // 지나면 source issue 가 있을 때만 자동 retry. 이후 재실패 시 기존 reopen 경로가
+          // 다시 owner 에게 넘긴다. side_effect 는 source retry 가 멱등 가정하에 안전.
+          if (input.applyOwnerDecisionActions && issue.originId) {
+            const ageMs = Date.now() - new Date(issue.createdAt).getTime();
+            const GRACE_MS = 20 * 60 * 1000;
+            if (ageMs >= GRACE_MS) {
+              ownerDecision = {
+                decision: "retry_source_issue",
+                reason: `auto-default (owner grace ${GRACE_MS / 60000}min expired)`,
+                sourceIssueRef: issue.originId,
+              };
+              findings.push(`owner_action_grace_default_retry: ${label} age=${Math.round(ageMs / 60000)}min — auto-defaulting retry_source_issue`);
+            }
+          }
+        }
+        if (ownerDecision) {
           const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
           const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerDecision.sourceIssueRef ?? issue.originId ?? "unknown-source");
           findings.push(`owner_action_decision_recorded: ${label} decision=${ownerDecision.decision} source=${sourceLabel} — ${issue.title}`);
