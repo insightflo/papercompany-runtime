@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { workflowStepRuns } from "@paperclipai/db";
+import { workflowStepRuns, heartbeatRuns } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -45,6 +45,7 @@ import { buildContextSafeFileViews } from "../services/context-safe-file-views.j
 import { buildMaintenanceDecisionContext } from "../services/maintenance/decision-context.js";
 import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
+import { openWorkProductWithDefaultApp, WorkProductOpenError } from "../services/work-products.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -816,6 +817,33 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.json(product);
   });
 
+  router.post("/work-products/:id/open", async (req, res) => {
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Board authentication required" });
+      return;
+    }
+
+    const id = req.params.id as string;
+    const existing = await workProductsSvc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Work product not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+
+    try {
+      const target = await openWorkProductWithDefaultApp(existing);
+      res.json({ ok: true, target });
+    } catch (error) {
+      if (error instanceof WorkProductOpenError) {
+        const status = error.code === "path_not_found" ? 404 : error.code === "no_open_target" ? 422 : 500;
+        res.status(status).json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  });
+
   router.delete("/work-products/:id", async (req, res) => {
     const id = req.params.id as string;
     const existing = await workProductsSvc.getById(id);
@@ -1390,6 +1418,24 @@ export function issueRoutes(db: Db, storage: StorageService) {
 
     const checkoutRunId = requireAgentRunId(req, res);
     if (req.actor.type === "agent" && !checkoutRunId) return;
+    // [수정시 영향] checkout run 은 실제 실행 중(running, started) 이어야 한다.
+    // queued(startedAt=null, 시작 안 된) run 이 checkout 하면 run 실행 없이 issue 가
+    // in_progress 로 점유되는 가짜 할당이 생긴다. queued run 은 거부한다.
+    if (checkoutRunId) {
+      const checkoutRunRows = await db
+        .select({ status: heartbeatRuns.status, agentId: heartbeatRuns.agentId })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, checkoutRunId))
+        .limit(1);
+      const runRow = checkoutRunRows[0];
+      if (!runRow || runRow.status !== "running" || runRow.agentId !== req.body.agentId) {
+        res.status(409).json({
+          error: "Checkout requires a live running heartbeat run for this agent",
+          runStatus: runRow?.status ?? null,
+        });
+        return;
+      }
+    }
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
     await workflowsSvc.syncRunStatusForIssue(db, updated.id);

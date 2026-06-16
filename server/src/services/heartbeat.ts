@@ -6507,6 +6507,29 @@ export function heartbeatService(db: Db) {
           return { kind: "deferred" as const };
         }
 
+        // [B] 같은 mission 에 이미 queued/running run 이 있으면 새 run 을 만들지
+        // 않는다(중복 run/issue 차단). workflow 가 한 mission 의 여러 issue 를
+        // 만들 때 per-issue wake 가 각각 새 run 을 spawn 하는 것을 막아, 한 mission
+        // 안에서 같은 agent 가 동시에 여러 run 을 가지지 않게 한다.
+        const missionIdForDedup = readNonEmptyString(enrichedContextSnapshot.missionId);
+        if (missionIdForDedup) {
+          const existingMissionRun = await tx
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(
+              and(
+                eq(heartbeatRuns.agentId, agentId),
+                sql`heartbeat_runs.status in ('queued','running')`,
+                sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForDedup}`,
+              ),
+            )
+            .limit(1);
+          if (existingMissionRun.length > 0) {
+            await writeSkippedRequest("heartbeat.mission_run_active");
+            return { kind: "skipped" as const };
+          }
+        }
+
         const wakeupRequest = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -7119,6 +7142,25 @@ export function heartbeatService(db: Db) {
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
+
+        // [수정시 영향] 이 에이전트가 이미 queued/running run 을 가지고 있으면
+        // timer wake 를 skip 한다. run 이 finalize 되지 않아 lastHeartbeatAt 가
+        // 갱신되지 않더라도, active run 이 존재하면 매 tick 새 wake 를 만들지
+        // 않는다(매 tick 재발사 + queued run 적체 방지).
+        const activeRun = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(
+            and(
+              eq(heartbeatRuns.agentId, agent.id),
+              sql`${heartbeatRuns.status} in ('queued','running')`,
+            ),
+          )
+          .limit(1);
+        if (activeRun.length > 0) {
+          skipped += 1;
+          continue;
+        }
 
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
