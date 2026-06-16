@@ -2239,7 +2239,15 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
             continue;
           }
         }
-        if (toolRecovery && issue.status === "done" && input.applyOwnerDecisionActions) {
+        // [수정시 영향] tool-step recovery 자동 retry 게이트. 이전엔 issue.status
+        // === "done"(owner 가 수동으로 recovery issue 를 닫은 뒤) 일 때만 자동 retry 가
+        // 동작했는데, owner 가 heartbeat 비활성/wakeOnDemand 로 recovery action 을
+        // 고르지 않으면 issue 가 "done" 이 되지 않아 영원히 stall 했다(6h+ 사례).
+        // status 조건을 제거하고 toolRecovery + applyOwnerDecisionActions 만으로 자동
+        // retry 를 돌린다. 안전장치는 기존 그대로: hasNativeToolStepRetryAppliedMarker
+        // 로 1회 cap, retry 실패 시 reopenAppliedToolStepRecoveryIfRetryFailed 가 issue
+        // 를 다시 열어 owner 에게 넘긴다.
+        if (toolRecovery && input.applyOwnerDecisionActions) {
           const markerInput = {
             ownerActionIssueId: issue.id,
             workflowRunId: toolRecovery.runId,
