@@ -739,7 +739,7 @@ async function syncStepRunsFromIssueState(
     if (!issue) continue;
 
     const validationVerdict = issue.status === "done"
-      ? heartbeatVerdictByIssueId.get(issue.id) ?? latestExplicitValidationVerdict(commentsByIssueId.get(issue.id) ?? [])
+      ? latestExplicitValidationVerdict(commentsByIssueId.get(issue.id) ?? []) ?? heartbeatVerdictByIssueId.get(issue.id)
       : null;
     const desiredStatus = validationVerdict === "request_changes"
       ? "failed"

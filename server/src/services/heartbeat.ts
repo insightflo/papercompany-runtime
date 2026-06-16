@@ -706,10 +706,24 @@ function canApplyMissingWorkProductRegistrationGate(issue: {
   );
 }
 
-function workProductReferencesClaimedArtifact(
-  product: { url: string | null; externalId: string | null; metadata: Record<string, unknown> | null },
+export function workProductReferencesClaimedArtifact(
+  product: {
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+    status?: string | null;
+    isPrimary?: boolean | null;
+  },
   claimedArtifactPaths: string[],
 ) {
+  if (product.status && product.status !== "active") return false;
+
+  // Some successful retry/heartbeat runs only report that the work is already complete
+  // (or echo setup files from the agent prompt) rather than re-printing the actual
+  // artifact path. In that case an existing active primary workProduct is already the
+  // control-plane contract and should not be auto-blocked as missing registration.
+  if (claimedArtifactPaths.length === 0) return product.isPrimary !== false;
+
   const haystack = [
     product.url,
     product.externalId,
@@ -1855,7 +1869,7 @@ const CLAIMED_ARTIFACT_JSON_PATH_RE = new RegExp(
   "giu",
 );
 const CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE = new RegExp(
-  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"])`,
+  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"\\\\,}\\]])`,
   "giu",
 );
 
@@ -1868,7 +1882,7 @@ function normalizeClaimedArtifactPath(value: string): string {
     .trim();
 }
 
-function isActionableClaimedArtifactPath(value: string): boolean {
+export function isActionableClaimedArtifactPath(value: string): boolean {
   if (!value.startsWith("/")) return false;
   if (value.includes("\\n") || value.includes("\\r") || /[\r\n]/u.test(value)) return false;
   if (/[<>]/u.test(value)) return false;
@@ -1877,16 +1891,18 @@ function isActionableClaimedArtifactPath(value: string): boolean {
   const nonDeliverablePathMarkers = [
     "/papercompany-runtime/skills/",
     "/papercompany-operations/scripts/paperclip-addon/agents/",
+    "/instructions/",
     "/node_modules/",
     "/.git/",
   ];
   if (nonDeliverablePathMarkers.some((marker) => value.includes(marker))) return false;
-  if (/(?:^|\/)SKILL\.md$/u.test(value)) return false;
+  if (/(?:^|\/)(?:AGENTS|CLAUDE|SKILL)\.md$/u.test(value)) return false;
+  if (/(?:^|\/)\.cursorrules$/u.test(value)) return false;
 
   return true;
 }
 
-function extractClaimedArtifactPaths(run: typeof heartbeatRuns.$inferSelect): string[] {
+export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
   const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
