@@ -173,6 +173,34 @@ async function ensureMissionForWorkflowRun(
   return { ...input, missionId: mission.id };
 }
 
+async function assertNoImplicitDuplicateScheduledWorkflowRun(
+  db: Db,
+  input: CreateWorkflowRunInput,
+  workflow: WorkflowDefinition,
+  runDate: string,
+): Promise<void> {
+  if (input.missionId || input.scheduledSlotId) return;
+  if (typeof workflow.schedule !== "string" || workflow.schedule.trim().length === 0) return;
+
+  const existingRuns = await listWorkflowRuns(db, {
+    companyId: input.companyId,
+    workflowId: input.workflowId,
+  });
+  const existingScheduledRun = existingRuns.find((run) => (
+    run.runDate === runDate
+    && typeof run.missionId === "string"
+    && run.missionId.trim().length > 0
+    && (run.triggerSource === "schedule" || typeof run.scheduledSlotId === "string")
+  ));
+
+  if (!existingScheduledRun) return;
+
+  throw new Error(
+    `Workflow already has scheduled workflow run for ${runDate}: ${existingScheduledRun.id}. `
+      + "Resume/rerun the existing run, or pass an explicit missionId for a planned mixed-workflow execution.",
+  );
+}
+
 async function assertWorkflowToolReadiness(
   db: Db,
   companyId: string,
@@ -276,6 +304,7 @@ export const workflowService = {
     const runDate = input.runDate
       ?? (timezone ? formatDateKeyInTimezone(new Date(), timezone) : null)
       ?? new Date().toISOString().slice(0, 10);
+    await assertNoImplicitDuplicateScheduledWorkflowRun(db, input, workflow, runDate);
     const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate });
     const run = await createWorkflowRun(db, runInput);
     if (run.missionId) {

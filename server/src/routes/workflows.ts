@@ -158,6 +158,9 @@ function translateWorkflowDomainError(error: unknown): never {
   if (error.message.startsWith("Workflow tools are unavailable:")) {
     throw conflict(error.message);
   }
+  if (error.message.startsWith("Workflow already has scheduled workflow run for")) {
+    throw conflict(error.message);
+  }
 
   throw error;
 }
