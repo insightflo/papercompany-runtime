@@ -5390,6 +5390,29 @@ export function heartbeatService(db: Db) {
             });
           }
         }
+        // [overloaded fallback] LLM 백엔드 529/overloaded/timeout 은 claude CLI 가
+        // subtype=success(exit 0) 로 끝는 경우가 많아 exit_error(exitCode!=0)/
+        // process_lost fallback 에 안 걸린다. errorMessage 에서 감지해 fallbackCommand
+        // 로 회피한다(trigger 무관, maxAttempts 제한).
+        if (outcome === "failed" && finalizedRun) {
+          const overloadedMsg = adapterResult.errorMessage ?? finalizedRun.error ?? "";
+          if (/529|overloaded|temporarily overloaded|rate[-_ ]?limit|operation timed out/i.test(overloadedMsg)) {
+            const ofb = resolveAdapterFallbackConfig(agent.adapterConfig);
+            const oAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
+            if (ofb && oAttempt < ofb.maxAttempts) {
+              await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
+                fallbackCommand: ofb.command,
+                fallbackReason: "server_overloaded",
+              });
+              await appendRunEvent(finalizedRun, seq++, {
+                eventType: "lifecycle",
+                stream: "system",
+                level: "warn",
+                message: "LLM 백엔드 과부하(529/timeout) 감지 — server_overloaded fallback 큐잉",
+              });
+            }
+          }
+        }
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
       await finalizeAgentStatus(agent.id, outcome);
