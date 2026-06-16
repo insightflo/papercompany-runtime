@@ -3905,7 +3905,6 @@ export function heartbeatService(db: Db) {
         const shouldFallback =
           Boolean(agent) &&
           Boolean(fallback) &&
-          fallback!.triggers.has("process_lost") &&
           fallbackAttempt < fallback!.maxAttempts;
         if (agent && fallback && shouldFallback) {
           fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, now, {
@@ -5380,53 +5379,26 @@ export function heartbeatService(db: Db) {
             error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
           });
         }
-        // exit_error fallback: when adapter exits with non-zero code and fallback triggers include "exit_error",
-        // enqueue a fallback run with the fallbackCommand before releasing the issue.
-        if (outcome === "failed" && finalizedRun && (adapterResult.exitCode ?? 0) !== 0) {
-          const exitErrorFallback = resolveAdapterFallbackConfig(agent.adapterConfig);
-          const exitErrorAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
-          const shouldExitErrorFallback =
-            Boolean(exitErrorFallback) &&
-            exitErrorFallback!.triggers.has("exit_error") &&
-            exitErrorAttempt < exitErrorFallback!.maxAttempts;
-          if (shouldExitErrorFallback) {
-            const exitErrorRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
-              fallbackCommand: exitErrorFallback!.command,
-              fallbackReason: "exit_error",
+        // adapter run 이 실패하면 fallbackCommand 가 있으면 무조건 큐잉.
+        if (outcome === "failed" && finalizedRun) {
+          const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
+          const fbAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
+          if (fb && fbAttempt < fb.maxAttempts) {
+            const fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
+              fallbackCommand: fb.command,
+              fallbackReason: "run_failed",
             });
             await appendRunEvent(finalizedRun, seq++, {
               eventType: "lifecycle",
               stream: "system",
               level: "warn",
-              message: `Adapter exited with code ${adapterResult.exitCode}; queued exit_error fallback ${exitErrorRun?.id ?? ""}`.trim(),
+              message: `Run failed — queued fallback ${fallbackRun?.id ?? ""}`.trim(),
               payload: {
-                exitCode: adapterResult.exitCode,
-                fallbackRunId: exitErrorRun?.id ?? null,
+                exitCode: adapterResult.exitCode ?? null,
+                errorMessage: adapterResult.errorMessage ?? null,
+                fallbackRunId: fallbackRun?.id ?? null,
               },
             });
-          }
-        }
-        // [overloaded fallback] LLM 백엔드 529/overloaded/timeout 은 claude CLI 가
-        // subtype=success(exit 0) 로 끝는 경우가 많아 exit_error(exitCode!=0)/
-        // process_lost fallback 에 안 걸린다. errorMessage 에서 감지해 fallbackCommand
-        // 로 회피한다(trigger 무관, maxAttempts 제한).
-        if (outcome === "failed" && finalizedRun) {
-          const overloadedMsg = adapterResult.errorMessage ?? finalizedRun.error ?? "";
-          if (/529|overloaded|temporarily overloaded|rate[-_ ]?limit|operation timed out/i.test(overloadedMsg)) {
-            const ofb = resolveAdapterFallbackConfig(agent.adapterConfig);
-            const oAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
-            if (ofb && oAttempt < ofb.maxAttempts) {
-              await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
-                fallbackCommand: ofb.command,
-                fallbackReason: "server_overloaded",
-              });
-              await appendRunEvent(finalizedRun, seq++, {
-                eventType: "lifecycle",
-                stream: "system",
-                level: "warn",
-                message: "LLM 백엔드 과부하(529/timeout) 감지 — server_overloaded fallback 큐잉",
-              });
-            }
           }
         }
         await releaseIssueExecutionAndPromote(finalizedRun);
