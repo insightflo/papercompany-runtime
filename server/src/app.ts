@@ -73,6 +73,7 @@ import { setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
+import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -601,8 +602,7 @@ export async function createApp(
 
   const missionOwnerSupervisionMonitor = createMissionOwnerSupervisionMonitor(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
-      if (!issue.assigneeAgentId) return null;
-      return heartbeat.wakeup(issue.assigneeAgentId, {
+      return heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment",
         triggerDetail: "system",
         reason: reason ?? "mission_unblock_action_created",
@@ -622,7 +622,7 @@ export async function createApp(
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(targetAgentId, {
+    onOwnerDecisionRetrySourceIssueApplied: ({ mission, ownerActionIssue, sourceIssue, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(mission.ownerAgentId, {
       source: "assignment",
       triggerDetail: "system",
       reason: "mission_owner_decision_retry_source_issue",
@@ -644,7 +644,7 @@ export async function createApp(
         wakeCommentId,
       },
     }),
-    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, targetAgentId, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(targetAgentId, {
+    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(mission.ownerAgentId, {
       source: "assignment",
       triggerDetail: "system",
       reason: "mission_stale_source_issue_wakeup",
@@ -680,6 +680,17 @@ export async function createApp(
   nativeWorkflowScheduler?.start();
   if (nativeWorkflowScheduler) {
     process.once("exit", () => nativeWorkflowScheduler.stop());
+  }
+
+  // Native workflow reconciler: failed step 이후 running 으로 방치되는 stuck run
+  // (60min+)과 orphan step run 을 주기 정리. plugin workflow-reconciler
+  // (insightflo.workflow-engine) 가 비활성화된 배포에서만 동작한다.
+  const nativeWorkflowReconciler = workflowSchedulerOwnership.pluginReconcilerEffectiveDisabled
+    ? createNativeWorkflowReconciler({ db, timeoutMinutes: 60 })
+    : null;
+  nativeWorkflowReconciler?.start();
+  if (nativeWorkflowReconciler) {
+    process.once("exit", () => nativeWorkflowReconciler.stop());
   }
 
   pluginScheduler.start();

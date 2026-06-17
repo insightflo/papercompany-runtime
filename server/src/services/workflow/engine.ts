@@ -8,7 +8,7 @@
 import type { Db } from "@paperclipai/db";
 import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
-import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { missionService } from "../missions.js";
 import {
@@ -473,16 +473,6 @@ export const workflowService = {
    */
   async validateDag(steps: unknown[]): Promise<DagValidationResult> {
     return validateDag(normalizeWorkflowSteps(steps));
-  },
-
-  /**
-   * Reconcile stuck workflow runs.
-   */
-  async reconcile(
-    db: Db,
-    timeoutMinutes: number = 60,
-  ): Promise<{ recovered: number; failed: number }> {
-    return reconcileWorkflowRuns(db, timeoutMinutes);
   },
 
   /**

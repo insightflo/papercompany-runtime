@@ -45,6 +45,7 @@ import {
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
+import { reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -204,9 +205,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       completedAt: null,
     });
 
-    const result = await workflowService.reconcile(db, 60);
+    const result = await reconcileStuckWorkflowRuns(db, 60);
 
-    expect(result).toEqual({ recovered: 0, failed: 1 });
+    expect(result).toHaveLength(1);
+    expect(result[0]?.action).toBe("recovered");
     const [stored] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
     expect(stored?.status).toBe("failed");
     expect(stored?.completedAt).toBeInstanceOf(Date);

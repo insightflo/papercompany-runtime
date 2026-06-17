@@ -17,7 +17,29 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 
 const HERMES_CLI = "hermes";
-const DEFAULT_TIMEOUT_SEC = 300;
+/**
+ * hermes_local 실행 제한 기본값.
+ * config.timeoutSec / idleTimeoutSec / graceSec 미설정일 때만 적용된다.
+ *
+ * [주의] DEFAULT_TIMEOUT_SEC 는 단일 hermes 실행의 wall-clock 상한이다. 이 값을
+ *        넘기면 자식 프로세스를 강제 종료(SIGTERM → graceSec 후 SIGKILL)하고
+ *        heartbeat run 은 failed 처리된다.
+ *
+ *        과거 300s 는 관측된 정상 run 최대치(~295s)와 거의 붙어 있어 정상 실행을
+ *        false-kill 할 위험이 있어 600s 로 상향했다. 정상 hermes run 의 분포는
+ *        14~295s(median ~159s)이므로 600s 는 충분한 여유폭이면서 hang 실행을
+ *        10분 안에 확실히 자른다.
+ *
+ * [수정시 영향] DEFAULT_IDLE_TIMEOUT_SEC 는 의도적으로 0(비활성)을 유지한다.
+ *        hermes run 은 LLM 추론 / 도구(curl 등) 대기로 수 분간 무출력이 정상이므로,
+ *        idle timeout 을 기본으로 켜면 정상 run 을 false-kill 한다. idle 보호가
+ *        필요한 company/agent 는 config.idleTimeoutSec 로 opt-in 할 것.
+ *
+ *        또한 idle timeout 은 "출력이 완전히 멈춘 경우"만 잡는다. 가즈아 사례처럼
+ *        "출력을 뿜으며 도는 auth/API 재시도 루프(잘못된 API URL 하드코딩 등)"에는
+ *        무력하므로, 그런 hang 은 근본 원인(API URL / 인증) 해결이 우선이다.
+ */
+const DEFAULT_TIMEOUT_SEC = 600;
 const DEFAULT_GRACE_SEC = 10;
 const DEFAULT_IDLE_TIMEOUT_SEC = 0;
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4";

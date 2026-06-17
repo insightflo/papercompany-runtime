@@ -5,7 +5,7 @@
  * A workflow is a DAG where each step has dependencies on other steps.
  */
 
-import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
@@ -268,10 +268,6 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
 
 function isTruthyBooleanMarker(value: unknown): boolean {
   return value === true || value === "true" || value === "1";
-}
-
-function getNormalWorkflowSteps(steps: WorkflowStep[]): WorkflowStep[] {
-  return steps.filter((step) => step.triggerOn !== "escalation");
 }
 
 function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
@@ -2094,45 +2090,8 @@ export async function executeWorkflowRun(
   return syncWorkflowRunState(db, runId);
 }
 
-/**
- * Reconciles workflow state - checks for stuck runs and recovers them.
- *
- * @param db - Database instance.
- * @param timeoutMinutes - Consider runs stuck if older than this.
- */
-export async function reconcileWorkflowRuns(
-  db: Db,
-  timeoutMinutes: number = 60,
-): Promise<{ recovered: number; failed: number }> {
-  const timeout = new Date(Date.now() - timeoutMinutes * 60 * 1000);
-
-  const stuckRuns = await db
-    .select()
-    .from(workflowRuns)
-    .where(
-      and(
-        eq(workflowRuns.status, "running"),
-        lt(workflowRuns.startedAt, timeout),
-      ),
-    );
-
-  let recovered = 0;
-  let failed = 0;
-
-  for (const run of stuckRuns) {
-    try {
-      await db
-        .update(workflowRuns)
-        .set({
-          status: "failed",
-          completedAt: new Date(),
-        })
-        .where(eq(workflowRuns.id, run.id));
-      failed++;
-    } catch (error) {
-      recovered++;
-    }
-  }
-
-  return { recovered, failed };
-}
+// NOTE: stuck-run 정리(reconcile)는 services/workflow/reconciler.ts 의
+// createNativeWorkflowReconciler + reconcileWorkflow 로 이관했다. 과거 이 파일에
+// 있던 reconcileWorkflowRuns(및 engine.ts 의 reconcile() 래퍼)는 호출부가 없는
+// dead code 였고, 그 빈약 구현(run 상태만 failed 로 바꾸고 pending step / orphan
+// step 은 처리하지 않음) 대신 reconciler.ts 의 더 완전한 구현을 주기 구동한다.
