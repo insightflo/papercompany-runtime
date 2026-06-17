@@ -9,6 +9,7 @@ let currentSearchParams = new URLSearchParams();
 const observedQueryKeys: unknown[][] = [];
 
 vi.mock("@tanstack/react-query", () => ({
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   useQuery: ({ queryKey }: { queryKey: readonly unknown[] }) => {
     observedQueryKeys.push([...queryKey]);
 
@@ -25,7 +26,9 @@ vi.mock("@tanstack/react-query", () => ({
           },
         ],
         isLoading: false,
+        isFetching: false,
         error: null,
+        refetch: vi.fn(),
       };
     }
 
@@ -33,11 +36,13 @@ vi.mock("@tanstack/react-query", () => ({
       return {
         data: [{ id: "agent-1", name: "Rocket QA" }],
         isLoading: false,
+        isFetching: false,
         error: null,
+        refetch: vi.fn(),
       };
     }
 
-    return { data: undefined, isLoading: false, error: null };
+    return { data: undefined, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
   },
 }));
 
@@ -91,6 +96,7 @@ vi.mock("@/components/StatusBadge", () => ({
 vi.mock("lucide-react", () => ({
   Rocket: () => <span>Rocket</span>,
   Plus: () => <span>Plus</span>,
+  RefreshCw: () => <span>RefreshCw</span>,
 }));
 
 describe("Missions", () => {
@@ -177,5 +183,12 @@ describe("Missions", () => {
     expect(html).toContain("Page 2");
     expect(html).toContain("Previous");
     expect(html).toContain("Next");
+  });
+
+  it("renders a refresh action for the current missions tab", () => {
+    const html = renderToStaticMarkup(<Missions />);
+
+    expect(html).toContain("Refresh");
+    expect(html).toContain("RefreshCw");
   });
 });
