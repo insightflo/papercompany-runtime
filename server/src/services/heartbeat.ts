@@ -2005,7 +2005,7 @@ function buildMissingWorkProductRegistrationGateComment(input: {
 }
 
 export type HeartbeatFailureClassification = {
-  category: "timeout" | "cancelled" | "quota" | "auth" | "command" | "adapter";
+  category: "timeout" | "cancelled" | "overload" | "quota" | "auth" | "command" | "adapter";
   reasonCode: string;
   summary: string;
   fallbackCandidates: string[];
@@ -2055,6 +2055,22 @@ export function classifyHeartbeatRunFailure(input: {
   }
   if (input.status === "cancelled") {
     return { category: "cancelled", reasonCode: "RUN_CANCELLED", summary: "Heartbeat run was cancelled.", fallbackCandidates };
+  }
+  // API overload(500/503/529): errorCode 를 우선 매칭한다. stderr 의 무해한
+  // "ENOENT: no such"(참조 instructions 파일 누락 워닝) 가 haystack 에 섞여 아래 command
+  // 분기로 오판되는 것(gazua 코난 529 run 사례) 을 막기 위해 errorCode 기반으로 먼저 잡는다.
+  // 일시 overload 는 adapter 의 backoff 재시도로 극복 가능(transient) 하므로 command 가 아님.
+  // 429 는 아래 quota 분기가 처리하도록 둔다.
+  const overloadApiStatus = /claude_api_error_(\d+)/i.exec(input.errorCode ?? "")?.[1];
+  const isOverloadApiStatus = overloadApiStatus === "500" || overloadApiStatus === "503" || overloadApiStatus === "529";
+  const isOverloadMessage = /overloaded|temporarily overloaded|service is currently/i.test(input.errorMessage ?? "");
+  if (isOverloadApiStatus || isOverloadMessage) {
+    return {
+      category: "overload",
+      reasonCode: overloadApiStatus ? `PROVIDER_OVERLOADED_${overloadApiStatus}` : "PROVIDER_OVERLOADED",
+      summary: "Provider temporarily overloaded (transient). Retry/backoff applicable; not a command/path/permission issue.",
+      fallbackCandidates,
+    };
   }
   if (/\b(403|429)\b/.test(normalized) && /quota|rate.?limit|rate limit|insufficient|billing|capacity|exceeded/.test(normalized)) {
     return {

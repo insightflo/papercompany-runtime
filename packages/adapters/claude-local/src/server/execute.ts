@@ -111,6 +111,30 @@ function readApiErrorStatus(parsed: Record<string, unknown>): number | null {
   return null;
 }
 
+/**
+ * API overload(429/500/503/529) 시 같은 세션으로 backoff 재시도 설정.
+ *
+ * [목적] Claude/Anthropic API(또는 z.ai 등 wrapper endpoint)가 일시적 overload(529) 를
+ *        반환할 때, adapter 가 즉시 failed 로 끝나면 workflow 엔진이 step 을 재dispatch
+ *        하며 매번 새 issue 를 찍어내는 증식(가즈아 CMPA-5371/5373/5375...) 을 유발한다.
+ *        이 대기-재시도는 adapter 안에서 같은 run/session 으로 backoff 후 재시도해 issue
+ *        를 새로 만들지 않고 overload 를 극복한다(Anthropic SDK 의 exponential backoff 차용).
+ * [주의] 각 runAttempt 는 timeoutSec 상한을 그대로 쓴다. N회 초과 시 그제 failed.
+ * [수정시 영향] 기본값은 maxOverloadRetries=3, backoff=5s(exponential+jitter).
+ *        agent config 의 maxOverloadRetries / overloadBackoffMs 로 조정.
+ */
+const DEFAULT_MAX_OVERLOAD_RETRIES = 3;
+const DEFAULT_OVERLOAD_BACKOFF_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isClaudeApiOverloaded(parsed: Record<string, unknown> | null): boolean {
+  const status = readApiErrorStatus(parsed ?? ({} as Record<string, unknown>));
+  return status === 429 || status === 500 || status === 503 || status === 529;
+}
+
 function readClaudeResultErrors(parsed: Record<string, unknown>): string[] {
   if (!Array.isArray(parsed.errors)) return [];
   return parsed.errors
@@ -789,8 +813,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  const maxOverloadRetries = Math.max(0, asNumber(config.maxOverloadRetries, DEFAULT_MAX_OVERLOAD_RETRIES));
+  const overloadBackoffMs = Math.max(0, asNumber(config.overloadBackoffMs, DEFAULT_OVERLOAD_BACKOFF_MS));
   try {
-    const initial = await runAttempt(sessionId ?? null);
+    let attempt = await runAttempt(sessionId ?? null);
+    for (
+      let overloadAttempt = 0;
+      overloadAttempt < maxOverloadRetries && isClaudeApiOverloaded(attempt.parsed);
+      overloadAttempt += 1
+    ) {
+      const waitMs = overloadBackoffMs * 2 ** overloadAttempt + Math.floor(Math.random() * 500);
+      await ctx.onLog(
+        "stdout",
+        `[paperclip] Claude API overloaded (status ${readApiErrorStatus(attempt.parsed ?? ({} as Record<string, unknown>))}); retry ${overloadAttempt + 1}/${maxOverloadRetries} after ~${Math.round(waitMs / 1000)}s with the same session (no new issue).\n`,
+      );
+      await sleep(waitMs);
+      attempt = await runAttempt(sessionId ?? null);
+    }
+    const initial = attempt;
     if (
       sessionId &&
       !initial.proc.timedOut &&

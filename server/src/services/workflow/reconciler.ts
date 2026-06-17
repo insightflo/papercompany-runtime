@@ -106,13 +106,18 @@ export async function reconcileStuckWorkflowRuns(
  * @returns Number of orphan step runs cleaned up.
  */
 export async function reconcileOrphanStepRuns(db: Db): Promise<number> {
-  // Find step runs whose workflow run doesn't exist or is in a terminal state
+  // [주의] "orphan" 은 참조 run 이 실제로 존재하지 않는(삭제된) step_run 만 해당한다.
+  // 과거 구현은 terminal(completed/failed/cancelled) run 의 step_run 까지 함께 DELETE 해
+  // 매 run 종료 시 정상 step 기록이 전부 사라지는(workflow_step_runs 가 비어버리는) 회귀가 있었다.
+  // workflow_step_runs.workflow_run_id 는 onDelete:cascade FK 라 run 삭제 시 step_run 은 이미
+  // 자동 삭제되므로, 여기서 잡아야 할 진짜 orphan 는 cascade 를 벗어난 dangling 뿐이다.
   const orphanStepRuns = await db
     .select({ id: workflowStepRuns.id })
     .from(workflowStepRuns)
     .where(sql`
-      ${workflowStepRuns.workflowRunId} NOT IN (
-        SELECT ${workflowRuns.id} FROM ${workflowRuns} WHERE ${workflowRuns.status} IN ('pending', 'running')
+      NOT EXISTS (
+        SELECT 1 FROM ${workflowRuns}
+        WHERE ${workflowRuns.id} = ${workflowStepRuns.workflowRunId}
       )
     `);
 
