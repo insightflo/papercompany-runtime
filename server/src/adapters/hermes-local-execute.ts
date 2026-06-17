@@ -405,7 +405,7 @@ export async function executeHermesLocal(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
   const config = (ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
-  const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
+  const hermesCmd = cfgString(config.command) || cfgString(config.hermesCommand) || HERMES_CLI;
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const provider = cfgString(config.provider);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;

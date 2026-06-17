@@ -1459,13 +1459,23 @@ function isTrackedLocalChildProcessAdapter(adapterType: string) {
   return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
 }
 
-function resolveAdapterFallbackConfig(adapterConfigRaw: unknown) {
+type AdapterFallbackConfig = {
+  command: string;
+  provider?: string;
+  model?: string;
+  triggers: Set<string>;
+  maxAttempts: number;
+};
+
+function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbackConfig | null {
   const adapterConfig = parseObject(adapterConfigRaw);
   const fallback = parseObject(adapterConfig.fallback);
   const command =
     readNonEmptyString(adapterConfig.fallbackCommand) ??
     readNonEmptyString(fallback.command);
   if (!command) return null;
+  const provider = readNonEmptyString(fallback.provider) ?? undefined;
+  const model = readNonEmptyString(fallback.model) ?? undefined;
 
   const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
   const triggers = rawTriggers
@@ -1478,6 +1488,8 @@ function resolveAdapterFallbackConfig(adapterConfigRaw: unknown) {
 
   return {
     command,
+    provider,
+    model,
     triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
     maxAttempts,
   };
@@ -1509,10 +1521,61 @@ function applyAdapterFallbackRuntimeConfig(input: {
   if (!shouldApplyAdapterFallbackConfig(input)) return input.config;
   const command = readNonEmptyString(input.context.fallbackCommand);
   if (!command) return input.config;
+  const provider = readNonEmptyString(input.context.fallbackProvider);
+  const model = readNonEmptyString(input.context.fallbackModel);
   return {
     ...input.config,
     command,
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
   };
+}
+
+function isTerminalAdapterFallbackConfigurationFailure(run: typeof heartbeatRuns.$inferSelect) {
+  const text = [
+    heartbeatRunFailureText({
+      errorCode: run.errorCode,
+      errorMessage: run.error,
+      stdoutExcerpt: run.stdoutExcerpt,
+      stderrExcerpt: run.stderrExcerpt,
+    }),
+    stringifyRunResultJson(run.resultJson),
+    stringifyRunResultJson(run.usageJson),
+  ].join("\n").toLowerCase();
+
+  return (
+    /api error:\s*400\b[\s\S]*param incorrect/.test(text) ||
+    /\bparam incorrect\b/.test(text) ||
+    /\bnot supported model\b/.test(text) ||
+    /\bunsupported model\b/.test(text) ||
+    /\binvalid model\b/.test(text) ||
+    /\bunknown model\b/.test(text) ||
+    /\bmodel\b[\s\S]{0,80}\bnot (?:found|supported)\b/.test(text)
+  );
+}
+
+function shouldQueueRunFailureAdapterFallback(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  fallback: Pick<AdapterFallbackConfig, "command" | "provider" | "model" | "maxAttempts">;
+}) {
+  const context = parseObject(input.run.contextSnapshot);
+  const fallbackAttempt = resolveAdapterFallbackAttempt(context);
+  if (fallbackAttempt >= input.fallback.maxAttempts) return false;
+
+  const activeFallbackCommand = readNonEmptyString(context.fallbackCommand);
+  const activeFallbackProvider = readNonEmptyString(context.fallbackProvider);
+  const activeFallbackModel = readNonEmptyString(context.fallbackModel);
+  const isSameFallbackCommand = activeFallbackCommand === input.fallback.command;
+  const isSameFallbackRoute =
+    isSameFallbackCommand &&
+    activeFallbackProvider === input.fallback.provider &&
+    activeFallbackModel === input.fallback.model;
+  const isFallbackRun = readNonEmptyString(context.wakeReason) === "adapter_fallback";
+  if (isFallbackRun && isSameFallbackRoute && isTerminalAdapterFallbackConfigurationFailure(input.run)) {
+    return false;
+  }
+
+  return true;
 }
 
 // A positive liveness check means some process currently owns the PID.
@@ -3467,6 +3530,8 @@ export function heartbeatService(db: Db) {
     now: Date,
     input: {
       fallbackCommand: string;
+      fallbackProvider?: string;
+      fallbackModel?: string;
       fallbackReason: string;
     },
   ) {
@@ -3505,6 +3570,8 @@ export function heartbeatService(db: Db) {
       fallbackReason: input.fallbackReason,
       fallbackAttempt,
       fallbackCommand: input.fallbackCommand,
+      ...(input.fallbackProvider ? { fallbackProvider: input.fallbackProvider } : {}),
+      ...(input.fallbackModel ? { fallbackModel: input.fallbackModel } : {}),
       wakeReason: "adapter_fallback",
     };
     const taskKey = deriveTaskKey(fallbackContextSnapshot, null);
@@ -3909,6 +3976,8 @@ export function heartbeatService(db: Db) {
         if (agent && fallback && shouldFallback) {
           fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, now, {
             fallbackCommand: fallback.command,
+            fallbackProvider: fallback.provider,
+            fallbackModel: fallback.model,
             fallbackReason: "process_lost",
           });
         } else {
@@ -5379,13 +5448,15 @@ export function heartbeatService(db: Db) {
             error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
           });
         }
-        // adapter run 이 실패하면 fallbackCommand 가 있으면 무조건 큐잉.
+        // Adapter failures can use a fallback command, but do not repeat the same
+        // fallback after a deterministic provider/model configuration failure.
         if (outcome === "failed" && finalizedRun) {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
-          const fbAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
-          if (fb && fbAttempt < fb.maxAttempts) {
+          if (fb && shouldQueueRunFailureAdapterFallback({ run: finalizedRun, fallback: fb })) {
             const fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
               fallbackCommand: fb.command,
+              fallbackProvider: fb.provider,
+              fallbackModel: fb.model,
               fallbackReason: "run_failed",
             });
             await appendRunEvent(finalizedRun, seq++, {
@@ -5397,6 +5468,22 @@ export function heartbeatService(db: Db) {
                 exitCode: adapterResult.exitCode ?? null,
                 errorMessage: adapterResult.errorMessage ?? null,
                 fallbackRunId: fallbackRun?.id ?? null,
+              },
+            });
+          } else if (fb) {
+            await appendRunEvent(finalizedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: "Run failed - adapter fallback suppressed",
+              payload: {
+                exitCode: adapterResult.exitCode ?? null,
+                errorMessage: adapterResult.errorMessage ?? null,
+                fallbackCommand: fb.command,
+                fallbackAttempt: resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot),
+                reason: isTerminalAdapterFallbackConfigurationFailure(finalizedRun)
+                  ? "terminal_fallback_configuration_failure"
+                  : "fallback_attempt_limit_reached",
               },
             });
           }
