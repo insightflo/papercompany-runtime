@@ -14,6 +14,7 @@ import {
 import { validate } from "../middleware/validate.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
+import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 import {
@@ -419,16 +420,27 @@ export function workflowRoutes(db: Db) {
         .filter((issue) => typeof issue.identifier === "string" && issue.identifier.trim())
         .map((issue) => [issue.id, issue.identifier as string]),
     );
+    const workProductsByIssueId = new Map<string, unknown[]>();
+    if (issueIds.length > 0) {
+      const workProductsSvc = workProductService(db);
+      const productsByIssue = await Promise.all(
+        issueIds.map(async (issueId) => [issueId, await workProductsSvc.listForIssue(issueId)] as const),
+      );
+      for (const [issueId, products] of productsByIssue) {
+        workProductsByIssueId.set(issueId, products);
+      }
+    }
     const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, workflowStepForUi(step)]));
     const serializedStepRuns = stepRuns.map((stepRun) => {
       const stepDefinition = stepDefinitionById.get(stepRun.stepId);
+      const workProducts = stepRun.issueId ? workProductsByIssueId.get(stepRun.issueId) ?? [] : [];
       return {
         ...serializeStepRun(stepRun),
         stepTitle: typeof stepDefinition?.title === "string" ? stepDefinition.title : stepRun.stepId,
         stepType: typeof stepDefinition?.type === "string" ? stepDefinition.type : undefined,
         issueId: stepRun.issueId ?? undefined,
         issueIdentifier: stepRun.issueId ? issueIdentifierById.get(stepRun.issueId) : undefined,
-        workProducts: [],
+        workProducts: serializeValue(workProducts),
       };
     });
 

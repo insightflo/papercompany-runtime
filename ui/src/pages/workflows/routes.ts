@@ -58,3 +58,13 @@ export function buildIssueHref(input: {
   if (companyPrefix) return `/${companyPrefix}/issues/${encodeURIComponent(issueId)}`;
   return `/issues/${encodeURIComponent(issueId)}`;
 }
+
+export function buildMissionHref(input: {
+  missionId: string;
+  currentPathname?: string;
+}): string {
+  const missionId = input.missionId.trim();
+  const companyPrefix = extractCompanyPrefixFromPath(input.currentPathname);
+  if (companyPrefix) return `/${companyPrefix}/missions/${encodeURIComponent(missionId)}`;
+  return `/missions/${encodeURIComponent(missionId)}`;
+}

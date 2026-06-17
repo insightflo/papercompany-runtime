@@ -1,8 +1,9 @@
 import * as React from "react";
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent, type JSX } from "react";
+import { issuesApi } from "../api/issues";
 import { useCompany } from "../context/CompanyContext";
 import { buildManualRunFeedback, buildManualRunButtonState, findNewRunId, manualRunUnavailableMessage } from "./workflows/run-feedback.js";
-import { buildIssueHref } from "./workflows/routes.js";
+import { buildIssueHref, buildMissionHref } from "./workflows/routes.js";
 import { getSelectableWorkflowTools, getWorkflowToolSystemState, type WorkflowToolSystemState } from "./workflows/tool-availability.js";
 import { appendStepAfter, applyStepRunsToGraphSteps, applyWorkflowGraphFailureRoute, assignStepsToContainer, assignStepsToGroup, buildWorkflowGraphContainerSummary, buildWorkflowGraphDataFlowMap, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphExecutionEvidenceSummary, buildWorkflowGraphExportSnapshot, buildWorkflowGraphFailureRouteSummary, buildWorkflowGraphInspectorSummary, buildWorkflowGraphIterationTestPreview, buildWorkflowGraphModel, buildWorkflowGraphRepairPlan, buildWorkflowGraphRequestFillPreview, buildWorkflowGraphRestartPreview, buildWorkflowGraphRunDebugSummary, buildWorkflowGraphSelectionSummary, buildWorkflowGraphSingleStepTestPreview, buildWorkflowGraphStructurePaletteSummary, buildWorkflowGraphTestDrawerSummary, buildWorkflowGraphTestExecutionPreview, buildWorkflowGraphTestPlan, buildWorkflowGraphTestRequestPreview, buildWorkflowGraphWorkbenchSummary, clearStepsGroup, clearWorkflowContainer, connectSteps, disconnectSteps, duplicateWorkflowContainer, duplicateWorkflowStep, expandWorkflowGraphSelection, getWorkflowGraphStepContext, insertWorkflowStepFromPalette, normalizeGraphEdgeKind, normalizeGraphRunStatus, parseDependencies, parseWorkflowGraphYamlDraft, removeWorkflowStep, renameWorkflowStep, serializeWorkflowGraphExportSnapshot, setGraphGroupCollapsed, summarizeWorkflowGraphDraftDiff, summarizeWorkflowGraphInterface, summarizeWorkflowGraphTestInputLibrary, summarizeWorkflowGraphTriggers, updateContainerMetadata, updateGraphEdgeMetadata, updateGraphGroupMetadata, updateStepAdvancedMetadata, updateStepApprovalMetadata, updateStepDataFlowMetadata, updateStepExecutionMetadata, updateStepNote, updateStepResourceMetadata, updateStepTestingMetadata, type WorkflowGraphContainerSummary, type WorkflowGraphContainerType, type WorkflowGraphDataFlowMap, type WorkflowGraphDefinitionNavigatorItem, type WorkflowGraphDraftDiff, type WorkflowGraphEdge, type WorkflowGraphEdgeKind, type WorkflowGraphEdgeMetadataRecord, type WorkflowGraphExecutionEvidenceSummary, type WorkflowGraphExportFormat, type WorkflowGraphExportSnapshot, type WorkflowGraphFailureRouteSummary, type WorkflowGraphFocusLensTone, type WorkflowGraphInspectorMode, type WorkflowGraphInspectorSummary, type WorkflowGraphInterfaceInput, type WorkflowGraphInterfaceSummary, type WorkflowGraphIssueSeverity, type WorkflowGraphIterationTestPreview, type WorkflowGraphNavigatorFilter, type WorkflowGraphPaletteNodeKind, type WorkflowGraphRepairPlan, type WorkflowGraphRequestFillPreview, type WorkflowGraphRestartPreview, type WorkflowGraphRunDebugSummary, type WorkflowGraphRunDebugTileTone, type WorkflowGraphRunStatus, type WorkflowGraphSelectionMode, type WorkflowGraphSelectionSummary, type WorkflowGraphSingleStepTestPreview, type WorkflowGraphStep, type WorkflowGraphStepContext, type WorkflowGraphStructurePaletteActionId, type WorkflowGraphStructurePaletteSummary, type WorkflowGraphTestDrawerSummary, type WorkflowGraphTestExecutionPreview, type WorkflowGraphTestInputLibrarySummary, type WorkflowGraphTestPlan, type WorkflowGraphTestRequestPreview, type WorkflowGraphTriggerSummary, type WorkflowGraphWorkbenchSummary, type WorkflowGraphWorkProduct } from "./workflows/workflow-graph.js";
 import { CREATE_PARENT_ISSUE_POLICIES, normalizeCreateParentIssuePolicy, type CreateParentIssuePolicy } from "./workflows/workflow-parent-policy.js";
@@ -26,15 +27,14 @@ function currentBrowserPathname(): string | undefined {
   return typeof window === "undefined" ? undefined : window.location.pathname;
 }
 
-function missionHref(missionId: string): string {
-  return `/missions/${encodeURIComponent(missionId)}`;
-}
-
 function MissionRunLink({ missionId }: { missionId?: string | null }): JSX.Element | null {
   if (!missionId) return null;
   return (
     <a
-      href={missionHref(missionId)}
+      href={buildMissionHref({
+        missionId,
+        currentPathname: currentBrowserPathname(),
+      })}
       style={{ ...buttonStyle, textDecoration: "none" }}
       title={missionId}
     >
@@ -2484,77 +2484,6 @@ function graphEdgeMetadataFor(step: StepDraft | null, sourceId: string): { kind:
     label: typeof metadata?.label === "string" ? metadata.label : "",
     condition: typeof metadata?.condition === "string" ? metadata.condition : "",
   };
-}
-
-function WorkflowGraphPathInspector({
-  context,
-  onSelectStep,
-}: {
-  context: WorkflowGraphStepContext | null;
-  onSelectStep?: (stepId: string) => void;
-}): JSX.Element | null {
-  if (!context) return null;
-
-  function renderStepList(stepIds: string[], emptyLabel: string, tone: "normal" | "error" = "normal"): JSX.Element {
-    if (stepIds.length === 0) {
-      return <span key="empty" style={{ ...mutedTextStyle, fontSize: "12px" }}>{emptyLabel}</span>;
-    }
-    return (
-      <div key="steps" style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
-        {stepIds.map((stepId) => {
-          const style = tone === "error"
-            ? {
-              ...buttonStyle,
-              padding: "3px 7px",
-              fontSize: "11px",
-              color: "var(--destructive, #ef4444)",
-              borderColor: "color-mix(in srgb, var(--destructive, #ef4444) 44%, var(--border, #334155))",
-            }
-            : { ...buttonStyle, padding: "3px 7px", fontSize: "11px" };
-          if (!onSelectStep || tone === "error") {
-            return <span key={stepId} style={{ ...graphPolicyBadgeStyle, color: tone === "error" ? "var(--destructive, #ef4444)" : graphPolicyBadgeStyle.color }}>{stepId}</span>;
-          }
-          return (
-            <button key={stepId} type="button" style={style} onClick={() => onSelectStep(stepId)}>
-              {stepId}
-            </button>
-          );
-        })}
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ display: "grid", gap: "7px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-      <span key="title" style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase" }}>Flow path</span>
-      <div key="paths" style={{ display: "grid", gap: "6px" }}>
-        <div key="direct" style={{ display: "grid", gap: "3px" }}>
-          <span key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Direct deps</span>
-          {renderStepList(context.directDependencyIds, "Entry step")}
-        </div>
-        <div key="upstream" style={{ display: "grid", gap: "3px" }}>
-          <span key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Upstream</span>
-          {renderStepList(context.upstreamStepIds, "No upstream path")}
-        </div>
-        <div key="next" style={{ display: "grid", gap: "3px" }}>
-          <span key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Next</span>
-          {renderStepList(context.directDependentIds, "No direct downstream step")}
-        </div>
-        <div key="downstream" style={{ display: "grid", gap: "3px" }}>
-          <span key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Downstream</span>
-          {renderStepList(context.downstreamStepIds, "Terminal step")}
-        </div>
-        {context.missingDependencyIds.length > 0 ? (
-          <div key="missing" style={{ display: "grid", gap: "3px" }}>
-            <span key="label" style={{ ...mutedTextStyle, fontSize: "11px", color: "var(--destructive, #ef4444)" }}>Missing deps</span>
-            {renderStepList(context.missingDependencyIds, "No missing dependencies", "error")}
-          </div>
-        ) : (
-          <Fragment key="missing-placeholder" />
-        )}
-      </div>
-    </div>
-  );
 }
 
 function GraphModeTabs({
@@ -5316,6 +5245,9 @@ function WorkflowRunGraphPreview({
   const [canvasPanY, setCanvasPanY] = useState(0);
   const [nodeDragOffsets, setNodeDragOffsets] = useState<Record<string, { dx: number; dy: number }>>({});
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
+  const [openingWorkProductId, setOpeningWorkProductId] = useState<string | null>(null);
+  const [openedWorkProductId, setOpenedWorkProductId] = useState<string | null>(null);
+  const [workProductOpenError, setWorkProductOpenError] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasPanRef = useRef<GraphCanvasPanState | null>(null);
   const nodeDragRef = useRef<{ stepId: string; pointerId: number; startClientX: number; startClientY: number; startDx: number; startDy: number; moved: boolean } | null>(null);
@@ -5337,6 +5269,20 @@ function WorkflowRunGraphPreview({
     const off = nodeDragOffsets[node.step.id];
     return node.y + (off?.dy ?? 0) + 132;
   }), 260);
+
+  async function handleOpenWorkProduct(product: WorkflowGraphWorkProduct): Promise<void> {
+    setOpeningWorkProductId(product.id);
+    setOpenedWorkProductId(null);
+    setWorkProductOpenError(null);
+    try {
+      await issuesApi.openWorkProduct(product.id);
+      setOpenedWorkProductId(product.id);
+    } catch (error) {
+      setWorkProductOpenError(error instanceof Error ? error.message : "Failed to open work product");
+    } finally {
+      setOpeningWorkProductId(null);
+    }
+  }
 
   function getNodeOffset(stepId: string): { dx: number; dy: number } {
     return nodeDragOffsets[stepId] ?? { dx: 0, dy: 0 };
@@ -5727,7 +5673,6 @@ function WorkflowRunGraphPreview({
                   )}
                 </div>
               </div>
-              <WorkflowGraphPathInspector context={selectedGraphContext} onSelectStep={setSelectedStepId} />
               {selectedNode.dataFlow.badges.length > 0 ? (
                 <div style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
                   <span style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.04em" }}>
@@ -5801,24 +5746,40 @@ function WorkflowRunGraphPreview({
                           background: "var(--card, #0f172a)",
                         }}
                       >
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-                          {product.url ? (
-                            <a
-                              href={product.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{ color: "var(--link, #60a5fa)", fontSize: "12px", fontWeight: 700, textDecoration: "none", overflowWrap: "anywhere" }}
+                        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "8px" }}>
+                          <div style={{ display: "grid", gap: "4px", minWidth: 0 }}>
+                            {product.url ? (
+                              <a
+                                href={product.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ color: "var(--link, #60a5fa)", fontSize: "12px", fontWeight: 700, textDecoration: "none", overflowWrap: "anywhere" }}
+                              >
+                                {product.title}
+                              </a>
+                            ) : (
+                              <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--foreground, #f8fafc)", overflowWrap: "anywhere" }}>
+                                {product.title}
+                              </span>
+                            )}
+                            {openedWorkProductId === product.id ? (
+                              <span style={{ ...mutedTextStyle, fontSize: "11px", color: "#34d399" }}>Opened</span>
+                            ) : null}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px", flex: "0 0 auto" }}>
+                            {product.isPrimary ? (
+                              <span style={{ ...graphPolicyBadgeStyle, flex: "0 0 auto" }}>Primary</span>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenWorkProduct(product)}
+                              disabled={openingWorkProductId === product.id}
+                              style={{ ...buttonStyle, padding: "4px 8px", fontSize: "11px", lineHeight: 1.2 }}
+                              title="Open with the operating system"
                             >
-                              {product.title}
-                            </a>
-                          ) : (
-                            <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--foreground, #f8fafc)", overflowWrap: "anywhere" }}>
-                              {product.title}
-                            </span>
-                          )}
-                          {product.isPrimary ? (
-                            <span style={{ ...graphPolicyBadgeStyle, flex: "0 0 auto" }}>Primary</span>
-                          ) : null}
+                              {openingWorkProductId === product.id ? "Opening" : "Open"}
+                            </button>
+                          </div>
                         </div>
                         <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
                           {product.type ? <span style={graphPolicyBadgeStyle}>{product.type}</span> : null}
@@ -5831,6 +5792,11 @@ function WorkflowRunGraphPreview({
                         ) : null}
                       </div>
                     ))}
+                    {workProductOpenError ? (
+                      <p style={{ margin: 0, color: "var(--destructive, #ef4444)", fontSize: "11px", lineHeight: 1.35, overflowWrap: "anywhere" }}>
+                        {workProductOpenError}
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <span style={mutedTextStyle}>No registered outputs for this step.</span>

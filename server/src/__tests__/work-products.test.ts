@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { workProductService } from "../services/work-products.ts";
+import {
+  openWorkProductWithDefaultApp,
+  resolveWorkProductOpenTarget,
+  workProductService,
+} from "../services/work-products.ts";
 
 function createWorkProductRow(overrides: Partial<Record<string, unknown>> = {}) {
   const now = new Date("2026-03-17T00:00:00.000Z");
@@ -32,6 +36,59 @@ function createWorkProductRow(overrides: Partial<Record<string, unknown>> = {}) 
 }
 
 describe("workProductService", () => {
+  it("resolves local file work products to their metadata path", () => {
+    const target = resolveWorkProductOpenTarget(createWorkProductRow({
+      type: "document",
+      provider: "local",
+      metadata: { path: "/tmp/report.html" },
+      url: null,
+    }) as any);
+
+    expect(target).toEqual({ kind: "path", value: "/tmp/report.html" });
+  });
+
+  it("resolves URL work products to their URL", () => {
+    const target = resolveWorkProductOpenTarget(createWorkProductRow({
+      provider: "paperclip",
+      url: "https://example.com/report.html",
+      metadata: null,
+    }) as any);
+
+    expect(target).toEqual({ kind: "url", value: "https://example.com/report.html" });
+  });
+
+  it("rejects local work products without an absolute metadata path", () => {
+    const target = resolveWorkProductOpenTarget(createWorkProductRow({
+      type: "document",
+      provider: "local",
+      metadata: { path: "relative/report.html" },
+      url: null,
+    }) as any);
+
+    expect(target).toBeNull();
+  });
+
+  it("opens resolved work products with the injected OS opener", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "paperclip-work-product-open-"));
+    const reportPath = path.join(dir, "report.html");
+    writeFileSync(reportPath, "<h1>report</h1>\n", "utf8");
+    const opener = vi.fn(async () => undefined);
+
+    try {
+      const result = await openWorkProductWithDefaultApp(createWorkProductRow({
+        type: "document",
+        provider: "local",
+        metadata: { path: reportPath },
+        url: null,
+      }) as any, { opener });
+
+      expect(result).toEqual({ kind: "path", value: reportPath });
+      expect(opener).toHaveBeenCalledWith(reportPath);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses a transaction when creating a new primary work product", async () => {
     const updatedWhere = vi.fn(async () => undefined);
     const updateSet = vi.fn(() => ({ where: updatedWhere }));

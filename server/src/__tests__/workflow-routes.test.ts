@@ -39,6 +39,10 @@ const mockWorkflowToolCatalog = vi.hoisted(() => ({
   syncToolRegistryToolsToCore: vi.fn(),
 }));
 
+const mockWorkProductsService = vi.hoisted(() => ({
+  listForIssue: vi.fn(),
+}));
+
 vi.mock("../services/workflow/engine.js", () => ({
   workflowService: mockWorkflowService,
 }));
@@ -51,6 +55,10 @@ vi.mock("../services/issues.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn(async () => undefined),
+}));
+
+vi.mock("../services/work-products.js", () => ({
+  workProductService: () => mockWorkProductsService,
 }));
 
 function workflowDefinition(overrides: Record<string, unknown> = {}) {
@@ -124,14 +132,14 @@ function createApp(actor: Record<string, unknown> = {
   companyIds: [COMPANY_ID],
   source: "authenticated",
   isInstanceAdmin: false,
-}) {
+}, db: unknown = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", workflowRoutes({} as never));
+  app.use("/api", workflowRoutes(db as never));
   app.use(errorHandler);
   return app;
 }
@@ -171,6 +179,7 @@ describe("workflow routes", () => {
         toolRegistry: { available: false, installed: false, count: 0 },
       },
     });
+    mockWorkProductsService.listForIssue.mockResolvedValue([]);
   });
 
   it("lists workflow tools from the core workflow tool catalog", async () => {
@@ -462,6 +471,52 @@ describe("workflow routes", () => {
       sessionId: "session-1",
       lastDispatchRequestId: "dispatch-1",
       metadata: { dispatch: "ok" },
+    }));
+  });
+
+  it("returns workflow run detail with linked issue work products", async () => {
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(async () => [{ id: ISSUE_ID, identifier: "CMPA-5230" }]),
+        })),
+      })),
+    };
+    mockWorkProductsService.listForIssue.mockResolvedValue([
+      {
+        id: "77777777-7777-4777-8777-777777777777",
+        issueId: ISSUE_ID,
+        title: "KR 데일리 리포트 2026-06-16",
+        type: "document",
+        provider: "local",
+        status: "active",
+        isPrimary: true,
+        url: null,
+        summary: null,
+        metadata: {
+          path: "/Users/kwak/Projects/ai/gazua-dashboard/reports/beginner_html/dashboard/daily/202606/KR_Market_Report_2026-06-16.html",
+        },
+        createdAt: new Date("2026-06-15T22:22:13.597Z"),
+      },
+    ]);
+
+    const res = await request(createApp(undefined, db)).get(`/api/workflow-runs/${RUN_ID}/detail`);
+
+    expect(res.status).toBe(200);
+    expect(mockWorkProductsService.listForIssue).toHaveBeenCalledWith(ISSUE_ID);
+    expect(res.body.stepRuns[0]).toEqual(expect.objectContaining({
+      issueId: ISSUE_ID,
+      issueIdentifier: "CMPA-5230",
+      workProducts: [
+        expect.objectContaining({
+          title: "KR 데일리 리포트 2026-06-16",
+          type: "document",
+          metadata: expect.objectContaining({
+            path: "/Users/kwak/Projects/ai/gazua-dashboard/reports/beginner_html/dashboard/daily/202606/KR_Market_Report_2026-06-16.html",
+          }),
+          createdAt: "2026-06-15T22:22:13.597Z",
+        }),
+      ],
     }));
   });
 
