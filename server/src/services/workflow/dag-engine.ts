@@ -635,12 +635,34 @@ function readExplicitValidationVerdict(value: string): "pass" | "request_changes
   return null;
 }
 
-function latestExplicitValidationVerdict(comments: string[]): "pass" | "request_changes" | null {
-  for (const comment of comments) {
-    const verdict = readExplicitValidationVerdict(comment);
-    if (verdict) return verdict;
+type ValidationVerdict = "pass" | "request_changes";
+
+interface ValidationVerdictObservation {
+  verdict: ValidationVerdict;
+  observedAt: Date | null;
+}
+
+function isNewerValidationVerdict(
+  next: ValidationVerdictObservation,
+  current: ValidationVerdictObservation | undefined,
+): boolean {
+  if (!current) return true;
+  const nextTime = next.observedAt?.getTime() ?? 0;
+  const currentTime = current.observedAt?.getTime() ?? 0;
+  return nextTime >= currentTime;
+}
+
+function setLatestValidationVerdict(
+  verdictsByIssueId: Map<string, ValidationVerdictObservation>,
+  issueId: string | null,
+  verdict: ValidationVerdict | null,
+  observedAt: Date | null,
+): void {
+  if (!issueId || !verdict) return;
+  const next = { verdict, observedAt };
+  if (isNewerValidationVerdict(next, verdictsByIssueId.get(issueId))) {
+    verdictsByIssueId.set(issueId, next);
   }
-  return null;
 }
 
 function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" | "request_changes" | null {
@@ -698,13 +720,14 @@ async function syncStepRunsFromIssueState(
     })
     .map((stepRun) => stepRun.issueId!)
     .filter((issueId, index, all) => all.indexOf(issueId) === index);
-  const commentsByIssueId = new Map<string, string[]>();
-  const heartbeatVerdictByIssueId = new Map<string, "pass" | "request_changes">();
+  const latestValidationVerdictByIssueId = new Map<string, ValidationVerdictObservation>();
   if (validationCandidateIssueIds.length > 0) {
     const runRows = await db
       .select({
         issueId: heartbeatRuns.issueId,
         resultJson: heartbeatRuns.resultJson,
+        finishedAt: heartbeatRuns.finishedAt,
+        createdAt: heartbeatRuns.createdAt,
       })
       .from(heartbeatRuns)
       .where(and(
@@ -713,23 +736,30 @@ async function syncStepRunsFromIssueState(
       ))
       .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
     for (const run of runRows) {
-      if (!run.issueId || heartbeatVerdictByIssueId.has(run.issueId)) continue;
-      const verdict = readValidationVerdictFromHeartbeatResult(run.resultJson);
-      if (verdict) heartbeatVerdictByIssueId.set(run.issueId, verdict);
+      setLatestValidationVerdict(
+        latestValidationVerdictByIssueId,
+        run.issueId,
+        readValidationVerdictFromHeartbeatResult(run.resultJson),
+        run.finishedAt ?? run.createdAt ?? null,
+      );
     }
 
     const commentRows = await db
       .select({
         issueId: issueComments.issueId,
         body: issueComments.body,
+        createdAt: issueComments.createdAt,
       })
       .from(issueComments)
       .where(inArray(issueComments.issueId, validationCandidateIssueIds))
       .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
     for (const comment of commentRows) {
-      const comments = commentsByIssueId.get(comment.issueId) ?? [];
-      comments.push(comment.body);
-      commentsByIssueId.set(comment.issueId, comments);
+      setLatestValidationVerdict(
+        latestValidationVerdictByIssueId,
+        comment.issueId,
+        readExplicitValidationVerdict(comment.body),
+        comment.createdAt ?? null,
+      );
     }
   }
 
@@ -739,7 +769,7 @@ async function syncStepRunsFromIssueState(
     if (!issue) continue;
 
     const validationVerdict = issue.status === "done"
-      ? latestExplicitValidationVerdict(commentsByIssueId.get(issue.id) ?? []) ?? heartbeatVerdictByIssueId.get(issue.id)
+      ? latestValidationVerdictByIssueId.get(issue.id)?.verdict ?? null
       : null;
     const desiredStatus = validationVerdict === "request_changes"
       ? "failed"
