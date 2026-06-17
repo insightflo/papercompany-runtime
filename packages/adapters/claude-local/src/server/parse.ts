@@ -45,12 +45,30 @@ export function parseClaudeStreamJson(stdout: string) {
   }
 
   if (!finalResult) {
+    const summary = assistantTexts.join("\n\n").trim();
+    if (summary) {
+      return {
+        sessionId,
+        model,
+        costUsd: null as number | null,
+        usage: null as UsageSummary | null,
+        summary,
+        resultJson: {
+          type: "result",
+          subtype: "best_effort_missing_result_event",
+          is_error: false,
+          session_id: sessionId,
+          result: summary,
+        } as Record<string, unknown>,
+      };
+    }
+
     return {
       sessionId,
       model,
       costUsd: null as number | null,
       usage: null as UsageSummary | null,
-      summary: assistantTexts.join("\n\n").trim(),
+      summary,
       resultJson: null as Record<string, unknown> | null,
     };
   }

@@ -14,6 +14,15 @@ console.log(JSON.stringify({ type: "result", session_id: "claude-session-1", res
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writeThinkingOnlyClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-1", model: "claude-test" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "claude-session-1", message: { content: [{ type: "thinking", thinking: "hold without visible response" }] } }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
 describe("claude execute session updates", () => {
   it("removes stale pyenv shim locks before launching Claude", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-pyenv-lock-"));
@@ -116,6 +125,46 @@ describe("claude execute session updates", () => {
           }),
         }),
       ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing result event clearly when Claude exits successfully without visible text", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-missing-result-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "claude");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeThinkingOnlyClaudeCommand(commandPath);
+
+    try {
+      const result = await execute({
+        runId: "run-claude-missing-result",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBe("Claude stream-json ended without a result event or assistant text");
+      expect(result.resultJson?.stdout).toContain('"type":"assistant"');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

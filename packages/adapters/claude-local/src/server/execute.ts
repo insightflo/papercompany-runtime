@@ -545,7 +545,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return args;
   };
 
-  const parseFallbackErrorMessage = (proc: RunProcessResult) => {
+  const parseFallbackErrorMessage = (
+    proc: RunProcessResult,
+    parsedStream: ReturnType<typeof parseClaudeStreamJson>,
+  ) => {
     const stderrLine =
       proc.stderr
         .split(/\r?\n/)
@@ -553,6 +556,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         .find(Boolean) ?? "";
 
     if ((proc.exitCode ?? 0) === 0) {
+      if (parsedStream.sessionId || parsedStream.model) {
+        return "Claude stream-json ended without a result event or assistant text";
+      }
       return "Failed to parse claude JSON output";
     }
 
@@ -681,7 +687,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: proc.exitCode,
         signal: proc.signal,
         timedOut: false,
-        errorMessage: parseFallbackErrorMessage(proc),
+        errorMessage: parseFallbackErrorMessage(proc, parsedStream),
         errorCode: loginMeta.requiresLogin ? "claude_auth_required" : null,
         errorMeta,
         resultJson: {
