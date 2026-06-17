@@ -98,11 +98,16 @@ describe("mission owner recovery comments", () => {
     expect(description).toContain("- Workflow run: tech-ai-news status=failed");
     expect(description).toContain("- Remaining workflow steps: validate-ai-news-artifact:failed, send-telegram:skipped");
     expect(description).toContain("Main executor brief:");
+    expect(description).toContain("- You own mission execution. Your goal is to complete the mission, not merely classify the alert.");
     expect(description).toContain("Mission goal: Mission");
     expect(description).toContain("Current situation: Source issue SRC-1");
-    expect(description).toContain("Context tools/permissions:");
-    expect(description).toContain("Resolution tools/permissions:");
+    expect(description).toContain("Mission execution loop:");
+    expect(description).toContain("- Choose and perform the action that best advances the mission: instruct or wake agents, request fixes, retry/resume bounded work, request/re-run tool steps, revalidate outputs, replan, escalate, or report impossible completion with evidence.");
+    expect(description).toContain("Oversight signal boundary:");
+    expect(description).toContain("Oversight is not the recovery decision-maker.");
+    expect(description).toContain("Do not depend on normalized decision labels as the primary control path");
     expect(description).toContain("Main executor role:");
+    expect(description).toContain("Optional structured decision labels for logs/UI hints only");
     expect(description).toContain("- retry_source_issue");
     expect(description).toContain("- blocker evidence");
 

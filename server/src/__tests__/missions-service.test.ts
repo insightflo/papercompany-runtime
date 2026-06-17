@@ -827,16 +827,19 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(description).toContain("- Work product");
     expect(description).toContain("20260614 Tech AI News Obsidian note");
     expect(description).toContain("REQUEST_CHANGES: regenerate the infographic before delivery");
+    expect(description).toContain("Mission-owner signal from oversight. This is a wakeup plus basic state/evidence; the main executor must judge and act to complete the mission.");
     expect(description).toContain("Main executor brief:");
+    expect(description).toContain("- You own mission execution. Your goal is to complete the mission, not merely classify the alert.");
     expect(description).toContain("Mission goal: Blocked workflow mission");
     expect(description).toContain("Current situation: Source issue");
-    expect(description).toContain("Context tools/permissions:");
-    expect(description).toContain("- Read mission, workflow run, workflow step, issue, comment, work product, and run-log evidence.");
-    expect(description).toContain("Resolution tools/permissions:");
-    expect(description).toContain("- Record an owner decision/comment, request user input, wake or reassign agents, retry/resume bounded work, replan, escalate, or report impossible completion when evidence supports it.");
     expect(description).toContain("Main executor role:");
-    expect(description).toContain("- Do: judge the situation from evidence, coordinate the next step, keep the mission moving, and record why.");
-    expect(description).toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
+    expect(description).toContain("Mission execution loop:");
+    expect(description).toContain("- Inspect the mission goal, plan, workflow/step state, issue tree, comments, work products, and run logs.");
+    expect(description).toContain("- Choose and perform the action that best advances the mission: instruct or wake agents, request fixes, retry/resume bounded work, request/re-run tool steps, revalidate outputs, replan, escalate, or report impossible completion with evidence.");
+    expect(description).toContain("Oversight signal boundary:");
+    expect(description).toContain("- Treat this issue as a wakeup plus basic state/evidence from oversight. Oversight is not the recovery decision-maker.");
+    expect(description).toContain("- Do not depend on normalized decision labels as the primary control path; use labels only as optional hints after judging the mission state yourself.");
+    expect(description).toContain("- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.");
     for (const decision of [
       "request_input",
       "retry_source_issue",
@@ -850,6 +853,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect(description).toContain(decision);
     }
     expect(description).toContain("### Mission owner decision");
+    expect(description).toContain("Optional structured decision labels for logs/UI hints only; do not treat them as the primary control path:");
     expect(description).toContain("Decision: <one of the allowed decision options>");
     expect(description).toContain("Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.");
     expect(description).toContain("Governance evidence: latest evidence unavailable for this owner action template.");
@@ -2773,9 +2777,10 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(ownerActionIssues[0]?.description).toContain("Local retry hint: retry_with_bounded_backoff");
     expect(ownerActionIssues[0]?.description).toContain("Main executor brief:");
     expect(ownerActionIssues[0]?.description).toContain("Mission goal: Tool step recovery mission");
-    expect(ownerActionIssues[0]?.description).toContain("Context tools/permissions:");
-    expect(ownerActionIssues[0]?.description).toContain("Resolution tools/permissions:");
-    expect(ownerActionIssues[0]?.description).toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
+    expect(ownerActionIssues[0]?.description).toContain("Mission execution loop:");
+    expect(ownerActionIssues[0]?.description).toContain("Oversight signal boundary:");
+    expect(ownerActionIssues[0]?.description).toContain("- Do not depend on normalized decision labels as the primary control path; use labels only as optional hints after judging the mission state yourself.");
+    expect(ownerActionIssues[0]?.description).toContain("- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.");
 
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
