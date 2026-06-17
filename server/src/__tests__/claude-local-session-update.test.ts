@@ -23,6 +23,15 @@ console.log(JSON.stringify({ type: "assistant", session_id: "claude-session-1", 
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writeApiErrorClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-1", model: "glm-5.2" }));
+console.log(JSON.stringify({ type: "result", session_id: "claude-session-1", subtype: "success", is_error: true, api_error_status: 529, result: "API Error: 529 [1305][The service may be temporarily overloaded, please try again later]", usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 }, total_cost_usd: 0 }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
 describe("claude execute session updates", () => {
   it("removes stale pyenv shim locks before launching Claude", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-pyenv-lock-"));
@@ -165,6 +174,48 @@ describe("claude execute session updates", () => {
       expect(result.exitCode).toBe(0);
       expect(result.errorMessage).toBe("Claude stream-json ended without a result event or assistant text");
       expect(result.resultJson?.stdout).toContain('"type":"assistant"');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats Claude stream-json API error results as adapter failures", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-api-error-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "claude");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeApiErrorClaudeCommand(commandPath);
+
+    try {
+      const result = await execute({
+        runId: "run-claude-api-error",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBe("claude_api_error_529");
+      expect(result.errorMessage).toContain("API Error: 529");
+      expect(result.summary).toContain("API Error: 529");
+      expect(result.resultJson).toMatchObject({ is_error: true, api_error_status: 529 });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

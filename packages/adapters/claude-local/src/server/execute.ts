@@ -101,6 +101,45 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+function readApiErrorStatus(parsed: Record<string, unknown>): number | null {
+  const raw = parsed.api_error_status;
+  if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
+  if (typeof raw === "string") {
+    const parsedNumber = Number(raw.trim());
+    if (Number.isInteger(parsedNumber) && parsedNumber > 0) return parsedNumber;
+  }
+  return null;
+}
+
+function readClaudeResultErrors(parsed: Record<string, unknown>): string[] {
+  if (!Array.isArray(parsed.errors)) return [];
+  return parsed.errors
+    .map((error) => {
+      if (typeof error === "string") return error.trim();
+      if (typeof error === "object" && error !== null && !Array.isArray(error)) {
+        const message = (error as { message?: unknown }).message;
+        if (typeof message === "string") return message.trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function describeClaudeResultError(parsed: Record<string, unknown>) {
+  const subtype = asString(parsed.subtype, "");
+  const errors = readClaudeResultErrors(parsed);
+  const isError = parsed.is_error === true || subtype.startsWith("error") || errors.length > 0;
+  if (!isError) return null;
+
+  const apiStatus = readApiErrorStatus(parsed);
+  const resultText = asString(parsed.result, "").trim();
+  const describedFailure = describeClaudeFailure(parsed);
+  return {
+    errorCode: apiStatus ? `claude_api_error_${apiStatus}` : "claude_result_error",
+    errorMessage: resultText || errors.join(" | ") || describedFailure || "Claude result reported an error",
+  };
+}
+
 function resolvePyenvShimLockPath(env: Record<string, string>): string {
   const pyenvRoot = env.PYENV_ROOT?.trim();
   if (pyenvRoot) return path.join(pyenvRoot, "shims", ".pyenv-shim");
@@ -722,16 +761,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       } as Record<string, unknown>)
       : null;
     const clearSessionForMaxTurns = isClaudeMaxTurnsResult(parsed);
+    const resultError = describeClaudeResultError(parsed);
 
     return {
       exitCode: proc.exitCode,
       signal: proc.signal,
       timedOut: false,
       errorMessage:
-        (proc.exitCode ?? 0) === 0
+        resultError?.errorMessage ??
+        ((proc.exitCode ?? 0) === 0
           ? null
-          : describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`,
-      errorCode: loginMeta.requiresLogin ? "claude_auth_required" : null,
+          : describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`),
+      errorCode: loginMeta.requiresLogin ? "claude_auth_required" : resultError?.errorCode ?? null,
       errorMeta,
       usage,
       sessionId: resolvedSessionId,

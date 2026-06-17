@@ -1565,11 +1565,13 @@ function shouldQueueRunFailureAdapterFallback(input: {
   const activeFallbackCommand = readNonEmptyString(context.fallbackCommand);
   const activeFallbackProvider = readNonEmptyString(context.fallbackProvider);
   const activeFallbackModel = readNonEmptyString(context.fallbackModel);
+  const fallbackProvider = input.fallback.provider ?? null;
+  const fallbackModel = input.fallback.model ?? null;
   const isSameFallbackCommand = activeFallbackCommand === input.fallback.command;
   const isSameFallbackRoute =
     isSameFallbackCommand &&
-    activeFallbackProvider === input.fallback.provider &&
-    activeFallbackModel === input.fallback.model;
+    activeFallbackProvider === fallbackProvider &&
+    activeFallbackModel === fallbackModel;
   const isFallbackRun = readNonEmptyString(context.wakeReason) === "adapter_fallback";
   if (isFallbackRun && isSameFallbackRoute && isTerminalAdapterFallbackConfigurationFailure(input.run)) {
     return false;
