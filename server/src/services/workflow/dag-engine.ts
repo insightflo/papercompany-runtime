@@ -912,6 +912,26 @@ async function createWorkflowStepIssue(input: {
     "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
   ].filter((line) => line !== null).join("\n");
 
+  // [idempotency] 같은 run + 같은 step(title) 의 기존 workflow_execution issue 가 살아있으면
+  // (cancelled 제외) 재사용. step 실패→재시도/Unblock 시 createWorkflowStepIssue 가 매번 새
+  // issue 를 찍어 signal/sector/narrative 가 처음부터 반복되는 것(가즈아 gazua-morning
+  // CMPA-5415→5419→5424→5427→5430 반복) 을 막는다. done/blocked issue 도 재사용 — 이후
+  // dispatch 의 wake/skip 이 상태를 판단한다(이미 done 이면 재실행 안 함).
+  const reusable = await input.db
+    .select({ id: issues.id, status: issues.status })
+    .from(issues)
+    .where(and(
+      eq(issues.originRunId, input.run.id),
+      eq(issues.originKind, "workflow_execution"),
+      eq(issues.title, title),
+      ne(issues.status, "cancelled"),
+    ))
+    .orderBy(asc(issues.createdAt))
+    .limit(1);
+  if (reusable.length > 0) {
+    return reusable[0]!.id;
+  }
+
   const createdIssue = await issueSvc.create(input.run.companyId, {
     title,
     description,
