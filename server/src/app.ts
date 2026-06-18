@@ -2,7 +2,7 @@ import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { agentWakeupRequests, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, agents, type Db } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
@@ -708,6 +708,36 @@ export async function createApp(
 
   pluginScheduler.start();
   jobCoordinator.start();
+
+  // [서버 시작 점검] Hermes Ops(adapter hermes_local + heartbeat timer 유일)에게 상태 점검 +
+  // 사장에게 telegram 보고 를 지시. wakeOnDemand agent 들은 재부팅/크래시 후 자동 진행을 안 하므로,
+  // 사장이 telegram 지시로 풀도록 Hermes Ops 가 running run / todo·pending step / stuck 을 점검·보고.
+  // 매 interval timer(불필요 토큰) 대신 시작 1회 wake.
+  void (async () => {
+    try {
+      const opsAgents = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(
+          and(
+            eq(agents.adapterType, "hermes_local"),
+            sql`${agents.runtimeConfig} -> 'heartbeat' ->> 'enabled' = 'true'`,
+          ),
+        );
+      for (const a of opsAgents) {
+        void heartbeat
+          .wakeup(a.id, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "server_startup_state_check",
+            contextSnapshot: {},
+          })
+          .catch((err) => logger.warn({ err, agentId: a.id }, "Server startup: Hermes Ops wake failed"));
+      }
+    } catch (err) {
+      logger.warn({ err }, "Server startup: failed to wake Hermes Ops for state check");
+    }
+  })();
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });
