@@ -692,6 +692,7 @@ async function syncStepRunsFromIssueState(
   const issueRows = await db
     .select({
       id: issues.id,
+      companyId: issues.companyId,
       status: issues.status,
       startedAt: issues.startedAt,
       completedAt: issues.completedAt,
@@ -707,7 +708,7 @@ async function syncStepRunsFromIssueState(
     .filter((stepRun) => {
       if (!stepRun.issueId) return false;
       const issue = issueById.get(stepRun.issueId);
-      if (!issue || issue.status !== "done") return false;
+      if (!issue || (issue.status !== "done" && issue.status !== "blocked")) return false;
       return isValidationGateCandidate({
         issueTitle: issue.title,
         issueOriginKind: issue.originKind,
@@ -759,6 +760,75 @@ async function syncStepRunsFromIssueState(
     }
   }
 
+  const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
+  for (const stepRun of stepRuns) {
+    if (!stepRun.issueId) continue;
+    const issue = issueById.get(stepRun.issueId);
+    if (!issue || issue.status !== "blocked") continue;
+    const step = stepById.get(stepRun.stepId);
+    if (!step || step.dependencies.length === 0) continue;
+    if (!isValidationGateCandidate({ issueTitle: issue.title, issueOriginKind: issue.originKind, step })) continue;
+
+    const latestVerdict = latestValidationVerdictByIssueId.get(issue.id);
+    if (latestVerdict?.verdict !== "request_changes" || !latestVerdict.observedAt) continue;
+
+    const dependencyIssueRows = step.dependencies
+      .map((dependencyStepId) => stepRunByStepId.get(dependencyStepId))
+      .map((dependencyStepRun) => dependencyStepRun?.issueId ? issueById.get(dependencyStepRun.issueId) : null);
+    if (dependencyIssueRows.length !== step.dependencies.length) continue;
+    if (dependencyIssueRows.some((dependencyIssue) => !dependencyIssue || dependencyIssue.status !== "done")) continue;
+
+    const dependencyCompletedTimes = dependencyIssueRows
+      .map((dependencyIssue) => dependencyIssue?.completedAt?.getTime() ?? 0)
+      .filter((time) => time > 0);
+    if (dependencyCompletedTimes.length === 0) continue;
+    if (Math.max(...dependencyCompletedTimes) <= latestVerdict.observedAt.getTime()) continue;
+
+    const now = new Date();
+    const [updatedIssue] = await db
+      .update(issues)
+      .set({
+        status: "todo",
+        startedAt: null,
+        completedAt: null,
+        cancelledAt: null,
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: now,
+      })
+      .where(and(eq(issues.id, issue.id), eq(issues.status, "blocked")))
+      .returning({
+        id: issues.id,
+        companyId: issues.companyId,
+        status: issues.status,
+        startedAt: issues.startedAt,
+        completedAt: issues.completedAt,
+        cancelledAt: issues.cancelledAt,
+        title: issues.title,
+        originKind: issues.originKind,
+      });
+    if (!updatedIssue) continue;
+
+    issueById.set(updatedIssue.id, updatedIssue);
+    await logActivity(db, {
+      companyId: updatedIssue.companyId,
+      actorType: "system",
+      actorId: "workflow:validation-recheck",
+      action: "workflow.validation_recheck_queued",
+      entityType: "issue",
+      entityId: updatedIssue.id,
+      details: {
+        workflowRunId: stepRun.workflowRunId,
+        stepId: step.id,
+        dependencyStepIds: step.dependencies,
+        reason: "dependency_completed_after_request_changes",
+        requestChangesObservedAt: latestVerdict.observedAt.toISOString(),
+      },
+    });
+  }
+
   for (const stepRun of stepRuns) {
     if (!stepRun.issueId) continue;
     const issue = issueById.get(stepRun.issueId);
@@ -804,12 +874,17 @@ async function syncStepRunsFromIssueState(
     .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
 }
 
-async function resetSkippedUnlaunchedStepRuns(
+async function resetUnlaunchedTerminalStepRuns(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  const skipped = stepRuns.filter((stepRun) => stepRun.status === "skipped" && stepRun.issueId == null);
-  if (skipped.length === 0) return stepRuns;
+  const unlaunchedTerminal = stepRuns.filter((stepRun) =>
+    (stepRun.status === "skipped" || stepRun.status === "failed")
+    && stepRun.issueId == null
+    && stepRun.startedAt == null
+    && stepRun.lastDispatchAttemptAt == null
+  );
+  if (unlaunchedTerminal.length === 0) return stepRuns;
 
   await db
     .update(workflowStepRuns)
@@ -818,7 +893,7 @@ async function resetSkippedUnlaunchedStepRuns(
       startedAt: null,
       completedAt: null,
     })
-    .where(inArray(workflowStepRuns.id, skipped.map((stepRun) => stepRun.id)));
+    .where(inArray(workflowStepRuns.id, unlaunchedTerminal.map((stepRun) => stepRun.id)));
 
   return db
     .select()
@@ -1684,7 +1759,7 @@ export async function retryIssueLessToolWorkflowStep(
     .select()
     .from(workflowStepRuns)
     .where(eq(workflowStepRuns.workflowRunId, input.runId));
-  await resetSkippedUnlaunchedStepRuns(db, refreshedStepRuns);
+  await resetUnlaunchedTerminalStepRuns(db, refreshedStepRuns);
 
   await db
     .update(workflowRuns)
@@ -1907,11 +1982,11 @@ export async function syncWorkflowRunState(
   let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps);
 
-  const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
-  if (!hasFailure && !dynamicLaunchStepIds && context.run.status !== "cancelled") {
-    stepRuns = await resetSkippedUnlaunchedStepRuns(db, stepRuns);
+  if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
+    stepRuns = await resetUnlaunchedTerminalStepRuns(db, stepRuns);
   }
+  const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (hasFailure) {
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   } else {
