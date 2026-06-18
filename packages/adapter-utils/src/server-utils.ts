@@ -40,6 +40,14 @@ type ChildProcessWithEvents = ChildProcess & {
 
 export const runningProcesses = new Map<string, RunningProcess>();
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
+/**
+ * 자식 프로세스 stdout 총 출력이 이 바이트를 넘으면 runaway(폭발) 로 판정해 자식을 종료한다.
+ * appendWithCap(MAX_CAPTURE_BYTES) 는 캡처 버퍼를 4MB 로 잘라 event loop 를 보호하지만,
+ * 자식이 stdout 을 닫지 않고 계속 뿜으면 on data 이벤트 자체가 무한히 발생해 event loop 를
+ * 독점한다(opencode/glm-5.2 stdout 폭발 → 서버 hang 사례). 정상 run 의 긴 출력은 보호하려
+ * 64MB 로 넉넉히 잡는다.
+ */
+export const STDOUT_KILL_BYTES = 64 * 1024 * 1024;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
 const SENSITIVE_ENV_KEY = /(key|token|secret|password|passwd|authorization|cookie)/i;
 const PAPERCLIP_SKILL_ROOT_RELATIVE_CANDIDATES = [
@@ -900,6 +908,8 @@ export async function runChildProcess(
         let idleTimedOut = false;
         let stdout = "";
         let stderr = "";
+        let totalStdoutBytes = 0;
+        let stdoutKillTriggered = false;
         let logError: Error | null = null;
         let logChain: Promise<void> = Promise.resolve();
 
@@ -956,7 +966,19 @@ export async function runChildProcess(
         child.stdout?.on("data", (chunk: unknown) => {
           refreshIdleTimeout();
           const text = String(chunk);
+          totalStdoutBytes += text.length;
           stdout = appendWithCap(stdout, text);
+          // stdout 폭발 방어: 자식이 stdout 을 닫지 않고 계속 뿜으면 on data 가 무한 발생해
+          // event loop 를 독점한다. STDOUT_KILL_BYTES(64MB) 초과 시 자식을 종료해 흐름을 끊는다.
+          if (!stdoutKillTriggered && !child.killed && totalStdoutBytes >= STDOUT_KILL_BYTES) {
+            stdoutKillTriggered = true;
+            const killMsg = `[paperclip] Child stdout exceeded ${STDOUT_KILL_BYTES} bytes (runaway output); terminating child process.\n`;
+            stderr = appendWithCap(stderr, killMsg);
+            logChain = logChain
+              .then(() => opts.onLog("stderr", killMsg))
+              .catch((err) => handleLogFailure(err, "stderr"));
+            terminateChild();
+          }
           logChain = logChain
             .then(() => opts.onLog("stdout", text))
             .catch((err) => handleLogFailure(err, "stdout"));
