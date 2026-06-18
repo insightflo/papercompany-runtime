@@ -798,6 +798,50 @@ function workProductSatisfiesIssueDeclaredArtifact(
   });
 }
 
+export function hasSatisfiedWorkProductRegistration(input: {
+  existingWorkProducts: Array<{
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+    status?: string | null;
+    isPrimary?: boolean | null;
+  }>;
+  claimedArtifactPaths: string[];
+  issue: { description?: string | null };
+  autoRegisteredWorkProduct?: unknown | null;
+}) {
+  // An active primary workProduct is the authoritative control-plane contract for the issue’s artifact. When a heartbeat/retry run succeeds and echoes input/setup/data-source paths in its stdout that do not literally match the registered deliverable URL, the existing registration must not be treated as missing. This removes the false-positive loop reported in CMPAA-163 without disabling the gate for the genuine “agent forgot to register WP” case.
+  const hasActivePrimaryWorkProduct = input.existingWorkProducts.some((product) =>
+    product.status === "active" && product.isPrimary === true
+  );
+  const hasMatchingWorkProduct = input.existingWorkProducts.some((product) => workProductReferencesClaimedArtifact(
+    {
+      url: product.url,
+      externalId: product.externalId,
+      metadata: product.metadata ?? null,
+      status: product.status,
+      isPrimary: product.isPrimary,
+    },
+    input.claimedArtifactPaths,
+  ));
+  const hasIssueDeclaredWorkProduct = input.existingWorkProducts.some((product) =>
+    workProductSatisfiesIssueDeclaredArtifact({
+      url: product.url,
+      externalId: product.externalId,
+      status: product.status,
+      isPrimary: product.isPrimary,
+      metadata: product.metadata ?? null,
+    }, input.issue),
+  );
+
+  return (
+    hasActivePrimaryWorkProduct ||
+    hasMatchingWorkProduct ||
+    hasIssueDeclaredWorkProduct ||
+    Boolean(input.autoRegisteredWorkProduct)
+  );
+}
+
 async function autoRegisterWorkProductFromIssueDocument(input: {
   tx: Pick<Db, "select" | "insert">;
   issue: {
@@ -1959,6 +2003,10 @@ export function isActionableClaimedArtifactPath(value: string): boolean {
     "/instructions/",
     "/node_modules/",
     "/.git/",
+    "/data/",
+    "/input/",
+    "/source/",
+    "/sources/",
   ];
   if (nonDeliverablePathMarkers.some((marker) => value.includes(marker))) return false;
   if (/(?:^|\/)(?:AGENTS|CLAUDE|SKILL)\.md$/u.test(value)) return false;
@@ -5828,24 +5876,12 @@ export function heartbeatService(db: Db) {
           .from(issueWorkProducts)
           .where(eq(issueWorkProducts.issueId, issue.id))
           .limit(10);
-        const hasMatchingWorkProduct = existingWorkProducts.some((product) => workProductReferencesClaimedArtifact(
-          {
-            url: product.url,
-            externalId: product.externalId,
-            metadata: product.metadata ?? null,
-          },
+        const hasSatisfiedExistingWorkProductRegistration = hasSatisfiedWorkProductRegistration({
+          existingWorkProducts,
           claimedArtifactPaths,
-        ));
-        const hasIssueDeclaredWorkProduct = existingWorkProducts.some((product) =>
-          workProductSatisfiesIssueDeclaredArtifact({
-            url: product.url,
-            externalId: product.externalId,
-            status: product.status,
-            isPrimary: product.isPrimary,
-            metadata: product.metadata ?? null,
-          }, issue),
-        );
-        const autoRegisteredWorkProduct = hasMatchingWorkProduct || hasIssueDeclaredWorkProduct
+          issue,
+        });
+        const autoRegisteredWorkProduct = hasSatisfiedExistingWorkProductRegistration
           ? null
           : await autoRegisterWorkProductFromIssueDocument({
               tx,
@@ -5853,7 +5889,12 @@ export function heartbeatService(db: Db) {
               run,
               claimedArtifactPaths,
             });
-        if (!hasMatchingWorkProduct && !hasIssueDeclaredWorkProduct && !autoRegisteredWorkProduct) {
+        if (!hasSatisfiedWorkProductRegistration({
+          existingWorkProducts,
+          claimedArtifactPaths,
+          issue,
+          autoRegisteredWorkProduct,
+        })) {
           const now = new Date();
           await tx
             .update(issues)

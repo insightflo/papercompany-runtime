@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   extractClaimedArtifactPaths,
+  hasSatisfiedWorkProductRegistration,
   isActionableClaimedArtifactPath,
   workProductReferencesClaimedArtifact,
 } from "../services/heartbeat.ts";
@@ -43,6 +44,48 @@ describe("heartbeat missing workProduct artifact gate", () => {
         },
       },
       [],
+    )).toBe(true);
+  });
+
+  it("treats an active primary workProduct as sufficient when retry output only reports input data paths", () => {
+    const issue = { description: null };
+    const existingWorkProducts = [
+      {
+        url: "https://example.invalid/reports/Macro_Event_Impact_2026-06-18.html",
+        externalId: null,
+        status: "active",
+        isPrimary: true,
+        metadata: {
+          path: "/reports/beginner_html/dashboard/deep_dive/202606/Macro_Event_Impact_2026-06-18.html",
+        },
+      },
+    ];
+    const claimedArtifactPaths = [
+      "/data/macro/events/macro_2026-06-18.json",
+      "/data/macro/indicators/vix_2026-06-18.csv",
+    ];
+
+    expect(hasSatisfiedWorkProductRegistration({
+      existingWorkProducts,
+      claimedArtifactPaths,
+      issue,
+    })).toBe(true);
+  });
+
+  it("does not satisfy registration when a deliverable path is claimed without a matching workProduct", () => {
+    expect(hasSatisfiedWorkProductRegistration({
+      existingWorkProducts: [],
+      claimedArtifactPaths: ["/Users/kwak/Projects/ai/gazua-dashboard/reports/x.html"],
+      issue: { description: null },
+    })).toBe(false);
+  });
+
+  it("filters input and source paths from actionable claimed artifact detection", () => {
+    expect(isActionableClaimedArtifactPath("/data/macro/events/macro_2026-06-18.json")).toBe(false);
+    expect(isActionableClaimedArtifactPath("/input/foo.csv")).toBe(false);
+    expect(isActionableClaimedArtifactPath("/source/bar.md")).toBe(false);
+    expect(isActionableClaimedArtifactPath(
+      "/Users/kwak/.paperclip-worktrees/instances/papercompany-runtime/workspaces/9d56d53b-7a3a-4046-ba0d-08d18083a0cc/produced_work/tech_scout_20260616.md",
     )).toBe(true);
   });
 });
