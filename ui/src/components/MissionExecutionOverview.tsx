@@ -1,8 +1,9 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type { AgentRuntimeState } from "@paperclipai/shared";
 import { AlertTriangle, BookOpen, Bot, GitBranch, Wrench } from "lucide-react";
 import { agentsApi } from "../api/agents";
+import { issuesApi } from "../api/issues";
 import { missionsApi, type MissionDetailItem, type MissionOwnerActionExplanationStatus } from "../api/missions";
 import { MissionGovernanceThreadPanel } from "./MissionGovernanceThreadPanel";
 import { useCompany } from "../context/CompanyContext";
@@ -127,6 +128,23 @@ function SummaryCard({
 
 export function MissionExecutionOverview({ missionId, mission }: MissionExecutionOverviewProps) {
   const { selectedCompanyId } = useCompany();
+  const [openingWorkProductId, setOpeningWorkProductId] = useState<string | null>(null);
+  const [openedWorkProductId, setOpenedWorkProductId] = useState<string | null>(null);
+  const [workProductOpenError, setWorkProductOpenError] = useState<string | null>(null);
+
+  async function handleOpenWorkProduct(productId: string): Promise<void> {
+    setOpeningWorkProductId(productId);
+    setOpenedWorkProductId(null);
+    setWorkProductOpenError(null);
+    try {
+      await issuesApi.openWorkProduct(productId);
+      setOpenedWorkProductId(productId);
+    } catch (error) {
+      setWorkProductOpenError(error instanceof Error ? error.message : "Failed to open work product");
+    } finally {
+      setOpeningWorkProductId(null);
+    }
+  }
 
   const { data: companyAgents, isLoading: agentsLoading, error: agentsError } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -397,6 +415,7 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
                         run.steps.flatMap((step) => step.knowledgeBaseIds).filter((knowledgeBaseId) => knowledgeBaseId.trim().length > 0),
                       ),
                     );
+                    const runWorkProducts = run.steps.flatMap((step) => step.workProducts ?? []);
 
                     return (
                       <div key={run.id} className="rounded border border-border/70 px-3 py-2 space-y-1.5">
@@ -419,7 +438,66 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
                               ? runKnowledgeBaseIds.map((knowledgeBaseId) => formatKnowledgeBaseLabel(knowledgeBaseId)).join(", ")
                               : "none"}
                           </div>
+                          <div>
+                            Work products:{" "}
+                            {runWorkProducts.length > 0 ? `${runWorkProducts.length} outputs` : "none"}
+                          </div>
                         </div>
+                        {runWorkProducts.length > 0 ? (
+                          <div className="space-y-1.5 border-t border-border/70 pt-2">
+                            {runWorkProducts.map((product) => (
+                              <div key={product.id} className="rounded border border-border/70 px-2 py-1.5 space-y-1">
+                                <div className="flex flex-wrap items-start justify-between gap-2">
+                                  <div className="min-w-0 space-y-0.5">
+                                    {product.url ? (
+                                      <a
+                                        href={product.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-xs font-medium text-blue-400 hover:underline break-words"
+                                      >
+                                        {product.title}
+                                      </a>
+                                    ) : (
+                                      <p className="text-xs font-medium text-foreground break-words">{product.title}</p>
+                                    )}
+                                    {openedWorkProductId === product.id ? (
+                                      <p className="text-[11px] text-emerald-400">Opened</p>
+                                    ) : null}
+                                  </div>
+                                  <div className="flex shrink-0 items-center gap-1.5">
+                                    {product.isPrimary ? (
+                                      <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                        Primary
+                                      </span>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-60"
+                                      disabled={openingWorkProductId === product.id}
+                                      onClick={() => void handleOpenWorkProduct(product.id)}
+                                      title="Open with the operating system"
+                                    >
+                                      {openingWorkProductId === product.id ? "Opening" : "Open"}
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                    {product.type}
+                                  </span>
+                                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                    {product.status}
+                                  </span>
+                                </div>
+                                {product.summary ? <p className="text-[11px] text-muted-foreground break-words">{product.summary}</p> : null}
+                              </div>
+                            ))}
+                            {workProductOpenError ? (
+                              <p className="text-[11px] text-destructive break-words">{workProductOpenError}</p>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}

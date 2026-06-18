@@ -343,6 +343,7 @@ export interface CreateConfigValues {
   dangerouslyBypassSandbox: boolean;
   command: string;
   fallbackCommand?: string;
+  fallbackModel?: string;
   args: string;
   extraArgs: string;
   envVars: string;

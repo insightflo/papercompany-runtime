@@ -4033,6 +4033,15 @@ export function heartbeatService(db: Db) {
 
       for (const run of queuedRuns) {
         if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+
+        const hasRunningRunForAgent = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.agentId, run.agentId), eq(heartbeatRuns.status, "running")))
+          .limit(1)
+          .then((rows) => rows.length > 0);
+        if (hasRunningRunForAgent) continue;
+
         const refTime = run.createdAt ? new Date(run.createdAt).getTime() : new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < queuedStaleThresholdMs) continue;
 
@@ -5466,6 +5475,7 @@ export function heartbeatService(db: Db) {
             error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
           });
         }
+        let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
         // Adapter failures can use a fallback command, but do not repeat the same
         // fallback after a deterministic provider/model configuration failure.
         if (outcome === "failed" && finalizedRun) {
@@ -5477,6 +5487,7 @@ export function heartbeatService(db: Db) {
               fallbackModel: fb.model,
               fallbackReason: "run_failed",
             });
+            queuedAdapterFallbackRun = fallbackRun;
             await appendRunEvent(finalizedRun, seq++, {
               eventType: "lifecycle",
               stream: "system",
@@ -5506,7 +5517,9 @@ export function heartbeatService(db: Db) {
             });
           }
         }
-        await releaseIssueExecutionAndPromote(finalizedRun);
+        if (!queuedAdapterFallbackRun) {
+          await releaseIssueExecutionAndPromote(finalizedRun);
+        }
       }
       await finalizeAgentStatus(agent.id, outcome);
     } catch (err) {
@@ -5514,6 +5527,7 @@ export function heartbeatService(db: Db) {
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),
       );
+      const errorCode = resolveHeartbeatFailureCode(err, "adapter_failed");
       logger.error({ err, runId }, "heartbeat execution failed");
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
@@ -5527,7 +5541,7 @@ export function heartbeatService(db: Db) {
 
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
-        errorCode: resolveHeartbeatFailureCode(err, "adapter_failed"),
+        errorCode,
         finishedAt: new Date(),
         stdoutExcerpt,
         stderrExcerpt,
@@ -5550,6 +5564,44 @@ export function heartbeatService(db: Db) {
           level: "error",
           message,
         });
+        let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+        if (errorCode === "adapter_failed") {
+          const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
+          if (fb && shouldQueueRunFailureAdapterFallback({ run: failedRun, fallback: fb })) {
+            const fallbackRun = await enqueueAdapterFallbackRun(failedRun, agent, new Date(), {
+              fallbackCommand: fb.command,
+              fallbackProvider: fb.provider,
+              fallbackModel: fb.model,
+              fallbackReason: "run_failed",
+            });
+            queuedAdapterFallbackRun = fallbackRun;
+            await appendRunEvent(failedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: `Run failed — queued fallback ${fallbackRun?.id ?? ""}`.trim(),
+              payload: {
+                errorMessage: message,
+                fallbackRunId: fallbackRun?.id ?? null,
+              },
+            });
+          } else if (fb) {
+            await appendRunEvent(failedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: "Run failed - adapter fallback suppressed",
+              payload: {
+                errorMessage: message,
+                fallbackCommand: fb.command,
+                fallbackAttempt: resolveAdapterFallbackAttempt(failedRun.contextSnapshot),
+                reason: isTerminalAdapterFallbackConfigurationFailure(failedRun)
+                  ? "terminal_fallback_configuration_failure"
+                  : "fallback_attempt_limit_reached",
+              },
+            });
+          }
+        }
         if (missionAgentRuntimeForRun) {
           await completeMissionAgentRuntimeRun(db, {
             runtimeId: missionAgentRuntimeForRun.runtime.id,
@@ -5560,7 +5612,9 @@ export function heartbeatService(db: Db) {
             logger.warn({ err: runtimeErr, runId, agentId: agent.id }, "failed to mark mission runtime failed");
           });
         }
-        await releaseIssueExecutionAndPromote(failedRun);
+        if (!queuedAdapterFallbackRun) {
+          await releaseIssueExecutionAndPromote(failedRun);
+        }
 
         await updateRuntimeState(agent, failedRun, {
           exitCode: null,

@@ -1385,6 +1385,101 @@ describe("heartbeat context budget preflight", () => {
     expect(sawSuppressedEvent).toBe(true);
   });
 
+  it("queues adapter fallback when adapter execution throws before returning a result", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    let fallbackConfig: Record<string, unknown> | null = null;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Fallback Throw",
+      role: "engineer",
+      status: "active",
+      adapterType: "opencode_local",
+      adapterConfig: {
+        command: "opencode",
+        model: "zai-coding-plan/glm-5.2",
+        fallback: {
+          command: "opencode",
+          model: "openai/gpt-5.4-mini",
+          maxAttempts: 1,
+          triggers: ["run_failed"],
+        },
+      },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "PAP-1",
+      title: "Run fallback after adapter throw",
+      status: "todo",
+      assigneeAgentId: agentId,
+    });
+
+    executeSpy
+      .mockImplementationOnce(async () => {
+        throw new Error("`opencode models` timed out after 20s.");
+      })
+      .mockImplementationOnce(async ({ config }) => {
+        fallbackConfig = structuredClone(config) as Record<string, unknown>;
+        return successfulAdapterResult();
+      });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, wakeReason: "assignment" },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("failed");
+    expect(finalized.error).toContain("opencode models");
+
+    const deadline = Date.now() + 5_000;
+    let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+    while (Date.now() < deadline && !fallbackRun) {
+      fallbackRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.retryOfRunId, finalized.id))
+        .then((rows) => rows[0] ?? null);
+      if (!fallbackRun) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(fallbackRun).toBeTruthy();
+    expect(fallbackRun?.contextSnapshot).toMatchObject({
+      fallbackOfRunId: finalized.id,
+      fallbackReason: "run_failed",
+      fallbackAttempt: 1,
+      fallbackCommand: "opencode",
+      fallbackModel: "openai/gpt-5.4-mini",
+      wakeReason: "adapter_fallback",
+    });
+
+    const fallbackFinalized = await waitForRunTerminal(heartbeat, fallbackRun!.id);
+    expect(fallbackFinalized.status).toBe("succeeded");
+    expect(fallbackConfig).toMatchObject({
+      command: "opencode",
+      model: "openai/gpt-5.4-mini",
+    });
+
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, finalized.id));
+    expect(events.some((event) => event.message.includes("queued fallback"))).toBe(true);
+  });
+
   it("auto-completes a successful root/plan issue after its planning run succeeds", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

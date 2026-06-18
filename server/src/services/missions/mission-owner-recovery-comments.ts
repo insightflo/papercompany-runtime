@@ -158,6 +158,32 @@ export function buildRetrySourceIssueWakeupDispatchedComment(input: {
   ].join("\n");
 }
 
+export function buildRetrySourceIssueWakeupHandledByWorkflowComment(input: {
+  missionId: string;
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  return [
+    "### Mission owner retry wakeup handled by workflow",
+    buildMissionOwnerDecisionWakeupDispatchedMarker({
+      missionId: input.missionId,
+      ownerActionIssueId: input.ownerActionIssueId,
+      sourceIssueId: input.sourceIssueId,
+      decision: "retry_source_issue",
+      idempotencyKey: input.idempotencyKey,
+    }),
+    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    `Target agent: ${input.targetAgentId}`,
+    "Wakeup: skipped direct mission-owner wake because an existing workflow resume wake already covered this source issue.",
+    `Idempotency key: ${input.idempotencyKey}`,
+  ].join("\n");
+}
+
 export function buildMissionOwnerUnblockDescription(
   mission: MissionOwnerDescriptionMission,
   blockedIssue: MissionOwnerDescriptionIssue,

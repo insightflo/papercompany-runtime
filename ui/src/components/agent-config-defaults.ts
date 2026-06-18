@@ -13,6 +13,7 @@ export const defaultCreateValues: CreateConfigValues = {
   dangerouslyBypassSandbox: false,
   command: "",
   fallbackCommand: "",
+  fallbackModel: "",
   args: "",
   extraArgs: "",
   envVars: "",

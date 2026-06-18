@@ -179,26 +179,41 @@ async function assertNoImplicitDuplicateScheduledWorkflowRun(
   workflow: WorkflowDefinition,
   runDate: string,
 ): Promise<void> {
-  if (input.missionId || input.scheduledSlotId) return;
+  if (input.missionId) return;
   if (typeof workflow.schedule !== "string" || workflow.schedule.trim().length === 0) return;
+
+  const existingScheduledRun = await findActiveScheduledWorkflowMissionRun(db, input, workflow, runDate);
+  if (!existingScheduledRun) return;
+
+  throw new Error(
+    `Workflow already has an active scheduled workflow mission for ${runDate}: ${existingScheduledRun.id}. `
+      + "Finish/cancel the active mission before starting another scheduled run for the same workflow date.",
+  );
+}
+
+async function findActiveScheduledWorkflowMissionRun(
+  db: Db,
+  input: Pick<CreateWorkflowRunInput, "companyId" | "workflowId">,
+  workflow: WorkflowDefinition,
+  runDate: string,
+): Promise<WorkflowRun | null> {
+  if (typeof workflow.schedule !== "string" || workflow.schedule.trim().length === 0) return null;
 
   const existingRuns = await listWorkflowRuns(db, {
     companyId: input.companyId,
     workflowId: input.workflowId,
   });
-  const existingScheduledRun = existingRuns.find((run) => (
-    run.runDate === runDate
-    && typeof run.missionId === "string"
-    && run.missionId.trim().length > 0
-    && (run.triggerSource === "schedule" || typeof run.scheduledSlotId === "string")
-  ));
 
-  if (!existingScheduledRun) return;
+  for (const run of existingRuns) {
+    if (run.runDate !== runDate) continue;
+    if (typeof run.missionId !== "string" || run.missionId.trim().length === 0) continue;
+    if (run.triggerSource !== "schedule" && typeof run.scheduledSlotId !== "string") continue;
 
-  throw new Error(
-    `Workflow already has scheduled workflow run for ${runDate}: ${existingScheduledRun.id}. `
-      + "Resume/rerun the existing run, or pass an explicit missionId for a planned mixed-workflow execution.",
-  );
+    const mission = await missionService(db).getById(run.missionId);
+    if (mission?.status === "active") return run;
+  }
+
+  return null;
 }
 
 async function assertWorkflowToolReadiness(
@@ -345,6 +360,18 @@ export const workflowService = {
     const runDate = input.runDate
       ?? (timezone ? formatDateKeyInTimezone(input.scheduledAt, timezone) : null)
       ?? input.scheduledAt.toISOString().slice(0, 10);
+    const activeScheduledRun = await findActiveScheduledWorkflowMissionRun(db, {
+      companyId: input.companyId,
+      workflowId: input.workflowId,
+    }, workflow, runDate);
+    if (activeScheduledRun) {
+      return {
+        claimed: false,
+        scheduledSlotId: null,
+        run: null,
+      };
+    }
+
     const slot = await claimWorkflowRunSlot(db, {
       workflowDefinitionId: input.workflowId,
       companyId: input.companyId,

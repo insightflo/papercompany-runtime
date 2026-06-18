@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -6,12 +7,15 @@ import {
   type MissionAgentRole,
   type MissionWorkflowRun,
   type MissionWorkflowStep,
+  type MissionWorkflowStepWorkProduct,
 } from "../api/missions";
+import { issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, formatDateTime } from "../lib/utils";
+import { Button } from "@/components/ui/button";
 import { GitBranch, User, Wrench } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -183,6 +187,71 @@ function WorkflowRunList({
   );
 }
 
+function WorkProductCard({
+  product,
+}: {
+  product: MissionWorkflowStepWorkProduct;
+}) {
+  const [openingProductId, setOpeningProductId] = useState<string | null>(null);
+  const [openedProductId, setOpenedProductId] = useState<string | null>(null);
+  const [openErrorProductId, setOpenErrorProductId] = useState<string | null>(null);
+
+  async function openWorkProduct() {
+    setOpeningProductId(product.id);
+    setOpenedProductId(null);
+    setOpenErrorProductId(null);
+    try {
+      await issuesApi.openWorkProduct(product.id);
+      setOpenedProductId(product.id);
+    } catch {
+      setOpenErrorProductId(product.id);
+    } finally {
+      setOpeningProductId(null);
+    }
+  }
+
+  return (
+    <div className="rounded border border-border bg-background px-2 py-1.5">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 space-y-1">
+          {product.url ? (
+            <a
+              href={product.url}
+              target="_blank"
+              rel="noreferrer"
+              className="block truncate text-xs font-medium underline-offset-2 hover:underline"
+            >
+              {product.title}
+            </a>
+          ) : (
+            <p className="truncate text-xs font-medium">{product.title}</p>
+          )}
+          <div className="flex flex-wrap gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <span className="rounded border border-border px-1.5 py-0.5">{product.type}</span>
+            <span className="rounded border border-border px-1.5 py-0.5">{formatStatusLabel(product.status)}</span>
+            {product.isPrimary ? (
+              <span className="rounded border border-emerald-500/60 px-1.5 py-0.5 text-emerald-700 dark:text-emerald-300">Primary</span>
+            ) : null}
+          </div>
+          {product.summary ? <p className="text-[11px] text-muted-foreground">{product.summary}</p> : null}
+          {openedProductId === product.id ? <p className="text-[11px] text-emerald-600">Opened</p> : null}
+          {openErrorProductId === product.id ? <p className="text-[11px] text-destructive">Open failed</p> : null}
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-6 shrink-0 px-2 text-[11px]"
+          onClick={() => void openWorkProduct()}
+          disabled={openingProductId === product.id}
+        >
+          {openingProductId === product.id ? "Opening…" : "Open"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function WorkflowStepRow({
   missionId,
   step,
@@ -198,11 +267,12 @@ function WorkflowStepRow({
     (dependencyId) => steps.find((candidate) => candidate.stepId === dependencyId)?.name ?? dependencyId,
   );
   const assignee = getStepAssignee(step, agentMap);
+  const workProducts = step.workProducts ?? [];
 
   return (
     <div className="rounded border border-border/70 px-3 py-2">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <div className="flex items-center gap-2 min-w-0">
             <span
               className={cn(
@@ -262,6 +332,18 @@ function WorkflowStepRow({
           ) : null}
           {step.description ? <p className="text-xs text-muted-foreground">{step.description}</p> : null}
         </div>
+        {workProducts.length > 0 ? (
+          <div className="w-[20rem] shrink-0 space-y-1.5 rounded border border-border/70 bg-muted/20 p-2">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Work products · {workProducts.length}
+            </p>
+            <div className="space-y-1.5">
+              {workProducts.map((product) => (
+                <WorkProductCard key={product.id} product={product} />
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div className="w-[16rem] shrink-0 space-y-1 text-right">
           {step.issue ? (
             <Link

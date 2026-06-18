@@ -14,7 +14,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
-import { GitBranch, ListTree, Rocket, Settings, User } from "lucide-react";
+import { GitBranch, ListTree, RefreshCw, Rocket, Settings, User } from "lucide-react";
 import { MissionIssueTree } from "../components/MissionIssueTree";
 import { MissionIssueInspector } from "../components/MissionIssueInspector";
 import { MissionExecutionOverview } from "../components/MissionExecutionOverview";
@@ -366,6 +366,7 @@ export function MissionDetail() {
   const {
     data: mission,
     isLoading,
+    isFetching: isMissionFetching,
     error,
   } = useQuery({
     queryKey: queryKeys.missions.detail(missionId!),
@@ -379,7 +380,7 @@ export function MissionDetail() {
     enabled: !!selectedCompanyId,
   });
 
-  const { data: missionActivity } = useQuery({
+  const { data: missionActivity, isFetching: isMissionActivityFetching } = useQuery({
     queryKey: queryKeys.missions.activity(missionId!),
     queryFn: () => activityApi.list(selectedCompanyId!, { entityType: "mission", entityId: missionId! }),
     enabled: !!selectedCompanyId && !!missionId,
@@ -420,6 +421,21 @@ export function MissionDetail() {
       return next;
     }, { replace: true });
   }
+
+  function refreshMissionDetail() {
+    if (!missionId) return;
+    queryClient.invalidateQueries({ queryKey: queryKeys.missions.detail(missionId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.missions.issues(missionId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.missions.workflowRuns(missionId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.missions.governanceThread(missionId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.missions.delegations(missionId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.missions.activity(missionId) });
+    if (selectedCompanyId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.missions.list(selectedCompanyId) });
+    }
+  }
+
+  const isRefreshingMissionDetail = isMissionFetching || isMissionActivityFetching;
 
   if (!missionId) {
     return <div className="p-4 text-sm text-muted-foreground">No mission selected.</div>;
@@ -513,24 +529,39 @@ export function MissionDetail() {
       <Separator />
 
       <Tabs defaultValue="overview" className="w-full">
-        <TabsList className="shrink-0">
-          <TabsTrigger value="overview" className="gap-1.5">
-            <Rocket className="h-3.5 w-3.5" />
-            Overview
-          </TabsTrigger>
-          <TabsTrigger value="issues" className="gap-1.5">
-            <ListTree className="h-3.5 w-3.5" />
-            Work
-          </TabsTrigger>
-          <TabsTrigger value="workflow" className="gap-1.5">
-            <GitBranch className="h-3.5 w-3.5" />
-            Execution Flow
-          </TabsTrigger>
-          <TabsTrigger value="worktree" className="gap-1.5">
-            <Settings className="h-3.5 w-3.5" />
-            Execution Rules
-          </TabsTrigger>
-        </TabsList>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <TabsList className="shrink-0">
+            <TabsTrigger value="overview" className="gap-1.5">
+              <Rocket className="h-3.5 w-3.5" />
+              Overview
+            </TabsTrigger>
+            <TabsTrigger value="issues" className="gap-1.5">
+              <ListTree className="h-3.5 w-3.5" />
+              Work
+            </TabsTrigger>
+            <TabsTrigger value="workflow" className="gap-1.5">
+              <GitBranch className="h-3.5 w-3.5" />
+              Execution Flow
+            </TabsTrigger>
+            <TabsTrigger value="worktree" className="gap-1.5">
+              <Settings className="h-3.5 w-3.5" />
+              Execution Rules
+            </TabsTrigger>
+          </TabsList>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={refreshMissionDetail}
+            disabled={isRefreshingMissionDetail}
+            title="Refresh mission detail"
+            aria-label="Refresh mission detail"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingMissionDetail ? "animate-spin" : ""}`} />
+            <span className="sr-only">Refresh mission detail</span>
+          </Button>
+        </div>
 
         <TabsContent value="overview" className="mt-4">
           <MissionExecutionOverview missionId={missionId} mission={mission} />

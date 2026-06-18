@@ -14,6 +14,7 @@ import {
   agentRuntimeState,
   heartbeatRuns,
   issueComments,
+  issueWorkProducts,
   issues,
   missionAgents,
   missionAgentRuntimes,
@@ -61,6 +62,7 @@ import {
   buildMissionOwnerUnblockDescription,
   buildRetrySourceIssueComment,
   buildRetrySourceIssueWakeupDispatchedComment,
+  buildRetrySourceIssueWakeupHandledByWorkflowComment,
   buildStaleSourceIssueWakeupDispatchedComment,
   buildValidatorRetryEvidenceComment,
   extractLatestMissionOwnerDecision,
@@ -131,6 +133,18 @@ export type MissionWorkflowStepIssue = {
   assigneeAgentId: string | null;
 };
 
+export type MissionWorkflowStepWorkProduct = {
+  id: string;
+  title: string;
+  type: string;
+  url: string | null;
+  status: string;
+  summary: string | null;
+  isPrimary: boolean;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
+};
+
 export type MissionWorkflowRunProgress = {
   totalSteps: number;
   pendingSteps: number;
@@ -152,6 +166,7 @@ export type MissionWorkflowRunStep = {
   status: "pending" | "running" | "completed" | "failed" | "skipped";
   issueId: string | null;
   issue: MissionWorkflowStepIssue | null;
+  workProducts: MissionWorkflowStepWorkProduct[];
   startedAt: Date | null;
   completedAt: Date | null;
 };
@@ -207,7 +222,13 @@ export type MissionOwnerSupervisionRecommendation = {
   sourceRef?: MissionExecutionSourceRef;
 };
 
-export type MissionOwnerDecisionWakeupDispatchStatus = "not_requested" | "dispatched" | "skipped_no_assignee" | "failed";
+export type MissionOwnerDecisionWakeupDispatchStatus = "not_requested" | "dispatched" | "workflow_already_dispatched" | "skipped_no_assignee" | "failed";
+
+export type MissionOwnerDecisionWakeupDispatchResult = {
+  status?: MissionOwnerDecisionWakeupDispatchStatus;
+  runId?: string | null;
+  workflowWakeupRequestId?: string;
+};
 
 export type MissionOwnerSupervisionAppliedAction = {
   type: "dispatch_missing_step";
@@ -740,6 +761,44 @@ function toPluginWorkflowStepData(value: unknown): PluginWorkflowStepData | null
   return value;
 }
 
+function normalizeMissionOwnerDecisionWakeupDispatchResult(value: unknown): MissionOwnerDecisionWakeupDispatchStatus {
+  if (!isRecord(value)) return "dispatched";
+  switch (value.status) {
+    case "not_requested":
+    case "dispatched":
+    case "workflow_already_dispatched":
+    case "skipped_no_assignee":
+    case "failed":
+      return value.status;
+    default:
+      return "dispatched";
+  }
+}
+
+function buildRetrySourceIssueWakeupResultComment(input: {
+  status: MissionOwnerDecisionWakeupDispatchStatus;
+  missionId: string;
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  const common = {
+    missionId: input.missionId,
+    ownerActionIssueId: input.ownerActionIssueId,
+    ownerActionLabel: input.ownerActionLabel,
+    sourceIssueId: input.sourceIssueId,
+    sourceLabel: input.sourceLabel,
+    targetAgentId: input.targetAgentId,
+    idempotencyKey: input.idempotencyKey,
+  };
+  return input.status === "workflow_already_dispatched"
+    ? buildRetrySourceIssueWakeupHandledByWorkflowComment(common)
+    : buildRetrySourceIssueWakeupDispatchedComment(common);
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -758,7 +817,7 @@ export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
   targetAgentId: string;
   idempotencyKey: string;
   wakeCommentId?: string;
-}) => Promise<unknown> | unknown;
+}) => Promise<MissionOwnerDecisionWakeupDispatchResult | unknown> | MissionOwnerDecisionWakeupDispatchResult | unknown;
 
 export type MissionStaleSourceIssueWakeupRequestedHandler = (input: {
   mission: MissionRow;
@@ -2421,7 +2480,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                         const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
                           ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
                           : null;
-                        await deps.onOwnerDecisionRetrySourceIssueApplied({
+                        const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
                           mission,
                           ownerActionIssue: issue,
                           sourceIssue: sourceCandidate,
@@ -2429,9 +2488,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                           idempotencyKey,
                           wakeCommentId: wakeEvidenceComment?.id,
                         });
+                        wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                         await issueService(db).addComment(
                           sourceCandidate.id,
-                          buildRetrySourceIssueWakeupDispatchedComment({
+                          buildRetrySourceIssueWakeupResultComment({
+                            status: wakeupDispatchStatus,
                             missionId: mission.id,
                             ownerActionIssueId: issue.id,
                             ownerActionLabel: label,
@@ -2442,7 +2503,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                           }),
                           { agentId: mission.ownerAgentId },
                         );
-                        wakeupDispatchStatus = "dispatched";
                       } catch (err) {
                         const message = err instanceof Error ? err.message : String(err);
                         findings.push(`owner_action_wakeup_failed: ${sourceCandidateLabel} retry_source_issue wakeup callback failed — ${message}`);
@@ -2491,7 +2551,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                       const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
                         ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
                         : null;
-                      await deps.onOwnerDecisionRetrySourceIssueApplied({
+                      const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
                         mission,
                         ownerActionIssue: issue,
                         sourceIssue: sourceCandidate,
@@ -2499,9 +2559,11 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                         idempotencyKey,
                         wakeCommentId: wakeEvidenceComment?.id,
                       });
+                      wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                       await issueService(db).addComment(
                         sourceCandidate.id,
-                        buildRetrySourceIssueWakeupDispatchedComment({
+                        buildRetrySourceIssueWakeupResultComment({
+                          status: wakeupDispatchStatus,
                           missionId: mission.id,
                           ownerActionIssueId: issue.id,
                           ownerActionLabel: label,
@@ -2512,7 +2574,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
                         }),
                         { agentId: mission.ownerAgentId },
                       );
-                      wakeupDispatchStatus = "dispatched";
                     } catch (err) {
                       const message = err instanceof Error ? err.message : String(err);
                       findings.push(`owner_action_wakeup_failed: ${sourceCandidateLabel} retry_source_issue wakeup callback failed — ${message}`);
@@ -3016,7 +3077,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           ? appliedActions.map((action) => action.type === "dispatch_missing_step"
             ? `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`
             : action.type === "owner_decision_retry_source_issue"
-              ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus}`
+              ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`
               : action.type === "native_tool_step_retry"
                 ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
                 : action.type === "materialize_plan_decision"
@@ -3797,6 +3858,25 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           .where(inArray(issues.id, stepIssueIds))
       : [];
 
+    const stepWorkProducts = stepIssueIds.length
+      ? await db
+          .select({
+            id: issueWorkProducts.id,
+            issueId: issueWorkProducts.issueId,
+            title: issueWorkProducts.title,
+            type: issueWorkProducts.type,
+            url: issueWorkProducts.url,
+            status: issueWorkProducts.status,
+            summary: issueWorkProducts.summary,
+            isPrimary: issueWorkProducts.isPrimary,
+            metadata: issueWorkProducts.metadata,
+            createdAt: issueWorkProducts.createdAt,
+          })
+          .from(issueWorkProducts)
+          .where(inArray(issueWorkProducts.issueId, stepIssueIds))
+          .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.createdAt))
+      : [];
+
     const stepRunsMap = new Map<string, Array<typeof workflowStepRuns.$inferSelect>>();
     for (const stepRun of allStepRuns) {
       const current = stepRunsMap.get(stepRun.workflowRunId) ?? [];
@@ -3807,6 +3887,23 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const stepIssueMap = new Map<string, MissionWorkflowStepIssue>(
       stepIssues.map((issue) => [issue.id, issue]),
     );
+
+    const stepWorkProductsMap = new Map<string, MissionWorkflowStepWorkProduct[]>();
+    for (const product of stepWorkProducts) {
+      const current = stepWorkProductsMap.get(product.issueId) ?? [];
+      current.push({
+        id: product.id,
+        title: product.title,
+        type: product.type,
+        url: product.url,
+        status: product.status,
+        summary: product.summary,
+        isPrimary: product.isPrimary,
+        metadata: product.metadata ?? null,
+        createdAt: product.createdAt,
+      });
+      stepWorkProductsMap.set(product.issueId, current);
+    }
 
     const companyAgents = await db
       .select({ id: agents.id, name: agents.name })
@@ -3848,6 +3945,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           status: normalizeMissionWorkflowStepStatus(stepRun?.status ?? "pending"),
           issueId: stepRun?.issueId ?? null,
           issue: stepRun?.issueId ? stepIssueMap.get(stepRun.issueId) ?? null : null,
+          workProducts: stepRun?.issueId ? stepWorkProductsMap.get(stepRun.issueId) ?? [] : [],
           startedAt: stepRun?.startedAt ?? null,
           completedAt: stepRun?.completedAt ?? null,
         };
@@ -3868,6 +3966,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           status: normalizeMissionWorkflowStepStatus(stepRun.status),
           issueId: stepRun.issueId,
           issue: stepRun.issueId ? stepIssueMap.get(stepRun.issueId) ?? null : null,
+          workProducts: stepRun.issueId ? stepWorkProductsMap.get(stepRun.issueId) ?? [] : [],
           startedAt: stepRun.startedAt,
           completedAt: stepRun.completedAt,
         });
@@ -4003,6 +4102,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           status: stepRun ? normalizePluginWorkflowStepStatus(stepRun.status) : "pending",
           issueId: stepRun?.issueId ?? null,
           issue: stepRun?.issueId ? pluginIssueMap.get(stepRun.issueId) ?? null : null,
+          workProducts: [],
           startedAt: stepRun?.startedAt ?? null,
           completedAt: stepRun?.completedAt ?? null,
         };
@@ -4023,6 +4123,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           status: normalizePluginWorkflowStepStatus(stepRun.status),
           issueId: stepRun.issueId,
           issue: stepRun.issueId ? pluginIssueMap.get(stepRun.issueId) ?? null : null,
+          workProducts: [],
           startedAt: stepRun.startedAt,
           completedAt: stepRun.completedAt,
         });

@@ -49,6 +49,19 @@ vi.mock("@tanstack/react-query", () => ({
                   status: "in_progress",
                   assigneeAgentId: "agent-1",
                 },
+                workProducts: [
+                  {
+                    id: "product-1",
+                    title: "Mission brief draft",
+                    type: "document",
+                    url: "file:///tmp/mission-brief.md",
+                    status: "ready_for_review",
+                    summary: "Drafted workflow output",
+                    isPrimary: true,
+                    metadata: null,
+                    createdAt: "2026-04-15T10:00:00.000Z",
+                  },
+                ],
                 startedAt: "2026-04-15T09:10:00",
                 completedAt: "2026-04-15T10:05:00",
               },
@@ -83,6 +96,10 @@ vi.mock("../context/CompanyContext", () => ({
   useCompany: () => ({
     selectedCompanyId: "company-1",
   }),
+}));
+
+vi.mock("@/components/ui/button", () => ({
+  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
 }));
 
 vi.mock("@/lib/router", () => ({
@@ -121,10 +138,19 @@ describe("WorkflowDagPanel", () => {
     expect(html).toContain("Prepare the mission brief");
     expect(html).toContain("search-docs");
     expect(html).toContain("kb:kb-product");
+    expect(html).not.toContain("Workflow products · 1");
+    expect(html).not.toContain("Registered deliverables from this run");
+    expect(html).toContain("Work products · 1");
+    expect(html).toContain("Mission brief draft");
+    expect(html).toContain("Drafted workflow output");
+    expect(html).toContain("Primary");
+    expect(html).toContain("Open");
     expect(html).toContain("CMP-101");
     expect(html).toContain('href="/issues/CMP-101"');
     expect(html).toContain(
       'data-state="{&quot;issueDetailBreadcrumb&quot;:{&quot;label&quot;:&quot;Mission&quot;,&quot;href&quot;:&quot;/missions/mission-1&quot;}}"',
     );
+    expect(html.indexOf("Prepare the mission brief")).toBeLessThan(html.indexOf("Work products · 1"));
+    expect(html.indexOf("Work products · 1")).toBeLessThan(html.indexOf("CMP-101"));
   });
 });

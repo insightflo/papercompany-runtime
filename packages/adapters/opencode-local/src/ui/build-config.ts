@@ -72,6 +72,14 @@ export function buildOpenCodeLocalConfig(v: CreateConfigValues): Record<string, 
   if (Object.keys(env).length > 0) ac.env = env;
   if (v.command) ac.command = v.command;
   if (v.fallbackCommand) ac.fallbackCommand = v.fallbackCommand;
+  if (v.fallbackCommand || v.fallbackModel) {
+    ac.fallback = {
+      command: v.fallbackCommand || v.command || "opencode",
+      ...(v.fallbackModel ? { model: v.fallbackModel } : {}),
+      maxAttempts: 1,
+      triggers: ["process_lost", "run_failed"],
+    };
+  }
   if (v.extraArgs) ac.extraArgs = parseCommaArgs(v.extraArgs);
   return ac;
 }

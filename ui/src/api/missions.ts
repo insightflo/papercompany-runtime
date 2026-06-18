@@ -36,6 +36,18 @@ export interface MissionWorkflowStepIssue {
   assigneeAgentId: string | null;
 }
 
+export interface MissionWorkflowStepWorkProduct {
+  id: string;
+  title: string;
+  type: string;
+  url: string | null;
+  status: string;
+  summary: string | null;
+  isPrimary: boolean;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
 export interface MissionWorkflowStep {
   stepId: string;
   name: string;
@@ -48,6 +60,7 @@ export interface MissionWorkflowStep {
   status: "pending" | "running" | "completed" | "failed" | "skipped";
   issueId: string | null;
   issue: MissionWorkflowStepIssue | null;
+  workProducts: MissionWorkflowStepWorkProduct[];
   startedAt: string | null;
   completedAt: string | null;
 }

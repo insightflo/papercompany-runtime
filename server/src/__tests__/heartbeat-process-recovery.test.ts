@@ -721,4 +721,55 @@ describe("heartbeat orphaned process recovery", () => {
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("failed");
   });
+
+  it("does not expire an old queued run while the same agent is still running another run", async () => {
+    const { companyId, agentId, runId: runningRunId } = await seedRunFixture({
+      includeIssue: false,
+      updatedAt: new Date(),
+    });
+    const queuedRunId = randomUUID();
+    const queuedWakeupId = randomUUID();
+    const staleAt = new Date("2026-03-19T00:00:00.000Z");
+
+    await db.insert(agentWakeupRequests).values({
+      id: queuedWakeupId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: {},
+      status: "pending",
+      runId: queuedRunId,
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: queuedRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId: queuedWakeupId,
+      contextSnapshot: {},
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ startedAt: new Date(), updatedAt: new Date() })
+      .where(eq(heartbeatRuns.id, runningRunId));
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    runningProcesses.set(runningRunId, { child, graceSec: 1 });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(0);
+
+    const queuedRun = await heartbeat.getRun(queuedRunId);
+    expect(queuedRun?.status).toBe("queued");
+    expect(queuedRun?.errorCode).toBeNull();
+  });
 });
