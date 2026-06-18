@@ -214,6 +214,90 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(stored?.completedAt).toBeInstanceOf(Date);
   });
 
+  it("does not fail pending downstream steps while a linked workflow issue is still active", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Active Workflow Company",
+      issuePrefix: `AW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: randomUUID(),
+      companyId,
+      name: "Worker",
+      role: "worker",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "active-workflow",
+      stepsJson: [
+        { id: "collect", name: "Collect", type: "agent", agentId: "", dependencies: [] },
+        { id: "synthesize", name: "Synthesize", type: "agent", agentId: "", dependencies: ["collect"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      completedAt: null,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "AW-1",
+      title: "Collect",
+      status: "in_progress",
+      originKind: "workflow_execution",
+      originId: runId,
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "collect",
+        issueId,
+        status: "running",
+        startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "synthesize",
+        status: "pending",
+      },
+    ]);
+
+    const result = await reconcileStuckWorkflowRuns(db, 60);
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        runId,
+        action: "skipped",
+        reason: "Active workflow step execution is still running",
+      }),
+    ]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("running");
+    expect(storedRun?.completedAt).toBeNull();
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "collect", status: "running" }),
+      expect.objectContaining({ stepId: "synthesize", status: "pending", completedAt: null }),
+    ]));
+  });
+
   it("creates workflow definitions from plugin UI step payloads", async () => {
     const companyId = randomUUID();
 
@@ -2651,11 +2735,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       exitCode: 1,
       error: "Tool failed",
     });
-    expect(failedResult?.status).toBe("failed");
-    expect(failedResult?.error).toBe("One or more workflow steps failed");
+    expect(failedResult?.status).toBe("running");
+    expect(failedResult?.error).toBeUndefined();
     expect(failedResult?.stepRuns).toEqual(expect.arrayContaining([
       expect.objectContaining({ stepId: "collect", status: "failed" }),
-      expect.objectContaining({ stepId: "publish", status: "skipped" }),
+      expect.objectContaining({ stepId: "publish", status: "pending" }),
     ]));
 
     const failedCollectStep = await db
@@ -3064,7 +3148,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(supervisionCommentBody).not.toContain("wake_agent");
   });
 
-  it("reactivates skipped downstream steps when a failed prerequisite issue is reopened", async () => {
+  it("keeps downstream steps pending when a prerequisite issue fails and resumes them when it recovers", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const workflowId = randomUUID();
@@ -3132,8 +3216,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
     expect(stepRuns.find((stepRun) => stepRun.stepId === "collect")?.status).toBe("failed");
-    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.status).toBe("skipped");
-    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.status).toBe("skipped");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.status).toBe("pending");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.status).toBe("pending");
 
     await issueSvc.update(collectStepRun!.issueId!, { status: "todo" });
     const reopened = await syncWorkflowRunForIssue(db, collectStepRun!.issueId!);

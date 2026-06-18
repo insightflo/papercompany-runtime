@@ -6,7 +6,7 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { heartbeatRuns, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { eq, and, lt, sql } from "drizzle-orm";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 
@@ -52,6 +52,39 @@ export async function reconcileStuckWorkflowRuns(
 
   for (const run of stuckRuns) {
     try {
+      const activeStep = await db
+        .select({ id: workflowStepRuns.id })
+        .from(workflowStepRuns)
+        .where(
+          and(
+            eq(workflowStepRuns.workflowRunId, run.id),
+            sql`(
+              ${workflowStepRuns.status} = 'running'
+              OR EXISTS (
+                SELECT 1 FROM ${issues}
+                WHERE ${issues.id} = ${workflowStepRuns.issueId}
+                  AND ${issues.status} IN ('todo', 'in_progress', 'in_review')
+              )
+              OR EXISTS (
+                SELECT 1 FROM ${heartbeatRuns}
+                WHERE ${heartbeatRuns.issueId} = ${workflowStepRuns.issueId}
+                  AND ${heartbeatRuns.status} IN ('queued', 'running')
+              )
+            )`,
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+      if (activeStep) {
+        results.push({
+          runId: run.id,
+          action: "skipped",
+          reason: "Active workflow step execution is still running",
+        });
+        continue;
+      }
+
       // Check if any step runs are still pending
       const pendingSteps = await db
         .select()

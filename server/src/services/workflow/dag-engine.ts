@@ -1913,20 +1913,6 @@ export async function syncWorkflowRunState(
     stepRuns = await resetSkippedUnlaunchedStepRuns(db, stepRuns);
   }
   if (hasFailure) {
-    const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
-    if (unlaunchedPendingSteps.length > 0) {
-      const now = new Date();
-      for (const stepRun of unlaunchedPendingSteps) {
-        await db
-          .update(workflowStepRuns)
-          .set({ status: "skipped", completedAt: now })
-          .where(eq(workflowStepRuns.id, stepRun.id));
-      }
-      stepRuns = await db
-        .select()
-        .from(workflowStepRuns)
-        .where(eq(workflowStepRuns.workflowRunId, runId));
-    }
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   } else {
     let shouldContinue = true;
@@ -1990,20 +1976,6 @@ export async function syncWorkflowRunState(
 
   const hasFailureAfterLaunch = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (!hasFailure && hasFailureAfterLaunch) {
-    const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
-    if (unlaunchedPendingSteps.length > 0) {
-      const now = new Date();
-      for (const stepRun of unlaunchedPendingSteps) {
-        await db
-          .update(workflowStepRuns)
-          .set({ status: "skipped", completedAt: now })
-          .where(eq(workflowStepRuns.id, stepRun.id));
-      }
-      stepRuns = await db
-        .select()
-        .from(workflowStepRuns)
-        .where(eq(workflowStepRuns.workflowRunId, runId));
-    }
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   }
 
