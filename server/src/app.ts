@@ -75,6 +75,7 @@ import { registerNativeWorkflowToolResultEventHandlers } from "./services/workfl
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
 import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
+import { createAgentWikiEvolutionLoop, resolveAgentWikiEvolutionOwnership } from "./services/agent-skill-optimizer.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -354,6 +355,7 @@ export async function createApp(
   setPluginEventBus(eventBus);
   registerNativeWorkflowToolResultEventHandlers(db, eventBus);
   const workflowSchedulerOwnership = resolveWorkflowSchedulerOwnership();
+  const agentWikiEvolutionOwnership = resolveAgentWikiEvolutionOwnership();
   logger.info({
     mode: workflowSchedulerOwnership.mode,
     nativeSchedulerEnabled: workflowSchedulerOwnership.nativeSchedulerEnabled,
@@ -704,6 +706,17 @@ export async function createApp(
   nativeWorkflowReconciler?.start();
   if (nativeWorkflowReconciler) {
     process.once("exit", () => nativeWorkflowReconciler.stop());
+  }
+
+  // Agent Wiki Phase 3 — SkillOpt-Sleep 자가진화 루프. AGENT_WIKI_EVOLUTION_ENABLED=1 일 때만
+  // 활성화(default off, 실험적). 반복 실패(frequency≥5)를 agent 영구 promptTemplate 에 bounded-edit 후
+  // 관찰창(24h) 동안 실패 추이로 수락/기각. 비활성 시 loop 자체를 생성하지 않아 완전 inert.
+  const agentWikiEvolutionLoop = agentWikiEvolutionOwnership.enabled
+    ? createAgentWikiEvolutionLoop({ db })
+    : null;
+  agentWikiEvolutionLoop?.start();
+  if (agentWikiEvolutionLoop) {
+    process.once("exit", () => agentWikiEvolutionLoop.stop());
   }
 
   pluginScheduler.start();

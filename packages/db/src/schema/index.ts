@@ -88,6 +88,7 @@ export { agentToolGrants } from "./agent_tool_grants.js";
 export { knowledgeBases } from "./knowledge_bases.js";
 export { agentKbGrants } from "./agent_kb_grants.js";
 export { agentWikiEntries } from "./agent_wiki_entries.js";
+export { agentWikiEditProposals } from "./agent_wiki_edit_proposals.js";
 export { schedules } from "./schedules.js";
 export { worktreeRules } from "./worktree_rules.js";
 export { worktreeRuleProposals } from "./worktree_rule_proposals.js";

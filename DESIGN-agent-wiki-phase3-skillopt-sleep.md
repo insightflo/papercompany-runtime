@@ -1,8 +1,26 @@
 # Design: Agent Wiki Phase 3 — SkillOpt-Sleep (자가 진화 루프)
 
-> **상태**: 설계 완료 / 구현은 별도 세션(handoff 합의). Phase 1(자동 축적) + Phase 2(자동 주입)는 이미 구현됨.
+> **상태**: v1 구현 완료(2026-06-19), default OFF(`AGENT_WIKI_EVOLUTION_ENABLED=1`로 활성화). 아래는 전체 설계; v1 범위/제약은 §0 참고.
 > **작성**: 2026-06-19
 > **의존**: `agent_wiki_entries` 테이블(0061), `server/src/services/agent-wiki.ts`, heartbeat 훅(5곳).
+
+---
+
+## 0. v1 구현 상태 (2026-06-19)
+
+v1 구현 파일: `server/src/services/agent-skill-optimizer.ts`, `agent_wiki_edit_proposals` 테이블(0062), `app.ts` 등록.
+검증: server `tsc --noEmit` 통과, migration 0062 live DB 적용, 단위 테스트 11건 통과(bounded-edit helpers / env gate / loop mechanics).
+
+**v1 구현됨**:
+- `createAgentWikiEvolutionLoop`(reconciler 패턴: setInterval + tickInFlight + unref + per-tick try/catch) + `runWikiEvolutionPass`(후보 수집 → propose/apply → 관찰 → accept/revert).
+- bounded-edit: `<!-- paperclip-skill-lesson:{entryId} START/END -->` 마커 쌍(idempotent append, surgical remove).
+- 영구 쓰기: `agentService.update({adapterConfig},{recordRevision})` → config revision + snapshot 자동 기록(감사/롤백 내장).
+- env 게이트 `resolveAgentWikiEvolutionOwnership`(default OFF) — off 시 app.ts 가 loop 자체를 생성하지 않아 완전 inert.
+
+**v1 제약 (v2 연기)**:
+- managed-bundle(AGENTS.md 디스크) 에이전트는 **skip** — v1은 legacy `adapter_config.promptTemplate`(jsonb)만 진화. 번들 file-IO는 v2(런타임이 디스크를 읽으므로 jsonb 쓰기가 무의미/충돌).
+- entry 당 proposal 1개(unique entry_id) — 기각된 패턴의 재제안 로직 미구현(flip-flop 방지).
+- 관찰창 기본 24h / threshold 기본 5 / interval 기본 10분 — env·opts 로 조정 가능.
 
 ---
 
