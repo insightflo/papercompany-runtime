@@ -17,9 +17,7 @@ import {
   issueWorkProducts,
   issues,
   missionAgents,
-  missionAgentRuntimes,
   missionPlanArtifacts,
-  missionRollingState,
   missionSessions,
   missions,
   pluginEntities,
@@ -50,12 +48,21 @@ import {
 } from "./missions/mission-owner-recovery-explanations.js";
 import { normalizeWorkflowStepsForExecution, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
+import { asRecordArray, asStringArray, asTrimmedString, isRecord, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
+import {
+  buildWorkflowRunProgress,
+  normalizeMissionWorkflowStepStatus,
+  normalizeMissionWorkflowStepType,
+  type MissionWorkflowStepIssue,
+  type MissionWorkflowStepWorkProduct,
+  type MissionWorkflowRunStep,
+  type MissionWorkflowRunDetail,
+} from "./missions/workflow-progress.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
   hasMissionOwnerDecisionAppliedMarker,
   hasMissionOwnerDecisionWakeupDispatchedMarker,
   hasStaleSourceIssueWakeupDispatchedMarker,
-  type ExtractedMissionOwnerDecision,
 } from "./missions/mission-owner-recovery-events.js";
 import {
   buildMainExecutorBrief,
@@ -125,78 +132,15 @@ export type MissionDetail = MissionRow & {
   ownerActionExplanations: MissionOwnerActionExplanation[];
 };
 
-export type MissionWorkflowStepIssue = {
-  id: string;
-  identifier: string | null;
-  title: string;
-  status: string;
-  assigneeAgentId: string | null;
-};
-
-export type MissionWorkflowStepWorkProduct = {
-  id: string;
-  title: string;
-  type: string;
-  url: string | null;
-  status: string;
-  summary: string | null;
-  isPrimary: boolean;
-  metadata: Record<string, unknown> | null;
-  createdAt: Date;
-};
-
-export type MissionWorkflowRunProgress = {
-  totalSteps: number;
-  pendingSteps: number;
-  runningSteps: number;
-  completedSteps: number;
-  failedSteps: number;
-  skippedSteps: number;
-};
-
-export type MissionWorkflowRunStep = {
-  stepId: string;
-  name: string;
-  type: "agent" | "tool";
-  agentId: string;
-  dependencies: string[];
-  description: string | null;
-  toolNames: string[];
-  knowledgeBaseIds: string[];
-  status: "pending" | "running" | "completed" | "failed" | "skipped";
-  issueId: string | null;
-  issue: MissionWorkflowStepIssue | null;
-  workProducts: MissionWorkflowStepWorkProduct[];
-  startedAt: Date | null;
-  completedAt: Date | null;
-};
-
-const MISSION_WORKFLOW_STEP_STATUSES = new Set([
-  "pending",
-  "running",
-  "completed",
-  "failed",
-  "skipped",
-] as const);
-
-function normalizeMissionWorkflowStepStatus(status: string): MissionWorkflowRunStep["status"] {
-  return MISSION_WORKFLOW_STEP_STATUSES.has(status as MissionWorkflowRunStep["status"])
-    ? (status as MissionWorkflowRunStep["status"])
-    : "pending";
-}
-
-function normalizeMissionWorkflowStepType(value: unknown): MissionWorkflowRunStep["type"] {
-  return typeof value === "string" && value.trim().toLowerCase() === "tool"
-    ? "tool"
-    : "agent";
-}
-
-export type MissionWorkflowRunDetail = typeof workflowRuns.$inferSelect & {
-  workflowName: string | null;
-  stepRuns: Array<typeof workflowStepRuns.$inferSelect>;
-  steps: MissionWorkflowRunStep[];
-  progress: MissionWorkflowRunProgress;
-};
+// workflow-run step/progress 타입 + 정규화/집계 로직은 ./missions/workflow-progress.js 로 분리.
+// 아래는 public API 호환용 re-export.
+export type {
+  MissionWorkflowStepIssue,
+  MissionWorkflowStepWorkProduct,
+  MissionWorkflowRunProgress,
+  MissionWorkflowRunStep,
+  MissionWorkflowRunDetail,
+} from "./missions/workflow-progress.js";
 export type MissionIssueTree = Awaited<ReturnType<ReturnType<typeof issueService>["list"]>>;
 
 export type MissionOwnerSupervisionRecommendationType =
@@ -420,40 +364,6 @@ function assertMissionId(value: string): void {
   }
 }
 
-function buildWorkflowRunProgress(steps: MissionWorkflowRunStep[]): MissionWorkflowRunProgress {
-  return steps.reduce<MissionWorkflowRunProgress>(
-    (acc, step) => {
-      acc.totalSteps += 1;
-      switch (step.status) {
-        case "completed":
-          acc.completedSteps += 1;
-          break;
-        case "failed":
-          acc.failedSteps += 1;
-          break;
-        case "running":
-          acc.runningSteps += 1;
-          break;
-        case "skipped":
-          acc.skippedSteps += 1;
-          break;
-        default:
-          acc.pendingSteps += 1;
-          break;
-      }
-      return acc;
-    },
-    {
-      totalSteps: 0,
-      pendingSteps: 0,
-      runningSteps: 0,
-      completedSteps: 0,
-      failedSteps: 0,
-      skippedSteps: 0,
-    },
-  );
-}
-
 type PluginWorkflowStepData = Record<string, unknown>;
 type PluginWorkflowDefinitionData = {
   name?: unknown;
@@ -478,24 +388,6 @@ type PluginWorkflowStepRunData = {
   startedAt?: unknown;
   completedAt?: unknown;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asTrimmedString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-}
-
-function asRecordArray(value: unknown): Record<string, unknown>[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is Record<string, unknown> => isRecord(item));
-}
 
 function isNativeWorkflowExecutionUnitForDifferentRun(
   unit: Record<string, unknown>,
@@ -702,36 +594,6 @@ function classifyToolStepFailure(
     requiredAction: "Inspect tool runtime logs; if the tool implementation failed, create/fix the tool bug before resuming the mission.",
     evidence,
   };
-}
-
-function parsePluginDate(value: unknown): Date | null {
-  const raw = asTrimmedString(value);
-  if (!raw) return null;
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? new Date(parsed) : null;
-}
-
-function parseMissionDateFilter(value: string, boundary: "start" | "end"): Date {
-  const normalized = value.trim();
-  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
-  if (dateOnlyMatch) {
-    const [, year, month, day] = dateOnlyMatch;
-    return new Date(
-      Number(year),
-      Number(month) - 1,
-      Number(day),
-      boundary === "start" ? 0 : 23,
-      boundary === "start" ? 0 : 59,
-      boundary === "start" ? 0 : 59,
-      boundary === "start" ? 0 : 999,
-    );
-  }
-
-  const parsed = Date.parse(normalized);
-  if (!Number.isFinite(parsed)) {
-    throw badRequest(`Invalid mission date filter: ${value}`);
-  }
-  return new Date(parsed);
 }
 
 function normalizePluginWorkflowStepStatus(status: unknown): MissionWorkflowRunStep["status"] {
