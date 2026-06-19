@@ -12,6 +12,7 @@ import {
   ensurePostgresDatabase,
   agents,
   agentRuntimeState,
+  agentWikiEntries,
   companySkills,
   companySecrets,
   activityLog,
@@ -335,6 +336,30 @@ describe("heartbeat orphaned process recovery", () => {
     const run = await heartbeat.getRun(runId);
     expect(run?.status).toBe("failed");
     expect(run?.errorCode).toBe("process_lost");
+  });
+
+  it("records a process_lost wiki entry when a detached run is force-reaped", async () => {
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    expect(child.pid).toBeTypeOf("number");
+
+    const seeded = await seedRunFixture({
+      processPid: child.pid ?? null,
+      processStartedAt: new Date(Date.now() - 45 * 60 * 1000), // > 30min cap → process_lost
+      processLossRetryCount: 1,
+      includeIssue: false,
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+    // fireWikiRecord is non-blocking — let the recordFailure insert settle.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const entries = await db
+      .select()
+      .from(agentWikiEntries)
+      .where(eq(agentWikiEntries.agentId, seeded.agentId));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.errorCode).toBe("process_lost");
+    expect(entries[0]?.pattern).toContain("process_lost");
   });
 
   it("terminates a detached recorded pid when cancelling the run", async () => {

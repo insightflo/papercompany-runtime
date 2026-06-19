@@ -4116,6 +4116,17 @@ export function heartbeatService(db: Db) {
       if (!finalizedRun) finalizedRun = await getRun(run.id);
       if (!finalizedRun) continue;
 
+      // Agent wiki hook (process_lost): adapter 자식 프로세스 상실 교훈 축적 (non-blocking).
+      // detached 30min cap fall-through 도 이 process_lost 경로를 타므로 이 hook 하나로 커버.
+      fireWikiRecord(wikiSvc, {
+        companyId: run.companyId,
+        agentId: run.agentId,
+        pattern: "process_lost (adapter 자식 프로세스 상실)",
+        cause: "어댑터 자식 프로세스가 예기치 않게 종료/상실돼 run 실패. in-memory handle 상실(→orphan), 서버 재시작, 자식 crash 등. CMPA-5519 hang의 주요 원인.",
+        solution: "detached 30min cap + graceful shutdown 자식 회수로 handle-loss 회수 지연을 보강. 반복 시 adapter command·리소스·안정성 점검.",
+        errorCode: "process_lost",
+      }, run.id);
+
       let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
       let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (shouldRetry) {
@@ -5934,6 +5945,19 @@ export function heartbeatService(db: Db) {
           cause: "어댑터 자식 프로세스가 stdout을 닫지 않고 무한 출력 → event loop 독점 → 64MB cap-kill.",
           solution: "자식의 대량 stdout은 파일 리다이렉트 후 tail. 명령/플래그로 스트리밍 출력 억제.",
           errorCode: "child_stdout_runaway_capkill",
+        }, run.id);
+      }
+      // Agent wiki hook (adapter_failed non-overload): adapter 실행 실패 교훈 축적 (non-blocking).
+      // provider overload(529)는 위 overload 분류로 별도 기록되므로 제외. 이 블록은 issue-linked failed run
+      // 에 도달(classifyHeartbeatRunFailure 이후)하므로 adapter_failed run을 커버.
+      if (run.status === "failed" && run.errorCode === "adapter_failed" && classification.category !== "overload") {
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          pattern: "adapter_failed (adapter 실행 실패)",
+          cause: "adapter 실행이 실패해 run 종료. opencode models discovery timeout(20s), command 시작 실패(ENOENT), adapter 내부 에러 등. provider overload(529)는 overload 분류로 별도 기록.",
+          solution: "opencode models timeout은 retry+stale serve로 완화. 반복 시 adapter command·PATH·인증·리소스 점검. command 부재는 영구 장애이므로 adapter 설정 확인.",
+          errorCode: "adapter_failed",
         }, run.id);
       }
 
