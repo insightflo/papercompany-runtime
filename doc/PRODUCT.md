@@ -1,15 +1,32 @@
-# Paperclip - Product Definition
+# papercompany - Product Definition
+
+papercompany is derived from [Paperclip](https://github.com/paperclipai/paperclip). This document describes the papercompany product surface; Paperclip-era package, CLI, and environment names are compatibility details rather than product positioning.
 
 ## What It Is
 
-Paperclip is the control plane for agent-run company operations.
-One instance of Paperclip can run multiple companies. A **company** is a first-order object.
+papercompany is the control plane for agent-run company operations.
+One instance of papercompany can run multiple companies. A **company** is a first-order object.
 
-Paperclip is designed so that coding is one department, not the center of the product.
+papercompany is designed so that coding is one department, not the center of the product.
 Its purpose is to help agent teams operate more like human teams: through missions, procedures, approvals, regulated work systems, and visible outcomes.
 
-Paperclip treats a mission as more than a prompt.
+papercompany treats a mission as more than a prompt.
 A mission is an operating loop: it turns a goal into planned work, assigns the right agents or tools, tracks execution state, retries or escalates when work fails, verifies outputs against explicit criteria, and records evidence before the work is considered complete.
+
+## What Changed From Paperclip
+
+papercompany keeps Paperclip's core idea of a self-hosted agent control plane, but changes the center of gravity from agent task coordination to company operations.
+
+- **Company-first product language.** Missions, teams, work systems, outputs, budgets, approvals, and outcomes are first-class product concepts. Issues and adapter runs remain V1 implementation nouns.
+- **Mission operating kernel.** Mission-scoped work follows a mission-first, evidence-first, bounded-recovery contract. Failures become small, explicit exception states such as `failed_run`, `blocked_issue`, `stale_issue`, `missing_evidence`, and `budget_or_policy_stop`.
+- **Evidence-backed completion.** Work is not considered complete because an agent says it is done. It needs work products, artifact references, verification signals, or operator-visible output.
+- **Native workflow/DAG ownership.** Workflow definitions, workflow runs, step runs, resume behavior, and downstream step creation are owned by the server-native workflow service instead of ad hoc plugin execution.
+- **Cross-company mission delegation.** A source mission can hand work to another company as a target mission, keep a blocked tracker issue, and copy completed target work products back to the source context.
+- **Operational board surface.** The board UI is organized around missions, scheduler state, approvals, channels, costs, exceptions, workflow state, and output review rather than only agent/task lists.
+- **Worktree-local development instances.** Dev worktrees can get isolated ports, embedded databases, config, and branding so multiple papercompany instances can run safely on one machine.
+- **Extensible edges.** Plugins, service-request bridges, research workbench adapters, tool registry integration, and company skill management add specialized behavior without turning every domain workflow into core code.
+
+The compatibility namespace is intentionally separate from product language. `paperclipai`, `@paperclipai/*`, `PAPERCLIP_*`, `~/.paperclip`, and `.paperclip.yaml` still exist because they are current runtime/package contracts inherited from Paperclip.
 
 ## Core Concepts
 
@@ -27,7 +44,7 @@ A company has:
 
 ### Teams and Agents
 
-Paperclip organizes workers into teams with clear responsibilities.
+papercompany organizes workers into teams with clear responsibilities.
 Those teams may be engineering, accounting, operations, support, sales, or another business function.
 
 In the current V1 implementation, live org structure is represented primarily through companies, agents, reporting lines, goals, missions, and issues.
@@ -78,18 +95,18 @@ Examples include:
 - repositories, CI, and deployment systems
 - document, file, and submission systems
 
-Paperclip does not replace these systems.
+papercompany does not replace these systems.
 It coordinates agent teams so work is completed through them.
 
 ### Outcomes
 
-Paperclip should track not only activity and spend, but the outputs and outcomes that matter to the company.
+papercompany should track not only activity and spend, but the outputs and outcomes that matter to the company.
 
 In V1, outcomes are currently represented most concretely through documents, work products, approvals, and visible artifacts rather than through a single dedicated outcome model.
 
 ## V1 Implementation Bridge
 
-Paperclip's product language should evolve faster than its implementation vocabulary, but the bridge must stay explicit.
+papercompany's product language should evolve faster than its implementation vocabulary, but the bridge must stay explicit.
 
 In V1:
 
@@ -102,7 +119,7 @@ This means the product should increasingly speak in company-operating terms, whi
 
 ## Principles
 
-1. **Company is the unit of organization.** Everything lives under a company. One Paperclip instance, many companies.
+1. **Company is the unit of organization.** Everything lives under a company. One papercompany instance, many companies.
 
 2. **Agent teams should operate like human teams.** The product should model responsibility, procedure, approvals, and outcomes, not just execution.
 
@@ -110,7 +127,7 @@ This means the product should increasingly speak in company-operating terms, whi
 
 4. **Outputs matter when they are completed in the right place.** Generated text is not the same thing as finished business work.
 
-5. **Control plane, not execution plane.** Paperclip orchestrates. The actual work is carried out through external work systems and execution infrastructure.
+5. **Control plane, not execution plane.** papercompany orchestrates. The actual work is carried out through external work systems and execution infrastructure.
 
 6. **Mission operating kernel, not bespoke micromanagement.** Papercompany-specific autonomy should stay bounded by the concise mission-first/evidence-first/recovery-action contract in `doc/spec/mission-operating-kernel.md`.
 
@@ -118,7 +135,7 @@ This means the product should increasingly speak in company-operating terms, whi
 
 ## User Flow (Dream Scenario)
 
-1. Open Paperclip and create a company
+1. Open papercompany and create a company
 2. Define the company's mission and operating goals
 3. Create the initial leadership and key team roles
 4. Define which procedures and work systems those teams use
@@ -126,7 +143,7 @@ This means the product should increasingly speak in company-operating terms, whi
 6. Start the company - agents begin working through missions, procedures, and work systems
 7. Observe outcomes, review exceptions, and intervene only where needed
 
-## What Paperclip Should Do vs. Not Do
+## What papercompany should do vs. not do
 
 **Do**
 

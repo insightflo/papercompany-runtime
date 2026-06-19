@@ -1,13 +1,15 @@
 # Plugin Authoring Guide
 
-This guide describes the current, implemented way to create a Paperclip plugin in this repo.
+This guide describes the current, implemented way to create a papercompany plugin in this repo.
+
+Compatibility note: scaffold commands and SDK packages still use `@paperclipai/*` names because that is the active package namespace inherited from Paperclip.
 
 It is intentionally narrower than [PLUGIN_SPEC.md](./PLUGIN_SPEC.md). The spec includes future ideas; this guide only covers the alpha surface that exists now.
 
 ## Current reality
 
 - Treat plugin workers and plugin UI as trusted code.
-- Plugin UI runs as same-origin JavaScript inside the main Paperclip app.
+- Plugin UI runs as same-origin JavaScript inside the main papercompany app.
 - Worker-side host APIs are capability-gated.
 - Plugin UI is not sandboxed by manifest capabilities.
 - There is no host-provided shared React component kit for plugins yet.
@@ -22,7 +24,7 @@ pnpm --filter @paperclipai/create-paperclip-plugin build
 node packages/plugins/create-paperclip-plugin/dist/index.js @yourscope/plugin-name --output ./packages/plugins/examples
 ```
 
-For a plugin that lives outside the Paperclip repo:
+For a plugin that lives outside the papercompany repo:
 
 ```bash
 pnpm --filter @paperclipai/create-paperclip-plugin build
@@ -42,7 +44,7 @@ That creates a package with:
 
 Inside this monorepo, the scaffold uses `workspace:*` for `@paperclipai/plugin-sdk`.
 
-Outside this monorepo, the scaffold snapshots `@paperclipai/plugin-sdk` from the local Paperclip checkout into a `.paperclip-sdk/` tarball so you can build and test a plugin without publishing anything to npm first.
+Outside this monorepo, the scaffold snapshots `@paperclipai/plugin-sdk` from the local papercompany checkout into a `.paperclip-sdk/` tarball so you can build and test a plugin without publishing anything to npm first.
 
 ## Recommended local workflow
 
@@ -55,12 +57,12 @@ pnpm test
 pnpm build
 ```
 
-For local development, install it into Paperclip from an absolute local path through the plugin manager or API. The server supports local filesystem installs and watches local-path plugins for file changes so worker restarts happen automatically after rebuilds.
+For local development, install it into papercompany from an absolute local path through the plugin manager or API. The server supports local filesystem installs and watches local-path plugins for file changes so worker restarts happen automatically after rebuilds.
 
 Example:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/api/plugins/install \
+curl -X POST http://127.0.0.1:3200/api/plugins/install \
   -H "Content-Type: application/json" \
   -d '{"packageName":"/absolute/path/to/your-plugin","isLocalPath":true}'
 ```

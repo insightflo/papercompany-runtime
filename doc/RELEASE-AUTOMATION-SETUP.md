@@ -1,11 +1,13 @@
 # Release Automation Setup
 
-This document covers the GitHub and npm setup required for the current Paperclip release model:
+This document covers the GitHub and npm setup required for the current papercompany release model:
 
 - automatic canaries from `master`
 - manual stable promotion from a chosen source ref
 - npm trusted publishing via GitHub OIDC
 - protected release infrastructure in a public repository
+
+Compatibility note: npm packages are still published under `paperclipai` / `@paperclipai/*`, but the trusted-publisher repository should be the current papercompany runtime repository.
 
 Repo-side files that depend on this setup:
 
@@ -29,7 +31,7 @@ Required files:
 
 ## 2. Configure npm Trusted Publishing
 
-Do this for every public package that Paperclip publishes.
+Do this for every public package that papercompany publishes.
 
 At minimum that includes:
 
@@ -43,7 +45,7 @@ For each package:
 
 1. open npm as an owner of the package
 2. go to the package settings / publishing access area
-3. add a trusted publisher for the GitHub repository `paperclipai/paperclip`
+3. add a trusted publisher for the GitHub repository `insightflo/papercompany-runtime`
 
 ### 2.2. Add one trusted publisher entry per package
 
@@ -55,7 +57,7 @@ Configure:
 
 Repository:
 
-- `paperclipai/paperclip`
+- `insightflo/papercompany-runtime`
 
 Environment name:
 
@@ -82,7 +84,7 @@ Only after that should you remove old token-based access.
 After trusted publishing works:
 
 1. revoke any repository or organization `NPM_TOKEN` secrets used for publish
-2. revoke any personal automation token that used to publish Paperclip
+2. revoke any personal automation token that used to publish papercompany
 3. if npm offers a package-level setting to restrict publishing to trusted publishers, enable it
 
 Goal:

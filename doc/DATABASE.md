@@ -1,6 +1,8 @@
 # Database
 
-Paperclip uses PostgreSQL via [Drizzle ORM](https://orm.drizzle.team/). There are three ways to run the database, from simplest to most production-ready.
+papercompany uses PostgreSQL via [Drizzle ORM](https://orm.drizzle.team/). There are three ways to run the database, from simplest to most production-ready.
+
+Compatibility note: local paths, CLI package names, and environment variables still use Paperclip-era names such as `~/.paperclip`, `paperclipai`, and `PAPERCLIP_*`. They are retained so existing instances and tooling continue to work while the product documentation moves to papercompany.
 
 ## 1. Embedded PostgreSQL — zero config
 
@@ -25,7 +27,7 @@ If you need to apply pending migrations manually, run:
 pnpm db:migrate
 ```
 
-When `DATABASE_URL` is unset, this command targets the current embedded PostgreSQL instance for your active Paperclip config/instance.
+When `DATABASE_URL` is unset, this command targets the current embedded PostgreSQL instance for your active papercompany config/instance.
 
 This mode is ideal for local development and one-command installs.
 
@@ -133,7 +135,7 @@ Your Drizzle schema (`packages/db/src/schema/`) stays the same regardless of mod
 
 ## Secret storage
 
-Paperclip stores secret metadata and versions in:
+papercompany stores secret metadata and versions in:
 
 - `company_secrets`
 - `company_secret_versions`

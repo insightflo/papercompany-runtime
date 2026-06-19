@@ -1,6 +1,8 @@
 # Docker Quickstart
 
-Run Paperclip in Docker without installing Node or pnpm locally.
+Run papercompany in Docker without installing Node or pnpm locally.
+
+Compatibility note: image/container examples may still use `paperclip` names, and runtime configuration still uses `PAPERCLIP_*` variables. Those names come from the upstream Paperclip base and remain part of the current runtime contract.
 
 ## One-liner (build + run)
 
@@ -46,7 +48,7 @@ If you change host port or use a non-local domain, set `PAPERCLIP_PUBLIC_URL` to
 
 ## Authenticated Compose (Single Public URL)
 
-For authenticated deployments, set one canonical public URL and let Paperclip derive auth/callback defaults:
+For authenticated deployments, set one canonical public URL and let papercompany derive auth/callback defaults:
 
 ```yaml
 services:
@@ -91,7 +93,7 @@ docker run --name paperclip \
 Notes:
 
 - Without API keys, the app still runs normally.
-- Adapter environment checks in Paperclip will surface missing auth/CLI prerequisites.
+- Adapter environment checks in papercompany will surface missing auth/CLI prerequisites.
 
 ## Untrusted PR Review Container
 
@@ -128,7 +130,7 @@ Notes:
 - Persistent data is mounted at `./data/docker-onboard-smoke` by default.
 - Container runtime user id defaults to your local `id -u` so the mounted data dir stays writable while avoiding root runtime.
 - Smoke script defaults to `authenticated/private` mode so `HOST=0.0.0.0` can be exposed to the host.
-- Smoke script defaults host port to `3131` to avoid conflicts with local Paperclip on `3200`.
+- Smoke script defaults host port to `3131` to avoid conflicts with local papercompany on `3200`.
 - Smoke script also defaults `PAPERCLIP_PUBLIC_URL` to `http://localhost:<HOST_PORT>` so bootstrap invite URLs and auth callbacks use the reachable host port instead of the container's internal `3200`.
 - In authenticated mode, the smoke script defaults `SMOKE_AUTO_BOOTSTRAP=true` and drives the real bootstrap path automatically: it signs up a real user, runs `paperclipai auth bootstrap-ceo` inside the container to mint a real bootstrap invite, accepts that invite over HTTP, and verifies board session access.
 - Run the script in the foreground to watch the onboarding flow; stop with `Ctrl+C` after validation.
