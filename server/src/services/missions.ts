@@ -64,6 +64,14 @@ import {
   isIssueLessToolWorkflowStep,
   type ToolStepFailureClassification,
 } from "./missions/tool-step-failure.js";
+import type {
+  MissionOwnerSupervisionRecommendation,
+  MissionOwnerDecisionWakeupDispatchStatus,
+  MissionOwnerDecisionWakeupDispatchResult,
+  MissionOwnerSupervisionAppliedAction,
+  MissionOwnerSupervisionResult,
+  ActiveMissionOwnerSupervisionResult,
+} from "./missions/supervision-types.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
   hasMissionOwnerDecisionAppliedMarker,
@@ -149,90 +157,16 @@ export type {
 } from "./missions/workflow-progress.js";
 export type MissionIssueTree = Awaited<ReturnType<ReturnType<typeof issueService>["list"]>>;
 
-export type MissionOwnerSupervisionRecommendationType =
-  | "dispatch_missing_step"
-  | "dispatch_missing_unit"
-  | "retry_failed_step_if_safe"
-  | "retry_unit_if_safe"
-  | "request_replan"
-  | "request_approval"
-  | "escalate_blocked"
-  | "materialize_plan_decision"
-  | "materialize_artifact_from_comment"
-  | "mark_impossible_with_evidence";
-
-export type MissionOwnerSupervisionRecommendation = {
-  type: MissionOwnerSupervisionRecommendationType;
-  missionId: string;
-  reason: string;
-  safeToAutoApply: boolean;
-  workflowRunId?: string;
-  stepId?: string;
-  issueId?: string;
-  sourceRef?: MissionExecutionSourceRef;
-};
-
-export type MissionOwnerDecisionWakeupDispatchStatus = "not_requested" | "dispatched" | "workflow_already_dispatched" | "skipped_no_assignee" | "failed";
-
-export type MissionOwnerDecisionWakeupDispatchResult = {
-  status?: MissionOwnerDecisionWakeupDispatchStatus;
-  runId?: string | null;
-  workflowWakeupRequestId?: string;
-};
-
-export type MissionOwnerSupervisionAppliedAction = {
-  type: "dispatch_missing_step";
-  missionId: string;
-  workflowRunId: string;
-  stepIds: string[];
-  resultStatus: string;
-} | {
-  type: "owner_decision_retry_source_issue";
-  missionId: string;
-  ownerActionIssueId: string;
-  sourceIssueId: string;
-  resultStatus: string;
-  wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
-  idempotencyKey?: string;
-} | {
-  type: "materialize_plan_decision";
-  missionId: string;
-  resultStatus: string;
-  planningIssueId: string | null;
-  workflowRunId?: string;
-} | {
-  type: "native_tool_step_retry";
-  missionId: string;
-  ownerActionIssueId: string;
-  workflowRunId: string;
-  stepId: string;
-  stepRunId: string;
-  resultStatus: string;
-} | {
-  type: "stale_source_issue_wakeup";
-  missionId: string;
-  sourceIssueId: string;
-  failedRunId: string;
-  resultStatus: string;
-  wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus;
-  idempotencyKey: string;
-};
-
-export type MissionOwnerSupervisionResult = {
-  missionId: string;
-  oversightIssueId: string | null;
-  findings: string[];
-  recommendations: MissionOwnerSupervisionRecommendation[];
-  appliedActions: MissionOwnerSupervisionAppliedAction[];
-  ownerActionExplanations: MissionOwnerActionExplanation[];
-  commented: boolean;
-};
-
-export type ActiveMissionOwnerSupervisionResult = {
-  companyId?: string;
-  missionIds: string[];
-  missions: MissionOwnerSupervisionResult[];
-};
+// supervision 결과 타입은 ./missions/supervision-types.js 로 분리(public API re-export).
+export type {
+  MissionOwnerSupervisionRecommendationType,
+  MissionOwnerSupervisionRecommendation,
+  MissionOwnerDecisionWakeupDispatchStatus,
+  MissionOwnerDecisionWakeupDispatchResult,
+  MissionOwnerSupervisionAppliedAction,
+  MissionOwnerSupervisionResult,
+  ActiveMissionOwnerSupervisionResult,
+} from "./missions/supervision-types.js";
 
 async function buildMissionOwnerActionExplanations(db: Db, mission: MissionRow): Promise<MissionOwnerActionExplanation[]> {
   const ownerActionIssues = await db
