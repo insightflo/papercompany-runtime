@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   discoverOpenCodeModelsCached,
   ensureOpenCodeModelConfiguredAndAvailable,
   isRetryableDiscoveryError,
   listOpenCodeModels,
   resetOpenCodeModelsCacheForTests,
+  resetOpenCodeModelsDiscoveryForTests,
   seedOpenCodeModelsCacheForTests,
+  setOpenCodeModelsDiscoveryForTests,
   withRetry,
 } from "./models.js";
 
@@ -16,6 +18,7 @@ describe("openCode models", () => {
   afterEach(() => {
     delete process.env.PAPERCLIP_OPENCODE_COMMAND;
     resetOpenCodeModelsCacheForTests();
+    resetOpenCodeModelsDiscoveryForTests();
   });
 
   it("returns an empty list when discovery command is unavailable", async () => {
@@ -72,6 +75,52 @@ describe("openCode models", () => {
     await expect(
       ensureOpenCodeModelConfiguredAndAvailable({ model: "anthropic/claude-5", command: BAD_COMMAND }),
     ).rejects.toThrow("Configured OpenCode model is unavailable");
+  });
+
+  it("does not retry discovery when a usable stale cache exists (1 attempt)", async () => {
+    const seeded = [{ id: "openai/gpt-5", label: "openai/gpt-5" }];
+    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND }, seeded, -30_000); // stale
+    let calls = 0;
+    setOpenCodeModelsDiscoveryForTests(async () => {
+      calls += 1;
+      throw new Error("`opencode models` failed: boom"); // retryable
+    });
+    await expect(discoverOpenCodeModelsCached({ command: BAD_COMMAND })).resolves.toEqual(seeded);
+    expect(calls).toBe(1);
+  });
+
+  it("retries discovery up to max attempts when no stale cache exists", async () => {
+    let calls = 0;
+    setOpenCodeModelsDiscoveryForTests(async () => {
+      calls += 1;
+      throw new Error("`opencode models` failed: boom"); // retryable
+    });
+    await expect(discoverOpenCodeModelsCached({ command: BAD_COMMAND })).rejects.toThrow("boom");
+    expect(calls).toBe(2); // MODELS_DISCOVERY_MAX_ATTEMPTS
+  });
+
+  it("sanitizes PATH out of the stale-serve warning reason", async () => {
+    const seeded = [{ id: "openai/gpt-5", label: "openai/gpt-5" }];
+    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND }, seeded, -30_000); // stale
+    const verbosePath = "/Users/kwak/.local/bin:/usr/bin:/bin";
+    setOpenCodeModelsDiscoveryForTests(async () => {
+      throw new Error(
+        `Failed to start command "${BAD_COMMAND}" in "/cwd". Verify adapter command, working directory, and PATH (${verbosePath}).`,
+      );
+    });
+    const warns: string[] = [];
+    const spy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warns.push(args.join(" "));
+    });
+    try {
+      await discoverOpenCodeModelsCached({ command: BAD_COMMAND });
+      const staleWarn = warns.find((w) => w.includes("STALE cached models")) ?? "";
+      expect(staleWarn).toContain("reason="); // 핵심 reason 남음
+      expect(staleWarn).not.toContain(verbosePath); // PATH 전체 제거
+      expect(staleWarn).not.toContain("/Users/kwak"); // PATH 잔여 없음
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
