@@ -31,6 +31,7 @@ import { createHeartbeatScheduler } from "./services/heartbeat-scheduler.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
+import { runningProcesses } from "./adapters/index.js";
 
 type BetterAuthSessionUser = {
   id: string;
@@ -647,26 +648,57 @@ export async function startServer(): Promise<StartedServer> {
     heartbeatScheduler.start();
   }
   
-  if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
-    const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-      logger.info({ signal }, "Stopping embedded PostgreSQL");
-      try {
-        heartbeatScheduler?.stop();
-        await embeddedPostgres?.stop();
-      } catch (err) {
-        logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");
-      } finally {
-        process.exit(0);
+  // Graceful shutdown — SIGINT/SIGTERM 시 (a) heartbeat scheduler 정지, (b) tracked adapter child를
+  // 모두 회수(orphan/hang 방지 — CMPA-5519: 재기동 후 child가 ~68분 orphan 생존하던 사고 대응),
+  // (c) 이 프로세스가 시작한 embedded postgres 정지. 핸들러를 embedded-postgres 가드 밖으로 뺐다 ->
+  // external-postgres 배포(A1 등)에서도 항상 tracked child를 회수한다.
+  const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+    logger.info({ signal }, "Server shutting down");
+    const childGraceMs = 2000;
+    try {
+      heartbeatScheduler?.stop();
+      // tracked adapter child 회수: SIGTERM → grace → SIGKUL(exit 전 확실히 종료).
+      // (child.killed 는 kill() 호출 즉시 true 가 되어 신뢰할 수 없으므로 SIGKILL 은 무조건 시도.)
+      const trackedEntries = Array.from(runningProcesses.entries());
+      for (const tracked of trackedEntries.map((entry) => entry[1])) {
+        try {
+          if (!tracked.child.killed) tracked.child.kill("SIGTERM");
+        } catch {
+          // best-effort: child may already be gone
+        }
       }
-    };
+      if (trackedEntries.length > 0) {
+        await new Promise((resolve) => setTimeout(resolve, childGraceMs));
+        for (const [runId, tracked] of trackedEntries) {
+          try {
+            tracked.child.kill("SIGKILL");
+          } catch {
+            // already exited
+          }
+          logger.info(
+            { runId, pid: tracked.child.pid ?? null },
+            "Terminated tracked adapter child on shutdown",
+          );
+        }
+        runningProcesses.clear();
+      }
+      if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
+        logger.info({ signal }, "Stopping embedded PostgreSQL");
+        await embeddedPostgres.stop();
+      }
+    } catch (err) {
+      logger.error({ err }, "Failed to shut down cleanly");
+    } finally {
+      process.exit(0);
+    }
+  };
   
-    process.once("SIGINT", () => {
-      void shutdown("SIGINT");
-    });
-    process.once("SIGTERM", () => {
-      void shutdown("SIGTERM");
-    });
-  }
+  process.once("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
 
   return {
     server,

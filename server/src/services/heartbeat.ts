@@ -113,6 +113,10 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
+// orphaned-but-alive child 강제 회수 시한. handle 상실 후에도 child pid 가 살아 reaper 가 process_detached
+// 로 매 tick defer 만 하던 무한 대기(CMPA-5519 ~72분 hang)를 상한으로 끊고 process_lost+retry 로 회수.
+const DETACHED_REAP_AFTER_MS = 30 * 60 * 1000;
+const DETACHED_GRACE_SEC = 5;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 const startLocksByAgent = new Map<string, Promise<void>>();
@@ -4072,7 +4076,27 @@ export function heartbeatService(db: Db) {
             });
           }
         }
-        continue;
+        // FIX 2b: orphaned-but-alive child longevity cap. child 가 DETACHED_REAP_AFTER_MS 초과 실행 중이면
+        // 강제 kill 후 아래 기존 process_lost/retry 경로로 fall-through(무한 defer 방지 — CMPA-5519 대응).
+        const detachedChildStartedMs = run.processStartedAt
+          ? new Date(run.processStartedAt).getTime()
+          : run.startedAt
+            ? new Date(run.startedAt).getTime()
+            : 0;
+        if (
+          DETACHED_REAP_AFTER_MS > 0 &&
+          detachedChildStartedMs > 0 &&
+          now.getTime() - detachedChildStartedMs > DETACHED_REAP_AFTER_MS
+        ) {
+          terminateRecordedProcess(run.processPid, "SIGTERM");
+          setTimeout(
+            () => terminateRecordedProcess(run.processPid, "SIGKILL"),
+            Math.max(1, DETACHED_GRACE_SEC) * 1000,
+          );
+          // fall through to process_lost/retry below (의도적 continue 생략).
+        } else {
+          continue;
+        }
       }
 
       const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;

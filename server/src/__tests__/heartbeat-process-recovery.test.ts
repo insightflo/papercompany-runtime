@@ -209,6 +209,7 @@ describe("heartbeat orphaned process recovery", () => {
     runErrorCode?: string | null;
     runError?: string | null;
     updatedAt?: Date;
+    processStartedAt?: Date | null;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -260,6 +261,7 @@ describe("heartbeat orphaned process recovery", () => {
       wakeupRequestId,
       contextSnapshot: input?.includeIssue === false ? {} : { issueId },
       processPid: input?.processPid ?? null,
+      processStartedAt: input?.processStartedAt ?? null,
       processLossRetryCount: input?.processLossRetryCount ?? 0,
       errorCode: input?.runErrorCode ?? null,
       error: input?.runError ?? null,
@@ -292,6 +294,7 @@ describe("heartbeat orphaned process recovery", () => {
 
     const { runId, wakeupRequestId } = await seedRunFixture({
       processPid: child.pid ?? null,
+      processStartedAt: new Date(),
       includeIssue: false,
     });
     const heartbeat = heartbeatService(db);
@@ -310,6 +313,28 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(agentWakeupRequests.id, wakeupRequestId))
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("claimed");
+  });
+
+  it("force-reaps a detached local run whose child has run past the detached cap", async () => {
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    expect(child.pid).toBeTypeOf("number");
+
+    const { runId } = await seedRunFixture({
+      processPid: child.pid ?? null,
+      // 45분 전 시작 — DETACHED_REAP_AFTER_MS(30분) 초과 → cap 발동해 process_lost 회수
+      processStartedAt: new Date(Date.now() - 45 * 60 * 1000),
+      processLossRetryCount: 1,
+      includeIssue: false,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("process_lost");
   });
 
   it("terminates a detached recorded pid when cancelling the run", async () => {

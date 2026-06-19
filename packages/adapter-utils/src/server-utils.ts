@@ -883,6 +883,11 @@ export async function runChildProcess(
     const mergedEnv = ensurePathInEnv(rawMerged);
     void resolveSpawnTarget(command, args, opts.cwd, mergedEnv)
       .then((target) => {
+        // [의도] deliberately foreground — detached 없음. Paperclip 은 child 를 runningProcesses Map 으로
+        // 추적하고 heartbeat reaper + graceful shutdown 핸들러(server/src/index.ts)가 SIGTERM/SIGKILL 로 회수한다.
+        // detached:true 를 다시 넣으려면 onSpawn/persistRunProcessMetadata 의 processGroupId 파이프라인도
+        // 함께 연결해야 함(참고: published npm @paperclipai/adapter-utils@2026.529.0 은 detached:true 를 쓰지만,
+        // 본 workspace 런타임은 package exports 가 src 를 물어 detached 없음으로 동작 — src/dist 간 불일치 아님).
         const child = spawn(target.command, target.args, {
           cwd: opts.cwd,
           env: mergedEnv,
