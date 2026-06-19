@@ -329,9 +329,62 @@ function isHermesCliChromeLine(line: string) {
   );
 }
 
+function isHermesProgressNoiseLine(line: string) {
+  return (
+    /^Query:\s*/i.test(line) ||
+    /^Initializing\b/i.test(line) ||
+    /^Paperclip runtime brief\b/i.test(line) ||
+    /^Reasoning$/i.test(line) ||
+    /^loop\. Do not switch to text-only replies/i.test(line) ||
+    /^the same tool, then try an absolute path/i.test(line) ||
+    /^such as read_file\/write_file\/patch/i.test(line) ||
+    /^error\/output and verify your assumptions/i.test(line) ||
+    /Do not perform new source discovery/i.test(line) ||
+    /Return PASS or REQUEST_CHANGES/i.test(line) ||
+    /validator returned REQUEST_CHANGES/i.test(line) ||
+    /Include article summaries/i.test(line) ||
+    /^source quality, overclaiming/i.test(line) ||
+    /^review diff$/i.test(line) ||
+    /^💻 preparing terminal/i.test(line) ||
+    /^\[hermes\]\s*/i.test(line)
+  );
+}
+
+function looksLikeShellOrToolPayload(line: string) {
+  return (
+    /^\s*(?:#|echo\b)/.test(line) ||
+    /^-d\s+/.test(line) ||
+    /^@@\s/.test(line) ||
+    /^[ab]\/\/tmp\//.test(line) ||
+    /^✍️\s+write\b/.test(line) ||
+    /^✍️\s+preparing\b/.test(line) ||
+    /^⚡\s+Concurrent\b/.test(line) ||
+    /\\"/.test(line) ||
+    /(?:^|\s)(?:curl|rg|grep|jq|sed|awk|cat|find|git|pnpm|npm|node|python3?|tsx)\s/.test(line) ||
+    /\|\s*(?:jq|grep|sed|awk)\b/.test(line) ||
+    /\b(?:exit_code|stderr|stdout|workdir|timeout_ms)\b/.test(line) ||
+    /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?\/api\//.test(line) ||
+    /(?:^|\\)"https?:\/\/[^"]+(?:\\)?"\s*\|/.test(line) ||
+    /\$AUTH\b/.test(line) ||
+    /2>\/dev\/null/.test(line) ||
+    /^\s*-iE\s+/.test(line)
+  );
+}
+
+function looksLikeUserFacingProgressLine(line: string) {
+  return (
+    /^(?:알겠습니다|먼저|다음|이제|확인|수정|완료|작업|현재|좋습니다|검증|결과|두 워크플로우)/.test(line) ||
+    /^(?:I\b|I'll\b|I'm\b|I’m\b|Let me\b|Now\b|Next\b|First\b|The files\b|The shell\b|Both\b|Good\b|Done\b|Completed\b|No matches\b|The grep\b)/i.test(line)
+  );
+}
+
 function looksLikeToolContinuation(line: string) {
   return (
-    /^[{}\[\]",]/.test(line) ||
+    /^[{}\[\]+,]/.test(line) ||
+    /^\\?"/.test(line) ||
+    /\\n/.test(line) ||
+    /\b(?:stepCount|graphContainerType|branch-one)\b/.test(line) ||
+    /^steps["']?\s*:/.test(line) ||
     /^["']?(?:command|timeout|workdir|output|exit_code|error)["']?\s*:/.test(line) ||
     /^\w+:\s*\{/.test(line) ||
     /^null[},]?$/.test(line)
@@ -351,21 +404,50 @@ function responseFromDisplayLines(lines: string[]) {
   return responseLines.length > 0 ? responseLines.join("\n").trim() : null;
 }
 
+export function parseHermesProgressText(stdout: string) {
+  const clean = stripAnsi(stdout);
+  const markerIdx = clean.indexOf("Conversation completed after");
+  const body = markerIdx >= 0 ? clean.slice(0, markerIdx) : clean;
+  const lines = hermesDisplayLines(body)
+    .filter((line) => !isHermesSpeakerLabel(line))
+    .filter((line) => !isHermesCliChromeLine(line))
+    .filter((line) => !looksLikeToolContinuation(line))
+    .filter((line) => !looksLikeShellOrToolPayload(line))
+    .filter((line) => !isHermesProgressNoiseLine(line))
+    .filter(looksLikeUserFacingProgressLine);
+
+  if (lines.length === 0) return null;
+  return lines.join("\n").trim();
+}
+
 function parseHermesConversationResponse(stdout: string) {
   const clean = stripAnsi(stdout);
   const marker = "Conversation completed after";
   const markerIdx = clean.indexOf(marker);
 
-  const beforeMarker = markerIdx >= 0 ? clean.slice(0, markerIdx) : clean;
-  const hermesBlockStart = Math.max(
-    beforeMarker.lastIndexOf("⚕ Hermes"),
-    beforeMarker.lastIndexOf("🤖 Hermes"),
-    beforeMarker.lastIndexOf("Hermes ─"),
-  );
-  if (hermesBlockStart >= 0) {
-    const response = responseFromDisplayLines(hermesDisplayLines(beforeMarker.slice(hermesBlockStart)));
-    if (response) return response;
+  const responseFromLastHermesBlock = (body: string) => {
+    const hermesBlockStart = Math.max(
+      body.lastIndexOf("⚕ Hermes"),
+      body.lastIndexOf("🤖 Hermes"),
+      body.lastIndexOf("Hermes ─"),
+    );
+    if (hermesBlockStart < 0) return null;
+    return responseFromDisplayLines(hermesDisplayLines(body.slice(hermesBlockStart)));
+  };
+
+  if (markerIdx >= 0) {
+    const afterMarker = clean.slice(markerIdx + marker.length);
+    const finalBlockEndMatch = afterMarker.match(/\n(?:Resume this session with:|Session:|Duration:|Messages:|\[hermes\])/);
+    const finalBlock = finalBlockEndMatch?.index !== undefined
+      ? afterMarker.slice(0, finalBlockEndMatch.index)
+      : afterMarker;
+    const finalResponse = responseFromLastHermesBlock(finalBlock);
+    if (finalResponse) return finalResponse;
   }
+
+  const beforeMarker = markerIdx >= 0 ? clean.slice(0, markerIdx) : clean;
+  const response = responseFromLastHermesBlock(beforeMarker);
+  if (response) return response;
 
   if (markerIdx < 0) return null;
   const afterMarkerLine = clean.slice(markerIdx).split(/\r?\n/).slice(1).join("\n");
@@ -426,7 +508,15 @@ export function parseHermesOutput(stdout: string, stderr: string) {
 export async function executeHermesLocal(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
-  const config = (ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
+  // [주의] ctx.config 는 heartbeat 가 resolveAdapterConfigForRuntime 으로 env 의 secret_ref
+  //        를 plain 으로 resolve 한 결과다. ctx.agent.adapterConfig(원본) 에는 env 값이
+  //        {type:"secret_ref"} 객체로 남아있어, 그대로 쓰면 hermes 자식 env 에 token 이
+  //        안 들어간다(telegram 발송 실패). ctx.config(resolved) 를 우선 병합해 env 를
+  //        plain 문자열로 쓴다.
+  const config = {
+    ...((ctx.agent?.adapterConfig as Record<string, unknown>) ?? {}),
+    ...(ctx.config ?? {}),
+  } as Record<string, unknown>;
   const hermesCmd = cfgString(config.command) || cfgString(config.hermesCommand) || HERMES_CLI;
   const model = cfgString(config.model) || DEFAULT_MODEL;
   const provider = cfgString(config.provider);
