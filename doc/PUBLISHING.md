@@ -1,6 +1,8 @@
 # Publishing to npm
 
-Low-level reference for how Paperclip packages are prepared and published to npm.
+Low-level reference for how papercompany packages are prepared and published to npm.
+
+Compatibility note: the public CLI and workspace package namespace still use `paperclipai` / `@paperclipai/*`. Those package names are retained for install compatibility while the product documentation uses papercompany.
 
 For the maintainer workflow, use [doc/RELEASING.md](RELEASING.md). This document focuses on packaging internals.
 
@@ -13,7 +15,7 @@ Use these scripts:
 - [`scripts/rollback-latest.sh`](../scripts/rollback-latest.sh) to repoint `latest`
 - [`scripts/build-npm.sh`](../scripts/build-npm.sh) for the CLI packaging build
 
-Paperclip no longer uses release branches or Changesets for publishing.
+papercompany no longer uses release branches or Changesets for publishing.
 
 ## Why the CLI needs special packaging
 
@@ -67,7 +69,7 @@ Those rewrites are temporary. The working tree is restored after publish or dry-
 
 ## Version formats
 
-Paperclip uses calendar versions:
+papercompany uses calendar versions:
 
 - stable: `YYYY.MDD.P`
 - canary: `YYYY.MDD.P-canary.N`

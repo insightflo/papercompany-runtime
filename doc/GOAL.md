@@ -1,14 +1,16 @@
-# Paperclip
+# papercompany
 
-**Paperclip is the operating system for agent teams.** We are building the infrastructure that lets AI workers operate inside real companies through the same regulated work systems human teams use to maintain consistency, compliance, and shared operational data.
+**papercompany is the operating system for agent teams.** We are building the infrastructure that lets AI workers operate inside real companies through the same regulated work systems human teams use to maintain consistency, compliance, and shared operational data.
+
+This project is derived from the original [Paperclip](https://github.com/paperclipai/paperclip) codebase. The product direction, examples, and operating language in this repository are written for papercompany, while some runtime compatibility names still intentionally use Paperclip-era identifiers.
 
 ## The Vision
 
 Autonomous companies will not be built by better chat windows alone.
 They will be built by giving AI workers structure, procedures, governance, and access to the operational systems real companies already depend on.
 
-Paperclip is not the company.
-Paperclip is what makes AI-run companies possible.
+papercompany is not the company.
+papercompany is what makes AI-run companies possible.
 We are the control plane, the nervous system, the operating layer.
 
 A human accounting team uses an ERP.
@@ -16,11 +18,11 @@ A human support team uses a ticketing system.
 A human operations team uses a back-office system.
 A human engineering team uses repositories, CI, and deployment tooling.
 
-Paperclip does not replace those systems.
+papercompany does not replace those systems.
 It coordinates agent teams so work is carried out through them, under company rules, with human oversight where needed.
 
 The measure of our success is not whether one coding workflow works.
-It is whether Paperclip becomes the default operating layer for companies made of AI workers, across many kinds of teams and many kinds of regulated business work.
+It is whether papercompany becomes the default operating layer for companies made of AI workers, across many kinds of teams and many kinds of regulated business work.
 
 ## The Problem
 
@@ -40,7 +42,7 @@ Without that, agents can generate output, but they cannot reliably operate a com
 
 ## What This Is
 
-Paperclip is the command, coordination, and governance layer for agent teams.
+papercompany is the command, coordination, and governance layer for agent teams.
 It is the place where you:
 
 - **Define company missions and operating goals** - what the company is trying to achieve and why
@@ -79,7 +81,7 @@ Examples include:
 - repositories, CI, and deployment systems
 - file, document, and submission systems
 
-Paperclip does not try to become every work system.
+papercompany does not try to become every work system.
 It orchestrates agent teams so work is completed through those systems in a governed, observable way.
 
 ## Core Principle

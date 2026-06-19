@@ -1,9 +1,13 @@
-# Paperclip V1 Implementation Spec
+# papercompany V1 Implementation Spec
 
 Status: Implementation contract for first release (V1)
 Date: 2026-02-17
 Audience: Product, engineering, and agent-integration authors
 Source inputs: `GOAL.md`, `PRODUCT.md`, `SPEC.md`, `DATABASE.md`, current monorepo code
+
+Lineage: papercompany is derived from the original Paperclip project. V1 keeps several Paperclip compatibility surfaces, including the `paperclipai` CLI package, `@paperclipai/*` workspace packages, `PAPERCLIP_*` environment variables, `~/.paperclip` local state, and `.paperclip.yaml` portability sidecars.
+
+papercompany changes the V1 emphasis from a generic agent-task control plane to an agent-company operating system. The implementation adds or elevates company-scoped missions, governance decisions, workflow/DAG runs, recovery state, work products, budget enforcement, cross-company delegation, operational board views, worktree-local instance isolation, and plugin/tool-registry extension seams.
 
 ## 1. Document Role
 
@@ -13,7 +17,7 @@ When there is a conflict, `SPEC-implementation.md` controls V1 behavior.
 
 ## 2. V1 Outcomes
 
-Paperclip V1 must provide a full control-plane loop for autonomous agents:
+papercompany V1 must provide a full control-plane loop for autonomous agents:
 
 1. A human board creates a company and defines goals.
 2. The board creates and manages agents in an org tree.
@@ -890,7 +894,7 @@ V1 supports company import/export using a portable package contract:
 
 - markdown-first package rooted at `COMPANY.md`
 - implicit folder discovery by convention
-- `.paperclip.yaml` sidecar for Paperclip-specific fidelity
+- `.paperclip.yaml` sidecar for papercompany-specific fidelity
 - canonical base package is vendor-neutral and aligned with `docs/companies/companies-spec.md`
 - common conventions:
   - `agents/<slug>/AGENTS.md`

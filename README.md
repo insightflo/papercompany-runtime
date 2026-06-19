@@ -4,14 +4,14 @@
 
 <p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
-  <a href="https://paperclip.ing/docs"><strong>Docs</strong></a> &middot;
-  <a href="https://github.com/paperclipai/paperclip"><strong>GitHub</strong></a> &middot;
+  <a href="doc/DEVELOPING.md"><strong>Docs</strong></a> &middot;
+  <a href="https://github.com/insightflo/papercompany-runtime"><strong>GitHub</strong></a> &middot;
   <a href="https://discord.gg/m4HZY7xNG3"><strong>Discord</strong></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/paperclipai/paperclip/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
-  <a href="https://github.com/paperclipai/paperclip/stargazers"><img src="https://img.shields.io/github/stars/paperclipai/paperclip?style=flat" alt="Stars" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
+  <a href="https://github.com/insightflo/papercompany-runtime"><img src="https://img.shields.io/badge/repo-papercompany--runtime-18181b" alt="papercompany-runtime" /></a>
   <a href="https://discord.gg/m4HZY7xNG3"><img src="https://img.shields.io/discord/000000000?label=discord" alt="Discord" /></a>
 </p>
 
@@ -23,7 +23,7 @@
 
 <br/>
 
-> `papercompany` is forked from [Paperclip](https://github.com/paperclipai/paperclip) and extended for the papercompany operating model.
+> `papercompany` is a derivative of [Paperclip](https://github.com/paperclipai/paperclip), adapted for the papercompany operating model. The original Paperclip project remains the upstream source for several package names, CLI commands, environment variables, and compatibility paths that still use `paperclipai`, `PAPERCLIP_*`, or `~/.paperclip`.
 
 ## What is papercompany?
 
@@ -44,6 +44,25 @@ papercompany sits one layer above direct CLI daily use: community best practice 
 | **01** | Define the mission | _"Build the #1 AI note-taking app to $1M MRR."_                    |
 | **02** | Hire the team      | CEO, CTO, engineers, designers, marketers — any bot, any provider. |
 | **03** | Approve and run    | Review strategy. Set budgets. Hit go. Monitor from the dashboard.  |
+
+<br/>
+
+## What changed from Paperclip
+
+papercompany keeps the upstream Paperclip control-plane foundation, then changes the product toward running agent companies instead of only coordinating agent tasks.
+
+| Area | What changed in papercompany |
+| --- | --- |
+| **Product model** | The main unit is an agent-run company: missions, goals, org structure, budgets, approvals, work products, and outcomes are treated as one operating loop. |
+| **Mission execution** | Missions now carry workflow runs, governance decisions, issue plans, recovery state, and evidence requirements instead of being plain task containers. |
+| **Evidence and outputs** | Completion is tied to visible work products, artifacts, reports, files, links, and verification signals. Agent self-report alone is not treated as done. |
+| **Workflow ownership** | Server-native workflow/DAG execution owns workflow definitions, runs, step runs, resume behavior, and downstream step materialization. |
+| **Cross-company work** | Mission delegation can create governed target-company missions while the source company tracks blocked handoff issues and receives copied work products on completion. |
+| **Operator surface** | The board UI emphasizes company operations: missions, scheduler, approvals, channels, costs, exceptions, workflow state, and output review. |
+| **Local operations** | Worktree-local instances isolate dev databases, ports, branding, and config so multiple papercompany servers can run side by side safely. |
+| **Extensibility** | Plugins, tool registry integration, service-request bridges, research workbench tools, and company skill management extend the control plane without making every workflow core logic. |
+
+Some lower-level names still say Paperclip because they are compatibility surfaces, not the product story: `paperclipai`, `@paperclipai/*`, `PAPERCLIP_*`, `~/.paperclip`, and `.paperclip.yaml`.
 
 <br/>
 
@@ -181,18 +200,20 @@ Open source. Self-hosted. No papercompany account required.
 npx paperclipai onboard --yes
 ```
 
+The public CLI package is still named `paperclipai` for compatibility with the upstream Paperclip distribution.
+
 Or manually:
 
 ```bash
-git clone https://github.com/paperclipai/paperclip.git
-cd paperclip
+git clone https://github.com/insightflo/papercompany-runtime.git
+cd papercompany-runtime
 pnpm install
 pnpm dev
 ```
 
 This starts the API server at `http://localhost:3200`. An embedded PostgreSQL database is created automatically - no setup required.
 
-> **Requirements:** Node.js 20+, pnpm 9.15+
+> **Requirements:** Node.js 24.x, pnpm 9.15+
 
 <br/>
 
@@ -201,7 +222,7 @@ This starts the API server at `http://localhost:3200`. An embedded PostgreSQL da
 **What does a typical setup look like?**
 Locally, a single Node.js process manages an embedded Postgres and local file storage. For production, point it at your own Postgres and deploy however you like. Configure work contexts, agents, and goals - the agents take care of the rest.
 
-If you're a solo-entreprenuer you can use Tailscale to access Paperclip on the go. Then later you can deploy to e.g. Vercel when you need it.
+If you're a solo entrepreneur you can use Tailscale to access papercompany on the go. Later, you can move the same instance to a hosted deployment when you need it.
 
 **Can I run multiple companies?**
 Yes. A single deployment can run an unlimited number of companies with complete data isolation.
@@ -250,25 +271,25 @@ See [doc/DEVELOPING.md](doc/DEVELOPING.md) for the full development guide.
 
 ## Contributing
 
-We welcome contributions. See the [contributing guide](CONTRIBUTING.md) for details.
+We welcome contributions. See [doc/DEVELOPING.md](doc/DEVELOPING.md) for local setup, repository policy, and verification commands.
 
 <br/>
 
 ## Community
 
 - [Discord](https://discord.gg/m4HZY7xNG3) — Join the community
-- [GitHub Issues](https://github.com/paperclipai/paperclip/issues) — bugs and feature requests
-- [GitHub Discussions](https://github.com/paperclipai/paperclip/discussions) — ideas and RFC
+- [GitHub Issues](https://github.com/insightflo/papercompany-runtime/issues) — bugs and feature requests
+- [GitHub](https://github.com/insightflo/papercompany-runtime) — source and project history
 
 <br/>
 
 ## License
 
-MIT &copy; 2026 Paperclip
+MIT. Portions of this repository derive from Paperclip, copyright 2025 Paperclip AI, and remain under the MIT license.
 
-## Star History
+## Upstream
 
-[![Star History Chart](https://api.star-history.com/image?repos=paperclipai/paperclip&type=date&legend=top-left)](https://www.star-history.com/?repos=paperclipai%2Fpaperclip&type=date&legend=top-left)
+papercompany keeps explicit compatibility with the upstream Paperclip ecosystem while changing the product surface and operating model. See [Paperclip](https://github.com/paperclipai/paperclip) for the original project.
 
 <br/>
 
