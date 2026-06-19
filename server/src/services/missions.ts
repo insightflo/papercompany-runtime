@@ -48,7 +48,7 @@ import {
 } from "./missions/mission-owner-recovery-explanations.js";
 import { normalizeWorkflowStepsForExecution, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
-import { asRecordArray, asStringArray, asTrimmedString, isRecord, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
+import { asStringArray, asTrimmedString, isRecord, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
   buildWorkflowRunProgress,
   normalizeMissionWorkflowStepStatus,
@@ -72,6 +72,15 @@ import type {
   MissionOwnerSupervisionResult,
   ActiveMissionOwnerSupervisionResult,
 } from "./missions/supervision-types.js";
+import {
+  pruneStaleWorkflowExecutionUnits,
+  normalizePluginWorkflowStepStatus,
+  toPluginWorkflowStepData,
+  type PluginWorkflowStepData,
+  type PluginWorkflowDefinitionData,
+  type PluginWorkflowRunData,
+  type PluginWorkflowStepRunData,
+} from "./missions/plugin-workflow.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
   hasMissionOwnerDecisionAppliedMarker,
@@ -302,91 +311,6 @@ function assertMissionId(value: string): void {
   if (!isUuidLike(value)) {
     throw badRequest(`Invalid mission id: ${value}`);
   }
-}
-
-type PluginWorkflowStepData = Record<string, unknown>;
-type PluginWorkflowDefinitionData = {
-  name?: unknown;
-  steps?: unknown;
-};
-type PluginWorkflowRunData = {
-  workflowId?: unknown;
-  workflowName?: unknown;
-  companyId?: unknown;
-  missionId?: unknown;
-  status?: unknown;
-  triggerSource?: unknown;
-  startedAt?: unknown;
-  completedAt?: unknown;
-};
-type PluginWorkflowStepRunData = {
-  runId?: unknown;
-  stepId?: unknown;
-  issueId?: unknown;
-  agentName?: unknown;
-  status?: unknown;
-  startedAt?: unknown;
-  completedAt?: unknown;
-};
-
-function isNativeWorkflowExecutionUnitForDifferentRun(
-  unit: Record<string, unknown>,
-  workflowName: string,
-  sourceRunId: string,
-): boolean {
-  const sourceRef = isRecord(unit.sourceRef) ? unit.sourceRef : {};
-  const type = asTrimmedString(sourceRef.type);
-  if (type === "native_workflow_step_run") {
-    const workflowRunId = asTrimmedString(sourceRef.workflowRunId);
-    return Boolean(workflowRunId && workflowRunId !== sourceRunId);
-  }
-  if (type === "native_workflow_run") {
-    const id = asTrimmedString(sourceRef.id);
-    const title = asTrimmedString(unit.title);
-    return Boolean(id && id !== sourceRunId && title === workflowName);
-  }
-  return false;
-}
-
-function pruneStaleWorkflowExecutionUnits(
-  refs: Record<string, unknown>,
-  workflowName: string,
-  sourceRunId?: string,
-): Record<string, unknown> {
-  if (!sourceRunId) return refs;
-  const executionUnits = asRecordArray(refs.executionUnits);
-  if (executionUnits.length === 0) return refs;
-  return {
-    ...refs,
-    executionUnits: executionUnits.filter((unit) => !isNativeWorkflowExecutionUnitForDifferentRun(unit, workflowName, sourceRunId)),
-  };
-}
-
-function normalizePluginWorkflowStepStatus(status: unknown): MissionWorkflowRunStep["status"] {
-  const normalized = asTrimmedString(status);
-  switch (normalized) {
-    case "done":
-      return "completed";
-    case "in_progress":
-      return "running";
-    case "failed":
-      return "failed";
-    case "skipped":
-      return "skipped";
-    case "running":
-    case "completed":
-    case "pending":
-      return normalizeMissionWorkflowStepStatus(normalized);
-    default:
-      return "pending";
-  }
-}
-
-function toPluginWorkflowStepData(value: unknown): PluginWorkflowStepData | null {
-  if (!isRecord(value)) return null;
-  const id = asTrimmedString(value.id);
-  if (!id) return null;
-  return value;
 }
 
 function normalizeMissionOwnerDecisionWakeupDispatchResult(value: unknown): MissionOwnerDecisionWakeupDispatchStatus {
