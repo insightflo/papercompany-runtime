@@ -14,9 +14,9 @@
 //   - 서비스는 에러를 throw(로그 후 rethrow)한다. main flow를 깨뜨리지 않으려면
 //     caller가 try/catch로 감싸 non-blocking 처리할 것(heartbeat 훅 참조).
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWikiEntries } from "@paperclipai/db";
+import { agentWikiEntries, heartbeatRuns } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 
 export type AgentWikiEntry = typeof agentWikiEntries.$inferSelect;
@@ -178,5 +178,37 @@ export function agentWikiService(db: Db) {
         .from(agentWikiEntries)
         .where(eq(agentWikiEntries.companyId, companyId))
         .orderBy(desc(agentWikiEntries.updatedAt)),
+
+    /**
+     * [목적] timeseries — 최근 N일간 실패 heartbeat_run을 일자(KST)×errorCode로 집계.
+     *   wiki entry 축적의 원천(실패 발생) 추이를 보여, 교훈 주입이 같은 실수 감소로
+     *   이어지는지(추세 하락) 확인하는 시계열 근거로 쓰인다.
+     * [입력] companyId, days(기본 14).
+     * [출력] { day(YYYY-MM-DD KST), errorCode(null=미분류 실패 포함), count }[].
+     * [수정시 영향] 집계 단위/필터(status, error_code)를 바꾸면 UI 시계열 범례도 함께 조정.
+     */
+    timeseries: async (
+      companyId: string,
+      days = 14,
+    ): Promise<{ day: string; errorCode: string | null; count: number }[]> => {
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const dayExpr = sql<string>`to_char(${heartbeatRuns.finishedAt} AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD')`;
+      return db
+        .select({
+          day: dayExpr,
+          errorCode: heartbeatRuns.errorCode,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, companyId),
+            gte(heartbeatRuns.finishedAt, since),
+            ne(heartbeatRuns.status, "succeeded"),
+          ),
+        )
+        .groupBy(dayExpr, heartbeatRuns.errorCode)
+        .orderBy(dayExpr);
+    },
   };
 }
