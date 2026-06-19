@@ -39,7 +39,8 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { toolService } from "./tools/registry.js";
 import { knowledgeService } from "./knowledge/base.js";
-import { finalizeHermesChatRun } from "./hermes-chat.js";
+import { finalizeHermesChatRun, hermesChatService } from "./hermes-chat.js";
+import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
@@ -3934,6 +3935,29 @@ export function heartbeatService(db: Db) {
       const trackedProcess = runningProcesses.get(run.id) ?? null;
       const hasActiveExecution = activeRunExecutions.has(run.id);
       if (trackedProcess || hasActiveExecution) {
+        // [issue done → 자식 즉시 kill] 에이전트가 issue 를 done/cancelled 처리했는데도
+        // 어댑터 자식(opencode 등)이 exit 안 하고 살아있으면 maxConcurrentRuns 블록이
+        // execution_stale(15min)까지 지속된다. issue 상태가 done/cancelled 면 자식을
+        // 즉시 종료해 블록을 푼다.
+        if (trackedProcess && run.issueId) {
+          const [issueRow] = await db.select({ status: issues.status }).from(issues)
+            .where(eq(issues.id, run.issueId)).limit(1);
+          if (issueRow && (issueRow.status === "done" || issueRow.status === "cancelled")) {
+            trackedProcess.child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!trackedProcess.child.killed) {
+                trackedProcess.child.kill("SIGKILL");
+              }
+            }, Math.max(1, trackedProcess.graceSec) * 1000);
+            runningProcesses.delete(run.id);
+            await setRunStatus(run.id, issueRow.status === "done" ? "succeeded" : "cancelled", {
+              error: `Issue ${issueRow.status} but adapter child did not exit; terminated`,
+              errorCode: "issue_done_child_not_exited",
+              finishedAt: now,
+            });
+            continue;
+          }
+        }
         if (activeExecutionTimeoutMs <= 0) continue;
         const refTime = run.startedAt ? new Date(run.startedAt).getTime() : new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < activeExecutionTimeoutMs) continue;
@@ -4925,6 +4949,24 @@ export function heartbeatService(db: Db) {
         else stderrGuardBuffer = remaining;
         return lines.filter((line) => line.trim().length > 0);
       };
+      const hermesChatContext = parseObject(context.paperclipHermesChat);
+      const hermesChatAssistantMessageId = readNonEmptyString(hermesChatContext.assistantMessageId);
+      const hermesChat = hermesChatAssistantMessageId ? hermesChatService(db) : null;
+      let lastHermesChatProgressText = "";
+      let lastHermesChatProgressUpdateMs = 0;
+      const maybeUpdateHermesChatProgress = async (now: Date) => {
+        if (!hermesChat || !hermesChatAssistantMessageId || agent.adapterType !== "hermes_local") return;
+        const progressText = parseHermesProgressText(stdoutExcerpt);
+        if (!progressText || progressText === lastHermesChatProgressText) return;
+        if (now.getTime() - lastHermesChatProgressUpdateMs < 2_000) return;
+        lastHermesChatProgressText = progressText;
+        lastHermesChatProgressUpdateMs = now.getTime();
+        try {
+          await hermesChat.updateAssistantProgress(hermesChatAssistantMessageId, progressText);
+        } catch (err) {
+          logger.warn({ err, runId: run.id }, "failed to update Hermes chat progress");
+        }
+      };
       let lastActivityTouchMs = 0;
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
         const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
@@ -4945,6 +4987,7 @@ export function heartbeatService(db: Db) {
         }
         if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
         if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
+        if (stream === "stdout") await maybeUpdateHermesChatProgress(now);
 
         if (handle) {
           await runLogStore.append(handle, {
