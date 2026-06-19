@@ -161,6 +161,9 @@ describe("heartbeat orphaned process recovery", () => {
   }, 60_000);
 
   afterEach(async () => {
+    // fire-and-forget wiki hooks(recordFailure)가 비동기 — cleanup delete 전에 settle해서
+    // company/agent 삭제 후 늦은 insert가 도착해 agent_wiki_entries FK error가 나는 race를 방지.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     runningProcesses.clear();
     for (const child of childProcesses) {
       child.kill("SIGKILL");
@@ -183,6 +186,7 @@ describe("heartbeat orphaned process recovery", () => {
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(agentWikiEntries);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(companies);
