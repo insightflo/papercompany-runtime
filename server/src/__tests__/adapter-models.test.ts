@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { models as codexFallbackModels } from "@paperclipai/adapter-codex-local";
 import { models as cursorFallbackModels } from "@paperclipai/adapter-cursor-local";
 import { resetOpenCodeModelsCacheForTests } from "@paperclipai/adapter-opencode-local/server";
@@ -6,6 +9,7 @@ import { listAdapterModels } from "../adapters/index.js";
 import { resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
 import { resetClaudeModelsCacheForTests } from "../adapters/claude-models.js";
 import { resetGeminiModelsCacheForTests } from "../adapters/gemini-models.js";
+import { resetHermesModelsCacheForTests } from "../adapters/hermes-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
 import { setLocalCliModelsRunnerForTests } from "../adapters/local-cli-models.js";
 
@@ -16,10 +20,12 @@ describe("adapter model listing", () => {
     resetCodexModelsCacheForTests();
     resetClaudeModelsCacheForTests();
     resetGeminiModelsCacheForTests();
+    resetHermesModelsCacheForTests();
     resetCursorModelsCacheForTests();
     setCursorModelsRunnerForTests(null);
     setLocalCliModelsRunnerForTests(null);
     resetOpenCodeModelsCacheForTests();
+    delete process.env.HERMES_HOME;
     vi.restoreAllMocks();
   });
 
@@ -178,5 +184,37 @@ describe("adapter model listing", () => {
 
     const models = await listAdapterModels("opencode_local");
     expect(models).toEqual([]);
+  });
+
+  it("loads hermes models from the provider model cache in provider/model format", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-hermes-models-"));
+    process.env.HERMES_HOME = home;
+    fs.writeFileSync(
+      path.join(home, "provider_models_cache.json"),
+      JSON.stringify({
+        "openai-codex": {
+          models: ["gpt-5.4-mini", "gpt-5.4"],
+        },
+        zai: {
+          models: ["glm-5.1"],
+        },
+      }),
+      "utf8",
+    );
+
+    try {
+      const models = await listAdapterModels("hermes_local");
+
+      expect(models).toContainEqual({
+        id: "openai-codex/gpt-5.4-mini",
+        label: "openai-codex/gpt-5.4-mini",
+      });
+      expect(models).toContainEqual({
+        id: "zai/glm-5.1",
+        label: "zai/glm-5.1",
+      });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

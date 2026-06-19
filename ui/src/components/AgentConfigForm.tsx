@@ -387,7 +387,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   // Current model for display
   const currentModelId = isCreate
     ? val!.model
-    : eff("adapterConfig", "model", String(config.model ?? ""));
+    : adapterType === "hermes_local"
+      ? (() => {
+          const provider = eff("adapterConfig", "provider", String(config.provider ?? ""));
+          const model = eff("adapterConfig", "model", String(config.model ?? ""));
+          return provider && model ? `${provider}/${model}` : model;
+        })()
+      : eff("adapterConfig", "model", String(config.model ?? ""));
   const currentFallbackConfig = isCreate
     ? {}
     : asRecord(eff("adapterConfig", "fallback", asRecord(config.fallback)));
@@ -804,13 +810,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 onChange={(v) =>
                   isCreate
                     ? set!({ model: v })
-                    : mark("adapterConfig", "model", v || undefined)
+                    : adapterType === "hermes_local"
+                      ? (() => {
+                          const provider = extractProviderId(v);
+                          mark("adapterConfig", "provider", provider || undefined);
+                          mark("adapterConfig", "model", provider ? extractModelName(v) : v || undefined);
+                        })()
+                      : mark("adapterConfig", "model", v || undefined)
                 }
                 open={modelOpen}
                 onOpenChange={setModelOpen}
                 allowDefault={adapterType !== "opencode_local"}
                 required={adapterType === "opencode_local"}
-                groupByProvider={adapterType === "opencode_local"}
+                groupByProvider={adapterType === "opencode_local" || adapterType === "hermes_local"}
               />
               {fetchedModelsError && (
                 <p className="text-xs text-destructive">

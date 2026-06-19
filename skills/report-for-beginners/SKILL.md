@@ -192,9 +192,12 @@ References
 
 Gazua 같은 dashboard report viewer에 들어갈 HTML이면 일반 단일 HTML 계약에 더해 viewer contract를 보존한다.
 
+- Gazua dashboard-bound report는 agent가 최종 HTML shell/CSS를 직접 작성하지 않는다. Agent는 source markdown 또는 structured report body를 작성하고, 최종 HTML은 `/Users/kwak/Projects/ai/gazua-dashboard/scripts/reports/report_for_beginners_renderer.py`의 단일 renderer 또는 `migrate_gazua_reports_to_beginner_html.py`를 통해 생성한다.
+- 생성 후 `/Users/kwak/Projects/ai/gazua-dashboard/scripts/reports/qa_report_for_beginners_html.py <html...>`를 실행해 renderer signature와 report-for-beginners 섹션 신호를 검증한다.
 - `data-gazua-report="beginner-html"` 마커를 유지하거나 추가한다.
 - 추적성을 위해 `data-report-style="report-for-beginners"`를 추가한다.
-- `GAZUA_BEGINNER_REPORT_META` 주석에 `title`, `summary`, `category`, `market`, `published_at`, `read_time`, `source_path`, `format`을 남긴다.
+- `data-renderer="gazua-report-for-beginners"`와 `data-template-signature`를 유지한다.
+- `GAZUA_BEGINNER_REPORT_META` 주석에 `title`, `summary`, `category`, `market`, `published_at`, `read_time`, `source_path`, `format`, `style`, `renderer`, `renderer_version`, `template_signature`를 남긴다.
 - 기존 dashboard artifact를 덮어쓸 때는 public/private 데이터 정책과 viewer가 읽는 경로를 확인한다.
 
 자세한 Gazua 변환 패턴은 `references/gazua-dashboard-report-conversion.md`를 참고한다.
@@ -205,6 +208,7 @@ Gazua 같은 dashboard report viewer에 들어갈 HTML이면 일반 단일 HTML 
 
 - `<!DOCTYPE html>`로 시작하고 `</html>`로 끝나는지 확인한다.
 - 핵심 구조가 있는지 확인한다: verdict table, KPI grid, evidence table, calculation list, chart card, risk grid, scenario grid, references, footnotes.
+- Gazua dashboard-bound artifact는 반드시 단일 renderer signature를 확인한다: `data-renderer="gazua-report-for-beginners"`, `data-template-signature`, `renderer_version`.
 - raw Markdown heading이 HTML에 남지 않았는지 확인한다.
 - 숫자 산식이 출처 문장과 맞지 않으면 조용히 고치거나 숨기지 말고 evidence/calculation 섹션에서 보정 설명을 남긴다.
 - 가능하면 브라우저로 로컬 파일 또는 dashboard viewer를 열어 시각 확인한다: 헤더, 표, 카드, 모바일 대응, raw Markdown 노출 여부.

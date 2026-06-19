@@ -1,5 +1,6 @@
 import type { UIAdapterModule } from "../types";
 import type { CreateConfigValues, TranscriptEntry } from "../types";
+import { extractModelName, extractProviderId } from "../../lib/model-utils";
 import {
   buildHermesConfig as buildBaseHermesConfig,
   parseHermesStdoutLine as parseBaseHermesStdoutLine,
@@ -120,10 +121,16 @@ function parseHermesStdoutLine(line: string, ts: string): TranscriptEntry[] {
 function buildHermesConfig(
   values: CreateConfigValues,
 ): Record<string, unknown> {
+  const provider = extractProviderId(values.model);
+  const model = provider ? extractModelName(values.model) : values.model;
   return {
     ...buildBaseHermesConfig(
-      values as unknown as Parameters<typeof buildBaseHermesConfig>[0],
+      {
+        ...values,
+        model,
+      } as unknown as Parameters<typeof buildBaseHermesConfig>[0],
     ),
+    ...(provider ? { provider } : {}),
     instructionsFilePath: values.instructionsFilePath ?? undefined,
   };
 }

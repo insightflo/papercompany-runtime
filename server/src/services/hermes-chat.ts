@@ -324,6 +324,26 @@ export function hermesChatService(db: Db) {
     return serializeMessage(message);
   }
 
+  async function updateAssistantProgress(messageId: string, body: string) {
+    const trimmed = body.trim();
+    if (!trimmed) return null;
+    const [message] = await db
+      .update(hermesChatMessages)
+      .set({
+        body: limitChatResponseText(trimmed),
+        status: "running",
+        updatedAt: new Date(),
+      })
+      .where(eq(hermesChatMessages.id, messageId))
+      .returning();
+    if (!message) return null;
+    await db
+      .update(hermesChatSessions)
+      .set({ updatedAt: new Date(), lastMessageAt: new Date() })
+      .where(eq(hermesChatSessions.id, message.sessionId));
+    return serializeMessage(message);
+  }
+
   async function recentConversation(companyId: string, sessionId: string, limit = 12) {
     const rows = await db
       .select()
@@ -381,6 +401,7 @@ export function hermesChatService(db: Db) {
     addAssistantPlaceholder,
     attachRunToAssistantMessage,
     markAssistantMessage,
+    updateAssistantProgress,
     recentConversation,
     finalizeRunResponse,
   };

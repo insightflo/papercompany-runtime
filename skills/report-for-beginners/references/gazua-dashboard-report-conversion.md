@@ -12,11 +12,22 @@ Session pattern: converting an existing Gazua Markdown market report into a `rep
 When the HTML is intended for Gazua report viewer, keep or add:
 
 ```html
-<html lang="ko" data-gazua-report="beginner-html" data-report-style="report-for-beginners">
-<!-- GAZUA_BEGINNER_REPORT_META { ... "format":"beginner-html", "style":"report-for-beginners" } -->
+<html lang="ko" data-gazua-report="beginner-html" data-report-style="report-for-beginners" data-renderer="gazua-report-for-beginners" data-template-signature="...">
+<!-- GAZUA_BEGINNER_REPORT_META { ... "format":"beginner-html", "style":"report-for-beginners", "renderer":"gazua-report-for-beginners", "renderer_version":"...", "template_signature":"..." } -->
 ```
 
-The metadata should include at least: `schema`, `title`, `summary`, `category`, `market`, `published_at`, `read_time`, `source_path`, `format`.
+The metadata should include at least: `schema`, `title`, `summary`, `category`, `market`, `published_at`, `read_time`, `source_path`, `format`, `style`, `renderer`, `renderer_version`, `template_signature`.
+
+## Fixed renderer contract
+
+Gazua dashboard-bound HTML must be produced by the Gazua renderer, not hand-authored per run:
+
+```sh
+python scripts/reports/migrate_gazua_reports_to_beginner_html.py --name-contains Narrative_Deep_Dive_YYYY-MM-DD --market KR
+python scripts/reports/qa_report_for_beginners_html.py reports/beginner_html/dashboard/deep_dive/YYYYMM/Narrative_Deep_Dive_YYYY-MM-DD.html
+```
+
+The agent still authors the source report and can rewrite weak source markdown first. The renderer owns the HTML shell, CSS, metadata, and template signature so reports remain visually consistent. QA must fail any dashboard HTML missing `data-renderer="gazua-report-for-beginners"` or the renderer `template_signature`.
 
 ## Report-for-beginners structure that worked
 
