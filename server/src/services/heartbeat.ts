@@ -55,6 +55,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
@@ -2353,6 +2354,28 @@ function buildMissionOversightRunSucceededReleaseComment(run: typeof heartbeatRu
   ].join("\n");
 }
 
+/**
+ * [목적] fireWikiRecord — agent 자가학습 wiki에 실패 패턴을 기록한다. fire-and-forget(non-blocking):
+ *   recordFailure를 await하지 않고 .catch로 에러를 삼켜, wiki 로깅이 절대 main flow를
+ *   깨뜨리지 않도록 한다(activity-log.ts의 plugin event fanout .catch 선례와 동일 패턴).
+ * [입력] wiki: agentWikiService(db) 인스턴스. input: RecordFailureInput. runIdForLog: 로깅용 run id.
+ * [수정시 영향] 호출부는 모두 heartbeatService 클로저 내부. 에러는 logger.warn으로만 남는다.
+ */
+function fireWikiRecord(
+  wiki: ReturnType<typeof agentWikiService>,
+  input: RecordFailureInput,
+  runIdForLog?: string,
+): void {
+  void wiki
+    .recordFailure(input)
+    .catch((err: unknown) =>
+      logger.warn(
+        { err, runId: runIdForLog, pattern: input.pattern },
+        "agent-wiki.recordFailure non-blocking failure",
+      ),
+    );
+}
+
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -2363,6 +2386,7 @@ export function heartbeatService(db: Db) {
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const wikiSvc = agentWikiService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
@@ -3955,6 +3979,16 @@ export function heartbeatService(db: Db) {
               errorCode: "issue_done_child_not_exited",
               finishedAt: now,
             });
+            // Agent self-learning wiki (Phase 1): adapter 자식 미종료 패턴 기록 (non-blocking).
+            fireWikiRecord(wikiSvc, {
+              companyId: run.companyId,
+              agentId: run.agentId,
+              missionId: null,
+              pattern: "adapter 자식 미종료 (issue done/cancelled)",
+              cause: "이슈가 done/cancelled로 종료됐는데도 어댑터 자식(opencode 등)이 exit하지 않아 maxConcurrentRuns 블록이 execution_stale까지 지속됨.",
+              solution: "이슈 done/cancelled 처리 후 어댑터 자식이 확실히 exit하도록 종료 시그널/플래그 점검. 작업 완료 시 프로세스를 즉시 종료할 것.",
+              errorCode: "issue_done_child_not_exited",
+            }, run.id);
             continue;
           }
         }
@@ -3996,6 +4030,16 @@ export function heartbeatService(db: Db) {
           });
           await releaseIssueExecutionAndPromote(timedOutRun);
         }
+        // Agent self-learning wiki (Phase 1): execution stale(hang) 패턴 기록 (non-blocking).
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          missionId: null,
+          pattern: "execution stale (hang)",
+          cause: "어댑터 실행이 타임아웃(activeExecutionTimeout) 전에 종단 상태에 도달하지 못해 hang으로 판정됨.",
+          solution: "API_TIMEOUT(10분)과 idle 점검. 장기 실행 명령은 타임아웃/백그라운드 분리. 자식이 stdout을 닫지 않고 누수하는지 확인.",
+          errorCode: "execution_stale_timeout",
+        }, run.id);
         await finalizeAgentStatus(run.agentId, "timed_out");
         await startNextQueuedRunForAgent(run.agentId);
         reaped.push(run.id);
@@ -4441,6 +4485,24 @@ export function heartbeatService(db: Db) {
       ...(missionIssueEnvelopePolicy.fullContextInjection ? { paperclipRuntimeSkills: runtimeSkillEntries } : {}),
     };
     runtimeConfig = applyAdapterFallbackRuntimeConfig({ run, context, config: runtimeConfig });
+
+    // Agent self-learning wiki (Phase 2): 해당 agent의 가장 빈번한 과거 실패 교훈을
+    // adapter prompt에 주입해 같은 실수가 반복되지 않도록 한다. non-blocking (실패 시 skip).
+    try {
+      const wikiEntries = await wikiSvc.searchRelevant({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        limit: 3,
+      });
+      const wikiSection = formatWikiLessons(wikiEntries);
+      if (wikiSection) {
+        const basePrompt = readNonEmptyString(runtimeConfig.promptTemplate);
+        runtimeConfig.promptTemplate = basePrompt ? `${basePrompt}\n\n${wikiSection}` : wikiSection;
+      }
+    } catch (err) {
+      logger.warn({ err, runId: run.id }, "agent-wiki.searchRelevant non-blocking failure");
+    }
+
     const issueRef = issueContext
       ? {
           id: issueContext.id,
@@ -5829,6 +5891,28 @@ export function heartbeatService(db: Db) {
         command: readNonEmptyString(agentAdapterConfig.command) ?? readNonEmptyString(agentRuntimeConfig.command),
       });
 
+      // Agent self-learning wiki (Phase 1): provider overload / runaway-stdout 패턴 기록 (non-blocking).
+      if (classification.category === "overload") {
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          pattern: "provider overload (529/503/500)",
+          cause: "외부 LLM provider 일시 과부하(500/503/529)로 요청을 거부/재시도.",
+          solution: "adapter가 exponential backoff 재시도를 수행. 회복 후 자동 재개되므로 즉시 수동 개입은 불필요.",
+          errorCode: classification.reasonCode ?? "provider_overload",
+        }, run.id);
+      }
+      if (/\bstdout\b.{0,40}exceeded|runaway output/i.test(run.stderrExcerpt ?? "")) {
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          pattern: "adapter 자식 stdout 폭발",
+          cause: "어댑터 자식 프로세스가 stdout을 닫지 않고 무한 출력 → event loop 독점 → 64MB cap-kill.",
+          solution: "자식의 대량 stdout은 파일 리다이렉트 후 tail. 명령/플래그로 스트리밍 출력 억제.",
+          errorCode: "child_stdout_runaway_capkill",
+        }, run.id);
+      }
+
       const isLinkedToRun = issue.checkoutRunId === run.id || issue.executionRunId === run.id || issue.id === run.issueId;
       const shouldAutoCaptureMissionChildOutput =
         run.status === "succeeded" &&
@@ -5973,6 +6057,16 @@ export function heartbeatService(db: Db) {
               claimedArtifactPaths,
             },
           });
+          // Agent self-learning wiki (Phase 1): workProduct 미등록 패턴 기록 (non-blocking).
+          fireWikiRecord(wikiSvc, {
+            companyId: issue.companyId,
+            agentId: run.agentId,
+            missionId: issue.missionId ?? null,
+            pattern: "workProduct 미등록",
+            cause: "run이 산출물 파일 경로를 보고했지만 issue에 공식 workProduct가 등록되지 않아 mission artifact gate가 해당 이슈를 block함.",
+            solution: "산출물 파일 생성 후 반드시 POST /api/issues/{id}/work-products 로 workProduct를 등록. 파일 생성 ≠ 등록.",
+            errorCode: "workproduct_registration_missing",
+          }, run.id);
           postTransactionWorkflowIssueSyncIssueId = issue.id;
           return null;
         }
