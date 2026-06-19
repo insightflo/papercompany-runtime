@@ -6,7 +6,7 @@ Audience: Operators setting up and running agents in papercompany
 
 ## 1. What this system does
 
-Agents in papercompany do not run continuously.  
+Agents in papercompany do not run continuously.
 They run in **heartbeats**: short execution windows triggered by a wakeup.
 
 Each heartbeat:

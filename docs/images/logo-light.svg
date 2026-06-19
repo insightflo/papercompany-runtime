@@ -1,6 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="140" height="32" viewBox="0 0 140 32" fill="none">
-  <g stroke-linecap="round" stroke-linejoin="round">
-    <path stroke="#18181b" stroke-width="2" d="m18 4-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/>
-  </g>
-  <text x="32" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="600" fill="#18181b">Paperclip</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="206" height="36" viewBox="0 0 206 36" fill="none">
+  <path d="M4 3h18l10 10v20H4z" fill="#fafafa"/>
+  <path d="M22 3v10h10" fill="#e4e4e7"/>
+  <path d="M4 3h18l10 10v20H4z" stroke="#18181b" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M22 3v10h10" stroke="#18181b" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M16 13 5 24 5 29 9 33 14 33 25 22 25 17 22 14 17 14 7 24 7 29 10 32 14 32 24 22" stroke="#71717a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M16 13 5 24 5 29 9 33 14 33 25 22 25 17 22 14 17 14 7 24 7 29 10 32 14 32 24 22" stroke="#d4d4d8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="43" y="25" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="650" fill="#18181b">papercompany</text>
 </svg>
