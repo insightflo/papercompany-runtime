@@ -1,12 +1,12 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "name": "Paperclip",
-  "description": "The control plane for autonomous AI companies",
+  "name": "papercompany",
+  "description": "The control plane for agent-run company operations",
   "theme": "mint",
   "colors": {
-    "primary": "#2563EB",
-    "light": "#3B82F6",
-    "dark": "#1D4ED8"
+    "primary": "#18181B",
+    "light": "#52525B",
+    "dark": "#09090B"
   },
   "favicon": "/favicon.svg",
   "logo": {
@@ -16,7 +16,7 @@
   "topbarLinks": [
     {
       "name": "GitHub",
-      "url": "https://github.com/paperclip-ai/paperclip"
+      "url": "https://github.com/insightflo/papercompany-runtime"
     }
   ],
   "navigation": {
@@ -138,6 +138,6 @@
     ]
   },
   "footerSocials": {
-    "github": "https://github.com/paperclip-ai/paperclip"
+    "github": "https://github.com/insightflo/papercompany-runtime"
   }
 }

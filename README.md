@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="doc/assets/header.png" alt="papercompany — runs your business" width="720" />
+  <img src="doc/assets/header.svg" alt="papercompany — control plane for agent-run company operations" width="720" />
 </p>
 
 <p align="center">
@@ -14,12 +14,6 @@
   <a href="https://github.com/insightflo/papercompany-runtime"><img src="https://img.shields.io/badge/repo-papercompany--runtime-18181b" alt="papercompany-runtime" /></a>
   <a href="https://discord.gg/m4HZY7xNG3"><img src="https://img.shields.io/discord/000000000?label=discord" alt="Discord" /></a>
 </p>
-
-<br/>
-
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/773bdfb2-6d1e-4e30-8c5f-3487d5b70c8f" width="600" controls></video>
-</div>
 
 <br/>
 
@@ -292,12 +286,6 @@ MIT. Portions of this repository derive from Paperclip, copyright 2025 Paperclip
 papercompany keeps explicit compatibility with the upstream Paperclip ecosystem while changing the product surface and operating model. See [Paperclip](https://github.com/paperclipai/paperclip) for the original project.
 
 <br/>
-
----
-
-<p align="center">
-  <img src="doc/assets/footer.jpg" alt="" width="720" />
-</p>
 
 <p align="center">
   <sub>Open source under MIT. Built for people who want to run companies, not babysit agents.</sub>
