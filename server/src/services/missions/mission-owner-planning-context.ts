@@ -18,6 +18,8 @@ import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources
 import type { MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import type { MissionRuleRef } from "./mission-rule-context.js";
+import { extractMissionIntent, type MissionIntent } from "./mission-intent.js";
+import { stat } from "node:fs/promises";
 
 export const MISSION_OWNER_PLANNING_SOURCE_REF_VOCABULARY = [
   "native_workflow_run",
@@ -89,9 +91,8 @@ export type MissionOwnerPlanningBoundedAssetSummary = {
 /**
  * [목적] intent-scoped compressed capability manifest — planner 가 "어떤 publish capability 가 있는지"
  *   알게 해 publish unit 누락을 사전에 예방(mission-plan-qa gate 는 사후 검출). raw SKILL.md/tool schema
- *   전문은 넣지 않고 key/name/purpose 요약만. site/cloudflare 설정은 runtime 소스가 아직 없어
- *   sitePublishTarget.available=null(full 에서 wiring).
- * [확장점] full 에서 tools/site resources/company skills 전반의 intent-scoped top-K discovery 로 확장.
+ *   전문은 넣지 않고 key/name/purpose 요약만. publish capability 는 intent.publish 일 때만 주입(과다 주입 방지).
+ *   sitePublishTarget 은 path/env 기반 실데이터(boolean/source only, secret 값 미노출).
  */
 export type MissionOwnerPlanningCapabilityEntry = {
   key: string;
@@ -99,10 +100,19 @@ export type MissionOwnerPlanningCapabilityEntry = {
   purpose: string;
 };
 
+/** site/cloudflare 게시 대상 감지 결과. secret 값은 절대 포함하지 않는다(presence/source 만). */
+export type MissionOwnerPlanningSitePublishTarget = {
+  available: boolean | null;
+  note: string;
+  siteRoot?: string;
+  canStage?: boolean;
+  cloudflare?: { hasApiToken: boolean; hasAccountId: boolean };
+};
+
 export type MissionOwnerPlanningCapabilityManifest = {
   publishCapabilities: MissionOwnerPlanningCapabilityEntry[];
   notableSkills: MissionOwnerPlanningCapabilityEntry[];
-  sitePublishTarget: { available: boolean | null; note: string };
+  sitePublishTarget: MissionOwnerPlanningSitePublishTarget;
 };
 
 export type MissionOwnerPlanningDossier = {
@@ -416,18 +426,26 @@ function compressSkillEntry(input: {
 }
 
 /**
- * [목적] company skill row 들 → intent-scoped compressed capability manifest(pure). publish 관련 skill 은
- *   별도 분리(planner 가 "게시 capability 있음"을 즉시 인지), 나머지는 top-K capped 요약.
- *   site/cloudflare 설정 소스는 runtime 에 아직 없어 available=null(full 확장점).
+ * [목적] company skill row 들 → intent-scoped compressed capability manifest(pure).
+ *   - intent 가 주어지면: intent.publish 일 때만 publishCapabilities 주입(non-publish 미션에 과다 주입 방지).
+ *     intent 가 없으면 backward-compat 로 publish 포함.
+ *   - notableSkills 는 top-K capped 요약(raw SKILL.md/schema 전문 미포함).
+ *   - sitePublishTarget 은 호출자가 resolveSitePublishTarget() 결과를 전달(순수성 유지).
  */
 export function buildCapabilityManifest(
   skills: ReadonlyArray<{ key: string; slug: string | null; name: string | null; description: string | null }>,
+  options: {
+    intent?: MissionIntent;
+    sitePublishTarget?: MissionOwnerPlanningSitePublishTarget;
+  } = {},
 ): MissionOwnerPlanningCapabilityManifest {
+  const publishWanted = !options.intent || options.intent.publish;
   const publishCapabilities: MissionOwnerPlanningCapabilityEntry[] = [];
   const notableSkills: MissionOwnerPlanningCapabilityEntry[] = [];
   for (const skill of skills) {
     const entry = compressSkillEntry(skill);
     if (notableSkills.length < MAX_NOTABLE_SKILLS) notableSkills.push(entry);
+    if (!publishWanted) continue;
     const haystack = `${skill.key} ${skill.slug ?? ""} ${skill.name ?? ""}`;
     if (PUBLISH_CAPABILITY_RE.test(haystack) && publishCapabilities.length < MAX_PUBLISH_CAPABILITIES) {
       publishCapabilities.push(entry);
@@ -436,26 +454,59 @@ export function buildCapabilityManifest(
   return {
     publishCapabilities,
     notableSkills,
-    sitePublishTarget: {
-      available: null,
-      note: "runtime에 site/cloudflare 설정 소스가 아직 없음 — full 구현에서 /srv/manual-onboarding-cloudflare 존재 + canStage + Cloudflare env/token 확인 후 채운다.",
-    },
+    sitePublishTarget: options.sitePublishTarget ?? { available: null, note: "sitePublishTarget resolver 가 전달되지 않음." },
   };
 }
 
-/** [목적] 회사 companySkills 를 조회해 compressed capability manifest 구성. */
-async function listCompanySkillSummaries(db: Db, companyId: string): Promise<MissionOwnerPlanningCapabilityManifest> {
-  const rows = await db
-    .select({
-      key: companySkills.key,
-      slug: companySkills.slug,
-      name: companySkills.name,
-      description: companySkills.description,
-    })
-    .from(companySkills)
-    .where(eq(companySkills.companyId, companyId))
-    .orderBy(asc(companySkills.key));
-  return buildCapabilityManifest(rows);
+/**
+ * [목적] site/cloudflare 게시 대상 감지(실데이터). path 존재 + Cloudflare env presence. secret 값은 절대
+ *   읽지 않고 boolean/source 만. A1(/srv/...) 과 local dev(env override) 모두 깨지지 않게 fallback.
+ *   - siteRoot: env MANUAL_ONBOARDING_SITE_ROOT 우선, 없으면 /srv/manual-onboarding-cloudflare 기본.
+ *   - cloudflare env: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 존재 여부(boolean).
+ * [주의] fs/env 조회는 전부 가드 — 어떤 환경에서도 throw 하지 않는다.
+ */
+export async function resolveSitePublishTarget(): Promise<MissionOwnerPlanningSitePublishTarget> {
+  const siteRoot = process.env.MANUAL_ONBOARDING_SITE_ROOT ?? "/srv/manual-onboarding-cloudflare";
+  let siteExists = false;
+  try {
+    await stat(siteRoot);
+    siteExists = true;
+  } catch {
+    siteExists = false;
+  }
+  const hasApiToken = Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  const hasAccountId = Boolean(process.env.CLOUDFLARE_ACCOUNT_ID);
+  const cloudflare = { hasApiToken, hasAccountId };
+  const available = siteExists || hasApiToken ? true : null;
+  const note = available
+    ? `site root=${siteRoot} exists=${siteExists}; cloudflare token=${hasApiToken} account=${hasAccountId}.`
+    : `site root(${siteRoot}) 미확인 + cloudflare env 미구성. local/A1 어느 쪽도 아니면 게시 불가.`;
+  return { available, note, siteRoot, canStage: siteExists, cloudflare };
+}
+
+/**
+ * [목적] 회사 companySkills + intent + site target → compressed capability manifest 구성.
+ *   intent 로 publish capability 스코핑, resolveSitePublishTarget 으로 site 실데이터 주입.
+ */
+async function listCompanySkillSummaries(
+  db: Db,
+  companyId: string,
+  intent?: MissionIntent,
+): Promise<MissionOwnerPlanningCapabilityManifest> {
+  const [rows, sitePublishTarget] = await Promise.all([
+    db
+      .select({
+        key: companySkills.key,
+        slug: companySkills.slug,
+        name: companySkills.name,
+        description: companySkills.description,
+      })
+      .from(companySkills)
+      .where(eq(companySkills.companyId, companyId))
+      .orderBy(asc(companySkills.key)),
+    resolveSitePublishTarget(),
+  ]);
+  return buildCapabilityManifest(rows, { intent, sitePublishTarget });
 }
 
 async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerPlanningAgentRosterEntry[]> {
@@ -546,7 +597,9 @@ export async function buildMissionOwnerPlanningContext(
   );
   const workflowCandidates = await listWorkflowCandidates(db, input.companyId, purposeTokens);
   const agentRoster = await listAgentRoster(db, input.missionId);
-  const capabilityManifest = await listCompanySkillSummaries(db, input.companyId);
+  // [P3] intent 로 capability 를 스코핑 — non-publish 미션에 publish capability 가 과다 주입되지 않게.
+  const missionIntent = extractMissionIntent(mission.title, mission.description);
+  const capabilityManifest = await listCompanySkillSummaries(db, input.companyId, missionIntent);
   const kbRefs = await listKbRefs(db, input.companyId, agentRoster);
   const todoMarkers: MissionOwnerPlanningTodoMarker[] = [];
 

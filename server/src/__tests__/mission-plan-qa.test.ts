@@ -8,7 +8,7 @@ import {
   setMissionPlanQaCritiqueHook,
   type PlanQaDiagnostic,
 } from "../services/missions/mission-plan-qa.js";
-import { buildCapabilityManifest } from "../services/missions/mission-owner-planning-context.js";
+import { buildCapabilityManifest, resolveSitePublishTarget } from "../services/missions/mission-owner-planning-context.js";
 
 /**
  * [목적] plan-time QA MVP(mission-intent + mission-plan-qa) 의 순수 로직 검증.
@@ -234,5 +234,62 @@ describe("mission-plan-qa critique hook (injectable)", () => {
     expect(getMissionPlanQaCritiqueHook()).toBe(null);
   });
 });
+
+describe("buildCapabilityManifest — intent-scoped (P3)", () => {
+  const skills = [
+    { key: "manual-onboarding-publisher", slug: "publisher", name: "Manual Onboarding Publisher", description: "site 게시" },
+    { key: "research-helper", slug: "research", name: "Research Helper", description: "리서치" },
+  ];
+  it("publish intent → publish capability 가 주입된다", () => {
+    const intent = extractMissionIntent("가이드를 site에 올리도록", "게시/배포");
+    expect(intent.publish).toBe(true);
+    const manifest = buildCapabilityManifest(skills, { intent });
+    expect(manifest.publishCapabilities.map((s) => s.key)).toContain("manual-onboarding-publisher");
+  });
+  it("non-publish intent → publish capability 가 과다 주입되지 않는다(스코핑)", () => {
+    const intent = extractMissionIntent("주간 기술 동향 리서치", "논문 요약");
+    expect(intent.publish).toBe(false);
+    const manifest = buildCapabilityManifest(skills, { intent });
+    expect(manifest.publishCapabilities).toEqual([]);
+    // notableSkills 는 intent 무관 general top-K 유지
+    expect(manifest.notableSkills.length).toBeGreaterThan(0);
+  });
+  it("sitePublishTarget 옵션이 manifest 에 그대로 전달된다", () => {
+    const manifest = buildCapabilityManifest([], {
+      sitePublishTarget: { available: true, note: "resolved", siteRoot: "/tmp/x", canStage: true, cloudflare: { hasApiToken: true, hasAccountId: false } },
+    });
+    expect(manifest.sitePublishTarget.available).toBe(true);
+    expect(manifest.sitePublishTarget.cloudflare?.hasApiToken).toBe(true);
+  });
+});
+
+describe("resolveSitePublishTarget — path/env(presence only, no secret)", () => {
+  const origToken = process.env.CLOUDFLARE_API_TOKEN;
+  const origAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const origRoot = process.env.MANUAL_ONBOARDING_SITE_ROOT;
+  afterEach(() => {
+    delete process.env.CLOUDFLARE_API_TOKEN;
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    delete process.env.MANUAL_ONBOARDING_SITE_ROOT;
+    if (origToken !== undefined) process.env.CLOUDFLARE_API_TOKEN = origToken;
+    if (origAccount !== undefined) process.env.CLOUDFLARE_ACCOUNT_ID = origAccount;
+    if (origRoot !== undefined) process.env.MANUAL_ONBOARDING_SITE_ROOT = origRoot;
+  });
+  it("cloudflare token 이 있으면 available=true, hasApiToken=true(secret 값 미노출)", async () => {
+    process.env.CLOUDFLARE_API_TOKEN = "fake-secret-value";
+    process.env.MANUAL_ONBOARDING_SITE_ROOT = "/definitely/does/not/exist/xyz";
+    const target = await resolveSitePublishTarget();
+    expect(target.available).toBe(true);
+    expect(target.cloudflare?.hasApiToken).toBe(true);
+    expect(JSON.stringify(target)).not.toContain("fake-secret-value"); // secret 값 노출 금지
+  });
+  it("path/env 모두 없으면 available=null", async () => {
+    process.env.MANUAL_ONBOARDING_SITE_ROOT = "/definitely/does/not/exist/xyz";
+    const target = await resolveSitePublishTarget();
+    expect(target.available).toBe(null);
+    expect(target.cloudflare?.hasApiToken).toBe(false);
+  });
+});
+
 
 
