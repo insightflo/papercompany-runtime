@@ -25,6 +25,7 @@ import {
   parseMissionOwnerPlanDecision,
   recordLatestAuthorizedMissionOwnerPlanDecision,
 } from "../services/mission-owner-plan-decisions.js";
+import { setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -1303,6 +1304,55 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("recorded");
+  });
+
+  it("[P2 critique] LLM critique hook 이 invalid diagnostic 을 추가하면 materialization 을 차단한다", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Critique Workflow" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    const decision = {
+      missionId,
+      missionGoal: "Critique test",
+      selectedExecutionUnits: [{ id: `wf:${wfId}:step:smoke`, kind: "workflow_definition_step", title: "Run smoke", selectionState: "selected", reason: "R", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" } }],
+      ruleRefs: [], kbRefs: [], assessment: validAssessment, requiredInputs: [], successCriteria: ["smoke passes"], steps: [],
+    };
+    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision), createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    // title "Planning mission" → deterministic 없음. critique 가 invalid 추가 → 차단.
+    setMissionPlanQaCritiqueHook(async () => [{ code: "missing_publish_unit", severity: "invalid", message: "critique: publish missing" }] as PlanQaDiagnostic[]);
+    try {
+      const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+      expect(result.status).toBe("invalid");
+      if (result.status !== "invalid") return;
+      expect(result.diagnostics.some((d) => d.code === "missing_publish_unit")).toBe(true);
+    } finally {
+      setMissionPlanQaCritiqueHook(null);
+    }
+  });
+
+  it("[P2 critique] deterministic invalid 는 critique 가 needs_clarification 를 반환해도 invalid 로 유지된다(완화 금지)", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    // mission title → publish intent → deterministic missing_publish_unit(invalid).
+    await db.update(missions).set({ title: "가이드를 site에 올리도록" }).where(eq(missions.id, missionId));
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Det Hold Workflow" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    const decision = {
+      missionId,
+      missionGoal: "Det hold test",
+      selectedExecutionUnits: [{ id: `wf:${wfId}:step:smoke`, kind: "workflow_definition_step", title: "Run smoke", selectionState: "selected", reason: "R", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" } }],
+      ruleRefs: [], kbRefs: [], assessment: validAssessment, requiredInputs: [], successCriteria: [], steps: [],
+    };
+    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision), createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    setMissionPlanQaCritiqueHook(async () => [{ code: "missing_audience_split", severity: "needs_clarification", message: "soft" }] as PlanQaDiagnostic[]);
+    try {
+      const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+      expect(result.status).toBe("invalid"); // deterministic invalid 유지
+      if (result.status !== "invalid") return;
+      expect(result.diagnostics.some((d) => d.code === "missing_publish_unit")).toBe(true);
+    } finally {
+      setMissionPlanQaCritiqueHook(null);
+    }
   });
 
   it("materializes selected execution units into a mission-scoped PAQO workflow DAG with ACTION gated before QA", async () => {

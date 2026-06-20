@@ -167,11 +167,90 @@ export function reviewPlanAgainstIntent(input: {
 }
 
 /**
- * [목적] LLM critique 확장점(full). MVP에선 호출하지 않거나 no-op hook 주입.
- *   full 구현에서는 plan gap 의 뉘앙스(체크리스트가 못 잡는 것)를 LLM 2순회로 보충한다.
- *   호출자는 async hook 을 주입하고, 반환 diagnostic 를 reviewPlanAgainstIntent 결과에 병합한다.
+ * [목적] LLM critique 확장점. deterministic checklist 이후 2순회로 호출되어 체크리스트가 못 잡는
+ *   뉘앙스를 보충한다. 실제 LLM 백엔드는 runtime 에 LLM client 가 없어 injectable 로 둔다(
+ *   setMissionPlanQaCritiqueHook). production 은 hook 미등록 → no-op(→ warn 수준).
+ * [주의] 반환 diagnostic 의 severity 를 그대로 병합한다. 단 deterministic invalid 는 critique 가
+ *   완화할 수 없다(병합은 additive). 명백한 critique invalid 는 차단 허용.
  */
 export type PlanQaCritiqueHook = (input: {
   intent: MissionIntent;
   selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>;
+  /** deterministic 1순회 결과. critique 가 중복을 피/참고할 수 있게 전달. */
+  priorDiagnostics: ReadonlyArray<PlanQaDiagnostic>;
 }) => Promise<PlanQaDiagnostic[]>;
+
+let missionPlanQaCritiqueHook: PlanQaCritiqueHook | null = null;
+
+/**
+ * [목적] LLM critique hook 등록/해제. dag-engine 의 setWorkflowToolStepExecutor 패턴과 동일(module-level).
+ *   테스트는 fake hook 주입, production 은 미등록(→ critique unavailable, warn).
+ */
+export function setMissionPlanQaCritiqueHook(hook: PlanQaCritiqueHook | null): void {
+  missionPlanQaCritiqueHook = hook;
+}
+
+/** gate 가 사용할 현재 hook(미등록 시 null). */
+export function getMissionPlanQaCritiqueHook(): PlanQaCritiqueHook | null {
+  return missionPlanQaCritiqueHook;
+}
+
+// ---------------------------------------------------------------------------
+// Hermes Ops clarification handoff contract
+// ---------------------------------------------------------------------------
+
+/** clarification 질문 하나. needs_clarification diagnostic → 사용자 질문 전환 단위. */
+export interface MissionPlanClarificationQuestion {
+  code: PlanQaDiagnosticCode;
+  /** 질문의 근거가 된 사용자 intent 토큰(진단 맥락). */
+  intentContext: string[];
+  /** operator/사용자에게 보낼 질문 문장. */
+  question: string;
+}
+
+/**
+ * [목적] needs_clarification diagnostic 들을 Hermes Ops 가 소비할 사용자 질문 contract 로 변환(순수).
+ *   gate 가 activity log(structured payload) 로 surface 하고, Hermes Ops liaison 가 이를 사용자
+ *   질문(Telegram 등)으로 전환한다. 본 MVP 에선 contract + log 까지; 직접 발송은 Hermes 경로 확정 후.
+ */
+export function buildClarificationRequest(input: {
+  diagnostics: ReadonlyArray<PlanQaDiagnostic>;
+  intent: MissionIntent;
+}): MissionPlanClarificationQuestion[] {
+  const { intent } = input;
+  const questions: MissionPlanClarificationQuestion[] = [];
+  for (const diagnostic of input.diagnostics) {
+    if (diagnostic.severity !== "needs_clarification") continue;
+    const intentContext = intentContextForCode(diagnostic.code, intent);
+    questions.push({
+      code: diagnostic.code,
+      intentContext,
+      question: clarificationQuestionForCode(diagnostic.code, intent),
+    });
+  }
+  return questions;
+}
+
+function intentContextForCode(code: PlanQaDiagnosticCode, intent: MissionIntent): string[] {
+  if (code === "missing_audience_split") return intent.audiences;
+  if (code === "missing_scenario_taxonomy") return intentSignalsByCategory(intent, "scenario");
+  if (code === "missing_publish_unit" || code === "missing_publish_readback_qa") {
+    return intentSignalsByCategory(intent, "publish");
+  }
+  return [];
+}
+
+function clarificationQuestionForCode(code: PlanQaDiagnosticCode, intent: MissionIntent): string {
+  switch (code) {
+    case "missing_audience_split":
+      return `복수 대상(${intent.audiences.join(", ")}) 각각에 대한 가이드가 필요한가요, 아니면 단일 대상으로 한정할까요? 대상별 분기가 필요하면 각 대상을 다루는 unit/success criteria 를 추가해 주세요.`;
+    case "missing_scenario_taxonomy":
+      return `상황별/케이스별 처리가 필요한가요? 그렇다면 다뤄야 할 시나리오 목록이나 상황별 success criteria 를 알려 주세요.`;
+    case "missing_publish_unit":
+      return `산출물을 사이트에 게시/배포해야 하나요? 그렇다면 게시 대상(site/cloudflare)을 확인해 게시 unit 을 추가해 주세요.`;
+    case "missing_publish_readback_qa":
+      return `게시 후 산출물 검증(QA/readback)이 필요한가요? 그렇다면 검증 unit 을 추가해 주세요.`;
+    default:
+      return "계획에 누락된 항목이 있는지 확인해 주세요.";
+  }
+}

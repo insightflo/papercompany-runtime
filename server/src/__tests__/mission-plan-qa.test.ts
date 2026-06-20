@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { extractMissionIntent, intentSignalsByCategory } from "../services/missions/mission-intent.js";
 import {
+  buildClarificationRequest,
   extractUnitRoles,
+  getMissionPlanQaCritiqueHook,
   reviewPlanAgainstIntent,
+  setMissionPlanQaCritiqueHook,
   type PlanQaDiagnostic,
 } from "../services/missions/mission-plan-qa.js";
 import { buildCapabilityManifest } from "../services/missions/mission-owner-planning-context.js";
@@ -197,4 +200,39 @@ describe("buildCapabilityManifest (capability discovery)", () => {
     expect(manifest.notableSkills[0]?.purpose.endsWith("…")).toBe(true);
   });
 });
+
+describe("buildClarificationRequest (Hermes handoff contract)", () => {
+  const intent = extractMissionIntent("AI 와 웹 디자이너를 위한 가이드", "각 대상에게 전달하는 법 정리");
+  it("needs_clarification diagnostic 만 질문으로 변환(invalid 는 제외)", () => {
+    const diagnostics: PlanQaDiagnostic[] = [
+      { code: "missing_audience_split", severity: "needs_clarification", message: "audience gap" },
+      { code: "missing_publish_unit", severity: "invalid", message: "publish gap" },
+    ];
+    const questions = buildClarificationRequest({ diagnostics, intent });
+    expect(questions).toHaveLength(1);
+    expect(questions[0]?.code).toBe("missing_audience_split");
+    expect(questions[0]?.intentContext).toEqual(expect.arrayContaining(["AI", "웹 디자이너"]));
+    expect(questions[0]?.question.length).toBeGreaterThan(0);
+  });
+  it("needs_clarification 가 없으면 빈 배열", () => {
+    const questions = buildClarificationRequest({
+      diagnostics: [{ code: "missing_publish_unit", severity: "invalid", message: "x" }],
+      intent,
+    });
+    expect(questions).toEqual([]);
+  });
+});
+
+describe("mission-plan-qa critique hook (injectable)", () => {
+  afterEach(() => setMissionPlanQaCritiqueHook(null));
+  it("set/get 으로 hook 등록/해제", () => {
+    const fake = async () => [{ code: "missing_publish_unit", severity: "invalid", message: "critique" }] as PlanQaDiagnostic[];
+    expect(getMissionPlanQaCritiqueHook()).toBe(null);
+    setMissionPlanQaCritiqueHook(fake);
+    expect(getMissionPlanQaCritiqueHook()).toBe(fake);
+    setMissionPlanQaCritiqueHook(null);
+    expect(getMissionPlanQaCritiqueHook()).toBe(null);
+  });
+});
+
 
