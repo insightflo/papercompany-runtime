@@ -15,6 +15,7 @@ import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { logActivity } from "../activity-log.js";
+import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/types.js";
 
 /**
  * Workflow step definition.
@@ -53,6 +54,12 @@ export interface WorkflowStep {
   executionMode?: "static_dag" | "dynamic_owner_plan" | string;
   workflowMode?: "static_dag" | "dynamic_owner_plan" | string;
   executionControls?: WorkflowStepExecutionControls;
+  /**
+   * 조건부/loop edge (control-flow). legacy `dependencies[]` 는 when:"success" 로 동작한다.
+   * edge 평가는 control-flow/edge-condition, cycle 허용은 cycle-validator, loop 재발화는 loop-driver,
+   * step 리셋은 step-reset 이 담당 — 여기선 데이터 모델만.
+   */
+  conditionalDependencies?: ConditionalEdge[];
 }
 
 export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
@@ -248,6 +255,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       ?? normalizeStringArray(step.tools)
       ?? normalizeStringArray(step.toolName);
     const executionControls = normalizeWorkflowStepExecutionControls(step);
+    const conditionalDependencies = normalizeConditionalEdges(step.conditionalDependencies);
     return {
       ...step,
       id: typeof step.id === "string" && step.id.trim() ? step.id.trim() : crypto.randomUUID(),
@@ -262,6 +270,8 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       dependencies,
       ...(toolNames ? { toolNames } : {}),
       ...(executionControls ? { executionControls } : {}),
+      // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
+      conditionalDependencies,
     };
   });
 }

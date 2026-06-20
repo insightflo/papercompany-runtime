@@ -21,6 +21,8 @@ export const workflowStepRuns = pgTable(
     originalStatus: text("original_status"),
     agentName: text("agent_name"),
     retryCount: integer("retry_count").notNull().default(0),
+    // control-flow loop 의 iteration 카운터(가즈아 무한 loop 방지 cap). retry_count 와 의미가 다름(DTO).
+    iterationIndex: integer("iteration_index").notNull().default(0),
     sessionId: text("session_id"),
     lastDispatchAttemptAt: timestamp("last_dispatch_attempt_at", { withTimezone: true }),
     lastDispatchAcceptedAt: timestamp("last_dispatch_accepted_at", { withTimezone: true }),
