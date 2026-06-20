@@ -827,16 +827,19 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(description).toContain("- Work product");
     expect(description).toContain("20260614 Tech AI News Obsidian note");
     expect(description).toContain("REQUEST_CHANGES: regenerate the infographic before delivery");
+    expect(description).toContain("Mission-owner signal from oversight. This is a wakeup plus basic state/evidence; the main executor must judge and act to complete the mission.");
     expect(description).toContain("Main executor brief:");
+    expect(description).toContain("- You own mission execution. Your goal is to complete the mission, not merely classify the alert.");
     expect(description).toContain("Mission goal: Blocked workflow mission");
     expect(description).toContain("Current situation: Source issue");
-    expect(description).toContain("Context tools/permissions:");
-    expect(description).toContain("- Read mission, workflow run, workflow step, issue, comment, work product, and run-log evidence.");
-    expect(description).toContain("Resolution tools/permissions:");
-    expect(description).toContain("- Record an owner decision/comment, request user input, wake or reassign agents, retry/resume bounded work, replan, escalate, or report impossible completion when evidence supports it.");
     expect(description).toContain("Main executor role:");
-    expect(description).toContain("- Do: judge the situation from evidence, coordinate the next step, keep the mission moving, and record why.");
-    expect(description).toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
+    expect(description).toContain("Mission execution loop:");
+    expect(description).toContain("- Inspect the mission goal, plan, workflow/step state, issue tree, comments, work products, and run logs.");
+    expect(description).toContain("- Choose and perform the action that best advances the mission: instruct or wake agents, request fixes, retry/resume bounded work, request/re-run tool steps, revalidate outputs, replan, escalate, or report impossible completion with evidence.");
+    expect(description).toContain("Oversight signal boundary:");
+    expect(description).toContain("- Treat this issue as a wakeup plus basic state/evidence from oversight. Oversight is not the recovery decision-maker.");
+    expect(description).toContain("- Do not depend on normalized decision labels as the primary control path; use labels only as optional hints after judging the mission state yourself.");
+    expect(description).toContain("- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.");
     for (const decision of [
       "request_input",
       "retry_source_issue",
@@ -850,6 +853,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect(description).toContain(decision);
     }
     expect(description).toContain("### Mission owner decision");
+    expect(description).toContain("Optional structured decision labels for logs/UI hints only; do not treat them as the primary control path:");
     expect(description).toContain("Decision: <one of the allowed decision options>");
     expect(description).toContain("Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.");
     expect(description).toContain("Governance evidence: latest evidence unavailable for this owner action template.");
@@ -1250,6 +1254,43 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceBody).toContain(idempotencyKey);
   });
 
+  it("marks retry_source_issue wakeup handled when workflow resume already dispatched it", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({
+      status: "workflow_already_dispatched",
+      workflowWakeupRequestId: "workflow-wake-1",
+      runId: "workflow-run-1",
+    });
+
+    await db.insert(companies).values({ id: companyId, name: "Workflow Handled Retry Company", issuePrefix: `WH${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Workflow handled retry mission", status: "active" });
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
+    const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked workflow source" });
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
+    const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
+    await issueService(db).update(unblockIssue.id, { status: "done" });
+    await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry via workflow wake"].join("\n") });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue`;
+
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({ targetAgentId: workerAgentId, idempotencyKey }));
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: blockedIssue.id, wakeupDispatchStatus: "workflow_already_dispatched", idempotencyKey }),
+    ]));
+    const sourceBody = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id)).then((rows) => rows.map((row) => row.body).join("\n"));
+    expect(sourceBody).toContain("Mission owner retry wakeup handled by workflow");
+    expect(sourceBody).toContain("mission-owner-decision-wakeup-dispatched");
+    expect(sourceBody).toContain(idempotencyKey);
+  });
+
   it("active supervision escalates a stale todo mission source when no issue is actually running", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1377,7 +1418,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const svc = missionService(db, { onOwnerActionCreated });
     await svc.ensureMissionExecutionPlan({ companyId, missionId, sourceHints: { workflowName: "Owner Action No Run Workflow" } });
     const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked source already has owner action" });
-    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "todo", title: "Existing owner action with no heartbeat" });
+    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: null, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "todo", title: "Existing unassigned owner action with no heartbeat" });
     await db.update(issues).set({ createdAt: new Date("2026-06-02T00:00:00.000Z"), updatedAt: new Date("2026-06-02T00:00:00.000Z") }).where(inArray(issues.id, [sourceIssue.id, ownerAction.id]));
 
     const result = await svc.runActiveMissionOwnerSupervision({ companyId, staleAfterMinutes: 1, now: new Date("2026-06-02T00:10:00.000Z") });
@@ -1389,7 +1430,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]));
     const ownerActions = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock"));
     expect(ownerActions).toEqual([
-      expect.objectContaining({ id: ownerAction.id, missionId, originId: sourceIssue.id, status: "todo", assigneeAgentId: ownerAgentId }),
+      expect.objectContaining({ id: ownerAction.id, missionId, originId: sourceIssue.id, status: "todo", assigneeAgentId: null }),
     ]);
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
@@ -1416,7 +1457,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const svc = missionService(db, { onOwnerActionCreated });
     await svc.ensureMissionExecutionPlan({ companyId, missionId, sourceHints: { workflowName: "Owner Action Failed Run Workflow" } });
     const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "todo", title: "Todo source already has owner action" });
-    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "todo", title: "Existing owner action after failed heartbeat" });
+    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: null, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "todo", title: "Existing unassigned owner action after failed heartbeat" });
     await db.update(issues).set({ createdAt: new Date("2026-06-02T00:00:00.000Z"), updatedAt: new Date("2026-06-02T00:00:00.000Z") }).where(inArray(issues.id, [sourceIssue.id, ownerAction.id]));
     await db.insert(heartbeatRuns).values({
       id: failedRunId,
@@ -1439,7 +1480,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]));
     const ownerActions = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock"));
     expect(ownerActions).toEqual([
-      expect.objectContaining({ id: ownerAction.id, missionId, originId: sourceIssue.id, status: "todo", assigneeAgentId: ownerAgentId }),
+      expect.objectContaining({ id: ownerAction.id, missionId, originId: sourceIssue.id, status: "todo", assigneeAgentId: null }),
     ]);
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
@@ -2773,9 +2814,10 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(ownerActionIssues[0]?.description).toContain("Local retry hint: retry_with_bounded_backoff");
     expect(ownerActionIssues[0]?.description).toContain("Main executor brief:");
     expect(ownerActionIssues[0]?.description).toContain("Mission goal: Tool step recovery mission");
-    expect(ownerActionIssues[0]?.description).toContain("Context tools/permissions:");
-    expect(ownerActionIssues[0]?.description).toContain("Resolution tools/permissions:");
-    expect(ownerActionIssues[0]?.description).toContain("- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.");
+    expect(ownerActionIssues[0]?.description).toContain("Mission execution loop:");
+    expect(ownerActionIssues[0]?.description).toContain("Oversight signal boundary:");
+    expect(ownerActionIssues[0]?.description).toContain("- Do not depend on normalized decision labels as the primary control path; use labels only as optional hints after judging the mission state yourself.");
+    expect(ownerActionIssues[0]?.description).toContain("- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.");
 
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
@@ -3653,6 +3695,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const runId = randomUUID();
     const stepRunId = randomUUID();
     const issueId = randomUUID();
+    const workProductId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -3727,6 +3770,19 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       status: "running",
     });
 
+    await db.insert(issueWorkProducts).values({
+      id: workProductId,
+      companyId,
+      issueId,
+      type: "document",
+      provider: "paperclip",
+      title: "Mission brief",
+      url: "file:///tmp/mission-brief.md",
+      status: "ready_for_review",
+      isPrimary: true,
+      summary: "Brief draft produced by workflow step",
+    });
+
     const svc = missionService(db);
     const result = await svc.listWorkflowRuns(missionId);
 
@@ -3763,6 +3819,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
           status: "in_progress",
           assigneeAgentId: ownerAgentId,
         }),
+        workProducts: [
+          expect.objectContaining({
+            id: workProductId,
+            title: "Mission brief",
+            url: "file:///tmp/mission-brief.md",
+            status: "ready_for_review",
+            isPrimary: true,
+            summary: "Brief draft produced by workflow step",
+          }),
+        ],
       }),
     ]);
     expect(result[0]?.progress).toEqual({

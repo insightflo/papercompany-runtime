@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { missionsApi } from "../api/missions";
+import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { cn } from "../lib/utils";
-import { ChevronRight, ListTree } from "lucide-react";
+import { ChevronRight, ListTree, PlayCircle } from "lucide-react";
 import type { Issue } from "@paperclipai/shared";
 
 interface MissionIssueTreeProps {
@@ -18,16 +19,55 @@ interface MissionIssueTreeProps {
 interface IssueNodeProps {
   issue: Issue;
   allIssues: Issue[];
+  liveRunsByIssueId: Map<string, LiveRunForIssue[]>;
   depth: number;
   selectedIssueId?: string | null;
   onSelectIssue?: (issueId: string) => void;
 }
 
-function IssueNode({ issue, allIssues, depth, selectedIssueId, onSelectIssue }: IssueNodeProps) {
+function createdAtTime(issue: Issue) {
+  return new Date(issue.createdAt).getTime();
+}
+
+function compareIssueCreatedAt(a: Issue, b: Issue) {
+  const aTime = createdAtTime(a);
+  const bTime = createdAtTime(b);
+  if (aTime !== bTime) return aTime - bTime;
+  return (a.identifier ?? a.title).localeCompare(b.identifier ?? b.title);
+}
+
+function RunIndicator({ runs }: { runs: LiveRunForIssue[] }) {
+  if (runs.length === 0) return null;
+
+  const primaryRun = runs[0];
+  const extraCount = runs.length - 1;
+  const runStatus = primaryRun.status === "queued" ? "queued" : "running";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+        runStatus === "running"
+          ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+          : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+      )}
+      title={`Run ${runStatus}${primaryRun.agentName ? ` by ${primaryRun.agentName}` : ""}${
+        primaryRun.id ? ` (${primaryRun.id.slice(0, 8)})` : ""
+      }`}
+    >
+      <PlayCircle className="h-3 w-3" />
+      <span>Run {runStatus}</span>
+      {extraCount > 0 && <span>+{extraCount}</span>}
+    </span>
+  );
+}
+
+function IssueNode({ issue, allIssues, liveRunsByIssueId, depth, selectedIssueId, onSelectIssue }: IssueNodeProps) {
   const children = allIssues.filter((i) => i.parentId === issue.id);
   const hasChildren = children.length > 0;
   const [expanded, setExpanded] = useState(true);
   const isSelected = selectedIssueId === issue.id;
+  const liveRuns = liveRunsByIssueId.get(issue.id) ?? [];
 
   return (
     <div>
@@ -64,6 +104,7 @@ function IssueNode({ issue, allIssues, depth, selectedIssueId, onSelectIssue }: 
           <StatusIcon status={issue.status} className="shrink-0" />
           <PriorityIcon priority={issue.priority} className="shrink-0" />
           <span className="flex-1 truncate">{issue.title}</span>
+          <RunIndicator runs={liveRuns} />
           {issue.identifier && (
             <span className="shrink-0 text-xs text-muted-foreground font-mono">
               {issue.identifier}
@@ -79,6 +120,7 @@ function IssueNode({ issue, allIssues, depth, selectedIssueId, onSelectIssue }: 
               key={child.id}
               issue={child}
               allIssues={allIssues}
+              liveRunsByIssueId={liveRunsByIssueId}
               depth={depth + 1}
               selectedIssueId={selectedIssueId}
               onSelectIssue={onSelectIssue}
@@ -99,17 +141,41 @@ export function MissionIssueTree({ missionId, selectedIssueId, onSelectIssue }: 
     enabled: !!selectedCompanyId && !!missionId,
   });
 
+  const { data: liveRuns } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.liveRuns(selectedCompanyId) : ["live-runs", "__no-company__"],
+    queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
+    enabled: !!selectedCompanyId && !!missionId,
+    refetchInterval: 3000,
+  });
+
+  const liveRunsByIssueId = useMemo(() => {
+    const map = new Map<string, LiveRunForIssue[]>();
+    for (const run of liveRuns ?? []) {
+      if (!run.issueId) continue;
+      if (run.status !== "running" && run.status !== "queued") continue;
+      const existing = map.get(run.issueId);
+      if (existing) {
+        existing.push(run);
+      } else {
+        map.set(run.issueId, [run]);
+      }
+    }
+    return map;
+  }, [liveRuns]);
+
   const roots = useMemo(() => {
     if (!issues) return [];
     const issueIds = new Set(issues.map((i) => i.id));
-    return issues.filter((i) => !i.parentId || !issueIds.has(i.parentId));
+    return issues
+      .filter((i) => !i.parentId || !issueIds.has(i.parentId))
+      .sort(compareIssueCreatedAt);
   }, [issues]);
 
   useEffect(() => {
     if (!issues || issues.length === 0 || !onSelectIssue) return;
     if (selectedIssueId && issues.some((issue) => issue.id === selectedIssueId)) return;
-    onSelectIssue(issues[0].id);
-  }, [issues, onSelectIssue, selectedIssueId]);
+    onSelectIssue(roots[0]?.id ?? issues[0].id);
+  }, [issues, onSelectIssue, roots, selectedIssueId]);
 
   if (!selectedCompanyId) return null;
 
@@ -154,6 +220,7 @@ export function MissionIssueTree({ missionId, selectedIssueId, onSelectIssue }: 
           key={issue.id}
           issue={issue}
           allIssues={issues}
+          liveRunsByIssueId={liveRunsByIssueId}
           depth={0}
           selectedIssueId={selectedIssueId}
           onSelectIssue={onSelectIssue}

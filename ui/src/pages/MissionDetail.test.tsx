@@ -100,6 +100,7 @@ vi.mock("@tanstack/react-query", () => ({
           },
         },
         isLoading: false,
+        isFetching: false,
         error: null,
       };
     }
@@ -126,6 +127,7 @@ vi.mock("@tanstack/react-query", () => ({
           },
         ],
         isLoading: false,
+        isFetching: false,
         error: null,
       };
     }
@@ -134,11 +136,12 @@ vi.mock("@tanstack/react-query", () => ({
       return {
         data: [{ id: "agent-1", name: "Planner" }],
         isLoading: false,
+        isFetching: false,
         error: null,
       };
     }
 
-    return { data: undefined, isLoading: false, error: null };
+    return { data: undefined, isLoading: false, isFetching: false, error: null };
   },
   useMutation: () => ({
     mutate: vi.fn(),
@@ -232,6 +235,7 @@ vi.mock("lucide-react", () => ({
   Rocket: () => <span>Rocket</span>,
   ListTree: () => <span>ListTree</span>,
   GitBranch: () => <span>GitBranch</span>,
+  RefreshCw: () => <span>RefreshCw</span>,
   Settings: () => <span>Settings</span>,
   User: () => <span>User</span>,
 }));
@@ -260,6 +264,8 @@ describe("MissionDetail", () => {
     expect(html).toContain('data-component="WorkflowDagPanel"');
     expect(html).toContain("Workflow DAG for mission-1");
     expect(html).toContain("Execution Rules");
+    expect(html).toContain("RefreshCw");
+    expect(html).toContain("Refresh mission detail");
     expect(html).toContain("Applied Worktree Rules");
     expect(html).toContain("Vendor handoff rule");
     expect(html).toContain("approval_gate");

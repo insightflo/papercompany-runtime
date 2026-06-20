@@ -44,6 +44,7 @@ const WorktreeProposals = lazy(async () => ({ default: (await import("./pages/Wo
 const Approvals = lazy(async () => ({ default: (await import("./pages/Approvals")).Approvals }));
 const ApprovalDetail = lazy(async () => ({ default: (await import("./pages/ApprovalDetail")).ApprovalDetail }));
 const Costs = lazy(async () => ({ default: (await import("./pages/Costs")).Costs }));
+const AgentWiki = lazy(async () => ({ default: (await import("./pages/AgentWiki")).AgentWiki }));
 const Activity = lazy(async () => ({ default: (await import("./pages/Activity")).Activity }));
 const CompanySkills = lazy(async () => ({ default: (await import("./pages/CompanySkills")).CompanySkills }));
 const CompanyInstructions = lazy(async () => ({ default: (await import("./pages/CompanyInstructions")).CompanyInstructions }));
@@ -205,6 +206,7 @@ function boardRoutes() {
       <Route path="approvals/all" element={lazyRoute(<Approvals />)} />
       <Route path="approvals/:approvalId" element={lazyRoute(<ApprovalDetail />)} />
       <Route path="costs" element={lazyRoute(<Costs />)} />
+      <Route path="agent-wiki" element={lazyRoute(<AgentWiki />)} />
       <Route path="activity" element={lazyRoute(<Activity />)} />
       <Route path="inbox" element={<InboxRootRedirect />} />
       <Route path="inbox/recent" element={lazyRoute(<Inbox />)} />

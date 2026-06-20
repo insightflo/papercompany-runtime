@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Agent, Company, Issue } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
-import manifest from "../../../packages/plugins/service-request-bridge/src/manifest.js";
-import worker from "../../../packages/plugins/service-request-bridge/src/worker.js";
+import manifest from "../../../../papercompany-plugins/packages/service-request-bridge/src/manifest.js";
+import worker from "../../../../papercompany-plugins/packages/service-request-bridge/src/worker.js";
 import {
   BRIDGE_DIRECTIONS,
   ENTITY_TYPES,
-} from "../../../packages/plugins/service-request-bridge/src/constants.js";
-import { upsertBridgePair } from "../../../packages/plugins/service-request-bridge/src/store.js";
+} from "../../../../papercompany-plugins/packages/service-request-bridge/src/constants.js";
+import { upsertBridgePair } from "../../../../papercompany-plugins/packages/service-request-bridge/src/store.js";
 
 function makeCompany(id: string, name: string, issuePrefix: string): Company {
   const now = new Date("2026-04-09T00:00:00.000Z");

@@ -12,6 +12,7 @@ import {
   ensurePostgresDatabase,
   agents,
   agentRuntimeState,
+  agentWikiEntries,
   companySkills,
   companySecrets,
   activityLog,
@@ -160,6 +161,9 @@ describe("heartbeat orphaned process recovery", () => {
   }, 60_000);
 
   afterEach(async () => {
+    // fire-and-forget wiki hooks(recordFailure)가 비동기 — cleanup delete 전에 settle해서
+    // company/agent 삭제 후 늦은 insert가 도착해 agent_wiki_entries FK error가 나는 race를 방지.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     runningProcesses.clear();
     for (const child of childProcesses) {
       child.kill("SIGKILL");
@@ -182,6 +186,7 @@ describe("heartbeat orphaned process recovery", () => {
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(agentWikiEntries);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(companies);
@@ -209,6 +214,7 @@ describe("heartbeat orphaned process recovery", () => {
     runErrorCode?: string | null;
     runError?: string | null;
     updatedAt?: Date;
+    processStartedAt?: Date | null;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -260,6 +266,7 @@ describe("heartbeat orphaned process recovery", () => {
       wakeupRequestId,
       contextSnapshot: input?.includeIssue === false ? {} : { issueId },
       processPid: input?.processPid ?? null,
+      processStartedAt: input?.processStartedAt ?? null,
       processLossRetryCount: input?.processLossRetryCount ?? 0,
       errorCode: input?.runErrorCode ?? null,
       error: input?.runError ?? null,
@@ -292,6 +299,7 @@ describe("heartbeat orphaned process recovery", () => {
 
     const { runId, wakeupRequestId } = await seedRunFixture({
       processPid: child.pid ?? null,
+      processStartedAt: new Date(),
       includeIssue: false,
     });
     const heartbeat = heartbeatService(db);
@@ -310,6 +318,52 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(agentWakeupRequests.id, wakeupRequestId))
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("claimed");
+  });
+
+  it("force-reaps a detached local run whose child has run past the detached cap", async () => {
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    expect(child.pid).toBeTypeOf("number");
+
+    const { runId } = await seedRunFixture({
+      processPid: child.pid ?? null,
+      // 45분 전 시작 — DETACHED_REAP_AFTER_MS(30분) 초과 → cap 발동해 process_lost 회수
+      processStartedAt: new Date(Date.now() - 45 * 60 * 1000),
+      processLossRetryCount: 1,
+      includeIssue: false,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("process_lost");
+  });
+
+  it("records a process_lost wiki entry when a detached run is force-reaped", async () => {
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    expect(child.pid).toBeTypeOf("number");
+
+    const seeded = await seedRunFixture({
+      processPid: child.pid ?? null,
+      processStartedAt: new Date(Date.now() - 45 * 60 * 1000), // > 30min cap → process_lost
+      processLossRetryCount: 1,
+      includeIssue: false,
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+    // fireWikiRecord is non-blocking — let the recordFailure insert settle.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const entries = await db
+      .select()
+      .from(agentWikiEntries)
+      .where(eq(agentWikiEntries.agentId, seeded.agentId));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.errorCode).toBe("process_lost");
+    expect(entries[0]?.pattern).toContain("process_lost");
   });
 
   it("terminates a detached recorded pid when cancelling the run", async () => {
@@ -720,5 +774,56 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(agentWakeupRequests.id, wakeupRequestId))
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("failed");
+  });
+
+  it("does not expire an old queued run while the same agent is still running another run", async () => {
+    const { companyId, agentId, runId: runningRunId } = await seedRunFixture({
+      includeIssue: false,
+      updatedAt: new Date(),
+    });
+    const queuedRunId = randomUUID();
+    const queuedWakeupId = randomUUID();
+    const staleAt = new Date("2026-03-19T00:00:00.000Z");
+
+    await db.insert(agentWakeupRequests).values({
+      id: queuedWakeupId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: {},
+      status: "pending",
+      runId: queuedRunId,
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: queuedRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId: queuedWakeupId,
+      contextSnapshot: {},
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ startedAt: new Date(), updatedAt: new Date() })
+      .where(eq(heartbeatRuns.id, runningRunId));
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    runningProcesses.set(runningRunId, { child, graceSec: 1 });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(0);
+
+    const queuedRun = await heartbeat.getRun(queuedRunId);
+    expect(queuedRun?.status).toBe("queued");
+    expect(queuedRun?.errorCode).toBeNull();
   });
 });

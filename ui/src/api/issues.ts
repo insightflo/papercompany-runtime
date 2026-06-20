@@ -110,6 +110,8 @@ export const issuesApi = {
   listWorkProducts: (id: string) => api.get<IssueWorkProduct[]>(`/issues/${id}/work-products`),
   createWorkProduct: (id: string, data: Record<string, unknown>) =>
     api.post<IssueWorkProduct>(`/issues/${id}/work-products`, data),
+  openWorkProduct: (id: string) =>
+    api.post<{ ok: true; target: { kind: "path" | "url"; value: string } }>(`/work-products/${id}/open`, {}),
   updateWorkProduct: (id: string, data: Record<string, unknown>) =>
     api.patch<IssueWorkProduct>(`/work-products/${id}`, data),
   deleteWorkProduct: (id: string) => api.delete<IssueWorkProduct>(`/work-products/${id}`),

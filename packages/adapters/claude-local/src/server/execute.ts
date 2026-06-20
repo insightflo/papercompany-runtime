@@ -101,6 +101,69 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+function readApiErrorStatus(parsed: Record<string, unknown>): number | null {
+  const raw = parsed.api_error_status;
+  if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
+  if (typeof raw === "string") {
+    const parsedNumber = Number(raw.trim());
+    if (Number.isInteger(parsedNumber) && parsedNumber > 0) return parsedNumber;
+  }
+  return null;
+}
+
+/**
+ * API overload(429/500/503/529) 시 같은 세션으로 backoff 재시도 설정.
+ *
+ * [목적] Claude/Anthropic API(또는 z.ai 등 wrapper endpoint)가 일시적 overload(529) 를
+ *        반환할 때, adapter 가 즉시 failed 로 끝나면 workflow 엔진이 step 을 재dispatch
+ *        하며 매번 새 issue 를 찍어내는 증식(가즈아 CMPA-5371/5373/5375...) 을 유발한다.
+ *        이 대기-재시도는 adapter 안에서 같은 run/session 으로 backoff 후 재시도해 issue
+ *        를 새로 만들지 않고 overload 를 극복한다(Anthropic SDK 의 exponential backoff 차용).
+ * [주의] 각 runAttempt 는 timeoutSec 상한을 그대로 쓴다. N회 초과 시 그제 failed.
+ * [수정시 영향] 기본값은 maxOverloadRetries=3, backoff=5s(exponential+jitter).
+ *        agent config 의 maxOverloadRetries / overloadBackoffMs 로 조정.
+ */
+const DEFAULT_MAX_OVERLOAD_RETRIES = 3;
+const DEFAULT_OVERLOAD_BACKOFF_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isClaudeApiOverloaded(parsed: Record<string, unknown> | null): boolean {
+  const status = readApiErrorStatus(parsed ?? ({} as Record<string, unknown>));
+  return status === 429 || status === 500 || status === 503 || status === 529;
+}
+
+function readClaudeResultErrors(parsed: Record<string, unknown>): string[] {
+  if (!Array.isArray(parsed.errors)) return [];
+  return parsed.errors
+    .map((error) => {
+      if (typeof error === "string") return error.trim();
+      if (typeof error === "object" && error !== null && !Array.isArray(error)) {
+        const message = (error as { message?: unknown }).message;
+        if (typeof message === "string") return message.trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function describeClaudeResultError(parsed: Record<string, unknown>) {
+  const subtype = asString(parsed.subtype, "");
+  const errors = readClaudeResultErrors(parsed);
+  const isError = parsed.is_error === true || subtype.startsWith("error") || errors.length > 0;
+  if (!isError) return null;
+
+  const apiStatus = readApiErrorStatus(parsed);
+  const resultText = asString(parsed.result, "").trim();
+  const describedFailure = describeClaudeFailure(parsed);
+  return {
+    errorCode: apiStatus ? `claude_api_error_${apiStatus}` : "claude_result_error",
+    errorMessage: resultText || errors.join(" | ") || describedFailure || "Claude result reported an error",
+  };
+}
+
 function resolvePyenvShimLockPath(env: Record<string, string>): string {
   const pyenvRoot = env.PYENV_ROOT?.trim();
   if (pyenvRoot) return path.join(pyenvRoot, "shims", ".pyenv-shim");
@@ -545,7 +608,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return args;
   };
 
-  const parseFallbackErrorMessage = (proc: RunProcessResult) => {
+  const parseFallbackErrorMessage = (
+    proc: RunProcessResult,
+    parsedStream: ReturnType<typeof parseClaudeStreamJson>,
+  ) => {
     const stderrLine =
       proc.stderr
         .split(/\r?\n/)
@@ -553,6 +619,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         .find(Boolean) ?? "";
 
     if ((proc.exitCode ?? 0) === 0) {
+      if (parsedStream.sessionId || parsedStream.model) {
+        return "Claude stream-json ended without a result event or assistant text";
+      }
       return "Failed to parse claude JSON output";
     }
 
@@ -681,7 +750,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: proc.exitCode,
         signal: proc.signal,
         timedOut: false,
-        errorMessage: parseFallbackErrorMessage(proc),
+        errorMessage: parseFallbackErrorMessage(proc, parsedStream),
         errorCode: loginMeta.requiresLogin ? "claude_auth_required" : null,
         errorMeta,
         resultJson: {
@@ -716,16 +785,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       } as Record<string, unknown>)
       : null;
     const clearSessionForMaxTurns = isClaudeMaxTurnsResult(parsed);
+    const resultError = describeClaudeResultError(parsed);
 
     return {
       exitCode: proc.exitCode,
       signal: proc.signal,
       timedOut: false,
       errorMessage:
-        (proc.exitCode ?? 0) === 0
+        resultError?.errorMessage ??
+        ((proc.exitCode ?? 0) === 0
           ? null
-          : describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`,
-      errorCode: loginMeta.requiresLogin ? "claude_auth_required" : null,
+          : describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`),
+      errorCode: loginMeta.requiresLogin ? "claude_auth_required" : resultError?.errorCode ?? null,
       errorMeta,
       usage,
       sessionId: resolvedSessionId,
@@ -742,8 +813,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  const maxOverloadRetries = Math.max(0, asNumber(config.maxOverloadRetries, DEFAULT_MAX_OVERLOAD_RETRIES));
+  const overloadBackoffMs = Math.max(0, asNumber(config.overloadBackoffMs, DEFAULT_OVERLOAD_BACKOFF_MS));
   try {
-    const initial = await runAttempt(sessionId ?? null);
+    let attempt = await runAttempt(sessionId ?? null);
+    for (
+      let overloadAttempt = 0;
+      overloadAttempt < maxOverloadRetries && isClaudeApiOverloaded(attempt.parsed);
+      overloadAttempt += 1
+    ) {
+      const waitMs = overloadBackoffMs * 2 ** overloadAttempt + Math.floor(Math.random() * 500);
+      await ctx.onLog(
+        "stdout",
+        `[paperclip] Claude API overloaded (status ${readApiErrorStatus(attempt.parsed ?? ({} as Record<string, unknown>))}); retry ${overloadAttempt + 1}/${maxOverloadRetries} after ~${Math.round(waitMs / 1000)}s with the same session (no new issue).\n`,
+      );
+      await sleep(waitMs);
+      attempt = await runAttempt(sessionId ?? null);
+    }
+    const initial = attempt;
     if (
       sessionId &&
       !initial.proc.timedOut &&

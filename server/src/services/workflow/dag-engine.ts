@@ -5,7 +5,7 @@
  * A workflow is a DAG where each step has dependencies on other steps.
  */
 
-import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
@@ -268,10 +268,6 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
 
 function isTruthyBooleanMarker(value: unknown): boolean {
   return value === true || value === "true" || value === "1";
-}
-
-function getNormalWorkflowSteps(steps: WorkflowStep[]): WorkflowStep[] {
-  return steps.filter((step) => step.triggerOn !== "escalation");
 }
 
 function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
@@ -635,12 +631,34 @@ function readExplicitValidationVerdict(value: string): "pass" | "request_changes
   return null;
 }
 
-function latestExplicitValidationVerdict(comments: string[]): "pass" | "request_changes" | null {
-  for (const comment of comments) {
-    const verdict = readExplicitValidationVerdict(comment);
-    if (verdict) return verdict;
+type ValidationVerdict = "pass" | "request_changes";
+
+interface ValidationVerdictObservation {
+  verdict: ValidationVerdict;
+  observedAt: Date | null;
+}
+
+function isNewerValidationVerdict(
+  next: ValidationVerdictObservation,
+  current: ValidationVerdictObservation | undefined,
+): boolean {
+  if (!current) return true;
+  const nextTime = next.observedAt?.getTime() ?? 0;
+  const currentTime = current.observedAt?.getTime() ?? 0;
+  return nextTime >= currentTime;
+}
+
+function setLatestValidationVerdict(
+  verdictsByIssueId: Map<string, ValidationVerdictObservation>,
+  issueId: string | null,
+  verdict: ValidationVerdict | null,
+  observedAt: Date | null,
+): void {
+  if (!issueId || !verdict) return;
+  const next = { verdict, observedAt };
+  if (isNewerValidationVerdict(next, verdictsByIssueId.get(issueId))) {
+    verdictsByIssueId.set(issueId, next);
   }
-  return null;
 }
 
 function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" | "request_changes" | null {
@@ -674,6 +692,7 @@ async function syncStepRunsFromIssueState(
   const issueRows = await db
     .select({
       id: issues.id,
+      companyId: issues.companyId,
       status: issues.status,
       startedAt: issues.startedAt,
       completedAt: issues.completedAt,
@@ -689,7 +708,7 @@ async function syncStepRunsFromIssueState(
     .filter((stepRun) => {
       if (!stepRun.issueId) return false;
       const issue = issueById.get(stepRun.issueId);
-      if (!issue || issue.status !== "done") return false;
+      if (!issue || (issue.status !== "done" && issue.status !== "blocked")) return false;
       return isValidationGateCandidate({
         issueTitle: issue.title,
         issueOriginKind: issue.originKind,
@@ -698,13 +717,14 @@ async function syncStepRunsFromIssueState(
     })
     .map((stepRun) => stepRun.issueId!)
     .filter((issueId, index, all) => all.indexOf(issueId) === index);
-  const commentsByIssueId = new Map<string, string[]>();
-  const heartbeatVerdictByIssueId = new Map<string, "pass" | "request_changes">();
+  const latestValidationVerdictByIssueId = new Map<string, ValidationVerdictObservation>();
   if (validationCandidateIssueIds.length > 0) {
     const runRows = await db
       .select({
         issueId: heartbeatRuns.issueId,
         resultJson: heartbeatRuns.resultJson,
+        finishedAt: heartbeatRuns.finishedAt,
+        createdAt: heartbeatRuns.createdAt,
       })
       .from(heartbeatRuns)
       .where(and(
@@ -713,24 +733,100 @@ async function syncStepRunsFromIssueState(
       ))
       .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
     for (const run of runRows) {
-      if (!run.issueId || heartbeatVerdictByIssueId.has(run.issueId)) continue;
-      const verdict = readValidationVerdictFromHeartbeatResult(run.resultJson);
-      if (verdict) heartbeatVerdictByIssueId.set(run.issueId, verdict);
+      setLatestValidationVerdict(
+        latestValidationVerdictByIssueId,
+        run.issueId,
+        readValidationVerdictFromHeartbeatResult(run.resultJson),
+        run.finishedAt ?? run.createdAt ?? null,
+      );
     }
 
     const commentRows = await db
       .select({
         issueId: issueComments.issueId,
         body: issueComments.body,
+        createdAt: issueComments.createdAt,
       })
       .from(issueComments)
       .where(inArray(issueComments.issueId, validationCandidateIssueIds))
       .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
     for (const comment of commentRows) {
-      const comments = commentsByIssueId.get(comment.issueId) ?? [];
-      comments.push(comment.body);
-      commentsByIssueId.set(comment.issueId, comments);
+      setLatestValidationVerdict(
+        latestValidationVerdictByIssueId,
+        comment.issueId,
+        readExplicitValidationVerdict(comment.body),
+        comment.createdAt ?? null,
+      );
     }
+  }
+
+  const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
+  for (const stepRun of stepRuns) {
+    if (!stepRun.issueId) continue;
+    const issue = issueById.get(stepRun.issueId);
+    if (!issue || issue.status !== "blocked") continue;
+    const step = stepById.get(stepRun.stepId);
+    if (!step || step.dependencies.length === 0) continue;
+    if (!isValidationGateCandidate({ issueTitle: issue.title, issueOriginKind: issue.originKind, step })) continue;
+
+    const latestVerdict = latestValidationVerdictByIssueId.get(issue.id);
+    if (latestVerdict?.verdict !== "request_changes" || !latestVerdict.observedAt) continue;
+
+    const dependencyIssueRows = step.dependencies
+      .map((dependencyStepId) => stepRunByStepId.get(dependencyStepId))
+      .map((dependencyStepRun) => dependencyStepRun?.issueId ? issueById.get(dependencyStepRun.issueId) : null);
+    if (dependencyIssueRows.length !== step.dependencies.length) continue;
+    if (dependencyIssueRows.some((dependencyIssue) => !dependencyIssue || dependencyIssue.status !== "done")) continue;
+
+    const dependencyCompletedTimes = dependencyIssueRows
+      .map((dependencyIssue) => dependencyIssue?.completedAt?.getTime() ?? 0)
+      .filter((time) => time > 0);
+    if (dependencyCompletedTimes.length === 0) continue;
+    if (Math.max(...dependencyCompletedTimes) <= latestVerdict.observedAt.getTime()) continue;
+
+    const now = new Date();
+    const [updatedIssue] = await db
+      .update(issues)
+      .set({
+        status: "todo",
+        startedAt: null,
+        completedAt: null,
+        cancelledAt: null,
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: now,
+      })
+      .where(and(eq(issues.id, issue.id), eq(issues.status, "blocked")))
+      .returning({
+        id: issues.id,
+        companyId: issues.companyId,
+        status: issues.status,
+        startedAt: issues.startedAt,
+        completedAt: issues.completedAt,
+        cancelledAt: issues.cancelledAt,
+        title: issues.title,
+        originKind: issues.originKind,
+      });
+    if (!updatedIssue) continue;
+
+    issueById.set(updatedIssue.id, updatedIssue);
+    await logActivity(db, {
+      companyId: updatedIssue.companyId,
+      actorType: "system",
+      actorId: "workflow:validation-recheck",
+      action: "workflow.validation_recheck_queued",
+      entityType: "issue",
+      entityId: updatedIssue.id,
+      details: {
+        workflowRunId: stepRun.workflowRunId,
+        stepId: step.id,
+        dependencyStepIds: step.dependencies,
+        reason: "dependency_completed_after_request_changes",
+        requestChangesObservedAt: latestVerdict.observedAt.toISOString(),
+      },
+    });
   }
 
   for (const stepRun of stepRuns) {
@@ -739,7 +835,7 @@ async function syncStepRunsFromIssueState(
     if (!issue) continue;
 
     const validationVerdict = issue.status === "done"
-      ? heartbeatVerdictByIssueId.get(issue.id) ?? latestExplicitValidationVerdict(commentsByIssueId.get(issue.id) ?? [])
+      ? latestValidationVerdictByIssueId.get(issue.id)?.verdict ?? null
       : null;
     const desiredStatus = validationVerdict === "request_changes"
       ? "failed"
@@ -778,12 +874,17 @@ async function syncStepRunsFromIssueState(
     .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
 }
 
-async function resetSkippedUnlaunchedStepRuns(
+async function resetUnlaunchedTerminalStepRuns(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  const skipped = stepRuns.filter((stepRun) => stepRun.status === "skipped" && stepRun.issueId == null);
-  if (skipped.length === 0) return stepRuns;
+  const unlaunchedTerminal = stepRuns.filter((stepRun) =>
+    (stepRun.status === "skipped" || stepRun.status === "failed")
+    && stepRun.issueId == null
+    && stepRun.startedAt == null
+    && stepRun.lastDispatchAttemptAt == null
+  );
+  if (unlaunchedTerminal.length === 0) return stepRuns;
 
   await db
     .update(workflowStepRuns)
@@ -792,7 +893,7 @@ async function resetSkippedUnlaunchedStepRuns(
       startedAt: null,
       completedAt: null,
     })
-    .where(inArray(workflowStepRuns.id, skipped.map((stepRun) => stepRun.id)));
+    .where(inArray(workflowStepRuns.id, unlaunchedTerminal.map((stepRun) => stepRun.id)));
 
   return db
     .select()
@@ -885,6 +986,26 @@ async function createWorkflowStepIssue(input: {
     "- For local file artifacts, include `provider: \"local\"`, an appropriate `type`, a title, and `metadata.path` with the absolute file path; set `isPrimary: true` for the main deliverable.",
     "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
   ].filter((line) => line !== null).join("\n");
+
+  // [idempotency] 같은 run + 같은 step(title) 의 기존 workflow_execution issue 가 살아있으면
+  // (cancelled 제외) 재사용. step 실패→재시도/Unblock 시 createWorkflowStepIssue 가 매번 새
+  // issue 를 찍어 signal/sector/narrative 가 처음부터 반복되는 것(가즈아 gazua-morning
+  // CMPA-5415→5419→5424→5427→5430 반복) 을 막는다. done/blocked issue 도 재사용 — 이후
+  // dispatch 의 wake/skip 이 상태를 판단한다(이미 done 이면 재실행 안 함).
+  const reusable = await input.db
+    .select({ id: issues.id, status: issues.status })
+    .from(issues)
+    .where(and(
+      eq(issues.originRunId, input.run.id),
+      eq(issues.originKind, "workflow_execution"),
+      eq(issues.title, title),
+      ne(issues.status, "cancelled"),
+    ))
+    .orderBy(asc(issues.createdAt))
+    .limit(1);
+  if (reusable.length > 0) {
+    return reusable[0]!.id;
+  }
 
   const createdIssue = await issueSvc.create(input.run.companyId, {
     title,
@@ -1638,7 +1759,7 @@ export async function retryIssueLessToolWorkflowStep(
     .select()
     .from(workflowStepRuns)
     .where(eq(workflowStepRuns.workflowRunId, input.runId));
-  await resetSkippedUnlaunchedStepRuns(db, refreshedStepRuns);
+  await resetUnlaunchedTerminalStepRuns(db, refreshedStepRuns);
 
   await db
     .update(workflowRuns)
@@ -1861,26 +1982,12 @@ export async function syncWorkflowRunState(
   let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps);
 
-  const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
-  if (!hasFailure && !dynamicLaunchStepIds && context.run.status !== "cancelled") {
-    stepRuns = await resetSkippedUnlaunchedStepRuns(db, stepRuns);
+  if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
+    stepRuns = await resetUnlaunchedTerminalStepRuns(db, stepRuns);
   }
+  const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (hasFailure) {
-    const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
-    if (unlaunchedPendingSteps.length > 0) {
-      const now = new Date();
-      for (const stepRun of unlaunchedPendingSteps) {
-        await db
-          .update(workflowStepRuns)
-          .set({ status: "skipped", completedAt: now })
-          .where(eq(workflowStepRuns.id, stepRun.id));
-      }
-      stepRuns = await db
-        .select()
-        .from(workflowStepRuns)
-        .where(eq(workflowStepRuns.workflowRunId, runId));
-    }
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   } else {
     let shouldContinue = true;
@@ -1944,20 +2051,6 @@ export async function syncWorkflowRunState(
 
   const hasFailureAfterLaunch = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (!hasFailure && hasFailureAfterLaunch) {
-    const unlaunchedPendingSteps = stepRuns.filter((stepRun) => stepRun.status === "pending" && stepRun.issueId == null);
-    if (unlaunchedPendingSteps.length > 0) {
-      const now = new Date();
-      for (const stepRun of unlaunchedPendingSteps) {
-        await db
-          .update(workflowStepRuns)
-          .set({ status: "skipped", completedAt: now })
-          .where(eq(workflowStepRuns.id, stepRun.id));
-      }
-      stepRuns = await db
-        .select()
-        .from(workflowStepRuns)
-        .where(eq(workflowStepRuns.workflowRunId, runId));
-    }
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   }
 
@@ -2064,45 +2157,8 @@ export async function executeWorkflowRun(
   return syncWorkflowRunState(db, runId);
 }
 
-/**
- * Reconciles workflow state - checks for stuck runs and recovers them.
- *
- * @param db - Database instance.
- * @param timeoutMinutes - Consider runs stuck if older than this.
- */
-export async function reconcileWorkflowRuns(
-  db: Db,
-  timeoutMinutes: number = 60,
-): Promise<{ recovered: number; failed: number }> {
-  const timeout = new Date(Date.now() - timeoutMinutes * 60 * 1000);
-
-  const stuckRuns = await db
-    .select()
-    .from(workflowRuns)
-    .where(
-      and(
-        eq(workflowRuns.status, "running"),
-        lt(workflowRuns.startedAt, timeout),
-      ),
-    );
-
-  let recovered = 0;
-  let failed = 0;
-
-  for (const run of stuckRuns) {
-    try {
-      await db
-        .update(workflowRuns)
-        .set({
-          status: "failed",
-          completedAt: new Date(),
-        })
-        .where(eq(workflowRuns.id, run.id));
-      failed++;
-    } catch (error) {
-      recovered++;
-    }
-  }
-
-  return { recovered, failed };
-}
+// NOTE: stuck-run 정리(reconcile)는 services/workflow/reconciler.ts 의
+// createNativeWorkflowReconciler + reconcileWorkflow 로 이관했다. 과거 이 파일에
+// 있던 reconcileWorkflowRuns(및 engine.ts 의 reconcile() 래퍼)는 호출부가 없는
+// dead code 였고, 그 빈약 구현(run 상태만 failed 로 바꾸고 pending step / orphan
+// step 은 처리하지 않음) 대신 reconciler.ts 의 더 완전한 구현을 주기 구동한다.

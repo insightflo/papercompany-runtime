@@ -8,7 +8,7 @@
 import type { Db } from "@paperclipai/db";
 import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
-import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, reconcileWorkflowRuns, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { missionService } from "../missions.js";
 import {
@@ -173,6 +173,49 @@ async function ensureMissionForWorkflowRun(
   return { ...input, missionId: mission.id };
 }
 
+async function assertNoImplicitDuplicateScheduledWorkflowRun(
+  db: Db,
+  input: CreateWorkflowRunInput,
+  workflow: WorkflowDefinition,
+  runDate: string,
+): Promise<void> {
+  if (input.missionId) return;
+  if (typeof workflow.schedule !== "string" || workflow.schedule.trim().length === 0) return;
+
+  const existingScheduledRun = await findActiveScheduledWorkflowMissionRun(db, input, workflow, runDate);
+  if (!existingScheduledRun) return;
+
+  throw new Error(
+    `Workflow already has an active scheduled workflow mission for ${runDate}: ${existingScheduledRun.id}. `
+      + "Finish/cancel the active mission before starting another scheduled run for the same workflow date.",
+  );
+}
+
+async function findActiveScheduledWorkflowMissionRun(
+  db: Db,
+  input: Pick<CreateWorkflowRunInput, "companyId" | "workflowId">,
+  workflow: WorkflowDefinition,
+  runDate: string,
+): Promise<WorkflowRun | null> {
+  if (typeof workflow.schedule !== "string" || workflow.schedule.trim().length === 0) return null;
+
+  const existingRuns = await listWorkflowRuns(db, {
+    companyId: input.companyId,
+    workflowId: input.workflowId,
+  });
+
+  for (const run of existingRuns) {
+    if (run.runDate !== runDate) continue;
+    if (typeof run.missionId !== "string" || run.missionId.trim().length === 0) continue;
+    if (run.triggerSource !== "schedule" && typeof run.scheduledSlotId !== "string") continue;
+
+    const mission = await missionService(db).getById(run.missionId);
+    if (mission?.status === "active") return run;
+  }
+
+  return null;
+}
+
 async function assertWorkflowToolReadiness(
   db: Db,
   companyId: string,
@@ -276,6 +319,7 @@ export const workflowService = {
     const runDate = input.runDate
       ?? (timezone ? formatDateKeyInTimezone(new Date(), timezone) : null)
       ?? new Date().toISOString().slice(0, 10);
+    await assertNoImplicitDuplicateScheduledWorkflowRun(db, input, workflow, runDate);
     const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate });
     const run = await createWorkflowRun(db, runInput);
     if (run.missionId) {
@@ -316,6 +360,18 @@ export const workflowService = {
     const runDate = input.runDate
       ?? (timezone ? formatDateKeyInTimezone(input.scheduledAt, timezone) : null)
       ?? input.scheduledAt.toISOString().slice(0, 10);
+    const activeScheduledRun = await findActiveScheduledWorkflowMissionRun(db, {
+      companyId: input.companyId,
+      workflowId: input.workflowId,
+    }, workflow, runDate);
+    if (activeScheduledRun) {
+      return {
+        claimed: false,
+        scheduledSlotId: null,
+        run: null,
+      };
+    }
+
     const slot = await claimWorkflowRunSlot(db, {
       workflowDefinitionId: input.workflowId,
       companyId: input.companyId,
@@ -444,16 +500,6 @@ export const workflowService = {
    */
   async validateDag(steps: unknown[]): Promise<DagValidationResult> {
     return validateDag(normalizeWorkflowSteps(steps));
-  },
-
-  /**
-   * Reconcile stuck workflow runs.
-   */
-  async reconcile(
-    db: Db,
-    timeoutMinutes: number = 60,
-  ): Promise<{ recovered: number; failed: number }> {
-    return reconcileWorkflowRuns(db, timeoutMinutes);
   },
 
   /**

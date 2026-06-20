@@ -137,6 +137,12 @@ function formatArgList(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 const codexThinkingEffortOptions = [
   { id: "", label: "Auto" },
   { id: "minimal", label: "Minimal" },
@@ -350,6 +356,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const [runPolicyAdvancedOpen, setRunPolicyAdvancedOpen] = useState(false);
   // Popover states
   const [modelOpen, setModelOpen] = useState(false);
+  const [fallbackModelOpen, setFallbackModelOpen] = useState(false);
   const [thinkingEffortOpen, setThinkingEffortOpen] = useState(false);
 
   // Create mode helpers
@@ -380,7 +387,41 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   // Current model for display
   const currentModelId = isCreate
     ? val!.model
-    : eff("adapterConfig", "model", String(config.model ?? ""));
+    : adapterType === "hermes_local"
+      ? (() => {
+          const provider = eff("adapterConfig", "provider", String(config.provider ?? ""));
+          const model = eff("adapterConfig", "model", String(config.model ?? ""));
+          return provider && model ? `${provider}/${model}` : model;
+        })()
+      : eff("adapterConfig", "model", String(config.model ?? ""));
+  const currentFallbackConfig = isCreate
+    ? {}
+    : asRecord(eff("adapterConfig", "fallback", asRecord(config.fallback)));
+  const currentFallbackCommand = isCreate
+    ? (val!.fallbackCommand ?? "")
+    : String(
+        eff(
+          "adapterConfig",
+          "fallbackCommand",
+          String(config.fallbackCommand ?? currentFallbackConfig.command ?? ""),
+        ) ?? "",
+      );
+  const currentFallbackModelId = isCreate
+    ? (val!.fallbackModel ?? "")
+    : String(currentFallbackConfig.model ?? "");
+
+  function markFallbackConfigField(field: string, value: unknown) {
+    if (isCreate) return;
+    const next = {
+      ...asRecord(eff("adapterConfig", "fallback", asRecord(config.fallback))),
+    };
+    if (value === undefined || value === "") {
+      delete next[field];
+    } else {
+      next[field] = value;
+    }
+    mark("adapterConfig", "fallback", Object.keys(next).length > 0 ? next : undefined);
+  }
 
   const thinkingEffortKey =
     adapterType === "codex_local"
@@ -719,15 +760,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               {supportsAdapterFallback && (
                 <Field label="Fallback command" hint={help.fallbackCommand}>
                   <DraftInput
-                    value={
-                      isCreate
-                        ? (val!.fallbackCommand ?? "")
-                        : eff("adapterConfig", "fallbackCommand", String(config.fallbackCommand ?? ""))
-                    }
+                    value={currentFallbackCommand}
                     onCommit={(v) =>
                       isCreate
                         ? set!({ fallbackCommand: v })
-                        : mark("adapterConfig", "fallbackCommand", v || undefined)
+                        : config.fallbackCommand !== undefined
+                          ? mark("adapterConfig", "fallbackCommand", v || undefined)
+                          : markFallbackConfigField("command", v || undefined)
                     }
                     immediate
                     className={inputClass}
@@ -746,19 +785,44 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 </Field>
               )}
 
+              {adapterType === "opencode_local" && (
+                <ModelDropdown
+                  label="Fallback model"
+                  hint={help.fallbackModel}
+                  models={models}
+                  value={currentFallbackModelId}
+                  onChange={(v) =>
+                    isCreate
+                      ? set!({ fallbackModel: v })
+                      : markFallbackConfigField("model", v || undefined)
+                  }
+                  open={fallbackModelOpen}
+                  onOpenChange={setFallbackModelOpen}
+                  allowDefault
+                  required={false}
+                  groupByProvider
+                />
+              )}
+
               <ModelDropdown
                 models={models}
                 value={currentModelId}
                 onChange={(v) =>
                   isCreate
                     ? set!({ model: v })
-                    : mark("adapterConfig", "model", v || undefined)
+                    : adapterType === "hermes_local"
+                      ? (() => {
+                          const provider = extractProviderId(v);
+                          mark("adapterConfig", "provider", provider || undefined);
+                          mark("adapterConfig", "model", provider ? extractModelName(v) : v || undefined);
+                        })()
+                      : mark("adapterConfig", "model", v || undefined)
                 }
                 open={modelOpen}
                 onOpenChange={setModelOpen}
                 allowDefault={adapterType !== "opencode_local"}
                 required={adapterType === "opencode_local"}
-                groupByProvider={adapterType === "opencode_local"}
+                groupByProvider={adapterType === "opencode_local" || adapterType === "hermes_local"}
               />
               {fetchedModelsError && (
                 <p className="text-xs text-destructive">
@@ -1333,6 +1397,8 @@ function EnvVarEditor({
 }
 
 function ModelDropdown({
+  label = "Model",
+  hint = help.model,
   models,
   value,
   onChange,
@@ -1342,6 +1408,8 @@ function ModelDropdown({
   required,
   groupByProvider,
 }: {
+  label?: string;
+  hint?: string;
   models: AdapterModel[];
   value: string;
   onChange: (id: string) => void;
@@ -1391,7 +1459,7 @@ function ModelDropdown({
   }, [filteredModels, groupByProvider]);
 
   return (
-    <Field label="Model" hint={help.model}>
+    <Field label={label} hint={hint}>
       <Popover
         open={open}
         onOpenChange={(nextOpen) => {

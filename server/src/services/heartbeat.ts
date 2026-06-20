@@ -39,7 +39,8 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { toolService } from "./tools/registry.js";
 import { knowledgeService } from "./knowledge/base.js";
-import { finalizeHermesChatRun } from "./hermes-chat.js";
+import { finalizeHermesChatRun, hermesChatService } from "./hermes-chat.js";
+import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
@@ -54,6 +55,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
@@ -111,6 +113,10 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
+// orphaned-but-alive child 강제 회수 시한. handle 상실 후에도 child pid 가 살아 reaper 가 process_detached
+// 로 매 tick defer 만 하던 무한 대기(CMPA-5519 ~72분 hang)를 상한으로 끊고 process_lost+retry 로 회수.
+const DETACHED_REAP_AFTER_MS = 30 * 60 * 1000;
+const DETACHED_GRACE_SEC = 5;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 const startLocksByAgent = new Map<string, Promise<void>>();
@@ -706,10 +712,24 @@ function canApplyMissingWorkProductRegistrationGate(issue: {
   );
 }
 
-function workProductReferencesClaimedArtifact(
-  product: { url: string | null; externalId: string | null; metadata: Record<string, unknown> | null },
+export function workProductReferencesClaimedArtifact(
+  product: {
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+    status?: string | null;
+    isPrimary?: boolean | null;
+  },
   claimedArtifactPaths: string[],
 ) {
+  if (product.status && product.status !== "active") return false;
+
+  // Some successful retry/heartbeat runs only report that the work is already complete
+  // (or echo setup files from the agent prompt) rather than re-printing the actual
+  // artifact path. In that case an existing active primary workProduct is already the
+  // control-plane contract and should not be auto-blocked as missing registration.
+  if (claimedArtifactPaths.length === 0) return product.isPrimary !== false;
+
   const haystack = [
     product.url,
     product.externalId,
@@ -782,6 +802,50 @@ function workProductSatisfiesIssueDeclaredArtifact(
     const candidates = Array.from(new Set([normalizedToken, basename].filter(Boolean)));
     return candidates.some((candidate) => new RegExp(artifactTokenRegexSource(candidate), "u").test(haystack));
   });
+}
+
+export function hasSatisfiedWorkProductRegistration(input: {
+  existingWorkProducts: Array<{
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+    status?: string | null;
+    isPrimary?: boolean | null;
+  }>;
+  claimedArtifactPaths: string[];
+  issue: { description?: string | null };
+  autoRegisteredWorkProduct?: unknown | null;
+}) {
+  // An active primary workProduct is the authoritative control-plane contract for the issue’s artifact. When a heartbeat/retry run succeeds and echoes input/setup/data-source paths in its stdout that do not literally match the registered deliverable URL, the existing registration must not be treated as missing. This removes the false-positive loop reported in CMPAA-163 without disabling the gate for the genuine “agent forgot to register WP” case.
+  const hasActivePrimaryWorkProduct = input.existingWorkProducts.some((product) =>
+    product.status === "active" && product.isPrimary === true
+  );
+  const hasMatchingWorkProduct = input.existingWorkProducts.some((product) => workProductReferencesClaimedArtifact(
+    {
+      url: product.url,
+      externalId: product.externalId,
+      metadata: product.metadata ?? null,
+      status: product.status,
+      isPrimary: product.isPrimary,
+    },
+    input.claimedArtifactPaths,
+  ));
+  const hasIssueDeclaredWorkProduct = input.existingWorkProducts.some((product) =>
+    workProductSatisfiesIssueDeclaredArtifact({
+      url: product.url,
+      externalId: product.externalId,
+      status: product.status,
+      isPrimary: product.isPrimary,
+      metadata: product.metadata ?? null,
+    }, input.issue),
+  );
+
+  return (
+    hasActivePrimaryWorkProduct ||
+    hasMatchingWorkProduct ||
+    hasIssueDeclaredWorkProduct ||
+    Boolean(input.autoRegisteredWorkProduct)
+  );
 }
 
 async function autoRegisterWorkProductFromIssueDocument(input: {
@@ -1445,13 +1509,23 @@ function isTrackedLocalChildProcessAdapter(adapterType: string) {
   return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
 }
 
-function resolveAdapterFallbackConfig(adapterConfigRaw: unknown) {
+type AdapterFallbackConfig = {
+  command: string;
+  provider?: string;
+  model?: string;
+  triggers: Set<string>;
+  maxAttempts: number;
+};
+
+function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbackConfig | null {
   const adapterConfig = parseObject(adapterConfigRaw);
   const fallback = parseObject(adapterConfig.fallback);
   const command =
     readNonEmptyString(adapterConfig.fallbackCommand) ??
     readNonEmptyString(fallback.command);
   if (!command) return null;
+  const provider = readNonEmptyString(fallback.provider) ?? undefined;
+  const model = readNonEmptyString(fallback.model) ?? undefined;
 
   const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
   const triggers = rawTriggers
@@ -1464,6 +1538,8 @@ function resolveAdapterFallbackConfig(adapterConfigRaw: unknown) {
 
   return {
     command,
+    provider,
+    model,
     triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
     maxAttempts,
   };
@@ -1495,10 +1571,63 @@ function applyAdapterFallbackRuntimeConfig(input: {
   if (!shouldApplyAdapterFallbackConfig(input)) return input.config;
   const command = readNonEmptyString(input.context.fallbackCommand);
   if (!command) return input.config;
+  const provider = readNonEmptyString(input.context.fallbackProvider);
+  const model = readNonEmptyString(input.context.fallbackModel);
   return {
     ...input.config,
     command,
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
   };
+}
+
+function isTerminalAdapterFallbackConfigurationFailure(run: typeof heartbeatRuns.$inferSelect) {
+  const text = [
+    heartbeatRunFailureText({
+      errorCode: run.errorCode,
+      errorMessage: run.error,
+      stdoutExcerpt: run.stdoutExcerpt,
+      stderrExcerpt: run.stderrExcerpt,
+    }),
+    stringifyRunResultJson(run.resultJson),
+    stringifyRunResultJson(run.usageJson),
+  ].join("\n").toLowerCase();
+
+  return (
+    /api error:\s*400\b[\s\S]*param incorrect/.test(text) ||
+    /\bparam incorrect\b/.test(text) ||
+    /\bnot supported model\b/.test(text) ||
+    /\bunsupported model\b/.test(text) ||
+    /\binvalid model\b/.test(text) ||
+    /\bunknown model\b/.test(text) ||
+    /\bmodel\b[\s\S]{0,80}\bnot (?:found|supported)\b/.test(text)
+  );
+}
+
+function shouldQueueRunFailureAdapterFallback(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  fallback: Pick<AdapterFallbackConfig, "command" | "provider" | "model" | "maxAttempts">;
+}) {
+  const context = parseObject(input.run.contextSnapshot);
+  const fallbackAttempt = resolveAdapterFallbackAttempt(context);
+  if (fallbackAttempt >= input.fallback.maxAttempts) return false;
+
+  const activeFallbackCommand = readNonEmptyString(context.fallbackCommand);
+  const activeFallbackProvider = readNonEmptyString(context.fallbackProvider);
+  const activeFallbackModel = readNonEmptyString(context.fallbackModel);
+  const fallbackProvider = input.fallback.provider ?? null;
+  const fallbackModel = input.fallback.model ?? null;
+  const isSameFallbackCommand = activeFallbackCommand === input.fallback.command;
+  const isSameFallbackRoute =
+    isSameFallbackCommand &&
+    activeFallbackProvider === fallbackProvider &&
+    activeFallbackModel === fallbackModel;
+  const isFallbackRun = readNonEmptyString(context.wakeReason) === "adapter_fallback";
+  if (isFallbackRun && isSameFallbackRoute && isTerminalAdapterFallbackConfigurationFailure(input.run)) {
+    return false;
+  }
+
+  return true;
 }
 
 // A positive liveness check means some process currently owns the PID.
@@ -1855,7 +1984,7 @@ const CLAIMED_ARTIFACT_JSON_PATH_RE = new RegExp(
   "giu",
 );
 const CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE = new RegExp(
-  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"])`,
+  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"\\\\,}\\]])`,
   "giu",
 );
 
@@ -1868,7 +1997,7 @@ function normalizeClaimedArtifactPath(value: string): string {
     .trim();
 }
 
-function isActionableClaimedArtifactPath(value: string): boolean {
+export function isActionableClaimedArtifactPath(value: string): boolean {
   if (!value.startsWith("/")) return false;
   if (value.includes("\\n") || value.includes("\\r") || /[\r\n]/u.test(value)) return false;
   if (/[<>]/u.test(value)) return false;
@@ -1877,16 +2006,22 @@ function isActionableClaimedArtifactPath(value: string): boolean {
   const nonDeliverablePathMarkers = [
     "/papercompany-runtime/skills/",
     "/papercompany-operations/scripts/paperclip-addon/agents/",
+    "/instructions/",
     "/node_modules/",
     "/.git/",
+    "/data/",
+    "/input/",
+    "/source/",
+    "/sources/",
   ];
   if (nonDeliverablePathMarkers.some((marker) => value.includes(marker))) return false;
-  if (/(?:^|\/)SKILL\.md$/u.test(value)) return false;
+  if (/(?:^|\/)(?:AGENTS|CLAUDE|SKILL)\.md$/u.test(value)) return false;
+  if (/(?:^|\/)\.cursorrules$/u.test(value)) return false;
 
   return true;
 }
 
-function extractClaimedArtifactPaths(run: typeof heartbeatRuns.$inferSelect): string[] {
+export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
   const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
@@ -1924,7 +2059,7 @@ function buildMissingWorkProductRegistrationGateComment(input: {
 }
 
 export type HeartbeatFailureClassification = {
-  category: "timeout" | "cancelled" | "quota" | "auth" | "command" | "adapter";
+  category: "timeout" | "cancelled" | "overload" | "quota" | "auth" | "command" | "adapter";
   reasonCode: string;
   summary: string;
   fallbackCandidates: string[];
@@ -1974,6 +2109,22 @@ export function classifyHeartbeatRunFailure(input: {
   }
   if (input.status === "cancelled") {
     return { category: "cancelled", reasonCode: "RUN_CANCELLED", summary: "Heartbeat run was cancelled.", fallbackCandidates };
+  }
+  // API overload(500/503/529): errorCode 를 우선 매칭한다. stderr 의 무해한
+  // "ENOENT: no such"(참조 instructions 파일 누락 워닝) 가 haystack 에 섞여 아래 command
+  // 분기로 오판되는 것(gazua 코난 529 run 사례) 을 막기 위해 errorCode 기반으로 먼저 잡는다.
+  // 일시 overload 는 adapter 의 backoff 재시도로 극복 가능(transient) 하므로 command 가 아님.
+  // 429 는 아래 quota 분기가 처리하도록 둔다.
+  const overloadApiStatus = /claude_api_error_(\d+)/i.exec(input.errorCode ?? "")?.[1];
+  const isOverloadApiStatus = overloadApiStatus === "500" || overloadApiStatus === "503" || overloadApiStatus === "529";
+  const isOverloadMessage = /overloaded|temporarily overloaded|service is currently/i.test(input.errorMessage ?? "");
+  if (isOverloadApiStatus || isOverloadMessage) {
+    return {
+      category: "overload",
+      reasonCode: overloadApiStatus ? `PROVIDER_OVERLOADED_${overloadApiStatus}` : "PROVIDER_OVERLOADED",
+      summary: "Provider temporarily overloaded (transient). Retry/backoff applicable; not a command/path/permission issue.",
+      fallbackCandidates,
+    };
   }
   if (/\b(403|429)\b/.test(normalized) && /quota|rate.?limit|rate limit|insufficient|billing|capacity|exceeded/.test(normalized)) {
     return {
@@ -2207,6 +2358,28 @@ function buildMissionOversightRunSucceededReleaseComment(run: typeof heartbeatRu
   ].join("\n");
 }
 
+/**
+ * [목적] fireWikiRecord — agent 자가학습 wiki에 실패 패턴을 기록한다. fire-and-forget(non-blocking):
+ *   recordFailure를 await하지 않고 .catch로 에러를 삼켜, wiki 로깅이 절대 main flow를
+ *   깨뜨리지 않도록 한다(activity-log.ts의 plugin event fanout .catch 선례와 동일 패턴).
+ * [입력] wiki: agentWikiService(db) 인스턴스. input: RecordFailureInput. runIdForLog: 로깅용 run id.
+ * [수정시 영향] 호출부는 모두 heartbeatService 클로저 내부. 에러는 logger.warn으로만 남는다.
+ */
+function fireWikiRecord(
+  wiki: ReturnType<typeof agentWikiService>,
+  input: RecordFailureInput,
+  runIdForLog?: string,
+): void {
+  void wiki
+    .recordFailure(input)
+    .catch((err: unknown) =>
+      logger.warn(
+        { err, runId: runIdForLog, pattern: input.pattern },
+        "agent-wiki.recordFailure non-blocking failure",
+      ),
+    );
+}
+
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -2217,6 +2390,7 @@ export function heartbeatService(db: Db) {
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const wikiSvc = agentWikiService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
@@ -3451,6 +3625,8 @@ export function heartbeatService(db: Db) {
     now: Date,
     input: {
       fallbackCommand: string;
+      fallbackProvider?: string;
+      fallbackModel?: string;
       fallbackReason: string;
     },
   ) {
@@ -3489,6 +3665,8 @@ export function heartbeatService(db: Db) {
       fallbackReason: input.fallbackReason,
       fallbackAttempt,
       fallbackCommand: input.fallbackCommand,
+      ...(input.fallbackProvider ? { fallbackProvider: input.fallbackProvider } : {}),
+      ...(input.fallbackModel ? { fallbackModel: input.fallbackModel } : {}),
       wakeReason: "adapter_fallback",
     };
     const taskKey = deriveTaskKey(fallbackContextSnapshot, null);
@@ -3785,6 +3963,39 @@ export function heartbeatService(db: Db) {
       const trackedProcess = runningProcesses.get(run.id) ?? null;
       const hasActiveExecution = activeRunExecutions.has(run.id);
       if (trackedProcess || hasActiveExecution) {
+        // [issue done → 자식 즉시 kill] 에이전트가 issue 를 done/cancelled 처리했는데도
+        // 어댑터 자식(opencode 등)이 exit 안 하고 살아있으면 maxConcurrentRuns 블록이
+        // execution_stale(15min)까지 지속된다. issue 상태가 done/cancelled 면 자식을
+        // 즉시 종료해 블록을 푼다.
+        if (trackedProcess && run.issueId) {
+          const [issueRow] = await db.select({ status: issues.status }).from(issues)
+            .where(eq(issues.id, run.issueId)).limit(1);
+          if (issueRow && (issueRow.status === "done" || issueRow.status === "cancelled")) {
+            trackedProcess.child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!trackedProcess.child.killed) {
+                trackedProcess.child.kill("SIGKILL");
+              }
+            }, Math.max(1, trackedProcess.graceSec) * 1000);
+            runningProcesses.delete(run.id);
+            await setRunStatus(run.id, issueRow.status === "done" ? "succeeded" : "cancelled", {
+              error: `Issue ${issueRow.status} but adapter child did not exit; terminated`,
+              errorCode: "issue_done_child_not_exited",
+              finishedAt: now,
+            });
+            // Agent self-learning wiki (Phase 1): adapter 자식 미종료 패턴 기록 (non-blocking).
+            fireWikiRecord(wikiSvc, {
+              companyId: run.companyId,
+              agentId: run.agentId,
+              missionId: null,
+              pattern: "adapter 자식 미종료 (issue done/cancelled)",
+              cause: "이슈가 done/cancelled로 종료됐는데도 어댑터 자식(opencode 등)이 exit하지 않아 maxConcurrentRuns 블록이 execution_stale까지 지속됨.",
+              solution: "이슈 done/cancelled 처리 후 어댑터 자식이 확실히 exit하도록 종료 시그널/플래그 점검. 작업 완료 시 프로세스를 즉시 종료할 것.",
+              errorCode: "issue_done_child_not_exited",
+            }, run.id);
+            continue;
+          }
+        }
         if (activeExecutionTimeoutMs <= 0) continue;
         const refTime = run.startedAt ? new Date(run.startedAt).getTime() : new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < activeExecutionTimeoutMs) continue;
@@ -3823,6 +4034,16 @@ export function heartbeatService(db: Db) {
           });
           await releaseIssueExecutionAndPromote(timedOutRun);
         }
+        // Agent self-learning wiki (Phase 1): execution stale(hang) 패턴 기록 (non-blocking).
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          missionId: null,
+          pattern: "execution stale (hang)",
+          cause: "어댑터 실행이 타임아웃(activeExecutionTimeout) 전에 종단 상태에 도달하지 못해 hang으로 판정됨.",
+          solution: "API_TIMEOUT(10분)과 idle 점검. 장기 실행 명령은 타임아웃/백그라운드 분리. 자식이 stdout을 닫지 않고 누수하는지 확인.",
+          errorCode: "execution_stale_timeout",
+        }, run.id);
         await finalizeAgentStatus(run.agentId, "timed_out");
         await startNextQueuedRunForAgent(run.agentId);
         reaped.push(run.id);
@@ -3855,7 +4076,27 @@ export function heartbeatService(db: Db) {
             });
           }
         }
-        continue;
+        // FIX 2b: orphaned-but-alive child longevity cap. child 가 DETACHED_REAP_AFTER_MS 초과 실행 중이면
+        // 강제 kill 후 아래 기존 process_lost/retry 경로로 fall-through(무한 defer 방지 — CMPA-5519 대응).
+        const detachedChildStartedMs = run.processStartedAt
+          ? new Date(run.processStartedAt).getTime()
+          : run.startedAt
+            ? new Date(run.startedAt).getTime()
+            : 0;
+        if (
+          DETACHED_REAP_AFTER_MS > 0 &&
+          detachedChildStartedMs > 0 &&
+          now.getTime() - detachedChildStartedMs > DETACHED_REAP_AFTER_MS
+        ) {
+          terminateRecordedProcess(run.processPid, "SIGTERM");
+          setTimeout(
+            () => terminateRecordedProcess(run.processPid, "SIGKILL"),
+            Math.max(1, DETACHED_GRACE_SEC) * 1000,
+          );
+          // fall through to process_lost/retry below (의도적 continue 생략).
+        } else {
+          continue;
+        }
       }
 
       const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;
@@ -3875,6 +4116,17 @@ export function heartbeatService(db: Db) {
       if (!finalizedRun) finalizedRun = await getRun(run.id);
       if (!finalizedRun) continue;
 
+      // Agent wiki hook (process_lost): adapter 자식 프로세스 상실 교훈 축적 (non-blocking).
+      // detached 30min cap fall-through 도 이 process_lost 경로를 타므로 이 hook 하나로 커버.
+      fireWikiRecord(wikiSvc, {
+        companyId: run.companyId,
+        agentId: run.agentId,
+        pattern: "process_lost (adapter 자식 프로세스 상실)",
+        cause: "어댑터 자식 프로세스가 예기치 않게 종료/상실돼 run 실패. in-memory handle 상실(→orphan), 서버 재시작, 자식 crash 등. CMPA-5519 hang의 주요 원인.",
+        solution: "detached 30min cap + graceful shutdown 자식 회수로 handle-loss 회수 지연을 보강. 반복 시 adapter command·리소스·안정성 점검.",
+        errorCode: "process_lost",
+      }, run.id);
+
       let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
       let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (shouldRetry) {
@@ -3889,11 +4141,12 @@ export function heartbeatService(db: Db) {
         const shouldFallback =
           Boolean(agent) &&
           Boolean(fallback) &&
-          fallback!.triggers.has("process_lost") &&
           fallbackAttempt < fallback!.maxAttempts;
         if (agent && fallback && shouldFallback) {
           fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, now, {
             fallbackCommand: fallback.command,
+            fallbackProvider: fallback.provider,
+            fallbackModel: fallback.model,
             fallbackReason: "process_lost",
           });
         } else {
@@ -3931,6 +4184,15 @@ export function heartbeatService(db: Db) {
 
       for (const run of queuedRuns) {
         if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+
+        const hasRunningRunForAgent = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.agentId, run.agentId), eq(heartbeatRuns.status, "running")))
+          .limit(1)
+          .then((rows) => rows.length > 0);
+        if (hasRunningRunForAgent) continue;
+
         const refTime = run.createdAt ? new Date(run.createdAt).getTime() : new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < queuedStaleThresholdMs) continue;
 
@@ -4258,6 +4520,24 @@ export function heartbeatService(db: Db) {
       ...(missionIssueEnvelopePolicy.fullContextInjection ? { paperclipRuntimeSkills: runtimeSkillEntries } : {}),
     };
     runtimeConfig = applyAdapterFallbackRuntimeConfig({ run, context, config: runtimeConfig });
+
+    // Agent self-learning wiki (Phase 2): 해당 agent의 가장 빈번한 과거 실패 교훈을
+    // adapter prompt에 주입해 같은 실수가 반복되지 않도록 한다. non-blocking (실패 시 skip).
+    try {
+      const wikiEntries = await wikiSvc.searchRelevant({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        limit: 3,
+      });
+      const wikiSection = formatWikiLessons(wikiEntries);
+      if (wikiSection) {
+        const basePrompt = readNonEmptyString(runtimeConfig.promptTemplate);
+        runtimeConfig.promptTemplate = basePrompt ? `${basePrompt}\n\n${wikiSection}` : wikiSection;
+      }
+    } catch (err) {
+      logger.warn({ err, runId: run.id }, "agent-wiki.searchRelevant non-blocking failure");
+    }
+
     const issueRef = issueContext
       ? {
           id: issueContext.id,
@@ -4766,6 +5046,24 @@ export function heartbeatService(db: Db) {
         else stderrGuardBuffer = remaining;
         return lines.filter((line) => line.trim().length > 0);
       };
+      const hermesChatContext = parseObject(context.paperclipHermesChat);
+      const hermesChatAssistantMessageId = readNonEmptyString(hermesChatContext.assistantMessageId);
+      const hermesChat = hermesChatAssistantMessageId ? hermesChatService(db) : null;
+      let lastHermesChatProgressText = "";
+      let lastHermesChatProgressUpdateMs = 0;
+      const maybeUpdateHermesChatProgress = async (now: Date) => {
+        if (!hermesChat || !hermesChatAssistantMessageId || agent.adapterType !== "hermes_local") return;
+        const progressText = parseHermesProgressText(stdoutExcerpt);
+        if (!progressText || progressText === lastHermesChatProgressText) return;
+        if (now.getTime() - lastHermesChatProgressUpdateMs < 2_000) return;
+        lastHermesChatProgressText = progressText;
+        lastHermesChatProgressUpdateMs = now.getTime();
+        try {
+          await hermesChat.updateAssistantProgress(hermesChatAssistantMessageId, progressText);
+        } catch (err) {
+          logger.warn({ err, runId: run.id }, "failed to update Hermes chat progress");
+        }
+      };
       let lastActivityTouchMs = 0;
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
         const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
@@ -4786,6 +5084,7 @@ export function heartbeatService(db: Db) {
         }
         if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
         if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
+        if (stream === "stdout") await maybeUpdateHermesChatProgress(now);
 
         if (handle) {
           await runLogStore.append(handle, {
@@ -5364,56 +5663,51 @@ export function heartbeatService(db: Db) {
             error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
           });
         }
-        // exit_error fallback: when adapter exits with non-zero code and fallback triggers include "exit_error",
-        // enqueue a fallback run with the fallbackCommand before releasing the issue.
-        if (outcome === "failed" && finalizedRun && (adapterResult.exitCode ?? 0) !== 0) {
-          const exitErrorFallback = resolveAdapterFallbackConfig(agent.adapterConfig);
-          const exitErrorAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
-          const shouldExitErrorFallback =
-            Boolean(exitErrorFallback) &&
-            exitErrorFallback!.triggers.has("exit_error") &&
-            exitErrorAttempt < exitErrorFallback!.maxAttempts;
-          if (shouldExitErrorFallback) {
-            const exitErrorRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
-              fallbackCommand: exitErrorFallback!.command,
-              fallbackReason: "exit_error",
+        let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+        // Adapter failures can use a fallback command, but do not repeat the same
+        // fallback after a deterministic provider/model configuration failure.
+        if (outcome === "failed" && finalizedRun) {
+          const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
+          if (fb && shouldQueueRunFailureAdapterFallback({ run: finalizedRun, fallback: fb })) {
+            const fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
+              fallbackCommand: fb.command,
+              fallbackProvider: fb.provider,
+              fallbackModel: fb.model,
+              fallbackReason: "run_failed",
             });
+            queuedAdapterFallbackRun = fallbackRun;
             await appendRunEvent(finalizedRun, seq++, {
               eventType: "lifecycle",
               stream: "system",
               level: "warn",
-              message: `Adapter exited with code ${adapterResult.exitCode}; queued exit_error fallback ${exitErrorRun?.id ?? ""}`.trim(),
+              message: `Run failed — queued fallback ${fallbackRun?.id ?? ""}`.trim(),
               payload: {
-                exitCode: adapterResult.exitCode,
-                fallbackRunId: exitErrorRun?.id ?? null,
+                exitCode: adapterResult.exitCode ?? null,
+                errorMessage: adapterResult.errorMessage ?? null,
+                fallbackRunId: fallbackRun?.id ?? null,
+              },
+            });
+          } else if (fb) {
+            await appendRunEvent(finalizedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: "Run failed - adapter fallback suppressed",
+              payload: {
+                exitCode: adapterResult.exitCode ?? null,
+                errorMessage: adapterResult.errorMessage ?? null,
+                fallbackCommand: fb.command,
+                fallbackAttempt: resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot),
+                reason: isTerminalAdapterFallbackConfigurationFailure(finalizedRun)
+                  ? "terminal_fallback_configuration_failure"
+                  : "fallback_attempt_limit_reached",
               },
             });
           }
         }
-        // [overloaded fallback] LLM 백엔드 529/overloaded/timeout 은 claude CLI 가
-        // subtype=success(exit 0) 로 끝는 경우가 많아 exit_error(exitCode!=0)/
-        // process_lost fallback 에 안 걸린다. errorMessage 에서 감지해 fallbackCommand
-        // 로 회피한다(trigger 무관, maxAttempts 제한).
-        if (outcome === "failed" && finalizedRun) {
-          const overloadedMsg = adapterResult.errorMessage ?? finalizedRun.error ?? "";
-          if (/529|overloaded|temporarily overloaded|rate[-_ ]?limit|operation timed out/i.test(overloadedMsg)) {
-            const ofb = resolveAdapterFallbackConfig(agent.adapterConfig);
-            const oAttempt = resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot);
-            if (ofb && oAttempt < ofb.maxAttempts) {
-              await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
-                fallbackCommand: ofb.command,
-                fallbackReason: "server_overloaded",
-              });
-              await appendRunEvent(finalizedRun, seq++, {
-                eventType: "lifecycle",
-                stream: "system",
-                level: "warn",
-                message: "LLM 백엔드 과부하(529/timeout) 감지 — server_overloaded fallback 큐잉",
-              });
-            }
-          }
+        if (!queuedAdapterFallbackRun) {
+          await releaseIssueExecutionAndPromote(finalizedRun);
         }
-        await releaseIssueExecutionAndPromote(finalizedRun);
       }
       await finalizeAgentStatus(agent.id, outcome);
     } catch (err) {
@@ -5421,6 +5715,7 @@ export function heartbeatService(db: Db) {
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),
       );
+      const errorCode = resolveHeartbeatFailureCode(err, "adapter_failed");
       logger.error({ err, runId }, "heartbeat execution failed");
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
@@ -5434,7 +5729,7 @@ export function heartbeatService(db: Db) {
 
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
-        errorCode: resolveHeartbeatFailureCode(err, "adapter_failed"),
+        errorCode,
         finishedAt: new Date(),
         stdoutExcerpt,
         stderrExcerpt,
@@ -5457,6 +5752,44 @@ export function heartbeatService(db: Db) {
           level: "error",
           message,
         });
+        let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+        if (errorCode === "adapter_failed") {
+          const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
+          if (fb && shouldQueueRunFailureAdapterFallback({ run: failedRun, fallback: fb })) {
+            const fallbackRun = await enqueueAdapterFallbackRun(failedRun, agent, new Date(), {
+              fallbackCommand: fb.command,
+              fallbackProvider: fb.provider,
+              fallbackModel: fb.model,
+              fallbackReason: "run_failed",
+            });
+            queuedAdapterFallbackRun = fallbackRun;
+            await appendRunEvent(failedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: `Run failed — queued fallback ${fallbackRun?.id ?? ""}`.trim(),
+              payload: {
+                errorMessage: message,
+                fallbackRunId: fallbackRun?.id ?? null,
+              },
+            });
+          } else if (fb) {
+            await appendRunEvent(failedRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: "Run failed - adapter fallback suppressed",
+              payload: {
+                errorMessage: message,
+                fallbackCommand: fb.command,
+                fallbackAttempt: resolveAdapterFallbackAttempt(failedRun.contextSnapshot),
+                reason: isTerminalAdapterFallbackConfigurationFailure(failedRun)
+                  ? "terminal_fallback_configuration_failure"
+                  : "fallback_attempt_limit_reached",
+              },
+            });
+          }
+        }
         if (missionAgentRuntimeForRun) {
           await completeMissionAgentRuntimeRun(db, {
             runtimeId: missionAgentRuntimeForRun.runtime.id,
@@ -5467,7 +5800,9 @@ export function heartbeatService(db: Db) {
             logger.warn({ err: runtimeErr, runId, agentId: agent.id }, "failed to mark mission runtime failed");
           });
         }
-        await releaseIssueExecutionAndPromote(failedRun);
+        if (!queuedAdapterFallbackRun) {
+          await releaseIssueExecutionAndPromote(failedRun);
+        }
 
         await updateRuntimeState(agent, failedRun, {
           exitCode: null,
@@ -5591,6 +5926,41 @@ export function heartbeatService(db: Db) {
         command: readNonEmptyString(agentAdapterConfig.command) ?? readNonEmptyString(agentRuntimeConfig.command),
       });
 
+      // Agent self-learning wiki (Phase 1): provider overload / runaway-stdout 패턴 기록 (non-blocking).
+      if (classification.category === "overload") {
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          pattern: "provider overload (529/503/500)",
+          cause: "외부 LLM provider 일시 과부하(500/503/529)로 요청을 거부/재시도.",
+          solution: "adapter가 exponential backoff 재시도를 수행. 회복 후 자동 재개되므로 즉시 수동 개입은 불필요.",
+          errorCode: classification.reasonCode ?? "provider_overload",
+        }, run.id);
+      }
+      if (/\bstdout\b.{0,40}exceeded|runaway output/i.test(run.stderrExcerpt ?? "")) {
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          pattern: "adapter 자식 stdout 폭발",
+          cause: "어댑터 자식 프로세스가 stdout을 닫지 않고 무한 출력 → event loop 독점 → 64MB cap-kill.",
+          solution: "자식의 대량 stdout은 파일 리다이렉트 후 tail. 명령/플래그로 스트리밍 출력 억제.",
+          errorCode: "child_stdout_runaway_capkill",
+        }, run.id);
+      }
+      // Agent wiki hook (adapter_failed non-overload): adapter 실행 실패 교훈 축적 (non-blocking).
+      // provider overload(529)는 위 overload 분류로 별도 기록되므로 제외. 이 블록은 issue-linked failed run
+      // 에 도달(classifyHeartbeatRunFailure 이후)하므로 adapter_failed run을 커버.
+      if (run.status === "failed" && run.errorCode === "adapter_failed" && classification.category !== "overload") {
+        fireWikiRecord(wikiSvc, {
+          companyId: run.companyId,
+          agentId: run.agentId,
+          pattern: "adapter_failed (adapter 실행 실패)",
+          cause: "adapter 실행이 실패해 run 종료. opencode models discovery timeout(20s), command 시작 실패(ENOENT), adapter 내부 에러 등. provider overload(529)는 overload 분류로 별도 기록.",
+          solution: "opencode models timeout은 retry+stale serve로 완화. 반복 시 adapter command·PATH·인증·리소스 점검. command 부재는 영구 장애이므로 adapter 설정 확인.",
+          errorCode: "adapter_failed",
+        }, run.id);
+      }
+
       const isLinkedToRun = issue.checkoutRunId === run.id || issue.executionRunId === run.id || issue.id === run.issueId;
       const shouldAutoCaptureMissionChildOutput =
         run.status === "succeeded" &&
@@ -5681,24 +6051,12 @@ export function heartbeatService(db: Db) {
           .from(issueWorkProducts)
           .where(eq(issueWorkProducts.issueId, issue.id))
           .limit(10);
-        const hasMatchingWorkProduct = existingWorkProducts.some((product) => workProductReferencesClaimedArtifact(
-          {
-            url: product.url,
-            externalId: product.externalId,
-            metadata: product.metadata ?? null,
-          },
+        const hasSatisfiedExistingWorkProductRegistration = hasSatisfiedWorkProductRegistration({
+          existingWorkProducts,
           claimedArtifactPaths,
-        ));
-        const hasIssueDeclaredWorkProduct = existingWorkProducts.some((product) =>
-          workProductSatisfiesIssueDeclaredArtifact({
-            url: product.url,
-            externalId: product.externalId,
-            status: product.status,
-            isPrimary: product.isPrimary,
-            metadata: product.metadata ?? null,
-          }, issue),
-        );
-        const autoRegisteredWorkProduct = hasMatchingWorkProduct || hasIssueDeclaredWorkProduct
+          issue,
+        });
+        const autoRegisteredWorkProduct = hasSatisfiedExistingWorkProductRegistration
           ? null
           : await autoRegisterWorkProductFromIssueDocument({
               tx,
@@ -5706,7 +6064,12 @@ export function heartbeatService(db: Db) {
               run,
               claimedArtifactPaths,
             });
-        if (!hasMatchingWorkProduct && !hasIssueDeclaredWorkProduct && !autoRegisteredWorkProduct) {
+        if (!hasSatisfiedWorkProductRegistration({
+          existingWorkProducts,
+          claimedArtifactPaths,
+          issue,
+          autoRegisteredWorkProduct,
+        })) {
           const now = new Date();
           await tx
             .update(issues)
@@ -5742,6 +6105,16 @@ export function heartbeatService(db: Db) {
               claimedArtifactPaths,
             },
           });
+          // Agent self-learning wiki (Phase 1): workProduct 미등록 패턴 기록 (non-blocking).
+          fireWikiRecord(wikiSvc, {
+            companyId: issue.companyId,
+            agentId: run.agentId,
+            missionId: issue.missionId ?? null,
+            pattern: "workProduct 미등록",
+            cause: "run이 산출물 파일 경로를 보고했지만 issue에 공식 workProduct가 등록되지 않아 mission artifact gate가 해당 이슈를 block함.",
+            solution: "산출물 파일 생성 후 반드시 POST /api/issues/{id}/work-products 로 workProduct를 등록. 파일 생성 ≠ 등록.",
+            errorCode: "workproduct_registration_missing",
+          }, run.id);
           postTransactionWorkflowIssueSyncIssueId = issue.id;
           return null;
         }

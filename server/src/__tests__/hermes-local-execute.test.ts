@@ -4,6 +4,7 @@ import {
   buildHermesChatArgs,
   formatHermesTimeoutLabel,
   parseHermesOutput,
+  parseHermesProgressText,
 } from "../adapters/hermes-local-execute.js";
 
 describe("hermes local execution config", () => {
@@ -88,6 +89,33 @@ describe("hermes local execution config", () => {
     ).toBe("timeout=240s, idleTimeout=75s");
   });
 
+  it("extracts user-facing progress while hiding tool calls and results", () => {
+    const progress = parseHermesProgressText(
+      [
+        "Query: Paperclip runtime brief:",
+        "╭─ ⚕ Hermes ───────────────────────────────────────────────────────────────────╮",
+        "    알겠습니다. 구조를 확인하고 영향도를 파악하겠습니다.",
+        "    먼저 workflow step 정의를 확인하겠습니다.",
+        "    📞 Tool 1: terminal",
+        "    Args: {\"command\":\"rg -n generate-infographic server\"}",
+        "    ✅ Tool 1 completed in 0.09s",
+        "    Result: {\"output\":\"server/src/workflows.ts:12\", \"exit_code\": 0}",
+        "    curl -s -H \"$AUTH\" \"http://localhost:3200/api/workflows/workflow-1\" | jq '.. | strings'",
+        "    -iE \"만화|comic|PNG\"",
+        "    다음으로 참조를 제거하고 테스트하겠습니다.",
+        "╰──────────────────────────────────────────────────────────────────────────────╯",
+      ].join("\n"),
+    );
+
+    expect(progress).toContain("알겠습니다. 구조를 확인하고 영향도를 파악하겠습니다.");
+    expect(progress).toContain("먼저 workflow step 정의를 확인하겠습니다.");
+    expect(progress).toContain("다음으로 참조를 제거하고 테스트하겠습니다.");
+    expect(progress).not.toContain("rg -n generate-infographic");
+    expect(progress).not.toContain("server/src/workflows.ts");
+    expect(progress).not.toContain("curl -s");
+    expect(progress).not.toContain("jq '.. | strings'");
+  });
+
   it("extracts the assistant response and session id from Hermes transcript output", () => {
     const parsed = parseHermesOutput(
       [
@@ -141,5 +169,43 @@ describe("hermes local execution config", () => {
     expect(parsed.response).toContain("추천 다음 액션:");
     expect(parsed.response).not.toBe("제가 지금 임의로 완료 처리하지는 않았습니다.");
     expect(parsed.sessionId).toBe("20260609_121523_a6478b");
+  });
+
+  it("prefers the final Hermes block after the completion marker over a preceding reasoning summary", () => {
+    const parsed = parseHermesOutput(
+      [
+        "┌─ Reasoning ──────────────────────────────────────────────────────────────────┐",
+        "Good. The grep exit code 1 means no matches found, which is what we want. Let me summarize",
+        "🎉 Conversation completed after 25 OpenAI-compatible API call(s)",
+        " the changes.",
+        "└──────────────────────────────────────────────────────────────────────────────┘",
+        "",
+        "╭─ ⚕ Hermes ───────────────────────────────────────────────────────────────────╮",
+        "    완료. 두 워크플로우 모두 수정했습니다.",
+        "    ",
+        "    tech-scout (8 steps → 6 steps):",
+        "    - 제거: generate-infographic (Tech Scout 교육만화 생성)",
+        "    - 제거: validate-artifact (Tech Scout 산출물 검증) — 만화 산출물 전용 검증",
+        "    - 수정: send-telegram 의존 변경 → lead-approval 직접 연결, 이름/설명에서 \"PNG\" 제거",
+        "    ",
+        "    tech-ai-news (7 steps → 5 steps):",
+        "    - 제거: generate-infographic (Generate TechCrunch AI educational comic)",
+        "    - 제거: validate-ai-news-artifact (Validate TechCrunch AI artifact) — 만화 산출물 전용 검증",
+        "    - 수정: send-telegram 의존 변경 → lead-ai-news-approval 직접 연결",
+        "╰──────────────────────────────────────────────────────────────────────────────╯",
+        "",
+        "Resume this session with:",
+        "  hermes --resume 20260619_080911_55a9e8",
+        "",
+        "Session:        20260619_080911_55a9e8",
+      ].join("\n"),
+      "",
+    );
+
+    expect(parsed.response).toContain("완료. 두 워크플로우 모두 수정했습니다.");
+    expect(parsed.response).toContain("tech-scout (8 steps → 6 steps):");
+    expect(parsed.response).toContain("tech-ai-news (7 steps → 5 steps):");
+    expect(parsed.response).not.toContain("Good. The grep exit code");
+    expect(parsed.sessionId).toBe("20260619_080911_55a9e8");
   });
 });

@@ -9,8 +9,8 @@ import {
   SquarePen,
   Network,
   BookOpen,
+  Brain,
   Boxes,
-  Repeat,
   Settings,
   Rocket,
   CalendarClock,
@@ -125,7 +125,6 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
 
         <SidebarSection label="Work">
           <SidebarNavItem to="/issues" label="Work" icon={CircleDot} />
-          <SidebarNavItem to="/routines" label="Routines" icon={Repeat} textBadge="Beta" textBadgeTone="amber" />
           <SidebarNavItem to="/workflows" label="Workflows" icon={Workflow} />
           <SidebarNavItem to="/scheduler" label="Scheduler" icon={CalendarClock} />
         </SidebarSection>
@@ -139,6 +138,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
           <SidebarNavItem to="/org" label="Org" icon={Network} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/instructions" label="Instructions" icon={BookOpen} />
+          <SidebarNavItem to="/agent-wiki" label="Wiki" icon={Brain} />
           <button
             type="button"
             onClick={onOpenHermes}

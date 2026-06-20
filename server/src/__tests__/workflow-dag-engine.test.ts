@@ -45,6 +45,7 @@ import {
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
+import { reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -204,12 +205,97 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       completedAt: null,
     });
 
-    const result = await workflowService.reconcile(db, 60);
+    const result = await reconcileStuckWorkflowRuns(db, 60);
 
-    expect(result).toEqual({ recovered: 0, failed: 1 });
+    expect(result).toHaveLength(1);
+    expect(result[0]?.action).toBe("recovered");
     const [stored] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
     expect(stored?.status).toBe("failed");
     expect(stored?.completedAt).toBeInstanceOf(Date);
+  });
+
+  it("does not fail pending downstream steps while a linked workflow issue is still active", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Active Workflow Company",
+      issuePrefix: `AW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: randomUUID(),
+      companyId,
+      name: "Worker",
+      role: "worker",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "active-workflow",
+      stepsJson: [
+        { id: "collect", name: "Collect", type: "agent", agentId: "", dependencies: [] },
+        { id: "synthesize", name: "Synthesize", type: "agent", agentId: "", dependencies: ["collect"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      completedAt: null,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "AW-1",
+      title: "Collect",
+      status: "in_progress",
+      originKind: "workflow_execution",
+      originId: runId,
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "collect",
+        issueId,
+        status: "running",
+        startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "synthesize",
+        status: "pending",
+      },
+    ]);
+
+    const result = await reconcileStuckWorkflowRuns(db, 60);
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        runId,
+        action: "skipped",
+        reason: "Active workflow step execution is still running",
+      }),
+    ]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("running");
+    expect(storedRun?.completedAt).toBeNull();
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "collect", status: "running" }),
+      expect.objectContaining({ stepId: "synthesize", status: "pending", completedAt: null }),
+    ]));
   });
 
   it("creates workflow definitions from plugin UI step payloads", async () => {
@@ -897,7 +983,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     const result = await syncWorkflowRunForIssue(db, validatorIssueId);
 
-    expect(result?.status).toBe("failed");
+    expect(result?.status).toBe("running");
     expect(toolExecutor).not.toHaveBeenCalled();
     const stepRows = await db
       .select()
@@ -908,9 +994,203 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       issueId: validatorIssueId,
     });
     expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
-      status: "skipped",
+      status: "pending",
       issueId: null,
     });
+  });
+
+  it("requeues a blocked validator issue when an upstream dependency completes after REQUEST_CHANGES", async () => {
+    const companyId = randomUUID();
+    const synthAgentId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const synthIssueId = randomUUID();
+    const validatorIssueId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-validator-recheck" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Validation Recheck",
+      issuePrefix: `VC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: synthAgentId,
+        companyId,
+        name: "Synthesis Editor",
+        role: "writer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: validatorAgentId,
+        companyId,
+        name: "Report Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Daily AI news validator recheck",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      stepsJson: [
+        {
+          id: "synthesize-ai-news-note",
+          name: "Synthesize TechCrunch AI note draft",
+          agentId: synthAgentId,
+          dependencies: [],
+        },
+        {
+          id: "validate-ai-news-note",
+          name: "Validate TechCrunch AI note claims and sources",
+          agentId: validatorAgentId,
+          dependencies: ["synthesize-ai-news-note"],
+        },
+        {
+          id: "lead-ai-news-approval",
+          name: "Lead approval for TechCrunch AI note",
+          agentId: ownerAgentId,
+          dependencies: ["validate-ai-news-note"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "board",
+      status: "running",
+      startedAt: new Date("2026-06-18T05:06:00.000Z"),
+    });
+    await db.insert(issues).values([
+      {
+        id: synthIssueId,
+        companyId,
+        missionId,
+        title: "tech-ai-news: Synthesize TechCrunch AI note draft",
+        status: "done",
+        assigneeAgentId: synthAgentId,
+        originKind: "workflow_execution",
+        originId: runId,
+        originRunId: runId,
+        startedAt: new Date("2026-06-18T05:50:00.000Z"),
+        completedAt: new Date("2026-06-18T05:55:56.000Z"),
+      },
+      {
+        id: validatorIssueId,
+        companyId,
+        missionId,
+        title: "tech-ai-news: Validate TechCrunch AI note claims and sources",
+        status: "blocked",
+        assigneeAgentId: validatorAgentId,
+        originKind: "workflow_execution",
+        originId: runId,
+        originRunId: runId,
+        startedAt: new Date("2026-06-18T05:31:00.000Z"),
+      },
+    ]);
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: validatorIssueId,
+      authorAgentId: validatorAgentId,
+      createdAt: new Date("2026-06-18T05:37:09.000Z"),
+      body: "Decision: REQUEST_CHANGES\nThree source-bound fidelity fixes are required on the synthesis issue.",
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "synthesize-ai-news-note",
+        issueId: synthIssueId,
+        status: "completed",
+        startedAt: new Date("2026-06-18T05:50:00.000Z"),
+        completedAt: new Date("2026-06-18T05:55:56.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "validate-ai-news-note",
+        issueId: validatorIssueId,
+        status: "failed",
+        startedAt: new Date("2026-06-18T05:31:00.000Z"),
+        completedAt: new Date("2026-06-18T05:37:09.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "lead-ai-news-approval",
+        issueId: null,
+        status: "pending",
+      },
+    ]);
+
+    const result = await syncWorkflowRunForIssue(db, synthIssueId);
+
+    expect(result?.status).toBe("running");
+    const [validatorIssue] = await db.select().from(issues).where(eq(issues.id, validatorIssueId));
+    expect(validatorIssue).toMatchObject({
+      status: "todo",
+      assigneeAgentId: validatorAgentId,
+      startedAt: null,
+      completedAt: null,
+    });
+    const stepRows = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")).toMatchObject({
+      status: "pending",
+      issueId: validatorIssueId,
+      startedAt: null,
+      completedAt: null,
+    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "lead-ai-news-approval")).toMatchObject({
+      status: "pending",
+      issueId: null,
+    });
+    expect(heartbeatWakeup).toHaveBeenCalledWith(validatorAgentId, expect.objectContaining({
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: validatorIssueId,
+        mutation: "workflow_resume",
+        missionId,
+        workflowRunId: runId,
+        workflowDefinitionId: workflowId,
+        stepId: "validate-ai-news-note",
+      }),
+    }));
   });
 
   it("allows downstream steps after a newer validator heartbeat PASS supersedes an older REQUEST_CHANGES comment", async () => {
@@ -1235,6 +1515,84 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .limit(1);
 
     expect(mission?.title).toBe("2026-06-12 gazua-morning");
+  });
+
+  it("does not start another scheduled run that would duplicate issues in the same active workflow mission", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-scheduled-active-mission" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Active Scheduled Mission Company",
+      issuePrefix: `ASM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      timezone: "Asia/Seoul",
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Report Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const definition = await workflowService.createDefinition(db, {
+      companyId,
+      name: "gazua-macro-sentinel",
+      timezone: "Asia/Seoul",
+      schedule: "0 9-15 * * 1-5",
+      steps: [
+        {
+          id: "report",
+          name: "초보자용 매크로 리포트 생성",
+          agentId,
+          dependencies: [],
+        },
+      ],
+    });
+
+    const first = await workflowService.claimScheduledRun(db, {
+      companyId,
+      workflowId: definition.id,
+      scheduledAt: new Date("2026-06-17T00:00:00.000Z"),
+      timezone: "Asia/Seoul",
+    });
+    expect(first.claimed).toBe(true);
+
+    const second = await workflowService.claimScheduledRun(db, {
+      companyId,
+      workflowId: definition.id,
+      scheduledAt: new Date("2026-06-17T01:00:00.000Z"),
+      timezone: "Asia/Seoul",
+    });
+
+    expect(second.claimed).toBe(false);
+    expect(second.run).toBeNull();
+
+    const storedRuns = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.workflowId, definition.id));
+    expect(storedRuns).toHaveLength(1);
+
+    const [mission] = await db
+      .select()
+      .from(missions)
+      .where(eq(missions.id, storedRuns[0]!.missionId!))
+      .limit(1);
+    expect(mission?.status).toBe("active");
+
+    const missionIssues = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.missionId, mission!.id));
+    expect(missionIssues.filter((issue) => issue.title === "초보자용 매크로 리포트 생성")).toHaveLength(1);
   });
 
   it("progresses dependent steps and completes the workflow as execution issues complete", async () => {
@@ -2571,11 +2929,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       exitCode: 1,
       error: "Tool failed",
     });
-    expect(failedResult?.status).toBe("failed");
-    expect(failedResult?.error).toBe("One or more workflow steps failed");
+    expect(failedResult?.status).toBe("running");
+    expect(failedResult?.error).toBeUndefined();
     expect(failedResult?.stepRuns).toEqual(expect.arrayContaining([
       expect.objectContaining({ stepId: "collect", status: "failed" }),
-      expect.objectContaining({ stepId: "publish", status: "skipped" }),
+      expect.objectContaining({ stepId: "publish", status: "pending" }),
     ]));
 
     const failedCollectStep = await db
@@ -2870,7 +3228,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(synthesisIssue.description).toContain("delegated:");
   });
 
-  it("fails the workflow and skips dependent steps when a prerequisite execution issue fails", async () => {
+  it("keeps dependent steps pending when a prerequisite execution issue fails", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const workflowId = randomUUID();
@@ -2938,7 +3296,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     await issueSvc.update(prepareStepRun!.issueId!, { status: "blocked" });
     const failed = await syncWorkflowRunForIssue(db, prepareStepRun!.issueId!);
-    expect(failed?.status).toBe("failed");
+    expect(failed?.status).toBe("running");
 
     const finalStepRuns = await db
       .select()
@@ -2947,7 +3305,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const prepare = finalStepRuns.find((stepRun) => stepRun.stepId === "prepare");
     const ship = finalStepRuns.find((stepRun) => stepRun.stepId === "ship");
     expect(prepare?.status).toBe("failed");
-    expect(ship?.status).toBe("skipped");
+    expect(ship?.status).toBe("pending");
     expect(ship?.issueId).toBeNull();
 
     const oversightComments = await db
@@ -2984,7 +3342,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(supervisionCommentBody).not.toContain("wake_agent");
   });
 
-  it("reactivates skipped downstream steps when a failed prerequisite issue is reopened", async () => {
+  it("keeps downstream steps pending when a prerequisite issue fails and resumes them when it recovers", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const workflowId = randomUUID();
@@ -3052,8 +3410,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
     expect(stepRuns.find((stepRun) => stepRun.stepId === "collect")?.status).toBe("failed");
-    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.status).toBe("skipped");
-    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.status).toBe("skipped");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "synthesize")?.status).toBe("pending");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "validate")?.status).toBe("pending");
 
     await issueSvc.update(collectStepRun!.issueId!, { status: "todo" });
     const reopened = await syncWorkflowRunForIssue(db, collectStepRun!.issueId!);
@@ -3083,6 +3441,110 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(synthesizeStepRun?.issueId).toBeTruthy();
     expect(validateStepRun?.status).toBe("pending");
     expect(validateStepRun?.issueId).toBeNull();
+  });
+
+  it("resets legacy failed unlaunched downstream rows and launches them after prerequisites recover", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const prepareIssueId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-legacy-downstream" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Legacy Downstream Recovery",
+      issuePrefix: `LD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Legacy Recovery Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Legacy Downstream Recovery Mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Legacy Downstream Recovery Workflow",
+      stepsJson: [
+        { id: "prepare", name: "Prepare", agentId, dependencies: [], description: "Prepare the work" },
+        { id: "approve", name: "Approve", agentId, dependencies: ["prepare"], description: "Approve the work" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+      startedAt: new Date("2026-06-18T06:00:00.000Z"),
+    });
+    await db.insert(issues).values({
+      id: prepareIssueId,
+      companyId,
+      missionId,
+      title: "Legacy Downstream Recovery Workflow: Prepare",
+      status: "done",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+      startedAt: new Date("2026-06-18T06:00:00.000Z"),
+      completedAt: new Date("2026-06-18T06:05:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "prepare",
+        issueId: prepareIssueId,
+        status: "completed",
+        startedAt: new Date("2026-06-18T06:00:00.000Z"),
+        completedAt: new Date("2026-06-18T06:05:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "approve",
+        issueId: null,
+        status: "failed",
+        startedAt: null,
+        completedAt: new Date("2026-06-18T06:06:00.000Z"),
+        lastDispatchAttemptAt: null,
+      },
+    ]);
+
+    const result = await syncWorkflowRunForIssue(db, prepareIssueId);
+
+    expect(result?.status).toBe("running");
+    const stepRows = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const approveStepRun = stepRows.find((stepRun) => stepRun.stepId === "approve");
+    expect(approveStepRun?.status).toBe("pending");
+    expect(approveStepRun?.issueId).toBeTruthy();
+    const [approveIssue] = await db.select().from(issues).where(eq(issues.id, approveStepRun!.issueId!));
+    expect(approveIssue).toMatchObject({
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originRunId: runId,
+    });
   });
 
   it("observes stale workflow todo dispatch omissions without hard-blocking", async () => {

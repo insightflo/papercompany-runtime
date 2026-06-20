@@ -36,7 +36,21 @@ vi.mock("@tanstack/react-query", () => ({
             id: "run-1",
             status: "running",
             steps: [
-              { toolNames: ["search-docs"], knowledgeBaseIds: ["kb-product"] },
+              {
+                toolNames: ["search-docs"],
+                knowledgeBaseIds: ["kb-product"],
+                workProducts: [
+                  {
+                    id: "product-1",
+                    title: "Mission brief",
+                    type: "document",
+                    url: "file:///tmp/mission-brief.md",
+                    status: "ready_for_review",
+                    summary: "Brief draft produced by workflow step",
+                    isPrimary: true,
+                  },
+                ],
+              },
               { toolNames: ["fetch-spec"], knowledgeBaseIds: [] },
             ],
           },
@@ -159,7 +173,6 @@ describe("MissionExecutionOverview", () => {
     expect(html).not.toContain("mission-owner-decision-applied");
     expect(html).not.toContain("mission-owner-action");
     expect(html).not.toContain("{&quot;");
-    expect(html).not.toContain("<button");
   });
 
   it("renders mission continuity, risk, and delivery summaries", () => {
@@ -216,6 +229,12 @@ describe("MissionExecutionOverview", () => {
     expect(html).toContain("failed");
     expect(html).toContain("Search-Docs");
     expect(html).toContain("Fetch-Spec");
+    expect(html).toContain("Work products: 1 outputs");
+    expect(html).toContain("Mission brief");
+    expect(html).toContain("file:///tmp/mission-brief.md");
+    expect(html).toContain("Brief draft produced by workflow step");
+    expect(html).toContain("Primary");
+    expect(html).toContain("Open");
     expect(html).toContain("1 blocked, 1 in review");
     expect(html).toContain("1 active, 1 failed");
   });

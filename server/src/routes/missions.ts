@@ -16,7 +16,8 @@
  * - GET    /missions/:id/governance-thread           — Read mission governance thread
  */
 import { Router } from "express";
-import type { Db } from "@paperclipai/db";
+import { agentWakeupRequests, type Db } from "@paperclipai/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { missionService } from "../services/missions.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -31,8 +32,7 @@ export function missionRoutes(db: Db) {
   const delegationSvc = missionDelegationService(db);
   const svc = missionService(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
-      if (!issue.assigneeAgentId) return null;
-      return heartbeat.wakeup(issue.assigneeAgentId, {
+      return heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment",
         triggerDetail: "system",
         reason: reason ?? "mission_unblock_action_created",
@@ -73,7 +73,19 @@ export function missionRoutes(db: Db) {
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey }) => {
+      const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
+        companyId: mission.companyId,
+        agentId: targetAgentId,
+        issueId: sourceIssue.id,
+      });
+      if (existingWorkflowWake) {
+        return {
+          status: "workflow_already_dispatched",
+          workflowWakeupRequestId: existingWorkflowWake.id,
+          runId: existingWorkflowWake.runId,
+        };
+      }
       return heartbeat.wakeup(targetAgentId, {
         source: "assignment",
         triggerDetail: "system",
@@ -85,7 +97,6 @@ export function missionRoutes(db: Db) {
           ownerActionIssueId: ownerActionIssue.id,
           mutation: "mission_owner_retry_source_issue",
           sourceIssueId: sourceIssue.id,
-          wakeCommentId,
         },
         requestedByActorType: "system",
         requestedByActorId: "mission-owner-supervision",
@@ -95,12 +106,11 @@ export function missionRoutes(db: Db) {
           source: "mission_owner_retry_source_issue",
           ownerActionIssueId: ownerActionIssue.id,
           sourceIssueId: sourceIssue.id,
-          wakeCommentId,
         },
       });
     },
-    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, targetAgentId, failedRun, idempotencyKey, wakeCommentId }) => {
-      return heartbeat.wakeup(targetAgentId, {
+    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, failedRun, idempotencyKey, wakeCommentId }) => {
+      return heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment",
         triggerDetail: "system",
         reason: "mission_stale_source_issue_wakeup",
@@ -555,4 +565,26 @@ export function missionRoutes(db: Db) {
   });
 
   return router;
+}
+
+async function findExistingWorkflowResumeWake(
+  db: Db,
+  input: { companyId: string; agentId: string; issueId: string },
+) {
+  return db
+    .select({
+      id: agentWakeupRequests.id,
+      runId: agentWakeupRequests.runId,
+    })
+    .from(agentWakeupRequests)
+    .where(and(
+      eq(agentWakeupRequests.companyId, input.companyId),
+      eq(agentWakeupRequests.agentId, input.agentId),
+      inArray(agentWakeupRequests.reason, ["workflow_step_runnable", "issue_execution_same_name"]),
+      inArray(agentWakeupRequests.status, ["queued", "completed", "coalesced", "deferred_issue_execution"]),
+      sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
+      sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
 }

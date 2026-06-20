@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT } from "@paperclipai/shared";
-import manifest from "../../../packages/plugins/tool-registry/src/manifest.js";
-import plugin from "../../../packages/plugins/tool-registry/src/worker.js";
-import { ACTION_KEYS } from "../../../packages/plugins/tool-registry/src/constants.js";
+import manifest from "../../../../papercompany-plugins/packages/tool-registry/src/manifest.js";
+import plugin from "../../../../papercompany-plugins/packages/tool-registry/src/worker.js";
+import { ACTION_KEYS } from "../../../../papercompany-plugins/packages/tool-registry/src/constants.js";
 
 describe("tool-registry workflow result delivery", () => {
   afterEach(() => {

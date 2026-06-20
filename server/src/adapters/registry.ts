@@ -62,6 +62,7 @@ import { listCodexModels } from "./codex-models.js";
 import { listClaudeModels } from "./claude-models.js";
 import { listCursorModels } from "./cursor-models.js";
 import { listGeminiModels } from "./gemini-models.js";
+import { listHermesModels } from "./hermes-models.js";
 import {
   execute as piExecute,
   listPiSkills,
@@ -198,6 +199,7 @@ const hermesLocalAdapter: ServerAdapterModule = {
   sessionCodec: hermesSessionCodec,
   sessionManagement: getAdapterSessionManagement("hermes_local") ?? undefined,
   models: hermesModels,
+  listModels: listHermesModels,
   supportsLocalAgentJwt: true,
   listSkills: listHermesSkills,
   syncSkills: syncHermesSkills,

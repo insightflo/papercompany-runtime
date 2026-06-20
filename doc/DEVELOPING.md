@@ -32,12 +32,17 @@ Current implementation status:
 - Node.js 24.x. The local dev runtime is pinned to Node 24 because the server depends on the native `re2` module, which is compiled against the active Node ABI.
 - pnpm 9+
 
-Use the repo-pinned Node before installing or running:
+Use the repo-pinned Node before installing dependencies:
 
 ```sh
 nvm use
 pnpm install
 ```
+
+The repo-level `pnpm dev` and `pnpm paperclipai ...` scripts automatically
+re-exec with the version pinned in `.node-version` / `.nvmrc` when that Node is
+available under `nvm`. Set `PAPERCLIP_NODE_BIN=/path/to/node` if your Node 24
+binary lives elsewhere.
 
 If Node was changed after dependencies were installed, rebuild `re2` under the active Node:
 

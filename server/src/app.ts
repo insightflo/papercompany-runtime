@@ -2,7 +2,8 @@ import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { Db } from "@paperclipai/db";
+import { agentWakeupRequests, agents, type Db } from "@paperclipai/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
@@ -29,6 +30,7 @@ import { goalRoutes } from "./routes/goals.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
+import { agentWikiRoutes } from "./routes/agent-wiki.js";
 import { channelConfigRoutes } from "./routes/channel-config.js";
 import { hermesChatRoutes } from "./routes/hermes-chat.js";
 import { activityRoutes } from "./routes/activity.js";
@@ -73,6 +75,8 @@ import { setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
+import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
+import { createAgentWikiEvolutionLoop, resolveAgentWikiEvolutionOwnership } from "./services/agent-skill-optimizer.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -340,6 +344,7 @@ export async function createApp(
   api.use(approvalRoutes(db));
   api.use(secretRoutes(db));
   api.use(costRoutes(db));
+  api.use(agentWikiRoutes(db));
   api.use(channelConfigRoutes(db));
   api.use(activityRoutes(db));
   api.use(dashboardRoutes(db));
@@ -352,6 +357,7 @@ export async function createApp(
   setPluginEventBus(eventBus);
   registerNativeWorkflowToolResultEventHandlers(db, eventBus);
   const workflowSchedulerOwnership = resolveWorkflowSchedulerOwnership();
+  const agentWikiEvolutionOwnership = resolveAgentWikiEvolutionOwnership();
   logger.info({
     mode: workflowSchedulerOwnership.mode,
     nativeSchedulerEnabled: workflowSchedulerOwnership.nativeSchedulerEnabled,
@@ -601,8 +607,7 @@ export async function createApp(
 
   const missionOwnerSupervisionMonitor = createMissionOwnerSupervisionMonitor(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
-      if (!issue.assigneeAgentId) return null;
-      return heartbeat.wakeup(issue.assigneeAgentId, {
+      return heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment",
         triggerDetail: "system",
         reason: reason ?? "mission_unblock_action_created",
@@ -622,29 +627,41 @@ export async function createApp(
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(targetAgentId, {
-      source: "assignment",
-      triggerDetail: "system",
-      reason: "mission_owner_decision_retry_source_issue",
-      idempotencyKey,
-      payload: {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey }) => {
+      const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
+        companyId: mission.companyId,
+        agentId: targetAgentId,
         issueId: sourceIssue.id,
-        missionId: mission.id,
-        mutation: "mission_owner_decision_retry_source_issue",
-        ownerActionIssueId: ownerActionIssue.id,
-        wakeCommentId,
-      },
-      requestedByActorType: "system",
-      requestedByActorId: "mission-owner-supervision-monitor",
-      contextSnapshot: {
-        issueId: sourceIssue.id,
-        missionId: mission.id,
-        source: "mission_owner_decision_retry_source_issue",
-        ownerActionIssueId: ownerActionIssue.id,
-        wakeCommentId,
-      },
-    }),
-    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, targetAgentId, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(targetAgentId, {
+      });
+      if (existingWorkflowWake) {
+        return {
+          status: "workflow_already_dispatched",
+          workflowWakeupRequestId: existingWorkflowWake.id,
+          runId: existingWorkflowWake.runId,
+        };
+      }
+      return heartbeat.wakeup(targetAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_owner_decision_retry_source_issue",
+        idempotencyKey,
+        payload: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          mutation: "mission_owner_decision_retry_source_issue",
+          ownerActionIssueId: ownerActionIssue.id,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision-monitor",
+        contextSnapshot: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          source: "mission_owner_decision_retry_source_issue",
+          ownerActionIssueId: ownerActionIssue.id,
+        },
+      });
+    },
+    onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(mission.ownerAgentId, {
       source: "assignment",
       triggerDetail: "system",
       reason: "mission_stale_source_issue_wakeup",
@@ -682,8 +699,60 @@ export async function createApp(
     process.once("exit", () => nativeWorkflowScheduler.stop());
   }
 
+  // Native workflow reconciler: failed step 이후 running 으로 방치되는 stuck run
+  // (60min+)과 orphan step run 을 주기 정리. plugin workflow-reconciler
+  // (insightflo.workflow-engine) 가 비활성화된 배포에서만 동작한다.
+  const nativeWorkflowReconciler = workflowSchedulerOwnership.pluginReconcilerEffectiveDisabled
+    ? createNativeWorkflowReconciler({ db, timeoutMinutes: 60 })
+    : null;
+  nativeWorkflowReconciler?.start();
+  if (nativeWorkflowReconciler) {
+    process.once("exit", () => nativeWorkflowReconciler.stop());
+  }
+
+  // Agent Wiki Phase 3 — SkillOpt-Sleep 자가진화 루프. AGENT_WIKI_EVOLUTION_ENABLED=1 일 때만
+  // 활성화(default off, 실험적). 반복 실패(frequency≥5)를 agent 영구 promptTemplate 에 bounded-edit 후
+  // 관찰창(24h) 동안 실패 추이로 수락/기각. 비활성 시 loop 자체를 생성하지 않아 완전 inert.
+  const agentWikiEvolutionLoop = agentWikiEvolutionOwnership.enabled
+    ? createAgentWikiEvolutionLoop({ db })
+    : null;
+  agentWikiEvolutionLoop?.start();
+  if (agentWikiEvolutionLoop) {
+    process.once("exit", () => agentWikiEvolutionLoop.stop());
+  }
+
   pluginScheduler.start();
   jobCoordinator.start();
+
+  // [서버 시작 점검] Hermes Ops(adapter hermes_local + heartbeat timer 유일)에게 상태 점검 +
+  // 사장에게 telegram 보고 를 지시. wakeOnDemand agent 들은 재부팅/크래시 후 자동 진행을 안 하므로,
+  // 사장이 telegram 지시로 풀도록 Hermes Ops 가 running run / todo·pending step / stuck 을 점검·보고.
+  // 매 interval timer(불필요 토큰) 대신 시작 1회 wake.
+  void (async () => {
+    try {
+      const opsAgents = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(
+          and(
+            eq(agents.adapterType, "hermes_local"),
+            sql`${agents.runtimeConfig} -> 'heartbeat' ->> 'enabled' = 'true'`,
+          ),
+        );
+      for (const a of opsAgents) {
+        void heartbeat
+          .wakeup(a.id, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "server_startup_state_check",
+            contextSnapshot: {},
+          })
+          .catch((err) => logger.warn({ err, agentId: a.id }, "Server startup: Hermes Ops wake failed"));
+      }
+    } catch (err) {
+      logger.warn({ err }, "Server startup: failed to wake Hermes Ops for state check");
+    }
+  })();
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });
@@ -722,4 +791,26 @@ export async function createApp(
   });
 
   return app;
+}
+
+async function findExistingWorkflowResumeWake(
+  db: Db,
+  input: { companyId: string; agentId: string; issueId: string },
+) {
+  return db
+    .select({
+      id: agentWakeupRequests.id,
+      runId: agentWakeupRequests.runId,
+    })
+    .from(agentWakeupRequests)
+    .where(and(
+      eq(agentWakeupRequests.companyId, input.companyId),
+      eq(agentWakeupRequests.agentId, input.agentId),
+      inArray(agentWakeupRequests.reason, ["workflow_step_runnable", "issue_execution_same_name"]),
+      inArray(agentWakeupRequests.status, ["queued", "completed", "coalesced", "deferred_issue_execution"]),
+      sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
+      sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
 }

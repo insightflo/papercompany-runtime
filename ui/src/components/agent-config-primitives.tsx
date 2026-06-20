@@ -42,6 +42,7 @@ export const help: Record<string, string> = {
   command: "The command to execute (e.g. node, python).",
   localCommand: "Override the path to the CLI command you want the adapter to call (e.g. /usr/local/bin/claude, codex, opencode).",
   fallbackCommand: "Alternate CLI command used for an automatic adapter fallback run after a lost local child process.",
+  fallbackModel: "Model used by automatic adapter fallback runs. Leave blank to reuse the primary model.",
   args: "Command-line arguments, comma-separated.",
   extraArgs: "Extra CLI arguments for local adapters, comma-separated.",
   envVars: "Environment variables injected into the adapter process. Use plain values or secret references.",

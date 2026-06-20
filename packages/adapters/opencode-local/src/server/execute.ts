@@ -179,12 +179,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   await ensureCommandResolvable(command, cwd, runtimeEnv);
 
-  await ensureOpenCodeModelConfiguredAndAvailable({
-    model,
-    command,
-    cwd,
-    env: runtimeEnv,
-  });
+  try {
+    await ensureOpenCodeModelConfiguredAndAvailable({
+      model,
+      command,
+      cwd,
+      env: runtimeEnv,
+    });
+  } catch (err) {
+    if (wakeReason !== "adapter_fallback" || !model) throw err;
+    await onLog(
+      "stderr",
+      `[paperclip] OpenCode model discovery failed during adapter fallback; continuing with configured model "${model}": ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+  }
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
   const graceSec = asNumber(config.graceSec, 20);

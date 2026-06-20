@@ -9,6 +9,12 @@ import {
 
 const MODELS_CACHE_TTL_MS = 60_000;
 const MODELS_DISCOVERY_TIMEOUT_MS = 20_000;
+// 만료된 cache entry 가 stale fallback 으로 살아있는 보존 기간. 이 window 안의 expired entry 는
+// fresh discovery 실패 시 반환된다(Phase 3: stale serve). 이를 넘으면 prune.
+const MODELS_STALE_RETENTION_MS = 5 * 60_000;
+// fresh discovery 의 timeout/exit 실패에 대한 재시도. 시작 실패(command 부재 등)는 비재시도.
+const MODELS_DISCOVERY_MAX_ATTEMPTS = 2; // initial + 1 retry
+const MODELS_DISCOVERY_RETRY_BACKOFF_MS = 500;
 
 function resolveOpenCodeCommand(input: unknown): string {
   const envOverride =
@@ -94,10 +100,65 @@ function discoveryCacheKey(command: string, cwd: string, env: Record<string, str
   return `${command}\n${cwd}\n${envKey}`;
 }
 
+// [수정시 주의] stale serve 를 위해 만료 즉시 삭제하지 않는다. expiresAt + STALE_RETENTION 을
+// 넘은 entry 만 prune 한다 (expired-but-within-retention entry 는 fresh discovery 실패 시 fallback).
 function pruneExpiredDiscoveryCache(now: number) {
   for (const [key, value] of discoveryCache.entries()) {
-    if (value.expiresAt <= now) discoveryCache.delete(key);
+    if (value.expiresAt + MODELS_STALE_RETENTION_MS <= now) discoveryCache.delete(key);
   }
+}
+
+/**
+ * [목적] isRetryableDiscoveryError — 재시도할 만한 일시 실패인지 판별. timeout / exit failure 만
+ *   재시도하고, command 시작 실패(ENOENT 등 "Failed to start command")는 재시도하지 않는다
+ *   (command 가 실제로 없는 경우이므로 재시도해도 실패 → run startup latency 만 낭비).
+ * [연결] withRetry 의 shouldRetry predicate 로 사용.
+ */
+export function isRetryableDiscoveryError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("timed out") || message.includes("`opencode models` failed");
+}
+
+/**
+ * [목적] summarizeDiscoveryError — runChildProcess 에러 메시지에서 PATH(...) 전체를 제거하고 첫 줄만
+ *   200자 이내로 요약. stale serve warn 이 PATH 를 통째로 로그에 남기지 않도록(Follow-up #3).
+ */
+export function summarizeDiscoveryError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const firstLine = (raw.split(/\r?\n/)[0] ?? raw)
+    .replace(/\s*PATH\s*\([^)]*\)/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return firstLine.slice(0, 200);
+}
+
+/**
+ * [목적] withRetry — fn 을 maxAttempts 회 시도. shouldRetry(err) 가 true 인 실패만 재시도
+ *   (false 면 즉시 throw). 마지막 시도 실패 시 마지막 에러 throw.
+ * [입력] fn, maxAttempts(≥1), backoffMs, shouldRetry(기본 항상 true).
+ * [출력] fn 의 반환값.
+ * [연결] resolveModelsCached 가 discoverOpenCodeModels 호출을 감쌈.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number,
+  backoffMs: number,
+  shouldRetry: (err: unknown) => boolean = () => true,
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      const moreAttempts = attempt < maxAttempts;
+      if (moreAttempts && shouldRetry(err)) {
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  // unreachable — for 루프가 모든 attempt 를 소진하면 위에서 throw 됨.
+  throw new Error("withRetry exhausted attempts without resolution");
 }
 
 export async function discoverOpenCodeModels(input: {
@@ -146,23 +207,76 @@ export async function discoverOpenCodeModels(input: {
   return sortModels(parseModelsOutput(result.stdout));
 }
 
-export async function discoverOpenCodeModelsCached(input: {
+// [테스트 seam] resolveModelsCached 가 discovery 를 이 가변 reference 로 호출. 테스트가 call count /
+// 실패 주입을 위해 교체 가능(setOpenCodeModelsDiscoveryForTests). 기본은 discoverOpenCodeModels.
+let discoverForCache: typeof discoverOpenCodeModels = discoverOpenCodeModels;
+
+type ResolvedModels = {
+  models: AdapterModel[];
+  /** true = fresh cache 또는 이번에 fresh discovery 성공. false = fresh discovery 실패로 stale cache 반환. */
+  fresh: boolean;
+  /** stale serve 시 fresh discovery 실패 사유(staleReason). fresh=true 면 undefined. */
+  staleReason?: string;
+};
+
+/**
+ * [목적] resolveModelsCached — models cache 해석 + retry + stale serve. fresh cache hit 시 즉시 반환,
+ *   아니면 discoverOpenCodeModels 를 withRetry 로 시도. 모든 시도 실패 시 (retention 내) stale cache 가
+ *   있으면 stale models(fresh=false)를 반환하고 warning, stale 도 없으면 기존처럼 에러 throw.
+ * [출력] { models, fresh, staleReason? }.
+ * [연결] discoverOpenCodeModelsCached / ensureOpenCodeModelConfiguredAndAvailable 가 사용.
+ */
+async function resolveModelsCached(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
-} = {}): Promise<AdapterModel[]> {
+}): Promise<ResolvedModels> {
   const command = resolveOpenCodeCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
   const key = discoveryCacheKey(command, cwd, env);
   const now = Date.now();
   pruneExpiredDiscoveryCache(now);
-  const cached = discoveryCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.models;
 
-  const models = await discoverOpenCodeModels({ command, cwd, env });
-  discoveryCache.set(key, { expiresAt: now + MODELS_CACHE_TTL_MS, models });
-  return models;
+  const cached = discoveryCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return { models: cached.models, fresh: true };
+  }
+
+  // [Follow-up #2] retention 내 stale cache 가 usable 하면 discovery 를 1회만 시도해 run startup
+  // 블록(~40s → ~20s) 단축. stale 이 없으면 기존처럼 MODELS_DISCOVERY_MAX_ATTEMPTS 유지.
+  const usableStale = Boolean(cached && cached.models.length > 0);
+  const maxAttempts = usableStale ? 1 : MODELS_DISCOVERY_MAX_ATTEMPTS;
+
+  try {
+    const models = await withRetry(
+      () => discoverForCache({ command, cwd, env }),
+      maxAttempts,
+      MODELS_DISCOVERY_RETRY_BACKOFF_MS,
+      isRetryableDiscoveryError,
+    );
+    discoveryCache.set(key, { expiresAt: now + MODELS_CACHE_TTL_MS, models });
+    return { models, fresh: true };
+  } catch (err) {
+    // fresh discovery 실패(retry 포함). retention 내 stale cache 가 있으면 반환.
+    if (usableStale && cached) {
+      const reason = summarizeDiscoveryError(err);
+      const cachedAt = cached.expiresAt - MODELS_CACHE_TTL_MS;
+      console.warn(
+        `[opencode-models] discovery failed; serving STALE cached models (ageMs=${Math.max(0, now - cachedAt)}, reason=${reason}).`,
+      );
+      return { models: cached.models, fresh: false, staleReason: reason };
+    }
+    throw err;
+  }
+}
+
+export async function discoverOpenCodeModelsCached(input: {
+  command?: unknown;
+  cwd?: unknown;
+  env?: unknown;
+} = {}): Promise<AdapterModel[]> {
+  return (await resolveModelsCached(input)).models;
 }
 
 export async function ensureOpenCodeModelConfiguredAndAvailable(input: {
@@ -176,11 +290,18 @@ export async function ensureOpenCodeModelConfiguredAndAvailable(input: {
     throw new Error("OpenCode requires `adapterConfig.model` in provider/model format.");
   }
 
-  const models = await discoverOpenCodeModelsCached({
+  const { models, fresh, staleReason } = await resolveModelsCached({
     command: input.command,
     cwd: input.cwd,
     env: input.env,
   });
+
+  if (!fresh) {
+    // [검증 표시] stale cache 로 model availability 를 검증했음을 코드/로그에 노출.
+    console.warn(
+      `[opencode-models] configured-model availability checked against STALE cache (reason=${staleReason ?? "unknown"}).`,
+    );
+  }
 
   if (models.length === 0) {
     throw new Error("OpenCode returned no models. Run `opencode models` and verify provider auth.");
@@ -206,4 +327,34 @@ export async function listOpenCodeModels(): Promise<AdapterModel[]> {
 
 export function resetOpenCodeModelsCacheForTests() {
   discoveryCache.clear();
+}
+
+/**
+ * [목적] seedOpenCodeModelsCacheForTests — 테스트용 cache 주입. expiresAtOffsetMs > 0 이면 fresh,
+ *   < 0 이면 stale(만료, retention 내) entry 를 만든다. stale-serve / fresh-hit 테스트에 사용.
+ */
+export function seedOpenCodeModelsCacheForTests(
+  input: { command?: unknown; cwd?: unknown; env?: unknown },
+  models: AdapterModel[],
+  expiresAtOffsetMs: number,
+) {
+  const command = resolveOpenCodeCommand(input.command);
+  const cwd = asString(input.cwd, process.cwd());
+  const env = normalizeEnv(input.env);
+  const key = discoveryCacheKey(command, cwd, env);
+  discoveryCache.set(key, { expiresAt: Date.now() + expiresAtOffsetMs, models });
+}
+
+/**
+ * [목적] setOpenCodeModelsDiscoveryForTests — resolveModelsCached 가 호출할 discovery 함수를 테스트용으로
+ *   교체(call count / 실패 주입). resetOpenCodeModelsDiscoveryForTests 로 원복.
+ */
+export function setOpenCodeModelsDiscoveryForTests(
+  fn: typeof discoverOpenCodeModels,
+) {
+  discoverForCache = fn;
+}
+
+export function resetOpenCodeModelsDiscoveryForTests() {
+  discoverForCache = discoverOpenCodeModels;
 }

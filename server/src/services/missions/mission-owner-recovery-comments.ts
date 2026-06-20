@@ -22,21 +22,51 @@ type MissionOwnerDescriptionIssue = {
   assigneeAgentId: string | null;
 };
 
+import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
+
+export function buildRetrySourceIssueWakeupResultComment(input: {
+  status: MissionOwnerDecisionWakeupDispatchStatus;
+  missionId: string;
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  const common = {
+    missionId: input.missionId,
+    ownerActionIssueId: input.ownerActionIssueId,
+    ownerActionLabel: input.ownerActionLabel,
+    sourceIssueId: input.sourceIssueId,
+    sourceLabel: input.sourceLabel,
+    targetAgentId: input.targetAgentId,
+    idempotencyKey: input.idempotencyKey,
+  };
+  return input.status === "workflow_already_dispatched"
+    ? buildRetrySourceIssueWakeupHandledByWorkflowComment(common)
+    : buildRetrySourceIssueWakeupDispatchedComment(common);
+}
+
 export function buildMainExecutorBrief(input: {
   missionGoal: string;
   currentSituation: string;
 }): string {
   return [
     "Main executor brief:",
+    "Main executor role:",
+    "- You own mission execution. Your goal is to complete the mission, not merely classify the alert.",
     `Mission goal: ${input.missionGoal}`,
     `Current situation: ${input.currentSituation}`,
-    "Context tools/permissions:",
-    "- Read mission, workflow run, workflow step, issue, comment, work product, and run-log evidence.",
-    "Resolution tools/permissions:",
-    "- Record an owner decision/comment, request user input, wake or reassign agents, retry/resume bounded work, replan, escalate, or report impossible completion when evidence supports it.",
-    "Main executor role:",
-    "- Do: judge the situation from evidence, coordinate the next step, keep the mission moving, and record why.",
-    "- Do not: blindly follow local classifications, perform delegated work by default, or invent a recovery recipe without evidence.",
+    "Mission execution loop:",
+    "- Inspect the mission goal, plan, workflow/step state, issue tree, comments, work products, and run logs.",
+    "- Analyze the reported error or blocked state. If evidence is incomplete, state what is unknown and what must be checked next.",
+    "- Choose and perform the action that best advances the mission: instruct or wake agents, request fixes, retry/resume bounded work, request/re-run tool steps, revalidate outputs, replan, escalate, or report impossible completion with evidence.",
+    "- Record the judgement, action taken, and next expected state so the mission can continue.",
+    "Oversight signal boundary:",
+    "- Treat this issue as a wakeup plus basic state/evidence from oversight. Oversight is not the recovery decision-maker.",
+    "- Do not depend on normalized decision labels as the primary control path; use labels only as optional hints after judging the mission state yourself.",
+    "- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.",
   ].join("\n");
 }
 
@@ -154,6 +184,32 @@ export function buildRetrySourceIssueWakeupDispatchedComment(input: {
   ].join("\n");
 }
 
+export function buildRetrySourceIssueWakeupHandledByWorkflowComment(input: {
+  missionId: string;
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  return [
+    "### Mission owner retry wakeup handled by workflow",
+    buildMissionOwnerDecisionWakeupDispatchedMarker({
+      missionId: input.missionId,
+      ownerActionIssueId: input.ownerActionIssueId,
+      sourceIssueId: input.sourceIssueId,
+      decision: "retry_source_issue",
+      idempotencyKey: input.idempotencyKey,
+    }),
+    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    `Target agent: ${input.targetAgentId}`,
+    "Wakeup: skipped direct mission-owner wake because an existing workflow resume wake already covered this source issue.",
+    `Idempotency key: ${input.idempotencyKey}`,
+  ].join("\n");
+}
+
 export function buildMissionOwnerUnblockDescription(
   mission: MissionOwnerDescriptionMission,
   blockedIssue: MissionOwnerDescriptionIssue,
@@ -173,7 +229,7 @@ export function buildMissionOwnerUnblockDescription(
       actionType: "unblock",
       status: "decision_required",
     }),
-    "Mission-owner signal. Automation has not selected a recovery action.",
+    "Mission-owner signal from oversight. This is a wakeup plus basic state/evidence; the main executor must judge and act to complete the mission.",
     "",
     `Mission id: ${mission.id}`,
     `Mission title: ${mission.title}`,
@@ -192,7 +248,7 @@ export function buildMissionOwnerUnblockDescription(
       currentSituation: `Source issue ${sourceLabel} is ${blockedIssue.status}; original assignee is ${blockedIssue.assigneeAgentId ?? "unassigned"}.`,
     }),
     "",
-    "Structured decision labels for control-plane actions:",
+    "Optional structured decision labels for logs/UI hints only; do not treat them as the primary control path:",
     ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => `- ${decision}`),
     "",
     buildMissionOwnerDecisionFormat(),

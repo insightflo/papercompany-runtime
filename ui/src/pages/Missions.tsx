@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "@/lib/router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   missionsApi,
   type MissionStatus,
@@ -15,7 +15,7 @@ import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Rocket, Plus } from "lucide-react";
+import { Rocket, Plus, RefreshCw } from "lucide-react";
 
 const STATUS_TABS: { label: string; value: MissionStatus | "all" }[] = [
   { label: "All", value: "all" },
@@ -69,6 +69,7 @@ export function Missions() {
   const { selectedCompanyId } = useCompany();
   const { openNewMission } = useDialog();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const statusFilter =
@@ -105,7 +106,9 @@ export function Missions() {
   const {
     data: missions,
     isLoading,
+    isFetching: isMissionsFetching,
     error,
+    refetch: refetchMissions,
   } = useQuery({
     queryKey: queryKeys.missions.list(selectedCompanyId!, missionFilters),
     queryFn: () => missionsApi.list(selectedCompanyId!, missionFilters),
@@ -125,6 +128,11 @@ export function Missions() {
   const hasPreviousPage = page > 1;
   const hasNextPage = (missions?.length ?? 0) >= pageSize;
   const currentSortValue = `${sortBy}:${sortOrder}`;
+  const refreshCurrentTab = () => {
+    if (!selectedCompanyId) return;
+    queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId) });
+    void refetchMissions();
+  };
 
   const updateSearchParams = (
     updates: Record<string, string | null>,
@@ -183,6 +191,20 @@ export function Missions() {
                 {tab.label}
               </Button>
             ))}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={refreshCurrentTab}
+              disabled={isMissionsFetching}
+              className="h-7 px-2 text-xs"
+              title="Refresh current tab"
+              aria-label="Refresh current missions tab"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isMissionsFetching ? "animate-spin" : ""}`} />
+              <span className="ml-1.5 hidden sm:inline">
+                {isMissionsFetching ? "Refreshing" : "Refresh"}
+              </span>
+            </Button>
           </div>
 
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
