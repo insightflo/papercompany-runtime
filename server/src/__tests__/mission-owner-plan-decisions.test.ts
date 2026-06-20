@@ -1355,6 +1355,26 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     }
   });
 
+  it("[P4 surface] plan_intent_coverage_failed 시 mission.plan.rejected activity 가 로깅된다(operator 가시)", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await db.update(missions).set({ title: "가이드를 site에 올리도록" }).where(eq(missions.id, missionId));
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Surface Workflow" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    const decision = {
+      missionId,
+      missionGoal: "surface",
+      selectedExecutionUnits: [{ id: `wf:${wfId}:step:smoke`, kind: "workflow_definition_step", title: "Run smoke", selectionState: "selected", reason: "R", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" } }],
+      ruleRefs: [], kbRefs: [], assessment: validAssessment, requiredInputs: [], successCriteria: [], steps: [],
+    };
+    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision), createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("invalid");
+    const rejected = await db.select().from(activityLog).where(eq(activityLog.action, "mission.plan.rejected"));
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(rejected[0]?.details).toMatchObject({ reason: "plan_intent_coverage_failed" });
+  });
+
   it("materializes selected execution units into a mission-scoped PAQO workflow DAG with ACTION gated before QA", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     const sourceWorkflowId = randomUUID();
