@@ -23,6 +23,7 @@ import {
   type PredFacts,
   type PredStatus,
 } from "./control-flow/edge-condition.js";
+import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 
 /**
  * Workflow step definition.
@@ -399,10 +400,11 @@ export function validateDag(steps: WorkflowStep[]): DagValidationResult {
     }
   }
 
-  // Check for cycles using depth-first search
-  const hasCycle = detectCycle(steps);
+  // Check for cycles: annotated back-edge(isBackEdge+maxIterations≥1) 로 닫히는 cycle(bounded loop)은 허용,
+  // 그 외 우연한 cycle 은 거부(control-flow/cycle-validator).
+  const hasCycle = hasDisallowedCycle(steps);
   if (hasCycle) {
-    errors.push("Workflow contains a cycle (circular dependency)");
+    errors.push("Workflow contains an unannotated cycle (circular dependency); only annotated back-edges (isBackEdge + maxIterations) may form a bounded loop");
   }
 
   // Check for steps with no dependencies (entry points)
@@ -429,46 +431,6 @@ export function validateDag(steps: WorkflowStep[]): DagValidationResult {
     errors,
     warnings,
   };
-}
-
-/**
- * Detects cycles in a DAG using DFS with coloring.
- */
-function detectCycle(steps: WorkflowStep[]): boolean {
-  const WHITE = 0;
-  const GRAY = 1;
-  const BLACK = 2;
-
-  const color = new Map<string, number>();
-  for (const step of steps) {
-    color.set(step.id, WHITE);
-  }
-
-  function dfs(stepId: string): boolean {
-    const c = color.get(stepId);
-    if (c === GRAY) return true; // back edge -> cycle
-    if (c === BLACK) return false;
-
-    color.set(stepId, GRAY);
-
-    const step = steps.find((s) => s.id === stepId);
-    if (step) {
-      for (const dep of step.dependencies) {
-        if (dfs(dep)) return true;
-      }
-    }
-
-    color.set(stepId, BLACK);
-    return false;
-  }
-
-  for (const step of steps) {
-    if (color.get(step.id) === WHITE) {
-      if (dfs(step.id)) return true;
-    }
-  }
-
-  return false;
 }
 
 /**

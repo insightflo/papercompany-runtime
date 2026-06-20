@@ -35,7 +35,7 @@
 ## 모듈 분해 (control-flow/ 아래, 각 ≤~300 LOC)
 - `types.ts` ✅ P1 — ConditionalEdge/StepIterationAttempt/normalizeConditionalEdges
 - `edge-condition.ts` ✅ P2 — edge `when` 평가(classifyStepActivation) + findSkippableSteps; dag-engine findRunnableSteps 게이트 교체 + skip-propagation pass
-- `cycle-validator.ts` — (P3) detectCycle relax(annotated back-edge 허용, 우연 cycle 거부)
+- `cycle-validator.ts` ✅ P3 — detectCycle relax(annotated back-edge 허용, 우연 cycle 거부). forward 방향 DFS로 closing edge가 isBackEdge와 정확히 대응
 - `step-reset.ts` — (P4) resetStepRunForRework: step+issue 같이 리셋, iteration_index++, attempt archive
 - `loop-driver.ts` — (P4) syncWorkflowRunState의 back-edge 재발화 pass(maxIterations gate)
 - `verdict-store.ts` — (P4) verdict/결함을 metadata.attempts[] persist
@@ -50,7 +50,7 @@
     3. **[MEDIUM 수정]** `validateDag` orphan 검사에 `conditionalDependencies.stepId` 추가(빠지면 영원히 waiting → hang).
     4. **[이월]** oversight comment가 launch-loop 내 신규 fail 시 1-sync 지연(자가치유, dedup marker로 중복 없음) → P7 hardening에서 `failedIdsPreLaunch` 추적으로 즉시화.
     5. **[P4 이월]** skip은 sentinel로 sticky → QA requeue 등 회복 불가. P4 step-reset에서 sentinel clear 시 처리.
-- **P3 back-edge 허용(cycle-validator)**: detectCycle에서 annotated(`isBackEdge+maxIterations≥1`)만 통과, 나머지 cycle은 거부. Files: cycle-validator.ts(신규, dag-engine에서 분리) + dag-engine.ts(hook).
+- **P3 back-edge 허용(cycle-validator)** ✅: detectCycle → control-flow/cycle-validator.ts(hasDisallowedCycle)로 분리. forward 방향 DFS — closing edge가 `isBackEdge+maxIterations≥1`면 cycle 허용(bounded loop), 나머지 cycle은 거부. dag-engine detectCycle 제거·validateDag가 위임. **검증**: tsc clean + vitest 82/82(47 engine + 7 types + 19 edge-condition + 9 cycle-validator). legacy accidental cycle 거부 동일(회귀 없음).
 - **P4 loop driver + reset**: 실제 재실행. QA reset+재wake, maxIterations에서 종료. verdict persist. **무한 loop 가드 테스트 필수**. Files: step-reset.ts, loop-driver.ts, verdict-store.ts + dag-engine.ts(while-loop 내 pass 호출).
 - **P5 planning(PAQO)**: QA step → rework back-edge 자동 합성. Files: mission-owner-plan-decisions.ts(buildPaqoWorkflowSteps), supervision-helpers.ts.
 - **P6 supervision hybrid 가드**: native loop 미션은 producer-rework(L447–670) skip. Files: supervision.ts. (삭제 말고 가드 먼저.)
