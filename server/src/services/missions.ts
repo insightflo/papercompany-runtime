@@ -81,6 +81,7 @@ import {
   type PluginWorkflowRunData,
   type PluginWorkflowStepRunData,
 } from "./missions/plugin-workflow.js";
+import type { IssueCreateInput, IssueRow, JsonRecord } from "./missions/shared-types.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
   hasMissionOwnerDecisionAppliedMarker,
@@ -121,9 +122,6 @@ export type MissionAgentRole = "executor" | "reviewer" | "observer";
  * Mission row type.
  */
 export type MissionRow = typeof missions.$inferSelect;
-
-type IssueRow = typeof issues.$inferSelect;
-type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
 export {
   MISSION_OWNER_DECISION_OPTIONS,
@@ -1210,8 +1208,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     });
     return { missionId: mission.id, oversightIssueId: oversightIssue.id, planId: activePlan?.id ?? null };
   }
-
-  type JsonRecord = Record<string, unknown>;
 
   function asRecord(value: unknown): JsonRecord {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonRecord : {};
