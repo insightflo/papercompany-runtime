@@ -110,6 +110,7 @@ import {
   buildStaleSourceIssueWakeupDispatchedComment,
   buildValidatorRetryEvidenceComment,
   isTerminalIssueStatus,
+  extractLatestMissionOwnerDecision,
   summarizeOwnerDecisionNotApplied,
 } from "./missions/mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
