@@ -5,7 +5,6 @@
  * OQ-4 schema: owner_agent_id is the mission main executor; mission_agents carries executor/reviewer/observer roles.
  */
 
-import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
@@ -25,29 +24,18 @@ import {
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { HttpError, notFound, badRequest } from "../errors.js";
+import { notFound, badRequest } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { issueService } from "./issues.js";
-import { mergeMissionPlanRefs, missionPlanArtifactService, summarizeMissionPlanForRuntime, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
-import {
-  isTerminalFailureStatus,
-  listMissionExecutionSourceSnapshots,
-  type MissionExecutionStatus,
-  type MissionExecutionSourceRef,
-} from "./missions/mission-execution-sources.js";
-import { buildMissionRuleContext } from "./missions/mission-rule-context.js";
-import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun } from "./missions/mission-supervision-context.js";
-import {
-  formatGovernanceThreadEvidenceLines,
-  governanceThreadReasonSuffix,
-} from "./missions/mission-owner-recovery-governance-format.js";
+import { missionPlanArtifactService, summarizeMissionPlanForRuntime, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
+import { type MissionSupervisionHeartbeatRun } from "./missions/mission-supervision-context.js";
 import {
   buildOwnerActionExplanations,
   type MissionOwnerActionExplanation,
 } from "./missions/mission-owner-recovery-explanations.js";
-import { normalizeWorkflowStepsForExecution, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "./workflow/dag-engine.js";
+import { normalizeWorkflowStepsForExecution } from "./workflow/dag-engine.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
-import { asStringArray, asTrimmedString, isRecord, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
+import { asStringArray, asTrimmedString, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
   buildWorkflowRunProgress,
   normalizeMissionWorkflowStepStatus,
@@ -57,16 +45,8 @@ import {
   type MissionWorkflowRunStep,
   type MissionWorkflowRunDetail,
 } from "./missions/workflow-progress.js";
-import {
-  isIssueLessToolWorkflowStep,
-} from "./missions/tool-step-failure.js";
 import type {
-  MissionOwnerSupervisionRecommendation,
-  MissionOwnerDecisionWakeupDispatchStatus,
   MissionOwnerDecisionWakeupDispatchResult,
-  MissionOwnerSupervisionAppliedAction,
-  MissionOwnerSupervisionResult,
-  ActiveMissionOwnerSupervisionResult,
 } from "./missions/supervision-types.js";
 import {
   normalizePluginWorkflowStepStatus,
@@ -76,48 +56,9 @@ import {
   type PluginWorkflowRunData,
   type PluginWorkflowStepRunData,
 } from "./missions/plugin-workflow.js";
-import type { IssueCreateInput, IssueRow } from "./missions/shared-types.js";
 import { isTerminalMissionStatus } from "./missions/shared-types.js";
-import { normalizeMissionOwnerDecisionWakeupDispatchResult } from "./missions/supervision-types.js";
-import {
-  activePlanRecoveryGateReason,
-  asRecord,
-  asRecordArray,
-  buildNativeToolStepRetryAppliedMarker,
-  executionUnitKey,
-  executionUnitKeyFromSourceRef,
-  findCanonicalToolStepRecoveryIssue,
-  hasArtifactMissingSignal,
-  hasDiagnosisSignal,
-  hasNativeToolStepRetryAppliedMarker,
-  hasRecoverableArtifactComment,
-  isApprovalRuleMode,
-  normalizedPlanStatus,
-  parseToolStepRecoveryMarker,
-  trimmedString,
-  unitRequiresGovernedAction,
-} from "./missions/supervision-helpers.js";
 import { createOwnerActions } from "./missions/owner-actions.js";
 import { createSupervision } from "./missions/supervision.js";
-import {
-  buildMissionOwnerDecisionWakeupIdempotencyKey,
-  hasMissionOwnerDecisionAppliedMarker,
-  hasMissionOwnerDecisionWakeupDispatchedMarker,
-  hasStaleSourceIssueWakeupDispatchedMarker,
-} from "./missions/mission-owner-recovery-events.js";
-import {
-  buildRetrySourceIssueComment,
-  buildRetrySourceIssueWakeupDispatchedComment,
-  buildRetrySourceIssueWakeupHandledByWorkflowComment,
-  buildStaleSourceIssueWakeupDispatchedComment,
-  buildValidatorRetryEvidenceComment,
-  isTerminalIssueStatus,
-  extractLatestMissionOwnerDecision, buildRetrySourceIssueWakeupResultComment,
-  summarizeOwnerDecisionNotApplied,
-} from "./missions/mission-owner-recovery-comments.js";
-import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
-import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
-import { logActivity } from "./activity-log.js";
 
 // ---------------------------------------------------------------------------
 // Types
