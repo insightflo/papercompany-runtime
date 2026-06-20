@@ -5,6 +5,7 @@ import {
   reviewPlanAgainstIntent,
   type PlanQaDiagnostic,
 } from "../services/missions/mission-plan-qa.js";
+import { buildCapabilityManifest } from "../services/missions/mission-owner-planning-context.js";
 
 /**
  * [목적] plan-time QA MVP(mission-intent + mission-plan-qa) 의 순수 로직 검증.
@@ -155,3 +156,28 @@ describe("extractUnitRoles", () => {
     expect(extractUnitRoles(unit({ title: "배포 파이프라인 실행" })).publish).toBe(true);
   });
 });
+
+describe("buildCapabilityManifest (capability discovery)", () => {
+  it("빈 skills → 빈 manifest, sitePublishTarget.available=null(runtime 미구현 표식)", () => {
+    const manifest = buildCapabilityManifest([]);
+    expect(manifest.publishCapabilities).toEqual([]);
+    expect(manifest.notableSkills).toEqual([]);
+    expect(manifest.sitePublishTarget.available).toBe(null);
+  });
+  it("publisher 계열 skill(manual-onboarding-publisher)을 publishCapabilities 로 분리", () => {
+    const manifest = buildCapabilityManifest([
+      { key: "manual-onboarding-publisher", slug: "publisher", name: "Manual Onboarding Publisher", description: "site에 산출물을 게시/배포한다." },
+      { key: "research-helper", slug: "research", name: "Research Helper", description: "리서치 보조." },
+    ]);
+    expect(manifest.publishCapabilities.map((s) => s.key)).toContain("manual-onboarding-publisher");
+    expect(manifest.publishCapabilities.map((s) => s.key)).not.toContain("research-helper");
+    expect(manifest.notableSkills.map((s) => s.key)).toEqual(expect.arrayContaining(["manual-onboarding-publisher", "research-helper"]));
+  });
+  it("description 이 길면 purpose 가 truncation 된다(raw SKILL.md 전문 미포함)", () => {
+    const long = "x".repeat(500);
+    const manifest = buildCapabilityManifest([{ key: "s", slug: "s", name: "S", description: long }]);
+    expect(manifest.notableSkills[0]?.purpose.length).toBeLessThan(long.length);
+    expect(manifest.notableSkills[0]?.purpose.endsWith("…")).toBe(true);
+  });
+});
+

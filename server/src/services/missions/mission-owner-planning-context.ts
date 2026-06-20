@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   agentKbGrants,
   agents,
+  companySkills,
   issues,
   knowledgeBases,
   missionAgents,
@@ -85,6 +86,25 @@ export type MissionOwnerPlanningBoundedAssetSummary = {
   note?: string;
 };
 
+/**
+ * [목적] intent-scoped compressed capability manifest — planner 가 "어떤 publish capability 가 있는지"
+ *   알게 해 publish unit 누락을 사전에 예방(mission-plan-qa gate 는 사후 검출). raw SKILL.md/tool schema
+ *   전문은 넣지 않고 key/name/purpose 요약만. site/cloudflare 설정은 runtime 소스가 아직 없어
+ *   sitePublishTarget.available=null(full 에서 wiring).
+ * [확장점] full 에서 tools/site resources/company skills 전반의 intent-scoped top-K discovery 로 확장.
+ */
+export type MissionOwnerPlanningCapabilityEntry = {
+  key: string;
+  name: string;
+  purpose: string;
+};
+
+export type MissionOwnerPlanningCapabilityManifest = {
+  publishCapabilities: MissionOwnerPlanningCapabilityEntry[];
+  notableSkills: MissionOwnerPlanningCapabilityEntry[];
+  sitePublishTarget: { available: boolean | null; note: string };
+};
+
 export type MissionOwnerPlanningDossier = {
   objective: {
     title: string;
@@ -105,6 +125,7 @@ export type MissionOwnerPlanningDossier = {
     ruleRefs: Array<Pick<MissionRuleRef, "id" | "key" | "name" | "mode" | "severity" | "action" | "reason">>;
     kbRefs: Array<{ id: string; name: string; type: string; reason: string }>;
     agentRoster: Array<{ agentId: string; name: string | null; role: string; capabilities: string | null }>;
+    capabilityManifest: MissionOwnerPlanningCapabilityManifest;
     fileViews: MissionOwnerPlanningBoundedAssetSummary;
     executionSourceSummary: { unitCount: number; labels: string[] };
   };
@@ -134,6 +155,10 @@ const MAX_PURPOSE_TOKENS = 10;
 const PURPOSE_TOKEN_MIN_LENGTH = 3;
 const MAX_DOSSIER_OBJECTIVE_FRAGMENTS = 5;
 const MAX_DOSSIER_LABELS = 10;
+// [capability manifest] company skills top-K 압축 한도. raw SKILL.md/tool schema 는 넣지 않는다.
+const MAX_NOTABLE_SKILLS = 12;
+const MAX_PUBLISH_CAPABILITIES = 8;
+const MAX_SKILL_PURPOSE_LENGTH = 160;
 const SUCCESS_CRITERIA_MARKER_RE = /\b(deliverable|delivery|output|result|report|summary|publish|send|channel|date|deadline|by|png|markdown|telegram|slack|email|완료|전송|발행|게시|보고|요약|산출|결과|채널|날짜|오늘|마감)\b|산출물|결과물|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2}/iu;
 
 function stripRawRefs(summary: MissionPlanRuntimeSummary): MissionOwnerPlanningActivePlan {
@@ -225,6 +250,7 @@ function buildPlanningDossier(input: {
   workflowCandidates: MissionOwnerPlanningWorkflowCandidate[];
   kbRefs: MissionOwnerPlanningKbRef[];
   agentRoster: MissionOwnerPlanningAgentRosterEntry[];
+  capabilityManifest: MissionOwnerPlanningCapabilityManifest;
   todoMarkers: MissionOwnerPlanningTodoMarker[];
 }): MissionOwnerPlanningDossier {
   const extractedDeliverables = splitObjectiveFragments(input.mission.title, input.mission.description);
@@ -276,6 +302,7 @@ function buildPlanningDossier(input: {
         reason: `Granted to mission agent ${agentId}.`,
       })),
       agentRoster: input.agentRoster.map(({ agentId, name, role, capabilities }) => ({ agentId, name, role, capabilities })),
+      capabilityManifest: input.capabilityManifest,
       fileViews: unavailableSummary("No file-view summary is available inside MissionOwnerPlanningContext; Slice 4B does not scan repositories or files."),
       executionSourceSummary: {
         unitCount: input.executionSourceSnapshot.units.length,
@@ -371,6 +398,66 @@ async function hasPluginWorkflowDefinitionEntities(db: Db, companyId: string): P
   return rows.length > 0;
 }
 
+/** publish capability 식별 정규식(skill key/slug/name 매칭). mission-intent publish 토큰과 의미 정렬. */
+const PUBLISH_CAPABILITY_RE = /manual[-_\s]?onboarding|publisher|cloudflare|\bpublish\b|\bdeploy\b|\bonboard/iu;
+
+function compressSkillEntry(input: {
+  key: string;
+  slug: string | null;
+  name: string | null;
+  description: string | null;
+}): MissionOwnerPlanningCapabilityEntry {
+  const name = (input.name ?? input.slug ?? input.key ?? "").toString().trim() || input.key;
+  const purposeRaw = (input.description ?? input.name ?? "").toString().trim();
+  const purpose = purposeRaw.length > MAX_SKILL_PURPOSE_LENGTH
+    ? `${purposeRaw.slice(0, MAX_SKILL_PURPOSE_LENGTH - 1).trimEnd()}…`
+    : purposeRaw;
+  return { key: input.key, name, purpose };
+}
+
+/**
+ * [목적] company skill row 들 → intent-scoped compressed capability manifest(pure). publish 관련 skill 은
+ *   별도 분리(planner 가 "게시 capability 있음"을 즉시 인지), 나머지는 top-K capped 요약.
+ *   site/cloudflare 설정 소스는 runtime 에 아직 없어 available=null(full 확장점).
+ */
+export function buildCapabilityManifest(
+  skills: ReadonlyArray<{ key: string; slug: string | null; name: string | null; description: string | null }>,
+): MissionOwnerPlanningCapabilityManifest {
+  const publishCapabilities: MissionOwnerPlanningCapabilityEntry[] = [];
+  const notableSkills: MissionOwnerPlanningCapabilityEntry[] = [];
+  for (const skill of skills) {
+    const entry = compressSkillEntry(skill);
+    if (notableSkills.length < MAX_NOTABLE_SKILLS) notableSkills.push(entry);
+    const haystack = `${skill.key} ${skill.slug ?? ""} ${skill.name ?? ""}`;
+    if (PUBLISH_CAPABILITY_RE.test(haystack) && publishCapabilities.length < MAX_PUBLISH_CAPABILITIES) {
+      publishCapabilities.push(entry);
+    }
+  }
+  return {
+    publishCapabilities,
+    notableSkills,
+    sitePublishTarget: {
+      available: null,
+      note: "runtime에 site/cloudflare 설정 소스가 아직 없음 — full 구현에서 /srv/manual-onboarding-cloudflare 존재 + canStage + Cloudflare env/token 확인 후 채운다.",
+    },
+  };
+}
+
+/** [목적] 회사 companySkills 를 조회해 compressed capability manifest 구성. */
+async function listCompanySkillSummaries(db: Db, companyId: string): Promise<MissionOwnerPlanningCapabilityManifest> {
+  const rows = await db
+    .select({
+      key: companySkills.key,
+      slug: companySkills.slug,
+      name: companySkills.name,
+      description: companySkills.description,
+    })
+    .from(companySkills)
+    .where(eq(companySkills.companyId, companyId))
+    .orderBy(asc(companySkills.key));
+  return buildCapabilityManifest(rows);
+}
+
 async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerPlanningAgentRosterEntry[]> {
   const rows = await db
     .select({
@@ -459,6 +546,7 @@ export async function buildMissionOwnerPlanningContext(
   );
   const workflowCandidates = await listWorkflowCandidates(db, input.companyId, purposeTokens);
   const agentRoster = await listAgentRoster(db, input.missionId);
+  const capabilityManifest = await listCompanySkillSummaries(db, input.companyId);
   const kbRefs = await listKbRefs(db, input.companyId, agentRoster);
   const todoMarkers: MissionOwnerPlanningTodoMarker[] = [];
 
@@ -482,6 +570,7 @@ export async function buildMissionOwnerPlanningContext(
     workflowCandidates,
     kbRefs,
     agentRoster,
+    capabilityManifest,
     todoMarkers,
   });
 
