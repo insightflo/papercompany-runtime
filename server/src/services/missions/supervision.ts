@@ -21,7 +21,7 @@ import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } fro
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
-import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseToolStepRecoveryMarker, trimmedString, unitRequiresGovernedAction } from "./supervision-helpers.js";
+import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext } from "./mission-supervision-context.js";
 
@@ -445,7 +445,35 @@ export function createSupervision({ db, deps, ownerActions }: {
                 safeToAutoApply: false,
               });
               if (input.applyOwnerDecisionActions) {
-                const sourceIssueId = issue.originId;
+                // [QA-gate rework] retry 타겟 = 수정 지시를 받을 upstream 생산자(synthesis 등).
+                // 과거엔 issue.originId(QA 게이트)를 써서 QA 본인을 재wake 하는 self-loop 가 원인이었다.
+                // B: 사장 결정의 Rework target(또는 Next action "revise RES-xxxx") → identifier 로 이슈 매칭.
+                const ownerReworkRef = ownerDecision.reworkTargetRef ?? parseReworkTargetRefFromNextAction(ownerDecision.nextAction);
+                let sourceIssueId: string | null = null;
+                if (ownerReworkRef) {
+                  const ownerTarget = missionIssues.find((mi) => (mi.identifier ?? null) === ownerReworkRef || mi.id === ownerReworkRef) ?? null;
+                  if (ownerTarget && ownerTarget.missionId === mission.id && !ownerTarget.hiddenAt) sourceIssueId = ownerTarget.id;
+                }
+                // A: 사장 지목이 없으면 DAG 역참조 — origin(QA) step 의 non-QA 생산자(위상 마지막)를 찾는다.
+                let producerReworkResolved = false;
+                if (!sourceIssueId && issue.originId) {
+                  const originStepRows = stepRowsByIssueId.get(issue.originId) ?? [];
+                  const originStepId = originStepRows.map((row) => row.stepRun.stepId).find((id) => Boolean(id)) ?? null;
+                  const dagSteps = (originStepRows[0]?.definition?.stepsJson ?? null) as DagStepLike[] | null;
+                  if (originStepId && Array.isArray(dagSteps) && dagSteps.length > 0) {
+                    const producerStepId = resolveProducerStepIdFromDag(originStepId, dagSteps);
+                    if (producerStepId) {
+                      const producerRow = stepRows.find((row) => row.stepRun.stepId === producerStepId && row.stepRun.issueId) ?? null;
+                      if (producerRow?.stepRun.issueId) {
+                        sourceIssueId = producerRow.stepRun.issueId;
+                        producerReworkResolved = true;
+                      }
+                    }
+                  }
+                }
+                // legacy: 어느 쪽도 못 구하면 origin(QA 자체 재시도의 기존 동작)으로 돌아간다.
+                if (!sourceIssueId) sourceIssueId = issue.originId ?? null;
+                const isProducerRework = producerReworkResolved || (issue.originId !== null && sourceIssueId !== issue.originId);
                 if (!sourceIssueId) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel, reason: "owner-action issue has no canonical originId source issue" }));
                   break;
@@ -469,7 +497,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue is hidden" }));
                   break;
                 }
-                if (isTerminalIssueStatus(sourceCandidate.status)) {
+                if (isTerminalIssueStatus(sourceCandidate.status) && !isProducerRework) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is already terminal status=${sourceCandidate.status}` }));
                   break;
                 }
@@ -495,7 +523,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                 const sourceIsRetryableStaleQueue = (sourceCandidate.status === "todo" || sourceCandidate.status === "backlog")
                   && !sourceHasActiveHeartbeat
                   && (sourceHasFailedRun || sourceHasCompletedCorrectionEvidence);
-                if (sourceCandidate.status !== "blocked" && !sourceIsRetryableStaleQueue) {
+                if (!isProducerRework && sourceCandidate.status !== "blocked" && !sourceIsRetryableStaleQueue) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked, stale queue after failed execution, or stale queue with completed correction evidence` }));
                   break;
                 }
@@ -570,10 +598,12 @@ export function createSupervision({ db, deps, ownerActions }: {
                   break;
                 }
                 let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchOwnerDecisionWakeups ? "skipped_no_assignee" : "not_requested";
+                // producer-rework 생산자는 done(terminal)일 수 있으므로 재오픈 대상에 done 포함 + completedAt clear.
+                const reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
                 await db
                   .update(issues)
-                  .set({ status: "todo", updatedAt: now })
-                  .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, ["blocked", "todo", "backlog"]), isNull(issues.hiddenAt)));
+                  .set({ status: "todo", updatedAt: now, ...(isProducerRework ? { completedAt: null } : {}) })
+                  .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
                 await issueService(db).addComment(
                   sourceCandidate.id,
                   buildRetrySourceIssueComment({

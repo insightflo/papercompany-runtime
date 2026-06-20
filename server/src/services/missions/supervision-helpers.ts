@@ -201,3 +201,64 @@ export function hasNativeToolStepRetryAppliedMarker(comments: string[], input: {
   return comments.some((comment) => comment.includes(buildNativeToolStepRetryAppliedMarker(input)));
 }
 
+/**
+ * [목적] QA-gate 회복의 rework 타겟(수정 지시를 받을 upstream 생산자) 해석 helper.
+ *   QA가 산출물을 반렸으면 고쳐야 할 대상은 산출물을 만든 생산자(synthesis 등)이지 QA 본인이 아니다.
+ *   B(사장 지목) → A(DAG 역참조) 순으로 생산자를 찾는다.
+ */
+export interface DagStepLike {
+  id: string;
+  dependencies?: string[];
+  dependsOn?: string[];
+  name?: string;
+  title?: string;
+  type?: string;
+}
+
+/** step이 QA/검수 계열인지(step id 접두 qa-/validate-/verify- 또는 이름에 qa/validate/verify/review/check 계열 어근). */
+export function isQaLikeStep(step: DagStepLike): boolean {
+  const id = step.id.toLowerCase();
+  if (id.startsWith("qa") || id.startsWith("validate") || id.startsWith("verify")) return true;
+  const name = `${step.name ?? ""} ${step.title ?? ""} ${step.type ?? ""}`.toLowerCase();
+  return /\b(qa|validat\w*|verif\w*|review\w*|check\w*)/i.test(name);
+}
+
+/**
+ * [목적] A(DAG 역참조): QA step의 dependency 중 non-QA 생산자를 찾는다.
+ * [입력] qaStepId(반려한 QA step), steps(워크플로우 정의 전체 step).
+ * [출력] 생산자 step id. QA 의존성 중 (a)QA 게이트가 아니고 (b)의존성이 가장 많아
+ *   위상적으로 가장 아래(=산출물을 최종 합성한 step, 예: synthesis)인 것을 생산자로 삼는다.
+ * [주의] 생산자 후보가 없거나 모두 QA면 null.
+ */
+export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: DagStepLike[]): string | null {
+  if (!qaStepId) return null;
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const qaStep = byId.get(qaStepId);
+  if (!qaStep) return null;
+  const deps = qaStep.dependencies ?? qaStep.dependsOn ?? [];
+  const producers = deps
+    .map((depId) => byId.get(depId))
+    .filter((step): step is DagStepLike => Boolean(step))
+    .filter((step) => !isQaLikeStep(step));
+  if (producers.length === 0) return null;
+  producers.sort(
+    (a, b) =>
+      (b.dependencies?.length ?? b.dependsOn?.length ?? 0) -
+      (a.dependencies?.length ?? a.dependsOn?.length ?? 0),
+  );
+  return producers[0]!.id;
+}
+
+/**
+ * [목적] B(사장 지목) 보조: 결정의 Next action 에서 rework 타겟 identifier를 파싱.
+ *   사장이 "Rework target" 필드를 안 적었어도 "Next action: revise RES-1329 ..." 처럼 적으면
+ *   그 생산자 identifier를 추출한다. identifier 형태: RES-1234, CMPA-1234 등(영문 접두-숫자).
+ */
+const REWORK_TARGET_IN_NEXT_ACTION =
+  /\b(?:revise|redo|rework|update|fix|correct|re-open|reopen)\s+(?:the\s+|issue\s+)?([A-Z][A-Z0-9_]*-\d+)\b/i;
+export function parseReworkTargetRefFromNextAction(nextAction: string | undefined | null): string | null {
+  if (!nextAction) return null;
+  const match = nextAction.match(REWORK_TARGET_IN_NEXT_ACTION);
+  return match ? match[1]! : null;
+}
+
