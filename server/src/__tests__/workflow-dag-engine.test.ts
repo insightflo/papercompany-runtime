@@ -3547,6 +3547,222 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   });
 
+  it("[P2 control-flow] failure-gated step activates on predecessor failure, false-branch is skipped, and skip does not flap across syncs", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const produceIssueId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-control-flow-if" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Control Flow IF",
+      issuePrefix: `CF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Control Flow Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Conditional IF Mission",
+      status: "active",
+    });
+    // Non-dynamic static DAG (이름이 tech-* 가 아니라 resetUnlaunchedTerminalStepRuns 가 실행됨 → sentinel 검증).
+    // produce[root] → on-failure(when:failure), on-success(when:success). 둘 다 conditional edge 만 보유.
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Conditional IF Activation",
+      stepsJson: [
+        { id: "produce", name: "Produce", agentId, dependencies: [], description: "Produce artifact" },
+        {
+          id: "on-failure",
+          name: "Recover on failure",
+          agentId,
+          dependencies: [],
+          conditionalDependencies: [{ stepId: "produce", when: "failure" }],
+          description: "Run only when produce fails",
+        },
+        {
+          id: "on-success",
+          name: "Continue on success",
+          agentId,
+          dependencies: [],
+          conditionalDependencies: [{ stepId: "produce", when: "success" }],
+          description: "Run only when produce succeeds",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+      startedAt: new Date("2026-06-18T07:00:00.000Z"),
+    });
+    // produce 를 failed 상태로 seed (issue blocked → stepRun failed).
+    await db.insert(issues).values({
+      id: produceIssueId,
+      companyId,
+      missionId,
+      title: "Conditional IF Activation: Produce",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+      startedAt: new Date("2026-06-18T07:01:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "produce",
+        issueId: produceIssueId,
+        status: "failed",
+        startedAt: new Date("2026-06-18T07:01:00.000Z"),
+        completedAt: new Date("2026-06-18T07:05:00.000Z"),
+      },
+      { workflowRunId: runId, stepId: "on-failure", issueId: null, status: "pending" },
+      { workflowRunId: runId, stepId: "on-success", issueId: null, status: "pending" },
+    ]);
+
+    // 1차 sync: produce failed → on-failure 발화(FAILURE gate), on-success 는 false-branch → skipped.
+    const first = await syncWorkflowRunForIssue(db, produceIssueId);
+    expect(first?.status).toBe("running"); // on-failure 가 막 발화했으므로 running
+
+    const rows1 = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const byId1 = new Map(rows1.map((row) => [row.stepId, row]));
+    expect(byId1.get("produce")?.status).toBe("failed");
+    expect(byId1.get("on-failure")?.status).toBe("pending");
+    expect(byId1.get("on-failure")?.issueId).toBeTruthy(); // failure-gated 발화 확인
+    expect(byId1.get("on-success")?.status).toBe("skipped"); // false-branch skip
+    expect((byId1.get("on-success")?.metadata as Record<string, unknown> | null)?.controlFlowSkipped).toBe(true);
+
+    // 2차 sync: sentinel 덕분에 resetUnlaunchedTerminalStepRuns 가 on-success 를 skipped→pending 으로 부활시키지 않는다(가즈아 flap/hang 회귀 가드).
+    await syncWorkflowRunForIssue(db, produceIssueId);
+    const rows2 = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const onSuccess2 = rows2.find((row) => row.stepId === "on-success");
+    expect(onSuccess2?.status).toBe("skipped"); // 여전히 skipped — 부활 없음
+    const onFailure2 = rows2.find((row) => row.stepId === "on-failure");
+    expect(onFailure2?.status).toBe("pending"); // 발화 유지
+    expect(onFailure2?.issueId).toBeTruthy();
+  });
+
+  it("[P2 control-flow] mixed workflow: legacy step downstream of a failed pred is skipped (not stuck pending) so the run is not hung", async () => {
+    // 회귀 가드: conditional 이 하나라도 있는 워크플로에선 도달 불가 legacy step 도 skip 되어야 한다.
+    // 이전엔 legacy-down 이 pending 에 갇혀 finalize 가 allStepsTerminal 에 도달 못 해 60min reconciler kill(가즈아 hang)을 유발했다.
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const produceIssueId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-control-flow-mixed" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Control Flow Mixed",
+      issuePrefix: `CM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Mixed Flow Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Conditional Mixed Mission",
+      status: "active",
+    });
+    // produce[root] → on-failure(conditional when:failure), legacy-down(LEGACY dependencies:[produce]).
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Conditional IF Mixed",
+      stepsJson: [
+        { id: "produce", name: "Produce", agentId, dependencies: [], description: "Produce artifact" },
+        {
+          id: "on-failure",
+          name: "Recover on failure",
+          agentId,
+          dependencies: [],
+          conditionalDependencies: [{ stepId: "produce", when: "failure" }],
+          description: "Run only when produce fails",
+        },
+        { id: "legacy-down", name: "Legacy downstream", agentId, dependencies: ["produce"], description: "Legacy dep on produce" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "running",
+      startedAt: new Date("2026-06-18T08:00:00.000Z"),
+    });
+    await db.insert(issues).values({
+      id: produceIssueId,
+      companyId,
+      missionId,
+      title: "Conditional IF Mixed: Produce",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+      startedAt: new Date("2026-06-18T08:01:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "produce",
+        issueId: produceIssueId,
+        status: "failed",
+        startedAt: new Date("2026-06-18T08:01:00.000Z"),
+        completedAt: new Date("2026-06-18T08:05:00.000Z"),
+      },
+      { workflowRunId: runId, stepId: "on-failure", issueId: null, status: "pending" },
+      { workflowRunId: runId, stepId: "legacy-down", issueId: null, status: "pending" },
+    ]);
+
+    await syncWorkflowRunForIssue(db, produceIssueId);
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const byId = new Map(rows.map((row) => [row.stepId, row]));
+    expect(byId.get("produce")?.status).toBe("failed");
+    expect(byId.get("on-failure")?.status).toBe("pending");
+    expect(byId.get("on-failure")?.issueId).toBeTruthy(); // failure-gated 발화
+    // 핵심 회귀 단정: legacy-down 은 pending 에 갇히지 않고 skipped 로 마감(도달 불가).
+    expect(byId.get("legacy-down")?.status).toBe("skipped");
+    expect((byId.get("legacy-down")?.metadata as Record<string, unknown> | null)?.controlFlowSkipped).toBe(true);
+  });
+
   it("observes stale workflow todo dispatch omissions without hard-blocking", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

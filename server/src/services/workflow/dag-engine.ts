@@ -16,6 +16,13 @@ import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { logActivity } from "../activity-log.js";
 import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/types.js";
+import {
+  classifyStepActivation,
+  findSkippableSteps,
+  workflowHasConditionalEdges,
+  type PredFacts,
+  type PredStatus,
+} from "./control-flow/edge-condition.js";
 
 /**
  * Workflow step definition.
@@ -91,7 +98,6 @@ type PersistedWorkflowStep = WorkflowStep & {
 };
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
-const WORKFLOW_STEP_SUCCESS_STATUSES = new Set(["completed"]);
 
 export type WorkflowToolStepExecutionRequest = {
   companyId: string;
@@ -377,11 +383,18 @@ export function validateDag(steps: WorkflowStep[]): DagValidationResult {
     errors.push("Duplicate step IDs detected");
   }
 
-  // Check for orphan dependencies
+  // Check for orphan dependencies (legacy dependencies[] + conditionalDependencies edge.stepId)
   for (const step of steps) {
     for (const dep of step.dependencies) {
       if (!stepIds.has(dep)) {
         errors.push(`Step "${step.id}" depends on non-existent step "${dep}"`);
+      }
+    }
+    // [IF/loop] conditional edge 의 선행 stepId 도 orphan 검사 — 빠지면 해당 step 이 영원히 waiting 에
+    // 갇혀 run 이 terminal 에 수렴하지 못 한다(가즈아 60min reconciler kill 회귀).
+    for (const edge of step.conditionalDependencies ?? []) {
+      if (!stepIds.has(edge.stepId)) {
+        errors.push(`Step "${step.id}" conditionalDependency references non-existent step "${edge.stepId}"`);
       }
     }
   }
@@ -888,11 +901,15 @@ async function resetUnlaunchedTerminalStepRuns(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  // controlFlowSkipped sentinel: IF false-branch 로 skip 된 step 은 리셋에서 제외한다.
+  // 그렇지 않으면 매 sync 마다 skipped→pending→(skip pass)→skipped 로 flap 하며 finalize 가
+  // allStepsTerminal 에 수렴하지 못해 60min reconciler kill(가즈아 hang 회귀)을 유발한다.
   const unlaunchedTerminal = stepRuns.filter((stepRun) =>
     (stepRun.status === "skipped" || stepRun.status === "failed")
     && stepRun.issueId == null
     && stepRun.startedAt == null
     && stepRun.lastDispatchAttemptAt == null
+    && normalizeRecord(stepRun.metadata).controlFlowSkipped !== true
   );
   if (unlaunchedTerminal.length === 0) return stepRuns;
 
@@ -1164,20 +1181,46 @@ function buildStepRunMap(
   return new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
 }
 
+/**
+ * [목적] edge-condition 평가용 선행(pred) facts 맵 구성 — dag-engine adapter.
+ *   stepRunMap(실행 상태) + step 정의 → {status, isQaGate, verdict}. 순수 edge-condition 모듈이
+ *   DB/stepRun 타입을 모르게 한다(역참조/결합 회피).
+ * [주의] verdict 는 P2 에선 null(P4 가 validation verdict 를 step_run.metadata 에 persist 한 뒤 공급).
+ *   isQaGate 는 isValidationGateCandidate({step}) 로 step-only 추정 — qa_request_changes 평가용이며,
+ *   P2 핵심 IF(success/failure/always) 평가엔 관여하지 않는다.
+ * [수정시 영향] findRunnableSteps + skip-propagation pass 가 동일한 맵을 소비한다.
+ */
+function buildPredFactsMap(
+  steps: WorkflowStep[],
+  stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
+): Map<string, PredFacts> {
+  const facts = new Map<string, PredFacts>();
+  for (const step of steps) {
+    const run = stepRunMap.get(step.id);
+    facts.set(step.id, {
+      status: (run?.status ?? "pending") as PredStatus,
+      isQaGate: isValidationGateCandidate({ step }),
+      verdict: null,
+    });
+  }
+  return facts;
+}
+
 function findRunnableSteps(
   steps: WorkflowStep[],
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
   options: { launchedStepIds?: Set<string> } = {},
 ): WorkflowStep[] {
+  // [IF/loop] edge-aware 활성화 게이트. classifyStepActivation 은 legacy dependencies[] 에 대해
+  // 기존 `dependencies.every(completed)` 와 byte-identical 이므로 legacy 회귀가 없고, conditional edge 가
+  // 있는 step 만 when 평가(failure/always 발화 또는 waiting)로 분기된다.
+  const predsByStepId = buildPredFactsMap(steps, stepRunMap);
   return steps.filter((step) => {
     if (options.launchedStepIds && !options.launchedStepIds.has(step.id)) return false;
     if (step.triggerOn === "escalation") return false;
     const stepRun = stepRunMap.get(step.id);
     if (!stepRun || stepRun.status !== "pending") return false;
-    return step.dependencies.every((dependencyId) => {
-      const dependencyRun = stepRunMap.get(dependencyId);
-      return dependencyRun ? WORKFLOW_STEP_SUCCESS_STATUSES.has(dependencyRun.status) : false;
-    });
+    return classifyStepActivation(step, predsByStepId).runnable;
   });
 }
 
@@ -1996,10 +2039,54 @@ export async function syncWorkflowRunState(
   if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
     stepRuns = await resetUnlaunchedTerminalStepRuns(db, stepRuns);
   }
+  // [IF/loop] skip-propagation pass — 명시적 conditional false-branch 를 skipped 로 마감.
+  //   hasConditionalEdges 게이트: conditional edge 가 없는 legacy 워크플로에겐 이 pass 가 no-op 이다(회귀 없음).
+  //   syncStepRunsFromIssueState 이후·resetUnlaunchedTerminalStepRuns 이후에 실행한다 — QA request_changes →
+  //   failed 가 반영된 후에야 when 평가가 정확하며, sentinel(controlFlowSkipped) 로 마감해 reset 의 flap(가즈아 hang)을 막는다.
+  const hasConditionalEdges = workflowHasConditionalEdges(context.steps);
+  if (hasConditionalEdges && context.run.status !== "cancelled") {
+    const skipRunMap = buildStepRunMap(stepRuns);
+    const skipPredsByStepId = buildPredFactsMap(context.steps, skipRunMap);
+    const skippableSteps = findSkippableSteps(context.steps, skipPredsByStepId, {
+      launchedStepIds: dynamicLaunchStepIds,
+      isStepEligible: (step) => {
+        const run = skipRunMap.get(step.id);
+        return !!run && run.status === "pending" && run.issueId == null;
+      },
+    });
+    if (skippableSteps.length > 0) {
+      const now = new Date();
+      for (const step of skippableSteps) {
+        const stepRun = skipRunMap.get(step.id);
+        if (!stepRun) continue;
+        await db
+          .update(workflowStepRuns)
+          .set({
+            status: "skipped",
+            completedAt: now,
+            metadata: {
+              ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
+              controlFlowSkipped: true,
+            },
+          })
+          .where(eq(workflowStepRuns.id, stepRun.id));
+      }
+      stepRuns = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, runId));
+    }
+  }
+
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (hasFailure) {
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
-  } else {
+  }
+  // [IF/loop] short-circuit narrowing: legacy 워크플로(hasConditionalEdges=false)에선 기존과 동일하게
+  //   hasFailure 시 launch 를 건너뛴다. conditional edge 가 있으면 failure/always-gated step 도 발화해야
+  //   하므로 launch loop 를 항상 실행한다 — findRunnableSteps(edge-aware) 가 sole gate 이고, legacy step 은
+  //   선행 실패 시 runnable 에 포함되지 않아 잘못 발화하지 않는다.
+  if (!hasFailure || hasConditionalEdges) {
     let shouldContinue = true;
     while (shouldContinue) {
       shouldContinue = false;
