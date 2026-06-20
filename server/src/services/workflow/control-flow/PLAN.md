@@ -1,6 +1,6 @@
 # Workflow Control-Flow (IF + bounded back-edge loop) — 구현 계획 / 핸드오프
 
-> 상태: **P0–P4 완료**(branch `feat/workflow-control-flow-if-loop`). P4 = bounded back-edge loop driver(step-reset.ts + loop-driver.ts + verdict-store.ts + dag-engine.ts 얇은 hook). **P5(planning)부터 재개 필요.**
+> 상태: **P0–P5 완료**(branch `feat/workflow-control-flow-if-loop`). P5 = PAQO plan 시 QA→producer rework back-edge 자동 합성(supervision-helpers.ts synthesizeQaReworkBackEdge + mission-owner-plan-decisions.ts wiring) + edge-condition forward-gate back-edge 제외(중요). **P6(supervision hybrid 가드)부터 재개 필요.**
 > 목표: 워크플로 엔진에 IF(조건부 edge) + bounded back-edge loop(QA 반려 → rework → 재QA) 추가.
 > 배경: 기존엔 loop를 supervision(10분 poll + comment/status hack)로 흉내냄 → producer self-loop / vacuous 자동완료 / 재QA 미발화 버그. 엔진 네이티브 loop로 대체.
 
@@ -60,7 +60,15 @@
     5. **P2 이월 해결**: step-reset 이 metadata.controlFlowSkipped sentinel 을 제거 → back-edge 로 회복되는 skip step 이 flap 없이 재실행.
     6. **테스트 4종**(workflow-dag-engine.test.ts): fire(caps single-sync), cap(maxIterations 도달 시 미리셋), happy-path(rework→QA pass→completed), bounded-failure(cap 초과→failed). 모두 deterministic(producer completedAt < QA verdict observedAt 로 validation-recheck/loop-driver 발화 분리).
     7. **이월(별도 작업 권장)**: StepIterationAttempt.failureReasons 미채움 — verdict + iteration + completedAt 만 persist. QA 상세 피드백은 issue comments 에 있으므로 중복 회피. producer 가 "뭘 고쳐야 할지" 보게 하는 것은 P5(planning rework step 합성) 에서 issue 주입으로 처리 예정.
-- **P5 planning(PAQO)**: QA step → rework back-edge 자동 합성. Files: mission-owner-plan-decisions.ts(buildPaqoWorkflowSteps), supervision-helpers.ts.
+- **P5 planning(PAQO)** ✅: QA step → producer rework back-edge 자동 합성. Files: supervision-helpers.ts(synthesizeQaReworkBackEdge + BackEdgeCapableStep + QA_REWORK_DEFAULT_MAX_ITERATIONS=2), mission-owner-plan-decisions.ts(buildPaqoWorkflowSteps 가 synthesizeQaReworkBackEdge 호출), edge-condition.ts(classifyStepActivation back-edge 제외 + conditionalEdgeHolds export), loop-driver.ts(conditionalEdgeHolds 직접 평가). **검증**: tsc clean + vitest 184/184(mission-owner-plan-decisions 65 + workflow-dag-engine 51 + control-flow 45 + supervision-helpers 23 포함). 사전구현 적대적 감사(5 agent) + 구현 후 적대적 리뷰(3 agent + verify) 통과.
+  - **P5 구현 노트(설계 결정)**:
+    1. **합성 대상 = 미션 최종 QA step 단 하나.** synthesizeQaReworkBackEdge(steps, qaStepId) 호출자가 qaStepId 명시. 모든 QA-like step 스캔 ❌(중간 단계 QA 회복은 runtime supervision 담당 → 다중 loop interleaving 회피).
+    2. **producer 식별 = resolveProducerStepIdFromDag 위임**(PLAN 설계). 합성 함수가 rework 타겟을 재정의하지 않는다. dedup 는 {stepId, when:qa_request_changes, isBackEdge:true} (maxIterations 무관) → 저작자 back-edge 보존.
+    3. **originKind interlock 검증 완료**: workflow step issue 는 originKind="workflow_execution"(dag-engine createWorkflowStepIssue) → isValidationGateCandidate/canApplyRequestChangesValidationGate 의 mission_main_executor_* 제외에 걸리지 않음 → P4 validation-recheck 가 QA issue(blocked) 를 재큐한다. (사전 감사 hang-invariant 차원이 "make-or-break" 로 지목했던 것, 확인 PASS.)
+    4. **[CRITICAL, 적대적 리뷰로 발견·수정] forward-gate back-edge 제외**: back-edge 가 classifyStepActivation 의 forward 게이트에 포함되면 root producer 가 back-edge 선행(QA, 시작 전 pending) 을 기다려 **producer→QA deadlock(dead-on-arrival)** — producer launch 안 됨, 2개 기존 PAQO 테스트 회귀. 수정: (a) classifyStepActivation 이 `resolveEdges(step).filter(e => e.isBackEdge !== true)` 로 forward-gate 에서 back-edge 제외; (b) loop-driver 가 back-edge 발화 판정을 classifyStepActivation.runnable 대신 **conditionalEdgeHolds(edge, predFacts)** 직접 평가로 전환(안 그러면 producer 가 항상 runnable 이 되어 QA 통과여도 매 sync 리셋하는 새 버그). resolveEdges 자체는 손대지 않는다(loop-driver.ts/cycle-validator.ts 가 back-edge 를 직접 읽음).
+    5. **선형 chain 동점 tie-break 한계(문서화+pinning)**: resolveProducerStepIdFromDag 가 의존성 수 DESC 정렬 후 producers[0] — 동점이면 qa.dependencies 배열의 첫 non-QA. fan-in/synthesis(PAQO 일반)에선 정확히 synthesis 선택. 순수 선형/병렬 동점에선 "첫 후보" 선택(차선). 테스트로 pinning. 근본 개선은 별도 follow-up(resolveProducerStepIdFromDag tie-break).
+    6. **테스트**: supervision-helpers-back-edge-synthesis.test.ts(순수 단위 15개 — 합성/dedup/maxIterations/불변/선형 tie-break pin/normalize round-trip/cycle 허용) + mission-owner-plan-decisions.test.ts 2 PAQO 테스트에 back-edge wiring 단정 추가(producer launch + back-edge 존재 → 회귀 감지).
+  - **이월(별도 작업)**: (a) persist-time normalize guard(engine.ts normalizeWorkflowSteps 가 normalizeConditionalEdges 적용) — defense-in-depth, runtime 은 load-time normalize 로 안전. (b) StepIterationAttempt.failureReasons 미채움(P4 이월과 동일).
 - **P6 supervision hybrid 가드**: native loop 미션은 producer-rework(L447–670) skip. Files: supervision.ts. (삭제 말고 가드 먼저.)
 - **P7 hardening/테스트**: 7개 신규 테스트 + reconciler iterating-step 면제.
 - **P-edit workflows editor**: UI에 IF/loop 저작 반영. 에디터 코드 위치 먼저 매핑 필요(papercompany-vane / UI 패키지 — Understand 맵에 미포함).
@@ -70,8 +78,8 @@
 - **보안 훅 (P2 재진단)**: `.claude/hooks/security-scan.cjs`가 PostToolUse:Edit마다 실행되는데, **사전 존재하는 의존성 취약점(npm audit)이 아니라 시크릿 탐지 정규식의 오탐**이 매 편집을 block한다 — dag-engine.ts의 긴 camelCase 식별자(예: `read`로 시작하는 40자+ QA-verdict 파서 함수명)를 "AWS Secret Key"로 오탐(cve:0, owasp:0). (이전 노트의 "npm audit 30s timeout" 진단은 오담; timeout:60 설정과 무관하게 발생.) **운용**: 편집 중엔 settings.json(부모 공유 `../.claude`, gitignored)에서 security-scan PostToolUse 항목을 잠시 빼고, 끝나면 백업에서 복구. PLAN.md에도 오탐 식별자 리터럴을 적으면 같은 현상 발생 → 리터럴 회피. **근본 fix(별도 작업 권장)**: security-scan.cjs의 시크릿 정규식 오탐 완화(식별자 길이/문자 클래스 한정) 또는 PostToolUse에서 파일 전체 스캔 대신 diff 기반 스캔으로 축소.
 
 ## 재개 방법 (다음 세션)
-1. `git checkout feat/workflow-control-flow-if-loop` (P4까지 있음).
-2. 이 PLAN.md + types.ts + edge-condition.ts + cycle-validator.ts + verdict-store.ts + step-reset.ts + loop-driver.ts 로 설계/결정 복구.
-3. P5(planning/PAQO)부터: QA step → rework back-edge 자동 합성. Files: mission-owner-plan-decisions.ts(buildPaqoWorkflowSteps), supervision-helpers.ts(resolveProducerStepIdFromDag 재사용). **주의**: 합성 시 QA issue 가 "blocked" 상태로 request_changes 를 표현해야 validation-recheck 가 QA 를 재큐한다(P4 interlock). producer completedAt < QA verdict observedAt 타이밍도 자연스럽게 성립해야.
-4. 각 phase마다 tsc + `npx vitest run src/__tests__/workflow-dag-engine.test.ts src/__tests__/control-flow-types.test.ts src/__tests__/control-flow-edge-condition.test.ts src/__tests__/control-flow-cycle-validator.test.ts src/__tests__/control-flow-verdict-store.test.ts` green 확인(현재 96/96).
-5. 모듈 분해 원칙(control-flow/ 분리, dag-engine 얇은 hook)·가즈아 무한 loop 가드(iteration_index<maxIterations)·sentinel(controlFlowSkipped, step-reset 이 clear) 잊지 말 것.
+1. `git checkout feat/workflow-control-flow-if-loop` (P5까지 있음).
+2. 이 PLAN.md + control-flow/{types,edge-condition,cycle-validator,verdict-store,step-reset,loop-driver}.ts + supervision-helpers.ts(synthesizeQaReworkBackEdge) 로 설계/결정 복구.
+3. P6(supervision hybrid 가드)부터: native loop 있는 미션은 supervision.ts producer-rework(L447–670) 분기를 skip(삭제 말고 가드 먼저). native loop 가 이미 producer rework 를 담당하므로 legacy supervision rework 와 충돌/이중 동작한다.
+4. 각 phase마다 tsc + 관련 vitest green 확인(현재 184/184). **수정한 심볼의 test 파일을 빠빠짆이 전부 돌릴 것** — P5 때 mission-owner-plan-decisions.test.ts 를 빠뜨려 CRITICAL 회귀를 적대적 리뷰에서야 발견한 교训. 영향 test 파일은 `grep -rlE '<심볼>' src/__tests__/` 로 찾기.
+5. 모듈 분해 원칙(control-flow/ 분리, dag-engine 얇은 hook)·가즈아 무한 loop 가드(iteration_index<maxIterations)·sentinel(controlFlowSkipped, step-reset 이 clear)·**back-edge 는 forward-gate(classifyStepActivation) 에서 제외**(P5 핵심) 잊지 말 것.

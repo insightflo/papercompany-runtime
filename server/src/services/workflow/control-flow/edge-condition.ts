@@ -79,7 +79,7 @@ export function workflowHasConditionalEdges(steps: ReadonlyArray<EdgeBearingStep
 
 /**
  * [목적] 단일 edge 의 when 이 (terminal) 선행 facts 에 대해 성립하는지.
- * [주의] 선행이 terminal 임은 호출자(classifyStepActivation)가 보장한다. 여기선 방어적으로 non-terminal 이면 false.
+ * [주의] 선행이 terminal 임은 호출자(classifyStepActivation/conditionalEdgeHolds)가 보증한다. 여기선 방어적으로 non-terminal 이면 false.
  */
 function edgeHolds(when: ConditionalEdgeWhen | undefined, pred: PredFacts): boolean {
   if (!TERMINAL_PRED_STATUSES.has(pred.status)) return false;
@@ -101,6 +101,16 @@ function edgeHolds(when: ConditionalEdgeWhen | undefined, pred: PredFacts): bool
     default:
       return false;
   }
+}
+
+/**
+ * [목적] 단일 conditional edge(back-edge 포함) 의 when 이 (terminal) 선행 facts 에 대해 성립하는지 —
+ *   edgeHolds 의 public 래퍼. loop-driver 가 back-edge 발화 여부를 classifyStepActivation 과 무관하게 직접
+ *   판정하기 위해 사용한다(P5: classifyStepActivation 은 back-edge 를 forward-gate 에서 제외하도록 수정됨).
+ * [주의] pred 가 undefined 거나 non-terminal 이면 false(방어적).
+ */
+export function conditionalEdgeHolds(edge: ConditionalEdge, pred: PredFacts | undefined): boolean {
+  return pred ? edgeHolds(edge.when, pred) : false;
 }
 
 export interface StepActivation {
@@ -134,7 +144,10 @@ export function classifyStepActivation(
   step: EdgeBearingStep,
   predsByStepId: ReadonlyMap<string, PredFacts>,
 ): StepActivation {
-  const edges = resolveEdges(step);
+  // [P5] back-edge 는 forward 활성화 게이트가 아니다 — 오직 loop-driver 가 resolveEdges 를 직접 읊어 발화한다.
+  //   back-edge 를 forward 게이트에 포함하면 root producer 가 back-edge 선행(QA, 시작 전 pending) 을 기다려
+  //   producer→QA deadlock(dead-on-arrival) 이 된다. forward 평가에서 제외한다.
+  const edges = resolveEdges(step).filter((edge) => edge.isBackEdge !== true);
   if (edges.length === 0) {
     return { runnable: true, skippable: false, waiting: false };
   }

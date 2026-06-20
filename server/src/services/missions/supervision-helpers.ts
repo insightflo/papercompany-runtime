@@ -9,6 +9,7 @@ import { isUuidLike } from "@paperclipai/shared";
 import type { IssueRow, JsonRecord } from "./shared-types.js";
 import type { MissionExecutionUnit } from "./mission-execution-sources.js";
 import type { MissionSupervisionPlanArtifact, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
+import type { ConditionalEdge } from "../workflow/control-flow/types.js";
 
 export function asRecord(value: unknown): JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonRecord : {};
@@ -247,6 +248,63 @@ export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: Dag
       (a.dependencies?.length ?? a.dependsOn?.length ?? 0),
   );
   return producers[0]!.id;
+}
+
+/**
+ * [파일 목적에서 연장] control-flow back-edge 를 저작(합성)할 수 있는 step 의 최소 구조.
+ *   DagStepLike(resolveProducerStepIdFromDag 입력) 에 conditionalDependencies 를 더한 것.
+ *   dag-engine 의 WorkflowStep 이 구조적 호환(제네릭 T 로 보존).
+ */
+export interface BackEdgeCapableStep extends DagStepLike {
+  conditionalDependencies?: ConditionalEdge[];
+}
+
+/** PAQO 미션 QA rework back-edge 의 기본 maxIterations(가즈아 무한 loop 방지 hard cap). */
+export const QA_REWORK_DEFAULT_MAX_ITERATIONS = 2;
+
+/**
+ * [목적] PLAN/build 시 미션 QA step 이 산출물 생산자(producer) 로 보내는 bounded rework back-edge 를
+ *   자동 합성한다(P5). QA 가 request_changes 할 때 P4 loop-driver 가 producer 를 rework 하게 한다.
+ *   legacy dependencies[] (forward) 는 건드리지 않고 producer 의 conditionalDependencies 에 back-edge 만 추가.
+ * [입력] steps(전체 step; T 는 WorkflowStep 등 BackEdgeCapableStep 의 상위 타입), qaStepId(미션 최종 QA step id),
+ *   maxIterations(기본 QA_REWORK_DEFAULT_MAX_ITERATIONS=2).
+ * [출력] producer 의 conditionalDependencies 에 back-edge 가 추가된 새 steps 배열(불변 rebuild). producer 가
+ *   없거나(null), 이미 동일 back-edge 가 있으면 입력을 그대로 반환.
+ * [주의]
+ *   - **생산자 식별은 resolveProducerStepIdFromDag 에 위임**(PLAN 설계). 이 함수는 rework 타겟을 다시
+ *     정의하지 않는다. 선형 chain(a→b→c)에서 의존성 수 동점이면 resolveProducerStepIdFromDag 가 QA 의
+ *     dependencies 배열에서 가장 앞의 동점 step 을 고른다(=중간 step 일 수 있음). fan-in/synthesis 구조
+ *     (PAQO 일반적)에선 정확히 synthesis step 이 선택된다. 선형 chain 한계는 별도 follow-up으로.
+ *   - **합성 대상은 호출자가 지정한 단일 qaStepId 만**(모든 QA-like step 스캔 ❌). 중간 단계 QA 게이트의
+ *     회복은 runtime supervision 이 담당하므로 여기서 다루지 않는다 — 다중 loop interleaving 회피.
+ *   - **중복 제거**: {stepId:qaStepId, when:'qa_request_changes', isBackEdge:true} 가 이미 있으면(maxIterations
+ *     무관) skip — 저작자가 직접 넣은 back-edge 를 보존한다.
+ *   - **무한 loop 금지**: 합성 edge 는 항상 maxIterations>=1. normalize/cycle-validator 가 없는 back-edge 를
+ *     drop/거부하므로, 이 함수가 내는 edge 는 반드시 maxIterations 를 동반해야 한다.
+ */
+export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
+  steps: T[],
+  qaStepId: string,
+  maxIterations: number = QA_REWORK_DEFAULT_MAX_ITERATIONS,
+): T[] {
+  if (!qaStepId || steps.length === 0) return steps;
+  const effectiveMaxIterations = typeof maxIterations === "number" && maxIterations >= 1 ? Math.floor(maxIterations) : QA_REWORK_DEFAULT_MAX_ITERATIONS;
+  const producerId = resolveProducerStepIdFromDag(qaStepId, steps);
+  if (!producerId) return steps;
+  const producer = steps.find((step) => step.id === producerId);
+  if (!producer) return steps;
+  const existing = producer.conditionalDependencies ?? [];
+  const alreadyHasBackEdge = existing.some(
+    (edge) => edge.stepId === qaStepId && edge.when === "qa_request_changes" && edge.isBackEdge === true,
+  );
+  if (alreadyHasBackEdge) return steps;
+  const backEdge: ConditionalEdge = {
+    stepId: qaStepId,
+    when: "qa_request_changes",
+    isBackEdge: true,
+    maxIterations: effectiveMaxIterations,
+  };
+  return steps.map((step) => (step.id === producerId ? ({ ...step, conditionalDependencies: [...existing, backEdge] } as T) : step));
 }
 
 /**
