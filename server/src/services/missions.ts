@@ -34,10 +34,9 @@ import {
   listMissionExecutionSourceSnapshots,
   type MissionExecutionStatus,
   type MissionExecutionSourceRef,
-  type MissionExecutionUnit,
 } from "./missions/mission-execution-sources.js";
 import { buildMissionRuleContext } from "./missions/mission-rule-context.js";
-import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionPlanArtifact, type MissionSupervisionWorkflowStepRow } from "./missions/mission-supervision-context.js";
+import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun } from "./missions/mission-supervision-context.js";
 import {
   formatGovernanceThreadEvidenceLines,
   governanceThreadReasonSuffix,
@@ -81,7 +80,25 @@ import {
   type PluginWorkflowRunData,
   type PluginWorkflowStepRunData,
 } from "./missions/plugin-workflow.js";
-import type { IssueCreateInput, IssueRow, JsonRecord } from "./missions/shared-types.js";
+import type { IssueCreateInput, IssueRow } from "./missions/shared-types.js";
+import {
+  activePlanRecoveryGateReason,
+  asRecord,
+  asRecordArray,
+  buildNativeToolStepRetryAppliedMarker,
+  executionUnitKey,
+  executionUnitKeyFromSourceRef,
+  findCanonicalToolStepRecoveryIssue,
+  hasArtifactMissingSignal,
+  hasDiagnosisSignal,
+  hasNativeToolStepRetryAppliedMarker,
+  hasRecoverableArtifactComment,
+  isApprovalRuleMode,
+  normalizedPlanStatus,
+  parseToolStepRecoveryMarker,
+  trimmedString,
+  unitRequiresGovernedAction,
+} from "./missions/supervision-helpers.js";
 import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
   hasMissionOwnerDecisionAppliedMarker,
@@ -1207,197 +1224,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       missionId: input.missionId,
     });
     return { missionId: mission.id, oversightIssueId: oversightIssue.id, planId: activePlan?.id ?? null };
-  }
-
-  function asRecord(value: unknown): JsonRecord {
-    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonRecord : {};
-  }
-
-  function asRecordArray(value: unknown): JsonRecord[] {
-    return Array.isArray(value)
-      ? value.filter((item): item is JsonRecord => typeof item === "object" && item !== null && !Array.isArray(item))
-      : [];
-  }
-
-  function trimmedString(value: unknown): string | null {
-    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-  }
-
-  function normalizedPlanStatus(value: unknown): string {
-    return trimmedString(value)?.toLowerCase() ?? "";
-  }
-
-  function executionUnitKeyFromSourceRef(sourceRef: unknown): string | null {
-    const ref = asRecord(sourceRef);
-    const type = trimmedString(ref.type);
-    const id = trimmedString(ref.id);
-    return type && id ? `${type}:${id}` : null;
-  }
-
-  function executionUnitKey(unit: Pick<MissionExecutionUnit, "sourceRef">): string {
-    return `${unit.sourceRef.type}:${unit.sourceRef.id}`;
-  }
-
-  function textContainsAny(value: unknown, needles: string[]): boolean {
-    const text = JSON.stringify(value ?? "").toLowerCase();
-    return needles.some((needle) => text.includes(needle));
-  }
-
-  function unitRequiresGovernedAction(unit: JsonRecord): boolean {
-    return textContainsAny(unit, ["external", "cost", "legal", "destructive", "delete", "spend", "payment", "production"]);
-  }
-
-  function isApprovalRuleMode(mode: unknown): boolean {
-    const normalized = normalizedPlanStatus(mode);
-    return normalized === "approval_gate" || normalized === "hard_gate";
-  }
-
-  function hasDiagnosisSignal(...bodies: string[]): boolean {
-    const body = bodies.join("\n").toLowerCase();
-    return body.includes("diagnos")
-      || body.includes("root cause")
-      || body.includes("replan")
-      || body.includes("re-plan")
-      || body.includes("recover")
-      || body.includes("escalat")
-      || body.includes("impossible")
-      || body.includes("failure:")
-      || body.includes("failed_unit_without_diagnosis");
-  }
-
-  function jsonArrayLength(value: unknown): number {
-    return Array.isArray(value) ? value.length : 0;
-  }
-
-  function sourceRefMatchesIssue(sourceRef: unknown, issue: Pick<IssueRow, "id">): boolean {
-    const ref = asRecord(sourceRef);
-    const type = trimmedString(ref.type);
-    const id = trimmedString(ref.id);
-    const issueId = trimmedString(ref.issueId);
-    return issueId === issue.id || (type === "mission_issue" && id === issue.id);
-  }
-
-  function materializedRefMatchesIssue(materializedRef: unknown, issue: Pick<IssueRow, "id">): boolean {
-    const ref = asRecord(materializedRef);
-    return trimmedString(ref.type) === "mission_issue" && trimmedString(ref.id) === issue.id;
-  }
-
-  function activePlanPaqoStepMatchesIssue(
-    activePlan: MissionSupervisionPlanArtifact,
-    stepRowsForIssue: MissionSupervisionWorkflowStepRow[],
-  ): boolean {
-    const refs = asRecord(activePlan.refs);
-    const paqoWorkflow = asRecord(refs.paqoWorkflow);
-    const workflowRunId = trimmedString(paqoWorkflow.workflowRunId);
-    const stepIds = new Set(asStringArray(paqoWorkflow.stepIds));
-    if (!workflowRunId || stepIds.size === 0) return false;
-    return stepRowsForIssue.some((row) => row.run.id === workflowRunId && stepIds.has(row.stepRun.stepId));
-  }
-
-  function activePlanRecoveryGateReason(
-    activePlan: MissionSupervisionPlanArtifact | null,
-    issue: IssueRow,
-    stepRowsForIssue: MissionSupervisionWorkflowStepRow[] = [],
-  ): string | null {
-    if (!activePlan) return null;
-    if (issue.originKind === "mission_main_executor_plan" || issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock") {
-      return null;
-    }
-    if (activePlanPaqoStepMatchesIssue(activePlan, stepRowsForIssue)) return null;
-
-    const stepCount = jsonArrayLength(activePlan.steps);
-    if (stepCount === 0) {
-      return `active plan revision=${activePlan.revision} has no high-level step skeleton; mission owner must finish the plan before source/QA recovery can execute`;
-    }
-
-    const refs = asRecord(activePlan.refs);
-    const selectedExecutionUnits = asRecordArray(refs.selectedExecutionUnits);
-    if (selectedExecutionUnits.length > 0) {
-      const selectedUnit = selectedExecutionUnits.find((unit) => (
-        sourceRefMatchesIssue(unit.sourceRef, issue) || materializedRefMatchesIssue(unit.materializedRef, issue)
-      ));
-      if (!selectedUnit) {
-        if (activePlanPaqoStepMatchesIssue(activePlan, stepRowsForIssue)) return null;
-        return `active plan revision=${activePlan.revision} does not select this issue as an execution unit; blocked status alone is not enough to launch recovery`;
-      }
-      const selectionState = normalizedPlanStatus(selectedUnit.selectionState);
-      if (selectionState !== "selected") {
-        return `active plan revision=${activePlan.revision} marks this issue selectionState=${selectionState || "unknown"}; only selected units can be unblocked or retried`;
-      }
-      const dependencyTreatment = normalizedPlanStatus(selectedUnit.dependencyTreatment);
-      if (dependencyTreatment === "blocked") {
-        return `active plan revision=${activePlan.revision} says this issue's prerequisites are blocked; wait for the upstream artifact/decision before running QA or recovery`;
-      }
-      const executionState = normalizedPlanStatus(selectedUnit.executionState);
-      if (executionState === "not_materialized" || executionState === "completed" || executionState === "cancelled" || executionState === "canceled") {
-        return `active plan revision=${activePlan.revision} marks this issue executionState=${executionState}; recovery is not runnable at this point`;
-      }
-      return null;
-    }
-
-    return null;
-  }
-
-  function hasArtifactMissingSignal(...bodies: string[]): boolean {
-    const body = bodies.join("\n").toLowerCase();
-    return body.includes("required workflow artifact missing")
-      || body.includes("required source artifact is missing")
-      || body.includes("artifact missing")
-      || body.includes("블로그 파일 누락")
-      || body.includes("markdown 파일로 저장")
-      || body.includes("파일로만 저장");
-  }
-
-  function hasRecoverableArtifactComment(...bodies: string[]): boolean {
-    const body = bodies.join("\n");
-    const lower = body.toLowerCase();
-    return hasArtifactMissingSignal(body)
-      && (lower.includes(".md") || lower.includes("markdown"))
-      && /^#{1,3}\s+\S+/m.test(body);
-  }
-
-  function parseToolStepRecoveryMarker(description: string | null): { runId: string; stepId: string } | null {
-    const match = description?.match(/<!--\s*tool-step-recovery:([0-9a-f-]{36}):([\s\S]*?)\s*-->/i);
-    if (!match) return null;
-    const runId = match[1]?.trim();
-    const stepId = match[2]?.trim();
-    if (!runId || !stepId || !isUuidLike(runId)) return null;
-    return { runId, stepId };
-  }
-
-  function toolStepRecoveryMarkerKey(marker: { runId: string; stepId: string }): string {
-    return `${marker.runId}:${marker.stepId}`;
-  }
-
-  function findCanonicalToolStepRecoveryIssue(input: {
-    marker: { runId: string; stepId: string };
-    missionIssues: IssueRow[];
-  }): IssueRow | null {
-    const markerKey = toolStepRecoveryMarkerKey(input.marker);
-    return input.missionIssues
-      .filter((candidate) =>
-        candidate.originKind === "mission_main_executor_unblock"
-        && !candidate.hiddenAt
-        && parseToolStepRecoveryMarker(candidate.description)
-        && toolStepRecoveryMarkerKey(parseToolStepRecoveryMarker(candidate.description)!) === markerKey
-      )
-      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))[0] ?? null;
-  }
-
-  function buildNativeToolStepRetryAppliedMarker(input: {
-    ownerActionIssueId: string;
-    workflowRunId: string;
-    stepId: string;
-  }): string {
-    return `<!-- native-tool-step-retry-applied:${JSON.stringify(input)} -->`;
-  }
-
-  function hasNativeToolStepRetryAppliedMarker(comments: string[], input: {
-    ownerActionIssueId: string;
-    workflowRunId: string;
-    stepId: string;
-  }): boolean {
-    return comments.some((comment) => comment.includes(buildNativeToolStepRetryAppliedMarker(input)));
   }
 
   async function reopenAppliedToolStepRecoveryIfRetryFailed(input: {
