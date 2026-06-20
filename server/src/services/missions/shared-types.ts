@@ -14,3 +14,8 @@ export type IssueCreateInput = Parameters<ReturnType<typeof issueService>["creat
 
 /** 범용 JSON record alias (Record<string, unknown>). */
 export type JsonRecord = Record<string, unknown>;
+
+/** mission 종단 상태(completed/cancelled) 여부. 본문은 순수 비교(MissionStatus 무의존). */
+export function isTerminalMissionStatus(status: string | undefined): status is "completed" | "cancelled" {
+  return status === "completed" || status === "cancelled";
+}
