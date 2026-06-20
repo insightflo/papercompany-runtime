@@ -3,15 +3,23 @@
 > 설계: `plan.md`. 이 파일은 매 step 업데이트. 중단 시 새 세션이 이 파일을 읽고 이어서 진행.
 
 ## 현재 상태
-- **Phase**: P0 + P1 **완료+push** → **P2 진행 예정**
-- **missions.ts**: 3727 → **3550줄** (P4 누적 -177)
-- 분리 모듈(P4): shared-types.ts(16) + supervision-helpers.ts(203)
-- **commit/push**: 최신 `3ed4ea9` (P0+P1). BOOT OK.
+- **Phase**: **P0-P3 전체 완료 + push** ✅
+- **missions.ts**: 4176 → **1297줄 (-69%)**
+- 분리 모듈(총 10): utils, workflow-progress, tool-step-failure, supervision-types, plugin-workflow, shared-types, supervision-helpers, owner-actions(factory), supervision(factory) + cascading-dep 이동(normalizeMissionOwnerDecisionWakeupDispatchResult→supervision-types, buildRetrySourceIssueWakeupResultComment→mission-owner-recovery-comments, isTerminalMissionStatus→shared-types)
+- **commit/push**: 최신 `51574eb`. BOOT OK.
 
 ## 완료 로그
 - [x] 설계 plan.md + reviewer 검토(NEEDS_REVISION→반영)
-- [x] P0: shared-types.ts (IssueRow/IssueCreateInput/JsonRecord) — tsc+136 test
-- [x] P1: supervision-helpers.ts (Layer 0 순수 helper 22개) — tsc+136+workflow-dag-engine 45 test
+- [x] P0: shared-types.ts — tsc+136
+- [x] P1: supervision-helpers.ts (Layer 0 순수 helper 22개) — tsc+136+45
+- [x] P2: owner-actions.ts factory createOwnerActions({db,deps}) — tsc+136+45
+- [x] P3: supervision.ts factory createSupervision({db,deps,ownerActions}) — tsc+136+45
+
+## 최종 검증
+- tsc: 0 errors
+- mission test: 136/136
+- workflow-dag-engine: 45/45
+- 서버 restart boot: OK
 
 ## 다음 (P2 — Layer 1 owner-actions factory, 위험 중~고)
 - 대상: createMissionOwnerActionIssue, isMissionOwnerActionParentPlacementRejected, findMainExecutorIssue, ensureMainExecutorPlanningIssue, ensureWorkflowMissionPlanArtifact, ensureMainExecutorUnblockIssue, ensureToolStepFailureRecoveryIssue, ensureMainExecutorOversightIssue, ensureMissionExecutionPlan, reconcileMissionStatusFromWorkflowRuns, completeOpenMissionOversightIfSettled, collectWorkflowIssueIdsForMission, collectIssueIdsWithAncestors, ensureWorkflowIssuesLinkedToMission, reopenAppliedToolStepRecoveryIfRetryFailed, closeDuplicateToolStepRecoveryIssue, listRecurringArtifactMissingIssueRefs, buildCorrectedArtifactValidatorRetryEvidence
