@@ -9,7 +9,7 @@ import { workflowService } from "./workflow/engine.js";
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
-import { reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
+import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -847,15 +847,37 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
 
-  // [plan-time QA] intent → required-units checklist (mission-plan-qa). materialization 직전 invariant.
-  //   publish gap 은 severity:"invalid" → materialization 차단(사용자 게시 의도가 unit 에 반영 안 됨).
-  //   audience/scenario gap 은 "needs_clarification" → log(full 에서 Hermes Ops 가 사용자 질문으로 전환).
+  // [plan-time QA] intent → required-units checklist (deterministic 1순회) + LLM critique(2순회, injectable).
+  //   deterministic invalid 는 critique 가 완화 못 함(additive merge). critique unavailable 은 warn(차단 아님).
+  //   needs_clarification 은 Hermes Ops clarification contract 로 surface(사용자 질문 전환).
   const missionIntent = extractMissionIntent(ownershipRow?.title ?? "", ownershipRow?.description ?? null);
-  const planQaDiagnostics = reviewPlanAgainstIntent({
+  const deterministicDiagnostics = reviewPlanAgainstIntent({
     intent: missionIntent,
     selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
     successCriteria: draftResult.draft.successCriteria,
   });
+  let critiqueDiagnostics: typeof deterministicDiagnostics = [];
+  const critiqueHook = getMissionPlanQaCritiqueHook();
+  if (critiqueHook) {
+    try {
+      critiqueDiagnostics = await critiqueHook({
+        intent: missionIntent,
+        selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
+        priorDiagnostics: deterministicDiagnostics,
+      });
+    } catch (error) {
+      await logActivity(db, {
+        companyId,
+        actorType: "system",
+        actorId: "mission-plan-qa",
+        action: "mission.plan.critique_unavailable",
+        entityType: "mission",
+        entityId: missionId,
+        details: { planningIssueId: collected.planningIssueId, error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+  const planQaDiagnostics = [...deterministicDiagnostics, ...critiqueDiagnostics];
   const blockingPlanQa = planQaDiagnostics.filter((diagnostic) => diagnostic.severity === "invalid");
   if (blockingPlanQa.length > 0) {
     return {
@@ -873,14 +895,16 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   }
   const clarificationPlanQa = planQaDiagnostics.filter((diagnostic) => diagnostic.severity === "needs_clarification");
   if (clarificationPlanQa.length > 0) {
+    // Hermes Ops 가 소비할 structured clarification contract. 직접 Telegram 발송은 Hermes 경로 확정 후.
+    const clarificationRequest = buildClarificationRequest({ diagnostics: clarificationPlanQa, intent: missionIntent });
     await logActivity(db, {
       companyId,
       actorType: "system",
       actorId: "mission-plan-qa",
-      action: "mission.plan.needs_clarification",
+      action: "mission.plan.clarification_requested",
       entityType: "mission",
       entityId: missionId,
-      details: { planningIssueId: collected.planningIssueId, diagnostics: clarificationPlanQa },
+      details: { planningIssueId: collected.planningIssueId, clarificationRequest },
     });
   }
 
