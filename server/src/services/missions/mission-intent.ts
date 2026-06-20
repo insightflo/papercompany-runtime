@@ -27,12 +27,16 @@ export interface MissionIntentSignal {
 export interface MissionIntent {
   /** 사이트/게시/배포 의도(HTML, landing, site, 올려, 게시, 배포...). */
   publish: boolean;
-  /** 복수의 구분된 대상 독자가 감지됨(→ 대상별 분기/유닛 필요). */
+  /** 복수의 구분된 대상 독자(recipient)가 감지됨(→ 대상별 분기/유닛 필요). */
   audienceSplit: boolean;
   /** 상황별/케이스별 시나리오 의도(→ 시나리오 taxonomy/success criteria 필요). */
   scenario: boolean;
-  /** 감지된 대상 label 들(예: ["AI", "웹 디자이너"]). audienceSplit 판정 근거. */
+  /** 감지된 recipient label 들(예: ["AI", "웹 디자이너"]). audienceSplit 판정 근거.
+   *  beneficiary(수혜자/주어)는 제외 — 산출물을 소비하는 대상만 split 대상. */
   audiences: string[];
+  /** 감지된 beneficiary/user label 들(예: ["비전문가"]). 주어/수혜자로, audienceSplit 에서 제외.
+   *  diagnostic 맥락 표시용. "를 위한/에게" 수식어가 없으면 recipient 로 취급하지 않는다. */
+  beneficiary: string[];
   /** 매치된 모든 신호(진단 근거 표시용). */
   matchedSignals: MissionIntentSignal[];
 }
@@ -50,7 +54,7 @@ const PUBLISH_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, label: string]> =
   [/\bupload(?:ed|ing)?\b/iu, "upload"],
   [/\bhost(?:ed|ing)?\b/iu, "host"],
   [/게시|배포|업로드|출간|출판/u, "게시/배포"],
-  [/올리/u, "올리(게시)"], // 올려/올리도록/올리는/올릴
+  [/올리(?!픽)/u, "올리(게시)"], // 올려/올리도록/올리는/올릴. (?!픽) 로 올림픽 오탐 회피
   [/\bhtml\b/iu, "HTML"],
   [/\blanding\b/iu, "landing"],
 ];
@@ -62,19 +66,28 @@ const SCENARIO_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, label: string]> 
 ];
 
 /**
- * 대상(audience) label 테이블. [정규식 소스, label]. label 이 서로 다르면 별개 대상으로 센다.
- * 동의어는 같은 label 로 정규화(예: 웹디자이너/웹 디자이너 → "웹 디자이너").
+ * recipient(산출물을 소비하는 대상) label 테이블. practitioner + client.
+ * 이 라벨들만 audienceSplit 판정에 들어간다. 동의어는 같은 label 로 정규화.
+ * (예: "AI 또는 웹 디자이너에게 전달" → recipient = {AI, 웹 디자이너})
  */
-const AUDIENCE_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, label: string]> = [
+const AUDIENCE_RECIPIENT_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, label: string]> = [
   [/\bAI\b|에이전트|인공지능|AI\s*에이전트/u, "AI"],
   [/웹\s*디자이너|웹디자이너/u, "웹 디자이너"],
   [/(?<!웹\s)(?<!웹)디자이너/u, "디자이너"],
   [/개발자|\bdeveloper[s]?\b|\bengineer[s]?\b|프로그래머/u, "개발자"],
-  [/비개발자|일반인|초보자|디자인\s*경험\s*없는|코딩\s*못하는|비전문가/u, "비전문가"],
   [/기획자|\bPM\b|프로덕트\s*매니저/u, "기획자"],
   [/작가|라이터|\bwriter[s]?\b|에디터|편집자/u, "작가/에디터"],
   [/마케터|\bmarketer[s]?\b/u, "마케터"],
-  [/클라이언트|고객|\bclient[s]?\b|顾客/u, "클라이언트/고객"],
+  [/클라이언트|고객|\bclient[s]?\b/u, "클라이언트/고객"],
+];
+
+/**
+ * subject/beneficiary(수혜자/사용자) label 테이블. brief 의 주어(예: "디자인 경험 없는 사람이 ...").
+ * recipient 가 아니므로 audienceSplit 에서 제외한다. 단 "를 위한/에게" 수식어가 붙으면 recipient 로
+ * 승격할 수 있으나(full 정밀화), P1에선 beneficiary 로만 분류해 맥락을 제공한다.
+ */
+const AUDIENCE_SUBJECT_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, label: string]> = [
+  [/비개발자|일반인|초보자|디자인\s*경험\s*없는|코딩\s*못하는|비전문가| 입문자/u, "비전문가/초보자"],
 ];
 
 function collectSignals(
@@ -102,11 +115,17 @@ export function extractMissionIntent(title: string, description?: string | null)
   collectSignals(text, PUBLISH_SIGNALS, "publish", matchedSignals);
   collectSignals(text, SCENARIO_SIGNALS, "scenario", matchedSignals);
 
-  const audienceSet = new Set<string>();
-  for (const [regexp, label] of AUDIENCE_SIGNALS) {
-    if (regexp.test(text)) audienceSet.add(label);
+  // recipient(산출물 소비 대상)만 split 판정에 사용. beneficiary(주어/수혜자)는 제외.
+  const recipientSet = new Set<string>();
+  for (const [regexp, label] of AUDIENCE_RECIPIENT_SIGNALS) {
+    if (regexp.test(text)) recipientSet.add(label);
   }
-  const audiences = Array.from(audienceSet);
+  const beneficiarySet = new Set<string>();
+  for (const [regexp, label] of AUDIENCE_SUBJECT_SIGNALS) {
+    if (regexp.test(text)) beneficiarySet.add(label);
+  }
+  const audiences = Array.from(recipientSet);
+  const beneficiary = Array.from(beneficiarySet);
   if (audiences.length >= 2) {
     for (const label of audiences) matchedSignals.push({ category: "audience", token: label });
   }
@@ -116,6 +135,7 @@ export function extractMissionIntent(title: string, description?: string | null)
     audienceSplit: audiences.length >= 2,
     scenario: matchedSignals.some((signal) => signal.category === "scenario"),
     audiences,
+    beneficiary,
     matchedSignals,
   };
 }
