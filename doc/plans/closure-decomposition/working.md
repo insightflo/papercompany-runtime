@@ -3,19 +3,32 @@
 > 설계: `plan.md`. 이 파일은 매 step 업데이트. 중단 시 새 세션이 이 파일을 읽고 이어서 진행.
 
 ## 현재 상태
-- **Phase**: 설계 완료 + **reviewer sub-agent 검토 완료(NEEDS_REVISION → 정정 반영)** → **P0 진행중**
-- 검토 정정: isMissionOwnerActionParentPlacementRejected Layer0 명시, createMissionOwnerActionIssue→create 오탐 정정, Layer1↔CRUD 순환 무(원시 db.update) 확인, CRUD도 {db,deps} 필요 명시, **P3 검증 강화**(workflow-dag-engine.test 비-mock 본체 실행 확인 + 프로덕션 supervision 라우트 식별 + deps 콜백 회귀테스트 P3 직전 추가). plan.md 섹션 8 참조.
-- **missions.ts**: 3727줄 (5 모듈 분리 완료)
-- **commit/push**: 최신 `5f87e73`. working tree: plan.md/working.md 신규(doc/plans/closure-decomposition/).
-
-## 다음 작업 (검토 통과 후)
-1. **P0**: shared-types.ts — IssueRow, IssueCreateInput, JsonRecord 이동 + re-export. tsc+test.
-2. **P1**: supervision-helpers.ts — Layer 0 pure helper ~24개 module-level 이동. tsc+test.
-3. **P2**: owner-actions.ts — Layer 1 ensure*/create/reconcile factory `createOwnerActions({db,deps})`. **위험 중~고**. tsc+test+supervision-monitor test.
-4. **P3**: supervision.ts — Layer 2 supervision factory `createSupervision(...)`. **위험 고** (1100줄). tsc+test 엄밀히.
+- **Phase**: P0 + P1 **완료+push** → **P2 진행 예정**
+- **missions.ts**: 3727 → **3550줄** (P4 누적 -177)
+- 분리 모듈(P4): shared-types.ts(16) + supervision-helpers.ts(203)
+- **commit/push**: 최신 `3ed4ea9` (P0+P1). BOOT OK.
 
 ## 완료 로그
-- [x] 2026-06-20: 설계 문서 plan.md 작성 + 클로저 호출 그래프 분석 완료.
+- [x] 설계 plan.md + reviewer 검토(NEEDS_REVISION→반영)
+- [x] P0: shared-types.ts (IssueRow/IssueCreateInput/JsonRecord) — tsc+136 test
+- [x] P1: supervision-helpers.ts (Layer 0 순수 helper 22개) — tsc+136+workflow-dag-engine 45 test
+
+## 다음 (P2 — Layer 1 owner-actions factory, 위험 중~고)
+- 대상: createMissionOwnerActionIssue, isMissionOwnerActionParentPlacementRejected, findMainExecutorIssue, ensureMainExecutorPlanningIssue, ensureWorkflowMissionPlanArtifact, ensureMainExecutorUnblockIssue, ensureToolStepFailureRecoveryIssue, ensureMainExecutorOversightIssue, ensureMissionExecutionPlan, reconcileMissionStatusFromWorkflowRuns, completeOpenMissionOversightIfSettled, collectWorkflowIssueIdsForMission, collectIssueIdsWithAncestors, ensureWorkflowIssuesLinkedToMission, reopenAppliedToolStepRecoveryIfRetryFailed, closeDuplicateToolStepRecoveryIssue, listRecurringArtifactMissingIssueRefs, buildCorrectedArtifactValidatorRetryEvidence
+- 방식: `missions/owner-actions.ts` factory `createOwnerActions({db, deps})` 반환. missions.ts에서 호출.
+- 내부 클러스터(ensureMissionExecutionPlan↔ensureMainExecutorOversightIssue↔ensureWorkflowMissionPlanArtifact) 동시 이동 필수.
+- 검증: tsc + mission 136 + workflow-dag-engine 45.
+
+### P2 설계 상세 (2026-06-20 분석)
+- **Layer 1은 현재 연속 블록**(421~1360, P1로 Layer 0 helper가 빠져서) → awk로 한 번에 추출 가능.
+- **외부 의존**:
+  - `issueService(db)`: create(5)/addComment(10)/update(2) — db에서 파생, factory 내 OK.
+  - `deps`: onOwnerActionCreated(6)/onOwnerDecisionRetrySourceIssueApplied(4)/onStaleSourceIssueWakeupRequested(2)/onOwnerPlanningIssueCreated(2)/cancelHeartbeatRun(2) — factory 주입.
+  - imported builder: mergeMissionPlanRefs, summarizeMissionPlanForRuntime(mission-plan-artifacts), extractLatestMissionOwnerDecision, buildMissionOwnerDecisionWakeupIdempotencyKey(mission-owner-recovery-events), buildOwnerActionExplanations/buildMissionOwnerActionExplanations(mission-owner-recovery-explanations + top-level 237), buildMissionSupervisionContext, buildMissionRuleContext, buildMissionOwnerUnblockDescription(mission-owner-recovery-comments), buildMissionOwnerDecisionFormat, buildMissionExecutionDigest(2).
+  - helpers: supervision-helpers(asRecord/trimmedString/parseToolStepRecoveryMarker 등) + isTerminalStatus(top-level 297, pure).
+- **factory 인터페이스**: `createOwnerActions({db, deps}: {db: Db, deps: MissionServiceDeps})` → 18함수 반환 객체.
+- **재배선**: missionService CRUD/supervision에서 이 함수들 호출부 → `ownerActions.X`로 변경(약 30+ call site).
+- **위험**: deps 콜백 바인딩, call site 누락. tsc가 누락 잡음(미정의 참조). 136+45 test로 회귀 확인.
 
 ## 검증 게이트 (매 phase)
 - `pnpm --filter @paperclipai/server typecheck` exit 0
