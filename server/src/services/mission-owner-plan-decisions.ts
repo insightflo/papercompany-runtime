@@ -816,15 +816,41 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
 
-  // [plan-time QA] intent → required-units checklist (mission-plan-qa). materialization 직전 invariant.
-  //   publish gap 은 severity:"invalid" → materialization 차단(사용자 게시 의도가 unit 에 반영 안 됨).
-  //   audience/scenario gap 은 "needs_clarification" → log(full 에서 Hermes Ops 가 사용자 질문으로 전환).
-  const [missionBrief] = await db
-    .select({ title: missions.title, description: missions.description })
+  // [ownership-drift invariant] planning issue(mission_main_executor_plan) assignee 가 mission.owner 와
+  //   불일치하면 materialization 이 막히는 현상을 fail-fast 진단(content QA 와 분리된 code).
+  //   owner-actions 가 planning issue 를 mission.owner 에 assign 하므로, 정상 조건에선 일치한다.
+  //   drift(재할당) 감지 시 명확한 diagnostic 로 차단 — silent block 회피.
+  const [ownershipRow] = await db
+    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description })
     .from(missions)
     .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
     .limit(1);
-  const missionIntent = extractMissionIntent(missionBrief?.title ?? "", missionBrief?.description ?? null);
+  const [planningAssigneeRow] = await db
+    .select({ assigneeAgentId: issues.assigneeAgentId })
+    .from(issues)
+    .where(eq(issues.id, collected.planningIssueId))
+    .limit(1);
+  const planningAssignee = planningAssigneeRow?.assigneeAgentId ?? null;
+  const missionOwnerAgentId = ownershipRow?.ownerAgentId ?? null;
+  if (planningAssignee && missionOwnerAgentId && planningAssignee !== missionOwnerAgentId) {
+    return {
+      status: "invalid",
+      reason: "ownership_drift",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: [{
+        code: "ownership_drift",
+        message: `Planning issue assignee (${planningAssignee}) 가 mission owner (${missionOwnerAgentId}) 와 불일치. planning issue 를 mission owner 에게 재할당하거나 의도된 변경이면 mission owner 를 갱신하세요.`,
+        commentId: collected.commentId,
+      }],
+    };
+  }
+
+  // [plan-time QA] intent → required-units checklist (mission-plan-qa). materialization 직전 invariant.
+  //   publish gap 은 severity:"invalid" → materialization 차단(사용자 게시 의도가 unit 에 반영 안 됨).
+  //   audience/scenario gap 은 "needs_clarification" → log(full 에서 Hermes Ops 가 사용자 질문으로 전환).
+  const missionIntent = extractMissionIntent(ownershipRow?.title ?? "", ownershipRow?.description ?? null);
   const planQaDiagnostics = reviewPlanAgainstIntent({
     intent: missionIntent,
     selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,

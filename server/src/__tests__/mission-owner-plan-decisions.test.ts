@@ -1226,6 +1226,85 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     });
   });
 
+  it("[P1 ownership-drift] planning issue assignee 가 mission owner 와 불일치하면 ownership_drift 로 fail-fast 한다", async () => {
+    const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Drift Workflow" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    const decision = {
+      missionId,
+      missionGoal: "Drift test",
+      selectedExecutionUnits: [{
+        id: `wf:${wfId}:step:smoke`,
+        kind: "workflow_definition_step",
+        title: "Run smoke",
+        selectionState: "selected",
+        reason: "Required",
+        sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" },
+      }],
+      ruleRefs: [],
+      kbRefs: [],
+      assessment: validAssessment,
+      requiredInputs: [],
+      successCriteria: ["smoke passes"],
+      steps: [],
+    };
+    await db.insert(issueComments).values({
+      id: randomUUID(),
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    // drift: planning issue 를 mission owner 가 아닌 agent 에게 재할당
+    await db.update(issues).set({ assigneeAgentId: otherAgentId }).where(eq(issues.id, planningIssueId));
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("invalid");
+    if (result.status !== "invalid") return;
+    expect(result.reason).toBe("ownership_drift");
+    expect(result.diagnostics.some((d) => d.code === "ownership_drift")).toBe(true);
+  });
+
+  it("[P1 ownership-drift] planning issue assignee == mission owner 면 drift 없이 materialize 한다", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Owner Assigned Workflow" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    const decision = {
+      missionId,
+      missionGoal: "Owner assigned",
+      selectedExecutionUnits: [{
+        id: `wf:${wfId}:step:smoke`,
+        kind: "workflow_definition_step",
+        title: "Run smoke",
+        selectionState: "selected",
+        reason: "Required",
+        sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" },
+      }],
+      ruleRefs: [],
+      kbRefs: [],
+      assessment: validAssessment,
+      requiredInputs: [],
+      successCriteria: ["smoke passes"],
+      steps: [],
+    };
+    await db.insert(issueComments).values({
+      id: randomUUID(),
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(decision),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    // owner 에게 명시 할당 → drift 없음
+    await db.update(issues).set({ assigneeAgentId: ownerAgentId }).where(eq(issues.id, planningIssueId));
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+  });
+
   it("materializes selected execution units into a mission-scoped PAQO workflow DAG with ACTION gated before QA", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     const sourceWorkflowId = randomUUID();

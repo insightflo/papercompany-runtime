@@ -31,6 +31,23 @@ describe("extractMissionIntent — 실제 brief", () => {
     expect(intent.audienceSplit).toBe(true);
     expect(intent.audiences).toEqual(expect.arrayContaining(["AI", "웹 디자이너"]));
   });
+  it("beneficiary(디자인 경험 없는 사람)는 recipient 에서 제외 — audiences 에 안 들음(P1 정밀화)", () => {
+    expect(intent.beneficiary).toContain("비전문가/초보자");
+    expect(intent.audiences).not.toContain("비전문가/초보자");
+  });
+});
+
+describe("extractMissionIntent — recipient vs beneficiary 구분", () => {
+  it("beneficiary(초보자/비전문가)만 있고 recipient 가 없으면 split 아님", () => {
+    const intent = extractMissionIntent("초보자 안내서", "비전문가가 이해하기 쉽게 정리");
+    expect(intent.audienceSplit).toBe(false);
+    expect(intent.audiences).toEqual([]);
+    expect(intent.beneficiary.length).toBeGreaterThan(0);
+  });
+  it("올림픽 등 오탐 회피 — '올리' 어간이지만 게시 아님", () => {
+    const intent = extractMissionIntent("올림픽 역사 정리", "폐회식까지 요약");
+    expect(intent.publish).toBe(false);
+  });
 });
 
 describe("extractMissionIntent — legacy/순수 research", () => {
