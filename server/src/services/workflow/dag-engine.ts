@@ -24,6 +24,7 @@ import {
   type PredStatus,
 } from "./control-flow/edge-condition.js";
 import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
+import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 
 /**
  * Workflow step definition.
@@ -664,6 +665,61 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
   return null;
 }
 
+/**
+ * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes) 를 heartbeat(성공) + comment
+ *   에서 추출해 issueId→observation 맵으로 반환. P4 추출(DRY): syncStepRunsFromIssueState 와
+ *   syncWorkflowRunState(loop-driver predFacts 빌드) 가 동일 verdict 원천을 공유. 관찰시간 최신 우선.
+ * [수정시 영향] syncStepRunsFromIssueState 의 기존 verdict 로딩과 byte-identical 해야(회귀 금지).
+ */
+async function loadLatestValidationVerdicts(
+  db: Db,
+  issueIds: string[],
+): Promise<Map<string, ValidationVerdictObservation>> {
+  const verdicts = new Map<string, ValidationVerdictObservation>();
+  if (issueIds.length === 0) return verdicts;
+
+  const runRows = await db
+    .select({
+      issueId: heartbeatRuns.issueId,
+      resultJson: heartbeatRuns.resultJson,
+      finishedAt: heartbeatRuns.finishedAt,
+      createdAt: heartbeatRuns.createdAt,
+    })
+    .from(heartbeatRuns)
+    .where(and(
+      inArray(heartbeatRuns.issueId, issueIds),
+      eq(heartbeatRuns.status, "succeeded"),
+    ))
+    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
+  for (const run of runRows) {
+    setLatestValidationVerdict(
+      verdicts,
+      run.issueId,
+      readValidationVerdictFromHeartbeatResult(run.resultJson),
+      run.finishedAt ?? run.createdAt ?? null,
+    );
+  }
+
+  const commentRows = await db
+    .select({
+      issueId: issueComments.issueId,
+      body: issueComments.body,
+      createdAt: issueComments.createdAt,
+    })
+    .from(issueComments)
+    .where(inArray(issueComments.issueId, issueIds))
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
+  for (const comment of commentRows) {
+    setLatestValidationVerdict(
+      verdicts,
+      comment.issueId,
+      readExplicitValidationVerdict(comment.body),
+      comment.createdAt ?? null,
+    );
+  }
+  return verdicts;
+}
+
 async function syncStepRunsFromIssueState(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
@@ -702,48 +758,7 @@ async function syncStepRunsFromIssueState(
     })
     .map((stepRun) => stepRun.issueId!)
     .filter((issueId, index, all) => all.indexOf(issueId) === index);
-  const latestValidationVerdictByIssueId = new Map<string, ValidationVerdictObservation>();
-  if (validationCandidateIssueIds.length > 0) {
-    const runRows = await db
-      .select({
-        issueId: heartbeatRuns.issueId,
-        resultJson: heartbeatRuns.resultJson,
-        finishedAt: heartbeatRuns.finishedAt,
-        createdAt: heartbeatRuns.createdAt,
-      })
-      .from(heartbeatRuns)
-      .where(and(
-        inArray(heartbeatRuns.issueId, validationCandidateIssueIds),
-        eq(heartbeatRuns.status, "succeeded"),
-      ))
-      .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
-    for (const run of runRows) {
-      setLatestValidationVerdict(
-        latestValidationVerdictByIssueId,
-        run.issueId,
-        readValidationVerdictFromHeartbeatResult(run.resultJson),
-        run.finishedAt ?? run.createdAt ?? null,
-      );
-    }
-
-    const commentRows = await db
-      .select({
-        issueId: issueComments.issueId,
-        body: issueComments.body,
-        createdAt: issueComments.createdAt,
-      })
-      .from(issueComments)
-      .where(inArray(issueComments.issueId, validationCandidateIssueIds))
-      .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
-    for (const comment of commentRows) {
-      setLatestValidationVerdict(
-        latestValidationVerdictByIssueId,
-        comment.issueId,
-        readExplicitValidationVerdict(comment.body),
-        comment.createdAt ?? null,
-      );
-    }
-  }
+  const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationCandidateIssueIds);
 
   const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
   for (const stepRun of stepRuns) {
@@ -1155,14 +1170,20 @@ function buildStepRunMap(
 function buildPredFactsMap(
   steps: WorkflowStep[],
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
+  validationVerdictsByIssueId?: Map<string, ValidationVerdictObservation>,
 ): Map<string, PredFacts> {
   const facts = new Map<string, PredFacts>();
   for (const step of steps) {
     const run = stepRunMap.get(step.id);
+    // P4: live validation verdict 로 qa_request_changes edge 를 정밀 평가(generic failure/infra 에러 loop 방지).
+    //   맵 미제공 시 null → edge-condition 의 P2 fallback(QA gate && status:failed) 으로 떨어진다.
+    const liveVerdict = run?.issueId
+      ? validationVerdictsByIssueId?.get(run.issueId)?.verdict ?? null
+      : null;
     facts.set(step.id, {
       status: (run?.status ?? "pending") as PredStatus,
       isQaGate: isValidationGateCandidate({ step }),
-      verdict: null,
+      verdict: liveVerdict,
     });
   }
   return facts;
@@ -1171,12 +1192,15 @@ function buildPredFactsMap(
 function findRunnableSteps(
   steps: WorkflowStep[],
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
-  options: { launchedStepIds?: Set<string> } = {},
+  options: {
+    launchedStepIds?: Set<string>;
+    validationVerdictsByIssueId?: Map<string, ValidationVerdictObservation>;
+  } = {},
 ): WorkflowStep[] {
   // [IF/loop] edge-aware 활성화 게이트. classifyStepActivation 은 legacy dependencies[] 에 대해
   // 기존 `dependencies.every(completed)` 와 byte-identical 이므로 legacy 회귀가 없고, conditional edge 가
   // 있는 step 만 when 평가(failure/always 발화 또는 waiting)로 분기된다.
-  const predsByStepId = buildPredFactsMap(steps, stepRunMap);
+  const predsByStepId = buildPredFactsMap(steps, stepRunMap, options.validationVerdictsByIssueId);
   return steps.filter((step) => {
     if (options.launchedStepIds && !options.launchedStepIds.has(step.id)) return false;
     if (step.triggerOn === "escalation") return false;
@@ -2006,9 +2030,18 @@ export async function syncWorkflowRunState(
   //   syncStepRunsFromIssueState 이후·resetUnlaunchedTerminalStepRuns 이후에 실행한다 — QA request_changes →
   //   failed 가 반영된 후에야 when 평가가 정확하며, sentinel(controlFlowSkipped) 로 마감해 reset 의 flap(가즈아 hang)을 막는다.
   const hasConditionalEdges = workflowHasConditionalEdges(context.steps);
+  // [IF/loop P4] live validation verdict 를 한 번 로드해 skip-pass · back-edge rework · launch 의 predFacts 가 공유.
+  //   QA 의 request_changes 를 정밀 평가한다(generic failure/infra 에러 loop 발화 방지 — PLAN 설계결정).
+  //   legacy 워크플로(hasConditionalEdges=false)면 생략(회귀 없음). verdict 가 비면 edge-condition 의 P2 fallback.
+  const validationVerdictsByIssueId = hasConditionalEdges && context.run.status !== "cancelled"
+    ? await loadLatestValidationVerdicts(
+      db,
+      stepRuns.map((stepRun) => stepRun.issueId).filter((issueId): issueId is string => Boolean(issueId)),
+    )
+    : new Map<string, ValidationVerdictObservation>();
   if (hasConditionalEdges && context.run.status !== "cancelled") {
     const skipRunMap = buildStepRunMap(stepRuns);
-    const skipPredsByStepId = buildPredFactsMap(context.steps, skipRunMap);
+    const skipPredsByStepId = buildPredFactsMap(context.steps, skipRunMap, validationVerdictsByIssueId);
     const skippableSteps = findSkippableSteps(context.steps, skipPredsByStepId, {
       launchedStepIds: dynamicLaunchStepIds,
       isStepEligible: (step) => {
@@ -2040,6 +2073,27 @@ export async function syncWorkflowRunState(
     }
   }
 
+  // [IF/loop P4] back-edge rework pass — QA request_changes 로 발화한 back-edge 의 타겟(producer) 을
+  //   maxIterations cap 내에서 리셋(rework). 리셋된 producer 는 이어지는 launch while-loop 에서 재실행되고,
+  //   producer 재완료 후 기존 validation-recheck(syncStepRunsFromIssueState) 가 QA issue 를 재QA 시킨다.
+  //   skip-pass 이후·launch 이전에 실행: QA failed 가 반영된 뒤 리셋된 step 이 runnable 로 launch 되게.
+  //   가즈아 무한 loop 방지: iteration_index 단조 증가 + maxIterations 하드 cap(loop-driver). reconciler(60min) 백업.
+  if (hasConditionalEdges && context.run.status !== "cancelled") {
+    const reworkPredsByStepId = buildPredFactsMap(
+      context.steps,
+      buildStepRunMap(stepRuns),
+      validationVerdictsByIssueId,
+    );
+    const reworkResult = await applyBackEdgeReworkPass({
+      db,
+      run: context.run,
+      steps: context.steps,
+      stepRuns,
+      predsByStepId: reworkPredsByStepId,
+    });
+    stepRuns = reworkResult.stepRuns;
+  }
+
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (hasFailure) {
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
@@ -2055,6 +2109,7 @@ export async function syncWorkflowRunState(
       const stepRunMap = buildStepRunMap(stepRuns);
       const runnableSteps = sortWorkflowStepsByPriority(findRunnableSteps(context.steps, stepRunMap, {
         launchedStepIds: dynamicLaunchStepIds,
+        validationVerdictsByIssueId,
       }));
       if (runnableSteps.length === 0) break;
 
