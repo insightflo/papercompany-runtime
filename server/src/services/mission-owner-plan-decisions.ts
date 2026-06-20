@@ -8,6 +8,8 @@ import { missionDelegationService } from "./mission-delegations.js";
 import { workflowService } from "./workflow/engine.js";
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
+import { extractMissionIntent } from "./missions/mission-intent.js";
+import { reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -812,6 +814,48 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       decisionHash,
       diagnostics: sourceValidationDiagnostics,
     };
+  }
+
+  // [plan-time QA] intent → required-units checklist (mission-plan-qa). materialization 직전 invariant.
+  //   publish gap 은 severity:"invalid" → materialization 차단(사용자 게시 의도가 unit 에 반영 안 됨).
+  //   audience/scenario gap 은 "needs_clarification" → log(full 에서 Hermes Ops 가 사용자 질문으로 전환).
+  const [missionBrief] = await db
+    .select({ title: missions.title, description: missions.description })
+    .from(missions)
+    .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
+    .limit(1);
+  const missionIntent = extractMissionIntent(missionBrief?.title ?? "", missionBrief?.description ?? null);
+  const planQaDiagnostics = reviewPlanAgainstIntent({
+    intent: missionIntent,
+    selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
+    successCriteria: draftResult.draft.successCriteria,
+  });
+  const blockingPlanQa = planQaDiagnostics.filter((diagnostic) => diagnostic.severity === "invalid");
+  if (blockingPlanQa.length > 0) {
+    return {
+      status: "invalid",
+      reason: "plan_intent_coverage_failed",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: blockingPlanQa.map((diagnostic) => ({
+        code: diagnostic.code,
+        message: diagnostic.message,
+        commentId: collected.commentId,
+      })),
+    };
+  }
+  const clarificationPlanQa = planQaDiagnostics.filter((diagnostic) => diagnostic.severity === "needs_clarification");
+  if (clarificationPlanQa.length > 0) {
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: "mission-plan-qa",
+      action: "mission.plan.needs_clarification",
+      entityType: "mission",
+      entityId: missionId,
+      details: { planningIssueId: collected.planningIssueId, diagnostics: clarificationPlanQa },
+    });
   }
 
   const service = missionPlanArtifactService(db);
