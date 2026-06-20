@@ -22,6 +22,32 @@ type MissionOwnerDescriptionIssue = {
   assigneeAgentId: string | null;
 };
 
+import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
+
+export function buildRetrySourceIssueWakeupResultComment(input: {
+  status: MissionOwnerDecisionWakeupDispatchStatus;
+  missionId: string;
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  const common = {
+    missionId: input.missionId,
+    ownerActionIssueId: input.ownerActionIssueId,
+    ownerActionLabel: input.ownerActionLabel,
+    sourceIssueId: input.sourceIssueId,
+    sourceLabel: input.sourceLabel,
+    targetAgentId: input.targetAgentId,
+    idempotencyKey: input.idempotencyKey,
+  };
+  return input.status === "workflow_already_dispatched"
+    ? buildRetrySourceIssueWakeupHandledByWorkflowComment(common)
+    : buildRetrySourceIssueWakeupDispatchedComment(common);
+}
+
 export function buildMainExecutorBrief(input: {
   missionGoal: string;
   currentSituation: string;

@@ -5,6 +5,7 @@
 // [외부 연결] consumer: missions.ts(supervision 함수). deps: MissionExecutionSourceRef, MissionOwnerActionExplanation.
 // [수정시 주의] recommendation type 종류가 바뀌면 MissionOwnerSupervisionRecommendationType union과 supervision 분기 동기화.
 import type { MissionExecutionSourceRef } from "./mission-execution-sources.js";
+import { isRecord } from "./utils.js";
 import type { MissionOwnerActionExplanation } from "./mission-owner-recovery-explanations.js";
 
 export type MissionOwnerSupervisionRecommendationType =
@@ -91,3 +92,19 @@ export type ActiveMissionOwnerSupervisionResult = {
   missionIds: string[];
   missions: MissionOwnerSupervisionResult[];
 };
+
+
+/** unknown 값을 MissionOwnerDecisionWakeupDispatchStatus로 정규화. */
+export function normalizeMissionOwnerDecisionWakeupDispatchResult(value: unknown): MissionOwnerDecisionWakeupDispatchStatus {
+  if (!isRecord(value)) return "dispatched";
+  switch (value.status) {
+    case "not_requested":
+    case "dispatched":
+    case "workflow_already_dispatched":
+    case "skipped_no_assignee":
+    case "failed":
+      return value.status;
+    default:
+      return "dispatched";
+  }
+}
