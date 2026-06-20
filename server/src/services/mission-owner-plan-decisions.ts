@@ -833,17 +833,28 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const planningAssignee = planningAssigneeRow?.assigneeAgentId ?? null;
   const missionOwnerAgentId = ownershipRow?.ownerAgentId ?? null;
   if (planningAssignee && missionOwnerAgentId && planningAssignee !== missionOwnerAgentId) {
+    const diagnostics = [{
+      code: "ownership_drift",
+      message: `Planning issue assignee (${planningAssignee}) 가 mission owner (${missionOwnerAgentId}) 와 불일치. planning issue 를 mission owner 에게 재할당하거나 의도된 변경이면 mission owner 를 갱신하세요.`,
+      commentId: collected.commentId,
+    }];
+    // [P4] 거부 사유를 activity 로 노출(operator 가 governance-thread 에서 plan rejection 을 볼 수 있게).
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: "mission-plan-qa",
+      action: "mission.plan.rejected",
+      entityType: "mission",
+      entityId: missionId,
+      details: { planningIssueId: collected.planningIssueId, reason: "ownership_drift", diagnostics },
+    });
     return {
       status: "invalid",
       reason: "ownership_drift",
       planningIssueId: collected.planningIssueId,
       commentId: collected.commentId,
       decisionHash,
-      diagnostics: [{
-        code: "ownership_drift",
-        message: `Planning issue assignee (${planningAssignee}) 가 mission owner (${missionOwnerAgentId}) 와 불일치. planning issue 를 mission owner 에게 재할당하거나 의도된 변경이면 mission owner 를 갱신하세요.`,
-        commentId: collected.commentId,
-      }],
+      diagnostics,
     };
   }
 
@@ -880,17 +891,28 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const planQaDiagnostics = [...deterministicDiagnostics, ...critiqueDiagnostics];
   const blockingPlanQa = planQaDiagnostics.filter((diagnostic) => diagnostic.severity === "invalid");
   if (blockingPlanQa.length > 0) {
+    const blockingDiagnostics = blockingPlanQa.map((diagnostic) => ({
+      code: diagnostic.code,
+      message: diagnostic.message,
+      commentId: collected.commentId,
+    }));
+    // [P4] 거부 사유(intent coverage 실패)를 activity 로 노출(operator 가 governance-thread 에서 확인).
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: "mission-plan-qa",
+      action: "mission.plan.rejected",
+      entityType: "mission",
+      entityId: missionId,
+      details: { planningIssueId: collected.planningIssueId, reason: "plan_intent_coverage_failed", diagnostics: blockingDiagnostics },
+    });
     return {
       status: "invalid",
       reason: "plan_intent_coverage_failed",
       planningIssueId: collected.planningIssueId,
       commentId: collected.commentId,
       decisionHash,
-      diagnostics: blockingPlanQa.map((diagnostic) => ({
-        code: diagnostic.code,
-        message: diagnostic.message,
-        commentId: collected.commentId,
-      })),
+      diagnostics: blockingDiagnostics,
     };
   }
   const clarificationPlanQa = planQaDiagnostics.filter((diagnostic) => diagnostic.severity === "needs_clarification");
