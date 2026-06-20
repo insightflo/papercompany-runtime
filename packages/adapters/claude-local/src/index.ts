@@ -2,11 +2,13 @@ export const type = "claude_local";
 export const label = "Claude Code (local)";
 
 export const models = [
+  { id: "claude-fable-5", label: "Claude Fable 5" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
+  { id: "claude-opus-4-7", label: "Claude Opus 4.7" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-  { id: "claude-haiku-4-6", label: "Claude Haiku 4.6" },
-  { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+  { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
 ];
 
 export const agentConfigurationDoc = `# claude_local agent configuration

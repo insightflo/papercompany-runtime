@@ -45,6 +45,8 @@ describe("adapter model listing", () => {
     const models = await listAdapterModels("codex_local");
 
     expect(models).toEqual(codexFallbackModels);
+    expect(models.some((model) => model.id === "gpt-5.5")).toBe(true);
+    expect(models.some((model) => model.id === "gpt-5.4-mini")).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -158,6 +160,9 @@ describe("adapter model listing", () => {
 
     const models = await listAdapterModels("cursor");
     expect(models).toEqual(cursorFallbackModels);
+    expect(models.some((model) => model.id === "gpt-5.5")).toBe(true);
+    expect(models.some((model) => model.id === "opus-4.8")).toBe(true);
+    expect(models.some((model) => model.id === "gemini-3.5-flash")).toBe(true);
   });
 
   it("loads cursor models dynamically and caches them", async () => {
