@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { missionsApi, type MissionStatus } from "../api/missions";
 import { agentsApi } from "../api/agents";
+import { projectsApi } from "../api/projects";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -15,7 +16,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Maximize2, Minimize2, Rocket, User } from "lucide-react";
+import { Folder, Maximize2, Minimize2, User } from "lucide-react";
 import { cn } from "../lib/utils";
 import { MarkdownEditor, type MarkdownEditorRef } from "./MarkdownEditor";
 import { StatusBadge } from "./StatusBadge";
@@ -38,11 +39,21 @@ export function NewMissionDialog() {
 
   const [statusOpen, setStatusOpen] = useState(false);
   const [ownerOpen, setOwnerOpen] = useState(false);
+  // [목적] new mission의 project 선택. optional → 빈 문자열 = 미지정.
+  const [projectId, setProjectId] = useState("");
+  const [projectOpen, setProjectOpen] = useState(false);
   const descriptionEditorRef = useRef<MarkdownEditorRef>(null);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId && newMissionOpen,
+  });
+
+  // [목적] project selector 옵션. owner와 달리 auto-select 하지 않는다(optional).
+  const { data: projects } = useQuery({
+    queryKey: queryKeys.projects.list(selectedCompanyId!),
+    queryFn: () => projectsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId && newMissionOpen,
   });
 
@@ -52,7 +63,7 @@ export function NewMissionDialog() {
   }, [agents, newMissionOpen, ownerAgentId]);
 
   const createMission = useMutation({
-    mutationFn: (data: { title: string; description?: string; status: MissionStatus; ownerAgentId: string }) =>
+    mutationFn: (data: { title: string; description?: string; status: MissionStatus; ownerAgentId: string; projectId?: string }) =>
       missionsApi.create(selectedCompanyId!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.missions.list(selectedCompanyId!) });
@@ -66,6 +77,7 @@ export function NewMissionDialog() {
     setDescription("");
     setStatus("planning");
     setOwnerAgentId("");
+    setProjectId("");
     setExpanded(false);
   }
 
@@ -76,6 +88,7 @@ export function NewMissionDialog() {
       description: description.trim() || undefined,
       status,
       ownerAgentId: ownerAgentId || (agents?.[0]?.id ?? ""),
+      projectId: projectId || undefined,
     });
   }
 
@@ -87,6 +100,7 @@ export function NewMissionDialog() {
   }
 
   const selectedOwner = agents?.find((a) => a.id === ownerAgentId);
+  const selectedProject = projects?.find((p) => p.id === projectId);
 
   return (
     <Dialog
@@ -220,6 +234,39 @@ export function NewMissionDialog() {
                   {a.name}
                 </button>
               ))}
+            </PopoverContent>
+          </Popover>
+
+          {/* Project (optional) */}
+          <Popover open={projectOpen} onOpenChange={setProjectOpen}>
+            <PopoverTrigger asChild>
+              <button type="button" className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors">
+                <Folder className="h-3 w-3 text-muted-foreground" />
+                {selectedProject ? selectedProject.name : "Project"}
+              </button>
+            </PopoverTrigger>
+            <PopoverContent className="w-48 p-1" align="start">
+              {(projects ?? []).length === 0 ? (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">No projects</div>
+              ) : (
+                (projects ?? []).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={cn(
+                      "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 truncate",
+                      p.id === projectId && "bg-accent"
+                    )}
+                    onClick={() => { setProjectId(p.id); setProjectOpen(false); }}
+                  >
+                    <span
+                      className="shrink-0 h-3 w-3 rounded-sm"
+                      style={{ backgroundColor: p.color ?? "#6366f1" }}
+                    />
+                    {p.name}
+                  </button>
+                ))
+              )}
             </PopoverContent>
           </Popover>
         </div>

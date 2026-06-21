@@ -194,6 +194,9 @@ export interface MissionListItem {
   description: string | null;
   status: MissionStatus;
   goalId: string | null;
+  // [외부 연결] server list()/getById()가 project: {id,name,color}|null 를 항상 포함.
+  //   optional + nullable: 운영 혼합 빌드(구 서버는 미포함)에서도 렌더가 안전하게 degraded.
+  project?: { id: string; name: string; color: string | null } | null;
   startedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
@@ -327,6 +330,8 @@ export interface CreateMissionInput {
   title: string;
   description?: string;
   goalId?: string;
+  // [목적] new mission 생성 시 project 지정. server POST /missions 가 projectId 수신(Phase1).
+  projectId?: string;
   status?: MissionStatus;
   agentIds?: Array<{ agentId: string; role: MissionAgentRole }>;
 }

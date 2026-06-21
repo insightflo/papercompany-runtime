@@ -474,6 +474,16 @@ export function MissionDetail() {
       <div className="flex flex-wrap items-center gap-3">
         <StatusBadge status={mission.status} />
 
+        {mission.project && (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-0.5 text-xs font-medium text-muted-foreground whitespace-nowrap shrink-0">
+            <span
+              className="shrink-0 h-3 w-3 rounded-sm"
+              style={{ backgroundColor: mission.project.color ?? "#6366f1" }}
+            />
+            {mission.project.name}
+          </span>
+        )}
+
         <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
           <User className="h-3.5 w-3.5" />
           <span>Main executor: {agentMap[mission.ownerAgentId] ?? mission.ownerAgentId ?? "—"}</span>

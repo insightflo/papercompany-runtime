@@ -77,7 +77,7 @@ vi.mock("./StatusBadge", () => ({
 vi.mock("lucide-react", () => ({
   Maximize2: () => <span>Maximize2</span>,
   Minimize2: () => <span>Minimize2</span>,
-  Rocket: () => <span>Rocket</span>,
+  Folder: () => <span>Folder</span>,
   User: () => <span>User</span>,
 }));
 
@@ -100,5 +100,12 @@ describe("NewMissionDialog", () => {
     expect(html).toContain("overscroll-contain");
     expect(html).toContain("whitespace-pre-wrap");
     expect(html).toContain("break-words");
+  });
+
+  it("offers an optional project selector", () => {
+    const html = renderToStaticMarkup(<NewMissionDialog />);
+
+    // Project is optional → trigger shows the "Project" placeholder when none selected.
+    expect(html).toContain("Project");
   });
 });
