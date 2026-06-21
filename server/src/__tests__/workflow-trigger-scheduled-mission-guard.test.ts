@@ -136,7 +136,7 @@ describeEmbeddedPostgres("workflow trigger scheduled mission guard", () => {
       companyId,
       triggeredBy: "agent",
       runDate: "2026-06-16",
-    })).rejects.toThrow(/already has scheduled workflow run/);
+    })).rejects.toThrow(/already has an active scheduled workflow mission/);
 
     const storedRuns = await db
       .select()
