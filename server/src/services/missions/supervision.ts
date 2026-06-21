@@ -408,6 +408,10 @@ export function createSupervision({ db, deps, ownerActions }: {
           }
         }
         let ownerDecision = extractLatestMissionOwnerDecision(comments);
+        // [P6 hybrid guard] AUTO(owner 미결정 grace default) rework 인지, 그리고 이 미션이 native loop(back-edge) 를
+        //   가지는지 — 둘 다 참이면 P4 loop-driver 가 QA-reject producer rework 를 이미 담당하므로 supervision 중복 skip.
+        let autoDefaulted = false;
+        let missionHasNativeLoop = false;
         if (ownerDecision?.decision === null) {
           findings.push(`owner_action_decision_invalid: ${label} has unsupported decision=${ownerDecision.invalidDecision} — ${issue.title}`);
           ownerDecision = null;
@@ -421,6 +425,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             const ageMs = Date.now() - new Date(issue.createdAt).getTime();
             const GRACE_MS = 20 * 60 * 1000;
             if (ageMs >= GRACE_MS) {
+              autoDefaulted = true;
               ownerDecision = {
                 decision: "retry_source_issue",
                 reason: `auto-default (owner grace ${GRACE_MS / 60000}min expired)`,
@@ -460,6 +465,10 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const originStepRows = stepRowsByIssueId.get(issue.originId) ?? [];
                   const originStepId = originStepRows.map((row) => row.stepRun.stepId).find((id) => Boolean(id)) ?? null;
                   const dagSteps = (originStepRows[0]?.definition?.stepsJson ?? null) as DagStepLike[] | null;
+                  missionHasNativeLoop = Array.isArray(dagSteps) && dagSteps.some((step) => {
+                    const edges = (step as { conditionalDependencies?: unknown }).conditionalDependencies;
+                    return Array.isArray(edges) && edges.some((edge) => (edge as { isBackEdge?: boolean } | null)?.isBackEdge === true);
+                  });
                   if (originStepId && Array.isArray(dagSteps) && dagSteps.length > 0) {
                     const producerStepId = resolveProducerStepIdFromDag(originStepId, dagSteps);
                     if (producerStepId) {
@@ -474,6 +483,13 @@ export function createSupervision({ db, deps, ownerActions }: {
                 // legacy: 어느 쪽도 못 구하면 origin(QA 자체 재시도의 기존 동작)으로 돌아간다.
                 if (!sourceIssueId) sourceIssueId = issue.originId ?? null;
                 const isProducerRework = producerReworkResolved || (issue.originId !== null && sourceIssueId !== issue.originId);
+                // [P6 hybrid guard] native-loop 미션의 AUTO(owner 미결정 grace default) producer-rework 는 P4 loop-driver
+                //   가 QA-reject rework 를 이미 담당(maxIterations cap + iteration_index/attempts 추적)하므로 supervision 이
+                //   중복 재오픈/상충하지 않게 skip. owner-명시 rework(autoDefaulted=false)는 유지 — owner 수동 제어권 보존.
+                if (autoDefaulted && isProducerRework && missionHasNativeLoop) {
+                  findings.push(`owner_action_skipped_native_loop: ${label} AUTO producer-rework deferred — QA-reject rework owned by native loop(P4). source=${sourceLabel}`);
+                  break;
+                }
                 if (!sourceIssueId) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel, reason: "owner-action issue has no canonical originId source issue" }));
                   break;
