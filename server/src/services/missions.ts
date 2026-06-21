@@ -34,6 +34,7 @@ import {
   type MissionOwnerActionExplanation,
 } from "./missions/mission-owner-recovery-explanations.js";
 import { normalizeWorkflowStepsForExecution } from "./workflow/dag-engine.js";
+import { normalizeConditionalEdges } from "./workflow/control-flow/types.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
 import { asStringArray, asTrimmedString, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
@@ -997,6 +998,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           type: normalizeMissionWorkflowStepType(persistedStep.type),
           agentId,
           dependencies: [...step.dependencies],
+          conditionalDependencies: step.conditionalDependencies ?? [],
           description: step.description ?? null,
           toolNames: Array.isArray(step.toolNames)
             ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -1022,6 +1024,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           type: "agent",
           agentId: "",
           dependencies: [],
+          conditionalDependencies: [],
           description: null,
           toolNames: [],
           knowledgeBaseIds: [],
@@ -1158,6 +1161,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           type: normalizeMissionWorkflowStepType(step.type),
           agentId,
           dependencies: asStringArray(step.dependencies).length ? asStringArray(step.dependencies) : asStringArray(step.dependsOn),
+          conditionalDependencies: normalizeConditionalEdges(step.conditionalDependencies) ?? [],
           description: asTrimmedString(step.description),
           toolNames: asStringArray(step.toolNames),
           knowledgeBaseIds: asStringArray(step.knowledgeBaseIds),
@@ -1179,6 +1183,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           type: "agent",
           agentId: "",
           dependencies: [],
+          conditionalDependencies: [],
           description: null,
           toolNames: [],
           knowledgeBaseIds: [],

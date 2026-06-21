@@ -6,6 +6,7 @@
 // [외부 연결] consumer: missions.ts (import + re-export). Db: workflowRuns/workflowStepRuns infer.
 // [수정시 주의] status/type 종류가 바뀌면 MISSION_WORKFLOW_STEP_STATUSES와 MissionWorkflowRunStep["status"] 동기화.
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import type { ConditionalEdge } from "../workflow/control-flow/types.js";
 
 /** workflow step에 연결된 issue 요약. */
 export type MissionWorkflowStepIssue = {
@@ -46,6 +47,9 @@ export type MissionWorkflowRunStep = {
   type: "agent" | "tool";
   agentId: string;
   dependencies: string[];
+  // control-flow: IF 조건부 edge + bounded back-edge loop(P5). legacy/일반 step 은 빈 배열.
+  // definition stepsJson 의 normalize 결과를 그대로 노출(run view 가 이전에 drop 해서 back-edge 가 안 보였던 버그 수정).
+  conditionalDependencies: ConditionalEdge[];
   description: string | null;
   toolNames: string[];
   knowledgeBaseIds: string[];
