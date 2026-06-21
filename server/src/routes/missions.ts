@@ -180,7 +180,7 @@ export function missionRoutes(db: Db) {
     const { companyId } = req.params;
     assertCompanyAccess(req, companyId);
 
-    const { ownerAgentId, title, description, goalId, status, agentIds, source } = req.body;
+    const { ownerAgentId, title, description, goalId, projectId, status, agentIds, source } = req.body;
 
     if (!ownerAgentId || !title) {
       throw badRequest("ownerAgentId and title are required");
@@ -192,6 +192,7 @@ export function missionRoutes(db: Db) {
       title,
       description,
       goalId,
+      projectId,
       status,
       agentIds,
       source,
@@ -369,7 +370,7 @@ export function missionRoutes(db: Db) {
     const existing = await svc.getById(req.params.id);
     assertCompanyAccess(req, existing.companyId);
 
-    const { title, description, status, goalId, startedAt, completedAt } = req.body;
+    const { title, description, status, goalId, projectId, startedAt, completedAt } = req.body;
     if (status === "cancelled") {
       const issueTree = await svc.getIssueTree(req.params.id);
       const candidateRunIds = new Set<string>();
@@ -391,6 +392,7 @@ export function missionRoutes(db: Db) {
       description,
       status,
       goalId,
+      projectId,
       startedAt: startedAt ? new Date(startedAt) : undefined,
       completedAt: completedAt ? new Date(completedAt) : undefined,
     });

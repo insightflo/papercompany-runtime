@@ -3038,6 +3038,7 @@ export function heartbeatService(db: Db) {
           .select({
             projectId: issues.projectId,
             projectWorkspaceId: issues.projectWorkspaceId,
+            missionId: issues.missionId,
           })
           .from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
@@ -3046,7 +3047,20 @@ export function heartbeatService(db: Db) {
     const issueProjectId = issueProjectRef?.projectId ?? null;
     const preferredProjectWorkspaceId =
       issueProjectRef?.projectWorkspaceId ?? contextProjectWorkspaceId ?? null;
-    const resolvedProjectId = issueProjectId ?? contextProjectId;
+    // [목적] issue/context 어디에도 project가 없으면, issue가 속한 mission의 projectId로 폴백.
+    //   mission에 project를 물리면 그 project의 primary workspace에서 run이 돌아간다
+    //   -> source='project_primary' + workspaceId -> broadScan 허용 + durable cwd.
+    //   RES-1363 류(Step Input Manifest 의 find. 광역스캔 차단)와 outputs/ 소실을 함께 방지.
+    // [주의] mission.projectId가 없거나 mission 자체가 없으면 null 로 둬 기존 fallback 경로 유지.
+    let resolvedProjectId = issueProjectId ?? contextProjectId;
+    if (!resolvedProjectId && issueProjectRef?.missionId) {
+      const [missionProjectRow] = await db
+        .select({ projectId: missions.projectId })
+        .from(missions)
+        .where(and(eq(missions.id, issueProjectRef.missionId), eq(missions.companyId, agent.companyId)))
+        .limit(1);
+      resolvedProjectId = missionProjectRow?.projectId ?? null;
+    }
     const useProjectWorkspace = opts?.useProjectWorkspace !== false;
     const workspaceProjectId = useProjectWorkspace ? resolvedProjectId : null;
 

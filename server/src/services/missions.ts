@@ -20,6 +20,7 @@ import {
   missionSessions,
   missions,
   pluginEntities,
+  projects,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -60,6 +61,9 @@ import {
 import { isTerminalMissionStatus } from "./missions/shared-types.js";
 import { createOwnerActions } from "./missions/owner-actions.js";
 import { createSupervision } from "./missions/supervision.js";
+// [목적] mission 생성 시점에 working.md를 미리 provisioning 하기 위해 import.
+// [외부 연결] create()에서 호출 → 첫 PLAN 런이 working.md를 발견하지 못해 실패하던 gap을 닫는다.
+import { ensureMissionWorkingNote } from "./missions/mission-working-note.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -94,11 +98,23 @@ export type { MissionOwnerActionExplanation, MissionOwnerActionExplanationStatus
 export type MissionAgentRow = typeof missionAgents.$inferSelect;
 
 /**
+ * [목적] mission에 연결된 project의 표시용 라이트 참조.
+ * [출력] { id, name, color } — 리스트 뱃지/상세 칩 렌더링에 쓰인다.
+ * [연결] mission.projectId -> projects 행에서 id/name/color만 투영.
+ */
+export type MissionProjectRef = {
+  id: string;
+  name: string;
+  color: string | null;
+};
+
+/**
  * Full mission detail with agents.
  */
 export type MissionDetail = MissionRow & {
   agents: Array<MissionAgentRow & { agentName?: string }>;
   ownerAgentName?: string;
+  project: MissionProjectRef | null;
   sessionBindings: Array<{
     agentId: string;
     adapterType: string;
@@ -108,6 +124,14 @@ export type MissionDetail = MissionRow & {
   }>;
   activeMissionPlan: MissionPlanRuntimeSummary;
   ownerActionExplanations: MissionOwnerActionExplanation[];
+};
+
+/**
+ * [목적] missions 리스트 1행 응답 타입. MissionRow에 풀어낸 project 참조를 더한다.
+ * [연결] list()가 batch로 projectId->project를 해석해 채운다. UI 리스트 뱃지용.
+ */
+export type MissionListItem = MissionRow & {
+  project: MissionProjectRef | null;
 };
 
 // workflow-run step/progress 타입 + 정규화/집계 로직은 ./missions/workflow-progress.js 로 분리.
@@ -189,6 +213,36 @@ async function buildMissionOwnerActionExplanations(db: Db, mission: MissionRow):
 }
 
 /**
+ * [목적] projectId -> 표시용 project 라이트 참조 단건 해석. 상세 헤더/단건 응답용.
+ * [입력] db, projectId. [출력] { id, name, color } | null(없거나 삭제된 project).
+ * [연결] getById가 호출. projects 테이블에서 id/name/color만 투영한다.
+ */
+async function resolveProjectRef(db: Db, projectId: string): Promise<MissionProjectRef | null> {
+  const [row] = await db
+    .select({ id: projects.id, name: projects.name, color: projects.color })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  return row ? { id: row.id, name: row.name, color: row.color } : null;
+}
+
+/**
+ * [목적] 여러 projectId를 한 번에 해석해 Map으로 반환. 리스트 batch enrich용(N+1 방지).
+ * [입력] db, projectId 배열. [출력] Map<projectId, MissionProjectRef>.
+ * [주의] 빈 배열 입력 시 쿼리하지 않고 빈 Map 반환(inArray 빈 값 회피).
+ */
+async function resolveProjectRefs(db: Db, projectIds: string[]): Promise<Map<string, MissionProjectRef>> {
+  const map = new Map<string, MissionProjectRef>();
+  if (projectIds.length === 0) return map;
+  const rows = await db
+    .select({ id: projects.id, name: projects.name, color: projects.color })
+    .from(projects)
+    .where(inArray(projects.id, projectIds));
+  for (const row of rows) map.set(row.id, { id: row.id, name: row.name, color: row.color });
+  return map;
+}
+
+/**
  * Input for creating a mission.
  */
 export interface CreateMissionInput {
@@ -197,6 +251,8 @@ export interface CreateMissionInput {
   title: string;
   description?: string;
   goalId?: string;
+  // [연결] project 직접 지정. goalId와 중복 가능하며 project 연결의 권위 컬럼.
+  projectId?: string;
   status?: MissionStatus;
   source?: "manual" | "workflow";
   agentIds?: Array<{ agentId: string; role: MissionAgentRole }>;
@@ -210,6 +266,8 @@ export interface UpdateMissionInput {
   description?: string;
   status?: MissionStatus;
   goalId?: string | null;
+  // [연결] project 재지정/해제(null). projectId를 권위로 둔다.
+  projectId?: string | null;
   startedAt?: Date | null;
   completedAt?: Date | null;
 }
@@ -231,6 +289,8 @@ export interface ListMissionsFilter {
   status?: MissionStatus;
   ownerAgentId?: string;
   goalId?: string;
+  // [연결] project별 mission 필터(리스트/상세 project 표시와 함께 사용).
+  projectId?: string;
   from?: string;
   to?: string;
   limit?: number;
@@ -361,6 +421,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         title: input.title,
         description: input.description ?? null,
         goalId: input.goalId ?? null,
+        projectId: input.projectId ?? null,
         status: input.status ?? "planning",
       })
       .returning();
@@ -433,6 +494,21 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
     }
 
+    // [목적] 첫 PLAN 런이 working.md를 발견하도록 mission 생성 시점에 미리 provisioning 한다.
+    //   compileMissionRunContext가 working.md를 lazily 읽으나, PLAN 런이 그 시점에 파일이
+    //   없으면 실패한다. create()에서 보장하면 모든 생성 경로(수동/위임/워크플로)가 커버된다.
+    // [주의] INSERT 이후 단계이므로 scratch note fs 실패가 생성 자체를 중단/롤백시키면 안 된다.
+    //   swallow + log 한다. compiler의 idempotent 호출(wx 플래그, EEXIST 무시)이 다음 런에 self-heal.
+    // [수정시 영향] ensureMissionWorkingNote 경로(PAPERCLIP_HOME/mission-working-notes) 변경 시 함께 검토.
+    try {
+      await ensureMissionWorkingNote({ companyId: mission.companyId, missionId: mission.id });
+    } catch (err) {
+      logger.warn(
+        { err, missionId: mission.id, companyId: mission.companyId },
+        "failed to provision mission working note at create",
+      );
+    }
+
     return getById(mission.id);
   }
 
@@ -483,10 +559,15 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     });
     const ownerActionExplanations = await buildMissionOwnerActionExplanations(db, mission);
 
+    // [목적] mission.projectId -> 표시용 project 참조 해석. 상세 헤더 칩 렌더링용.
+    // [입력] mission.projectId(nullable). [출력] { id, name, color } | null.
+    const project = mission.projectId ? await resolveProjectRef(db, mission.projectId) : null;
+
     return {
       ...mission,
       agents: agentRows.map((r: { row: typeof missionAgents.$inferSelect; agentName: string | null }) => ({ ...r.row, agentName: r.agentName ?? undefined })),
       ownerAgentName: ownerRow?.name,
+      project,
       sessionBindings,
       activeMissionPlan: summarizeMissionPlanForRuntime(activeMissionPlan),
       ownerActionExplanations,
@@ -496,7 +577,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   /**
    * List missions with optional filters.
    */
-  async function list(filter: ListMissionsFilter): Promise<MissionRow[]> {
+  async function list(filter: ListMissionsFilter): Promise<MissionListItem[]> {
     const conditions: ReturnType<typeof eq>[] = [eq(missions.companyId, filter.companyId)];
 
     if (filter.status) {
@@ -505,6 +586,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     }
     if (filter.ownerAgentId) conditions.push(eq(missions.ownerAgentId, filter.ownerAgentId));
     if (filter.goalId) conditions.push(eq(missions.goalId, filter.goalId));
+    if (filter.projectId) conditions.push(eq(missions.projectId, filter.projectId));
     if (filter.from) conditions.push(gte(missions.createdAt, parseMissionDateFilter(filter.from, "start")));
     if (filter.to) conditions.push(lte(missions.createdAt, parseMissionDateFilter(filter.to, "end")));
 
@@ -551,7 +633,16 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     }
 
     const reconciledRows = await Promise.all(rows.map((mission) => ownerActions.reconcileMissionStatusFromWorkflowRuns(mission)));
-    return filter.status ? reconciledRows.filter((mission) => mission.status === filter.status) : reconciledRows;
+    const filteredRows = filter.status ? reconciledRows.filter((mission) => mission.status === filter.status) : reconciledRows;
+    // [목적] 리스트 행에 project 참조를 batch 해석해 붙인다(N+1 방지).
+    // [주의] projectMap 미스(삭제된 project)면 null로 내려가 뱃지가 숨김 처리된다.
+    const projectMap = await resolveProjectRefs(db, [
+      ...new Set(filteredRows.map((mission) => mission.projectId).filter((value): value is string => value !== null)),
+    ]);
+    return filteredRows.map((mission) => ({
+      ...mission,
+      project: mission.projectId ? (projectMap.get(mission.projectId) ?? null) : null,
+    }));
   }
 
   /**
@@ -584,6 +675,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       }
     }
     if (input.goalId !== undefined) updates.goalId = input.goalId;
+    // [연결] project 재지정/해제. null 명시적 해제, undefined는 미변경.
+    if (input.projectId !== undefined) updates.projectId = input.projectId;
     if (input.startedAt !== undefined) updates.startedAt = input.startedAt;
     if (input.completedAt !== undefined) updates.completedAt = input.completedAt;
 
