@@ -298,6 +298,50 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     ]));
   });
 
+  it("[P7] does not kill a stuck-looking run when a native control-flow loop is iterating (iteration_index > 0)", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Iterating Loop Company",
+      issuePrefix: `IL${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "iterating-loop",
+      stepsJson: [
+        { id: "produce", name: "Produce", type: "agent", agentId: "", dependencies: [] },
+        { id: "qa", name: "QA", type: "agent", agentId: "", dependencies: ["produce"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      completedAt: null,
+    });
+    // produce completed + loop fired once(iteration_index=1); qa pending(no active issue/heartbeat).
+    // → activeStep 검사엔 안 걸리지만 iteration_index>0 로 60min kill 면제.
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "produce", status: "completed", iterationIndex: 1, startedAt: new Date("2020-01-01T00:00:00.000Z"), completedAt: new Date("2020-01-01T00:05:00.000Z") },
+      { workflowRunId: runId, stepId: "qa", status: "pending" },
+    ]);
+
+    const result = await reconcileStuckWorkflowRuns(db, 60);
+    expect(result).toEqual([
+      expect.objectContaining({ runId, action: "skipped", reason: expect.stringContaining("iterating") }),
+    ]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("running");
+  });
+
   it("creates workflow definitions from plugin UI step payloads", async () => {
     const companyId = randomUUID();
 
