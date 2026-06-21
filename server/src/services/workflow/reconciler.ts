@@ -7,7 +7,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { eq, and, lt, sql } from "drizzle-orm";
+import { eq, and, gt, lt, sql } from "drizzle-orm";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 
 /**
@@ -52,6 +52,28 @@ export async function reconcileStuckWorkflowRuns(
 
   for (const run of stuckRuns) {
     try {
+      // [P7] native control-flow loop 가 iterating 중(iteration_index>0)이면 stuck kill 면제.
+      // 루프는 maxIterations cap 으로 자기 종료하므로 60min reconciler kill 의 대상이 아니다.
+      // (루프 반복 사이에 순간적으로 active step/issue 가 없는 찰나에 kill 이 발화하지 않게.)
+      const iteratingStep = await db
+        .select({ id: workflowStepRuns.id })
+        .from(workflowStepRuns)
+        .where(and(
+          eq(workflowStepRuns.workflowRunId, run.id),
+          gt(workflowStepRuns.iterationIndex, 0),
+        ))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+      if (iteratingStep) {
+        results.push({
+          runId: run.id,
+          action: "skipped",
+          reason: "Native control-flow loop iterating (iteration_index > 0); bounded by maxIterations",
+        });
+        continue;
+      }
+
       const activeStep = await db
         .select({ id: workflowStepRuns.id })
         .from(workflowStepRuns)

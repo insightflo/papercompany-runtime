@@ -1435,6 +1435,16 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     ]);
     expect(paqoSteps[0]!.agentId).toBe(ownerAgentId);
     expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
+    // [P5 control-flow loop] ACTION producer 에 QA rework back-edge 가 합성되었는지(wiring 회귀 감지).
+    const paqoStepsRaw = paqoDefinitions[0]!.stepsJson as Array<{
+      id: string;
+      conditionalDependencies?: Array<{ stepId: string; when: string; isBackEdge?: boolean; maxIterations?: number }>;
+    }>;
+    const actionWithEdge = paqoStepsRaw.find((step) => step.id === paqoSteps[0]!.id)!;
+    expect(actionWithEdge.conditionalDependencies).toEqual([
+      { stepId: paqoSteps[1]!.id, when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+    ]);
+    expect(paqoStepsRaw.find((step) => step.id === paqoSteps[1]!.id)!.conditionalDependencies).toBeUndefined();
 
     const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
     expect(runs).toHaveLength(1);
@@ -1548,6 +1558,16 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     ]);
     expect(paqoSteps.some((step) => step.name.includes("[OVERSIGHT]"))).toBe(false);
     expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
+    // [P5 control-flow loop] ACTION producer 에 QA rework back-edge 가 합성되었는지(wiring 회귀 감지).
+    const paqoStepsRaw = paqoDefinitions[0]!.stepsJson as Array<{
+      id: string;
+      conditionalDependencies?: Array<{ stepId: string; when: string; isBackEdge?: boolean; maxIterations?: number }>;
+    }>;
+    const actionWithEdge = paqoStepsRaw.find((step) => step.id === paqoSteps[0]!.id)!;
+    expect(actionWithEdge.conditionalDependencies).toEqual([
+      { stepId: paqoSteps[1]!.id, when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+    ]);
+    expect(paqoStepsRaw.find((step) => step.id === paqoSteps[1]!.id)!.conditionalDependencies).toBeUndefined();
 
     const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
     expect(runs).toHaveLength(1);

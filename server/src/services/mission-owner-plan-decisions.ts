@@ -7,6 +7,7 @@ import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtif
 import { missionDelegationService } from "./mission-delegations.js";
 import { workflowService } from "./workflow/engine.js";
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
+import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
@@ -1549,7 +1550,11 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     ].filter(Boolean).join("\n"),
   };
 
-  return [...plannedSteps, qaStep];
+  // [P5 control-flow loop] 미션 QA step 이 산출물 생산자(producer) 로 보내는 bounded rework back-edge 자동 합성.
+  //   QA 가 request_changes 하면 P4 loop-driver 가 producer 를 rework 한다(maxIterations cap). producer 식별은
+  //   resolveProducerStepIdFromDag 에 위임(synthesizeQaReworkBackEdge 내부). forward dependencies[] 는 불변.
+  //   합성 대상은 이 미션 최종 QA(qaStep) 단 하나 — 중간 단계 QA 회복은 runtime supervision 담당.
+  return synthesizeQaReworkBackEdge([...plannedSteps, qaStep], qaStep.id);
 }
 
 async function ensureCrossCompanyDelegationsForMissionOwnerPlan(input: {

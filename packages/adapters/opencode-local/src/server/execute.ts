@@ -26,6 +26,46 @@ import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/se
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * opencode → provider(z.ai GLM 등) 비응답 / overload hang 방어.
+ *
+ * [목적] wake-on-demand + heartbeat 비활성 에이전트는 heartbeat execution_stale reaper 가
+ *        감시하지 않는다(app.ts 의 주기 heartbeat timer 는 Hermes Ops 유일). 그래서 adapter
+ *        실행 자체에 상한이 없으면 z.ai GLM 비응답 시 opencode 자식이 run 을 영구 점거한다
+ *        (가즈아 25h hang 과 동일 계보, opencode_local 경로로 발현). adapter 단에서 (a) 무출력
+ *        idle timeout 으로 hang 을 빠르게 절단하고, (b) provider overload(z.ai 529 등) 를 같은
+ *        session 으로 backoff 재시도해 issue 증식 없이 극복한다. hang 절단 시 run 이 종료되고
+ *        다음 wake(handoff)가 발화한다.
+ * [입력] config.timeoutSec(미설정 시 hard backstop), config.idleTimeoutSec(미설정 시 1800s),
+ *        config.maxOverloadRetries / config.overloadBackoffMs.
+ * [출력] runChildProcess 로 전달되는 timeoutSec/idleTimeoutSec 와 overload 재시도 루프.
+ * [수정시 영향] idleTimeoutSec 기본 1800s(30min) — 정상 run 은 JSON 이벤트를 계속 뿜으므로
+ *        활동 중인 긴 run(실측 ~27min/step)은 보호되고, GLM no-response(출력 0)만 절단.
+ *        hard timeout 기본 7200s(2h) pure backstop. overload 재시도는 timeout 시도는 제외.
+ */
+const DEFAULT_HARD_TIMEOUT_SEC = 7200;
+const DEFAULT_IDLE_TIMEOUT_SEC = 1800;
+const DEFAULT_MAX_OVERLOAD_RETRIES = 3;
+const DEFAULT_OVERLOAD_BACKOFF_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// provider overload 신호 탐지(429/503/529 status, overload/rate-limit 키워드). z.ai GLM 529 포함.
+// 500 은 status 문맥에서만 매치(토큰 카운트 등 노이즈 회피).
+const OPENCODE_PROVIDER_OVERLOAD_RE =
+  /\b(status[_\s:]*(?:429|500|503|529)|(?:429|503|529)\b|overload|rate[\s_-]?limit|too many requests|service unavailable|temporarily unavailable)/i;
+
+/** opencode stdout(JSON event error → parsed.errorMessage) + stderr 에서 provider overload 탐지. */
+export function isOpenCodeProviderOverloaded(
+  parsed: { errorMessage: string | null },
+  stderr: string,
+): boolean {
+  const text = `${parsed.errorMessage ?? ""}\n${stderr ?? ""}`;
+  return OPENCODE_PROVIDER_OVERLOAD_RE.test(text);
+}
+
 function firstNonEmptyLine(text: string): string {
   return (
     text
@@ -196,8 +236,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
-  const timeoutSec = asNumber(config.timeoutSec, 0);
+  // hard timeout: 순수 backstop 상한. config 가 양수로 명시하면 존중, 아니면 2h.
+  const explicitTimeoutSec =
+    typeof config.timeoutSec === "number" && Number.isFinite(config.timeoutSec) && config.timeoutSec > 0
+      ? config.timeoutSec
+      : null;
+  const timeoutSec = explicitTimeoutSec ?? DEFAULT_HARD_TIMEOUT_SEC;
   const graceSec = asNumber(config.graceSec, 20);
+  // idleTimeoutSec: opencode 가 N초간 한 글자도 출력 안 하면 hang(z.ai GLM no-response)으로 보고
+  // 종료. 정상 run 은 JSON 이벤트를 계속 뿜으므로 활동 중인 긴 run 은 보호된다. wake-on-demand +
+  // heartbeat 비활성 에이전트는 execution_stale reaper 가 안 보기 때문에 이 idle 감시가 핵심이다.
+  const explicitIdleSec =
+    typeof config.idleTimeoutSec === "number" && Number.isFinite(config.idleTimeoutSec) && config.idleTimeoutSec > 0
+      ? config.idleTimeoutSec
+      : null;
+  const idleTimeoutSec = explicitIdleSec ?? DEFAULT_IDLE_TIMEOUT_SEC;
   const extraArgs = (() => {
     const fromExtraArgs = asStringArray(config.extraArgs);
     if (fromExtraArgs.length > 0) return fromExtraArgs;
@@ -370,6 +423,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env: runtimeEnv,
       stdin: prompt,
       timeoutSec,
+      idleTimeoutSec,
       graceSec,
       fatalOnLogError: true,
       onSpawn,
@@ -451,7 +505,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  const initial = await runAttempt(sessionId);
+  // provider overload(z.ai GLM 529 등) 시 같은 session 으로 backoff 재시도. adapter 안에서
+  // 극복해 workflow 엔진이 step 을 재dispatch 하며 새 issue 를 찍어내는 증식을 막는다.
+  // timeout(idle/hard)으로 종료된 시도는 재시도하지 않는다(hang 절단이 우선).
+  const maxOverloadRetries = Math.max(0, asNumber(config.maxOverloadRetries, DEFAULT_MAX_OVERLOAD_RETRIES));
+  const overloadBackoffMs = Math.max(0, asNumber(config.overloadBackoffMs, DEFAULT_OVERLOAD_BACKOFF_MS));
+
+  let initial = await runAttempt(sessionId);
+  for (
+    let overloadAttempt = 0;
+    overloadAttempt < maxOverloadRetries &&
+    !initial.proc.timedOut &&
+    isOpenCodeProviderOverloaded(initial.parsed, initial.rawStderr);
+    overloadAttempt += 1
+  ) {
+    const waitMs = overloadBackoffMs * 2 ** overloadAttempt + Math.floor(Math.random() * 500);
+    await onLog(
+      "stdout",
+      `[paperclip] OpenCode provider overloaded; retry ${overloadAttempt + 1}/${maxOverloadRetries} after ~${Math.round(waitMs / 1000)}s with the same session (no new issue).\n`,
+    );
+    await sleep(waitMs);
+    initial = await runAttempt(sessionId);
+  }
+
   const initialFailed =
     !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || Boolean(initial.parsed.errorMessage));
   if (

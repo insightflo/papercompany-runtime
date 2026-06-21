@@ -68,6 +68,7 @@ export function buildMissionOwnerDecisionFormat(): string {
     "### Mission owner decision",
     "Decision: <one of the allowed decision options>",
     "Source issue: <source issue identifier or id>",
+    "Rework target: <upstream producer issue identifier to revise when a QA gate blocked the source; omit when retrying the source itself>",
     "Reason: <why this decision is appropriate>",
     "Next action: <specific next action or waiting condition>",
     "Evidence: <compact evidence used for the decision>",
@@ -77,6 +78,7 @@ export function buildMissionOwnerDecisionFormat(): string {
 export type ExtractedMissionOwnerDecision = {
   decision: MissionOwnerDecisionOption;
   sourceIssueRef?: string;
+  reworkTargetRef?: string;
   reason?: string;
   nextAction?: string;
   evidence?: string;
@@ -84,6 +86,7 @@ export type ExtractedMissionOwnerDecision = {
   decision: null;
   invalidDecision: string;
   sourceIssueRef?: string;
+  reworkTargetRef?: string;
   reason?: string;
   nextAction?: string;
   evidence?: string;
@@ -115,15 +118,16 @@ export function extractMissionOwnerDecisionFromText(text: string): ExtractedMiss
   if (!rawDecision) return null;
 
   const sourceIssueRef = readDecisionField(block, "Source issue");
+  const reworkTargetRef = readDecisionField(block, "Rework target");
   const reason = readDecisionField(block, "Reason");
   const nextAction = readDecisionField(block, "Next action");
   const evidence = readDecisionField(block, "Evidence");
 
   if (!MISSION_OWNER_DECISION_OPTIONS.includes(rawDecision as MissionOwnerDecisionOption)) {
-    return { decision: null, invalidDecision: rawDecision, sourceIssueRef, reason, nextAction, evidence };
+    return { decision: null, invalidDecision: rawDecision, sourceIssueRef, reworkTargetRef, reason, nextAction, evidence };
   }
 
-  return { decision: rawDecision as MissionOwnerDecisionOption, sourceIssueRef, reason, nextAction, evidence };
+  return { decision: rawDecision as MissionOwnerDecisionOption, sourceIssueRef, reworkTargetRef, reason, nextAction, evidence };
 }
 
 export function buildMissionOwnerDecisionAppliedMarker(input: {

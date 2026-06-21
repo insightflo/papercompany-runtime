@@ -339,6 +339,15 @@ export function Missions() {
                   <span className="flex-1 truncate font-medium">
                     {mission.title}
                   </span>
+                  {mission.project && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-0.5 text-xs font-medium text-muted-foreground whitespace-nowrap shrink-0">
+                      <span
+                        className="shrink-0 h-3 w-3 rounded-sm"
+                        style={{ backgroundColor: mission.project.color ?? "#6366f1" }}
+                      />
+                      <span className="max-w-[10rem] truncate">{mission.project.name}</span>
+                    </span>
+                  )}
                   <StatusBadge status={mission.status} />
                   <span className="shrink-0 text-xs text-muted-foreground">
                     Main executor: {agentMap[mission.ownerAgentId] ?? "—"}
