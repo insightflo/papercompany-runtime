@@ -48,11 +48,13 @@ describe("resolveProducerStepIdFromDag (A: DAG 역참조 → 생산자)", () => 
 });
 
 describe("isQaLikeStep", () => {
-  it("qa-/validate-/verify- 접두 또는 QA 계열 이름을 QA로 본다", () => {
+  it("qa-/validate-/verify-/audit- 접두 또는 QA 계열 이름을 QA로 본다", () => {
     expect(isQaLikeStep({ id: "qa-6200a35259" })).toBe(true);
     expect(isQaLikeStep({ id: "qa-5-109cd4a030" })).toBe(true);
+    expect(isQaLikeStep({ id: "audit-source-coverage" })).toBe(true);
     expect(isQaLikeStep({ id: "step-1", name: "Verify report" })).toBe(true);
     expect(isQaLikeStep({ id: "step-2", title: "QA validation" })).toBe(true);
+    expect(isQaLikeStep({ id: "step-3", title: "Audit source coverage and confidence" })).toBe(true);
   });
 
   it("ACTION/연구 step은 QA가 아니다", () => {

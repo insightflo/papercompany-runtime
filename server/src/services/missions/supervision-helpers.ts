@@ -216,12 +216,12 @@ export interface DagStepLike {
   type?: string;
 }
 
-/** step이 QA/검수 계열인지(step id 접두 qa-/validate-/verify- 또는 이름에 qa/validate/verify/review/check 계열 어근). */
+/** step이 QA/검수 계열인지(step id 접두 qa-/validate-/verify-/audit- 또는 이름에 qa/validate/verify/review/check/audit 계열 어근). */
 export function isQaLikeStep(step: DagStepLike): boolean {
   const id = step.id.toLowerCase();
-  if (id.startsWith("qa") || id.startsWith("validate") || id.startsWith("verify")) return true;
+  if (id.startsWith("qa") || id.startsWith("validate") || id.startsWith("verify") || id.startsWith("audit")) return true;
   const name = `${step.name ?? ""} ${step.title ?? ""} ${step.type ?? ""}`.toLowerCase();
-  return /\b(qa|validat\w*|verif\w*|review\w*|check\w*)/i.test(name);
+  return /\b(qa|audit\w*|validat\w*|verif\w*|review\w*|check\w*)/i.test(name);
 }
 
 /**
@@ -319,4 +319,3 @@ export function parseReworkTargetRefFromNextAction(nextAction: string | undefine
   const match = nextAction.match(REWORK_TARGET_IN_NEXT_ACTION);
   return match ? match[1]! : null;
 }
-
