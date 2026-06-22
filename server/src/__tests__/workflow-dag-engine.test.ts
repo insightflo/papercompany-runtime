@@ -5029,6 +5029,86 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(lead.issueId).toBeTruthy();
   });
 
+  it("[P4 control-flow loop] keeps downstream steps pending while audit request_changes is still recoverable", async () => {
+    heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-audit-downstream" });
+    const companyId = randomUUID();
+    const producerAgentId = randomUUID();
+    const auditAgentId = randomUUID();
+    const writerAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const producerIssueId = randomUUID();
+    const auditIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Audit Loop Downstream",
+      issuePrefix: `AD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      { id: producerAgentId, companyId, name: "Research Agent", role: "researcher", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: auditAgentId, companyId, name: "Audit Agent", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: writerAgentId, companyId, name: "Writer Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: producerAgentId, title: "Audit Back-edge Downstream Mission", status: "active" });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "audit-back-edge-downstream",
+      stepsJson: [
+        {
+          id: "collect-ai-news-evidence",
+          name: "Collect bounded evidence",
+          agentId: producerAgentId,
+          dependencies: [],
+          conditionalDependencies: [{ stepId: "audit-source-coverage", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 }],
+          description: "Collect source evidence",
+        },
+        {
+          id: "audit-source-coverage",
+          name: "Audit source coverage and confidence",
+          agentId: auditAgentId,
+          dependencies: ["collect-ai-news-evidence"],
+          description: "Audit source coverage before synthesis",
+        },
+        {
+          id: "synthesize-ai-news-report-draft",
+          name: "Synthesize AI news report draft",
+          agentId: writerAgentId,
+          dependencies: ["audit-source-coverage"],
+          description: "Write the report after audit passes",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running", startedAt: new Date("2026-06-22T05:00:00.000Z"),
+    });
+    await db.insert(issues).values([
+      { id: producerIssueId, companyId, missionId, title: "audit-back-edge-downstream: Collect bounded evidence", status: "done", assigneeAgentId: producerAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-22T05:01:00.000Z"), completedAt: new Date("2026-06-22T05:05:00.000Z") },
+      { id: auditIssueId, companyId, missionId, title: "audit-back-edge-downstream: Audit source coverage and confidence", status: "blocked", assigneeAgentId: auditAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-22T05:06:00.000Z") },
+    ]);
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "collect-ai-news-evidence", issueId: producerIssueId, status: "completed", startedAt: new Date("2026-06-22T05:01:00.000Z"), completedAt: new Date("2026-06-22T05:05:00.000Z") },
+      { workflowRunId: runId, stepId: "audit-source-coverage", issueId: auditIssueId, status: "failed", startedAt: new Date("2026-06-22T05:06:00.000Z"), completedAt: new Date("2026-06-22T05:10:00.000Z") },
+      { workflowRunId: runId, stepId: "synthesize-ai-news-report-draft", status: "pending" },
+    ]);
+    await addQaVerdictComment(auditIssueId, companyId, auditAgentId, "REQUEST_CHANGES", "2026-06-22T05:10:00.000Z");
+
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(rows.find((row) => row.stepId === "collect-ai-news-evidence")!).toMatchObject({
+      status: "pending",
+      iterationIndex: 1,
+    });
+    expect(rows.find((row) => row.stepId === "synthesize-ai-news-report-draft")!).toMatchObject({
+      status: "pending",
+      issueId: null,
+    });
+  });
+
   it("[P4 control-flow loop] cascades skips after QA cap exhaustion so the workflow fails instead of hanging pending", async () => {
     const companyId = randomUUID();
     const producerAgentId = randomUUID();

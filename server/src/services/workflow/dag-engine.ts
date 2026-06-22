@@ -14,6 +14,7 @@ import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
+import { isQaLikeStep } from "../missions/supervision-helpers.js";
 import { logActivity } from "../activity-log.js";
 import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/types.js";
 import {
@@ -577,6 +578,8 @@ function isValidationGateCandidate(input: {
     return false;
   }
 
+  if (input.step && isQaLikeStep(input.step)) return true;
+
   const text = [
     input.issueTitle,
     input.step?.id,
@@ -590,7 +593,7 @@ function isValidationGateCandidate(input: {
 
   return (
     /^\s*\[QA\]/iu.test(text) ||
-    /\b(QA|validator|validation|validate)\b/iu.test(text) ||
+    /\b(QA|audit|auditor|validator|validation|validate|verify|review|check)\b/iu.test(text) ||
     text.includes("검증")
   );
 }
