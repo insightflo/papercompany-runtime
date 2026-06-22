@@ -2278,7 +2278,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       workflowRunId: runId,
       stepId: "collect-ai-news-evidence",
       stepName: "TechCrunch AI 데일리 브리핑",
-      toolNames: [],
+      toolNames: ["techcrunch-ai-scan"],
     });
     expect(heartbeatWakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
       source: "assignment",

@@ -430,11 +430,7 @@ export async function getWorkflowStepExecutionContractForIssue(
 
   const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-  const rawStep = step as (WorkflowStep & { agentName?: unknown; type?: unknown }) | undefined;
-  const stepType = typeof rawStep?.type === "string" ? rawStep.type.trim().toLowerCase() : "";
-  const agentName = typeof rawStep?.agentName === "string" ? rawStep.agentName.trim() : "";
-  const isAgentBackedStep = stepType === "agent" || agentName.length > 0;
-  const toolNames = !isAgentBackedStep && Array.isArray(step?.toolNames)
+  const toolNames = Array.isArray(step?.toolNames)
     ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
 
