@@ -898,7 +898,7 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
-  it("blocks a validation issue when a successful checked-out run ends with REQUEST_CHANGES in Codex stdout", async () => {
+  it("blocks an audit issue when a successful checked-out run ends with REQUEST_CHANGES in Codex stdout", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -915,7 +915,7 @@ describe("heartbeat context budget preflight", () => {
       {
         id: agentId,
         companyId,
-        name: "Readability Validator",
+      name: "Source Audit Agent",
         role: "qa",
         status: "active",
         adapterType: "codex_local",
@@ -947,7 +947,7 @@ describe("heartbeat context budget preflight", () => {
       companyId,
       missionId,
       identifier: "PAP-VAL",
-      title: "Validate beginner readability",
+      title: "Audit source coverage and confidence",
       status: "in_progress",
       assigneeAgentId: agentId,
       originKind: "workflow_execution",

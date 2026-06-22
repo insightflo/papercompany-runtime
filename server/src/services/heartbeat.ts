@@ -693,7 +693,7 @@ function canApplyRequestChangesValidationGate(issue: {
   const title = issue.title?.trim() ?? "";
   return (
     /^\s*\[QA\]/iu.test(title) ||
-    /\b(QA|validator|validation|validate)\b/iu.test(title) ||
+    /\b(QA|audit|auditor|validator|validation|validate|verify|review|check)\b/iu.test(title) ||
     title.includes("검증")
   );
 }
