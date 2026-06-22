@@ -11,6 +11,7 @@ import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { missionService } from "../missions.js";
+import { isQaLikeStep, synthesizeQaReworkBackEdge } from "../missions/supervision-helpers.js";
 import {
   createWorkflowDefinition,
   claimWorkflowRunSlot,
@@ -51,21 +52,32 @@ type WorkflowStepLike = WorkflowStep & {
   agentName?: unknown;
 };
 
+function synthesizeWorkflowQaReworkBackEdges(steps: WorkflowStep[]): WorkflowStep[] {
+  return steps
+    .filter((step) => isQaLikeStep(step) && step.dependencies.length > 0)
+    .reduce(
+      (nextSteps, qaStep) => synthesizeQaReworkBackEdge(nextSteps, qaStep.id),
+      steps,
+    );
+}
+
 function normalizeWorkflowSteps(
   steps: unknown[],
   options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown } = {},
 ): WorkflowStep[] {
   const normalizedSteps = steps.map((rawStep) => {
     const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as WorkflowStepLike;
+    const { conditionalDependencies: _rawConditionalDependencies, ...stepWithoutRawConditionalDependencies } = step;
     const normalized = normalizeWorkflowStepsForExecution([step])[0]!;
     const toolNames = normalized.toolNames;
 
     return {
-      ...step,
+      ...stepWithoutRawConditionalDependencies,
       id: normalized.id,
       name: normalized.name,
       agentId: normalized.agentId,
       dependencies: normalized.dependencies,
+      ...(normalized.conditionalDependencies ? { conditionalDependencies: normalized.conditionalDependencies } : {}),
       ...(toolNames ? { toolNames } : {}),
     };
   });
@@ -73,9 +85,11 @@ function normalizeWorkflowSteps(
   const dynamicOwnerPlan = options.executionMode === "dynamic_owner_plan"
     || options.dynamicPlanBootstrapOnly === true
     || options.dynamicPlanBootstrapOnly === "true";
-  if (!dynamicOwnerPlan) return normalizedSteps;
+  const stepsWithQaLoops = synthesizeWorkflowQaReworkBackEdges(normalizedSteps);
 
-  return normalizedSteps.map((step) => {
+  if (!dynamicOwnerPlan) return stepsWithQaLoops;
+
+  return stepsWithQaLoops.map((step) => {
     if (step.triggerOn === "escalation" || step.dependencies.length > 0) return step;
     return {
       ...step,
