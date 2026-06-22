@@ -4845,6 +4845,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const [producerIssue] = await db.select().from(issues).where(eq(issues.id, producerIssueId));
     expect(producerIssue.status).toBe("todo");
     expect(producerIssue.completedAt).toBeNull();
+    const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
+    const producerCommentBody = producerComments.map((comment) => comment.body).join("\n");
+    expect(producerCommentBody).toContain("Workflow QA rework request");
+    expect(producerCommentBody).toContain("qa-validate");
+    expect(producerCommentBody).toContain("Decision: REQUEST_CHANGES");
     // producer 가 재실행(wake) 됐다.
     expect(heartbeatWakeup).toHaveBeenCalled();
     // QA 는 이 sync 에서 리셋하지 않는다(producer 가 아직 재완료 전이라 validation-recheck 도 미발화).

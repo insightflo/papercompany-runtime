@@ -28,9 +28,9 @@
  *     재호출하지 않으므로 1 sync = (step 당) 최대 1 리셋.
  */
 
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { workflowStepRuns } from "@paperclipai/db";
+import { issueComments, workflowStepRuns } from "@paperclipai/db";
 import {
   conditionalEdgeHolds,
   resolveEdges,
@@ -51,6 +51,7 @@ interface LoopRun {
 }
 
 const TERMINAL_STEP_RUN_STATUSES = new Set(["completed", "failed", "skipped"]);
+const REQUEST_CHANGES_PATTERN = /\bREQUEST[_\s-]?CHANGES\b|request\s+changes/i;
 
 export interface ApplyBackEdgeReworkInput {
   db: Db;
@@ -68,6 +69,53 @@ export interface ApplyBackEdgeReworkInput {
 export interface ApplyBackEdgeReworkResult {
   stepRuns: StepRun[];
   reworkedCount: number;
+}
+
+function truncateFeedback(body: string, maxLength = 4000): string {
+  return body.length <= maxLength ? body : `${body.slice(0, maxLength)}\n\n[truncated]`;
+}
+
+async function loadQaReworkFeedback(input: {
+  db: Db;
+  qaIssueId: string | null;
+}): Promise<string | null> {
+  if (!input.qaIssueId) return null;
+  const rows = await input.db
+    .select({ body: issueComments.body, createdAt: issueComments.createdAt })
+    .from(issueComments)
+    .where(eq(issueComments.issueId, input.qaIssueId))
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+    .limit(5);
+  if (rows.length === 0) return null;
+  const requestChangeRows = rows.filter((row) => REQUEST_CHANGES_PATTERN.test(row.body));
+  const selectedRows = requestChangeRows.length > 0 ? requestChangeRows : rows.slice(0, 1);
+  return selectedRows
+    .map((row) => {
+      const createdAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : "unknown-time";
+      return `### QA feedback at ${createdAt}\n${truncateFeedback(row.body)}`;
+    })
+    .join("\n\n");
+}
+
+function buildProducerReworkComment(input: {
+  producerStepId: string;
+  qaStepId: string;
+  qaIssueId: string | null;
+  currentIteration: number;
+  maxIterations: number;
+  feedback: string | null;
+}): string {
+  return [
+    "## Workflow QA rework request",
+    "",
+    `QA step \`${input.qaStepId}\` requested changes, so producer step \`${input.producerStepId}\` was reset for rework.`,
+    `- QA issue: ${input.qaIssueId ?? "unknown"}`,
+    `- Rework iteration: ${input.currentIteration + 1}/${input.maxIterations}`,
+    "- Required: update the registered deliverable to address the QA feedback, then re-register or update the workProduct before marking done.",
+    "- Do not close this issue as already complete unless the requested changes are actually reflected in the deliverable.",
+    "",
+    input.feedback ?? "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.",
+  ].join("\n");
 }
 
 /**
@@ -117,6 +165,8 @@ export async function applyBackEdgeReworkPass(
       verdict: predFacts?.verdict === "pass" ? "pass" : "request_changes",
       completedAt: new Date().toISOString(),
     };
+    const qaStepRun = stepRunMap.get(firingEdge.stepId);
+    const qaFeedback = await loadQaReworkFeedback({ db, qaIssueId: qaStepRun?.issueId ?? null });
 
     await resetStepRunForRework({
       db,
@@ -125,6 +175,20 @@ export async function applyBackEdgeReworkPass(
       attempt,
       reason: `qa_request_changes(back-edge ${step.id}←${firingEdge.stepId}, iteration ${currentIteration}/${maxIterations})`,
     });
+    if (stepRun.issueId) {
+      await db.insert(issueComments).values({
+        companyId: run.companyId,
+        issueId: stepRun.issueId,
+        body: buildProducerReworkComment({
+          producerStepId: step.id,
+          qaStepId: firingEdge.stepId,
+          qaIssueId: qaStepRun?.issueId ?? null,
+          currentIteration,
+          maxIterations,
+          feedback: qaFeedback,
+        }),
+      });
+    }
     reworkedCount += 1;
   }
 
