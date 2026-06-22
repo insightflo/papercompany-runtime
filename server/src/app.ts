@@ -486,6 +486,15 @@ export async function createApp(
       allowedHostnames: opts.allowedHostnames,
     }),
   );
+  app.use((req, res, next) => {
+    if (req.path !== "/plugins/tools/execute") {
+      next();
+      return;
+    }
+    const queryIndex = req.originalUrl.indexOf("?");
+    req.url = `/plugins/tools/execute${queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : ""}`;
+    api(req, res, next);
+  });
   app.use("/api", api);
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "API route not found" });
