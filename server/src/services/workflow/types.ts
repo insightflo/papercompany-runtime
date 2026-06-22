@@ -177,6 +177,7 @@ export interface WorkflowStepExecutionContract {
   stepId: string;
   stepName: string;
   toolNames: string[];
+  toolArgs: unknown;
   knowledgeBaseIds: string[];
 }
 

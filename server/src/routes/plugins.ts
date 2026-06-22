@@ -25,7 +25,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, pluginEntities, pluginLogs, pluginWebhookDeliveries } from "@paperclipai/db";
+import { companies, heartbeatRuns, pluginEntities, pluginLogs, pluginWebhookDeliveries } from "@paperclipai/db";
 import type {
   PluginStatus,
   PaperclipPluginManifestV1,
@@ -357,6 +357,29 @@ interface PluginToolExecuteRequest {
   parameters?: unknown;
   /** Agent run context. */
   runContext: ToolRunContext;
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+}
+
+function workflowToolContractAllowsTool(contextSnapshot: unknown, toolName: string): boolean {
+  const context = readObject(contextSnapshot);
+  const contract = readObject(context.paperclipWorkflowStepToolContract);
+  const tools = Array.isArray(contract.tools)
+    ? contract.tools.filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object" && !Array.isArray(entry))
+    : [];
+  const allowedToolNames = new Set([
+    ...readStringArray(contract.toolNames),
+    ...tools.map((tool) => typeof tool.name === "string" ? tool.name.trim() : "").filter(Boolean),
+  ]);
+  return allowedToolNames.has(toolName);
 }
 
 /**
@@ -1061,8 +1084,6 @@ export function pluginRoutes(
    * - 502 if the plugin worker is unavailable or the RPC call fails
    */
   router.post("/plugins/tools/execute", async (req, res) => {
-    assertBoard(req);
-
     if (!toolDeps) {
       res.status(501).json({ error: "Plugin tool dispatch is not enabled" });
       return;
@@ -1095,6 +1116,33 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, runContext.companyId);
+    if (req.actor.type === "agent") {
+      if (req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId) {
+        res.status(403).json({ error: "Agent can only execute workflow tools for its own company run context" });
+        return;
+      }
+      const run = await db
+        .select({
+          id: heartbeatRuns.id,
+          agentId: heartbeatRuns.agentId,
+          companyId: heartbeatRuns.companyId,
+          contextSnapshot: heartbeatRuns.contextSnapshot,
+        })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runContext.runId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!run || run.agentId !== req.actor.agentId || run.companyId !== req.actor.companyId) {
+        res.status(403).json({ error: "Agent run context is not valid for tool execution" });
+        return;
+      }
+      if (!workflowToolContractAllowsTool(run.contextSnapshot, tool)) {
+        res.status(403).json({ error: `Workflow tool "${tool}" is not allowed for this agent run` });
+        return;
+      }
+    } else {
+      assertBoard(req);
+    }
 
     // Verify the tool exists
     const registeredTool = toolDeps.toolDispatcher.getTool(tool);

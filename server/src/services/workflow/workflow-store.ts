@@ -441,6 +441,7 @@ export async function getWorkflowStepExecutionContractForIssue(
     stepId: row.stepRun.stepId,
     stepName: step?.name ?? row.stepRun.stepId,
     toolNames,
+    toolArgs: (step as { toolArgs?: unknown } | undefined)?.toolArgs ?? {},
     knowledgeBaseIds: Array.isArray(step?.knowledgeBaseIds)
       ? step.knowledgeBaseIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [],

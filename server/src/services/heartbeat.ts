@@ -296,6 +296,7 @@ type WorkflowStepToolContext = {
   stepId: string;
   stepName: string;
   toolNames: string[];
+  toolArgs: unknown;
   tools: Array<{
     name: string;
     description: string;
@@ -380,6 +381,7 @@ async function resolveWorkflowStepToolContext(input: {
     stepId: contract.stepId,
     stepName: contract.stepName,
     toolNames: contract.toolNames,
+    toolArgs: contract.toolArgs,
     tools: contract.toolNames
       .map((toolName) => definitionByName.get(toolName))
       .filter((definition): definition is NonNullable<typeof definition> => Boolean(definition))

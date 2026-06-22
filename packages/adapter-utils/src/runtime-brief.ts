@@ -25,6 +25,14 @@ function truncateBriefLine(value: string, max = 260) {
   return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized;
 }
 
+function stringifyBriefJson(value: unknown, max = 1_000) {
+  try {
+    return truncateBriefLine(JSON.stringify(value ?? {}), max);
+  } catch {
+    return "{}";
+  }
+}
+
 function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null) {
   if (!contract || Object.keys(contract).length === 0) return null;
 
@@ -44,13 +52,16 @@ function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null
         return `- Tool: ${name}${description ? ` — ${truncateBriefLine(description, 180)}` : ""}`;
       })
     : (toolNames.length > 0 ? [`- Tools: ${toolNames.join(", ")}`] : []);
+  const defaultParameters = stringifyBriefJson(contract.toolArgs ?? {});
+  const primaryToolName = toolNames[0] ?? "<registered-tool-name>";
 
   return joinPromptSections([
     "Workflow tool-call contract:",
     asString(contract.stepName) ? `Step: ${asString(contract.stepName)}` : asString(contract.stepId) ? `Step: ${asString(contract.stepId)}` : null,
     toolNames.length > 0 ? `Allowed workflow tools: ${toolNames.join(", ")}` : null,
     ...toolLines,
-    'Exact generic executor invocation shape: {"toolName":"<registered-tool-name>","args":{...}}',
+    `Default parameters: ${defaultParameters}`,
+    `Agent HTTP invocation: POST $PAPERCLIP_API_BASE_URL/plugins/tools/execute with Authorization: Bearer $PAPERCLIP_API_KEY and JSON {"tool":"${primaryToolName}","parameters":${defaultParameters},"runContext":{"agentId":"$PAPERCLIP_AGENT_ID","runId":"$PAPERCLIP_RUN_ID","companyId":"$PAPERCLIP_COMPANY_ID"}}.`,
   ], "\n");
 }
 

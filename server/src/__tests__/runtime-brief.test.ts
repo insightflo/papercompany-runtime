@@ -10,6 +10,7 @@ describe("buildPaperclipRuntimeBrief", () => {
         stepId: "collect",
         stepName: "Collect Tech Scout Top25",
         toolNames: ["generic-cli-executor"],
+        toolArgs: { toolName: "daily-tech-scout", args: { limit: 25 } },
         tools: [
           {
             name: "generic-cli-executor",
@@ -43,7 +44,9 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Workflow tool-call contract:");
     expect(brief).toContain("Step: Collect Tech Scout Top25");
     expect(brief).toContain("generic-cli-executor");
-    expect(brief).toContain('{"toolName":"<registered-tool-name>","args":{...}}');
+    expect(brief).toContain('Default parameters: {"toolName":"daily-tech-scout","args":{"limit":25}}');
+    expect(brief).toContain("POST $PAPERCLIP_API_BASE_URL/plugins/tools/execute");
+    expect(brief).toContain("Authorization: Bearer $PAPERCLIP_API_KEY");
     expect(brief).toContain("Recent issue comments:");
     expect(brief).toContain("Use generic-cli-executor with toolName=daily-tech-scout");
   });

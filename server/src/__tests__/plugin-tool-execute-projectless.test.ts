@@ -31,22 +31,33 @@ function createApp(toolDispatcher: {
   listToolsForAgent: ReturnType<typeof vi.fn>;
   getTool: ReturnType<typeof vi.fn>;
   executeTool: ReturnType<typeof vi.fn>;
-}) {
+}, options: {
+  actor?: Record<string, unknown>;
+  dbRows?: unknown[];
+} = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.actor = {
+    req.actor = (options.actor ?? {
       type: "board",
       userId: "board-user-1",
       companyIds: ["company-1"],
       source: "session",
-    };
+    }) as never;
     next();
   });
+  const query = {
+    from: vi.fn(() => query),
+    where: vi.fn(() => query),
+    limit: vi.fn(() => Promise.resolve(options.dbRows ?? [])),
+  };
+  const db = {
+    select: vi.fn(() => query),
+  };
   app.use(
     "/api",
     pluginRoutes(
-      {} as never,
+      db as never,
       {} as never,
       undefined,
       undefined,
@@ -94,6 +105,66 @@ describe("plugin tool execution projectless run context", () => {
       { topic: "Oklo SMR" },
       runContext,
     );
+  });
+
+  it("allows an agent to execute a workflow tool allowed by its current run contract", async () => {
+    const toolDispatcher = {
+      listToolsForAgent: vi.fn(),
+      getTool: vi.fn().mockReturnValue({ namespacedName: "daily-tech-scout" }),
+      executeTool: vi.fn().mockResolvedValue({ content: "ok" }),
+    };
+    const runContext = { agentId: "agent-1", runId: "run-1", companyId: "company-1" };
+
+    const res = await request(createApp(toolDispatcher, {
+      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      dbRows: [{
+        id: "run-1",
+        agentId: "agent-1",
+        companyId: "company-1",
+        contextSnapshot: {
+          paperclipWorkflowStepToolContract: {
+            toolNames: ["daily-tech-scout"],
+            tools: [{ name: "daily-tech-scout" }],
+          },
+        },
+      }],
+    }))
+      .post("/api/plugins/tools/execute")
+      .send({ tool: "daily-tech-scout", parameters: { limit: 25 }, runContext });
+
+    expect(res.status).toBe(200);
+    expect(toolDispatcher.executeTool).toHaveBeenCalledWith("daily-tech-scout", { limit: 25 }, runContext);
+  });
+
+  it("rejects an agent executing a tool outside its workflow run contract", async () => {
+    const toolDispatcher = {
+      listToolsForAgent: vi.fn(),
+      getTool: vi.fn().mockReturnValue({ namespacedName: "manual-publisher" }),
+      executeTool: vi.fn(),
+    };
+
+    const res = await request(createApp(toolDispatcher, {
+      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      dbRows: [{
+        id: "run-1",
+        agentId: "agent-1",
+        companyId: "company-1",
+        contextSnapshot: {
+          paperclipWorkflowStepToolContract: {
+            toolNames: ["daily-tech-scout"],
+          },
+        },
+      }],
+    }))
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "manual-publisher",
+        parameters: {},
+        runContext: { agentId: "agent-1", runId: "run-1", companyId: "company-1" },
+      });
+
+    expect(res.status).toBe(403);
+    expect(toolDispatcher.executeTool).not.toHaveBeenCalled();
   });
 
   it("still requires agentId, runId, and companyId", async () => {
