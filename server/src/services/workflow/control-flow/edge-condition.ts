@@ -35,11 +35,15 @@ const TERMINAL_PRED_STATUSES: ReadonlySet<PredStatus> = new Set(["completed", "f
  * - status: 선행 stepRun.status.
  * - isQaGate: isValidationGateCandidate(step) 결과(qa_request_changes 평가용).
  * - verdict: P4 에서만 공급. P2 에선 null → status 기반 fallback.
+ * - verdictChecked: verdict 원천 맵이 제공됐는지(P4=true / P2=undefined). true 면 verdict=null 을
+ *   "조사했으나 REQUEST_CHANGES 판정이 없음(infra/알 수 없는 실패)"으로 해석해 rework 를 발화하지 않는다.
+ *   undefined(P2)면 기존 fallback(QA gate && failed)을 유지해 legacy 동작을 보존한다.
  */
 export interface PredFacts {
   status: PredStatus;
   isQaGate: boolean;
   verdict: "pass" | "request_changes" | null;
+  verdictChecked?: boolean;
 }
 
 /**
@@ -95,8 +99,16 @@ function edgeHolds(when: ConditionalEdgeWhen | undefined, pred: PredFacts): bool
       // classifyStepActivation 의 hardRequiredFailed 가 전체 runnable 을 거부한다(최소놀람: success 게이트가 우선).
       return true;
     case "qa_request_changes":
-      // P4: pred.verdict==="request_changes". P2: verdict 미지속 → QA gate && status:failed 로 평가.
-      if (pred.verdict != null) return pred.verdict === "request_changes";
+      // P4 정밀 평가: 실제 REQUEST_CHANGES 판정일 때만 발화. PASS 면 발화 안 함.
+      if (pred.verdict === "request_changes") return true;
+      if (pred.verdict === "pass") return false;
+      // verdict === null
+      if (pred.verdictChecked) {
+        // P4: verdict 원천 맵이 제공됐으나 이 이슈에 REQUEST_CHANGES 판정이 없음 → infra/알 수 없는 실패.
+        // rework(producer 되돌림)가 아니라 hard failure 로 취급. generic/infra 실패 loop 방지 핵심 분기.
+        return false;
+      }
+      // P2(맵 미제공): verdict 를 알 수 없으므로 기존 fallback(QA gate && failed) 유지.
       return pred.isQaGate && pred.status === "failed";
     default:
       return false;

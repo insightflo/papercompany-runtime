@@ -21,7 +21,7 @@ import {
  */
 
 function preds(
-  input: Record<string, { status: PredStatus; isQaGate?: boolean; verdict?: "pass" | "request_changes" | null }>,
+  input: Record<string, { status: PredStatus; isQaGate?: boolean; verdict?: "pass" | "request_changes" | null; verdictChecked?: boolean }>,
 ): Map<string, PredFacts> {
   const map = new Map<string, PredFacts>();
   for (const [id, value] of Object.entries(input)) {
@@ -29,6 +29,7 @@ function preds(
       status: value.status,
       isQaGate: value.isQaGate ?? false,
       verdict: value.verdict ?? null,
+      verdictChecked: value.verdictChecked,
     });
   }
   return map;
@@ -112,6 +113,13 @@ describe("classifyStepActivation — conditional edge (IF)", () => {
     // verdict 명시(P4 호환): request_changes 만 발화
     expect(classifyStepActivation(s, preds({ qa: { status: "failed", isQaGate: true, verdict: "request_changes" } })).runnable).toBe(true);
     expect(classifyStepActivation(s, preds({ qa: { status: "completed", isQaGate: true, verdict: "pass" } })).skippable).toBe(true);
+  });
+  it("when:qa_request_changes — P4 정밀: verdictChecked + 판정 없음(infra 실패) → rework 발화 안 함", () => {
+    const s = step("c", { conditionalDependencies: [{ stepId: "qa", when: "qa_request_changes" }] });
+    // 핵심 회귀: QA gate 이 infra(판정 없음)로 실패해도 producer rework(runnable) 가 발화하지 않는다.
+    expect(classifyStepActivation(s, preds({ qa: { status: "failed", isQaGate: true, verdictChecked: true } })).runnable).toBe(false);
+    // 대조: P2(맵 미제공, verdictChecked 생략)는 기존 fallback 유지 → 여전히 rework 발화.
+    expect(classifyStepActivation(s, preds({ qa: { status: "failed", isQaGate: true } })).runnable).toBe(true);
   });
 });
 

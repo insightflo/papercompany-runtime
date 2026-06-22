@@ -1207,6 +1207,9 @@ function buildPredFactsMap(
       status: (run?.status ?? "pending") as PredStatus,
       isQaGate: isValidationGateCandidate({ step }),
       verdict: liveVerdict,
+      // validationVerdictsByIssueId 맵이 제공됐으면(P4) verdictChecked=true. 맵에 이 이슈가 없으면
+      // liveVerdict=null 이고 edge-condition 은 이를 "조사했으나 판정 없음(infra 실패)"으로 해석한다.
+      verdictChecked: validationVerdictsByIssueId !== undefined,
     });
   }
   return facts;
