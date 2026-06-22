@@ -4795,7 +4795,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           agentId: producerAgentId,
           dependencies: [],
           conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: opts.maxIterations }],
-          description: "Produce the artifact",
+          description: "Produce the artifact. Do not validate your own output.",
         },
         { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
       ],

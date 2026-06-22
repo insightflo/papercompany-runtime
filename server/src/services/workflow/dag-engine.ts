@@ -586,7 +586,6 @@ function isValidationGateCandidate(input: {
     input.step?.name,
     input.step?.title,
     input.step?.type,
-    input.step?.description,
   ]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
