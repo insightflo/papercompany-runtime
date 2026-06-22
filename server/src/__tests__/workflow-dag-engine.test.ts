@@ -4995,6 +4995,81 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(lead.issueId).toBeTruthy();
   });
 
+  it("[P4 control-flow loop] cascades skips after QA cap exhaustion so the workflow fails instead of hanging pending", async () => {
+    const companyId = randomUUID();
+    const producerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const leadAgentId = randomUUID();
+    const htmlAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const producerIssueId = randomUUID();
+    const qaIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Control Flow Loop Exhausted Cascade",
+      issuePrefix: `LX${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      { id: producerAgentId, companyId, name: "Producer Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: qaAgentId, companyId, name: "QA Validator Agent", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: leadAgentId, companyId, name: "Lead Agent", role: "lead", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: htmlAgentId, companyId, name: "HTML Agent", role: "publisher", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: producerAgentId, title: "Back-edge Exhausted Cascade Mission", status: "active" });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "back-edge-exhausted-cascade",
+      stepsJson: [
+        {
+          id: "produce",
+          name: "Produce artifact",
+          agentId: producerAgentId,
+          dependencies: [],
+          conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: 1 }],
+          description: "Produce the artifact",
+        },
+        { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "lead-approval", name: "Lead approval", agentId: leadAgentId, dependencies: ["qa-validate"], description: "Approve validated artifact" },
+        { id: "build-html", name: "Build HTML", agentId: htmlAgentId, dependencies: ["lead-approval"], description: "Build HTML artifact" },
+        { id: "publish-html", name: "Publish HTML", agentId: htmlAgentId, dependencies: ["build-html"], description: "Publish HTML artifact" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running", startedAt: new Date("2026-06-18T09:00:00.000Z"),
+    });
+    await db.insert(issues).values([
+      { id: producerIssueId, companyId, missionId, title: "back-edge-exhausted-cascade: Produce artifact", status: "done", assigneeAgentId: producerAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T09:01:00.000Z"), completedAt: new Date("2026-06-18T09:05:00.000Z") },
+      { id: qaIssueId, companyId, missionId, title: "back-edge-exhausted-cascade: Validate the produced artifact", status: "blocked", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T09:03:00.000Z") },
+    ]);
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "produce", issueId: producerIssueId, status: "completed", iterationIndex: 1, startedAt: new Date("2026-06-18T09:01:00.000Z"), completedAt: new Date("2026-06-18T09:05:00.000Z") },
+      { workflowRunId: runId, stepId: "qa-validate", issueId: qaIssueId, status: "failed", startedAt: new Date("2026-06-18T09:03:00.000Z"), completedAt: new Date("2026-06-18T09:10:00.000Z") },
+      { workflowRunId: runId, stepId: "lead-approval", status: "pending" },
+      { workflowRunId: runId, stepId: "build-html", status: "pending" },
+      { workflowRunId: runId, stepId: "publish-html", status: "pending" },
+    ]);
+    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T09:10:00.000Z");
+
+    await syncWorkflowRunForIssue(db, qaIssueId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(rows.find((row) => row.stepId === "produce")!).toMatchObject({
+      status: "completed",
+      iterationIndex: 1,
+    });
+    expect(rows.find((row) => row.stepId === "qa-validate")!.status).toBe("failed");
+    expect(rows.find((row) => row.stepId === "lead-approval")!.status).toBe("skipped");
+    expect(rows.find((row) => row.stepId === "build-html")!.status).toBe("skipped");
+    expect(rows.find((row) => row.stepId === "publish-html")!.status).toBe("skipped");
+    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(run.status).toBe("failed");
+  });
+
   it("[P4 control-flow loop] bounded failure: cap exhausted with persistent QA reject → workflow fails (no infinite loop)", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-fail" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 1 });

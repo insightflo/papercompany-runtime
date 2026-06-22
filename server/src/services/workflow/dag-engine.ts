@@ -2080,22 +2080,26 @@ export async function syncWorkflowRunState(
     )
     : new Map<string, ValidationVerdictObservation>();
   if (hasConditionalEdges && context.run.status !== "cancelled") {
-    const skipRunMap = buildStepRunMap(stepRuns);
-    const skipPredsByStepId = buildPredFactsMap(context.steps, skipRunMap, validationVerdictsByIssueId);
-    const skippableSteps = findSkippableSteps(context.steps, skipPredsByStepId, {
-      launchedStepIds: dynamicLaunchStepIds,
-      isStepEligible: (step) => {
-        const run = skipRunMap.get(step.id);
-        if (!run || run.status !== "pending" || run.issueId != null) return false;
-        return !hasRecoverableQaRequestChangesDependency(
-          step,
-          context.steps,
-          skipRunMap,
-          validationVerdictsByIssueId,
-        );
-      },
-    });
-    if (skippableSteps.length > 0) {
+    let skippedInPass = 0;
+    do {
+      const skipRunMap = buildStepRunMap(stepRuns);
+      const skipPredsByStepId = buildPredFactsMap(context.steps, skipRunMap, validationVerdictsByIssueId);
+      const skippableSteps = findSkippableSteps(context.steps, skipPredsByStepId, {
+        launchedStepIds: dynamicLaunchStepIds,
+        isStepEligible: (step) => {
+          const run = skipRunMap.get(step.id);
+          if (!run || run.status !== "pending" || run.issueId != null) return false;
+          return !hasRecoverableQaRequestChangesDependency(
+            step,
+            context.steps,
+            skipRunMap,
+            validationVerdictsByIssueId,
+          );
+        },
+      });
+      skippedInPass = skippableSteps.length;
+      if (skippedInPass === 0) break;
+
       const now = new Date();
       for (const step of skippableSteps) {
         const stepRun = skipRunMap.get(step.id);
@@ -2116,7 +2120,7 @@ export async function syncWorkflowRunState(
         .select()
         .from(workflowStepRuns)
         .where(eq(workflowStepRuns.workflowRunId, runId));
-    }
+    } while (skippedInPass > 0);
   }
 
   // [IF/loop P4] back-edge rework pass — QA request_changes 로 발화한 back-edge 의 타겟(producer) 을
