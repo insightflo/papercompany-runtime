@@ -4912,7 +4912,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const runId = randomUUID();
     const missionId = randomUUID();
     const producerIssueId = randomUUID();
-    const qaIssueId = randomUUID();
+    const claimsQaIssueId = randomUUID();
+    const readabilityQaIssueId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -4936,11 +4937,15 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           name: "Produce artifact",
           agentId: producerAgentId,
           dependencies: [],
-          conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 }],
+          conditionalDependencies: [
+            { stepId: "qa-claims", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+            { stepId: "qa-readability", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+          ],
           description: "Produce the artifact",
         },
-        { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
-        { id: "lead-approval", name: "Lead approval", agentId: leadAgentId, dependencies: ["qa-validate"], description: "Approve validated artifact" },
+        { id: "qa-claims", name: "Validate the produced artifact claims", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "qa-readability", name: "Validate the produced artifact readability", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "lead-approval", name: "Lead approval", agentId: leadAgentId, dependencies: ["qa-claims", "qa-readability"], description: "Approve validated artifact" },
       ],
     });
     await db.insert(workflowRuns).values({
@@ -4948,14 +4953,17 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
     await db.insert(issues).values([
       { id: producerIssueId, companyId, missionId, title: "back-edge-downstream: Produce artifact", status: "done", assigneeAgentId: producerAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T08:01:00.000Z"), completedAt: new Date("2026-06-18T08:05:00.000Z") },
-      { id: qaIssueId, companyId, missionId, title: "back-edge-downstream: Validate the produced artifact", status: "blocked", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T08:03:00.000Z") },
+      { id: claimsQaIssueId, companyId, missionId, title: "back-edge-downstream: Validate the produced artifact claims", status: "done", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T08:03:00.000Z"), completedAt: new Date("2026-06-18T08:09:00.000Z") },
+      { id: readabilityQaIssueId, companyId, missionId, title: "back-edge-downstream: Validate the produced artifact readability", status: "blocked", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T08:03:00.000Z") },
     ]);
     await db.insert(workflowStepRuns).values([
       { workflowRunId: runId, stepId: "produce", issueId: producerIssueId, status: "completed", startedAt: new Date("2026-06-18T08:01:00.000Z"), completedAt: new Date("2026-06-18T08:05:00.000Z") },
-      { workflowRunId: runId, stepId: "qa-validate", issueId: qaIssueId, status: "failed", startedAt: new Date("2026-06-18T08:03:00.000Z"), completedAt: new Date("2026-06-18T08:10:00.000Z") },
+      { workflowRunId: runId, stepId: "qa-claims", issueId: claimsQaIssueId, status: "completed", startedAt: new Date("2026-06-18T08:03:00.000Z"), completedAt: new Date("2026-06-18T08:09:00.000Z") },
+      { workflowRunId: runId, stepId: "qa-readability", issueId: readabilityQaIssueId, status: "failed", startedAt: new Date("2026-06-18T08:03:00.000Z"), completedAt: new Date("2026-06-18T08:10:00.000Z") },
       { workflowRunId: runId, stepId: "lead-approval", status: "pending" },
     ]);
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T08:10:00.000Z");
+    await addQaVerdictComment(claimsQaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:09:00.000Z");
+    await addQaVerdictComment(readabilityQaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T08:10:00.000Z");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -4977,9 +4985,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }).where(eq(issues.id, producerIssueId));
     await syncWorkflowRunForIssue(db, producerIssueId);
 
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:40:00.000Z");
-    await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T08:40:00.000Z"), cancelledAt: null }).where(eq(issues.id, qaIssueId));
-    await syncWorkflowRunForIssue(db, qaIssueId);
+    await addQaVerdictComment(readabilityQaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:40:00.000Z");
+    await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T08:40:00.000Z"), cancelledAt: null }).where(eq(issues.id, readabilityQaIssueId));
+    await syncWorkflowRunForIssue(db, readabilityQaIssueId);
 
     rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     const lead = rows.find((row) => row.stepId === "lead-approval")!;

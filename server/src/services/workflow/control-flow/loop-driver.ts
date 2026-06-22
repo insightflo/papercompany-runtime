@@ -97,7 +97,8 @@ export async function applyBackEdgeReworkPass(
     // pending/running(이미 돌고있거나 대기) 은 rework 대상 아님. terminal 만.
     if (!stepRun || !TERMINAL_STEP_RUN_STATUSES.has(stepRun.status)) continue;
 
-    const firingEdge = backEdges[0]!;
+    const firingEdge = backEdges.find((edge) => conditionalEdgeHolds(edge, predsByStepId.get(edge.stepId)));
+    if (!firingEdge) continue;
     const maxIterations = firingEdge.maxIterations!;
     const currentIteration = stepRun.iterationIndex ?? 0;
 
@@ -105,7 +106,6 @@ export async function applyBackEdgeReworkPass(
     // classifyStepActivation 은 forward-gate 전용이라(P5: back-edge 제외) back-edge 발화 판정에 쓸 수 없다 —
     // 여기선 back-edge 의 when 을 직접 평가한다(conditionalEdgeHolds). live verdict 가 predFacts 에 채워져 있다.
     const predFacts = predsByStepId.get(firingEdge.stepId);
-    if (!conditionalEdgeHolds(firingEdge, predFacts)) continue;
 
     // cap: iteration_index(수행된 rework 수) 가 maxIterations 에 도달하면 더 않는다(bounded).
     if (currentIteration >= maxIterations) {
