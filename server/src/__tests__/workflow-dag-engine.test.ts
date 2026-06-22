@@ -1481,6 +1481,132 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   });
 
+  it("ignores REQUEST_CHANGES comments from before the current validator execution window", async () => {
+    const companyId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const validatorIssueId = randomUUID();
+    const toolExecutor = vi.fn().mockResolvedValue({ accepted: true });
+    setWorkflowToolStepExecutor(toolExecutor);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Validation Requeued Recovery",
+      issuePrefix: `VQ${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: validatorAgentId,
+      companyId,
+      name: "Report Validator",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: validatorAgentId,
+      title: "Daily AI news requeued recovery",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      stepsJson: [
+        {
+          id: "validate-ai-news-note",
+          name: "Validate TechCrunch AI note claims and sources",
+          agentId: validatorAgentId,
+          dependencies: [],
+        },
+        {
+          id: "send-telegram",
+          name: "Send Telegram",
+          agentId: "",
+          dependencies: ["validate-ai-news-note"],
+          type: "tool",
+          toolNames: ["send-telegram"],
+          toolArgs: { chatId: "ops" },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "board",
+      status: "running",
+      startedAt: new Date("2026-06-14T06:00:00.000Z"),
+    });
+    await db.insert(issues).values({
+      id: validatorIssueId,
+      companyId,
+      missionId,
+      title: "tech-ai-news: Validate TechCrunch AI note claims and sources",
+      status: "done",
+      assigneeAgentId: validatorAgentId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+      startedAt: new Date("2026-06-14T06:11:00.000Z"),
+      completedAt: new Date("2026-06-14T06:12:00.000Z"),
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: validatorIssueId,
+      authorAgentId: validatorAgentId,
+      createdAt: new Date("2026-06-14T06:09:00.000Z"),
+      body: "## Mission validation gate: REQUEST_CHANGES\n- Earlier execution failed before requeue.",
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "validate-ai-news-note",
+        issueId: validatorIssueId,
+        status: "failed",
+        startedAt: new Date("2026-06-14T06:11:00.000Z"),
+        completedAt: new Date("2026-06-14T06:12:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "send-telegram",
+        issueId: null,
+        status: "skipped",
+        completedAt: new Date("2026-06-14T06:10:00.000Z"),
+      },
+    ]);
+
+    const result = await syncWorkflowRunForIssue(db, validatorIssueId);
+
+    expect(result?.status).toBe("running");
+    expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
+      workflowRunId: runId,
+      stepId: "send-telegram",
+      toolName: "send-telegram",
+    }));
+    const stepRows = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")).toMatchObject({
+      status: "completed",
+      issueId: validatorIssueId,
+    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
+      status: "running",
+      issueId: null,
+    });
+  });
+
   it("creates a mission for a workflow trigger without an existing mission and links run and step issues", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

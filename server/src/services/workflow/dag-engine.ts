@@ -712,6 +712,20 @@ async function loadLatestValidationVerdicts(
   const verdicts = new Map<string, ValidationVerdictObservation>();
   if (issueIds.length === 0) return verdicts;
 
+  const issueRows = await db
+    .select({
+      id: issues.id,
+      startedAt: issues.startedAt,
+    })
+    .from(issues)
+    .where(inArray(issues.id, issueIds));
+  const minObservedAtByIssueId = new Map(issueRows.map((issue) => [issue.id, issue.startedAt ?? null]));
+  const isWithinCurrentExecutionWindow = (issueId: string | null, observedAt: Date | null): boolean => {
+    if (!issueId || !observedAt) return true;
+    const minObservedAt = minObservedAtByIssueId.get(issueId);
+    return !minObservedAt || observedAt.getTime() >= minObservedAt.getTime();
+  };
+
   const runRows = await db
     .select({
       issueId: heartbeatRuns.issueId,
@@ -726,11 +740,13 @@ async function loadLatestValidationVerdicts(
     ))
     .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
   for (const run of runRows) {
+    const observedAt = run.finishedAt ?? run.createdAt ?? null;
+    if (!isWithinCurrentExecutionWindow(run.issueId, observedAt)) continue;
     setLatestValidationVerdict(
       verdicts,
       run.issueId,
       readValidationVerdictFromHeartbeatResult(run.resultJson),
-      run.finishedAt ?? run.createdAt ?? null,
+      observedAt,
     );
   }
 
@@ -744,11 +760,13 @@ async function loadLatestValidationVerdicts(
     .where(inArray(issueComments.issueId, issueIds))
     .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
   for (const comment of commentRows) {
+    const observedAt = comment.createdAt ?? null;
+    if (!isWithinCurrentExecutionWindow(comment.issueId, observedAt)) continue;
     setLatestValidationVerdict(
       verdicts,
       comment.issueId,
       readExplicitValidationVerdict(comment.body),
-      comment.createdAt ?? null,
+      observedAt,
     );
   }
   return verdicts;
