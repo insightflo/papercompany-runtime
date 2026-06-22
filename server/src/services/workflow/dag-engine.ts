@@ -659,6 +659,7 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
     result.outcome,
     result.status,
     result.result,
+    ...extractCodexTaskCompleteMessages(typeof result.stdout === "string" ? result.stdout : null),
   ];
 
   for (const candidate of candidates) {
@@ -667,6 +668,36 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
     if (verdict) return verdict;
   }
   return null;
+}
+
+function extractCodexTaskCompleteMessages(stdout: string | null): string[] {
+  if (!stdout) return [];
+  const messages: string[] = [];
+  for (const line of stdout.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = normalizeRecord(parsed);
+    if (record.type === "task_complete") {
+      const payload = normalizeRecord(record.payload);
+      if (typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()) {
+        messages.push(payload.last_agent_message);
+      }
+      continue;
+    }
+    if (record.type === "item.completed") {
+      const item = normalizeRecord(record.item);
+      if (item.type === "agent_message" && typeof item.text === "string" && item.text.trim()) {
+        messages.push(item.text);
+      }
+    }
+  }
+  return messages.reverse();
 }
 
 /**

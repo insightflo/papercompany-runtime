@@ -898,6 +898,133 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
+  it("blocks a validation issue when a successful checked-out run ends with REQUEST_CHANGES in Codex stdout", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentId,
+        companyId,
+        name: "Readability Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Validate readability." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Validate report workflow",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-VAL",
+      title: "Validate beginner readability",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: runId,
+          executionRunId: runId,
+        })
+        .where(eq(issues.id, issueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+            JSON.stringify({
+              type: "task_complete",
+              payload: {
+                last_agent_message: [
+                  "REQUEST_CHANGES",
+                  "",
+                  "- Add a glossary for beginner-facing jargon.",
+                  "- Normalize the source-window wording.",
+                ].join("\n"),
+              },
+            }),
+          ].join("\n"),
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) =>
+      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
+      comment.body.includes("Add a glossary for beginner-facing jargon")
+    )).toBe(true);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "issue.validation_request_changes_auto_blocked",
+          entityType: "issue",
+          entityId: issueId,
+        }),
+      ]),
+    );
+  });
+
   it("syncs workflow step runs after auto-completing a successful workflow execution issue", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

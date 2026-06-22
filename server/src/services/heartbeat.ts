@@ -1904,6 +1904,7 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
     readNonEmptyString(result.outcome),
     readNonEmptyString(result.status),
     readNonEmptyString(result.result),
+    ...extractCodexTaskCompleteMessages(readNonEmptyString(result.stdout)),
   ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
   let requestChangesCandidate: string | null = null;
   for (const candidate of candidates) {
@@ -1923,6 +1924,36 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
         ? requestChangesCandidate.slice(requestChangesCandidate.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)
         : requestChangesCandidate,
   };
+}
+
+function extractCodexTaskCompleteMessages(stdout: string | null): string[] {
+  if (!stdout) return [];
+  const messages: string[] = [];
+  for (const line of stdout.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = parseObject(parsed);
+    if (record.type === "task_complete") {
+      const payload = parseObject(record.payload);
+      const message = readNonEmptyString(payload.last_agent_message);
+      if (message) messages.push(message);
+      continue;
+    }
+    if (record.type === "item.completed") {
+      const item = parseObject(record.item);
+      if (item.type === "agent_message") {
+        const message = readNonEmptyString(item.text);
+        if (message) messages.push(message);
+      }
+    }
+  }
+  return messages.reverse();
 }
 
 function buildRequestChangesValidationGateComment(input: {
