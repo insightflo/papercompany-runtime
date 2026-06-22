@@ -1,8 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execute } from "@paperclipai/adapter-codex-local/server";
+
+// [목적] 크로스-파일 테스트 격리 누수 방지.
+// 이 파일은 process.env.* 를 직접 덮어쓰지만 afterEach/afterAll 복원이 없어
+// 동일 vitest worker 의 후속 테스트 파일로 변경이 새어나간다.
+// 임의 쓰기(탑레벨/beforeAll/beforeEach/인라인) 위치와 무관하게 동작하도록
+// 가장 이른 시점(임포트 직후, 첫 env 쓰기 이전)에 원본 값을 스냅샷한다.
+const __ENV_RESTORE: Record<string, string | undefined> = {
+  CODEX_HOME: process.env.CODEX_HOME,
+  HOME: process.env.HOME,
+  PAPERCLIP_API_KEY: process.env.PAPERCLIP_API_KEY,
+  PAPERCLIP_HOME: process.env.PAPERCLIP_HOME,
+  PAPERCLIP_IN_WORKTREE: process.env.PAPERCLIP_IN_WORKTREE,
+  PAPERCLIP_INSTANCE_ID: process.env.PAPERCLIP_INSTANCE_ID,
+  PAPERCLIP_TEST_CAPTURE_PATH: process.env.PAPERCLIP_TEST_CAPTURE_PATH,
+};
 
 async function writeFakeCodexCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -73,6 +88,15 @@ type LogEntry = {
 };
 
 describe("codex execute", () => {
+  // [목적] 스냅샷된 원본 env 값을 파일 종료 시 복원하여 후속 테스트 파일로의 누수 차단.
+  // 원본이 undefined 였으면 키를 삭제, 그렇지 않으면 원래 값으로 되돌린다.
+  afterAll(() => {
+    for (const [k, v] of Object.entries(__ENV_RESTORE)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
   it("uses a Paperclip-managed CODEX_HOME outside worktree mode while preserving shared auth and config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-default-"));
     const workspace = path.join(root, "workspace");

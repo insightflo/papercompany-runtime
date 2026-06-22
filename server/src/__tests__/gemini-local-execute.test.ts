@@ -1,8 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execute } from "@paperclipai/adapter-gemini-local/server";
+
+// Snapshot of original process.env values for every key this file mutates or
+// reads, so the worker's env is pristine for subsequent test files regardless
+// of where the write occurs (top-level, beforeAll, beforeEach, or inline).
+// HOME is reassigned per-test below; PAPERCLIP_TEST_CAPTURE_PATH is read by the
+// fake gemini command but is never assigned on process.env here — snapshotted
+// defensively for completeness.
+const __ENV_RESTORE: Record<string, string | undefined> = {
+  HOME: process.env.HOME,
+  PAPERCLIP_TEST_CAPTURE_PATH: process.env.PAPERCLIP_TEST_CAPTURE_PATH,
+};
+
+afterAll(() => {
+  for (const [k, v] of Object.entries(__ENV_RESTORE)) {
+    if (v === undefined) {
+      delete process.env[k];
+    } else {
+      process.env[k] = v;
+    }
+  }
+});
 
 async function writeFakeGeminiCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node

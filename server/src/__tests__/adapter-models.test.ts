@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,15 @@ import { resetGeminiModelsCacheForTests } from "../adapters/gemini-models.js";
 import { resetHermesModelsCacheForTests } from "../adapters/hermes-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
 import { setLocalCliModelsRunnerForTests } from "../adapters/local-cli-models.js";
+
+// Snapshot the original values of every process.env key this file mutates
+// (top-level, beforeEach, or inline within tests) so afterAll can restore
+// the pristine env for subsequent test files in the same vitest worker.
+const __ENV_RESTORE: Record<string, string | undefined> = {
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  PAPERCLIP_OPENCODE_COMMAND: process.env.PAPERCLIP_OPENCODE_COMMAND,
+  HERMES_HOME: process.env.HERMES_HOME,
+};
 
 describe("adapter model listing", () => {
   beforeEach(() => {
@@ -27,6 +36,13 @@ describe("adapter model listing", () => {
     resetOpenCodeModelsCacheForTests();
     delete process.env.HERMES_HOME;
     vi.restoreAllMocks();
+  });
+
+  afterAll(() => {
+    for (const [k, v] of Object.entries(__ENV_RESTORE)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
 
   it("returns an empty list for unknown adapters", async () => {

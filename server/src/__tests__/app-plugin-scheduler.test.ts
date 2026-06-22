@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Snapshot of every process.env / globalThis key this file mutates, captured at
+// module-load time (before any write). Restored in afterAll so the env is
+// pristine for later test files in the same vitest worker.
+const __ENV_RESTORE: Record<string, string | undefined> = {
+  WORKFLOW_NATIVE_SCHEDULER_ENABLED: process.env.WORKFLOW_NATIVE_SCHEDULER_ENABLED,
+  WORKFLOW_PLUGIN_RECONCILER_DISABLED: process.env.WORKFLOW_PLUGIN_RECONCILER_DISABLED,
+};
 
 const pluginSchedulerStart = vi.fn();
 const nativeWorkflowSchedulerStart = vi.fn();
@@ -180,6 +188,13 @@ describe("createApp plugin scheduler lifecycle", () => {
     pluginEventBus.clearPlugin.mockClear();
     pluginEventBus.subscriptionCount.mockClear();
     createMissionOwnerSupervisionMonitorMock.mockClear();
+  });
+
+  afterAll(() => {
+    for (const [k, v] of Object.entries(__ENV_RESTORE)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
 
   it("starts the plugin job scheduler so plugin cron jobs can tick", async () => {

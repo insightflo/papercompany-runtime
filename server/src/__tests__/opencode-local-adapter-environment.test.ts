@@ -1,8 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { testEnvironment } from "@paperclipai/adapter-opencode-local/server";
+
+// Snapshot original values BEFORE any test mutates them so we can restore a
+// pristine environment for subsequent test files in the same vitest worker.
+const __ENV_RESTORE: Record<string, string | undefined> = {
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+};
+
+afterAll(() => {
+  for (const [k, v] of Object.entries(__ENV_RESTORE)) {
+    if (v === undefined) {
+      delete process.env[k];
+    } else {
+      process.env[k] = v;
+    }
+  }
+});
 
 describe("opencode_local environment diagnostics", () => {
   it("reports a missing working directory as an error when cwd is absolute", async () => {

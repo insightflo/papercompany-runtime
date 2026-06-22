@@ -1,8 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
+
+// Snapshot original values of every process.env key this file mutates, so the
+// environment is pristine for subsequent test files running in the same worker.
+// Captured at module load, before any test writes to process.env.
+const __ENV_RESTORE: Record<string, string | undefined> = {
+  HOME: process.env.HOME,
+};
+
+afterAll(() => {
+  for (const [k, v] of Object.entries(__ENV_RESTORE)) {
+    if (v === undefined) {
+      delete process.env[k];
+    } else {
+      process.env[k] = v;
+    }
+  }
+});
 
 async function writeFakeCursorCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
