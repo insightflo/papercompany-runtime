@@ -50,7 +50,7 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   }
   const normalized = command.toLowerCase().trim();
   for (const segment of splitShellSegments(normalized)) {
-    const matched = findBroadScanCommand(segment, allowedPaths);
+    const matched = findBroadScanCommand(segment.command, allowedPaths, { stdinFromPipe: segment.stdinFromPipe });
     if (!matched) {
       continue;
     }
@@ -65,7 +65,11 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   return { blocked: false, reason: null, matchedCommand: null };
 }
 
-function findBroadScanCommand(command: string, allowedPaths: string[]) {
+function findBroadScanCommand(
+  command: string,
+  allowedPaths: string[],
+  options: { stdinFromPipe?: boolean } = {},
+) {
   for (const candidate of COMMAND_PREFIX_PATTERNS) {
     if (!candidate.pattern.test(command)) continue;
     if (candidate.label === "find .") {
@@ -77,6 +81,7 @@ function findBroadScanCommand(command: string, allowedPaths: string[]) {
     }
     if (candidate.label === "rg without path" || candidate.label === "grep -R without path") {
       if (hasRepoWideTarget(command)) return candidate.label;
+      if (options.stdinFromPipe && extractExplicitTargetPaths(command).length === 0) return null;
       return areAllExplicitTargetPathsAllowed(command, allowedPaths) ? null : candidate.label;
     }
     if (candidate.label === "tree" || candidate.label === "ls -R") {
@@ -141,10 +146,20 @@ function extractExplicitTargetPaths(command: string) {
 }
 
 function splitShellSegments(command: string) {
-  return command
-    .split(/(?:&&|\|\||;|\|)/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+  const parts = command.split(/(&&|\|\||;|\|)/);
+  const segments: Array<{ command: string; stdinFromPipe: boolean }> = [];
+  let previousOperator: string | null = null;
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (trimmed === "&&" || trimmed === "||" || trimmed === ";" || trimmed === "|") {
+      previousOperator = trimmed;
+      continue;
+    }
+    segments.push({ command: trimmed, stdinFromPipe: previousOperator === "|" });
+    previousOperator = null;
+  }
+  return segments;
 }
 
 function extractCommand(adapterType: string, line: string) {

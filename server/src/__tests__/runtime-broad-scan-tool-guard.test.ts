@@ -178,6 +178,86 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     });
   });
 
+  it("allows rg as a stdin filter after a pipe", () => {
+    const line = JSON.stringify({
+      type: "item.started",
+      item: {
+        id: "item_1",
+        type: "command_execution",
+        command: "/bin/bash -lc \"env | sort | rg '^(PAPERCLIP_|PWD=|HOME=)'\"",
+        status: "in_progress",
+      },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "codex_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          taskKey: null,
+          issueId: null,
+          projectId: null,
+          allowedContextKeys: [],
+          guardrails: { broadScanAllowed: false },
+          inputs: {
+            workspace: { available: true, source: "agent_home", workspaceId: null, projectId: null },
+            workspaceHints: { available: false, count: 0 },
+            runtimeServiceIntents: { available: false, count: 0 },
+            runtimeServices: { available: false, count: 0, primaryUrl: null },
+            fileViews: { available: false, count: 0, source: null },
+            sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
+  });
+
+  it("still blocks rg after a pipe when it targets the repo", () => {
+    const line = JSON.stringify({
+      type: "item.started",
+      item: {
+        id: "item_1",
+        type: "command_execution",
+        command: "printf TODO | rg TODO .",
+        status: "in_progress",
+      },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "codex_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          taskKey: null,
+          issueId: null,
+          projectId: null,
+          allowedContextKeys: [],
+          guardrails: { broadScanAllowed: false },
+          inputs: {
+            workspace: { available: true, source: "agent_home", workspaceId: null, projectId: null },
+            workspaceHints: { available: false, count: 0 },
+            runtimeServiceIntents: { available: false, count: 0 },
+            runtimeServices: { available: false, count: 0, primaryUrl: null },
+            fileViews: { available: false, count: 0, source: null },
+            sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      blocked: true,
+      matchedCommand: "rg without path",
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+    });
+  });
+
   it("blocks mixed shell segments when a later segment performs a repo-wide scan", () => {
     const line = JSON.stringify({
       type: "tool_call",
