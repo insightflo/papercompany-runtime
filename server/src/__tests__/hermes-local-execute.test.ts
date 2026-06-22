@@ -3,9 +3,48 @@ import { describe, expect, it } from "vitest";
 import {
   buildHermesChatArgs,
   formatHermesTimeoutLabel,
+  HERMES_OPERATIONS_LIAISON_BRIEF,
   parseHermesOutput,
   parseHermesProgressText,
 } from "../adapters/hermes-local-execute.js";
+
+// [목적] Hermes Ops liaison default brief가 operational monitoring MVP 규칙을
+//   source-level로 포함하는지 검증. 이 brief는 모든 liaison agent runtime에
+//   prepend되므로(기존/신규 agent, DB config 무관), source 기본값이 곧 동작 기본값이다.
+describe("Hermes Ops liaison default brief (operational monitoring MVP)", () => {
+  const brief = HERMES_OPERATIONS_LIAISON_BRIEF;
+
+  it("includes the active-mission monitoring checklist for timer/heartbeat runs", () => {
+    expect(brief).toMatch(/Operational Monitoring Protocol/i);
+    expect(brief).toMatch(/read-only/i);
+    expect(brief).toContain("GET /api/companies/:companyId/missions?status=active");
+    expect(brief).toMatch(/stuck candidate/i);
+  });
+
+  it("routes no-active-run handoff to the supervision-run endpoint FIRST", () => {
+    expect(brief).toContain("POST /api/companies/:companyId/missions/:missionId/supervision/run");
+    expect(brief).toMatch(/FIRST CHOICE/i);
+  });
+
+  it("uses POST issue comments as the fallback handoff and forbids PATCH", () => {
+    expect(brief).toContain("POST /api/issues/:id/comments");
+    expect(brief).toMatch(/Do NOT use PATCH/i);
+  });
+
+  it("keeps maxConcurrentRuns at 1 and monitoring runs short", () => {
+    expect(brief).toMatch(/maxConcurrentRuns at 1/);
+  });
+
+  it("encodes a 30-minute per-mission dedup with a stuck marker", () => {
+    expect(brief).toMatch(/30 minutes/);
+    expect(brief).toContain("<!-- hermes-ops-stuck-monitor:{missionId}:{YYYY-MM-DDTHH} -->");
+  });
+
+  it("marks heartbeat.mission_run_active stuck-but-active as report-only (needs code)", () => {
+    expect(brief).toMatch(/heartbeat\.mission_run_active/);
+    expect(brief).toMatch(/Report-only/);
+  });
+});
 
 describe("hermes local execution config", () => {
   it("streams Hermes output to Paperclip by default", () => {
