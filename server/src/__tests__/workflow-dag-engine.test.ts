@@ -1607,6 +1607,391 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   });
 
+  // [목적] dag-engine 의 validation verdict 로딩 경로(loadLatestValidationVerdicts →
+  //   readValidationVerdictFromHeartbeatResult → extractCodexTaskCompleteMessages) 가 heartbeat run 의
+  //   resultJson.stdout(codex JSONL) 에서 REQUEST_CHANGES / PASS 를 읽는지 검증.
+  //   comment 경로는 위 두 테스트가, codex stdout 경로는 아래 두 테스트가 담당한다.
+  function buildCodexStdout(lines: unknown[]): string {
+    return lines.map((line) => JSON.stringify(line)).join("\n");
+  }
+
+  it("blocks downstream tool steps when a validator heartbeat resultJson.stdout carries REQUEST_CHANGES via codex task_complete last_agent_message", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const collectIssueId = randomUUID();
+    const validatorIssueId = randomUUID();
+    const verdictRunId = randomUUID();
+    const toolExecutor = vi.fn().mockResolvedValue({ accepted: true });
+    setWorkflowToolStepExecutor(toolExecutor);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Codex Stdout Validation Gate",
+      issuePrefix: `CS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: validatorAgentId,
+        companyId,
+        name: "Artifact Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Daily AI news",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      stepsJson: [
+        {
+          id: "collect-ai-news-evidence",
+          name: "Collect AI news evidence",
+          agentId: validatorAgentId,
+          dependencies: [],
+        },
+        {
+          id: "validate-ai-news-artifact",
+          name: "Validate TechCrunch AI artifact before delivery",
+          agentId: validatorAgentId,
+          dependencies: ["collect-ai-news-evidence"],
+        },
+        {
+          id: "send-telegram",
+          name: "Send Telegram",
+          agentId: "",
+          dependencies: ["validate-ai-news-artifact"],
+          type: "tool",
+          toolNames: ["send-telegram"],
+          toolArgs: { chatId: "ops" },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "board",
+      status: "running",
+      startedAt: new Date("2026-06-14T06:00:00.000Z"),
+    });
+    await db.insert(issues).values([
+      {
+        id: collectIssueId,
+        companyId,
+        missionId,
+        title: "tech-ai-news: Collect AI news evidence",
+        status: "done",
+        assigneeAgentId: validatorAgentId,
+        originKind: "workflow_execution",
+        originId: runId,
+        originRunId: runId,
+        startedAt: new Date("2026-06-14T06:00:00.000Z"),
+        completedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        id: validatorIssueId,
+        companyId,
+        missionId,
+        title: "tech-ai-news: Validate TechCrunch AI artifact before delivery",
+        status: "done",
+        assigneeAgentId: validatorAgentId,
+        originKind: "workflow_execution",
+        originId: runId,
+        originRunId: runId,
+        startedAt: new Date("2026-06-14T06:05:00.000Z"),
+        completedAt: new Date("2026-06-14T06:10:00.000Z"),
+      },
+    ]);
+    // validator heartbeat run: codex stdout(JSONL) 가 REQUEST_CHANGES verdict 를 싣는다.
+    // task_complete 이벤트의 payload.last_agent_message 가 "REQUEST_CHANGES\n- ..." — extractCodexTaskCompleteMessages
+    // 가 이를 추출하고 readValidationVerdictFromHeartbeatResult 가 request_changes 로 판정한다.
+    await db.insert(heartbeatRuns).values({
+      id: verdictRunId,
+      companyId,
+      agentId: validatorAgentId,
+      issueId: validatorIssueId,
+      status: "succeeded",
+      invocationSource: "automation",
+      resultJson: {
+        stdout: buildCodexStdout([
+          {
+            type: "item.completed",
+            item: { type: "agent_message", text: "Validating the artifact against source claims." },
+          },
+          {
+            type: "task_complete",
+            payload: {
+              last_agent_message: "REQUEST_CHANGES\n- Hallucinated label remains in the PNG.\n- Coverage is incomplete; do not deliver to Telegram.",
+            },
+          },
+        ]),
+      },
+      startedAt: new Date("2026-06-14T06:08:00.000Z"),
+      finishedAt: new Date("2026-06-14T06:10:00.000Z"),
+      createdAt: new Date("2026-06-14T06:08:00.000Z"),
+      updatedAt: new Date("2026-06-14T06:10:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "collect-ai-news-evidence",
+        issueId: collectIssueId,
+        status: "completed",
+        startedAt: new Date("2026-06-14T06:00:00.000Z"),
+        completedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "validate-ai-news-artifact",
+        issueId: validatorIssueId,
+        status: "running",
+        startedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "send-telegram",
+        issueId: null,
+        status: "pending",
+      },
+    ]);
+
+    const result = await syncWorkflowRunForIssue(db, validatorIssueId);
+
+    expect(result?.status).toBe("running");
+    expect(toolExecutor).not.toHaveBeenCalled();
+    const stepRows = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-artifact")).toMatchObject({
+      status: "failed",
+      issueId: validatorIssueId,
+    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
+      status: "pending",
+      issueId: null,
+    });
+  });
+
+  it("allows downstream steps when a validator heartbeat resultJson.stdout carries PASS via codex item.completed agent_message", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const collectIssueId = randomUUID();
+    const validatorIssueId = randomUUID();
+    const verdictRunId = randomUUID();
+    const toolExecutor = vi.fn().mockResolvedValue({ accepted: true });
+    setWorkflowToolStepExecutor(toolExecutor);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Codex Stdout Pass Gate",
+      issuePrefix: `CP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Research Director",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: validatorAgentId,
+        companyId,
+        name: "Artifact Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Daily AI news",
+      status: "active",
+      source: "workflow",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "tech-ai-news",
+      stepsJson: [
+        {
+          id: "collect-ai-news-evidence",
+          name: "Collect AI news evidence",
+          agentId: validatorAgentId,
+          dependencies: [],
+        },
+        {
+          id: "validate-ai-news-artifact",
+          name: "Validate TechCrunch AI artifact before delivery",
+          agentId: validatorAgentId,
+          dependencies: ["collect-ai-news-evidence"],
+        },
+        {
+          id: "send-telegram",
+          name: "Send Telegram",
+          agentId: "",
+          dependencies: ["validate-ai-news-artifact"],
+          type: "tool",
+          toolNames: ["send-telegram"],
+          toolArgs: { chatId: "ops" },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "board",
+      status: "running",
+      startedAt: new Date("2026-06-14T06:00:00.000Z"),
+    });
+    await db.insert(issues).values([
+      {
+        id: collectIssueId,
+        companyId,
+        missionId,
+        title: "tech-ai-news: Collect AI news evidence",
+        status: "done",
+        assigneeAgentId: validatorAgentId,
+        originKind: "workflow_execution",
+        originId: runId,
+        originRunId: runId,
+        startedAt: new Date("2026-06-14T06:00:00.000Z"),
+        completedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        id: validatorIssueId,
+        companyId,
+        missionId,
+        title: "tech-ai-news: Validate TechCrunch AI artifact before delivery",
+        status: "done",
+        assigneeAgentId: validatorAgentId,
+        originKind: "workflow_execution",
+        originId: runId,
+        originRunId: runId,
+        startedAt: new Date("2026-06-14T06:05:00.000Z"),
+        completedAt: new Date("2026-06-14T06:10:00.000Z"),
+      },
+    ]);
+    // validator heartbeat run: codex stdout(JSONL) 가 PASS verdict 를 싣는다.
+    // item.completed 이벤트의 item.type:"agent_message" / item.text 가 "PASS ..." — extractCodexTaskCompleteMessages
+    // 가 이를 추출하고 readValidationVerdictFromHeartbeatResult 가 pass 로 판정한다.
+    await db.insert(heartbeatRuns).values({
+      id: verdictRunId,
+      companyId,
+      agentId: validatorAgentId,
+      issueId: validatorIssueId,
+      status: "succeeded",
+      invocationSource: "automation",
+      resultJson: {
+        stdout: buildCodexStdout([
+          {
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: "PASS — Both requested fixes are verified in the PNG; sources match.",
+            },
+          },
+        ]),
+      },
+      startedAt: new Date("2026-06-14T06:08:00.000Z"),
+      finishedAt: new Date("2026-06-14T06:10:00.000Z"),
+      createdAt: new Date("2026-06-14T06:08:00.000Z"),
+      updatedAt: new Date("2026-06-14T06:10:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "collect-ai-news-evidence",
+        issueId: collectIssueId,
+        status: "completed",
+        startedAt: new Date("2026-06-14T06:00:00.000Z"),
+        completedAt: new Date("2026-06-14T06:05:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "validate-ai-news-artifact",
+        issueId: validatorIssueId,
+        status: "failed",
+        startedAt: new Date("2026-06-14T06:05:00.000Z"),
+        completedAt: new Date("2026-06-14T06:10:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "send-telegram",
+        issueId: null,
+        status: "skipped",
+        completedAt: new Date("2026-06-14T06:10:00.000Z"),
+      },
+    ]);
+
+    const result = await syncWorkflowRunForIssue(db, validatorIssueId);
+
+    expect(result?.status).toBe("running");
+    expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
+      workflowRunId: runId,
+      stepId: "send-telegram",
+      toolName: "send-telegram",
+    }));
+    const stepRows = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-artifact")).toMatchObject({
+      status: "completed",
+      issueId: validatorIssueId,
+    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
+      status: "running",
+      issueId: null,
+    });
+  });
+
   it("creates a mission for a workflow trigger without an existing mission and links run and step issues", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

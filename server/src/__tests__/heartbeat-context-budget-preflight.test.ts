@@ -1025,6 +1025,396 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
+  // Boundary coverage for the title-based REQUEST_CHANGES validation gate
+  // (`canApplyRequestChangesValidationGate` in services/heartbeat.ts). These
+  // cases pin the intended gating behavior and guard against false-positive
+  // drift: ordinary-titled issues must slip through even when a checked-out
+  // run ends with a REQUEST_CHANGES verdict, while titles carrying common
+  // validation verbs ("verify", "review") currently DO trigger the gate.
+
+  it("does NOT block an ordinary-titled issue whose checked-out run ends with REQUEST_CHANGES (no gate keyword in title)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Synthesis",
+      issuePrefix: "PSN",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentId,
+        companyId,
+        name: "Synthesis Worker",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Draft the report." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Synthesize report workflow",
+      status: "active",
+    });
+    // Title intentionally contains NONE of the gate keywords
+    // (no QA / audit / auditor / validator / validation / validate / verify /
+    // review / check / [QA] / 검증). This documents that ordinary-titled
+    // issues slip through the REQUEST_CHANGES gate even when a checked-out
+    // run surfaces a REQUEST_CHANGES verdict in Codex stdout.
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PSN-NEWS",
+      title: "Synthesize ai news report draft",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: runId,
+          executionRunId: runId,
+        })
+        .where(eq(issues.id, issueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+            JSON.stringify({
+              type: "task_complete",
+              payload: {
+                // REQUEST_CHANGES verdict present in stdout, yet the issue
+                // title carries no gate keyword → the validation gate must
+                // NOT auto-block it.
+                last_agent_message: [
+                  "REQUEST_CHANGES",
+                  "",
+                  "- Tighten the lede and cite primary sources.",
+                ].join("\n"),
+              },
+            }),
+          ].join("\n"),
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    // The issue is linked to a mission and assigned to the run agent, but its
+    // title does not match the validation gate. It must therefore be
+    // auto-completed (not blocked) by the successful checked-out run path.
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "done",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) =>
+      comment.body.includes("Mission validation gate: REQUEST_CHANGES"),
+    )).toBe(false);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities.some((entry) =>
+      entry.action === "issue.validation_request_changes_auto_blocked" &&
+      entry.entityId === issueId,
+    )).toBe(false);
+  });
+
+  it("blocks a 'verify' titled issue whose checked-out run ends with REQUEST_CHANGES", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Verify",
+      issuePrefix: "PVF",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentId,
+        companyId,
+        name: "Verify Agent",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Verify the deliverable." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Verify report workflow",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PVF-VERIFY",
+      title: "Verify citation accuracy of the report",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: runId,
+          executionRunId: runId,
+        })
+        .where(eq(issues.id, issueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+            JSON.stringify({
+              type: "task_complete",
+              payload: {
+                last_agent_message: [
+                  "REQUEST_CHANGES",
+                  "",
+                  "- Three citations point to secondary sources.",
+                ].join("\n"),
+              },
+            }),
+          ].join("\n"),
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) =>
+      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
+      comment.body.includes("Three citations point to secondary sources"),
+    )).toBe(true);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "issue.validation_request_changes_auto_blocked",
+          entityType: "issue",
+          entityId: issueId,
+        }),
+      ]),
+    );
+  });
+
+  it("blocks a 'review' titled issue whose checked-out run ends with REQUEST_CHANGES", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Review",
+      issuePrefix: "PRV",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentId,
+        companyId,
+        name: "Review Agent",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Review the deliverable." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Review report workflow",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PRV-REVIEW",
+      title: "Review editorial consistency of the report",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: runId,
+          executionRunId: runId,
+        })
+        .where(eq(issues.id, issueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+            JSON.stringify({
+              type: "task_complete",
+              payload: {
+                last_agent_message: [
+                  "REQUEST_CHANGES",
+                  "",
+                  "- Tone is inconsistent across sections two and four.",
+                ].join("\n"),
+              },
+            }),
+          ].join("\n"),
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) =>
+      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
+      comment.body.includes("Tone is inconsistent across sections two and four"),
+    )).toBe(true);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "issue.validation_request_changes_auto_blocked",
+          entityType: "issue",
+          entityId: issueId,
+        }),
+      ]),
+    );
+  });
+
   it("syncs workflow step runs after auto-completing a successful workflow execution issue", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

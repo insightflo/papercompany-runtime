@@ -44,6 +44,7 @@ import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import { extractCodexTaskCompleteMessages } from "./workflow/codex-task-output.js";
 import { createWorktreeHarness, WorktreeViolation } from "./worktree/harness.js";
 import {
   buildWorkspaceReadyComment,
@@ -1924,36 +1925,6 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
         ? requestChangesCandidate.slice(requestChangesCandidate.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)
         : requestChangesCandidate,
   };
-}
-
-function extractCodexTaskCompleteMessages(stdout: string | null): string[] {
-  if (!stdout) return [];
-  const messages: string[] = [];
-  for (const line of stdout.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    const record = parseObject(parsed);
-    if (record.type === "task_complete") {
-      const payload = parseObject(record.payload);
-      const message = readNonEmptyString(payload.last_agent_message);
-      if (message) messages.push(message);
-      continue;
-    }
-    if (record.type === "item.completed") {
-      const item = parseObject(record.item);
-      if (item.type === "agent_message") {
-        const message = readNonEmptyString(item.text);
-        if (message) messages.push(message);
-      }
-    }
-  }
-  return messages.reverse();
 }
 
 function buildRequestChangesValidationGateComment(input: {
