@@ -4091,6 +4091,7 @@ describe("heartbeat context budget preflight", () => {
       stepId: "draft",
       stepName: "Draft",
       toolNames: ["search-docs"],
+      toolArgs: {},
       tools: [
         {
           name: "search-docs",

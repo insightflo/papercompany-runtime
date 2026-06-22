@@ -34,6 +34,7 @@ function createApp(toolDispatcher: {
 }, options: {
   actor?: Record<string, unknown>;
   dbRows?: unknown[];
+  dbRowQueue?: unknown[][];
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -46,10 +47,11 @@ function createApp(toolDispatcher: {
     }) as never;
     next();
   });
+  const rowQueue = [...(options.dbRowQueue ?? [])];
   const query = {
     from: vi.fn(() => query),
     where: vi.fn(() => query),
-    limit: vi.fn(() => Promise.resolve(options.dbRows ?? [])),
+    limit: vi.fn(() => Promise.resolve(rowQueue.length > 0 ? rowQueue.shift() : (options.dbRows ?? []))),
   };
   const db = {
     select: vi.fn(() => query),
@@ -134,6 +136,53 @@ describe("plugin tool execution projectless run context", () => {
 
     expect(res.status).toBe(200);
     expect(toolDispatcher.executeTool).toHaveBeenCalledWith("daily-tech-scout", { limit: 25 }, runContext);
+  });
+
+  it("falls back to a granted core builtin workflow tool when no plugin tool is registered", async () => {
+    const toolDispatcher = {
+      listToolsForAgent: vi.fn(),
+      getTool: vi.fn().mockReturnValue(null),
+      executeTool: vi.fn(),
+    };
+    const runContext = { agentId: "agent-1", runId: "run-1", companyId: "company-1" };
+
+    const res = await request(createApp(toolDispatcher, {
+      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      dbRowQueue: [
+        [{
+          id: "run-1",
+          agentId: "agent-1",
+          companyId: "company-1",
+          issueId: "issue-1",
+          contextSnapshot: {
+            paperclipWorkflowStepToolContract: {
+              toolNames: ["daily-tech-scout"],
+              tools: [{ name: "daily-tech-scout" }],
+            },
+          },
+        }],
+        [{
+          id: "tool-1",
+          name: "daily-tech-scout",
+          enabled: true,
+          adapterType: "builtin",
+          adapterConfig: {
+            command: "printf '{\"ok\":true}'",
+            workingDirectory: process.cwd(),
+            env: {},
+            requiresApproval: false,
+          },
+        }],
+        [{ id: "grant-1" }],
+      ],
+    }))
+      .post("/api/plugins/tools/execute")
+      .send({ tool: "daily-tech-scout", parameters: { limit: 25 }, runContext });
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe("core");
+    expect(res.body.data).toEqual({ ok: true });
+    expect(toolDispatcher.executeTool).not.toHaveBeenCalled();
   });
 
   it("rejects an agent executing a tool outside its workflow run contract", async () => {

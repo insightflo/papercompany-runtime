@@ -17,15 +17,25 @@
  * @see doc/plugins/PLUGIN_SPEC.md for the full plugin specification
  */
 
+import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, heartbeatRuns, pluginEntities, pluginLogs, pluginWebhookDeliveries } from "@paperclipai/db";
+import {
+  agentToolGrants,
+  companies,
+  heartbeatRuns,
+  pluginEntities,
+  pluginLogs,
+  pluginWebhookDeliveries,
+  toolDefinitions,
+} from "@paperclipai/db";
 import type {
   PluginStatus,
   PaperclipPluginManifestV1,
@@ -57,6 +67,8 @@ import {
   completeWorkflowToolStepFromResult,
   type WorkflowExecutionMode,
 } from "../services/workflow/dag-engine.js";
+
+const execFile = promisify(execFileCallback);
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -380,6 +392,130 @@ function workflowToolContractAllowsTool(contextSnapshot: unknown, toolName: stri
     ...tools.map((tool) => typeof tool.name === "string" ? tool.name.trim() : "").filter(Boolean),
   ]);
   return allowedToolNames.has(toolName);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
+}
+
+function parameterKeyToCliFlag(key: string): string {
+  return `--${key.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`).replace(/_/g, "-")}`;
+}
+
+function parametersToCliArgs(parameters: unknown): string[] {
+  const args = readObject(parameters);
+  const cliArgs: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (!key.trim() || value === undefined || value === null || value === false) continue;
+    const flag = parameterKeyToCliFlag(key);
+    if (value === true) {
+      cliArgs.push(flag);
+      continue;
+    }
+    const values = Array.isArray(value) ? value : [value];
+    for (const entry of values) {
+      if (entry === undefined || entry === null || entry === false) continue;
+      cliArgs.push(flag, String(entry));
+    }
+  }
+  return cliArgs;
+}
+
+async function executeCoreBuiltinWorkflowTool(input: {
+  db: Db;
+  companyId: string;
+  agentId: string;
+  issueId?: string | null;
+  toolName: string;
+  parameters: unknown;
+}) {
+  const [tool] = await input.db
+    .select({
+      id: toolDefinitions.id,
+      name: toolDefinitions.name,
+      enabled: toolDefinitions.enabled,
+      adapterType: toolDefinitions.adapterType,
+      adapterConfig: toolDefinitions.adapterConfig,
+    })
+    .from(toolDefinitions)
+    .where(and(
+      eq(toolDefinitions.companyId, input.companyId),
+      eq(toolDefinitions.name, input.toolName),
+    ))
+    .limit(1);
+
+  if (!tool) return null;
+  if (!tool.enabled) {
+    return { status: 403 as const, body: { error: `Tool "${input.toolName}" is disabled` } };
+  }
+
+  const [grant] = await input.db
+    .select({ id: agentToolGrants.id })
+    .from(agentToolGrants)
+    .where(and(
+      eq(agentToolGrants.companyId, input.companyId),
+      eq(agentToolGrants.agentId, input.agentId),
+      eq(agentToolGrants.toolId, tool.id),
+    ))
+    .limit(1);
+  if (!grant) {
+    return { status: 403 as const, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
+  }
+
+  if (tool.adapterType !== "builtin") {
+    return {
+      status: 501 as const,
+      body: { error: `Core workflow tool "${input.toolName}" uses unsupported adapter type "${tool.adapterType}"` },
+    };
+  }
+
+  const adapterConfig = readObject(tool.adapterConfig);
+  const command = typeof adapterConfig.command === "string" ? adapterConfig.command.trim() : "";
+  if (!command) {
+    return { status: 422 as const, body: { error: `Core workflow tool "${input.toolName}" has no command configured` } };
+  }
+  if (adapterConfig.requiresApproval === true) {
+    return { status: 403 as const, body: { error: `Core workflow tool "${input.toolName}" requires approval` } };
+  }
+
+  const cwd = typeof adapterConfig.workingDirectory === "string" && adapterConfig.workingDirectory.trim()
+    ? adapterConfig.workingDirectory.trim()
+    : process.cwd();
+  const envConfig = readObject(adapterConfig.env);
+  const cliArgs = parametersToCliArgs(input.parameters);
+  const shellCommand = [command, ...cliArgs.map(shellQuote)].join(" ");
+  const { stdout, stderr } = await execFile("sh", ["-lc", shellCommand], {
+    cwd,
+    env: {
+      ...process.env,
+      ...Object.fromEntries(Object.entries(envConfig).map(([key, value]) => [key, String(value)])),
+      PAPERCLIP_COMPANY_ID: input.companyId,
+      PAPERCLIP_AGENT_ID: input.agentId,
+      ...(input.issueId ? { PAPERCLIP_TASK_ID: input.issueId } : {}),
+    },
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 120_000,
+  });
+  const trimmedStdout = stdout.trim();
+  let parsed: unknown = undefined;
+  if (trimmedStdout) {
+    try {
+      parsed = JSON.parse(trimmedStdout);
+    } catch {
+      parsed = undefined;
+    }
+  }
+
+  return {
+    status: 200 as const,
+    body: {
+      content: trimmedStdout,
+      data: parsed ?? { stdout: trimmedStdout },
+      stderr: stderr.trim(),
+      tool: input.toolName,
+      source: "core",
+    },
+  };
 }
 
 /**
@@ -1084,11 +1220,6 @@ export function pluginRoutes(
    * - 502 if the plugin worker is unavailable or the RPC call fails
    */
   router.post("/plugins/tools/execute", async (req, res) => {
-    if (!toolDeps) {
-      res.status(501).json({ error: "Plugin tool dispatch is not enabled" });
-      return;
-    }
-
     const body = (req.body as PluginToolExecuteRequest | undefined);
     if (!body) {
       res.status(400).json({ error: "Request body is required" });
@@ -1116,6 +1247,7 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, runContext.companyId);
+    let workflowRunIssueId: string | null = null;
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId) {
         res.status(403).json({ error: "Agent can only execute workflow tools for its own company run context" });
@@ -1126,6 +1258,7 @@ export function pluginRoutes(
           id: heartbeatRuns.id,
           agentId: heartbeatRuns.agentId,
           companyId: heartbeatRuns.companyId,
+          issueId: heartbeatRuns.issueId,
           contextSnapshot: heartbeatRuns.contextSnapshot,
         })
         .from(heartbeatRuns)
@@ -1136,6 +1269,7 @@ export function pluginRoutes(
         res.status(403).json({ error: "Agent run context is not valid for tool execution" });
         return;
       }
+      workflowRunIssueId = run.issueId;
       if (!workflowToolContractAllowsTool(run.contextSnapshot, tool)) {
         res.status(403).json({ error: `Workflow tool "${tool}" is not allowed for this agent run` });
         return;
@@ -1144,30 +1278,52 @@ export function pluginRoutes(
       assertBoard(req);
     }
 
-    // Verify the tool exists
-    const registeredTool = toolDeps.toolDispatcher.getTool(tool);
-    if (!registeredTool) {
-      res.status(404).json({ error: `Tool "${tool}" not found` });
+    const registeredTool = toolDeps?.toolDispatcher.getTool(tool);
+    if (registeredTool) {
+      try {
+        const result = await toolDeps!.toolDispatcher.executeTool(
+          tool,
+          parameters ?? {},
+          runContext,
+        );
+        res.json(result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+
+        // Distinguish between "worker not running" (502) and other errors (500)
+        if (message.includes("not running") || message.includes("worker")) {
+          res.status(502).json({ error: message });
+        } else {
+          res.status(500).json({ error: message });
+        }
+      }
       return;
     }
 
     try {
-      const result = await toolDeps.toolDispatcher.executeTool(
-        tool,
-        parameters ?? {},
-        runContext,
-      );
-      res.json(result);
+      const coreResult = await executeCoreBuiltinWorkflowTool({
+        db,
+        companyId: runContext.companyId,
+        agentId: runContext.agentId,
+        issueId: workflowRunIssueId,
+        toolName: tool,
+        parameters: parameters ?? {},
+      });
+      if (coreResult) {
+        res.status(coreResult.status).json(coreResult.body);
+        return;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-
-      // Distinguish between "worker not running" (502) and other errors (500)
-      if (message.includes("not running") || message.includes("worker")) {
-        res.status(502).json({ error: message });
-      } else {
-        res.status(500).json({ error: message });
-      }
+      res.status(500).json({ error: message });
+      return;
     }
+
+    if (!toolDeps) {
+      res.status(501).json({ error: "Plugin tool dispatch is not enabled and no core workflow tool matched" });
+      return;
+    }
+    res.status(404).json({ error: `Tool "${tool}" not found` });
   });
 
   /**
