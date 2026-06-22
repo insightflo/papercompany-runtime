@@ -179,6 +179,11 @@ async function ensureMissionForWorkflowRun(
     description: `Created automatically for workflow run: ${workflow.name}`,
     status: "active",
     source: "workflow",
+    // [연결] workflow 정의의 projectId → mission 으로 전파. mission.projectId 가 있어야
+    //   heartbeat resolveWorkspaceForRun 이 project_primary workspace 를 주입하고,
+    //   step-input-manifest 의 broadScanAllowed 가 켜진다(find . / rg 허용). 없으면 broad scan guard 가
+    //   workflow 단계의 정상적인 파일 탐색까지 차단해 첫 단계부터 실패함.
+    projectId: workflow.projectId ?? null,
   });
   await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
     workflowStepIds: workflow.steps.map((step) => step.id),
