@@ -19,6 +19,7 @@ import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/
 import {
   classifyStepActivation,
   findSkippableSteps,
+  resolveEdges,
   workflowHasConditionalEdges,
   type PredFacts,
   type PredStatus,
@@ -1210,6 +1211,45 @@ function findRunnableSteps(
   });
 }
 
+function hasRecoverableQaRequestChangesDependency(
+  step: WorkflowStep,
+  steps: WorkflowStep[],
+  stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
+  validationVerdictsByIssueId: Map<string, ValidationVerdictObservation>,
+): boolean {
+  const predsByStepId = buildPredFactsMap(steps, stepRunMap, validationVerdictsByIssueId);
+  const incomingEdges = resolveEdges(step).filter((edge) => edge.isBackEdge !== true);
+  for (const edge of incomingEdges) {
+    const pred = predsByStepId.get(edge.stepId);
+    if (
+      pred?.status !== "failed"
+      || pred.isQaGate !== true
+      || pred.verdict !== "request_changes"
+      || (edge.when ?? "success") !== "success"
+    ) {
+      continue;
+    }
+
+    const hasRemainingBackEdgeRework = steps.some((candidate) => {
+      const candidateRun = stepRunMap.get(candidate.id);
+      if (!candidateRun) return false;
+      return resolveEdges(candidate).some((candidateEdge) => {
+        if (
+          candidateEdge.isBackEdge !== true
+          || candidateEdge.stepId !== edge.stepId
+          || candidateEdge.when !== "qa_request_changes"
+          || typeof candidateEdge.maxIterations !== "number"
+        ) {
+          return false;
+        }
+        return (candidateRun.iterationIndex ?? 0) < candidateEdge.maxIterations;
+      });
+    });
+    if (hasRemainingBackEdgeRework) return true;
+  }
+  return false;
+}
+
 function isIssueLessToolStep(step: WorkflowStep): boolean {
   const hasToolNames = Array.isArray(step.toolNames)
     && step.toolNames.some((toolName) => typeof toolName === "string" && toolName.trim().length > 0);
@@ -2046,7 +2086,13 @@ export async function syncWorkflowRunState(
       launchedStepIds: dynamicLaunchStepIds,
       isStepEligible: (step) => {
         const run = skipRunMap.get(step.id);
-        return !!run && run.status === "pending" && run.issueId == null;
+        if (!run || run.status !== "pending" || run.issueId != null) return false;
+        return !hasRecoverableQaRequestChangesDependency(
+          step,
+          context.steps,
+          skipRunMap,
+          validationVerdictsByIssueId,
+        );
       },
     });
     if (skippableSteps.length > 0) {
