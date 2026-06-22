@@ -4857,6 +4857,35 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(qa.iterationIndex).toBe(0);
   });
 
+  it("[P4 control-flow loop] carries QA heartbeat feedback into the producer rework issue before QA comment commit", async () => {
+    heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-feedback" });
+    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: qaAgentId,
+      issueId: qaIssueId,
+      status: "succeeded",
+      startedAt: new Date("2026-06-18T07:09:00.000Z"),
+      finishedAt: new Date("2026-06-18T07:10:00.000Z"),
+      resultJson: {
+        result: "REQUEST_CHANGES\n- Add a glossary before approval.",
+      },
+    });
+
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(rows.find((row) => row.stepId === "produce")!).toMatchObject({
+      status: "pending",
+      iterationIndex: 1,
+    });
+    const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
+    const producerCommentBody = producerComments.map((comment) => comment.body).join("\n");
+    expect(producerCommentBody).toContain("Workflow QA rework request");
+    expect(producerCommentBody).toContain("QA heartbeat feedback");
+    expect(producerCommentBody).toContain("Add a glossary before approval");
+  });
+
   it("[P4 control-flow loop] maxIterations cap blocks further rework (no infinite loop): producer at cap is not reset", async () => {
     // 가즈아 무한 loop 회귀 가드: iteration_index 가 maxIterations 에 도달하면 더 이상 리셋하지 않는다.
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 1, initialProducerIteration: 1 });

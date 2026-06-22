@@ -30,7 +30,7 @@
 
 import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, workflowStepRuns } from "@paperclipai/db";
+import { heartbeatRuns, issueComments, workflowStepRuns } from "@paperclipai/db";
 import {
   conditionalEdgeHolds,
   resolveEdges,
@@ -75,6 +75,26 @@ function truncateFeedback(body: string, maxLength = 4000): string {
   return body.length <= maxLength ? body : `${body.slice(0, maxLength)}\n\n[truncated]`;
 }
 
+function extractHeartbeatFeedback(resultJson: unknown, stdoutExcerpt: string | null): string | null {
+  const result = resultJson && typeof resultJson === "object" && !Array.isArray(resultJson)
+    ? resultJson as Record<string, unknown>
+    : {};
+  const candidates = [
+    result.result,
+    result.summary,
+    result.message,
+    result.stdout,
+    stdoutExcerpt,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    return truncateFeedback(trimmed);
+  }
+  return null;
+}
+
 async function loadQaReworkFeedback(input: {
   db: Db;
   qaIssueId: string | null;
@@ -86,15 +106,36 @@ async function loadQaReworkFeedback(input: {
     .where(eq(issueComments.issueId, input.qaIssueId))
     .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
     .limit(5);
-  if (rows.length === 0) return null;
   const requestChangeRows = rows.filter((row) => REQUEST_CHANGES_PATTERN.test(row.body));
   const selectedRows = requestChangeRows.length > 0 ? requestChangeRows : rows.slice(0, 1);
-  return selectedRows
-    .map((row) => {
+  if (selectedRows.length > 0) {
+    return selectedRows.map((row) => {
       const createdAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : "unknown-time";
       return `### QA feedback at ${createdAt}\n${truncateFeedback(row.body)}`;
     })
     .join("\n\n");
+  }
+
+  const runRows = await input.db
+    .select({
+      resultJson: heartbeatRuns.resultJson,
+      stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
+      finishedAt: heartbeatRuns.finishedAt,
+      createdAt: heartbeatRuns.createdAt,
+    })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.issueId, input.qaIssueId))
+    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+    .limit(5);
+  for (const run of runRows) {
+    const feedback = extractHeartbeatFeedback(run.resultJson, run.stdoutExcerpt);
+    if (!feedback) continue;
+    const observedAt = run.finishedAt ?? run.createdAt;
+    const timestamp = observedAt instanceof Date ? observedAt.toISOString() : "unknown-time";
+    return `### QA heartbeat feedback at ${timestamp}\n${feedback}`;
+  }
+
+  return null;
 }
 
 function buildProducerReworkComment(input: {
