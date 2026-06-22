@@ -216,6 +216,44 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
   });
 
+  it("allows rg stdin filters whose search pattern contains slashes", () => {
+    const line = JSON.stringify({
+      type: "item.started",
+      item: {
+        id: "item_1",
+        type: "command_execution",
+        command: "curl -sS http://127.0.0.1/openapi.json | jq -r '.paths | keys[]' | rg '^/issues|^/api/issues|work-products|comments|heartbeat-context'",
+        status: "in_progress",
+      },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "codex_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          taskKey: null,
+          issueId: null,
+          projectId: null,
+          allowedContextKeys: [],
+          guardrails: { broadScanAllowed: false },
+          inputs: {
+            workspace: { available: true, source: "agent_home", workspaceId: null, projectId: null },
+            workspaceHints: { available: false, count: 0 },
+            runtimeServiceIntents: { available: false, count: 0 },
+            runtimeServices: { available: false, count: 0, primaryUrl: null },
+            fileViews: { available: false, count: 0, source: null },
+            sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
+  });
+
   it("still blocks rg after a pipe when it targets the repo", () => {
     const line = JSON.stringify({
       type: "item.started",

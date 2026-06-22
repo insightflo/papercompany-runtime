@@ -80,9 +80,14 @@ function findBroadScanCommand(
       return candidate.label;
     }
     if (candidate.label === "rg without path" || candidate.label === "grep -R without path") {
-      if (hasRepoWideTarget(command)) return candidate.label;
-      if (options.stdinFromPipe && extractExplicitTargetPaths(command).length === 0) return null;
-      return areAllExplicitTargetPathsAllowed(command, allowedPaths) ? null : candidate.label;
+      const explicitTargets = extractSearchTargetPaths(command, candidate.label === "rg without path" ? "rg" : "grep");
+      if (explicitTargets.some(isRepoWideTargetToken)) return candidate.label;
+      if (options.stdinFromPipe && explicitTargets.length === 0) return null;
+      return explicitTargets.length > 0 && explicitTargets.every((target) =>
+        allowedPaths.some((relativePath) => target === relativePath.toLowerCase()),
+      )
+        ? null
+        : candidate.label;
     }
     if (candidate.label === "tree" || candidate.label === "ls -R") {
       return areAllExplicitTargetPathsAllowed(command, allowedPaths) && !hasRepoWideTarget(command)
@@ -101,35 +106,39 @@ function areAllExplicitTargetPathsAllowed(command: string, allowedPaths: string[
 }
 
 function hasRepoWideTarget(command: string) {
-  const tokens = command.split(/\s+/).filter(Boolean);
+  const tokens = shellTokenize(command);
   return tokens.some((token) => {
-    const raw = token.toLowerCase();
-    if (
-      raw === "." ||
-      raw === "./" ||
-      raw === "$pwd" ||
-      raw === '"$pwd"' ||
-      raw === "'$pwd'" ||
-      raw === "$(pwd)" ||
-      raw === '`pwd`'
-    ) {
-      return true;
-    }
-    const normalized = token.replace(/^['"`]+|['"`,:;!?]+$/g, "").toLowerCase();
-    return (
-      normalized === "." ||
-      normalized === "./" ||
-      normalized === "$pwd" ||
-      normalized === '"$pwd"' ||
-      normalized === "'$pwd'" ||
-      normalized === "$(pwd)" ||
-      normalized === '`pwd`'
-    );
+    return isRepoWideTargetToken(token);
   });
 }
 
+function isRepoWideTargetToken(token: string) {
+  const raw = token.toLowerCase();
+  if (
+    raw === "." ||
+    raw === "./" ||
+    raw === "$pwd" ||
+    raw === '"$pwd"' ||
+    raw === "'$pwd'" ||
+    raw === "$(pwd)" ||
+    raw === '`pwd`'
+  ) {
+    return true;
+  }
+  const normalized = token.replace(/^['"`]+|['"`,:;!?]+$/g, "").toLowerCase();
+  return (
+    normalized === "." ||
+    normalized === "./" ||
+    normalized === "$pwd" ||
+    normalized === '"$pwd"' ||
+    normalized === "'$pwd'" ||
+    normalized === "$(pwd)" ||
+    normalized === '`pwd`'
+  );
+}
+
 function extractExplicitTargetPaths(command: string) {
-  const tokens = command.split(/\s+/).filter(Boolean);
+  const tokens = shellTokenize(command);
   const explicit: string[] = [];
   for (const token of tokens) {
     if (token.startsWith("-")) continue;
@@ -143,6 +152,76 @@ function extractExplicitTargetPaths(command: string) {
     }
   }
   return explicit;
+}
+
+function extractSearchTargetPaths(command: string, executable: "rg" | "grep") {
+  const tokens = shellTokenize(command);
+  const commandIndex = tokens.findIndex((token) => token === executable);
+  if (commandIndex < 0) return [];
+  const positional: string[] = [];
+  for (let index = commandIndex + 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token === "--") continue;
+    if (token.startsWith("-")) {
+      if (optionTakesValue(token) && index + 1 < tokens.length) index += 1;
+      continue;
+    }
+    positional.push(token);
+  }
+  const targetTokens = positional.slice(1);
+  return targetTokens
+    .map((token) => token.replace(/^['"`]+|['"`,:;!?]+$/g, "").toLowerCase())
+    .filter(Boolean);
+}
+
+function optionTakesValue(token: string) {
+  return [
+    "-e",
+    "-f",
+    "-g",
+    "--glob",
+    "--type",
+    "-t",
+    "--type-not",
+    "-T",
+    "--context",
+    "-C",
+    "--after-context",
+    "-A",
+    "--before-context",
+    "-B",
+  ].includes(token);
+}
+
+function shellTokenize(command: string) {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | "`" | null = null;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) tokens.push(current);
+  return tokens;
 }
 
 function splitShellSegments(command: string) {
