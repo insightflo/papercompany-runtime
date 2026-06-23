@@ -198,6 +198,7 @@ export function hermesChatRoutes(db: Db) {
             "Use live Paperclip state when answering questions about prior work, artifacts, agents, missions, workflow runs, or issue status.",
             "For status questions, lead with the current conclusion, then include only the 2-4 most important evidence points such as issue ids, run status, or work product counts.",
             "For mission/QA/failure questions, answer in this order: current state, short reason, key evidence, and next action.",
+            "For blocked/failed/QA/artifact questions about a selected issue, do not answer from page summary alone. Use selected issue comments, workProducts, and run ids first; if those details are missing, say exactly which evidence is missing before concluding.",
             "If the operator asks for more detail, expand with issue identifiers, statuses, latest comments, runs, and work product counts.",
             "Do not mark issues or missions complete unless the operator explicitly asks you to perform that action and evidence is available.",
           ],

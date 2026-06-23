@@ -116,7 +116,7 @@ function countByStatus(items: Array<{ status: string }>) {
 type MissionPageWorkItemContext = {
   issue: Issue;
   comments: Array<Pick<IssueComment, "id" | "body" | "createdAt" | "authorAgentId" | "authorUserId">>;
-  workProducts: Array<Pick<IssueWorkProduct, "id" | "title" | "type" | "url" | "status">>;
+  workProducts: Array<Pick<IssueWorkProduct, "id" | "title" | "type" | "provider" | "externalId" | "url" | "status" | "metadata" | "isPrimary">>;
 };
 
 function serializeWorkItemContext(item: MissionPageWorkItemContext) {
@@ -140,8 +140,12 @@ function serializeWorkItemContext(item: MissionPageWorkItemContext) {
         id: product.id,
         title: product.title ?? null,
         type: product.type ?? null,
+        provider: product.provider ?? null,
+        externalId: product.externalId ?? null,
         url: product.url ?? null,
         status: product.status ?? null,
+        metadata: product.metadata ?? null,
+        isPrimary: product.isPrimary ?? false,
       })),
     },
     latestComments: item.comments.slice(-6).map((comment) => ({
@@ -185,8 +189,12 @@ async function loadWorkItemContext(issue: Issue): Promise<MissionPageWorkItemCon
       id: product.id,
       title: product.title ?? null,
       type: product.type,
+      provider: product.provider,
+      externalId: product.externalId ?? null,
       url: product.url ?? null,
       status: product.status,
+      metadata: product.metadata ?? null,
+      isPrimary: product.isPrimary,
     })),
   };
 }

@@ -990,6 +990,9 @@ async function createWorkflowStepIssue(input: {
         : "  workProducts: none registered",
     ];
   });
+  const missingDependencyWorkProductLines = dependencyIssueRows
+    .filter((row) => (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length === 0)
+    .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
 
   const stepName = renderWorkflowRunTextTemplate(input.step.name.trim(), input.run);
   const title = stepName || renderWorkflowRunTextTemplate(input.definition.name, input.run);
@@ -1006,6 +1009,14 @@ async function createWorkflowStepIssue(input: {
     `- dependencyStepIds: ${JSON.stringify(input.step.dependencies)}`,
     dependencyIssueLines.length > 0 ? "Dependency issue inputs:" : null,
     ...dependencyIssueLines,
+    missingDependencyWorkProductLines.length > 0 ? "Dependency workProduct hard-stop:" : null,
+    ...missingDependencyWorkProductLines,
+    missingDependencyWorkProductLines.length > 0
+      ? "- Registered dependency workProducts above are the only official upstream artifacts. Do not infer dependency deliverables from guessed filesystem paths, sibling run folders, old dates, or unrelated comments."
+      : null,
+    missingDependencyWorkProductLines.length > 0
+      ? "- If this step needs that dependency deliverable for validation, synthesis, build, publish, or approval, stop and leave a blocker/REQUEST_CHANGES naming the missing dependency workProduct instead of producing a guessed result."
+      : null,
     "- Treat issue ids from other missions or workflow runs as out of scope, even when their titles are similar.",
     "",
     "Official workProduct contract:",

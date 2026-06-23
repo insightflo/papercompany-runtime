@@ -2353,6 +2353,15 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(progressedPlan?.status).toBe("completed");
     expect(progressedBuild?.issueId).toBeTruthy();
 
+    const buildIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, progressedBuild!.issueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(buildIssue?.description).toContain("Dependency workProduct hard-stop:");
+    expect(buildIssue?.description).toContain(`- plan: ${planIssue?.identifier ?? planIssue!.id} has no registered dependency workProduct.`);
+    expect(buildIssue?.description).toContain("Do not infer dependency deliverables from guessed filesystem paths");
+
     await issueSvc.update(progressedBuild!.issueId!, { status: "done" });
     const afterBuild = await syncWorkflowRunForIssue(db, progressedBuild!.issueId!);
     expect(afterBuild?.status).toBe("completed");

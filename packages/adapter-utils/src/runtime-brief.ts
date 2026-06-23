@@ -87,6 +87,71 @@ function buildRecentIssueCommentsBrief(value: unknown) {
   ], "\n");
 }
 
+function artifactRefForWorkProduct(product: Record<string, unknown>) {
+  const metadata = asRecord(product.metadata);
+  return (
+    asString(product.url) ??
+    asString(product.externalId) ??
+    asString(metadata?.path) ??
+    (metadata && Object.keys(metadata).length > 0 ? stringifyBriefJson(metadata, 500) : null)
+  );
+}
+
+function buildWorkItemEvidenceLines(label: string, item: Record<string, unknown>) {
+  const identifier = asString(item.identifier) ?? asString(item.id) ?? "unknown";
+  const title = asString(item.title);
+  const status = asString(item.status);
+  const description = asString(item.description);
+  const workProducts = asRecord(item.workProducts);
+  const latestProducts = Array.isArray(workProducts?.latest)
+    ? workProducts!.latest.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const latestComments = Array.isArray(item.latestComments)
+    ? item.latestComments.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const lines = [
+    `- ${label}: ${identifier}${title ? ` — ${truncateBriefLine(title, 180)}` : ""}${status ? ` (${status})` : ""}`,
+    description ? `  Description: ${truncateBriefLine(description, 700)}` : null,
+    `  Work products: ${asNumber(workProducts?.total)}`,
+    ...latestProducts.slice(0, 5).map((product) => {
+      const productTitle = asString(product.title) ?? asString(product.id) ?? "workProduct";
+      const productType = asString(product.type) ?? "unknown";
+      const productStatus = asString(product.status) ?? "unknown";
+      const provider = asString(product.provider);
+      const artifactRef = artifactRefForWorkProduct(product);
+      return `  - ${productTitle} [${productType}/${productStatus}]${provider ? ` provider=${provider}` : ""}${artifactRef ? ` ref=${truncateBriefLine(artifactRef, 420)}` : ""}`;
+    }),
+    latestComments.length > 0 ? "  Latest comments:" : null,
+    ...latestComments.slice(-5).map((comment) => {
+      const body = asString(comment.body ?? comment.content ?? comment.text);
+      if (!body) return null;
+      const author = asString(comment.authorUserId) ?? asString(comment.authorAgentId) ?? "unknown";
+      const createdAt = asString(comment.createdAt);
+      return `  - ${createdAt ? `${createdAt} ` : ""}${author}: ${truncateBriefLine(body, 900)}`;
+    }),
+  ].filter((line): line is string => line !== null);
+  return lines;
+}
+
+function buildCurrentPageIssueEvidence(currentPage: Record<string, unknown> | null) {
+  const facts = asRecord(currentPage?.facts);
+  if (!facts) return [];
+  const selected = asRecord(facts.selectedWorkItem);
+  const attention = Array.isArray(facts.attentionWorkItems)
+    ? facts.attentionWorkItems.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const lines = [
+    ...(selected ? buildWorkItemEvidenceLines("Selected work item", selected) : []),
+    ...attention.slice(0, 4).flatMap((item, index) => buildWorkItemEvidenceLines(`Attention work item ${index + 1}`, item)),
+  ];
+  if (lines.length === 0) return [];
+  return [
+    "Current page issue evidence:",
+    "Use this section before the summary/Facts JSON for blocked, failed, QA, artifact, or workProduct questions.",
+    ...lines,
+  ];
+}
+
 function buildHermesChatBrief(value: unknown) {
   const chat = asRecord(value);
   if (!chat) return null;
@@ -117,6 +182,7 @@ function buildHermesChatBrief(value: unknown) {
   const currentPageFactsLine = currentPageFacts && Object.keys(currentPageFacts).length > 0
     ? truncateBriefLine(JSON.stringify(currentPageFacts), 4_000)
     : null;
+  const currentPageIssueEvidenceLines = buildCurrentPageIssueEvidence(currentPage);
   const attachmentLines = attachments.slice(0, 6).flatMap((attachment) => {
     const name = asString(attachment.name) ?? "attachment";
     const contentType = asString(attachment.contentType) ?? "application/octet-stream";
@@ -134,7 +200,8 @@ function buildHermesChatBrief(value: unknown) {
     sessionId ? `- Session: ${sessionId}` : null,
     sessionTitle ? `- Title: ${sessionTitle}` : null,
     instructions.length > 0 ? "Instructions:" : null,
-    ...instructions.slice(0, 8).map((instruction) => `- ${instruction}`),
+    ...instructions.slice(0, 10).map((instruction) => `- ${instruction}`),
+    ...currentPageIssueEvidenceLines,
     currentPage ? "Current Paperclip page:" : null,
     asString(currentPage?.kind) ? `- Kind: ${asString(currentPage?.kind)}` : null,
     asString(currentPage?.path) ? `- Path: ${asString(currentPage?.path)}` : null,

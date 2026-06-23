@@ -74,6 +74,34 @@ describe("buildPaperclipRuntimeBrief", () => {
           facts: {
             missionId: "mission-1",
             issues: { total: 3, openCount: 1, blockedCount: 0 },
+            selectedWorkItem: {
+              id: "issue-2",
+              identifier: "RES-163",
+              title: "Audit source coverage and confidence",
+              status: "blocked",
+              description: "Validate the evidence bundle.",
+              workProducts: {
+                total: 1,
+                latest: [
+                  {
+                    id: "wp-1",
+                    title: "Source Coverage Audit",
+                    type: "document",
+                    provider: "local",
+                    status: "active",
+                    metadata: { path: "/srv/papercompany/projects/research-company/source_coverage.md" },
+                  },
+                ],
+              },
+              latestComments: [
+                {
+                  id: "comment-1",
+                  body: "Verdict: REQUEST_CHANGES. Fix the stale Anthropic reference.",
+                  createdAt: "2026-06-23T14:07:45.679Z",
+                  authorAgentId: "validator-agent",
+                },
+              ],
+            },
           },
           loadedAt: "2026-06-09T00:00:00.000Z",
         },
@@ -86,6 +114,10 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("- Title: Find old report");
     expect(brief).toContain("This is a free-form operations chat, not a mission or issue assignment.");
     expect(brief).toContain("Current Paperclip page:");
+    expect(brief).toContain("Current page issue evidence:");
+    expect(brief).toContain("Selected work item: RES-163");
+    expect(brief).toContain("Source Coverage Audit [document/active] provider=local ref=/srv/papercompany/projects/research-company/source_coverage.md");
+    expect(brief).toContain("Verdict: REQUEST_CHANGES. Fix the stale Anthropic reference.");
     expect(brief).toContain("- Kind: mission");
     expect(brief).toContain("- Path: /RES/missions/mission-1");
     expect(brief).toContain("Mission \"SpaceX report mission\" is active.");
