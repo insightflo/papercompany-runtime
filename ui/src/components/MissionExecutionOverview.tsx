@@ -3,11 +3,11 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import type { AgentRuntimeState } from "@paperclipai/shared";
 import { AlertTriangle, BookOpen, Bot, GitBranch, Wrench } from "lucide-react";
 import { agentsApi } from "../api/agents";
-import { issuesApi } from "../api/issues";
 import { missionsApi, type MissionDetailItem, type MissionOwnerActionExplanationStatus } from "../api/missions";
 import { MissionGovernanceThreadPanel } from "./MissionGovernanceThreadPanel";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
+import { openWorkProductInBrowser } from "../lib/workProductOpen";
 
 interface MissionExecutionOverviewProps {
   missionId: string;
@@ -137,7 +137,7 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
     setOpenedWorkProductId(null);
     setWorkProductOpenError(null);
     try {
-      await issuesApi.openWorkProduct(productId);
+      await openWorkProductInBrowser(productId);
       setOpenedWorkProductId(productId);
     } catch (error) {
       setWorkProductOpenError(error instanceof Error ? error.message : "Failed to open work product");
@@ -476,7 +476,7 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
                                       className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-60"
                                       disabled={openingWorkProductId === product.id}
                                       onClick={() => void handleOpenWorkProduct(product.id)}
-                                      title="Open with the operating system"
+                                      title="Open in your browser"
                                     >
                                       {openingWorkProductId === product.id ? "Opening" : "Open"}
                                     </button>

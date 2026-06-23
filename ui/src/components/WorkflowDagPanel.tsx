@@ -9,12 +9,12 @@ import {
   type MissionWorkflowStep,
   type MissionWorkflowStepWorkProduct,
 } from "../api/missions";
-import { issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, formatDateTime } from "../lib/utils";
+import { openWorkProductInBrowser } from "../lib/workProductOpen";
 import { Button } from "@/components/ui/button";
 import { GitBranch, User, Wrench } from "lucide-react";
 
@@ -201,7 +201,7 @@ function WorkProductCard({
     setOpenedProductId(null);
     setOpenErrorProductId(null);
     try {
-      await issuesApi.openWorkProduct(product.id);
+      await openWorkProductInBrowser(product.id);
       setOpenedProductId(product.id);
     } catch {
       setOpenErrorProductId(product.id);

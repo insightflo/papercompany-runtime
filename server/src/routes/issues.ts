@@ -1,3 +1,5 @@
+import { createReadStream, statSync } from "node:fs";
+import path from "node:path";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { desc, eq } from "drizzle-orm";
@@ -45,9 +47,24 @@ import { buildContextSafeFileViews } from "../services/context-safe-file-views.j
 import { buildMaintenanceDecisionContext } from "../services/maintenance/decision-context.js";
 import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
-import { openWorkProductWithDefaultApp, WorkProductOpenError } from "../services/work-products.js";
+import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+
+function contentTypeForWorkProductPath(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".html" || extension === ".htm") return "text/html; charset=utf-8";
+  if (extension === ".md" || extension === ".markdown") return "text/markdown; charset=utf-8";
+  if (extension === ".txt" || extension === ".log") return "text/plain; charset=utf-8";
+  if (extension === ".json") return "application/json; charset=utf-8";
+  if (extension === ".pdf") return "application/pdf";
+  if (extension === ".png") return "image/png";
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".gif") return "image/gif";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".webp") return "image/webp";
+  return "application/octet-stream";
+}
 
 export function issueRoutes(db: Db, storage: StorageService) {
   const router = Router();
@@ -831,17 +848,53 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     assertCompanyAccess(req, existing.companyId);
 
-    try {
-      const target = await openWorkProductWithDefaultApp(existing);
-      res.json({ ok: true, target });
-    } catch (error) {
-      if (error instanceof WorkProductOpenError) {
-        const status = error.code === "path_not_found" ? 404 : error.code === "no_open_target" ? 422 : 500;
-        res.status(status).json({ error: error.message, code: error.code });
-        return;
-      }
-      throw error;
+    const target = resolveWorkProductBrowserOpenTarget(existing);
+    if (!target) {
+      res.status(422).json({ error: "Work product has no browser-openable URL or local file path", code: "no_open_target" });
+      return;
     }
+
+    res.json({ ok: true, target });
+  });
+
+  router.get("/work-products/:id/content", async (req, res, next) => {
+    const id = req.params.id as string;
+    const existing = await workProductsSvc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Work product not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+
+    const filePath = resolveWorkProductLocalFilePath(existing);
+    if (!filePath) {
+      res.status(422).json({ error: "Work product has no local file path", code: "no_local_path" });
+      return;
+    }
+
+    let stat;
+    try {
+      stat = statSync(filePath);
+    } catch {
+      res.status(404).json({ error: "Work product path does not exist", code: "path_not_found" });
+      return;
+    }
+    if (!stat.isFile()) {
+      res.status(422).json({ error: "Work product path is not a file", code: "not_a_file" });
+      return;
+    }
+
+    res.setHeader("Content-Type", contentTypeForWorkProductPath(filePath));
+    res.setHeader("Content-Length", String(stat.size));
+    res.setHeader("Cache-Control", "private, max-age=60");
+    const filename = path.basename(filePath) || "work-product";
+    res.setHeader("Content-Disposition", `inline; filename=\"${filename.replaceAll("\"", "")}\"`);
+
+    const stream = createReadStream(filePath);
+    stream.on("error", (err) => {
+      next(err);
+    });
+    stream.pipe(res);
   });
 
   router.delete("/work-products/:id", async (req, res) => {

@@ -1,9 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
-  openWorkProductWithDefaultApp,
+  resolveWorkProductBrowserOpenTarget,
+  resolveWorkProductLocalFilePath,
   resolveWorkProductOpenTarget,
   workProductService,
 } from "../services/work-products.ts";
@@ -68,25 +70,46 @@ describe("workProductService", () => {
     expect(target).toBeNull();
   });
 
-  it("opens resolved work products with the injected OS opener", async () => {
+  it("resolves file URL work products to a local path", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "paperclip-work-product-open-"));
     const reportPath = path.join(dir, "report.html");
     writeFileSync(reportPath, "<h1>report</h1>\n", "utf8");
-    const opener = vi.fn(async () => undefined);
 
     try {
-      const result = await openWorkProductWithDefaultApp(createWorkProductRow({
+      const result = resolveWorkProductLocalFilePath(createWorkProductRow({
         type: "document",
         provider: "local",
-        metadata: { path: reportPath },
-        url: null,
-      }) as any, { opener });
+        metadata: null,
+        url: pathToFileURL(reportPath).toString(),
+      }) as any);
 
-      expect(result).toEqual({ kind: "path", value: reportPath });
-      expect(opener).toHaveBeenCalledWith(reportPath);
+      expect(result).toBe(reportPath);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("returns an API content URL for local files when opening in a browser", () => {
+    const target = resolveWorkProductBrowserOpenTarget(createWorkProductRow({
+      id: "work-product-1",
+      type: "document",
+      provider: "local",
+      metadata: { path: "/tmp/report.html" },
+      url: null,
+    }) as any);
+
+    expect(target).toEqual({ kind: "url", value: "/api/work-products/work-product-1/content" });
+  });
+
+  it("keeps HTTP URLs as browser-open targets", () => {
+    const target = resolveWorkProductBrowserOpenTarget(createWorkProductRow({
+      id: "work-product-1",
+      provider: "paperclip",
+      metadata: null,
+      url: "https://example.com/report.html",
+    }) as any);
+
+    expect(target).toEqual({ kind: "url", value: "https://example.com/report.html" });
   });
 
   it("uses a transaction when creating a new primary work product", async () => {

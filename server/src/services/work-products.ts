@@ -1,24 +1,14 @@
 import { and, desc, eq } from "drizzle-orm";
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
 type WorkProductOpenTarget = { kind: "path" | "url"; value: string };
-type WorkProductOpener = (target: string) => Promise<void>;
-
-export class WorkProductOpenError extends Error {
-  code: "no_open_target" | "path_not_found" | "open_failed";
-
-  constructor(code: WorkProductOpenError["code"], message: string) {
-    super(message);
-    this.name = "WorkProductOpenError";
-    this.code = code;
-  }
-}
+type WorkProductBrowserOpenTarget = { kind: "url"; value: string };
 
 function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
   return {
@@ -64,9 +54,34 @@ function isOpenableUrl(value: string): boolean {
   }
 }
 
-export function resolveWorkProductOpenTarget(product: Pick<IssueWorkProduct, "metadata" | "provider" | "url">): WorkProductOpenTarget | null {
+function isBrowserOpenableUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function resolveWorkProductLocalFilePath(product: Pick<IssueWorkProduct, "metadata" | "url">): string | null {
   const localPath = metadataPath(product.metadata);
-  if (localPath && path.isAbsolute(localPath)) return { kind: "path", value: localPath };
+  if (localPath && path.isAbsolute(localPath)) return localPath;
+
+  const url = product.url?.trim();
+  if (!url) return null;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "file:") return null;
+    return fileURLToPath(parsed);
+  } catch {
+    return null;
+  }
+}
+
+export function resolveWorkProductOpenTarget(product: Pick<IssueWorkProduct, "metadata" | "provider" | "url">): WorkProductOpenTarget | null {
+  const localPath = resolveWorkProductLocalFilePath(product);
+  if (localPath) return { kind: "path", value: localPath };
 
   const url = product.url?.trim();
   if (url && isOpenableUrl(url)) return { kind: "url", value: url };
@@ -74,49 +89,17 @@ export function resolveWorkProductOpenTarget(product: Pick<IssueWorkProduct, "me
   return null;
 }
 
-function defaultOsOpener(target: string): Promise<void> {
-  const command = process.platform === "darwin"
-    ? "open"
-    : process.platform === "win32"
-      ? "rundll32.exe"
-      : "xdg-open";
-  const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", target] : [target];
+export function resolveWorkProductBrowserOpenTarget(
+  product: Pick<IssueWorkProduct, "id" | "metadata" | "url">,
+): WorkProductBrowserOpenTarget | null {
+  const url = product.url?.trim();
+  if (url && isBrowserOpenableUrl(url)) return { kind: "url", value: url };
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      detached: true,
-      stdio: "ignore",
-      shell: false,
-    });
-    child.once("error", reject);
-    child.once("spawn", () => {
-      child.unref();
-      resolve();
-    });
-  });
-}
-
-export async function openWorkProductWithDefaultApp(
-  product: IssueWorkProduct,
-  options: { opener?: WorkProductOpener } = {},
-): Promise<WorkProductOpenTarget> {
-  const target = resolveWorkProductOpenTarget(product);
-  if (!target) {
-    throw new WorkProductOpenError("no_open_target", "Work product has no local path or openable URL");
-  }
-  if (target.kind === "path" && !existsSync(target.value)) {
-    throw new WorkProductOpenError("path_not_found", "Work product path does not exist");
+  if (resolveWorkProductLocalFilePath(product)) {
+    return { kind: "url", value: `/api/work-products/${encodeURIComponent(product.id)}/content` };
   }
 
-  try {
-    await (options.opener ?? defaultOsOpener)(target.value);
-    return target;
-  } catch (error) {
-    throw new WorkProductOpenError(
-      "open_failed",
-      error instanceof Error ? error.message : "Failed to open work product",
-    );
-  }
+  return null;
 }
 
 function hasValidLocalFilePath(data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) {

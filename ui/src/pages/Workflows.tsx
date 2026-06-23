@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent, type JSX } from "react";
-import { issuesApi } from "../api/issues";
 import { useCompany } from "../context/CompanyContext";
+import { openWorkProductInBrowser } from "../lib/workProductOpen";
 import { buildManualRunFeedback, buildManualRunButtonState, findNewRunId, manualRunUnavailableMessage } from "./workflows/run-feedback.js";
 import { buildIssueHref, buildMissionHref } from "./workflows/routes.js";
 import { getSelectableWorkflowTools, getWorkflowToolSystemState, type WorkflowToolSystemState } from "./workflows/tool-availability.js";
@@ -3079,22 +3079,40 @@ function WorkflowGraphEditor({
     deleteStep(selectedStep.id);
   }
 
+  function deleteSelectedEdge(): boolean {
+    const edge = selectedEdgeActionAnchor?.edge ?? graph.edges.find((candidate) => candidate.id === selectedEdgeId);
+    if (!edge) return false;
+    disconnect(edge.source, edge.target);
+    return true;
+  }
+
+  function deleteSelectedGraphObject(): void {
+    if (deleteSelectedEdge()) return;
+    deleteSelectedStep();
+  }
+
   function stopGraphControlEvent(event: React.SyntheticEvent<HTMLElement>): void {
     event.stopPropagation();
   }
 
   useEffect(() => {
-    if (!selectedStepIdForKeyboard) return undefined;
+    if (!selectedStepIdForKeyboard && !selectedEdgeId) return undefined;
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Delete" && event.key !== "Backspace") return;
       if (isEditableKeyboardTarget(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
+      const edge = graph.edges.find((candidate) => candidate.id === selectedEdgeId);
+      if (edge) {
+        disconnect(edge.source, edge.target);
+        return;
+      }
+      if (!selectedStepIdForKeyboard) return;
       deleteStep(selectedStepIdForKeyboard);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [selectedStepIdForKeyboard, steps]);
+  }, [graph.edges, selectedEdgeId, selectedStepIdForKeyboard, steps]);
 
   function closeGraphContextMenu(): void {
     setGraphContextMenu(null);
@@ -3643,14 +3661,14 @@ function WorkflowGraphEditor({
               </button>
               <button
                 type="button"
-                style={selectedStep ? { ...graphCanvasToolButtonStyle, color: "var(--destructive, #ef4444)" } : { ...graphCanvasToolButtonStyle, ...buttonDisabledStyle }}
-                title="Delete selected step"
-                aria-label="Delete selected step"
-                disabled={!selectedStep}
+                style={selectedStep || selectedEdgeActionAnchor ? { ...graphCanvasToolButtonStyle, color: "var(--destructive, #ef4444)" } : { ...graphCanvasToolButtonStyle, ...buttonDisabledStyle }}
+                title={selectedEdgeActionAnchor ? "Delete selected relationship" : "Delete selected step"}
+                aria-label={selectedEdgeActionAnchor ? "Delete selected relationship" : "Delete selected step"}
+                disabled={!selectedStep && !selectedEdgeActionAnchor}
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  deleteSelectedStep();
+                  deleteSelectedGraphObject();
                 }}
               >
                 -
@@ -3923,6 +3941,8 @@ function WorkflowGraphEditor({
                 left: selectedEdgeActionAnchor.x - 11,
                 top: selectedEdgeActionAnchor.y - 11,
               }}
+              onPointerDown={stopGraphControlEvent}
+              onPointerUp={stopGraphControlEvent}
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -5312,7 +5332,7 @@ function WorkflowRunGraphPreview({
     setOpenedWorkProductId(null);
     setWorkProductOpenError(null);
     try {
-      await issuesApi.openWorkProduct(product.id);
+      await openWorkProductInBrowser(product.id);
       setOpenedWorkProductId(product.id);
     } catch (error) {
       setWorkProductOpenError(error instanceof Error ? error.message : "Failed to open work product");
@@ -5812,7 +5832,7 @@ function WorkflowRunGraphPreview({
                               onClick={() => void handleOpenWorkProduct(product)}
                               disabled={openingWorkProductId === product.id}
                               style={{ ...buttonStyle, padding: "4px 8px", fontSize: "11px", lineHeight: 1.2 }}
-                              title="Open with the operating system"
+                              title="Open in your browser"
                             >
                               {openingWorkProductId === product.id ? "Opening" : "Open"}
                             </button>

@@ -1,13 +1,11 @@
 import express from "express";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
-
-const mockOpenWorkProductWithDefaultApp = vi.hoisted(() => vi.fn(async () => ({
-  kind: "url",
-  value: "https://example.com/report.html",
-})));
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -60,14 +58,6 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => mockWorkProductsService,
 }));
 
-vi.mock("../services/work-products.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../services/work-products.js")>();
-  return {
-    ...actual,
-    openWorkProductWithDefaultApp: mockOpenWorkProductWithDefaultApp,
-  };
-});
-
 function createApp(actor: Record<string, unknown> = {}) {
   const app = express();
   app.use(express.json());
@@ -114,21 +104,57 @@ describe("work product routes", () => {
     });
   });
 
-  it("opens a work product through the OS default application", async () => {
+  it("returns a browser-openable target for a work product", async () => {
     const res = await request(createApp()).post("/api/work-products/work-product-1/open").send({});
 
     expect(res.status).toBe(200);
-    expect(mockOpenWorkProductWithDefaultApp).toHaveBeenCalledWith(expect.objectContaining({ id: "work-product-1" }));
     expect(res.body).toEqual({
       ok: true,
-      target: { kind: "url", value: "https://example.com/report.html" },
+      target: { kind: "url", value: "/api/work-products/work-product-1/content" },
     });
   });
 
-  it("requires board access to open work products on the host OS", async () => {
+  it("streams local work product content to the browser", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "paperclip-work-product-route-"));
+    const reportPath = path.join(dir, "report.html");
+    writeFileSync(reportPath, "<h1>report</h1>\n", "utf8");
+    mockWorkProductsService.getById.mockResolvedValueOnce({
+      id: "work-product-1",
+      companyId: "company-1",
+      issueId: "issue-1",
+      type: "document",
+      provider: "local",
+      title: "Report",
+      url: null,
+      status: "active",
+      reviewState: "none",
+      isPrimary: true,
+      healthStatus: "unknown",
+      summary: null,
+      metadata: { path: reportPath },
+      projectId: null,
+      executionWorkspaceId: null,
+      runtimeServiceId: null,
+      externalId: null,
+      createdByRunId: null,
+      createdAt: new Date("2026-06-16T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-16T00:00:00.000Z"),
+    });
+
+    try {
+      const res = await request(createApp()).get("/api/work-products/work-product-1/content");
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.text).toContain("<h1>report</h1>");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires board access to request a browser-open target", async () => {
     const res = await request(createApp({ type: "agent" })).post("/api/work-products/work-product-1/open").send({});
 
     expect(res.status).toBe(403);
-    expect(mockOpenWorkProductWithDefaultApp).not.toHaveBeenCalled();
   });
 });
