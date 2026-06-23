@@ -939,6 +939,82 @@ async function autoRegisterWorkProductFromIssueDocument(input: {
   return created ?? null;
 }
 
+async function autoRegisterWorkProductFromClaimedFile(input: {
+  tx: Pick<Db, "select" | "insert">;
+  issue: {
+    id: string;
+    companyId: string;
+    projectId?: string | null;
+  };
+  run: typeof heartbeatRuns.$inferSelect;
+  claimedArtifactPaths: string[];
+}) {
+  // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
+  //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
+  //   문서가 없어 못 잡을 때, claimed 절대경로가 실제 파일이면 그 파일을 workProduct 로 등록한다.
+  // [주의] 절대경로 + fs.isFile() 확인으로만 등록(오등록/과등록 위험 최소화). CMPAA-163(existing WP 를
+  //   missing 으로 오탐하는 false-positive)과는 다른 경로 — 여기는 진짜 등록 안 된 실제 파일을 보강 등록.
+  // [수정시 영향] 모든 producer(workflow/수동)에 적용. 조건 완화 시 오등록 위험.
+  let resolvedArtifactPath: string | null = null;
+  for (const candidate of input.claimedArtifactPaths) {
+    if (!candidate || !path.isAbsolute(candidate)) continue;
+    const stats = await fs.stat(candidate).catch(() => null);
+    if (stats?.isFile()) {
+      resolvedArtifactPath = candidate;
+      break;
+    }
+  }
+  if (!resolvedArtifactPath) return null;
+
+  const isPrimary = !(await input.tx
+    .select({ id: issueWorkProducts.id })
+    .from(issueWorkProducts)
+    .where(eq(issueWorkProducts.issueId, input.issue.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null));
+
+  const [created] = await input.tx
+    .insert(issueWorkProducts)
+    .values({
+      companyId: input.issue.companyId,
+      projectId: input.issue.projectId ?? null,
+      issueId: input.issue.id,
+      type: "file",
+      provider: "local",
+      externalId: resolvedArtifactPath,
+      title: path.basename(resolvedArtifactPath),
+      status: "active",
+      reviewState: "none",
+      isPrimary,
+      healthStatus: "unknown",
+      summary: "Auto-registered from a claimed artifact path that resolves to a real file (producer reported the path but did not register a workProduct).",
+      metadata: {
+        path: resolvedArtifactPath,
+        autoRegisteredFrom: "claimed_artifact_file",
+        claimedArtifactPaths: input.claimedArtifactPaths,
+      },
+      createdByRunId: input.run.id,
+    })
+    .returning({ id: issueWorkProducts.id });
+
+  await input.tx.insert(activityLog).values({
+    companyId: input.issue.companyId,
+    actorType: "system",
+    actorId: "heartbeat",
+    action: "issue.work_product_auto_registered_from_file",
+    entityType: "issue",
+    entityId: input.issue.id,
+    agentId: input.run.agentId,
+    runId: input.run.id,
+    details: {
+      workProductId: created?.id ?? null,
+      path: resolvedArtifactPath,
+    },
+  });
+
+  return created ?? null;
+}
+
 function canCreateMissionOwnerUnblockForRequestChanges(issue: {
   originKind: string | null;
   title?: string | null;
@@ -6076,12 +6152,17 @@ export function heartbeatService(db: Db) {
         });
         const autoRegisteredWorkProduct = hasSatisfiedExistingWorkProductRegistration
           ? null
-          : await autoRegisterWorkProductFromIssueDocument({
+          : (await autoRegisterWorkProductFromIssueDocument({
               tx,
               issue,
               run,
               claimedArtifactPaths,
-            });
+            }) ?? await autoRegisterWorkProductFromClaimedFile({
+              tx,
+              issue,
+              run,
+              claimedArtifactPaths,
+            }));
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
           claimedArtifactPaths,
