@@ -961,7 +961,21 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   //   맥락에서 같은 경로를 resolve 하므로 producer 가 쓴 형태를 보존하는 쪽이 일관된다. 파일이 진짜 없으면
   //   downstream REQUEST_CHANGES 로 자교정(현재 gate block 보다 낫다). CMPAA-163(existing WP missing 오탐)
   //   과는 다른, 진짜 미등록 claimed 산출물의 보강 등록 경로.
-  const resolvedArtifactPath = input.claimedArtifactPaths.find((candidate) => typeof candidate === "string" && candidate.trim().length > 0) ?? null;
+  // producer 가 여러 경로를 claimed 할 때 deliverable-like(report/draft/.md/.html/.pdf 등) 경로를 선호하고
+  //   misc(favicon/.svg/.ico/.json 등)는 배제. 잘못된 artifact 를 등록해 downstream 가 엉뚱한 파일을 쓰는 것을
+  //   막는다(이전 run: synthesize 가 favicon.svg 를 대신 등록해 build 가 report.md 를 못 찾음).
+  const DELIVERABLE_NAME_RE = /(report|draft|outline|article|document|deliverable|artifact|manual|guide|summary|brief|synthesi[sz]e)/i;
+  const DELIVERABLE_EXT_RE = /\.(md|html?|pdf|txt)$/i;
+  const MISC_ARTIFACT_RE = /(favicon|\.svg$|\.ico$|\.json$|\.lock$|\.log$|\.map$|node_modules|package\.json|\/config\.)/i;
+  const scored = input.claimedArtifactPaths
+    .filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+    .map((p) => ({
+      p,
+      score: (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0),
+    }))
+    .sort((a, b) => b.score - a.score);
+  // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
+  const resolvedArtifactPath = scored.length > 0 && scored[0].score > 0 ? scored[0].p : null;
   if (!resolvedArtifactPath) return null;
 
   const isPrimary = !(await input.tx
