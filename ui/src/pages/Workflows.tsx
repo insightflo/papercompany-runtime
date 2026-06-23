@@ -27,6 +27,12 @@ function currentBrowserPathname(): string | undefined {
   return typeof window === "undefined" ? undefined : window.location.pathname;
 }
 
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
+}
+
 function MissionRunLink({ missionId }: { missionId?: string | null }): JSX.Element | null {
   if (!missionId) return null;
   return (
@@ -2777,6 +2783,7 @@ function WorkflowGraphEditor({
   const matchingNodeIds = useMemo(() => new Set<string>(), []);
   const selectedStep = steps.find((step) => step.id === selectedStepId) ?? steps[0] ?? null;
   const selectedGraphNode = selectedStep ? graph.nodes.find((node) => node.step.id === selectedStep.id) ?? null : null;
+  const selectedStepIdForKeyboard = selectedStep?.id ?? "";
   const selectedGraphContext = selectedStep ? getWorkflowGraphStepContext(steps, selectedStep.id) : null;
   const selectedDataFlowMap = useMemo<WorkflowGraphDataFlowMap | null>(
     () => selectedStep ? buildWorkflowGraphDataFlowMap(steps, selectedStep.id) : null,
@@ -3071,6 +3078,23 @@ function WorkflowGraphEditor({
     if (!selectedStep) return;
     deleteStep(selectedStep.id);
   }
+
+  function stopGraphControlEvent(event: React.SyntheticEvent<HTMLElement>): void {
+    event.stopPropagation();
+  }
+
+  useEffect(() => {
+    if (!selectedStepIdForKeyboard) return undefined;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (isEditableKeyboardTarget(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      deleteStep(selectedStepIdForKeyboard);
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [selectedStepIdForKeyboard, steps]);
 
   function closeGraphContextMenu(): void {
     setGraphContextMenu(null);
@@ -3604,7 +3628,14 @@ function WorkflowGraphEditor({
         onClick={handleCanvasClick}
       >
         <div key="graph-canvas-edit-tools-layer" style={graphCanvasEditToolLayerStyle}>
-          <div key="graph-canvas-edit-tools" data-graph-toolbar="true" style={graphCanvasEditToolDockStyle}>
+          <div
+            key="graph-canvas-edit-tools"
+            data-graph-toolbar="true"
+            style={graphCanvasEditToolDockStyle}
+            onPointerDown={stopGraphControlEvent}
+            onPointerUp={stopGraphControlEvent}
+            onClick={stopGraphControlEvent}
+          >
             <div key="object-tools" aria-label="Object editing tools" style={graphCanvasToolGroupStyle}>
               <span style={graphCanvasToolLabelStyle}>Edit</span>
               <button type="button" style={graphCanvasToolButtonStyle} title="Add downstream step" aria-label="Add downstream step" onClick={() => addAfter(selectedStep?.id ?? null)}>
@@ -3616,7 +3647,11 @@ function WorkflowGraphEditor({
                 title="Delete selected step"
                 aria-label="Delete selected step"
                 disabled={!selectedStep}
-                onClick={deleteSelectedStep}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  deleteSelectedStep();
+                }}
               >
                 -
               </button>
@@ -3628,6 +3663,8 @@ function WorkflowGraphEditor({
             key="graph-context-menu"
             data-graph-menu="true"
             style={{ ...graphContextMenuStyle, left: graphContextMenu.clientX, top: graphContextMenu.clientY }}
+            onPointerDown={stopGraphControlEvent}
+            onPointerUp={stopGraphControlEvent}
             onClick={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
           >
