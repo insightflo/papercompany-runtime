@@ -955,15 +955,13 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   // [주의] 절대경로 + fs.isFile() 확인으로만 등록(오등록/과등록 위험 최소화). CMPAA-163(existing WP 를
   //   missing 으로 오탐하는 false-positive)과는 다른 경로 — 여기는 진짜 등록 안 된 실제 파일을 보강 등록.
   // [수정시 영향] 모든 producer(workflow/수동)에 적용. 조건 완화 시 오등록 위험.
-  let resolvedArtifactPath: string | null = null;
-  for (const candidate of input.claimedArtifactPaths) {
-    if (!candidate || !path.isAbsolute(candidate)) continue;
-    const stats = await fs.stat(candidate).catch(() => null);
-    if (stats?.isFile()) {
-      resolvedArtifactPath = candidate;
-      break;
-    }
-  }
+  // producer 가 명시한 claimed 경로(artifact-path regex 추출)를 권위로 그대로 등록한다. 파일 존재 검사/
+  //   workspace resolve 는 의도적으로 생략 — (a) producer 가 project-relative("/tech-scout/...") 등 다양한
+  //   형태로 경로를 보고해 단일 resolve base 를 정하기 어렵고, (b) downstream validator 가 같은 workspace
+  //   맥락에서 같은 경로를 resolve 하므로 producer 가 쓴 형태를 보존하는 쪽이 일관된다. 파일이 진짜 없으면
+  //   downstream REQUEST_CHANGES 로 자교정(현재 gate block 보다 낫다). CMPAA-163(existing WP missing 오탐)
+  //   과는 다른, 진짜 미등록 claimed 산출물의 보강 등록 경로.
+  const resolvedArtifactPath = input.claimedArtifactPaths.find((candidate) => typeof candidate === "string" && candidate.trim().length > 0) ?? null;
   if (!resolvedArtifactPath) return null;
 
   const isPrimary = !(await input.tx
