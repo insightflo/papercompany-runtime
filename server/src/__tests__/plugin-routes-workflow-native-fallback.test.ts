@@ -185,6 +185,11 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
             toolNames: [],
             dependencies: ["step-1"],
             knowledgeBaseIds: [],
+            graphPositionX: 320,
+            graphPositionY: -48,
+            graphEdgeMetadata: {
+              "step-1": { kind: "success", label: "ready", condition: "ok" },
+            },
           },
         ],
         createdAt: new Date("2026-04-24T00:00:00.000Z"),
@@ -243,7 +248,7 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
         name: "Native only workflow",
         status: "active",
         steps: [
-          {
+          expect.objectContaining({
             id: "step-2",
             title: "Ask agent",
             description: "",
@@ -251,7 +256,13 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
             toolName: "",
             agentName: "agent-1",
             dependsOn: ["step-1"],
-          },
+            dependencies: ["step-1"],
+            graphPositionX: 320,
+            graphPositionY: -48,
+            graphEdgeMetadata: {
+              "step-1": { kind: "success", label: "ready", condition: "ok" },
+            },
+          }),
         ],
       }),
     ]);

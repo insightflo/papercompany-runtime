@@ -1796,31 +1796,7 @@ export function pluginRoutes(
             .filter((id): id is string => typeof id === "string" && id.length > 0));
           const nativeWorkflowSummaries = nativeDefinitions
             .filter((definition) => !pluginWorkflowIds.has(definition.id))
-            .map((definition) => ({
-              id: definition.id,
-              companyId: definition.companyId,
-              name: definition.name,
-              description: "",
-              status: "active",
-              executionMode: definition.executionMode,
-              steps: definition.steps.map((step) => {
-                const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
-                return {
-                  id: step.id,
-                  title: step.name,
-                  description: step.description ?? "",
-                  type: !step.agentId && toolNames.length > 0 ? "tool" : "agent",
-                  toolName: toolNames[0] ?? "",
-                  agentName: step.agentId,
-                  dependsOn: step.dependencies,
-                  executionMode: step.executionMode,
-                  ownerPlanBootstrapOnly: step.ownerPlanBootstrapOnly,
-                  dynamicChildren: step.dynamicChildren,
-                };
-              }),
-              createdAt: definition.createdAt,
-              updatedAt: definition.updatedAt,
-            }));
+            .map(nativeWorkflowDefinitionForPlugin);
           res.json({
             data: {
               ...resultRecord,

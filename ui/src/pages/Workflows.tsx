@@ -189,6 +189,10 @@ type WorkflowOverviewData = {
       executionMode?: string;
       ownerPlanBootstrapOnly?: boolean;
       dynamicChildren?: boolean;
+      graphPositionX?: number | string;
+      graphPositionY?: number | string;
+      graphEdgeMetadata?: WorkflowGraphEdgeMetadataRecord;
+      [key: string]: unknown;
     }>;
   }>;
   activeRuns: Array<{
@@ -1214,7 +1218,7 @@ function parseOptionalGraphPosition(value: unknown): number | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value === "string" && !value.trim()) return undefined;
   const parsed = typeof value === "number" ? value : Number(String(value).trim());
-  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : undefined;
+  return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
 }
 
 function clampGraphCanvasScale(value: number): number {
@@ -7757,14 +7761,20 @@ function DefinitionsTable({
         createParentIssuePolicy: editingCreateParentIssuePolicy,
         legacyMetadata: legacyMetadata.value,
       };
-      await updateWorkflow({
+      const updated = await updateWorkflow({
         companyId,
         workflowId,
         id: workflowId,
         patch,
         ...patch,
       });
-      cancelEdit();
+      const updatedRecord = updated && typeof updated === "object" ? updated as Record<string, unknown> : {};
+      const updatedWorkflow = (updatedRecord.workflow && typeof updatedRecord.workflow === "object"
+        ? updatedRecord.workflow
+        : updatedRecord) as WorkflowOverviewData["workflows"][number] | null;
+      if (updatedWorkflow?.id) {
+        beginEdit(updatedWorkflow);
+      }
       await refreshOverview();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
