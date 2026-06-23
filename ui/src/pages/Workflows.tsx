@@ -3091,6 +3091,13 @@ function WorkflowGraphEditor({
     deleteSelectedStep();
   }
 
+  function handleDeleteGraphObjectPointerDown(event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    deleteSelectedGraphObject();
+  }
+
   function stopGraphControlEvent(event: React.SyntheticEvent<HTMLElement>): void {
     event.stopPropagation();
   }
@@ -3665,10 +3672,10 @@ function WorkflowGraphEditor({
                 title={selectedEdgeActionAnchor ? "Delete selected relationship" : "Delete selected step"}
                 aria-label={selectedEdgeActionAnchor ? "Delete selected relationship" : "Delete selected step"}
                 disabled={!selectedStep && !selectedEdgeActionAnchor}
+                onPointerDown={handleDeleteGraphObjectPointerDown}
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  deleteSelectedGraphObject();
                 }}
               >
                 -
@@ -4595,7 +4602,15 @@ function WorkflowGraphEditor({
               <button type="button" style={buttonStyle} onClick={duplicateSelectedStep}>
                 Duplicate selected
               </button>
-              <button type="button" style={dangerButtonStyle} onClick={deleteSelectedStep}>
+              <button
+                type="button"
+                style={dangerButtonStyle}
+                onPointerDown={handleDeleteGraphObjectPointerDown}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+              >
                 Delete selected
               </button>
             </div>
