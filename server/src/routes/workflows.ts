@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
-import { issues, labels, projects, workflowStepRuns } from "@paperclipai/db";
+import { agents, issues, labels, projects, workflowStepRuns } from "@paperclipai/db";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   cancelWorkflowRunSchema,
@@ -50,7 +50,39 @@ function serializeStepRun(stepRun: WorkflowStepRun) {
   return serializeValue(stepRun) as Record<string, unknown>;
 }
 
-function workflowStepForUi(step: WorkflowDefinition["steps"][number]): Record<string, unknown> {
+type AgentNameById = ReadonlyMap<string, string>;
+
+function resolveWorkflowStepAgentName(
+  step: WorkflowDefinition["steps"][number],
+  record: { agentName?: unknown },
+  agentNameById: AgentNameById,
+): string {
+  const explicitAgentName = typeof record.agentName === "string" ? record.agentName.trim() : "";
+  if (explicitAgentName) return explicitAgentName;
+
+  const agentId = typeof step.agentId === "string" ? step.agentId.trim() : "";
+  if (!agentId) return "";
+
+  return agentNameById.get(agentId) ?? agentId;
+}
+
+async function listAgentNameById(db: Db, companyId: string): Promise<Map<string, string>> {
+  const agentRows = await db
+    .select({ id: agents.id, name: agents.name })
+    .from(agents)
+    .where(eq(agents.companyId, companyId));
+
+  return new Map(
+    agentRows
+      .filter((agent) => typeof agent.id === "string" && typeof agent.name === "string" && agent.name.trim())
+      .map((agent) => [agent.id, agent.name.trim()]),
+  );
+}
+
+function workflowStepForUi(
+  step: WorkflowDefinition["steps"][number],
+  agentNameById: AgentNameById = new Map(),
+): Record<string, unknown> {
   const record = step as WorkflowDefinition["steps"][number] & {
     title?: unknown;
     type?: unknown;
@@ -67,13 +99,16 @@ function workflowStepForUi(step: WorkflowDefinition["steps"][number]): Record<st
     description: step.description ?? "",
     type: typeof record.type === "string" ? record.type : (!step.agentId && toolNames.length > 0 ? "tool" : "agent"),
     toolName: typeof record.toolName === "string" ? record.toolName : toolNames[0] ?? "",
-    agentName: typeof record.agentName === "string" ? record.agentName : step.agentId,
+    agentName: resolveWorkflowStepAgentName(step, record, agentNameById),
     dependsOn: Array.isArray(record.dependsOn) ? record.dependsOn : dependencies,
     toolNames,
   };
 }
 
-function workflowDefinitionForUi(definition: WorkflowDefinition): Record<string, unknown> {
+function workflowDefinitionForUi(
+  definition: WorkflowDefinition,
+  agentNameById: AgentNameById = new Map(),
+): Record<string, unknown> {
   return {
     id: definition.id,
     companyId: definition.companyId,
@@ -96,7 +131,7 @@ function workflowDefinitionForUi(definition: WorkflowDefinition): Record<string,
     legacyMetadata: definition.legacyMetadata ?? {},
     createdAt: definition.createdAt.toISOString(),
     updatedAt: definition.updatedAt.toISOString(),
-    steps: definition.steps.map(workflowStepForUi),
+    steps: definition.steps.map((step) => workflowStepForUi(step, agentNameById)),
   };
 }
 
@@ -185,11 +220,12 @@ export function workflowRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
 
-    const [definitions, runs, projectRows, labelRows] = await Promise.all([
+    const [definitions, runs, projectRows, labelRows, agentNameById] = await Promise.all([
       workflowService.listDefinitions(db, companyId),
       workflowService.listRuns(db, { companyId }),
       db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, companyId)),
       db.select({ id: labels.id, name: labels.name, color: labels.color }).from(labels).where(eq(labels.companyId, companyId)),
+      listAgentNameById(db, companyId),
     ]);
 
     const parentIssueIds = Array.from(new Set(runs.map((run) => run.parentIssueId).filter((id): id is string => Boolean(id))));
@@ -215,7 +251,7 @@ export function workflowRoutes(db: Db) {
     res.json({
       projects: projectRows,
       labels: labelRows,
-      workflows: definitions.map(workflowDefinitionForUi),
+      workflows: definitions.map((definition) => workflowDefinitionForUi(definition, agentNameById)),
       activeRuns: runSummaries.filter((run) => isActiveWorkflowRunStatus(String(run.status ?? ""))),
       recentRuns: runSummaries.filter((run) => !isActiveWorkflowRunStatus(String(run.status ?? ""))).slice(0, 25),
     });
@@ -404,9 +440,10 @@ export function workflowRoutes(db: Db) {
       throw notFound("Workflow run not found");
     }
 
-    const [definition, stepRuns] = await Promise.all([
+    const [definition, stepRuns, agentNameById] = await Promise.all([
       workflowService.getDefinition(db, run.workflowId),
       workflowService.listStepRuns(db, run.id),
+      listAgentNameById(db, run.companyId),
     ]);
     const issueIds = Array.from(new Set(stepRuns.map((stepRun) => stepRun.issueId).filter((id): id is string => Boolean(id))));
     const issueRows = issueIds.length > 0
@@ -430,7 +467,7 @@ export function workflowRoutes(db: Db) {
         workProductsByIssueId.set(issueId, products);
       }
     }
-    const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, workflowStepForUi(step)]));
+    const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, workflowStepForUi(step, agentNameById)]));
     const serializedStepRuns = stepRuns.map((stepRun) => {
       const stepDefinition = stepDefinitionById.get(stepRun.stepId);
       const workProducts = stepRun.issueId ? workProductsByIssueId.get(stepRun.issueId) ?? [] : [];
@@ -447,7 +484,7 @@ export function workflowRoutes(db: Db) {
     res.json({
       run: serializeRun(run),
       stepRuns: serializedStepRuns,
-      workflow: definition ? workflowDefinitionForUi(definition) : null,
+      workflow: definition ? workflowDefinitionForUi(definition, agentNameById) : null,
     });
   });
 

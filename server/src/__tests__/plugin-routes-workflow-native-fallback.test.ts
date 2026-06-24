@@ -231,8 +231,15 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
         createdAt: new Date("2026-04-26T00:00:00.000Z"),
       },
     ]);
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(async () => [{ id: "agent-1", name: "Researcher" }]),
+        })),
+      })),
+    };
 
-    const res = await request(createApp(workerManager))
+    const res = await request(createApp(workerManager, db))
       .post("/api/plugins/plugin-1/data/workflow-overview")
       .send({ params: { companyId: "company-1" } });
 
@@ -254,7 +261,7 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
             description: "",
             type: "agent",
             toolName: "",
-            agentName: "agent-1",
+            agentName: "Researcher",
             dependsOn: ["step-1"],
             dependencies: ["step-1"],
             graphPositionX: 320,

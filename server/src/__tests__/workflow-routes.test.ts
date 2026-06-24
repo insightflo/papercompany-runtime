@@ -182,6 +182,46 @@ describe("workflow routes", () => {
     mockWorkProductsService.listForIssue.mockResolvedValue([]);
   });
 
+  it("resolves agentId-only workflow steps to agent names in the overview", async () => {
+    const agentId = "77777777-7777-4777-8777-777777777777";
+    const dbResponses: unknown[][] = [
+      [],
+      [],
+      [{ id: agentId, name: "Technology Research Agent" }],
+    ];
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(async () => dbResponses.shift() ?? []),
+        })),
+      })),
+    };
+    mockWorkflowService.listDefinitions.mockResolvedValue([
+      workflowDefinition({
+        steps: [
+          {
+            id: "collect-tech-scout-evidence",
+            name: "Collect tech scout evidence",
+            type: "agent",
+            agentId,
+            toolNames: ["daily-tech-scout"],
+            dependencies: [],
+          },
+        ],
+      }),
+    ]);
+    mockWorkflowService.listRuns.mockResolvedValue([]);
+
+    const res = await request(createApp(undefined, db)).get(`/api/companies/${COMPANY_ID}/workflows/overview`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.workflows[0].steps[0]).toEqual(expect.objectContaining({
+      id: "collect-tech-scout-evidence",
+      agentName: "Technology Research Agent",
+      toolNames: ["daily-tech-scout"],
+    }));
+  });
+
   it("lists workflow tools from the core workflow tool catalog", async () => {
     mockWorkflowToolCatalog.listWorkflowToolCatalog.mockResolvedValue({
       tools: [

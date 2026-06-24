@@ -28,6 +28,7 @@ import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  agents,
   agentToolGrants,
   companies,
   heartbeatRuns,
@@ -137,6 +138,8 @@ const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+type WorkflowAgentNameById = ReadonlyMap<string, string>;
+
 function serializeValue(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(serializeValue);
@@ -148,7 +151,42 @@ function serializeValue(value: unknown): unknown {
   return value;
 }
 
-function nativeWorkflowStepForPlugin(step: WorkflowDefinition["steps"][number]): Record<string, unknown> {
+function resolveNativeWorkflowAgentName(
+  step: WorkflowDefinition["steps"][number],
+  agentNameById: WorkflowAgentNameById,
+): string {
+  const explicitAgentName = typeof step.agentName === "string" ? step.agentName.trim() : "";
+  if (explicitAgentName) return explicitAgentName;
+
+  const agentId = typeof step.agentId === "string" ? step.agentId.trim() : "";
+  if (!agentId) return "";
+
+  return agentNameById.get(agentId) ?? agentId;
+}
+
+async function safeListWorkflowAgentNameById(db: Db, companyId: string): Promise<Map<string, string>> {
+  if (typeof (db as { select?: unknown }).select !== "function") return new Map();
+
+  try {
+    const agentRows = await db
+      .select({ id: agents.id, name: agents.name })
+      .from(agents)
+      .where(eq(agents.companyId, companyId));
+
+    return new Map(
+      agentRows
+        .filter((agent) => typeof agent.id === "string" && typeof agent.name === "string" && agent.name.trim())
+        .map((agent) => [agent.id, agent.name.trim()]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function nativeWorkflowStepForPlugin(
+  step: WorkflowDefinition["steps"][number],
+  agentNameById: WorkflowAgentNameById = new Map(),
+): Record<string, unknown> {
   const toolNames = Array.isArray(step.toolNames) ? step.toolNames.filter(Boolean) : [];
   const tools = Array.isArray(step.tools) ? step.tools.filter(Boolean) : toolNames;
   const dependencies = Array.isArray(step.dependencies)
@@ -164,7 +202,7 @@ function nativeWorkflowStepForPlugin(step: WorkflowDefinition["steps"][number]):
     description: step.description ?? "",
     type,
     toolName: step.toolName ?? toolNames[0] ?? "",
-    agentName: step.agentName ?? step.agentId ?? "",
+    agentName: resolveNativeWorkflowAgentName(step, agentNameById),
     toolNames,
     tools,
     dependsOn: dependencies,
@@ -172,7 +210,10 @@ function nativeWorkflowStepForPlugin(step: WorkflowDefinition["steps"][number]):
   };
 }
 
-function nativeWorkflowDefinitionForPlugin(definition: WorkflowDefinition): Record<string, unknown> {
+function nativeWorkflowDefinitionForPlugin(
+  definition: WorkflowDefinition,
+  agentNameById: WorkflowAgentNameById = new Map(),
+): Record<string, unknown> {
   return {
     ...(serializeValue(definition) as Record<string, unknown>),
     id: definition.id,
@@ -181,7 +222,7 @@ function nativeWorkflowDefinitionForPlugin(definition: WorkflowDefinition): Reco
     description: definition.description ?? "",
     status: definition.status ?? "active",
     executionMode: definition.executionMode,
-    steps: definition.steps.map(nativeWorkflowStepForPlugin),
+    steps: definition.steps.map((step) => nativeWorkflowStepForPlugin(step, agentNameById)),
   };
 }
 
@@ -193,7 +234,8 @@ async function nativeWorkflowRunDetailForPlugin(
 ): Promise<Record<string, unknown>> {
   const issueSvc = issueService(db);
   const workProductsSvc = workProductService(db);
-  const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, nativeWorkflowStepForPlugin(step)]));
+  const agentNameById = await safeListWorkflowAgentNameById(db, run.companyId);
+  const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, nativeWorkflowStepForPlugin(step, agentNameById)]));
   const serializedStepRuns = await Promise.all(stepRuns.map(async (stepRun) => {
     const stepDefinition = stepDefinitionById.get(stepRun.stepId);
     let issueIdentifier: string | undefined;
@@ -225,7 +267,7 @@ async function nativeWorkflowRunDetailForPlugin(
   return {
     run: serializeValue(run),
     stepRuns: serializedStepRuns,
-    workflow: definition ? nativeWorkflowDefinitionForPlugin(definition) : null,
+    workflow: definition ? nativeWorkflowDefinitionForPlugin(definition, agentNameById) : null,
   };
 }
 const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -1776,8 +1818,11 @@ export function pluginRoutes(
             : undefined;
         if (companyId) {
           assertCompanyAccess(req, companyId);
-          const nativeDefinitions = await workflowService.listDefinitions(db, companyId);
-          const nativeRuns = await workflowService.listRuns(db, { companyId });
+          const [nativeDefinitions, nativeRuns, agentNameById] = await Promise.all([
+            workflowService.listDefinitions(db, companyId),
+            workflowService.listRuns(db, { companyId }),
+            safeListWorkflowAgentNameById(db, companyId),
+          ]);
           const definitionNameById = new Map(nativeDefinitions.map((definition) => [definition.id, definition.name]));
           const nativeRunSummaries = nativeRuns.map((run) => ({
             id: run.id,
@@ -1796,7 +1841,7 @@ export function pluginRoutes(
             .filter((id): id is string => typeof id === "string" && id.length > 0));
           const nativeWorkflowSummaries = nativeDefinitions
             .filter((definition) => !pluginWorkflowIds.has(definition.id))
-            .map(nativeWorkflowDefinitionForPlugin);
+            .map((definition) => nativeWorkflowDefinitionForPlugin(definition, agentNameById));
           res.json({
             data: {
               ...resultRecord,
