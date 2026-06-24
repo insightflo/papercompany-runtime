@@ -967,12 +967,18 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   const DELIVERABLE_NAME_RE = /(report|draft|outline|article|document|deliverable|artifact|manual|guide|summary|brief|synthesi[sz]e)/i;
   const DELIVERABLE_EXT_RE = /\.(md|html?|pdf|txt)$/i;
   const MISC_ARTIFACT_RE = /(favicon|\.svg$|\.ico$|\.json$|\.lock$|\.log$|\.map$|node_modules|package\.json|\/config\.)/i;
+  const runDateStr = input.run.startedAt instanceof Date
+    ? input.run.startedAt.toISOString().slice(0, 10).replace(/-/g, "")
+    : "";
   const scored = input.claimedArtifactPaths
     .filter((c): c is string => typeof c === "string" && c.trim().length > 0)
-    .map((p) => ({
-      p,
-      score: (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0),
-    }))
+    .map((p) => {
+      let score = (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0);
+      // run-date awareness: current-run 날짜 경로 선호(+5), stale 날짜 패널티(-5)
+      if (runDateStr && p.includes(runDateStr)) score += 5;
+      else if (/\d{8}/.test(p)) score -= 5;
+      return { p, score };
+    })
     .sort((a, b) => b.score - a.score);
   // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
   const resolvedArtifactPath = scored.length > 0 && scored[0].score > 0 ? scored[0].p : null;
