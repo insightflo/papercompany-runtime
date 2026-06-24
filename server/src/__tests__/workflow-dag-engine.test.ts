@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -26,11 +26,15 @@ import {
 
 const heartbeatWakeup = vi.fn();
 
-vi.mock("../services/heartbeat.js", () => ({
-  heartbeatService: () => ({
-    wakeup: heartbeatWakeup,
-  }),
-}));
+vi.mock("../services/heartbeat.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
+  return {
+    ...actual,
+    heartbeatService: () => ({
+      wakeup: heartbeatWakeup,
+    }),
+  };
+});
 
 import { issueService } from "../services/issues.ts";
 import { missionService } from "../services/missions.js";
@@ -2373,6 +2377,299 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .then((rows) => rows[0] ?? null);
     expect(workflowRun?.status).toBe("completed");
     expect(workflowRun?.completedAt).toBeTruthy();
+  });
+
+  // ---- Plan B: dependency ARTIFACT path injection ----
+  // [목적] upstream 이 정식 workProduct 를 등록하지 않아도, producer 가 run output /
+  // description / comment 에 남긴 명시적 `ARTIFACT: <절대경로>` 를 downstream input 에
+  // 보조 evidence 로 주입하는지 검증한다.
+  type PlanBStepDef = {
+    id: string;
+    name: string;
+    agentId: string;
+    dependencies: string[];
+    description?: string;
+  };
+
+  async function executeDependencyWorkflow(opts: {
+    companyId: string;
+    companyName: string;
+    missionId: string;
+    workflowId: string;
+    runId: string;
+    agents: Array<{ id: string; name: string; role: string }>;
+    steps: PlanBStepDef[];
+  }): Promise<Record<string, typeof issues.$inferSelect>> {
+    heartbeatWakeup.mockResolvedValue({ id: "plan-b-run" });
+    await db.insert(companies).values({
+      id: opts.companyId,
+      name: opts.companyName,
+      issuePrefix: `PB${opts.companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values(
+      opts.agents.map((agent) => ({
+        id: agent.id,
+        companyId: opts.companyId,
+        name: agent.name,
+        role: agent.role,
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      })),
+    );
+    await db.insert(missions).values({
+      id: opts.missionId,
+      companyId: opts.companyId,
+      ownerAgentId: opts.agents[0]!.id,
+      title: opts.companyName,
+      status: "planning",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: opts.workflowId,
+      companyId: opts.companyId,
+      name: opts.companyName,
+      stepsJson: opts.steps,
+    });
+    await db.insert(workflowRuns).values({
+      id: opts.runId,
+      workflowId: opts.workflowId,
+      companyId: opts.companyId,
+      missionId: opts.missionId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+    await executeWorkflowRun(db, opts.runId);
+    const stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, opts.runId));
+    const issuesByStep: Record<string, typeof issues.$inferSelect> = {};
+    for (const stepRun of stepRuns) {
+      if (!stepRun.issueId) continue;
+      const issue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, stepRun.issueId))
+        .then((rows) => rows[0] ?? null);
+      if (issue) issuesByStep[stepRun.stepId] = issue;
+    }
+    return issuesByStep;
+  }
+
+  async function completeStepIssue(issueId: string) {
+    await issueService(db).update(issueId, { status: "done" });
+    await syncWorkflowRunForIssue(db, issueId);
+  }
+
+  async function getStepIssue(runId: string, stepId: string) {
+    const stepRun = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(and(eq(workflowStepRuns.workflowRunId, runId), eq(workflowStepRuns.stepId, stepId)))
+      .then((rows) => rows[0] ?? null);
+    if (!stepRun?.issueId) return null;
+    return db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, stepRun.issueId))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  // producer 가 heartbeat run output 에 `ARTIFACT:` 를 남긴 경우를 시뮬레이션.
+  async function seedArtifactRun(opts: { companyId: string; agentId: string; issueId: string; artifactPath: string }) {
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: opts.companyId,
+      agentId: opts.agentId,
+      issueId: opts.issueId,
+      status: "succeeded",
+      invocationSource: "automation",
+      stdoutExcerpt: `Collect finished.\nARTIFACT: ${opts.artifactPath}`,
+      startedAt: new Date("2026-06-24T06:00:00.000Z"),
+      finishedAt: new Date("2026-06-24T06:05:00.000Z"),
+      createdAt: new Date("2026-06-24T06:00:00.000Z"),
+      updatedAt: new Date("2026-06-24T06:05:00.000Z"),
+    });
+    return runId;
+  }
+
+  async function seedArtifactComment(opts: { companyId: string; agentId: string; issueId: string; artifactPath: string }) {
+    await db.insert(issueComments).values({
+      companyId: opts.companyId,
+      issueId: opts.issueId,
+      authorAgentId: opts.agentId,
+      body: `Done — evidence collected.\nARTIFACT: ${opts.artifactPath}`,
+      createdAt: new Date("2026-06-24T06:06:00.000Z"),
+    });
+  }
+
+  function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it("Plan B: injects producer-declared ARTIFACT path (run output) for single upstream without a registered workProduct", async () => {
+    const companyId = randomUUID();
+    const agentAId = randomUUID();
+    const agentBId = randomUUID();
+    const runId = randomUUID();
+    const upstream = await executeDependencyWorkflow({
+      companyId,
+      companyName: "PlanB Single Upstream",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [
+        { id: agentAId, name: "Collector", role: "engineer" },
+        { id: agentBId, name: "Auditor", role: "pm" },
+      ],
+      steps: [
+        { id: "collect", name: "Collect", agentId: agentAId, dependencies: [], description: "Collect evidence" },
+        { id: "audit", name: "Audit", agentId: agentBId, dependencies: ["collect"], description: "Audit the evidence" },
+      ],
+    });
+    const artifactPath = "/srv/papercompany/projects/research-company/produced_work/tech-scout/202606/tech_scout_20260624/evidence.json";
+    await seedArtifactRun({ companyId, agentId: agentAId, issueId: upstream.collect!.id, artifactPath });
+    await completeStepIssue(upstream.collect!.id);
+
+    const auditIssue = await getStepIssue(runId, "audit");
+    expect(auditIssue).toBeTruthy();
+    const desc = auditIssue!.description ?? "";
+    expect(desc).toContain("artifactPaths (auxiliary, producer-declared `ARTIFACT:`)");
+    expect(desc).toContain(artifactPath);
+    expect(desc).not.toContain("Dependency workProduct hard-stop:");
+    expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(0);
+  });
+
+  it("Plan B: injects per-dependency ARTIFACT paths for multiple upstreams (run output + comment sources)", async () => {
+    const companyId = randomUUID();
+    const agentAId = randomUUID();
+    const agentBId = randomUUID();
+    const agentCId = randomUUID();
+    const runId = randomUUID();
+    const upstream = await executeDependencyWorkflow({
+      companyId,
+      companyName: "PlanB Multi Upstream",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [
+        { id: agentAId, name: "Collector A1", role: "engineer" },
+        { id: agentBId, name: "Collector A2", role: "engineer" },
+        { id: agentCId, name: "Synthesizer", role: "pm" },
+      ],
+      steps: [
+        { id: "a1", name: "Collect A1", agentId: agentAId, dependencies: [], description: "Collect A1" },
+        { id: "a2", name: "Collect A2", agentId: agentBId, dependencies: [], description: "Collect A2" },
+        { id: "b", name: "Synthesize", agentId: agentCId, dependencies: ["a1", "a2"], description: "Synthesize A1+A2" },
+      ],
+    });
+    const a1Path = "/srv/papercompany/produced_work/a1/evidence_a1.json";
+    const a2Path = "/srv/papercompany/produced_work/a2/evidence_a2.json";
+    await seedArtifactRun({ companyId, agentId: agentAId, issueId: upstream.a1!.id, artifactPath: a1Path });
+    await seedArtifactComment({ companyId, agentId: agentBId, issueId: upstream.a2!.id, artifactPath: a2Path });
+    await completeStepIssue(upstream.a1!.id);
+    await completeStepIssue(upstream.a2!.id);
+
+    const synthIssue = await getStepIssue(runId, "b");
+    expect(synthIssue).toBeTruthy();
+    const desc = synthIssue!.description ?? "";
+    expect(desc).toContain(a1Path);
+    expect(desc).toContain(a2Path);
+    expect(desc).not.toContain("Dependency workProduct hard-stop:");
+    expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(0);
+  });
+
+  it("Plan B: hard-stops only the dependency missing both workProduct and ARTIFACT, while injecting paths for the one that declared ARTIFACT", async () => {
+    const companyId = randomUUID();
+    const agentAId = randomUUID();
+    const agentBId = randomUUID();
+    const agentCId = randomUUID();
+    const runId = randomUUID();
+    const upstream = await executeDependencyWorkflow({
+      companyId,
+      companyName: "PlanB Partial Artifact",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [
+        { id: agentAId, name: "Collector A1", role: "engineer" },
+        { id: agentBId, name: "Collector A2", role: "engineer" },
+        { id: agentCId, name: "Synthesizer", role: "pm" },
+      ],
+      steps: [
+        { id: "a1", name: "Collect A1", agentId: agentAId, dependencies: [], description: "Collect A1" },
+        { id: "a2", name: "Collect A2", agentId: agentBId, dependencies: [], description: "Collect A2" },
+        { id: "b", name: "Synthesize", agentId: agentCId, dependencies: ["a1", "a2"], description: "Synthesize A1+A2" },
+      ],
+    });
+    const a1Path = "/srv/papercompany/produced_work/a1/evidence_a1.json";
+    // a1 은 ARTIFACT 선언, a2 는 workProduct 도 ARTIFACT 도 없음.
+    await seedArtifactRun({ companyId, agentId: agentAId, issueId: upstream.a1!.id, artifactPath: a1Path });
+    await completeStepIssue(upstream.a1!.id);
+    await completeStepIssue(upstream.a2!.id);
+
+    const synthIssue = await getStepIssue(runId, "b");
+    expect(synthIssue).toBeTruthy();
+    const desc = synthIssue!.description ?? "";
+    expect(desc).toContain(a1Path);
+    expect(desc).toContain("Dependency workProduct hard-stop:");
+    expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(1);
+    expect(desc).toContain(`- a2: ${upstream.a2!.identifier ?? upstream.a2!.id} has no registered dependency workProduct.`);
+  });
+
+  it("Plan B: ignores ARTIFACT paths declared on unrelated issues/comments outside the dependency scope", async () => {
+    const companyId = randomUUID();
+    const agentAId = randomUUID();
+    const agentBId = randomUUID();
+    const runId = randomUUID();
+    const upstream = await executeDependencyWorkflow({
+      companyId,
+      companyName: "PlanB Scope Guard",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [
+        { id: agentAId, name: "Collector", role: "engineer" },
+        { id: agentBId, name: "Auditor", role: "pm" },
+      ],
+      steps: [
+        { id: "collect", name: "Collect", agentId: agentAId, dependencies: [], description: "Collect evidence" },
+        { id: "audit", name: "Audit", agentId: agentBId, dependencies: ["collect"], description: "Audit the evidence" },
+      ],
+    });
+    const depPath = "/srv/papercompany/produced_work/collect/evidence.json";
+    const orphanPath = "/srv/papercompany/produced_work/orphan/unrelated.json";
+    // 의존성 collect issue 는 description 에 ARTIFACT 선언.
+    const collectIssue = upstream.collect!;
+    await db
+      .update(issues)
+      .set({ description: `${collectIssue.description ?? ""}\nARTIFACT: ${depPath}` })
+      .where(eq(issues.id, collectIssue.id));
+    // 동일 company 의 무관 orphan issue 를 만들고 comment 에 ARTIFACT 남김 — dependency scope 밖.
+    const orphanIssue = await issueService(db).create(companyId, {
+      title: "Unrelated orphan issue",
+      description: "Not part of this workflow run",
+      status: "todo",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: orphanIssue.id,
+      authorAgentId: agentAId,
+      body: `Some unrelated work.\nARTIFACT: ${orphanPath}`,
+      createdAt: new Date("2026-06-24T06:06:00.000Z"),
+    });
+    await completeStepIssue(collectIssue.id);
+
+    const auditIssue = await getStepIssue(runId, "audit");
+    expect(auditIssue).toBeTruthy();
+    const desc = auditIssue!.description ?? "";
+    expect(desc).toContain(depPath);
+    expect(desc).not.toContain(orphanPath);
+    expect(desc).not.toContain("Dependency workProduct hard-stop:");
   });
 
   it("advances dependent steps when a linked workflow step issue lost workflow origin metadata", async () => {

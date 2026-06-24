@@ -792,6 +792,31 @@ function extractIssueDeclaredArtifactTokens(text: string | null | undefined) {
   return Array.from(new Set(matches.map(stripArtifactTokenPunctuation).filter(Boolean)));
 }
 
+/**
+ * [목적] producer 가 run output / issue description / comment 에 명시적으로 남긴
+ * `ARTIFACT: <absolute path>` 선언만 추출한다.
+ * [입력] 가변 인자로 텍스트 소스(run stdout/resultJson 직렬화, issue description, comment body 등).
+ * [출력] dedup 된 절대경로(leading `/`) 배열. 절대경로만 허용 → 상대경로 FS scan 차단.
+ * [왜 다른 extractor 와 분리되는가] extractIssueDeclaredArtifactTokens / extractClaimedArtifactPaths
+ *   는 deliverable 확장자를 가진 "아무 경로"나 매칭하지만, 본 함수는 리터럴 `ARTIFACT:` 접두사를
+ *   요구한다. downstream step 이 본의 아니게 언급된 경로를 upstream 산출물로 착각 섭취하지 않도록.
+ * [수정시 영향] dag-engine createWorkflowStepIssue 의 dependency 보조 evidence 주입 경로에서 호출.
+ *   producer 자동 등록(기존 extractClaimedArtifactPaths 경로)은 변경하지 않는다 — additive 전용.
+ */
+const EXPLICIT_ARTIFACT_DECLARATION_RE = /`?ARTIFACT`?\s*:\s*[`'"]?(\/[^\s`'")\]\n]+)/giu;
+
+export function extractExplicitArtifactPaths(...sources: Array<string | null | undefined>): string[] {
+  const paths = new Set<string>();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const match of source.matchAll(EXPLICIT_ARTIFACT_DECLARATION_RE)) {
+      const candidate = stripArtifactTokenPunctuation(match[1]!);
+      if (candidate.startsWith("/")) paths.add(candidate);
+    }
+  }
+  return Array.from(paths);
+}
+
 function artifactTokenRegexSource(token: string) {
   return escapeRegExp(token)
     .replace(/YYYY-MM-DD/gu, "\\d{4}-\\d{2}-\\d{2}")

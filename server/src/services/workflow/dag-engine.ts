@@ -10,7 +10,7 @@ import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
-import { heartbeatService } from "../heartbeat.js";
+import { heartbeatService, extractExplicitArtifactPaths } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
@@ -947,6 +947,7 @@ async function createWorkflowStepIssue(input: {
         identifier: issues.identifier,
         title: issues.title,
         status: issues.status,
+        description: issues.description,
       })
       .from(workflowStepRuns)
       .innerJoin(issues, eq(workflowStepRuns.issueId, issues.id))
@@ -976,23 +977,94 @@ async function createWorkflowStepIssue(input: {
     products.push(product);
     dependencyWorkProductsByIssueId.set(product.issueId, products);
   }
+  // [Plan B] 업스트림이 정식 workProduct 를 등록하지 않았더라도, producer 가 run output /
+  // issue description / comment 에 남긴 명시적 `ARTIFACT: <absolute path>` 선언을 보조
+  // evidence 로 downstream input 에 주입한다. broad filesystem scan 을 차단하기 위해 오직
+  // (1) 이 workflowRun 의 dependency issue 들, (2) 각 issue 의 description/comment/run output
+  // scope 안에서 명시된 `ARTIFACT:` 절대경로만 추출한다.
+  const dependenciesWithoutWorkProduct = dependencyIssueRows.filter(
+    (row) => (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length === 0,
+  );
+  const dependencyArtifactPathsByIssueId = new Map<string, string[]>();
+  if (dependenciesWithoutWorkProduct.length > 0) {
+    const dependencyIssueIds = dependenciesWithoutWorkProduct.map((row) => row.issueId);
+    const dependencyCommentRows = await input.db
+      .select({ issueId: issueComments.issueId, body: issueComments.body })
+      .from(issueComments)
+      .where(inArray(issueComments.issueId, dependencyIssueIds));
+    const commentsByIssueId = new Map<string, string[]>();
+    for (const comment of dependencyCommentRows) {
+      const list = commentsByIssueId.get(comment.issueId) ?? [];
+      list.push(comment.body);
+      commentsByIssueId.set(comment.issueId, list);
+    }
+    // producer run output 은 heartbeatRuns.issueId 로 찾는다. executionRunId 는 issue 가
+    // done/cancelled 등 in_progress 외 상태로 전환될 때 issueService.update 가 null 로
+    // 정리하므로 downstream 시점(= upstream 완료 후)엔 항상 비어있어 신뢰할 수 없다.
+    const dependencyRunRows = await input.db
+      .select({
+        issueId: heartbeatRuns.issueId,
+        stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
+        stderrExcerpt: heartbeatRuns.stderrExcerpt,
+        resultJson: heartbeatRuns.resultJson,
+      })
+      .from(heartbeatRuns)
+      .where(inArray(heartbeatRuns.issueId, dependencyIssueIds));
+    const runsByIssueId = new Map<string, Array<{
+      stdoutExcerpt: string | null;
+      stderrExcerpt: string | null;
+      resultJson: Record<string, unknown> | null;
+    }>>();
+    for (const run of dependencyRunRows) {
+      if (!run.issueId) continue;
+      const list = runsByIssueId.get(run.issueId) ?? [];
+      list.push({ stdoutExcerpt: run.stdoutExcerpt, stderrExcerpt: run.stderrExcerpt, resultJson: run.resultJson });
+      runsByIssueId.set(run.issueId, list);
+    }
+    for (const row of dependenciesWithoutWorkProduct) {
+      const sources: Array<string | null | undefined> = [];
+      sources.push(row.description);
+      sources.push(...(commentsByIssueId.get(row.issueId) ?? []));
+      for (const run of runsByIssueId.get(row.issueId) ?? []) {
+        sources.push(run.stdoutExcerpt, run.stderrExcerpt);
+        if (run.resultJson) sources.push(JSON.stringify(run.resultJson));
+      }
+      const artifactPaths = extractExplicitArtifactPaths(...sources);
+      if (artifactPaths.length > 0) {
+        dependencyArtifactPathsByIssueId.set(row.issueId, artifactPaths);
+      }
+    }
+  }
   const dependencyIssueLines = dependencyIssueRows.flatMap((row) => {
     const label = row.identifier ?? row.issueId;
     const products = dependencyWorkProductsByIssueId.get(row.issueId) ?? [];
-    return [
+    const artifactPaths = dependencyArtifactPathsByIssueId.get(row.issueId) ?? [];
+    const lines: string[] = [
       `- ${row.stepId}: ${label} (${row.status}) — ${row.title}`,
-      products.length > 0
-        ? `  workProducts: ${products.map((product) => {
-          const artifactRef = product.url ?? product.externalId ?? (
-            product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
-          );
-          return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
-        }).join("; ")}`
-        : "  workProducts: none registered",
     ];
+    if (products.length > 0) {
+      lines.push(`  workProducts: ${products.map((product) => {
+        const artifactRef = product.url ?? product.externalId ?? (
+          product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
+        );
+        return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
+      }).join("; ")}`);
+    } else {
+      lines.push("  workProducts: none registered");
+    }
+    if (artifactPaths.length > 0) {
+      lines.push(`  artifactPaths (auxiliary, producer-declared \`ARTIFACT:\`): ${artifactPaths.join("; ")}`);
+    }
+    return lines;
   });
+  // hard-stop 은 workProduct 도, 명시적 ARTIFACT 도 없는 dependency 에만 남긴다.
+  // (메시지 텍스트는 기존 테스트 기대치와 동일하게 유지 — 필터 조건만 완화.)
   const missingDependencyWorkProductLines = dependencyIssueRows
-    .filter((row) => (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length === 0)
+    .filter((row) => {
+      const hasProducts = (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length > 0;
+      const hasArtifacts = (dependencyArtifactPathsByIssueId.get(row.issueId) ?? []).length > 0;
+      return !hasProducts && !hasArtifacts;
+    })
     .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
 
   const stepName = renderWorkflowRunTextTemplate(input.step.name.trim(), input.run);
@@ -1036,6 +1108,15 @@ async function createWorkflowStepIssue(input: {
     `- dependencyStepIds: ${JSON.stringify(input.step.dependencies)}`,
     dependencyIssueLines.length > 0 ? "Dependency issue inputs:" : null,
     ...dependencyIssueLines,
+    dependencyArtifactPathsByIssueId.size > 0
+      ? "Auxiliary dependency artifactPaths (producer-declared via `ARTIFACT:`, not formally registered):"
+      : null,
+    dependencyArtifactPathsByIssueId.size > 0
+      ? "- These upstream steps did not register a workProduct, but their producer output declared `ARTIFACT: <absolute path>`. Use the listed artifactPaths as the dependency deliverable evidence for validation/synthesis/build/approval instead of stopping."
+      : null,
+    dependencyArtifactPathsByIssueId.size > 0
+      ? "- artifactPaths are auxiliary evidence and do not replace a formally registered workProduct. When a dependency registers a workProduct above, prefer it. Do not scan the filesystem for other paths."
+      : null,
     missingDependencyWorkProductLines.length > 0 ? "Dependency workProduct hard-stop:" : null,
     ...missingDependencyWorkProductLines,
     missingDependencyWorkProductLines.length > 0
