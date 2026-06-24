@@ -16,6 +16,7 @@ export interface Company {
   logoAssetId: string | null;
   logoUrl: string | null;
   timezone: string | null;
+  workProductRoot: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

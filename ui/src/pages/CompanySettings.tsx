@@ -38,6 +38,7 @@ export function CompanySettings() {
   const [brandColor, setBrandColor] = useState("");
   const [timezone, setTimezone] = useState("");
   const [logoUrl, setLogoUrl] = useState("");
+  const [workProductRoot, setWorkProductRoot] = useState("");
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
 
   // Sync local state from selected company
@@ -48,6 +49,7 @@ export function CompanySettings() {
     setBrandColor(selectedCompany.brandColor ?? "");
     setTimezone(selectedCompany.timezone ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
+    setWorkProductRoot((selectedCompany as { workProductRoot?: string | null }).workProductRoot ?? "");
   }, [selectedCompany]);
 
   const [inviteError, setInviteError] = useState<string | null>(null);
@@ -60,7 +62,8 @@ export function CompanySettings() {
     (companyName !== selectedCompany.name ||
       description !== (selectedCompany.description ?? "") ||
       brandColor !== (selectedCompany.brandColor ?? "") ||
-      timezone !== (selectedCompany.timezone ?? ""));
+      timezone !== (selectedCompany.timezone ?? "") ||
+      workProductRoot !== (selectedCompany.workProductRoot ?? ""));
 
   const generalMutation = useMutation({
     mutationFn: (data: {
@@ -68,6 +71,7 @@ export function CompanySettings() {
       description: string | null;
       brandColor: string | null;
       timezone: string | null;
+      workProductRoot: string | null;
     }) => companiesApi.update(selectedCompanyId!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
@@ -222,7 +226,8 @@ export function CompanySettings() {
       name: companyName.trim(),
       description: description.trim() || null,
       brandColor: brandColor || null,
-      timezone: timezone.trim() || null
+      timezone: timezone.trim() || null,
+      workProductRoot: workProductRoot.trim() || null
     });
   }
 
@@ -269,6 +274,18 @@ export function CompanySettings() {
               value={timezone}
               placeholder="e.g. Asia/Seoul"
               onChange={(e) => setTimezone(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="Work product root"
+            hint="Base directory for workflow output artifacts (e.g. /srv/papercompany/projects/research-company/produced_work). Leave empty for default."
+          >
+            <input
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              type="text"
+              value={workProductRoot}
+              placeholder="e.g. /srv/papercompany/projects/research-company/produced_work"
+              onChange={(e) => setWorkProductRoot(e.target.value)}
             />
           </Field>
         </div>

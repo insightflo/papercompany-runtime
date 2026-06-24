@@ -1369,6 +1369,27 @@ function StepEditor({
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
 }): JSX.Element {
+  const { selectedCompanyId } = useCompany();
+  const companyId = selectedCompanyId ?? "";
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!companyId.trim()) return;
+    let cancelled = false;
+    fetch(`${apiBaseUrl()}/api/companies/${encodeURIComponent(companyId)}/agents`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: unknown) => {
+        if (cancelled || !Array.isArray(data)) return;
+        setAgents(
+          data
+            .filter((a): a is Record<string, unknown> => Boolean(a && typeof a === "object"))
+            .map((a) => ({ id: String(a.id ?? ""), name: String(a.name ?? a.id ?? "") })),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId]);
   const [collapsedSet, setCollapsedSet] = useState<Set<number>>(() => new Set(steps.map((_, i) => i)));
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
@@ -1549,13 +1570,18 @@ function StepEditor({
                   </>
                 ) : (
                   <>
-                    <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent Name</label>
-                    <input style={inputStyle} value={step.agentName} placeholder="헐크" onChange={(e) => {
+                    <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent</label>
+                    <select style={selectStyle} value={step.agentName} onChange={(e) => {
                   const newName = e.target.value;
                   const granted = new Set(availableToolGrants.filter((g) => g.agentName === newName).map((g) => g.toolName));
                   const cleaned = splitCommaList(step.tools).filter((t) => granted.has(t)).join(", ");
                   update(i, { agentName: newName, tools: cleaned });
-                }} />
+                }}>
+                      <option value="">— Select agent —</option>
+                      {agents.map((a) => (
+                        <option key={a.id} value={a.name}>{a.name}</option>
+                      ))}
+                    </select>
                   </>
                 )}
               </div>
@@ -2762,6 +2788,27 @@ function WorkflowGraphEditor({
   const [showGraphEvidenceDrawer, setShowGraphEvidenceDrawer] = useState<boolean>(false);
   const [canvasScale, setCanvasScale] = useState<number>(1);
   const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
+  const { selectedCompanyId: graphCompanyId } = useCompany();
+  const [graphAgents, setGraphAgents] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    const cid = graphCompanyId ?? "";
+    if (!cid.trim()) return;
+    let cancelled = false;
+    fetch(`${apiBaseUrl()}/api/companies/${encodeURIComponent(cid)}/agents`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: unknown) => {
+        if (cancelled || !Array.isArray(data)) return;
+        setGraphAgents(
+          data
+            .filter((a): a is Record<string, unknown> => Boolean(a && typeof a === "object"))
+            .map((a) => ({ id: String(a.id ?? ""), name: String(a.name ?? a.id ?? "") })),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [graphCompanyId]);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [connectingFromStepId, setConnectingFromStepId] = useState<string | null>(null);
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
@@ -4581,12 +4628,17 @@ function WorkflowGraphEditor({
               <Fragment key="agent-step-fields">
                 <div key="agent-name-field" style={{ display: "grid", gap: "4px" }}>
                   <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent</label>
-                  <input style={inputStyle} value={selectedStep.agentName} placeholder="Agent name" onChange={(event) => {
+                  <select style={selectStyle} value={selectedStep.agentName} onChange={(event) => {
                     const newName = event.target.value;
                     const granted = new Set(availableToolGrants.filter((g) => g.agentName === newName).map((g) => g.toolName));
                     const cleaned = splitCommaList(selectedStep.tools).filter((t) => granted.has(t)).join(", ");
                     updateSelected({ agentName: newName, tools: cleaned });
-                  }} />
+                  }}>
+                    <option value="">— Select agent —</option>
+                    {graphAgents.map((a) => (
+                      <option key={a.id} value={a.name}>{a.name}</option>
+                    ))}
+                  </select>
                 </div>
                 <div key="agent-tool-access-field" style={{ display: "grid", gap: "4px" }}>
                   <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent tool access</label>
