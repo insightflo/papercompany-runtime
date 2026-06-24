@@ -971,7 +971,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
     ? input.run.startedAt.toISOString().slice(0, 10).replace(/-/g, "")
     : "";
   const scored = input.claimedArtifactPaths
-    .filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+    .filter((c): c is string => typeof c === "string" && c.trim().length > 0 && !c.includes("{"))
     .map((p) => {
       let score = (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0);
       // run-date awareness: current-run 날짜 경로 선호(+5), stale 날짜 패널티(-5)
