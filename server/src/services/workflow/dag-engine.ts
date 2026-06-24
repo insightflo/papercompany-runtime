@@ -1086,15 +1086,10 @@ async function createWorkflowStepIssue(input: {
     stepId: input.step.id,
   });
   const description = [
-    workProductPaths ? "System workProduct output contract:" : null,
-    workProductPaths ? `- companyWorkProductRoot: ${workProductPaths.workProductRoot}` : null,
-    workProductPaths ? `- missionOutputDir: ${workProductPaths.missionOutputDir}` : null,
-    workProductPaths?.runOutputDir ? `- workflowRunOutputDir: ${workProductPaths.runOutputDir}` : null,
-    workProductPaths?.stepOutputDir ? `- stepOutputDir: ${workProductPaths.stepOutputDir}` : null,
-    workProductPaths ? "- If this issue creates a file artifact, write it under stepOutputDir unless the issue explicitly names a more specific child path under missionOutputDir." : null,
-    workProductPaths ? "- missionOutputDir is the system-enforced boundary for this mission's local workProducts. Do not write or register deliverables under previous run dates, sibling mission folders, or other produced_work paths." : null,
-    workProductPaths ? "- If older step text mentions another produced_work path, this System workProduct output contract takes precedence." : null,
-    workProductPaths ? "- Finish producer output with `ARTIFACT: <absolute path>` pointing to the file under missionOutputDir so Papercompany can register the workProduct automatically." : null,
+    workProductPaths?.stepOutputDir ? "Deliverable output (use exactly this directory):" : null,
+    workProductPaths?.stepOutputDir ? `- ${workProductPaths.stepOutputDir}` : null,
+    workProductPaths?.stepOutputDir ? `- Write your deliverable file(s) into that directory. Then finish your run output with one line: ARTIFACT: <absolute path of the file you wrote there>. The system registers the workProduct from that line — do not POST.` : null,
+    workProductPaths ? "- Do not write or look for deliverables anywhere else (not under other produced_work paths, run dates, or sibling mission folders). Use only the directory above." : null,
     workProductPaths ? "" : null,
     input.step.description?.trim()
       ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
