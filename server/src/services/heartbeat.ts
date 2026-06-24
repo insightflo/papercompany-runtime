@@ -6094,7 +6094,8 @@ export function heartbeatService(db: Db) {
           ? extractClaimedArtifactPaths(run)
           : [];
       const shouldCheckMissingWorkProductRegistration =
-        claimedArtifactPaths.length > 0 &&
+        // produced-nothing guard: producer-type issue 가 succeeded run 후 workProduct 가 하나도 없으면
+        // claimed paths 유무와 무관하게 gate 발화(자동 done 차단). workProduct 가 있으면 통과.
         isLinkedToRun &&
         !!issue.missionId &&
         canApplyMissingWorkProductRegistrationGate(issue) &&
