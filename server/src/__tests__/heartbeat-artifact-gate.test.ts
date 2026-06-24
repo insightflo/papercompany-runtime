@@ -72,6 +72,44 @@ describe("heartbeat missing workProduct artifact gate", () => {
     })).toBe(true);
   });
 
+  it("does not satisfy a mission artifact gate with a primary workProduct outside the allowed mission output root", () => {
+    expect(hasSatisfiedWorkProductRegistration({
+      existingWorkProducts: [
+        {
+          url: null,
+          externalId: null,
+          status: "active",
+          isPrimary: true,
+          metadata: {
+            path: "/srv/papercompany/projects/research-company/produced_work/tech-scout/202606/old/report.md",
+          },
+        },
+      ],
+      claimedArtifactPaths: [],
+      issue: { description: null },
+      allowedArtifactRoot: "/srv/papercompany/projects/research-company/produced_work/missions/mission-1",
+    })).toBe(false);
+  });
+
+  it("satisfies a mission artifact gate with a primary workProduct under the allowed mission output root", () => {
+    expect(hasSatisfiedWorkProductRegistration({
+      existingWorkProducts: [
+        {
+          url: null,
+          externalId: null,
+          status: "active",
+          isPrimary: true,
+          metadata: {
+            path: "/srv/papercompany/projects/research-company/produced_work/missions/mission-1/runs/run-1/steps/collect/report.md",
+          },
+        },
+      ],
+      claimedArtifactPaths: [],
+      issue: { description: null },
+      allowedArtifactRoot: "/srv/papercompany/projects/research-company/produced_work/missions/mission-1",
+    })).toBe(true);
+  });
+
   it("does not satisfy registration when a deliverable path is claimed without a matching workProduct", () => {
     expect(hasSatisfiedWorkProductRegistration({
       existingWorkProducts: [],

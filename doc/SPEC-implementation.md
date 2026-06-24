@@ -162,8 +162,16 @@ Human auth tables (`users`, `sessions`, and provider-specific auth artifacts) ar
 - `name` text not null
 - `description` text null
 - `status` enum: `active | paused | archived`
+- `work_product_root` text null
 
 Invariant: every business record belongs to exactly one company.
+
+Work product output invariant:
+
+- If `work_product_root` is set, workflow-produced files for that company must be written under it.
+- Mission workflow steps receive a system output contract rooted at `work_product_root/missions/:missionId`.
+- If `work_product_root` is not set, the runtime falls back to the primary project workspace `cwd/produced_work`.
+- Mission artifact gates only accept registered file workProducts inside the mission output root.
 
 ## 7.2 `agents`
 

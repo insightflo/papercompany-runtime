@@ -7,7 +7,7 @@
 
 import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
@@ -28,6 +28,7 @@ import {
 import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
+import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 
 /**
  * Workflow step definition.
@@ -996,7 +997,33 @@ async function createWorkflowStepIssue(input: {
 
   const stepName = renderWorkflowRunTextTemplate(input.step.name.trim(), input.run);
   const title = stepName || renderWorkflowRunTextTemplate(input.definition.name, input.run);
+  const missionProject = input.run.missionId
+    ? await input.db
+      .select({ projectId: missions.projectId })
+      .from(missions)
+      .where(eq(missions.id, input.run.missionId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null)
+    : null;
+  const projectId = missionProject?.projectId ?? input.definition.projectId ?? null;
+  const workProductPaths = await resolveMissionWorkProductPaths(input.db, {
+    companyId: input.run.companyId,
+    missionId: input.run.missionId ?? null,
+    projectId,
+    workflowRunId: input.run.id,
+    stepId: input.step.id,
+  });
   const description = [
+    workProductPaths ? "System workProduct output contract:" : null,
+    workProductPaths ? `- companyWorkProductRoot: ${workProductPaths.workProductRoot}` : null,
+    workProductPaths ? `- missionOutputDir: ${workProductPaths.missionOutputDir}` : null,
+    workProductPaths?.runOutputDir ? `- workflowRunOutputDir: ${workProductPaths.runOutputDir}` : null,
+    workProductPaths?.stepOutputDir ? `- stepOutputDir: ${workProductPaths.stepOutputDir}` : null,
+    workProductPaths ? "- If this issue creates a file artifact, write it under stepOutputDir unless the issue explicitly names a more specific child path under missionOutputDir." : null,
+    workProductPaths ? "- missionOutputDir is the system-enforced boundary for this mission's local workProducts. Do not write or register deliverables under previous run dates, sibling mission folders, or other produced_work paths." : null,
+    workProductPaths ? "- If older step text mentions another produced_work path, this System workProduct output contract takes precedence." : null,
+    workProductPaths ? "- Finish producer output with `ARTIFACT: <absolute path>` pointing to the file under missionOutputDir so Papercompany can register the workProduct automatically." : null,
+    workProductPaths ? "" : null,
     input.step.description?.trim()
       ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
       : null,
@@ -1050,6 +1077,7 @@ async function createWorkflowStepIssue(input: {
     description,
     status: "todo",
     assigneeAgentId,
+    projectId,
     missionId: input.run.missionId ?? null,
     originKind: "workflow_execution",
     originId: input.run.id,

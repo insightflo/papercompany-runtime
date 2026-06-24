@@ -1086,7 +1086,7 @@ describe("heartbeat context budget preflight", () => {
       companyId,
       missionId,
       identifier: "PSN-NEWS",
-      title: "Synthesize ai news report draft",
+      title: "Discuss ai news wording",
       status: "in_progress",
       assigneeAgentId: agentId,
       originKind: "workflow_execution",

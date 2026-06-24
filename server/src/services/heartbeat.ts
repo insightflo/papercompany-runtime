@@ -65,6 +65,7 @@ import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
+import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
@@ -745,6 +746,33 @@ export function workProductReferencesClaimedArtifact(
   return claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
 }
 
+function workProductArtifactPaths(product: {
+  url: string | null;
+  externalId: string | null;
+  metadata: Record<string, unknown> | null;
+}) {
+  const paths: string[] = [];
+  for (const value of [product.url, product.externalId]) {
+    if (typeof value === "string" && path.isAbsolute(value)) paths.push(value);
+  }
+  const metadataPath = product.metadata?.path;
+  if (typeof metadataPath === "string" && path.isAbsolute(metadataPath)) paths.push(metadataPath);
+  return paths;
+}
+
+function workProductWithinAllowedRoot(
+  product: {
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+  },
+  allowedArtifactRoot: string | null | undefined,
+) {
+  if (!allowedArtifactRoot) return true;
+  const paths = workProductArtifactPaths(product);
+  return paths.length > 0 && paths.some((artifactPath) => isPathInsideOrEqual(artifactPath, allowedArtifactRoot));
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -782,9 +810,11 @@ function workProductSatisfiesIssueDeclaredArtifact(
     isPrimary?: boolean | null;
   },
   issue: { description?: string | null },
+  allowedArtifactRoot?: string | null,
 ) {
   if (product.status && product.status !== "active") return false;
   if (product.isPrimary === false) return false;
+  if (!workProductWithinAllowedRoot(product, allowedArtifactRoot)) return false;
 
   const declaredArtifactTokens = extractIssueDeclaredArtifactTokens(issue.description);
   if (declaredArtifactTokens.length === 0) return false;
@@ -818,10 +848,23 @@ export function hasSatisfiedWorkProductRegistration(input: {
   claimedArtifactPaths: string[];
   issue: { description?: string | null };
   autoRegisteredWorkProduct?: unknown | null;
+  allowedArtifactRoot?: string | null;
 }) {
+  const effectiveClaimedArtifactPaths = input.claimedArtifactPaths
+    .filter(isActionableClaimedArtifactPath)
+    .filter((artifactPath) =>
+      input.allowedArtifactRoot ? isPathInsideOrEqual(artifactPath, input.allowedArtifactRoot) : true,
+    );
   // An active primary workProduct is the authoritative control-plane contract for the issue’s artifact. When a heartbeat/retry run succeeds and echoes input/setup/data-source paths in its stdout that do not literally match the registered deliverable URL, the existing registration must not be treated as missing. This removes the false-positive loop reported in CMPAA-163 without disabling the gate for the genuine “agent forgot to register WP” case.
   const hasActivePrimaryWorkProduct = input.existingWorkProducts.some((product) =>
-    product.status === "active" && product.isPrimary === true
+    effectiveClaimedArtifactPaths.length === 0 &&
+    product.status === "active" &&
+    product.isPrimary === true &&
+    workProductWithinAllowedRoot({
+      url: product.url,
+      externalId: product.externalId,
+      metadata: product.metadata ?? null,
+    }, input.allowedArtifactRoot)
   );
   const hasMatchingWorkProduct = input.existingWorkProducts.some((product) => workProductReferencesClaimedArtifact(
     {
@@ -831,8 +874,12 @@ export function hasSatisfiedWorkProductRegistration(input: {
       status: product.status,
       isPrimary: product.isPrimary,
     },
-    input.claimedArtifactPaths,
-  ));
+    effectiveClaimedArtifactPaths,
+  ) && workProductWithinAllowedRoot({
+    url: product.url,
+    externalId: product.externalId,
+    metadata: product.metadata ?? null,
+  }, input.allowedArtifactRoot));
   const hasIssueDeclaredWorkProduct = input.existingWorkProducts.some((product) =>
     workProductSatisfiesIssueDeclaredArtifact({
       url: product.url,
@@ -840,7 +887,7 @@ export function hasSatisfiedWorkProductRegistration(input: {
       status: product.status,
       isPrimary: product.isPrimary,
       metadata: product.metadata ?? null,
-    }, input.issue),
+    }, input.issue, input.allowedArtifactRoot),
   );
 
   return (
@@ -860,6 +907,7 @@ async function autoRegisterWorkProductFromIssueDocument(input: {
   };
   run: typeof heartbeatRuns.$inferSelect;
   claimedArtifactPaths: string[];
+  allowedArtifactRoot?: string | null;
 }) {
   const issueDocs = await input.tx
     .select({
@@ -876,11 +924,14 @@ async function autoRegisterWorkProductFromIssueDocument(input: {
   const matchingDocument = issueDocs.find((doc) => {
     if (doc.key !== "work-product" && doc.key !== "workproduct") return false;
     const haystack = [doc.title, doc.latestBody].filter(Boolean).join("\n");
-    return input.claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
+    return input.claimedArtifactPaths
+      .filter((artifactPath) => !input.allowedArtifactRoot || isPathInsideOrEqual(artifactPath, input.allowedArtifactRoot))
+      .some((artifactPath) => haystack.includes(artifactPath));
   });
   if (!matchingDocument) return null;
 
   const artifactPath = input.claimedArtifactPaths.find((candidate) => {
+    if (input.allowedArtifactRoot && !isPathInsideOrEqual(candidate, input.allowedArtifactRoot)) return false;
     const haystack = [matchingDocument.title, matchingDocument.latestBody].filter(Boolean).join("\n");
     return haystack.includes(candidate);
   });
@@ -948,6 +999,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   };
   run: typeof heartbeatRuns.$inferSelect;
   claimedArtifactPaths: string[];
+  allowedArtifactRoot?: string | null;
 }) {
   // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
   //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
@@ -972,6 +1024,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
     : "";
   const scored = input.claimedArtifactPaths
     .filter((c): c is string => typeof c === "string" && c.trim().length > 0 && !c.includes("{"))
+    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot))
     .map((p) => {
       let score = (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0);
       // run-date awareness: current-run 날짜 경로 선호(+5), stale 날짜 패널티(-5)
@@ -2140,6 +2193,7 @@ export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$infe
 function buildMissingWorkProductRegistrationGateComment(input: {
   run: typeof heartbeatRuns.$inferSelect;
   claimedArtifactPaths: string[];
+  allowedArtifactRoot?: string | null;
 }) {
   const paths = input.claimedArtifactPaths.length > 0
     ? input.claimedArtifactPaths.map((artifactPath) => `- ${artifactPath}`).join("\n")
@@ -2150,10 +2204,13 @@ function buildMissingWorkProductRegistrationGateComment(input: {
     "- 감지: run은 succeeded로 종료됐고 산출물 파일 경로를 보고했지만, issue에 공식 `workProduct`가 등록되어 있지 않습니다.",
     "- 조치: downstream workflow가 비공식 comment 경로만 보고 진행하지 않도록 source issue를 `blocked`로 전이합니다.",
     "- 복구: 아래 파일을 이 issue의 `workProduct`로 등록한 뒤 workflow를 resume하세요.",
+    input.allowedArtifactRoot
+      ? `- 허용 경로: 이 mission의 local workProduct는 \`${input.allowedArtifactRoot}\` 아래에 있어야 합니다.`
+      : null,
     "",
     "### Claimed artifact paths",
     paths,
-  ].join("\n");
+  ].filter((line) => line !== null).join("\n");
 }
 
 export type HeartbeatFailureClassification = {
@@ -5988,6 +6045,7 @@ export function heartbeatService(db: Db) {
         .select({
           id: issues.id,
           companyId: issues.companyId,
+          projectId: issues.projectId,
           missionId: issues.missionId,
           parentId: issues.parentId,
           identifier: issues.identifier,
@@ -6099,6 +6157,14 @@ export function heartbeatService(db: Db) {
         run.status === "succeeded" && isLinkedToRun && !!issue.missionId
           ? extractClaimedArtifactPaths(run)
           : [];
+      const missionWorkProductPaths = issue.missionId
+        ? await resolveMissionWorkProductPaths(tx, {
+          companyId: issue.companyId,
+          missionId: issue.missionId,
+          projectId: issue.projectId,
+        })
+        : null;
+      const allowedArtifactRoot = missionWorkProductPaths?.missionOutputDir ?? null;
       const shouldCheckMissingWorkProductRegistration =
         // produced-nothing guard: producer-type issue 가 succeeded run 후 workProduct 가 하나도 없으면
         // claimed paths 유무와 무관하게 gate 발화(자동 done 차단). workProduct 가 있으면 통과.
@@ -6168,25 +6234,31 @@ export function heartbeatService(db: Db) {
           existingWorkProducts,
           claimedArtifactPaths,
           issue,
+          allowedArtifactRoot,
         });
         const autoRegisteredWorkProduct = hasSatisfiedExistingWorkProductRegistration
           ? null
-          : (await autoRegisterWorkProductFromIssueDocument({
-              tx,
-              issue,
-              run,
-              claimedArtifactPaths,
-            }) ?? await autoRegisterWorkProductFromClaimedFile({
-              tx,
-              issue,
-              run,
-              claimedArtifactPaths,
-            }));
+          : existingWorkProducts.length > 0
+            ? null
+            : (await autoRegisterWorkProductFromIssueDocument({
+                tx,
+                issue,
+                run,
+                claimedArtifactPaths,
+                allowedArtifactRoot,
+              }) ?? await autoRegisterWorkProductFromClaimedFile({
+                tx,
+                issue,
+                run,
+                claimedArtifactPaths,
+                allowedArtifactRoot,
+              }));
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
           claimedArtifactPaths,
           issue,
           autoRegisteredWorkProduct,
+          allowedArtifactRoot,
         })) {
           const now = new Date();
           await tx
@@ -6205,7 +6277,7 @@ export function heartbeatService(db: Db) {
             companyId: issue.companyId,
             issueId: issue.id,
             authorAgentId: run.agentId,
-            body: buildMissingWorkProductRegistrationGateComment({ run, claimedArtifactPaths }),
+            body: buildMissingWorkProductRegistrationGateComment({ run, claimedArtifactPaths, allowedArtifactRoot }),
           });
           await tx.insert(activityLog).values({
             companyId: issue.companyId,

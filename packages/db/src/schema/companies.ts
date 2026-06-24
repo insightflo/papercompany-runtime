@@ -17,6 +17,7 @@ export const companies = pgTable(
       .notNull()
       .default(true),
     timezone: text("timezone"),
+    workProductRoot: text("work_product_root"),
     brandColor: text("brand_color"),
     companyKind: text("company_kind").notNull().default("business"),
     allowsCodeModify: boolean("allows_code_modify").notNull().default(false),
