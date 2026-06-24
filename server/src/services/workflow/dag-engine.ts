@@ -1127,9 +1127,10 @@ async function createWorkflowStepIssue(input: {
       : null,
     "- Treat issue ids from other missions or workflow runs as out of scope, even when their titles are similar.",
     "",
-    "Official workProduct contract:",
-    "- If this step creates or updates a file/report/HTML/PDF/dataset/deliverable, register it on this assigned issue with `POST /api/issues/{issueId}/work-products` before marking done.",
-    "- For local file artifacts, include `provider: \"local\"`, an appropriate `type`, a title, and `metadata.path` with the absolute file path; set `isPrimary: true` for the main deliverable.",
+    "WorkProduct registration contract:",
+    "- Do NOT call POST or curl to register a workProduct. Registration is automatic — there is no manual registration API you need to call.",
+    "- To register a deliverable, write the file under the step output directory above and finish your run output with a line exactly `ARTIFACT: <absolute path>`. The system reads that line and registers the workProduct for you; this is the only registration method.",
+    "- Do not invent a registration request, schema, or fields (type/provider/title/metadata) — the `ARTIFACT:` line is sufficient and required. POSTing or guessing a schema will not register the workProduct.",
     "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
   ].filter((line) => line !== null).join("\n");
 

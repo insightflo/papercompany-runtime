@@ -663,8 +663,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain(`stepId: ${stepId}`);
     expect(createdIssue?.description).toContain("dependencyStepIds: []");
     expect(createdIssue?.description).toContain("Treat issue ids from other missions or workflow runs as out of scope");
-    expect(createdIssue?.description).toContain("Official workProduct contract:");
-    expect(createdIssue?.description).toContain(`POST /api/issues/{issueId}/work-products`);
+    expect(createdIssue?.description).toContain("WorkProduct registration contract:");
+    expect(createdIssue?.description).toContain("Do NOT call POST or curl to register a workProduct");
+    expect(createdIssue?.description).toContain("ARTIFACT: <absolute path>");
+    expect(createdIssue?.description).not.toContain("POST /api/issues/{issueId}/work-products");
 
     const activity = await db
       .select()
