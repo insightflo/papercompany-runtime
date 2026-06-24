@@ -28,9 +28,9 @@
  *     재호출하지 않으므로 1 sync = (step 당) 최대 1 리셋.
  */
 
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, issueComments, workflowStepRuns } from "@paperclipai/db";
+import { heartbeatRuns, issueComments, issueWorkProducts, workflowStepRuns } from "@paperclipai/db";
 import {
   conditionalEdgeHolds,
   resolveEdges,
@@ -138,6 +138,68 @@ async function loadQaReworkFeedback(input: {
   return null;
 }
 
+/**
+ * [목적] producer 가 rework 재실행할 때 current(this-run) upstream(dependency) workProduct 절대경로를
+ *   rework 댓글에 주입. agent 가 issue 댓글을 읽으므로, stale 이전-run 경로 대신 current 산출물을 보게 해
+ *   "producer가 rework 후에도 stale/무생산을 반복"하는 deeper 루트(rework context freshness)를 끊는다.
+ * [입력] db, stepRunMap(stepId→stepRun), producerStep(dependencies). [출력] current dependency artifact 섹션文本|null.
+ */
+async function loadProducerDependencyArtifacts(input: {
+  db: Db;
+  stepRunMap: Map<string, StepRun>;
+  producerStep: { dependencies?: string[] };
+}): Promise<string | null> {
+  const depStepIds = Array.isArray(input.producerStep.dependencies) ? input.producerStep.dependencies : [];
+  if (depStepIds.length === 0) return null;
+  const issueToStepId = new Map<string, string>();
+  const depIssueIds: string[] = [];
+  for (const depStepId of depStepIds) {
+    const issueId = input.stepRunMap.get(depStepId)?.issueId;
+    if (typeof issueId === "string" && issueId.length > 0) {
+      depIssueIds.push(issueId);
+      issueToStepId.set(issueId, depStepId);
+    }
+  }
+  if (depIssueIds.length === 0) return null;
+  const products = await input.db
+    .select({
+      issueId: issueWorkProducts.issueId,
+      title: issueWorkProducts.title,
+      url: issueWorkProducts.url,
+      externalId: issueWorkProducts.externalId,
+      metadata: issueWorkProducts.metadata,
+      status: issueWorkProducts.status,
+    })
+    .from(issueWorkProducts)
+    .where(inArray(issueWorkProducts.issueId, depIssueIds));
+  const byStepId = new Map<string, string[]>();
+  for (const product of products) {
+    if (typeof product.status === "string" && product.status !== "active") continue;
+    const stepId = issueToStepId.get(product.issueId);
+    if (!stepId) continue;
+    const metaPath = product.metadata && typeof product.metadata === "object"
+      ? (product.metadata as Record<string, unknown>).path
+      : null;
+    const ref = product.url ?? product.externalId ?? (typeof metaPath === "string" ? metaPath : null);
+    if (typeof ref !== "string" || ref.trim().length === 0) continue;
+    const arr = byStepId.get(stepId) ?? [];
+    arr.push(`${product.title ?? "artifact"} → ${ref}`);
+    byStepId.set(stepId, arr);
+  }
+  const lines = ["### Current upstream artifacts (refreshed for this rework — use THESE paths, not previous-run files):"];
+  let any = false;
+  for (const depStepId of depStepIds) {
+    const arr = byStepId.get(depStepId);
+    if (arr && arr.length > 0) {
+      lines.push(`- ${depStepId}: ${arr.join("; ")}`);
+      any = true;
+    } else {
+      lines.push(`- ${depStepId}: (no active workProduct registered)`);
+    }
+  }
+  return any ? lines.join("\n") : null;
+}
+
 function buildProducerReworkComment(input: {
   producerStepId: string;
   qaStepId: string;
@@ -145,6 +207,7 @@ function buildProducerReworkComment(input: {
   currentIteration: number;
   maxIterations: number;
   feedback: string | null;
+  dependencyArtifacts?: string | null;
 }): string {
   return [
     "## Workflow QA rework request",
@@ -154,9 +217,12 @@ function buildProducerReworkComment(input: {
     `- Rework iteration: ${input.currentIteration + 1}/${input.maxIterations}`,
     "- Required: update the registered deliverable to address the QA feedback, then re-register or update the workProduct before marking done.",
     "- Do not close this issue as already complete unless the requested changes are actually reflected in the deliverable.",
+    input.dependencyArtifacts ?? null,
     "",
     input.feedback ?? "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.",
-  ].join("\n");
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
 }
 
 /**
@@ -208,6 +274,7 @@ export async function applyBackEdgeReworkPass(
     };
     const qaStepRun = stepRunMap.get(firingEdge.stepId);
     const qaFeedback = await loadQaReworkFeedback({ db, qaIssueId: qaStepRun?.issueId ?? null });
+    const dependencyArtifacts = await loadProducerDependencyArtifacts({ db, stepRunMap, producerStep: step });
 
     await resetStepRunForRework({
       db,
@@ -227,6 +294,7 @@ export async function applyBackEdgeReworkPass(
           currentIteration,
           maxIterations,
           feedback: qaFeedback,
+          dependencyArtifacts,
         }),
       });
     }
