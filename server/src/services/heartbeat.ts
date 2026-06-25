@@ -4694,11 +4694,12 @@ export function heartbeatService(db: Db) {
     const assignedTaskPromptSection = buildAssignedIssuePromptSection(issueContext);
     const resolvedPromptTemplate = readNonEmptyString(resolvedConfig.promptTemplate);
     const promptTemplateWithIssueTask =
-      issueContext &&
-      resolvedPromptTemplate &&
-      !resolvedPromptTemplate.includes("{{taskBody}}") &&
-      !resolvedPromptTemplate.includes("{{#taskId}}")
-        ? `${resolvedPromptTemplate}${assignedTaskPromptSection}`
+      issueContext
+        ? resolvedPromptTemplate
+          ? !resolvedPromptTemplate.includes("{{taskBody}}") && !resolvedPromptTemplate.includes("{{#taskId}}")
+            ? `${resolvedPromptTemplate}${assignedTaskPromptSection}`
+            : resolvedPromptTemplate
+          : assignedTaskPromptSection.trim()
         : resolvedPromptTemplate;
     const issueTaskAdapterConfig = issueContext
       ? {
@@ -6327,7 +6328,7 @@ export function heartbeatService(db: Db) {
             missionId: issue.missionId ?? null,
             pattern: "workProduct 미등록",
             cause: "run이 산출물 파일 경로를 보고했지만 issue에 공식 workProduct가 등록되지 않아 mission artifact gate가 해당 이슈를 block함.",
-            solution: "산출물 파일 생성 후 반드시 POST /api/issues/{id}/work-products 로 workProduct를 등록. 파일 생성 ≠ 등록.",
+            solution: "산출물 파일을 지정된 출력 디렉토리에 만들고 실행 출력 끝에 `ARTIFACT: <절대경로>` 한 줄을 남긴다. workProduct 등록은 시스템이 자동 처리하므로 POST/curl 등록을 시도하지 않는다.",
             errorCode: "workproduct_registration_missing",
           }, run.id);
           postTransactionWorkflowIssueSyncIssueId = issue.id;
