@@ -692,6 +692,110 @@ async function writeQaRubricMarkdown(input: {
   await writeFile(input.filePath, body, "utf8");
 }
 
+async function commentOnValidationRecheckQueued(input: {
+  db: Db;
+  companyId: string;
+  issueId: string;
+  workflowRunId: string;
+  step: WorkflowStep;
+}): Promise<void> {
+  const dependencyStepIds = input.step.dependencies;
+  const dependencyRows = dependencyStepIds.length > 0
+    ? await input.db
+      .select({
+        stepId: workflowStepRuns.stepId,
+        issueId: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+      })
+      .from(workflowStepRuns)
+      .innerJoin(issues, eq(workflowStepRuns.issueId, issues.id))
+      .where(and(
+        eq(workflowStepRuns.workflowRunId, input.workflowRunId),
+        inArray(workflowStepRuns.stepId, dependencyStepIds),
+      ))
+    : [];
+
+  const order = new Map(dependencyStepIds.map((stepId, index) => [stepId, index]));
+  dependencyRows.sort((a, b) => (order.get(a.stepId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.stepId) ?? Number.MAX_SAFE_INTEGER));
+
+  const workProductRows = dependencyRows.length > 0
+    ? await input.db
+      .select({
+        issueId: issueWorkProducts.issueId,
+        title: issueWorkProducts.title,
+        type: issueWorkProducts.type,
+        provider: issueWorkProducts.provider,
+        url: issueWorkProducts.url,
+        externalId: issueWorkProducts.externalId,
+        metadata: issueWorkProducts.metadata,
+        status: issueWorkProducts.status,
+      })
+      .from(issueWorkProducts)
+      .where(inArray(issueWorkProducts.issueId, dependencyRows.map((row) => row.issueId)))
+    : [];
+
+  const workProductsByIssueId = new Map<string, typeof workProductRows>();
+  for (const product of workProductRows) {
+    const products = workProductsByIssueId.get(product.issueId) ?? [];
+    products.push(product);
+    workProductsByIssueId.set(product.issueId, products);
+  }
+
+  const renderWorkProductSummary = (product: typeof workProductRows[number]) => {
+    const metadata = normalizeRecord(product.metadata);
+    const metadataPath = typeof metadata.path === "string" ? metadata.path : null;
+    const artifactRef = metadataPath ?? product.url ?? product.externalId ?? (
+      product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
+    );
+    return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
+  };
+
+  const dependencyIssueLines = dependencyRows.flatMap((row) => {
+    const products = workProductsByIssueId.get(row.issueId) ?? [];
+    const lines = [
+      `- ${row.stepId}: ${row.identifier ?? row.issueId} (${row.status}) — ${row.title}`,
+    ];
+    if (products.length > 0) {
+      lines.push(`  workProducts: ${products.map(renderWorkProductSummary).join("; ")}`);
+    } else {
+      lines.push("  workProducts: none registered");
+    }
+    return lines;
+  });
+
+  const missingWorkProductLines = dependencyRows
+    .filter((row) => (workProductsByIssueId.get(row.issueId) ?? []).length === 0)
+    .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
+
+  await input.db.insert(issueComments).values({
+    companyId: input.companyId,
+    issueId: input.issueId,
+    body: [
+      "### Workflow validation recheck",
+      "",
+      "The producer/dependency completed after the previous REQUEST_CHANGES verdict.",
+      "Re-run this validation using the current dependency workProducts below.",
+      "",
+      `- workflowRunId: ${input.workflowRunId}`,
+      `- stepId: ${input.step.id}`,
+      `- dependencyStepIds: ${JSON.stringify(dependencyStepIds)}`,
+      "",
+      "Current dependency issue inputs:",
+      ...(dependencyIssueLines.length > 0 ? dependencyIssueLines : ["- No dependency issue inputs are registered for this step."]),
+      ...(missingWorkProductLines.length > 0
+        ? [
+            "",
+            "Missing dependency hard-stop:",
+            ...missingWorkProductLines,
+            "- If this validation needs a missing dependency deliverable, return `REQUEST_CHANGES: <specific missing workProduct>`.",
+          ]
+        : []),
+    ].join("\n"),
+  });
+}
+
 type ValidationVerdict = "pass" | "request_changes";
 
 interface ValidationVerdictObservation {
@@ -906,6 +1010,13 @@ async function syncStepRunsFromIssueState(
     if (!updatedIssue) continue;
 
     issueById.set(updatedIssue.id, updatedIssue);
+    await commentOnValidationRecheckQueued({
+      db,
+      companyId: updatedIssue.companyId,
+      issueId: updatedIssue.id,
+      workflowRunId: stepRun.workflowRunId,
+      step,
+    });
     await logActivity(db, {
       companyId: updatedIssue.companyId,
       actorType: "system",

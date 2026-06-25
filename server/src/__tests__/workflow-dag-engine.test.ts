@@ -6089,6 +6089,64 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(run.status).toBe("completed");
   });
 
+  it("[P4 control-flow loop] comments current dependency workProducts when requeueing QA after producer rework", async () => {
+    heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-refresh-qa" });
+    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
+    await db
+      .update(issues)
+      .set({
+        description: [
+          "Workflow execution boundary:",
+          `- workflowRunId: ${runId}`,
+          "- dependencyStepIds: [\"produce\"]",
+          "Dependency issue inputs:",
+          "- produce: old-producer (done) — Produce artifact",
+          "  workProducts: none registered",
+          "Dependency workProduct hard-stop:",
+          "- produce: old-producer has no registered dependency workProduct.",
+        ].join("\n"),
+      })
+      .where(eq(issues.id, qaIssueId));
+    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const reportPath = "/srv/papercompany/projects/research-company/produced_work/missions/rework-report.md";
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: producerIssueId,
+      type: "file",
+      provider: "local",
+      externalId: reportPath,
+      title: "rework-report.md",
+      status: "active",
+      isPrimary: true,
+      metadata: { path: reportPath },
+    });
+    await db
+      .update(issues)
+      .set({
+        status: "done",
+        completedAt: new Date("2026-06-18T07:30:00.000Z"),
+        cancelledAt: null,
+        startedAt: new Date("2026-06-18T07:11:00.000Z"),
+      })
+      .where(eq(issues.id, producerIssueId));
+
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const [qaIssueAfterRequeue] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
+    expect(qaIssueAfterRequeue.status).toBe("todo");
+    expect(qaIssueAfterRequeue.description).toContain("workProducts: none registered");
+    expect(qaIssueAfterRequeue.description).toContain("Dependency workProduct hard-stop:");
+    const qaComments = await db.select().from(issueComments).where(eq(issueComments.issueId, qaIssueId));
+    const qaCommentBody = qaComments.map((comment) => comment.body).join("\n");
+    expect(qaCommentBody).toContain("Workflow validation recheck");
+    expect(qaCommentBody).toContain("rework-report.md [file/active]");
+    expect(qaCommentBody).toContain(reportPath);
+    expect(qaCommentBody).not.toContain("has no registered dependency workProduct");
+  });
+
   it("[P4 control-flow loop] keeps downstream steps pending while QA request_changes is still recoverable", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-downstream" });
     const companyId = randomUUID();
