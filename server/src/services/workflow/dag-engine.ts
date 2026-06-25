@@ -5,6 +5,8 @@
  * A workflow is a DAG where each step has dependencies on other steps.
  */
 
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
@@ -636,6 +638,60 @@ function readExplicitValidationVerdict(value: string): "pass" | "request_changes
   return null;
 }
 
+async function writeQaRubricMarkdown(input: {
+  filePath: string;
+  run: typeof workflowRuns.$inferSelect;
+  definition: typeof workflowDefinitions.$inferSelect;
+  step: WorkflowStep;
+  renderedStepDescription: string | null;
+  dependencyIssueLines: string[];
+  missingDependencyWorkProductLines: string[];
+}): Promise<void> {
+  await mkdir(path.dirname(input.filePath), { recursive: true });
+  const body = [
+    "# QA grading rubric",
+    "",
+    "This rubric is workflow-owned input for the QA/validator step. Do not invent a new grading standard; judge the dependency workProducts against this rubric.",
+    "",
+    "## Workflow execution boundary",
+    "",
+    `- workflowRunId: ${input.run.id}`,
+    `- workflowDefinitionId: ${input.definition.id}`,
+    `- missionId: ${input.run.missionId ?? "none"}`,
+    `- stepId: ${input.step.id}`,
+    `- dependencyStepIds: ${JSON.stringify(input.step.dependencies)}`,
+    "",
+    "## Evaluation criteria",
+    "",
+    input.renderedStepDescription?.trim()
+      || "No step-specific criteria were provided by the workflow owner. Validate only objective completeness, dependency workProduct availability, and explicit workflow success requirements.",
+    "",
+    "## Dependency inputs",
+    "",
+    input.dependencyIssueLines.length > 0
+      ? input.dependencyIssueLines.join("\n")
+      : "- No dependency issue inputs are registered for this step.",
+    "",
+    ...(input.missingDependencyWorkProductLines.length > 0
+      ? [
+          "## Missing dependency hard-stop",
+          "",
+          ...input.missingDependencyWorkProductLines,
+          "- If this step needs the missing dependency deliverable, return `REQUEST_CHANGES: <specific missing workProduct>` instead of guessing from the filesystem.",
+          "",
+        ]
+      : []),
+    "## Required verdict",
+    "",
+    "- Read the dependency workProduct files directly when paths are provided.",
+    "- Return `PASS` only when the dependency workProducts meet every criterion above.",
+    "- Return `REQUEST_CHANGES: <specific gaps>` when any criterion is missing, ambiguous, stale, or unsupported.",
+    "- End the final answer with one clear verdict: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
+    "",
+  ].join("\n");
+  await writeFile(input.filePath, body, "utf8");
+}
+
 type ValidationVerdict = "pass" | "request_changes";
 
 interface ValidationVerdictObservation {
@@ -1100,15 +1156,34 @@ async function createWorkflowStepIssue(input: {
     stepId: input.step.id,
   });
   const requiresWorkProduct = input.step.graphWorkProductRequired === true;
+  const renderedStepDescription = input.step.description?.trim()
+    ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
+    : null;
+  const qaRubricPath = !requiresWorkProduct && isQaLikeStep(input.step) && workProductPaths?.stepOutputDir
+    ? path.join(workProductPaths.stepOutputDir, "qa-rubric.md")
+    : null;
+  if (qaRubricPath) {
+    await writeQaRubricMarkdown({
+      filePath: qaRubricPath,
+      run: input.run,
+      definition: input.definition,
+      step: input.step,
+      renderedStepDescription,
+      dependencyIssueLines,
+      missingDependencyWorkProductLines,
+    });
+  }
   const description = [
     requiresWorkProduct && workProductPaths?.stepOutputDir ? "Deliverable output (use exactly this directory):" : null,
     requiresWorkProduct && workProductPaths?.stepOutputDir ? `- ${workProductPaths.stepOutputDir}` : null,
     requiresWorkProduct && workProductPaths?.stepOutputDir ? `- Write your deliverable file(s) into that directory. Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>. The system registers the workProduct from that line — do not POST.` : null,
     requiresWorkProduct && workProductPaths ? "- Do not write or look for deliverables anywhere else (not under other produced_work paths, run dates, or sibling mission folders). Use only the directory above." : null,
     requiresWorkProduct && workProductPaths ? "" : null,
-    input.step.description?.trim()
-      ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
-      : null,
+    qaRubricPath ? "QA grading rubric:" : null,
+    qaRubricPath ? `- ${qaRubricPath}` : null,
+    qaRubricPath ? "- Read the rubric file before judging the dependency workProducts. Do not invent extra criteria in the issue body." : null,
+    qaRubricPath ? "- Finish with exactly `PASS` or `REQUEST_CHANGES: <specific gaps>`." : null,
+    qaRubricPath ? null : renderedStepDescription,
     "",
     "Workflow execution boundary:",
     `- workflowRunId: ${input.run.id}`,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -805,6 +806,148 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain("[ARTIFACT]:");
     expect(createdIssue?.description).toContain("For QA/validator steps"); // QA guidance always present
     expect(createdIssue?.description).not.toContain("POST /api/issues/{issueId}/work-products");
+  });
+
+  it("writes QA step grading criteria to a rubric markdown file and gives the QA agent only that path", async () => {
+    const companyId = randomUUID();
+    const producerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const workProductRoot = `/tmp/wf-qa-rubric-${companyId}`;
+    const criteriaText = [
+      "Report Validator step.",
+      "Check Top25 rank coverage, duplicate/missing entries, source URL presence,",
+      "collection timestamp, fallback notes, confidence labels, and whether any item should be excluded from synthesis.",
+      "Return PASS or REQUEST_CHANGES with exact gaps.",
+    ].join(" ");
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-qa-rubric" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip QA Rubric",
+      issuePrefix: `QR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values([
+      {
+        id: producerAgentId,
+        companyId,
+        name: "Producer Agent",
+        role: "researcher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: qaAgentId,
+        companyId,
+        name: "QA Agent",
+        role: "validator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: producerAgentId,
+      title: "QA rubric mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "QA Rubric Workflow",
+      stepsJson: [
+        {
+          id: "collect-evidence",
+          name: "Collect evidence",
+          agentId: producerAgentId,
+          dependencies: [],
+          description: "Write evidence.json.",
+          graphWorkProductRequired: true,
+        },
+        {
+          id: "audit-evidence",
+          name: "Audit evidence",
+          agentId: qaAgentId,
+          dependencies: ["collect-evidence"],
+          description: criteriaText,
+          graphWorkProductRequired: false,
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+      runDate: "2026-06-25",
+    });
+
+    await executeWorkflowRun(db, runId);
+    let stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const producerStepRun = stepRuns.find((row) => row.stepId === "collect-evidence")!;
+    const producerIssueId = producerStepRun.issueId!;
+
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: producerIssueId,
+      type: "file",
+      provider: "local",
+      externalId: `${workProductRoot}/missions/${missionId}/runs/${runId}/steps/collect-evidence/evidence.json`,
+      title: "evidence.json",
+      status: "active",
+      isPrimary: true,
+      metadata: {
+        path: `${workProductRoot}/missions/${missionId}/runs/${runId}/steps/collect-evidence/evidence.json`,
+      },
+    });
+    await issueService(db).update(producerIssueId, { status: "done" });
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const qaStepRun = stepRuns.find((row) => row.stepId === "audit-evidence")!;
+    expect(qaStepRun.issueId).toBeTruthy();
+
+    const [qaIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, qaStepRun.issueId!));
+
+    expect(qaIssue.description).toContain("QA grading rubric:");
+    expect(qaIssue.description).toContain("qa-rubric.md");
+    expect(qaIssue.description).not.toContain("Check Top25 rank coverage");
+    expect(qaIssue.description).not.toContain("collection timestamp, fallback notes");
+    expect(qaIssue.description).not.toContain("Deliverable output (use exactly this directory):");
+    expect(qaIssue.description).not.toContain("[ARTIFACT]:");
+
+    const rubricPath = qaIssue.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
+    expect(rubricPath).toBeTruthy();
+    expect(fs.existsSync(rubricPath!)).toBe(true);
+    const rubric = fs.readFileSync(rubricPath!, "utf8");
+    expect(rubric).toContain("Check Top25 rank coverage");
+    expect(rubric).toContain("Return PASS or REQUEST_CHANGES with exact gaps.");
+    expect(rubric).toContain(`workflowRunId: ${runId}`);
+    expect(rubric).toContain("collect-evidence");
+    expect(rubric).toContain("evidence.json");
   });
 
   it("copies execution controls into workflow step run metadata when launching a step", async () => {
