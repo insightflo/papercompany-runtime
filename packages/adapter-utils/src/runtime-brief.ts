@@ -63,11 +63,13 @@ function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null
         const name = asString(tool.name) ?? "unknown-tool";
         const description = asString(tool.description);
         const inputSchema = asRecord(tool.inputSchema ?? tool.parametersSchema);
+        const instructions = asString(tool.instructions);
         return [
           `- Tool: ${name}${description ? ` — ${truncateBriefLine(description, 180)}` : ""}`,
           inputSchema && Object.keys(inputSchema).length > 0
             ? `  Parameter schema: ${stringifyBriefJson(inputSchema, 1_200)}`
             : null,
+          instructions ? `  Instructions: ${truncateBriefLine(instructions, 400)}` : null,
         ].filter((line): line is string => line !== null);
       })
     : (toolNames.length > 0 ? [`- Tools: ${toolNames.join(", ")}`] : []);

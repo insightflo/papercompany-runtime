@@ -304,6 +304,7 @@ type WorkflowStepToolContext = {
     description: string;
     inputSchema: Record<string, unknown>;
     adapterType: string;
+    instructions?: string | null;
   }>;
 };
 
@@ -344,6 +345,21 @@ type MaintenanceGuidanceContext = {
     error?: string;
   }>;
 };
+
+/**
+ * toolDefinitions.adapterConfig.instructions를 안전하게 string으로 꺼낸다.
+ * adapterConfig는 jsonb object 또는 string-encoded JSON일 수 있고(codex가 daily-tech-scout
+ * 수정 중 string→object 변환 이력 있음), instructions는 tool 사용 지시문(예: rawPath 파일을
+ * 읽고 evidence.json을 써라). string이면 그대로, 아니면 null.
+ */
+function readToolInstructions(adapterConfig: unknown): string | null {
+  const cfg = typeof adapterConfig === "string"
+    ? (() => { try { return JSON.parse(adapterConfig); } catch { return null; } })()
+    : adapterConfig;
+  if (!cfg || typeof cfg !== "object") return null;
+  const value = (cfg as Record<string, unknown>).instructions;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
 async function resolveWorkflowStepToolContext(input: {
   db: Db;
@@ -393,6 +409,7 @@ async function resolveWorkflowStepToolContext(input: {
         description: definition.description,
         inputSchema: definition.inputSchema,
         adapterType: definition.adapterType,
+        instructions: readToolInstructions(definition.adapterConfig),
       })),
   };
 }
