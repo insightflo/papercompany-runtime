@@ -33,6 +33,19 @@ function stringifyBriefJson(value: unknown, max = 1_000) {
   }
 }
 
+function extractSchemaDefaults(schema: Record<string, unknown> | null): Record<string, unknown> {
+  const properties = asRecord(schema?.properties);
+  if (!properties) return {};
+
+  const defaults: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    const property = asRecord(value);
+    if (!property || !Object.prototype.hasOwnProperty.call(property, "default")) continue;
+    defaults[key] = property.default;
+  }
+  return defaults;
+}
+
 function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null) {
   if (!contract || Object.keys(contract).length === 0) return null;
 
@@ -46,22 +59,39 @@ function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null
   if (toolNames.length === 0 && !asString(contract.stepName) && !asString(contract.stepId)) return null;
 
   const toolLines = tools.length > 0
-    ? tools.slice(0, 8).map((tool) => {
+    ? tools.slice(0, 8).flatMap((tool) => {
         const name = asString(tool.name) ?? "unknown-tool";
         const description = asString(tool.description);
-        return `- Tool: ${name}${description ? ` — ${truncateBriefLine(description, 180)}` : ""}`;
+        const inputSchema = asRecord(tool.inputSchema ?? tool.parametersSchema);
+        return [
+          `- Tool: ${name}${description ? ` — ${truncateBriefLine(description, 180)}` : ""}`,
+          inputSchema && Object.keys(inputSchema).length > 0
+            ? `  Parameter schema: ${stringifyBriefJson(inputSchema, 1_200)}`
+            : null,
+        ].filter((line): line is string => line !== null);
       })
     : (toolNames.length > 0 ? [`- Tools: ${toolNames.join(", ")}`] : []);
-  const defaultParameters = stringifyBriefJson(contract.toolArgs ?? {});
   const primaryToolName = toolNames[0] ?? "<registered-tool-name>";
+  const primaryTool = tools.find((tool) => asString(tool.name) === primaryToolName) ?? tools[0] ?? null;
+  const primaryInputSchema = primaryTool ? asRecord(primaryTool.inputSchema ?? primaryTool.parametersSchema) : null;
+  const schemaDefaults = extractSchemaDefaults(primaryInputSchema);
+  const workflowStepArgs = asRecord(contract.toolArgs) ?? {};
+  const effectiveParameters = {
+    ...schemaDefaults,
+    ...workflowStepArgs,
+  };
+  const workflowStepArgsJson = stringifyBriefJson(contract.toolArgs ?? {});
+  const effectiveParametersJson = stringifyBriefJson(effectiveParameters);
 
   return joinPromptSections([
     "Workflow tool-call contract:",
     asString(contract.stepName) ? `Step: ${asString(contract.stepName)}` : asString(contract.stepId) ? `Step: ${asString(contract.stepId)}` : null,
     toolNames.length > 0 ? `Allowed workflow tools: ${toolNames.join(", ")}` : null,
     ...toolLines,
-    `Default parameters: ${defaultParameters}`,
-    `Agent HTTP invocation: POST $PAPERCLIP_API_BASE_URL/plugins/tools/execute with Authorization: Bearer $PAPERCLIP_API_KEY and JSON {"tool":"${primaryToolName}","parameters":${defaultParameters},"runContext":{"agentId":"$PAPERCLIP_AGENT_ID","runId":"$PAPERCLIP_RUN_ID","companyId":"$PAPERCLIP_COMPANY_ID"}}.`,
+    `Workflow step args: ${workflowStepArgsJson}`,
+    `Effective HTTP parameters: ${effectiveParametersJson}`,
+    "Use the Effective HTTP parameters above as the HTTP `parameters` JSON unless the assigned issue explicitly overrides them.",
+    `Agent HTTP invocation: POST $PAPERCLIP_API_BASE_URL/plugins/tools/execute with Authorization: Bearer $PAPERCLIP_API_KEY and JSON {"tool":"${primaryToolName}","parameters":${effectiveParametersJson},"runContext":{"agentId":"$PAPERCLIP_AGENT_ID","runId":"$PAPERCLIP_RUN_ID","companyId":"$PAPERCLIP_COMPANY_ID"}}.`,
   ], "\n");
 }
 

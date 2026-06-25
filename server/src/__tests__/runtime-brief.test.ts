@@ -15,6 +15,19 @@ describe("buildPaperclipRuntimeBrief", () => {
           {
             name: "generic-cli-executor",
             description: "Execute an approved CLI tool registered in Tool Registry.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                toolName: {
+                  type: "string",
+                  description: "Registered tool name to execute.",
+                },
+                args: {
+                  type: "object",
+                  description: "Tool-specific arguments.",
+                },
+              },
+            },
             adapterType: "plugin",
           },
         ],
@@ -44,11 +57,87 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Workflow tool-call contract:");
     expect(brief).toContain("Step: Collect Tech Scout Top25");
     expect(brief).toContain("generic-cli-executor");
-    expect(brief).toContain('Default parameters: {"toolName":"daily-tech-scout","args":{"limit":25}}');
+    expect(brief).toContain("Parameter schema:");
+    expect(brief).toContain('"toolName":{"type":"string"');
+    expect(brief).toContain('Workflow step args: {"toolName":"daily-tech-scout","args":{"limit":25}}');
+    expect(brief).toContain('Effective HTTP parameters: {"toolName":"daily-tech-scout","args":{"limit":25}}');
     expect(brief).toContain("POST $PAPERCLIP_API_BASE_URL/plugins/tools/execute");
     expect(brief).toContain("Authorization: Bearer $PAPERCLIP_API_KEY");
+    expect(brief).toContain('"parameters":{"toolName":"daily-tech-scout","args":{"limit":25}}');
     expect(brief).toContain("Recent issue comments:");
     expect(brief).toContain("Use generic-cli-executor with toolName=daily-tech-scout");
+  });
+
+  it("renders workflow tool schema and step args into the exact invocation example", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipWorkflowStepToolContract: {
+        workflowRunId: "workflow-run-1",
+        workflowId: "workflow-1",
+        stepId: "collect-tech-scout-evidence",
+        stepName: "Collect TrendShift Top25 evidence",
+        toolNames: ["daily-tech-scout"],
+        toolArgs: { limit: 25 },
+        tools: [
+          {
+            name: "daily-tech-scout",
+            description: "TrendShift.io Daily Explore trending repos 수집 → JSON 출력.",
+            adapterType: "builtin",
+            inputSchema: {
+              type: "object",
+              properties: {
+                limit: {
+                  type: "integer",
+                  minimum: 1,
+                  maximum: 100,
+                  default: 25,
+                  description: "Number of repositories to collect.",
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(brief).toContain("Allowed workflow tools: daily-tech-scout");
+    expect(brief).toContain("Parameter schema:");
+    expect(brief).toContain('"default":25');
+    expect(brief).toContain('Workflow step args: {"limit":25}');
+    expect(brief).toContain('Effective HTTP parameters: {"limit":25}');
+    expect(brief).toContain('"tool":"daily-tech-scout","parameters":{"limit":25}');
+  });
+
+  it("materializes tool schema defaults into effective invocation parameters", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipWorkflowStepToolContract: {
+        workflowRunId: "workflow-run-1",
+        workflowId: "workflow-1",
+        stepId: "collect-tech-scout-evidence",
+        stepName: "Collect TrendShift Top25 evidence",
+        toolNames: ["daily-tech-scout"],
+        toolArgs: {},
+        tools: [
+          {
+            name: "daily-tech-scout",
+            description: "TrendShift.io Daily Explore trending repos 수집 → JSON 출력.",
+            adapterType: "builtin",
+            inputSchema: {
+              type: "object",
+              properties: {
+                limit: {
+                  type: "integer",
+                  default: 25,
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(brief).toContain("Workflow step args: {}");
+    expect(brief).toContain('Effective HTTP parameters: {"limit":25}');
+    expect(brief).toContain('"tool":"daily-tech-scout","parameters":{"limit":25}');
   });
 
   it("surfaces Hermes web chat sessions as free-form operator context", () => {

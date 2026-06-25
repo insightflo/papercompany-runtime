@@ -302,6 +302,7 @@ type WorkflowStepToolContext = {
   tools: Array<{
     name: string;
     description: string;
+    inputSchema: Record<string, unknown>;
     adapterType: string;
   }>;
 };
@@ -390,6 +391,7 @@ async function resolveWorkflowStepToolContext(input: {
       .map((definition) => ({
         name: definition.name,
         description: definition.description,
+        inputSchema: definition.inputSchema,
         adapterType: definition.adapterType,
       })),
   };

@@ -4733,7 +4733,12 @@ describe("heartbeat context budget preflight", () => {
       companyId,
       name: "search-docs",
       description: "Search project documentation",
-      inputSchema: {},
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+        },
+      },
       adapterType: "builtin",
       adapterConfig: {},
       enabled: true,
@@ -4749,6 +4754,7 @@ describe("heartbeat context budget preflight", () => {
           agentId,
           dependencies: [],
           toolNames: ["search-docs"],
+          toolArgs: { query: "mission context" },
         },
       ],
     });
@@ -4799,11 +4805,17 @@ describe("heartbeat context budget preflight", () => {
       stepId: "draft",
       stepName: "Draft",
       toolNames: ["search-docs"],
-      toolArgs: {},
+      toolArgs: { query: "mission context" },
       tools: [
         {
           name: "search-docs",
           description: "Search project documentation",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+            },
+          },
           adapterType: "builtin",
         },
       ],
