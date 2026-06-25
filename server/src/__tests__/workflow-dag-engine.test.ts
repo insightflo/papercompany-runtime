@@ -680,9 +680,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain(`stepId: ${stepId}`);
     expect(createdIssue?.description).toContain("dependencyStepIds: []");
     expect(createdIssue?.description).toContain("Treat issue ids from other missions or workflow runs as out of scope");
-    expect(createdIssue?.description).toContain("WorkProduct registration contract:");
-    expect(createdIssue?.description).toContain("Do NOT call POST or curl to register a workProduct");
-    expect(createdIssue?.description).toContain("[ARTIFACT]: <absolute path>");
+    // planning step is NOT a workProduct producer (graphWorkProductRequired unset) →
+    // dag-engine must NOT inject the deliverable/registration contract.
+    expect(createdIssue?.description).not.toContain("Deliverable output (use exactly this directory)");
+    expect(createdIssue?.description).not.toContain("WorkProduct registration contract:");
+    expect(createdIssue?.description).not.toContain("[ARTIFACT]:");
     expect(createdIssue?.description).not.toContain("POST /api/issues/{issueId}/work-products");
 
     const activity = await db
@@ -719,6 +721,90 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .where(eq(workflowRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     expect(workflowRun?.status).toBe("running");
+  });
+
+  it("injects deliverable + registration contract only for workProduct steps (graphWorkProductRequired=true)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const stepId = "produce-report";
+    const workProductRoot = `/tmp/wf-workproduct-${companyId}`;
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-workproduct" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip WorkProduct",
+      issuePrefix: `WP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Producer Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "WorkProduct mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Producer Workflow",
+      stepsJson: [
+        {
+          id: stepId,
+          name: "Produce report",
+          agentId,
+          dependencies: [],
+          description: "Write the report file.",
+          graphWorkProductRequired: true,
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+      runDate: "2026-06-12",
+    });
+
+    await executeWorkflowRun(db, runId);
+
+    const stepRun = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId))
+      .then((rows) => rows.find((row) => row.stepId === stepId) ?? null);
+    expect(stepRun?.issueId).toBeTruthy();
+    const createdIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, stepRun!.issueId!))
+      .then((rows) => rows[0] ?? null);
+
+    // graphWorkProductRequired=true → dag-engine injects the full contract.
+    expect(createdIssue?.description).toContain("Deliverable output (use exactly this directory):");
+    expect(createdIssue?.description).toContain(workProductRoot);
+    expect(createdIssue?.description).toContain("WorkProduct registration contract:");
+    expect(createdIssue?.description).toContain("[ARTIFACT]:");
+    expect(createdIssue?.description).toContain("For QA/validator steps"); // QA guidance always present
+    expect(createdIssue?.description).not.toContain("POST /api/issues/{issueId}/work-products");
   });
 
   it("copies execution controls into workflow step run metadata when launching a step", async () => {

@@ -1095,12 +1095,13 @@ async function createWorkflowStepIssue(input: {
     workflowRunId: input.run.id,
     stepId: input.step.id,
   });
+  const requiresWorkProduct = input.step.graphWorkProductRequired === true;
   const description = [
-    workProductPaths?.stepOutputDir ? "Deliverable output (use exactly this directory):" : null,
-    workProductPaths?.stepOutputDir ? `- ${workProductPaths.stepOutputDir}` : null,
-    workProductPaths?.stepOutputDir ? `- Write your deliverable file(s) into that directory. Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>. The system registers the workProduct from that line — do not POST.` : null,
-    workProductPaths ? "- Do not write or look for deliverables anywhere else (not under other produced_work paths, run dates, or sibling mission folders). Use only the directory above." : null,
-    workProductPaths ? "" : null,
+    requiresWorkProduct && workProductPaths?.stepOutputDir ? "Deliverable output (use exactly this directory):" : null,
+    requiresWorkProduct && workProductPaths?.stepOutputDir ? `- ${workProductPaths.stepOutputDir}` : null,
+    requiresWorkProduct && workProductPaths?.stepOutputDir ? `- Write your deliverable file(s) into that directory. Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>. The system registers the workProduct from that line — do not POST.` : null,
+    requiresWorkProduct && workProductPaths ? "- Do not write or look for deliverables anywhere else (not under other produced_work paths, run dates, or sibling mission folders). Use only the directory above." : null,
+    requiresWorkProduct && workProductPaths ? "" : null,
     input.step.description?.trim()
       ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
       : null,
@@ -1132,10 +1133,10 @@ async function createWorkflowStepIssue(input: {
       : null,
     "- Treat issue ids from other missions or workflow runs as out of scope, even when their titles are similar.",
     "",
-    "WorkProduct registration contract:",
-    "- Do NOT call POST or curl to register a workProduct. Registration is automatic — there is no manual registration API you need to call.",
-    "- To register a deliverable, write the file under the step output directory above and finish your run output with a line exactly `[ARTIFACT]: <absolute path>`. The system reads that line and registers the workProduct for you; this is the only registration method.",
-    "- Do not invent a registration request, schema, or fields (type/provider/title/metadata) — the `[ARTIFACT]:` line is sufficient and required. POSTing or guessing a schema will not register the workProduct.",
+    requiresWorkProduct ? "WorkProduct registration contract:" : null,
+    requiresWorkProduct ? "- Do NOT call POST or curl to register a workProduct. Registration is automatic — there is no manual registration API you need to call." : null,
+    requiresWorkProduct ? "- To register a deliverable, write the file under the step output directory above and finish your run output with a line exactly `[ARTIFACT]: <absolute path>`. The system reads that line and registers the workProduct for you; this is the only registration method." : null,
+    requiresWorkProduct ? "- Do not invent a registration request, schema, or fields (type/provider/title/metadata) — the `[ARTIFACT]:` line is sufficient and required. POSTing or guessing a schema will not register the workProduct." : null,
     "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
   ].filter((line) => line !== null).join("\n");
 
