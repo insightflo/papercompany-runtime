@@ -731,6 +731,21 @@ function hasDeliverableOutputContract(description: string | null | undefined) {
   return text.includes("Deliverable output (use exactly this directory)") && /`?\[?ARTIFACT\]?`?\s*:/iu.test(text);
 }
 
+/**
+ * workflow_step_runs.metadata 에서 graphWorkProductRequired 플래그를 3상으로 판정.
+ * - true  → 명시 산출물 step (gate 발동)
+ * - false → 명시 비산출물 step (gate 스킵, 휴리스틱도 무시)
+ * - undefined → 필드 미스탬프(legacy row / metadata={} / non-boolean) → 종래 휴리스틱 fallback
+ * buildWorkflowStepRunMetadata 가 항상 boolean 으로 stamp 하므로 non-boolean은 undefined 취급(legacy 호환).
+ */
+export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const value = (metadata as Record<string, unknown>).graphWorkProductRequired;
+  if (value === true) return true;
+  if (value === false) return false;
+  return undefined;
+}
+
 export function workProductReferencesClaimedArtifact(
   product: {
     url: string | null;
@@ -6224,9 +6239,7 @@ export function heartbeatService(db: Db) {
           .limit(1)
           .then((rows) => rows[0]?.metadata ?? null)
         : null;
-      const stepRunRequiresWorkProduct = stepRunMetadata
-        ? (stepRunMetadata as Record<string, unknown>).graphWorkProductRequired === true
-        : undefined;
+      const stepRunRequiresWorkProduct = resolveStepRunRequiresWorkProduct(stepRunMetadata);
       const shouldCheckMissingWorkProductRegistration =
         // produced-nothing guard: producer-type issue 가 succeeded run 후 workProduct 가 하나도 없으면
         // claimed paths 유무와 무관하게 gate 발화(자동 done 차단). workProduct 가 있으면 통과.

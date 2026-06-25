@@ -3,8 +3,26 @@ import {
   extractClaimedArtifactPaths,
   hasSatisfiedWorkProductRegistration,
   isActionableClaimedArtifactPath,
+  resolveStepRunRequiresWorkProduct,
   workProductReferencesClaimedArtifact,
 } from "../services/heartbeat.ts";
+
+describe("resolveStepRunRequiresWorkProduct (graphWorkProductRequired 3-state)", () => {
+  it("returns true only when the field is explicitly true", () => {
+    expect(resolveStepRunRequiresWorkProduct({ graphWorkProductRequired: true })).toBe(true);
+  });
+
+  it("returns false when explicitly false so the gate skips heuristics", () => {
+    expect(resolveStepRunRequiresWorkProduct({ graphWorkProductRequired: false })).toBe(false);
+  });
+
+  it("returns undefined for legacy/unstamped metadata so the prior heuristics still apply", () => {
+    expect(resolveStepRunRequiresWorkProduct({})).toBeUndefined();
+    expect(resolveStepRunRequiresWorkProduct({ executionControls: { concurrencyKey: "x" } })).toBeUndefined();
+    expect(resolveStepRunRequiresWorkProduct(null)).toBeUndefined();
+    expect(resolveStepRunRequiresWorkProduct({ graphWorkProductRequired: "true" })).toBeUndefined();
+  });
+});
 
 describe("heartbeat missing workProduct artifact gate", () => {
   it("ignores agent instruction files when extracting claimed artifact paths", () => {
