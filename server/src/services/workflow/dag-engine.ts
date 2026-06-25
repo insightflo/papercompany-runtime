@@ -1140,6 +1140,7 @@ async function createWorkflowStepIssue(input: {
     requiresWorkProduct ? "WorkProduct registration contract:" : null,
     requiresWorkProduct ? "- Do NOT call POST or curl to register a workProduct. Registration is automatic — there is no manual registration API you need to call." : null,
     requiresWorkProduct ? "- To register a deliverable, write the file under the step output directory above and finish your run output with a line exactly `[ARTIFACT]: <absolute path>`. The system reads that line and registers the workProduct for you; this is the only registration method." : null,
+    requiresWorkProduct ? "- FINAL LINE RULE: your last assistant message MUST end with exactly one standalone line `[ARTIFACT]: <absolute path>` pointing at the deliverable file you wrote. Nothing may follow that line — no closing prose, no summary, and never write meta text like 'ARTIFACT line ready' or 'the [ARTIFACT] line has been emitted'. The system registers only from that exact standalone final line; if it is absent or buried inside other output, registration does not happen." : null,
     requiresWorkProduct ? "- Do not invent a registration request, schema, or fields (type/provider/title/metadata) — the `[ARTIFACT]:` line is sufficient and required. POSTing or guessing a schema will not register the workProduct." : null,
     "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
   ].filter((line) => line !== null).join("\n");
