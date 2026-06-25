@@ -73,6 +73,13 @@ export interface WorkflowStep {
    * step 리셋은 step-reset 이 담당 — 여기선 데이터 모델만.
    */
   conditionalDependencies?: ConditionalEdge[];
+  /**
+   * 이 step이 파일 산출물을 생산하는지(compile-time 계약).
+   * normalizeWorkflowStepsForExecution 이 isTruthyBooleanMarker 로 항상 boolean으로 강제한다.
+   * true면 createWorkflowStepIssue 가 출력 디렉토리 + [ARTIFACT]: 등록 contract를 주입하고,
+   * heartbeat missing-workProduct gate가 적용된다.
+   */
+  graphWorkProductRequired?: boolean;
 }
 
 export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
@@ -101,6 +108,7 @@ type PersistedWorkflowStep = WorkflowStep & {
   graphCacheEnabled?: unknown;
   graphCacheTtlSeconds?: unknown;
   graphDeleteAfterUse?: unknown;
+  graphWorkProductRequired?: unknown;
 };
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
@@ -284,6 +292,8 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       ...(executionControls ? { executionControls } : {}),
       // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
       conditionalDependencies,
+      // 산출물 생산 step 여부를 항상 strict boolean으로 강제(legacy "true" string도 흡수).
+      graphWorkProductRequired: isTruthyBooleanMarker(step.graphWorkProductRequired),
     };
   });
 }

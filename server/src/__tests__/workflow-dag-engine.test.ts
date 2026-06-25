@@ -95,6 +95,23 @@ describe("normalizeWorkflowStepsForExecution", () => {
     ]);
   });
 
+  it("coerces graphWorkProductRequired to a strict boolean (legacy string absorbed, default false)", () => {
+    const normalized = normalizeWorkflowStepsForExecution([
+      { id: "producer", graphWorkProductRequired: true },
+      { id: "producer-legacy-string", graphWorkProductRequired: "true" },
+      { id: "validator", graphWorkProductRequired: false },
+      { id: "unset" },
+      { id: "garbage-string", graphWorkProductRequired: "false" },
+    ]);
+    expect(normalized.map((s) => s.graphWorkProductRequired)).toEqual([
+      true,
+      true,
+      false,
+      false,
+      false,
+    ]);
+  });
+
   it("normalizes workflow graph execution controls into the native runtime contract", () => {
     expect(
       normalizeWorkflowStepsForExecution([
