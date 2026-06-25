@@ -32,10 +32,12 @@ import {
   agentToolGrants,
   companies,
   heartbeatRuns,
+  issues,
   pluginEntities,
   pluginLogs,
   pluginWebhookDeliveries,
   toolDefinitions,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import type {
   PluginStatus,
@@ -50,6 +52,7 @@ import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { getPluginUiContributionMetadata, pluginLoader } from "../services/plugin-loader.js";
 import { logActivity } from "../services/activity-log.js";
+import { resolveMissionWorkProductPaths } from "../services/work-products/output-paths.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
@@ -463,6 +466,48 @@ function parametersToCliArgs(parameters: unknown): string[] {
   return cliArgs;
 }
 
+/**
+ * runId → heartbeat_runs(issueId/companyId) → issues(missionId/projectId)
+ * → workflow_step_runs(workflowRunId/stepId) → resolveMissionWorkProductPaths → stepOutputDir.
+ * core builtin workflow tool에게 PAPERCLIP_STEP_OUTPUT_DIR env로 전달해
+ * tool이 큰 raw 결과를 agent context가 아닌 파일로 쓸 수 있게 한다.
+ * workflow step run이 아니거나 workProductRoot가 없으면 null.
+ */
+async function resolveRunStepOutputDir(db: Db, runId: string): Promise<string | null> {
+  const run = await db
+    .select({ issueId: heartbeatRuns.issueId, companyId: heartbeatRuns.companyId })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!run?.issueId) return null;
+
+  const issue = await db
+    .select({ missionId: issues.missionId, projectId: issues.projectId })
+    .from(issues)
+    .where(eq(issues.id, run.issueId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!issue?.missionId) return null;
+
+  const stepRun = await db
+    .select({ workflowRunId: workflowStepRuns.workflowRunId, stepId: workflowStepRuns.stepId })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.issueId, run.issueId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!stepRun) return null;
+
+  const paths = await resolveMissionWorkProductPaths(db, {
+    companyId: run.companyId,
+    missionId: issue.missionId,
+    projectId: issue.projectId,
+    workflowRunId: stepRun.workflowRunId,
+    stepId: stepRun.stepId,
+  });
+  return paths?.stepOutputDir ?? null;
+}
+
 async function executeCoreBuiltinWorkflowTool(input: {
   db: Db;
   companyId: string;
@@ -470,6 +515,7 @@ async function executeCoreBuiltinWorkflowTool(input: {
   issueId?: string | null;
   toolName: string;
   parameters: unknown;
+  stepOutputDir?: string | null;
 }) {
   const [tool] = await input.db
     .select({
@@ -534,6 +580,7 @@ async function executeCoreBuiltinWorkflowTool(input: {
       PAPERCLIP_COMPANY_ID: input.companyId,
       PAPERCLIP_AGENT_ID: input.agentId,
       ...(input.issueId ? { PAPERCLIP_TASK_ID: input.issueId } : {}),
+      ...(input.stepOutputDir ? { PAPERCLIP_STEP_OUTPUT_DIR: input.stepOutputDir } : {}),
     },
     maxBuffer: 10 * 1024 * 1024,
     timeout: 120_000,
@@ -1343,6 +1390,7 @@ export function pluginRoutes(
     }
 
     try {
+      const stepOutputDir = await resolveRunStepOutputDir(db, String(runContext.runId));
       const coreResult = await executeCoreBuiltinWorkflowTool({
         db,
         companyId: runContext.companyId,
@@ -1350,6 +1398,7 @@ export function pluginRoutes(
         issueId: workflowRunIssueId,
         toolName: tool,
         parameters: parameters ?? {},
+        stepOutputDir,
       });
       if (coreResult) {
         res.status(coreResult.status).json(coreResult.body);
