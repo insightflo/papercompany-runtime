@@ -828,7 +828,7 @@ function stripArtifactTokenPunctuation(value: string) {
   return value
     .trim()
     .replace(/^[`'"]+/u, "")
-    .replace(/[`'",;.)\]]+$/u, "");
+    .replace(/[`'",;.)\\\]]+$/u, "");
 }
 
 function extractIssueDeclaredArtifactTokens(text: string | null | undefined) {
@@ -1098,8 +1098,18 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   const eligibleClaimedArtifactPaths = input.claimedArtifactPaths
     .filter((c): c is string => typeof c === "string" && c.trim().length > 0 && !c.includes("{"))
     .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
-  const declaredArtifactPath = input.preferClaimedArtifactPath && eligibleClaimedArtifactPaths.length === 1
-    ? eligibleClaimedArtifactPaths[0]
+  // explicit `[ARTIFACT]: <abs path>` 마커로 선언된 경로를 권위로 우선한다. generic scraping noise
+  // (raw-tech-scout.json, /design.md 등)가 eligible 을 여러 개로 만들어도, explicit 선언 1개면
+  // 그것을 등록(.json 이라도). extractExplicitArtifactPaths 가 Set dedup + backslash strip 하므로
+  // `evidence.json\`(command escaping)과 `evidence.json`(final line)은 하나로 정규화된다.
+  const explicitRunText = [stringifyRunResultJson(input.run.resultJson), input.run.stdoutExcerpt, input.run.stderrExcerpt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  const explicitEligiblePaths = extractExplicitArtifactPaths(explicitRunText)
+    .filter((p) => isActionableClaimedArtifactPath(p))
+    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
+  const declaredArtifactPath = input.preferClaimedArtifactPath && explicitEligiblePaths.length >= 1
+    ? explicitEligiblePaths[0]
     : null;
   const scored = eligibleClaimedArtifactPaths
     .map((p) => {

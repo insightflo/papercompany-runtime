@@ -4817,6 +4817,7 @@ describe("heartbeat context budget preflight", () => {
             },
           },
           adapterType: "builtin",
+          instructions: null,
         },
       ],
     });

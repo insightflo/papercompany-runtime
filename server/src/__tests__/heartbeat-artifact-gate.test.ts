@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   extractClaimedArtifactPaths,
+  extractExplicitArtifactPaths,
   hasSatisfiedWorkProductRegistration,
   isActionableClaimedArtifactPath,
   resolveStepRunRequiresWorkProduct,
@@ -21,6 +22,17 @@ describe("resolveStepRunRequiresWorkProduct (graphWorkProductRequired 3-state)",
     expect(resolveStepRunRequiresWorkProduct({ executionControls: { concurrencyKey: "x" } })).toBeUndefined();
     expect(resolveStepRunRequiresWorkProduct(null)).toBeUndefined();
     expect(resolveStepRunRequiresWorkProduct({ graphWorkProductRequired: "true" })).toBeUndefined();
+  });
+});
+
+describe("extractExplicitArtifactPaths (backslash + dedup)", () => {
+  it("strips trailing backslash from command-escaped paths and dedupes identical marker declarations", () => {
+    const clean = "/srv/papercompany/projects/research-company/produced_work/missions/m/runs/r/steps/collect-tech-scout-evidence/evidence.json";
+    // One occurrence trailing a backslash (shell/command escaping), one clean final-line marker.
+    const paths = extractExplicitArtifactPaths(
+      `wrote file\n[ARTIFACT]: ${clean}\\\nrepeated: [ARTIFACT]: ${clean}\n`,
+    );
+    expect(paths).toEqual([clean]);
   });
 });
 
