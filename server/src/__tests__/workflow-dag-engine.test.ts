@@ -804,7 +804,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain(workProductRoot);
     expect(createdIssue?.description).toContain("WorkProduct registration contract:");
     expect(createdIssue?.description).toContain("[ARTIFACT]:");
-    expect(createdIssue?.description).toContain("For QA/validator steps"); // QA guidance always present
+    // AREA-3: the QA/validator guidance line is gated on !graphWorkProductRequired,
+    // so a producer step must NOT receive it — it would contradict the [ARTIFACT]
+    // FINAL LINE RULE above. QA/validator steps (flag=false) still get the line.
+    expect(createdIssue?.description).not.toContain("For QA/validator steps");
     expect(createdIssue?.description).not.toContain("POST /api/issues/{issueId}/work-products");
   });
 
