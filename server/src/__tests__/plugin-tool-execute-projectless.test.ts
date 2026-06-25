@@ -162,6 +162,12 @@ describe("plugin tool execution projectless run context", () => {
           },
         }],
         [{
+          id: "run-1",
+          agentId: "agent-1",
+          companyId: "company-1",
+          issueId: null,
+        }],
+        [{
           id: "tool-1",
           name: "daily-tech-scout",
           enabled: true,

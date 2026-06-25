@@ -599,11 +599,17 @@ describe("workflow routes", () => {
   });
 
   it("returns 404 for cross-company record lookup after auth context is valid", async () => {
-    mockWorkflowService.getRun.mockResolvedValue(workflowRun({ companyId: OTHER_COMPANY_ID }));
+    mockWorkflowService.getRun.mockResolvedValueOnce(workflowRun({ companyId: OTHER_COMPANY_ID }));
 
-    const res = await request(createApp()).get(`/api/workflow-runs/${RUN_ID}`);
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "77777777-7777-4777-8777-777777777777",
+      companyId: COMPANY_ID,
+      source: "api_key",
+    })).get(`/api/workflow-runs/${RUN_ID}`);
 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("Workflow run not found");
+    expect(mockWorkflowService.listStepRuns).not.toHaveBeenCalled();
   });
 });

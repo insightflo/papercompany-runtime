@@ -177,6 +177,25 @@ async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
   }
 }
 
+async function deleteAgentsAfterLateIssueSideEffects(db: ReturnType<typeof createDb>) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await cleanupHeartbeatRunRecords(db);
+    await db.delete(agentWakeupRequests);
+    try {
+      await db.delete(agents);
+      return;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await cleanupHeartbeatRunRecords(db);
+      await db.delete(issueWorkProducts);
+      await db.delete(issueDocuments);
+      await db.delete(issueComments);
+      await db.delete(issues);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 function successfulAdapterResult() {
   return {
     exitCode: 0,
@@ -200,6 +219,35 @@ function failedAdapterResult(overrides: Partial<ReturnType<typeof successfulAdap
     errorCode: "adapter_failed",
     ...overrides,
   };
+}
+
+function mockRequestChangesOnce(db: ReturnType<typeof createDb>, issueId: string, lines: string[]) {
+  let returnedRequestChanges = false;
+  executeSpy.mockImplementation(async ({ runId }) => {
+    if (returnedRequestChanges) return successfulAdapterResult();
+    returnedRequestChanges = true;
+    await db
+      .update(issues)
+      .set({
+        checkoutRunId: runId,
+        executionRunId: runId,
+      })
+      .where(eq(issues.id, issueId));
+    return {
+      ...successfulAdapterResult(),
+      resultJson: {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+          JSON.stringify({
+            type: "task_complete",
+            payload: {
+              last_agent_message: lines.join("\n"),
+            },
+          }),
+        ].join("\n"),
+      },
+    };
+  });
 }
 
 function decisionComment(decision: Record<string, unknown>) {
@@ -342,8 +390,7 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(missions);
     await db.delete(companySecrets);
     await db.delete(agentRuntimeState);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agents);
+    await deleteAgentsAfterLateIssueSideEffects(db);
     await db.delete(projects);
     await db.delete(companySkills);
     await db.delete(companies);
@@ -953,34 +1000,12 @@ describe("heartbeat context budget preflight", () => {
       originKind: "workflow_execution",
     });
 
-    executeSpy.mockImplementation(async ({ runId }) => {
-      await db
-        .update(issues)
-        .set({
-          checkoutRunId: runId,
-          executionRunId: runId,
-        })
-        .where(eq(issues.id, issueId));
-      return {
-        ...successfulAdapterResult(),
-        resultJson: {
-          stdout: [
-            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
-            JSON.stringify({
-              type: "task_complete",
-              payload: {
-                last_agent_message: [
-                  "REQUEST_CHANGES",
-                  "",
-                  "- Add a glossary for beginner-facing jargon.",
-                  "- Normalize the source-window wording.",
-                ].join("\n"),
-              },
-            }),
-          ].join("\n"),
-        },
-      };
-    });
+    mockRequestChangesOnce(db, issueId, [
+      "REQUEST_CHANGES",
+      "",
+      "- Add a glossary for beginner-facing jargon.",
+      "- Normalize the source-window wording.",
+    ]);
 
     const heartbeat = heartbeatService(db);
     const run = await heartbeat.invoke(
@@ -1218,33 +1243,11 @@ describe("heartbeat context budget preflight", () => {
       originKind: "workflow_execution",
     });
 
-    executeSpy.mockImplementation(async ({ runId }) => {
-      await db
-        .update(issues)
-        .set({
-          checkoutRunId: runId,
-          executionRunId: runId,
-        })
-        .where(eq(issues.id, issueId));
-      return {
-        ...successfulAdapterResult(),
-        resultJson: {
-          stdout: [
-            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
-            JSON.stringify({
-              type: "task_complete",
-              payload: {
-                last_agent_message: [
-                  "REQUEST_CHANGES",
-                  "",
-                  "- Three citations point to secondary sources.",
-                ].join("\n"),
-              },
-            }),
-          ].join("\n"),
-        },
-      };
-    });
+    mockRequestChangesOnce(db, issueId, [
+      "REQUEST_CHANGES",
+      "",
+      "- Three citations point to secondary sources.",
+    ]);
 
     const heartbeat = heartbeatService(db);
     const run = await heartbeat.invoke(
@@ -1344,33 +1347,11 @@ describe("heartbeat context budget preflight", () => {
       originKind: "workflow_execution",
     });
 
-    executeSpy.mockImplementation(async ({ runId }) => {
-      await db
-        .update(issues)
-        .set({
-          checkoutRunId: runId,
-          executionRunId: runId,
-        })
-        .where(eq(issues.id, issueId));
-      return {
-        ...successfulAdapterResult(),
-        resultJson: {
-          stdout: [
-            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
-            JSON.stringify({
-              type: "task_complete",
-              payload: {
-                last_agent_message: [
-                  "REQUEST_CHANGES",
-                  "",
-                  "- Tone is inconsistent across sections two and four.",
-                ].join("\n"),
-              },
-            }),
-          ].join("\n"),
-        },
-      };
-    });
+    mockRequestChangesOnce(db, issueId, [
+      "REQUEST_CHANGES",
+      "",
+      "- Tone is inconsistent across sections two and four.",
+    ]);
 
     const heartbeat = heartbeatService(db);
     const run = await heartbeat.invoke(

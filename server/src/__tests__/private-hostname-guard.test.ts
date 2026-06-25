@@ -41,16 +41,18 @@ describe("privateHostnameGuard", () => {
   });
 
   it("blocks unknown hostnames with remediation command", async () => {
+    const unknownHost = "unlisted-host.test";
     const app = createApp({ enabled: true, allowedHostnames: ["some-other-host"] });
-    const res = await request(app).get("/api/health").set("Host", "dotta-macbook-pro:3100");
+    const res = await request(app).get("/api/health").set("Host", `${unknownHost}:3100`);
     expect(res.status).toBe(403);
-    expect(res.body?.error).toContain("please run pnpm paperclipai allowed-hostname dotta-macbook-pro");
+    expect(res.body?.error).toContain(`please run pnpm paperclipai allowed-hostname ${unknownHost}`);
   });
 
   it("blocks unknown hostnames on page routes with plain-text remediation command", async () => {
+    const unknownHost = "unlisted-host.test";
     const app = createApp({ enabled: true, allowedHostnames: ["some-other-host"] });
-    const res = await request(app).get("/dashboard").set("Host", "dotta-macbook-pro:3100");
+    const res = await request(app).get("/dashboard").set("Host", `${unknownHost}:3100`);
     expect(res.status).toBe(403);
-    expect(res.text).toContain("please run pnpm paperclipai allowed-hostname dotta-macbook-pro");
+    expect(res.text).toContain(`please run pnpm paperclipai allowed-hostname ${unknownHost}`);
   }, 20_000);
 });

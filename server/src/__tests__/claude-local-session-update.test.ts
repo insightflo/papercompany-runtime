@@ -206,6 +206,7 @@ describe("claude execute session updates", () => {
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Follow the paperclip heartbeat.",
+          maxOverloadRetries: 0,
         },
         context: {},
         onLog: async () => {},
