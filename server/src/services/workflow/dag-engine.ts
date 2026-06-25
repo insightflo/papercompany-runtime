@@ -535,6 +535,10 @@ function buildWorkflowStepRunMetadata(
   } else {
     delete metadata.executionControls;
   }
+  // heartbeat missing-workProduct gate가 이 step의 산출물 여부를
+  // title/contract 휴리스틱 없이 권위적으로 판정하도록 stamp. syncStepRunExecutionControlMetadata 가
+  // 로드 시마다 재동기화하므로 기존 step-run에도 채워진다.
+  metadata.graphWorkProductRequired = step.graphWorkProductRequired === true;
   return metadata;
 }
 

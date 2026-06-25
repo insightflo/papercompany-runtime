@@ -879,6 +879,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         cacheTtlSeconds: 600,
         deleteAfterUse: true,
       },
+      graphWorkProductRequired: false,
     });
   });
 

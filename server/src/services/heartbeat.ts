@@ -706,11 +706,17 @@ function canApplyMissingWorkProductRegistrationGate(issue: {
   originKind: string | null;
   title?: string | null;
   description?: string | null;
-}) {
+}, stepRunRequiresWorkProduct?: boolean) {
   if (issue.originKind === "mission_main_executor_plan") return false;
   if (issue.originKind === "mission_main_executor_oversight") return false;
   if (issue.originKind === "mission_main_executor_unblock") return false;
 
+  // workflow step의 명시 graphWorkProductRequired 플래그(workflow_step_runs.metadata에 stamp)가
+  // 권위 source. present면 title/contract 휴리스틱을 무시한다.
+  if (stepRunRequiresWorkProduct === true) return true;
+  if (stepRunRequiresWorkProduct === false) return false;
+
+  // Legacy fallback: 플래그 미스탬프 step-run(pre-deploy / 미동기화)용 종래 휴리스틱.
   const title = issue.title?.trim() ?? "";
   if (/\b(lead|approval|approve|audit|auditor|validator|validation|validate|verify|QA|review|check)\b/iu.test(title)) return false;
   if (hasDeliverableOutputContract(issue.description)) return true;
@@ -6208,12 +6214,25 @@ export function heartbeatService(db: Db) {
         })
         : null;
       const allowedArtifactRoot = missionWorkProductPaths?.missionOutputDir ?? null;
+      // 이 issue의 workflow step-run metadata에서 명시 graphWorkProductRequired 플래그 조회.
+      // stamp가 없으면(undefined) gate가 종래 휴리스틱으로 fallback한다.
+      const stepRunMetadata = isLinkedToRun && !!issue.missionId
+        ? await tx
+          .select({ metadata: workflowStepRuns.metadata })
+          .from(workflowStepRuns)
+          .where(eq(workflowStepRuns.issueId, issue.id))
+          .limit(1)
+          .then((rows) => rows[0]?.metadata ?? null)
+        : null;
+      const stepRunRequiresWorkProduct = stepRunMetadata
+        ? (stepRunMetadata as Record<string, unknown>).graphWorkProductRequired === true
+        : undefined;
       const shouldCheckMissingWorkProductRegistration =
         // produced-nothing guard: producer-type issue 가 succeeded run 후 workProduct 가 하나도 없으면
         // claimed paths 유무와 무관하게 gate 발화(자동 done 차단). workProduct 가 있으면 통과.
         isLinkedToRun &&
         !!issue.missionId &&
-        canApplyMissingWorkProductRegistrationGate(issue) &&
+        canApplyMissingWorkProductRegistrationGate(issue, stepRunRequiresWorkProduct) &&
         (issue.status === "in_progress" || issue.status === "done") &&
         issue.assigneeAgentId === run.agentId;
 
@@ -6295,7 +6314,7 @@ export function heartbeatService(db: Db) {
                 run,
                 claimedArtifactPaths,
                 allowedArtifactRoot,
-                preferClaimedArtifactPath: hasDeliverableOutputContract(issue.description),
+                preferClaimedArtifactPath: stepRunRequiresWorkProduct === true || hasDeliverableOutputContract(issue.description),
               }));
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
