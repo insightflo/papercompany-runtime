@@ -50,13 +50,14 @@ function MissionRunLink({ missionId }: { missionId?: string | null }): JSX.Eleme
 }
 
 
-type StepDraft = {
+export type StepDraft = {
   id: string;
   title: string;
   description: string;
   type: "agent" | "tool";
   toolName: string;
   toolArgs: string;
+  agentId: string;
   agentName: string;
   tools: string;
   dependsOn: string;
@@ -1257,6 +1258,7 @@ function emptyStep(): StepDraft {
     type: "agent",
     toolName: "",
     toolArgs: "{}",
+    agentId: "",
     agentName: "",
     tools: "",
     dependsOn: "",
@@ -1571,15 +1573,17 @@ function StepEditor({
                 ) : (
                   <>
                     <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent</label>
-                    <select style={selectStyle} value={step.agentName} onChange={(e) => {
-                  const newName = e.target.value;
+                    <select style={selectStyle} value={step.agentId || agents.find((a) => a.name === step.agentName)?.id || ""} onChange={(e) => {
+                  const selectedId = e.target.value;
+                  const agent = agents.find((a) => a.id === selectedId);
+                  const newName = agent?.name ?? "";
                   const granted = new Set(availableToolGrants.filter((g) => g.agentName === newName).map((g) => g.toolName));
                   const cleaned = splitCommaList(step.tools).filter((t) => granted.has(t)).join(", ");
-                  update(i, { agentName: newName, tools: cleaned });
+                  update(i, { agentId: selectedId, agentName: newName, tools: cleaned });
                 }}>
                       <option value="">— Select agent —</option>
                       {agents.map((a) => (
-                        <option key={a.id} value={a.name}>{a.name}</option>
+                        <option key={a.id} value={a.id}>{a.name}</option>
                       ))}
                     </select>
                   </>
@@ -1599,6 +1603,7 @@ function StepEditor({
               </div>
             )}
             {step.type === "agent" && (
+              <>
               <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
                 <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent tool access</label>
                 <WorkflowToolPicker
@@ -1608,6 +1613,17 @@ function StepEditor({
                   onChange={(value) => update(i, { tools: value })}
                 />
               </div>
+              <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
+                  <input
+                    type="checkbox"
+                    checked={step.graphWorkProductRequired}
+                    onChange={(e) => update(i, { graphWorkProductRequired: e.target.checked })}
+                  />
+                  Require registered work product
+                </label>
+              </div>
+              </>
             )}
             <div style={stepRowStyle} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "grid", gap: "4px" }}>
@@ -4628,15 +4644,17 @@ function WorkflowGraphEditor({
               <Fragment key="agent-step-fields">
                 <div key="agent-name-field" style={{ display: "grid", gap: "4px" }}>
                   <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent</label>
-                  <select style={selectStyle} value={selectedStep.agentName} onChange={(event) => {
-                    const newName = event.target.value;
+                  <select style={selectStyle} value={selectedStep.agentId || graphAgents.find((a) => a.name === selectedStep.agentName)?.id || ""} onChange={(event) => {
+                    const selectedId = event.target.value;
+                    const agent = graphAgents.find((a) => a.id === selectedId);
+                    const newName = agent?.name ?? "";
                     const granted = new Set(availableToolGrants.filter((g) => g.agentName === newName).map((g) => g.toolName));
                     const cleaned = splitCommaList(selectedStep.tools).filter((t) => granted.has(t)).join(", ");
-                    updateSelected({ agentName: newName, tools: cleaned });
+                    updateSelected({ agentId: selectedId, agentName: newName, tools: cleaned });
                   }}>
                     <option value="">— Select agent —</option>
                     {graphAgents.map((a) => (
-                      <option key={a.id} value={a.name}>{a.name}</option>
+                      <option key={a.id} value={a.id}>{a.name}</option>
                     ))}
                   </select>
                 </div>
@@ -6803,7 +6821,7 @@ function StepWorkspaceEditor({
   );
 }
 
-function stepsToJson(drafts: StepDraft[]): unknown[] {
+export function stepsToJson(drafts: StepDraft[]): unknown[] {
   const safeText = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
   const safeCsv = (value: unknown): string[] => safeText(value).split(",").map((entry) => entry.trim()).filter(Boolean);
   return drafts.map((d) => {
@@ -6819,7 +6837,14 @@ function stepsToJson(drafts: StepDraft[]): unknown[] {
       step.toolName = safeText(d.toolName);
       try { step.toolArgs = JSON.parse(d.toolArgs || "{}"); } catch { step.toolArgs = {}; }
     } else {
-      if (safeText(d.agentName)) step.agentName = safeText(d.agentName);
+      // Stale agentId from the generic `extra` bag must never survive an agent
+      // change. Persist a consistent agentId+agentName pair; clear both when no
+      // agent is set so the server falls back to name-only resolution.
+      delete step.agentId;
+      if (safeText(d.agentName)) {
+        step.agentName = safeText(d.agentName);
+        if (safeText(d.agentId)) step.agentId = safeText(d.agentId);
+      }
       const toolsList = safeCsv(d.tools);
       if (toolsList.length > 0) step.tools = toolsList;
     }
@@ -6905,7 +6930,7 @@ function stepsToJson(drafts: StepDraft[]): unknown[] {
   });
 }
 
-function jsonToSteps(steps: WorkflowOverviewData["workflows"][number]["steps"]): StepDraft[] {
+export function jsonToSteps(steps: WorkflowOverviewData["workflows"][number]["steps"]): StepDraft[] {
   return steps.map((s) => {
     const raw = s as Record<string, unknown>;
     const rawToolArgs = raw.toolArgs;
@@ -6918,6 +6943,7 @@ function jsonToSteps(steps: WorkflowOverviewData["workflows"][number]["steps"]):
       "type",
       "toolName",
       "toolArgs",
+      "agentId",
       "agentName",
       "tools",
       "toolNames",
@@ -7004,6 +7030,7 @@ function jsonToSteps(steps: WorkflowOverviewData["workflows"][number]["steps"]):
         null,
         2,
       ),
+      agentId: typeof raw.agentId === "string" ? raw.agentId : "",
       agentName: s.agentName || "",
       tools: Array.isArray(raw.tools)
         ? (raw.tools as string[]).join(", ")
