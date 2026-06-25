@@ -2780,6 +2780,101 @@ describe("heartbeat context budget preflight", () => {
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
+  it("auto-registers an ARTIFACT path for a workflow collect step with an output contract", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowRunId = randomUUID();
+    const issueId = randomUUID();
+    const workProductRoot = "/srv/papercompany/projects/research-company/produced_work";
+    const outputDir = `${workProductRoot}/missions/${missionId}/runs/${workflowRunId}/steps/collect-tech-scout-evidence`;
+    const artifactPath = `${outputDir}/evidence.json`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Technology Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Collect the required evidence and write the declared artifact." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-COLLECT",
+      title: "Collect TrendShift Top25 evidence",
+      description: [
+        "Deliverable output (use exactly this directory):",
+        `- ${outputDir}`,
+        "- Write your deliverable file(s) into that directory.",
+        "- Then finish your run output with one line: ARTIFACT: <absolute path of the file you wrote there>.",
+      ].join("\n"),
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", `Collected TrendShift evidence.\nARTIFACT: ${artifactPath}\n`);
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.completedAt).not.toBeNull();
+
+    const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    expect(workProducts).toHaveLength(1);
+    expect(workProducts[0]).toEqual(expect.objectContaining({
+      type: "file",
+      provider: "local",
+      externalId: artifactPath,
+      title: "evidence.json",
+      isPrimary: true,
+      createdByRunId: finalized.id,
+    }));
+    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
+      path: artifactPath,
+      autoRegisteredFrom: "claimed_artifact_file",
+    }));
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+  });
+
   it("ignores prompt and instruction paths when checking registered workProducts", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -3110,6 +3205,88 @@ describe("heartbeat context budget preflight", () => {
       (issue) => issue.status === "done" && issue.executionRunId === null,
     );
     expect(updatedIssue.status).toBe("done");
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+  });
+
+  it("does not auto-register ARTIFACT paths for audit issues even when an output contract is present", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowRunId = randomUUID();
+    const issueId = randomUUID();
+    const workProductRoot = "/srv/papercompany/projects/research-company/produced_work";
+    const outputDir = `${workProductRoot}/missions/${missionId}/runs/${workflowRunId}/steps/audit-tech-scout-coverage`;
+    const artifactPath = `${outputDir}/audit.json`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Coverage Auditor",
+      role: "auditor",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Audit upstream workProducts." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-AUDIT",
+      title: "Audit source coverage",
+      description: [
+        "Deliverable output (use exactly this directory):",
+        `- ${outputDir}`,
+        "- If you create a separate audit artifact, finish with: ARTIFACT: <absolute path>.",
+      ].join("\n"),
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", `Coverage audit passed.\nARTIFACT: ${artifactPath}\n`);
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.status).toBe("done");
+
+    const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    expect(workProducts).toHaveLength(0);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);

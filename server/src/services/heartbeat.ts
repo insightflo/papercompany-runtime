@@ -703,17 +703,24 @@ function canApplyRequestChangesValidationGate(issue: {
 function canApplyMissingWorkProductRegistrationGate(issue: {
   originKind: string | null;
   title?: string | null;
+  description?: string | null;
 }) {
   if (issue.originKind === "mission_main_executor_plan") return false;
   if (issue.originKind === "mission_main_executor_oversight") return false;
   if (issue.originKind === "mission_main_executor_unblock") return false;
 
   const title = issue.title?.trim() ?? "";
-  if (/\b(lead|approval|approve|validator|validation|validate|QA|review)\b/iu.test(title)) return false;
+  if (/\b(lead|approval|approve|audit|auditor|validator|validation|validate|verify|QA|review|check)\b/iu.test(title)) return false;
+  if (hasDeliverableOutputContract(issue.description)) return true;
   return (
     /\b(synthesi[sz]e|synthesis|generate|produce|create|draft|artifact|document|note|infographic|export|deliver|html|pdf|report)\b/iu.test(title) ||
     /(작성|생성|제작|산출물|문서|자료|보고서|리포트|HTML|PDF)/u.test(title)
   );
+}
+
+function hasDeliverableOutputContract(description: string | null | undefined) {
+  const text = description?.trim() ?? "";
+  return text.includes("Deliverable output (use exactly this directory)") && /`?ARTIFACT`?\s*:/iu.test(text);
 }
 
 export function workProductReferencesClaimedArtifact(
@@ -1025,6 +1032,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   run: typeof heartbeatRuns.$inferSelect;
   claimedArtifactPaths: string[];
   allowedArtifactRoot?: string | null;
+  preferClaimedArtifactPath?: boolean;
 }) {
   // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
   //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
@@ -1047,9 +1055,13 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   const runDateStr = input.run.startedAt instanceof Date
     ? input.run.startedAt.toISOString().slice(0, 10).replace(/-/g, "")
     : "";
-  const scored = input.claimedArtifactPaths
+  const eligibleClaimedArtifactPaths = input.claimedArtifactPaths
     .filter((c): c is string => typeof c === "string" && c.trim().length > 0 && !c.includes("{"))
-    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot))
+    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
+  const declaredArtifactPath = input.preferClaimedArtifactPath && eligibleClaimedArtifactPaths.length === 1
+    ? eligibleClaimedArtifactPaths[0]
+    : null;
+  const scored = eligibleClaimedArtifactPaths
     .map((p) => {
       let score = (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0);
       // run-date awareness: current-run 날짜 경로 선호(+5), stale 날짜 패널티(-5)
@@ -1059,7 +1071,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
     })
     .sort((a, b) => b.score - a.score);
   // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
-  const resolvedArtifactPath = scored.length > 0 && scored[0].score > 0 ? scored[0].p : null;
+  const resolvedArtifactPath = declaredArtifactPath ?? (scored.length > 0 && scored[0].score > 0 ? scored[0].p : null);
   if (!resolvedArtifactPath) return null;
 
   const isPrimary = !(await input.tx
@@ -6278,6 +6290,7 @@ export function heartbeatService(db: Db) {
                 run,
                 claimedArtifactPaths,
                 allowedArtifactRoot,
+                preferClaimedArtifactPath: hasDeliverableOutputContract(issue.description),
               }));
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
