@@ -75,12 +75,15 @@ function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null
   const primaryTool = tools.find((tool) => asString(tool.name) === primaryToolName) ?? tools[0] ?? null;
   const primaryInputSchema = primaryTool ? asRecord(primaryTool.inputSchema ?? primaryTool.parametersSchema) : null;
   const schemaDefaults = extractSchemaDefaults(primaryInputSchema);
-  const workflowStepArgs = asRecord(contract.toolArgs) ?? {};
-  const effectiveParameters = {
-    ...schemaDefaults,
-    ...workflowStepArgs,
-  };
-  const workflowStepArgsJson = stringifyBriefJson(contract.toolArgs ?? {});
+  const rawWorkflowStepArgs = contract.toolArgs ?? {};
+  const workflowStepArgs = asRecord(rawWorkflowStepArgs);
+  const effectiveParameters = workflowStepArgs
+    ? {
+        ...schemaDefaults,
+        ...workflowStepArgs,
+      }
+    : rawWorkflowStepArgs;
+  const workflowStepArgsJson = stringifyBriefJson(rawWorkflowStepArgs);
   const effectiveParametersJson = stringifyBriefJson(effectiveParameters);
 
   return joinPromptSections([
