@@ -978,10 +978,10 @@ async function createWorkflowStepIssue(input: {
     dependencyWorkProductsByIssueId.set(product.issueId, products);
   }
   // [Plan B] 업스트림이 정식 workProduct 를 등록하지 않았더라도, producer 가 run output /
-  // issue description / comment 에 남긴 명시적 `ARTIFACT: <absolute path>` 선언을 보조
+  // issue description / comment 에 남긴 명시적 `[ARTIFACT]: <absolute path>` 선언을 보조
   // evidence 로 downstream input 에 주입한다. broad filesystem scan 을 차단하기 위해 오직
   // (1) 이 workflowRun 의 dependency issue 들, (2) 각 issue 의 description/comment/run output
-  // scope 안에서 명시된 `ARTIFACT:` 절대경로만 추출한다.
+  // scope 안에서 명시된 `[ARTIFACT]:` 절대경로만 추출한다.
   const dependenciesWithoutWorkProduct = dependencyIssueRows.filter(
     (row) => (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length === 0,
   );
@@ -1053,7 +1053,7 @@ async function createWorkflowStepIssue(input: {
       lines.push("  workProducts: none registered");
     }
     if (artifactPaths.length > 0) {
-      lines.push(`  artifactPaths (auxiliary, producer-declared \`ARTIFACT:\`): ${artifactPaths.join("; ")}`);
+      lines.push(`  artifactPaths (auxiliary, producer-declared \`[ARTIFACT]:\`): ${artifactPaths.join("; ")}`);
     }
     return lines;
   });
@@ -1088,7 +1088,7 @@ async function createWorkflowStepIssue(input: {
   const description = [
     workProductPaths?.stepOutputDir ? "Deliverable output (use exactly this directory):" : null,
     workProductPaths?.stepOutputDir ? `- ${workProductPaths.stepOutputDir}` : null,
-    workProductPaths?.stepOutputDir ? `- Write your deliverable file(s) into that directory. Then finish your run output with one line: ARTIFACT: <absolute path of the file you wrote there>. The system registers the workProduct from that line — do not POST.` : null,
+    workProductPaths?.stepOutputDir ? `- Write your deliverable file(s) into that directory. Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>. The system registers the workProduct from that line — do not POST.` : null,
     workProductPaths ? "- Do not write or look for deliverables anywhere else (not under other produced_work paths, run dates, or sibling mission folders). Use only the directory above." : null,
     workProductPaths ? "" : null,
     input.step.description?.trim()
@@ -1104,10 +1104,10 @@ async function createWorkflowStepIssue(input: {
     dependencyIssueLines.length > 0 ? "Dependency issue inputs:" : null,
     ...dependencyIssueLines,
     dependencyArtifactPathsByIssueId.size > 0
-      ? "Auxiliary dependency artifactPaths (producer-declared via `ARTIFACT:`, not formally registered):"
+      ? "Auxiliary dependency artifactPaths (producer-declared via `[ARTIFACT]:`, not formally registered):"
       : null,
     dependencyArtifactPathsByIssueId.size > 0
-      ? "- These upstream steps did not register a workProduct, but their producer output declared `ARTIFACT: <absolute path>`. Use the listed artifactPaths as the dependency deliverable evidence for validation/synthesis/build/approval instead of stopping."
+      ? "- These upstream steps did not register a workProduct, but their producer output declared `[ARTIFACT]: <absolute path>`. Use the listed artifactPaths as the dependency deliverable evidence for validation/synthesis/build/approval instead of stopping."
       : null,
     dependencyArtifactPathsByIssueId.size > 0
       ? "- artifactPaths are auxiliary evidence and do not replace a formally registered workProduct. When a dependency registers a workProduct above, prefer it. Do not scan the filesystem for other paths."
@@ -1124,8 +1124,8 @@ async function createWorkflowStepIssue(input: {
     "",
     "WorkProduct registration contract:",
     "- Do NOT call POST or curl to register a workProduct. Registration is automatic — there is no manual registration API you need to call.",
-    "- To register a deliverable, write the file under the step output directory above and finish your run output with a line exactly `ARTIFACT: <absolute path>`. The system reads that line and registers the workProduct for you; this is the only registration method.",
-    "- Do not invent a registration request, schema, or fields (type/provider/title/metadata) — the `ARTIFACT:` line is sufficient and required. POSTing or guessing a schema will not register the workProduct.",
+    "- To register a deliverable, write the file under the step output directory above and finish your run output with a line exactly `[ARTIFACT]: <absolute path>`. The system reads that line and registers the workProduct for you; this is the only registration method.",
+    "- Do not invent a registration request, schema, or fields (type/provider/title/metadata) — the `[ARTIFACT]:` line is sufficient and required. POSTing or guessing a schema will not register the workProduct.",
     "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable.",
   ].filter((line) => line !== null).join("\n");
 

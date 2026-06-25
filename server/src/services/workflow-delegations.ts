@@ -91,7 +91,7 @@ function buildTargetDescription(input: {
     `- sourceTrackerIssueIdentifier: ${input.sourceIssueIdentifier ?? "none"}`,
     "",
     "Official workProduct contract:",
-    "- If this delegated issue specifies an output directory or `ARTIFACT:` contract, write the deliverable there and finish with the required `ARTIFACT: <absolute path>` line. Do not POST/curl workProduct registration.",
+    "- If this delegated issue specifies an output directory or `[ARTIFACT]:` contract, write the deliverable there and finish with the required `[ARTIFACT]: <absolute path>` line. Do not POST/curl workProduct registration.",
     "- The source workflow will copy those registered workProducts back to the source tracker issue when this issue is done.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }

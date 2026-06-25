@@ -665,7 +665,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain("Treat issue ids from other missions or workflow runs as out of scope");
     expect(createdIssue?.description).toContain("WorkProduct registration contract:");
     expect(createdIssue?.description).toContain("Do NOT call POST or curl to register a workProduct");
-    expect(createdIssue?.description).toContain("ARTIFACT: <absolute path>");
+    expect(createdIssue?.description).toContain("[ARTIFACT]: <absolute path>");
     expect(createdIssue?.description).not.toContain("POST /api/issues/{issueId}/work-products");
 
     const activity = await db
@@ -2383,7 +2383,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
   // ---- Plan B: dependency ARTIFACT path injection ----
   // [목적] upstream 이 정식 workProduct 를 등록하지 않아도, producer 가 run output /
-  // description / comment 에 남긴 명시적 `ARTIFACT: <절대경로>` 를 downstream input 에
+  // description / comment 에 남긴 명시적 `[ARTIFACT]: <절대경로>` 를 downstream input 에
   // 보조 evidence 로 주입하는지 검증한다.
   type PlanBStepDef = {
     id: string;
@@ -2480,7 +2480,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .then((rows) => rows[0] ?? null);
   }
 
-  // producer 가 heartbeat run output 에 `ARTIFACT:` 를 남긴 경우를 시뮬레이션.
+  // producer 가 heartbeat run output 에 `[ARTIFACT]:` 를 남긴 경우를 시뮬레이션.
   async function seedArtifactRun(opts: { companyId: string; agentId: string; issueId: string; artifactPath: string }) {
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({
@@ -2490,7 +2490,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       issueId: opts.issueId,
       status: "succeeded",
       invocationSource: "automation",
-      stdoutExcerpt: `Collect finished.\nARTIFACT: ${opts.artifactPath}`,
+      stdoutExcerpt: `Collect finished.\n[ARTIFACT]: ${opts.artifactPath}`,
       startedAt: new Date("2026-06-24T06:00:00.000Z"),
       finishedAt: new Date("2026-06-24T06:05:00.000Z"),
       createdAt: new Date("2026-06-24T06:00:00.000Z"),
@@ -2504,7 +2504,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       companyId: opts.companyId,
       issueId: opts.issueId,
       authorAgentId: opts.agentId,
-      body: `Done — evidence collected.\nARTIFACT: ${opts.artifactPath}`,
+      body: `Done — evidence collected.\n[ARTIFACT]: ${opts.artifactPath}`,
       createdAt: new Date("2026-06-24T06:06:00.000Z"),
     });
   }
@@ -2540,7 +2540,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const auditIssue = await getStepIssue(runId, "audit");
     expect(auditIssue).toBeTruthy();
     const desc = auditIssue!.description ?? "";
-    expect(desc).toContain("artifactPaths (auxiliary, producer-declared `ARTIFACT:`)");
+    expect(desc).toContain("artifactPaths (auxiliary, producer-declared `[ARTIFACT]:`)");
     expect(desc).toContain(artifactPath);
     expect(desc).not.toContain("Dependency workProduct hard-stop:");
     expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(0);
@@ -2649,7 +2649,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const collectIssue = upstream.collect!;
     await db
       .update(issues)
-      .set({ description: `${collectIssue.description ?? ""}\nARTIFACT: ${depPath}` })
+      .set({ description: `${collectIssue.description ?? ""}\n[ARTIFACT]: ${depPath}` })
       .where(eq(issues.id, collectIssue.id));
     // 동일 company 의 무관 orphan issue 를 만들고 comment 에 ARTIFACT 남김 — dependency scope 밖.
     const orphanIssue = await issueService(db).create(companyId, {
@@ -2661,7 +2661,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       companyId,
       issueId: orphanIssue.id,
       authorAgentId: agentAId,
-      body: `Some unrelated work.\nARTIFACT: ${orphanPath}`,
+      body: `Some unrelated work.\n[ARTIFACT]: ${orphanPath}`,
       createdAt: new Date("2026-06-24T06:06:00.000Z"),
     });
     await completeStepIssue(collectIssue.id);

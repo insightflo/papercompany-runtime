@@ -2825,7 +2825,7 @@ describe("heartbeat context budget preflight", () => {
         "Deliverable output (use exactly this directory):",
         `- ${outputDir}`,
         "- Write your deliverable file(s) into that directory.",
-        "- Then finish your run output with one line: ARTIFACT: <absolute path of the file you wrote there>.",
+        "- Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>.",
       ].join("\n"),
       status: "todo",
       assigneeAgentId: agentId,
@@ -2833,7 +2833,21 @@ describe("heartbeat context budget preflight", () => {
     });
 
     executeSpy.mockImplementation(async ({ onLog }) => {
-      await onLog("stdout", `Collected TrendShift evidence.\nARTIFACT: ${artifactPath}\n`);
+      await onLog("stdout", [
+        "Collected TrendShift evidence.",
+        "/tool-index.md",
+        "/tool-index.json",
+        "/README-kali.md",
+        "/platforms/macos.md",
+        "/platforms/linux.md",
+        "/README_en.md",
+        "/README_ja.md",
+        "/docs/install.md",
+        "/docs/usage.md",
+        "/examples/basic.json",
+        "/examples/advanced.json",
+        `[ARTIFACT]: ${artifactPath}`,
+      ].join("\n"));
       return successfulAdapterResult();
     });
 
@@ -3254,7 +3268,7 @@ describe("heartbeat context budget preflight", () => {
       description: [
         "Deliverable output (use exactly this directory):",
         `- ${outputDir}`,
-        "- If you create a separate audit artifact, finish with: ARTIFACT: <absolute path>.",
+        "- If you create a separate audit artifact, finish with: [ARTIFACT]: <absolute path>.",
       ].join("\n"),
       status: "todo",
       assigneeAgentId: agentId,
@@ -3262,7 +3276,7 @@ describe("heartbeat context budget preflight", () => {
     });
 
     executeSpy.mockImplementation(async ({ onLog }) => {
-      await onLog("stdout", `Coverage audit passed.\nARTIFACT: ${artifactPath}\n`);
+      await onLog("stdout", `Coverage audit passed.\n[ARTIFACT]: ${artifactPath}\n`);
       return successfulAdapterResult();
     });
 
@@ -4843,7 +4857,7 @@ describe("heartbeat context budget preflight", () => {
       description: [
         "Deliverable output (use exactly this directory):",
         `- ${outputDir}`,
-        "- Write evidence.json into that directory. Then finish your run output with one line: ARTIFACT: <absolute path of the file you wrote there>.",
+        "- Write evidence.json into that directory. Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>.",
       ].join("\n"),
       status: "todo",
       assigneeAgentId: agentId,
@@ -4867,7 +4881,7 @@ describe("heartbeat context budget preflight", () => {
     expect(invocationPromptTemplate).toContain("## Assigned Task");
     expect(invocationPromptTemplate).toContain("Deliverable output (use exactly this directory):");
     expect(invocationPromptTemplate).toContain(outputDir);
-    expect(invocationPromptTemplate).toContain("ARTIFACT:");
+    expect(invocationPromptTemplate).toContain("[ARTIFACT]:");
     expect(invocationPromptTemplate).not.toContain(`POST /api/issues/${issueId}/work-products`);
   });
 

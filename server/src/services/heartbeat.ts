@@ -720,7 +720,7 @@ function canApplyMissingWorkProductRegistrationGate(issue: {
 
 function hasDeliverableOutputContract(description: string | null | undefined) {
   const text = description?.trim() ?? "";
-  return text.includes("Deliverable output (use exactly this directory)") && /`?ARTIFACT`?\s*:/iu.test(text);
+  return text.includes("Deliverable output (use exactly this directory)") && /`?\[?ARTIFACT\]?`?\s*:/iu.test(text);
 }
 
 export function workProductReferencesClaimedArtifact(
@@ -801,16 +801,16 @@ function extractIssueDeclaredArtifactTokens(text: string | null | undefined) {
 
 /**
  * [목적] producer 가 run output / issue description / comment 에 명시적으로 남긴
- * `ARTIFACT: <absolute path>` 선언만 추출한다.
+ * `ARTIFACT: <absolute path>` / `[ARTIFACT]: <absolute path>` 선언만 추출한다.
  * [입력] 가변 인자로 텍스트 소스(run stdout/resultJson 직렬화, issue description, comment body 등).
  * [출력] dedup 된 절대경로(leading `/`) 배열. 절대경로만 허용 → 상대경로 FS scan 차단.
  * [왜 다른 extractor 와 분리되는가] extractIssueDeclaredArtifactTokens / extractClaimedArtifactPaths
- *   는 deliverable 확장자를 가진 "아무 경로"나 매칭하지만, 본 함수는 리터럴 `ARTIFACT:` 접두사를
+ *   는 deliverable 확장자를 가진 "아무 경로"나 매칭하지만, 본 함수는 리터럴 artifact 접두사를
  *   요구한다. downstream step 이 본의 아니게 언급된 경로를 upstream 산출물로 착각 섭취하지 않도록.
- * [수정시 영향] dag-engine createWorkflowStepIssue 의 dependency 보조 evidence 주입 경로에서 호출.
- *   producer 자동 등록(기존 extractClaimedArtifactPaths 경로)은 변경하지 않는다 — additive 전용.
+ * [수정시 영향] dag-engine createWorkflowStepIssue 의 dependency 보조 evidence 주입 경로와
+ *   producer 자동 등록의 claimed artifact 추출 경로에서 호출한다.
  */
-const EXPLICIT_ARTIFACT_DECLARATION_RE = /`?ARTIFACT`?\s*:\s*[`'"]?(\/[^\s`'")\]\n]+)/giu;
+const EXPLICIT_ARTIFACT_DECLARATION_RE = /`?\[?ARTIFACT\]?`?\s*:\s*[`'"]?(\/[^\s`'")\]\n]+)/giu;
 
 export function extractExplicitArtifactPaths(...sources: Array<string | null | undefined>): string[] {
   const paths = new Set<string>();
@@ -2216,6 +2216,9 @@ export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$infe
   if (!text.trim()) return [];
 
   const paths = new Set<string>();
+  for (const artifactPath of extractExplicitArtifactPaths(text)) {
+    if (isActionableClaimedArtifactPath(artifactPath)) paths.add(artifactPath);
+  }
   for (const match of text.matchAll(CLAIMED_ARTIFACT_JSON_PATH_RE)) {
     const value = normalizeClaimedArtifactPath(match[1] ?? "");
     if (value && isActionableClaimedArtifactPath(value)) paths.add(value);
@@ -6341,7 +6344,7 @@ export function heartbeatService(db: Db) {
             missionId: issue.missionId ?? null,
             pattern: "workProduct 미등록",
             cause: "run이 산출물 파일 경로를 보고했지만 issue에 공식 workProduct가 등록되지 않아 mission artifact gate가 해당 이슈를 block함.",
-            solution: "산출물 파일을 지정된 출력 디렉토리에 만들고 실행 출력 끝에 `ARTIFACT: <절대경로>` 한 줄을 남긴다. workProduct 등록은 시스템이 자동 처리하므로 POST/curl 등록을 시도하지 않는다.",
+            solution: "산출물 파일을 지정된 출력 디렉토리에 만들고 실행 출력 끝에 `[ARTIFACT]: <절대경로>` 한 줄을 남긴다. workProduct 등록은 시스템이 자동 처리하므로 POST/curl 등록을 시도하지 않는다.",
             errorCode: "workproduct_registration_missing",
           }, run.id);
           postTransactionWorkflowIssueSyncIssueId = issue.id;

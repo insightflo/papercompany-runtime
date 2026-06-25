@@ -215,7 +215,7 @@ function buildProducerReworkComment(input: {
     `QA step \`${input.qaStepId}\` requested changes, so producer step \`${input.producerStepId}\` was reset for rework.`,
     `- QA issue: ${input.qaIssueId ?? "unknown"}`,
     `- Rework iteration: ${input.currentIteration + 1}/${input.maxIterations}`,
-    "- Required: update the deliverable to address the QA feedback, save it in the assigned output directory, and finish with the required `ARTIFACT: <absolute path>` line.",
+    "- Required: update the deliverable to address the QA feedback, save it in the assigned output directory, and finish with the required `[ARTIFACT]: <absolute path>` line.",
     "- Do not close this issue as already complete unless the requested changes are actually reflected in the deliverable.",
     input.dependencyArtifacts ?? null,
     "",
