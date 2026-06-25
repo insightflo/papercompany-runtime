@@ -2638,6 +2638,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     agentId: string;
     dependencies: string[];
     description?: string;
+    graphWorkProductRequired?: boolean;
   };
 
   async function executeDependencyWorkflow(opts: {
@@ -2868,6 +2869,89 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(desc).toContain("Dependency workProduct hard-stop:");
     expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(1);
     expect(desc).toContain(`- a2: ${upstream.a2!.identifier ?? upstream.a2!.id} has no registered dependency workProduct.`);
+  });
+
+  it("Plan B: treats QA gate dependencies as pass gates and forwards the checked producer workProduct to downstream producer steps", async () => {
+    const companyId = randomUUID();
+    const collectorAgentId = randomUUID();
+    const validatorAgentId = randomUUID();
+    const outlineAgentId = randomUUID();
+    const runId = randomUUID();
+    const upstream = await executeDependencyWorkflow({
+      companyId,
+      companyName: "PlanB QA Gate Forwarding",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [
+        { id: collectorAgentId, name: "Collector", role: "researcher" },
+        { id: validatorAgentId, name: "Validator", role: "validator" },
+        { id: outlineAgentId, name: "Outline Writer", role: "editor" },
+      ],
+      steps: [
+        {
+          id: "collect",
+          name: "Collect evidence",
+          agentId: collectorAgentId,
+          dependencies: [],
+          description: "Collect evidence.",
+          graphWorkProductRequired: true,
+        },
+        {
+          id: "audit",
+          name: "Audit evidence",
+          agentId: validatorAgentId,
+          dependencies: ["collect"],
+          description: "Return PASS or REQUEST_CHANGES.",
+          graphWorkProductRequired: false,
+        },
+        {
+          id: "outline",
+          name: "Draft outline",
+          agentId: outlineAgentId,
+          dependencies: ["audit"],
+          description: "Read the collected evidence and write outline.md.",
+          graphWorkProductRequired: true,
+        },
+      ],
+    });
+
+    const evidencePath = "/srv/papercompany/projects/research-company/produced_work/missions/run/steps/collect/evidence.json";
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: upstream.collect!.id,
+      type: "file",
+      provider: "local",
+      externalId: evidencePath,
+      title: "evidence.json",
+      status: "active",
+      isPrimary: true,
+      metadata: { path: evidencePath },
+    });
+    await completeStepIssue(upstream.collect!.id);
+
+    const auditIssue = await getStepIssue(runId, "audit");
+    expect(auditIssue).toBeTruthy();
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: auditIssue!.id,
+      authorAgentId: validatorAgentId,
+      body: "Coverage checked.\nPASS",
+      createdAt: new Date("2026-06-24T06:06:00.000Z"),
+    });
+    await completeStepIssue(auditIssue!.id);
+
+    const outlineIssue = await getStepIssue(runId, "outline");
+    expect(outlineIssue).toBeTruthy();
+    const desc = outlineIssue!.description ?? "";
+    expect(desc).toContain("audit:"); // keep the gate visible in dependency inputs
+    expect(desc).toContain("gate dependency passed without its own workProduct");
+    expect(desc).toContain("Validated upstream workProducts:");
+    expect(desc).toContain("collect: ");
+    expect(desc).toContain("evidence.json [file/active]");
+    expect(desc).toContain(evidencePath);
+    expect(desc).not.toContain(`- audit: ${auditIssue!.identifier ?? auditIssue!.id} has no registered dependency workProduct.`);
+    expect(desc).not.toContain("Dependency workProduct hard-stop:");
   });
 
   it("Plan B: ignores ARTIFACT paths declared on unrelated issues/comments outside the dependency scope", async () => {

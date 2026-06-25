@@ -999,6 +999,51 @@ async function resetUnlaunchedTerminalStepRuns(
     .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
 }
 
+function uniqueIssueRowsByIssueId<T extends { issueId: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+  for (const row of rows) {
+    if (seen.has(row.issueId)) continue;
+    seen.add(row.issueId);
+    unique.push(row);
+  }
+  return unique;
+}
+
+function collectGateValidatedProducerStepIds(
+  directDependencyStepIds: string[],
+  workflowStepsById: Map<string, WorkflowStep>,
+): Map<string, string[]> {
+  const producerStepIdsByGateStepId = new Map<string, string[]>();
+
+  const collectProducerSteps = (stepId: string, visited: Set<string>): string[] => {
+    if (visited.has(stepId)) return [];
+    const step = workflowStepsById.get(stepId);
+    if (!step) return [];
+    if (step.graphWorkProductRequired === true) return [stepId];
+    const nextVisited = new Set(visited);
+    nextVisited.add(stepId);
+    return Array.from(new Set(step.dependencies.flatMap((dependencyStepId) => (
+      collectProducerSteps(dependencyStepId, nextVisited)
+    ))));
+  };
+
+  for (const dependencyStepId of directDependencyStepIds) {
+    const dependencyStep = workflowStepsById.get(dependencyStepId);
+    if (!dependencyStep || dependencyStep.graphWorkProductRequired === true || dependencyStep.dependencies.length === 0) {
+      continue;
+    }
+    const producerStepIds = Array.from(new Set(dependencyStep.dependencies.flatMap((upstreamStepId) => (
+      collectProducerSteps(upstreamStepId, new Set([dependencyStepId]))
+    ))));
+    if (producerStepIds.length > 0) {
+      producerStepIdsByGateStepId.set(dependencyStepId, producerStepIds);
+    }
+  }
+
+  return producerStepIdsByGateStepId;
+}
+
 async function createWorkflowStepIssue(input: {
   db: Db;
   run: typeof workflowRuns.$inferSelect;
@@ -1009,8 +1054,23 @@ async function createWorkflowStepIssue(input: {
   const heartbeat = heartbeatService(input.db);
 
   const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, input.step);
-  const dependencyIssueRows = input.step.dependencies.length > 0
-    ? await input.db
+  const workflowStepsById = new Map(
+    normalizeWorkflowStepsForExecution(input.definition.stepsJson).map((step) => [step.id, step]),
+  );
+  const gateProducerStepIdsByGateStepId = collectGateValidatedProducerStepIds(
+    input.step.dependencies,
+    workflowStepsById,
+  );
+  const gateValidatedProducerStepIds = Array.from(new Set(
+    Array.from(gateProducerStepIdsByGateStepId.values()).flatMap((stepIds) => stepIds),
+  )).filter((stepId) => !input.step.dependencies.includes(stepId));
+  const sortByStepIds = <T extends { stepId: string }>(rows: T[], stepIds: string[]): T[] => {
+    const order = new Map(stepIds.map((stepId, index) => [stepId, index]));
+    return rows.sort((a, b) => (order.get(a.stepId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.stepId) ?? Number.MAX_SAFE_INTEGER));
+  };
+  const queryIssueRowsForStepIds = async (stepIds: string[]) => {
+    if (stepIds.length === 0) return [];
+    const rows = await input.db
       .select({
         stepId: workflowStepRuns.stepId,
         issueId: issues.id,
@@ -1023,10 +1083,17 @@ async function createWorkflowStepIssue(input: {
       .innerJoin(issues, eq(workflowStepRuns.issueId, issues.id))
       .where(and(
         eq(workflowStepRuns.workflowRunId, input.run.id),
-        inArray(workflowStepRuns.stepId, input.step.dependencies),
-      ))
-    : [];
-  const dependencyWorkProductRows = dependencyIssueRows.length > 0
+        inArray(workflowStepRuns.stepId, stepIds),
+      ));
+    return sortByStepIds(rows, stepIds);
+  };
+  const dependencyIssueRows = await queryIssueRowsForStepIds(input.step.dependencies);
+  const gateValidatedProducerIssueRows = await queryIssueRowsForStepIds(gateValidatedProducerStepIds);
+  const artifactLookupIssueRows = uniqueIssueRowsByIssueId([
+    ...dependencyIssueRows,
+    ...gateValidatedProducerIssueRows,
+  ]);
+  const dependencyWorkProductRows = artifactLookupIssueRows.length > 0
     ? await input.db
       .select({
         issueId: issueWorkProducts.issueId,
@@ -1039,7 +1106,7 @@ async function createWorkflowStepIssue(input: {
         status: issueWorkProducts.status,
       })
       .from(issueWorkProducts)
-      .where(inArray(issueWorkProducts.issueId, dependencyIssueRows.map((row) => row.issueId)))
+      .where(inArray(issueWorkProducts.issueId, artifactLookupIssueRows.map((row) => row.issueId)))
     : [];
   const dependencyWorkProductsByIssueId = new Map<string, typeof dependencyWorkProductRows>();
   for (const product of dependencyWorkProductRows) {
@@ -1052,7 +1119,7 @@ async function createWorkflowStepIssue(input: {
   // evidence 로 downstream input 에 주입한다. broad filesystem scan 을 차단하기 위해 오직
   // (1) 이 workflowRun 의 dependency issue 들, (2) 각 issue 의 description/comment/run output
   // scope 안에서 명시된 `[ARTIFACT]:` 절대경로만 추출한다.
-  const dependenciesWithoutWorkProduct = dependencyIssueRows.filter(
+  const dependenciesWithoutWorkProduct = artifactLookupIssueRows.filter(
     (row) => (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length === 0,
   );
   const dependencyArtifactPathsByIssueId = new Map<string, string[]>();
@@ -1105,7 +1172,22 @@ async function createWorkflowStepIssue(input: {
       }
     }
   }
-  const dependencyIssueLines = dependencyIssueRows.flatMap((row) => {
+  const dependencyHasWorkProductOrArtifact = (row: { issueId: string }) =>
+    (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length > 0
+    || (dependencyArtifactPathsByIssueId.get(row.issueId) ?? []).length > 0;
+  const renderWorkProductSummary = (product: typeof dependencyWorkProductRows[number]) => {
+    const artifactRef = product.url ?? product.externalId ?? (
+      product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
+    );
+    return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
+  };
+  const renderArtifactInputLines = (row: {
+    issueId: string;
+    stepId: string;
+    identifier: string | null;
+    status: string;
+    title: string;
+  }) => {
     const label = row.identifier ?? row.issueId;
     const products = dependencyWorkProductsByIssueId.get(row.issueId) ?? [];
     const artifactPaths = dependencyArtifactPathsByIssueId.get(row.issueId) ?? [];
@@ -1113,12 +1195,27 @@ async function createWorkflowStepIssue(input: {
       `- ${row.stepId}: ${label} (${row.status}) — ${row.title}`,
     ];
     if (products.length > 0) {
-      lines.push(`  workProducts: ${products.map((product) => {
-        const artifactRef = product.url ?? product.externalId ?? (
-          product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
-        );
-        return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
-      }).join("; ")}`);
+      lines.push(`  workProducts: ${products.map(renderWorkProductSummary).join("; ")}`);
+    } else {
+      lines.push("  workProducts: none registered");
+    }
+    if (artifactPaths.length > 0) {
+      lines.push(`  artifactPaths (auxiliary, producer-declared \`[ARTIFACT]:\`): ${artifactPaths.join("; ")}`);
+    }
+    return lines;
+  };
+  const dependencyIssueLines = dependencyIssueRows.flatMap((row) => {
+    const label = row.identifier ?? row.issueId;
+    const products = dependencyWorkProductsByIssueId.get(row.issueId) ?? [];
+    const artifactPaths = dependencyArtifactPathsByIssueId.get(row.issueId) ?? [];
+    const gateProducerStepIds = gateProducerStepIdsByGateStepId.get(row.stepId) ?? [];
+    const lines: string[] = [
+      `- ${row.stepId}: ${label} (${row.status}) — ${row.title}`,
+    ];
+    if (products.length > 0) {
+      lines.push(`  workProducts: ${products.map(renderWorkProductSummary).join("; ")}`);
+    } else if (gateProducerStepIds.length > 0) {
+      lines.push(`  gate dependency passed without its own workProduct; use validated upstream workProducts below: ${gateProducerStepIds.join(", ")}`);
     } else {
       lines.push("  workProducts: none registered");
     }
@@ -1127,15 +1224,29 @@ async function createWorkflowStepIssue(input: {
     }
     return lines;
   });
+  const validatedUpstreamWorkProductLines = gateValidatedProducerIssueRows.flatMap((row) => {
+    const gateStepIds = Array.from(gateProducerStepIdsByGateStepId.entries())
+      .filter(([, producerStepIds]) => producerStepIds.includes(row.stepId))
+      .map(([gateStepId]) => gateStepId);
+    return [
+      ...renderArtifactInputLines(row),
+      gateStepIds.length > 0 ? `  checkedByGates: ${gateStepIds.join(", ")}` : null,
+    ].filter((line) => line !== null);
+  });
   // hard-stop 은 workProduct 도, 명시적 ARTIFACT 도 없는 dependency 에만 남긴다.
   // (메시지 텍스트는 기존 테스트 기대치와 동일하게 유지 — 필터 조건만 완화.)
-  const missingDependencyWorkProductLines = dependencyIssueRows
-    .filter((row) => {
-      const hasProducts = (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length > 0;
-      const hasArtifacts = (dependencyArtifactPathsByIssueId.get(row.issueId) ?? []).length > 0;
-      return !hasProducts && !hasArtifacts;
-    })
+  const gateStepIds = new Set(gateProducerStepIdsByGateStepId.keys());
+  const missingDirectDependencyWorkProductLines = dependencyIssueRows
+    .filter((row) => !dependencyHasWorkProductOrArtifact(row))
+    .filter((row) => !gateStepIds.has(row.stepId))
     .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
+  const missingGateValidatedProducerWorkProductLines = gateValidatedProducerIssueRows
+    .filter((row) => !dependencyHasWorkProductOrArtifact(row))
+    .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
+  const missingDependencyWorkProductLines = [
+    ...missingDirectDependencyWorkProductLines,
+    ...missingGateValidatedProducerWorkProductLines,
+  ];
 
   const stepName = renderWorkflowRunTextTemplate(input.step.name.trim(), input.run);
   const title = stepName || renderWorkflowRunTextTemplate(input.definition.name, input.run);
@@ -1193,6 +1304,8 @@ async function createWorkflowStepIssue(input: {
     `- dependencyStepIds: ${JSON.stringify(input.step.dependencies)}`,
     dependencyIssueLines.length > 0 ? "Dependency issue inputs:" : null,
     ...dependencyIssueLines,
+    validatedUpstreamWorkProductLines.length > 0 ? "Validated upstream workProducts:" : null,
+    ...validatedUpstreamWorkProductLines,
     dependencyArtifactPathsByIssueId.size > 0
       ? "Auxiliary dependency artifactPaths (producer-declared via `[ARTIFACT]:`, not formally registered):"
       : null,
