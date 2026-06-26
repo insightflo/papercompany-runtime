@@ -9,10 +9,12 @@ import type {
   Issue,
   IssueComment,
   IssueWorkProduct,
+  AdapterEnvironmentTestResult,
 } from "@paperclipai/shared";
 import {
   Archive,
   Bot,
+  CheckCircle2,
   Eye,
   MessageSquareText,
   Paperclip,
@@ -24,7 +26,8 @@ import {
 } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
-import { hermesChatApi } from "../api/hermesChat";
+import { useToast } from "../context/ToastContext";
+import { hermesChatApi, type HermesOperationsAgentStatusResult } from "../api/hermesChat";
 import { issuesApi } from "../api/issues";
 import { missionsApi, type MissionDetailItem, type MissionWorkflowRun } from "../api/missions";
 import { queryKeys } from "../lib/queryKeys";
@@ -552,6 +555,7 @@ function SessionsList({
   onSelect,
   onCreate,
   createPending,
+  createDisabled,
   compact = false,
 }: {
   loading: boolean;
@@ -560,6 +564,7 @@ function SessionsList({
   onSelect: (sessionId: string) => void;
   onCreate: () => void;
   createPending: boolean;
+  createDisabled?: boolean;
   compact?: boolean;
 }) {
   if (loading) {
@@ -577,8 +582,8 @@ function SessionsList({
       <EmptyState
         icon={MessageSquareText}
         message="No Hermes sessions."
-        action="New Session"
-        onAction={onCreate}
+        action={createDisabled ? undefined : "New Session"}
+        onAction={createDisabled ? undefined : onCreate}
       />
     );
   }
@@ -601,7 +606,7 @@ function SessionsList({
             size="sm"
             className="w-full"
             onClick={onCreate}
-            disabled={createPending}
+            disabled={createPending || createDisabled}
           >
             <Plus className="h-4 w-4" />
             New Session
@@ -612,17 +617,105 @@ function SessionsList({
   );
 }
 
+export function OperationsAgentSetupNotice({
+  checking,
+  creating,
+  completed,
+  environment,
+  error,
+  compact,
+  onCreate,
+  onRetry,
+}: {
+  checking: boolean;
+  creating: boolean;
+  completed: boolean;
+  environment?: AdapterEnvironmentTestResult | null;
+  error: unknown;
+  compact: boolean;
+  onCreate: () => void;
+  onRetry: () => void;
+}) {
+  const blockingEnvironmentCheck = environment?.checks.find((check) => check.level === "error") ?? null;
+  const warningEnvironmentCheck = blockingEnvironmentCheck
+    ? null
+    : environment?.checks.find((check) => check.level === "warn") ?? null;
+  const title = completed
+    ? "Hermes Ops agent created."
+    : creating
+      ? "Creating Hermes Ops agent..."
+      : error
+        ? "Could not check Hermes Ops registration."
+        : checking
+          ? "Checking Hermes CLI..."
+          : blockingEnvironmentCheck
+            ? "Hermes CLI is not ready."
+            : "Hermes Ops agent is not registered.";
+  const body = completed
+    ? "Hermes is ready for this company."
+    : creating
+      ? "Registration is in progress. Hermes chat will unlock when it finishes."
+      : error
+        ? "Retry the check before creating a new agent."
+        : checking
+          ? "Paperclip is checking whether the local Hermes adapter can run."
+          : blockingEnvironmentCheck
+            ? [blockingEnvironmentCheck.message, blockingEnvironmentCheck.hint].filter(Boolean).join(" ")
+            : warningEnvironmentCheck
+              ? `${warningEnvironmentCheck.message} Create it now?`
+              : "Create it now?";
+  const shouldRetry = Boolean(error || blockingEnvironmentCheck);
+
+  return (
+    <div className={cn(
+      "shrink-0 border-b px-3 py-3",
+      completed
+        ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+        : "border-amber-200 bg-amber-50 text-amber-950",
+    )}>
+      <div className={cn("flex items-center gap-3", compact ? "flex-col items-stretch" : "mx-auto max-w-4xl")}>
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          {completed ? (
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
+          ) : (
+            <Bot className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+          )}
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">{title}</p>
+            <p className="mt-0.5 text-xs opacity-80">{body}</p>
+          </div>
+        </div>
+        {!completed && !checking && (
+          <Button
+            type="button"
+            variant={shouldRetry ? "outline" : "default"}
+            size="sm"
+            className="shrink-0"
+            onClick={shouldRetry ? onRetry : onCreate}
+            disabled={creating}
+          >
+            {creating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            {shouldRetry ? "Check again" : creating ? "Creating..." : "Yes, create"}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelProps) {
   const compact = mode === "sidebar";
   const { selectedCompanyId, selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const { pushToast } = useToast();
   const location = useLocation();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<HermesChatAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [sessionListOpen, setSessionListOpen] = useState(!compact);
+  const [setupCompletedNotice, setSetupCompletedNotice] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -636,6 +729,20 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
     queryFn: () => hermesChatApi.listSessions(selectedCompanyId!),
     enabled: !!selectedCompanyId,
     refetchInterval: 10_000,
+  });
+
+  useEffect(() => {
+    setSetupCompletedNotice(false);
+  }, [selectedCompanyId]);
+
+  const operationsAgentQuery = useQuery({
+    queryKey: selectedCompanyId
+      ? queryKeys.hermesChat.operationsAgent(selectedCompanyId)
+      : ["hermes-chat", "no-company", "operations-agent"],
+    queryFn: () => hermesChatApi.getOperationsAgent(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    retry: 1,
+    staleTime: 5 * 60_000,
   });
 
   const pageContextQuery = useQuery({
@@ -652,6 +759,51 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
     () => (sessionsQuery.data ?? []).filter((session) => session.status === "active"),
     [sessionsQuery.data],
   );
+  const operationsEnvironment = operationsAgentQuery.data?.environment ?? null;
+  const operationsEnvironmentFailed = operationsEnvironment?.status === "fail";
+  const operationsAgentRegistered =
+    operationsAgentQuery.data?.configured === true || !!operationsAgentQuery.data?.agent;
+  const operationsAgentReady =
+    operationsAgentRegistered && !operationsEnvironmentFailed && !operationsAgentQuery.isError;
+
+  const ensureOperationsAgentMutation = useMutation({
+    mutationFn: () => hermesChatApi.ensureOperationsAgent(selectedCompanyId!),
+    onMutate: () => {
+      setSetupCompletedNotice(false);
+    },
+    onSuccess: (agent) => {
+      if (!selectedCompanyId) return;
+      queryClient.setQueryData<HermesOperationsAgentStatusResult>(
+        queryKeys.hermesChat.operationsAgent(selectedCompanyId),
+        (current) => ({
+          environment: current?.environment ?? {
+            adapterType: "hermes_local",
+            status: "pass",
+            checks: [],
+            testedAt: new Date().toISOString(),
+          },
+          configured: true,
+          agent,
+        }),
+      );
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.org(selectedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.hermesChat.sessions(selectedCompanyId) });
+      setSetupCompletedNotice(true);
+      pushToast({
+        tone: "success",
+        title: agent.autoProvisionedNow ? "Hermes Ops agent created" : "Hermes Ops agent ready",
+        body: agent.name,
+      });
+    },
+    onError: (error) => {
+      pushToast({
+        tone: "error",
+        title: "Hermes Ops registration failed",
+        body: error instanceof Error ? error.message : "Could not create Hermes Ops agent.",
+      });
+    },
+  });
 
   useEffect(() => {
     if (!selectedSessionId && activeSessions[0]) {
@@ -694,6 +846,9 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
 
   const sendMutation = useMutation({
     mutationFn: async (input: { body: string; attachments: HermesChatAttachment[] }) => {
+      if (!operationsAgentReady) {
+        throw new Error("Create the Hermes Ops agent before sending messages.");
+      }
       let sessionId = selectedSessionId;
       if (!sessionId) {
         const session = await hermesChatApi.createSession(selectedCompanyId!, {});
@@ -727,9 +882,11 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
       : "Hermes";
   const canSend =
     !!selectedCompanyId &&
+    operationsAgentReady &&
     (draft.trim().length > 0 || attachments.length > 0) &&
     !sendMutation.isPending &&
-    !pageContextQuery.isLoading;
+    !pageContextQuery.isLoading &&
+    !ensureOperationsAgentMutation.isPending;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -829,6 +986,19 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
         compact={compact}
       />
 
+      {(!operationsAgentReady || ensureOperationsAgentMutation.isPending || setupCompletedNotice || operationsAgentQuery.isError) && (
+        <OperationsAgentSetupNotice
+          checking={operationsAgentQuery.isLoading && !operationsAgentQuery.data}
+          creating={ensureOperationsAgentMutation.isPending}
+          completed={setupCompletedNotice && operationsAgentReady && !ensureOperationsAgentMutation.isPending}
+          environment={operationsEnvironment}
+          error={operationsAgentQuery.error}
+          compact={compact}
+          onCreate={() => ensureOperationsAgentMutation.mutate()}
+          onRetry={() => operationsAgentQuery.refetch()}
+        />
+      )}
+
       {compact && sessionListOpen && (
         <div className="max-h-56 shrink-0 overflow-y-auto border-b border-border bg-card">
           <SessionsList
@@ -841,6 +1011,7 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
             }}
             onCreate={() => createSessionMutation.mutate()}
             createPending={createSessionMutation.isPending}
+            createDisabled={!operationsAgentReady}
             compact
           />
         </div>
@@ -894,7 +1065,7 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
             size="icon"
             className="shrink-0"
             onClick={() => fileInputRef.current?.click()}
-            disabled={attachments.length >= MAX_ATTACHMENTS || sendMutation.isPending}
+            disabled={attachments.length >= MAX_ATTACHMENTS || sendMutation.isPending || !operationsAgentReady}
             aria-label="Attach file"
             title="Attach file"
           >
@@ -909,8 +1080,9 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
                 submit();
               }
             }}
-            placeholder="Ask Hermes..."
+            placeholder={operationsAgentReady ? "Ask Hermes..." : "Create Hermes Ops agent to start chatting..."}
             className="min-h-11 max-h-40 resize-none"
+            disabled={!operationsAgentReady || ensureOperationsAgentMutation.isPending}
           />
           <Button type="button" onClick={submit} disabled={!canSend} className="shrink-0">
             <Send className="h-4 w-4" />
@@ -942,7 +1114,7 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
             variant="ghost"
             size="icon-sm"
             onClick={() => createSessionMutation.mutate()}
-            disabled={createSessionMutation.isPending}
+            disabled={createSessionMutation.isPending || !operationsAgentReady}
             aria-label="New Hermes session"
             title="New Hermes session"
           >
@@ -971,7 +1143,7 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
               variant="ghost"
               size="icon-sm"
               onClick={() => createSessionMutation.mutate()}
-              disabled={createSessionMutation.isPending}
+              disabled={createSessionMutation.isPending || !operationsAgentReady}
               aria-label="New Hermes session"
               title="New Hermes session"
             >
@@ -986,6 +1158,7 @@ export function HermesChatPanel({ mode = "page", onCollapse }: HermesChatPanelPr
               onSelect={setSelectedSessionId}
               onCreate={() => createSessionMutation.mutate()}
               createPending={createSessionMutation.isPending}
+              createDisabled={!operationsAgentReady}
             />
           </div>
         </div>

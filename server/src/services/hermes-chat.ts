@@ -8,8 +8,49 @@ import type {
   HermesChatSessionStatus,
 } from "@paperclipai/shared";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { agentService } from "./agents.js";
 
 const MAX_CHAT_RESPONSE_CHARS = 100_000;
+
+const HERMES_OPS_AGENT_NAME = "Hermes Operations Manager";
+const HERMES_OPS_RUNTIME_CONFIG = {
+  domain: "operations",
+  operatingMode: "chief_of_staff_liaison",
+  heartbeat: {
+    enabled: true,
+    intervalSec: 300,
+    maxConcurrentRuns: 2,
+  },
+  monitoring: {
+    agents: true,
+    missions: true,
+    workflowRuns: true,
+    failedRuns: true,
+    processLoss: true,
+    staleAssignments: true,
+  },
+  delegationPolicy: {
+    preferDelegation: true,
+    blockOrEscalateOffPurposeWork: true,
+    requireReviewBeforeParentDone: true,
+    routeMissionActionsToMainExecutor: true,
+  },
+  authorityBoundary: {
+    role: "chief_of_staff",
+    reportsTo: "chairman_operator",
+    monitoringAllowed: true,
+    missionActionRoute: "signal_main_executor",
+    noDirectMissionMutationWithoutExplicitUserInstruction: true,
+  },
+  organizationPrinciple: "chief-of-staff-report-and-relay-only",
+} satisfies Record<string, unknown>;
+
+const HERMES_OPS_METADATA = {
+  purpose: "hermes-operations-management",
+  autoProvisioned: true,
+  chiefOfStaffToOperator: true,
+  independentFromCeoChain: false,
+} satisfies Record<string, unknown>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -103,6 +144,8 @@ export function responseTextFromRun(row: Pick<typeof heartbeatRuns.$inferSelect,
 }
 
 export function hermesChatService(db: Db) {
+  const agentsSvc = agentService(db);
+
   async function findOperationsAgent(companyId: string) {
     const rows = await db
       .select({
@@ -110,6 +153,7 @@ export function hermesChatService(db: Db) {
         name: agents.name,
         status: agents.status,
         adapterType: agents.adapterType,
+        adapterConfig: agents.adapterConfig,
         runtimeConfig: agents.runtimeConfig,
         metadata: agents.metadata,
       })
@@ -133,6 +177,43 @@ export function hermesChatService(db: Db) {
         telegram?.directConversation === true
       );
     }) ?? null;
+  }
+
+  async function ensureOperationsAgent(companyId: string) {
+    const existing = await findOperationsAgent(companyId);
+    if (existing) return { ...existing, autoProvisionedNow: false };
+
+    const created = await agentsSvc.create(companyId, {
+      name: HERMES_OPS_AGENT_NAME,
+      role: "pm",
+      title: HERMES_OPS_AGENT_NAME,
+      icon: "radar",
+      status: "idle",
+      reportsTo: null,
+      capabilities: [
+        "Monitors company, mission, workflow, and agent state.",
+        "Summarizes blockers, risks, failed runs, and recommended next actions for the operator.",
+        "Relays explicit operator intent to the responsible mission owner or executor without taking over mission work.",
+      ].join("\n"),
+      adapterType: "hermes_local",
+      adapterConfig: {},
+      runtimeConfig: HERMES_OPS_RUNTIME_CONFIG,
+      budgetMonthlyCents: 0,
+      spentMonthlyCents: 0,
+      permissions: {},
+      lastHeartbeatAt: null,
+      metadata: HERMES_OPS_METADATA,
+    });
+
+    return {
+      id: created.id,
+      name: created.name,
+      status: created.status,
+      adapterType: created.adapterType,
+      runtimeConfig: created.runtimeConfig,
+      metadata: created.metadata,
+      autoProvisionedNow: true,
+    };
   }
 
   async function listSessions(companyId: string): Promise<HermesChatSession[]> {
@@ -392,6 +473,7 @@ export function hermesChatService(db: Db) {
 
   return {
     findOperationsAgent,
+    ensureOperationsAgent,
     listSessions,
     createSession,
     getOrCreateTelegramSession,

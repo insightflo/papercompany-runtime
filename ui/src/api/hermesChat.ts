@@ -4,6 +4,7 @@ import type {
   HermesChatSendMessageResult,
   HermesChatSession,
   HermesChatSessionDetail,
+  AdapterEnvironmentTestResult,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -11,7 +12,25 @@ function base(companyId: string) {
   return `/companies/${encodeURIComponent(companyId)}/hermes-chat`;
 }
 
+export interface HermesOperationsAgentEnsureResult {
+  id: string;
+  name: string;
+  status: string;
+  adapterType: string;
+  autoProvisionedNow: boolean;
+}
+
+export interface HermesOperationsAgentStatusResult {
+  configured: boolean;
+  agent: HermesOperationsAgentEnsureResult | null;
+  environment: AdapterEnvironmentTestResult;
+}
+
 export const hermesChatApi = {
+  getOperationsAgent: (companyId: string) =>
+    api.get<HermesOperationsAgentStatusResult>(`${base(companyId)}/operations-agent`),
+  ensureOperationsAgent: (companyId: string) =>
+    api.post<HermesOperationsAgentEnsureResult>(`${base(companyId)}/operations-agent`, {}),
   listSessions: (companyId: string) =>
     api.get<HermesChatSession[]>(`${base(companyId)}/sessions`),
   createSession: (companyId: string, data: { title?: string | null } = {}) =>

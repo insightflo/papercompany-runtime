@@ -1,7 +1,9 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
+import type { AdapterEnvironmentTestResult } from "@paperclipai/shared";
+import { findServerAdapter } from "../adapters/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
-import { logActivity } from "../services/index.js";
+import { logActivity, secretService } from "../services/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { hermesChatService } from "../services/hermes-chat.js";
 
@@ -57,16 +59,116 @@ function sanitizeChatAttachments(value: unknown): Record<string, unknown>[] {
     });
 }
 
+function failedHermesEnvironmentResult(message: string, detail?: string): AdapterEnvironmentTestResult {
+  return {
+    adapterType: "hermes_local",
+    status: "fail",
+    checks: [{
+      code: "hermes_environment_unavailable",
+      level: "error",
+      message,
+      detail,
+      hint: "Install and configure Hermes Agent before creating a Hermes Ops agent.",
+    }],
+    testedAt: new Date().toISOString(),
+  };
+}
+
 export function hermesChatRoutes(db: Db) {
   const router = Router();
   const service = hermesChatService(db);
   const heartbeat = heartbeatService(db);
+  const secrets = secretService(db);
+
+  async function testHermesEnvironment(companyId: string): Promise<AdapterEnvironmentTestResult> {
+    const adapter = findServerAdapter("hermes_local");
+    if (!adapter?.testEnvironment) {
+      return failedHermesEnvironmentResult("Hermes local adapter environment test is not available");
+    }
+
+    const agent = await service.findOperationsAgent(companyId);
+    const adapterConfig = (agent?.adapterConfig ?? {}) as Record<string, unknown>;
+    try {
+      const { config } = await secrets.resolveAdapterConfigForRuntime(companyId, adapterConfig);
+      return await adapter.testEnvironment({
+        companyId,
+        adapterType: "hermes_local",
+        config,
+      });
+    } catch (err) {
+      return failedHermesEnvironmentResult(
+        "Hermes local environment could not be checked",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
 
   router.get("/companies/:companyId/hermes-chat/sessions", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertBoard(req);
     assertCompanyAccess(req, companyId);
     res.json(await service.listSessions(companyId));
+  });
+
+  router.get("/companies/:companyId/hermes-chat/operations-agent", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+    const agent = await service.findOperationsAgent(companyId);
+    const environment = await testHermesEnvironment(companyId);
+    res.json({
+      configured: !!agent,
+      agent: agent
+        ? {
+            id: agent.id,
+            name: agent.name,
+            status: agent.status,
+            adapterType: agent.adapterType,
+            autoProvisionedNow: false,
+          }
+        : null,
+      environment,
+    });
+  });
+
+  router.post("/companies/:companyId/hermes-chat/operations-agent", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+    const actor = getActorInfo(req);
+    const environment = await testHermesEnvironment(companyId);
+    if (environment.status === "fail") {
+      res.status(409).json({
+        error: "Hermes local environment is not ready",
+        environment,
+      });
+      return;
+    }
+    const agent = await service.ensureOperationsAgent(companyId);
+    if (agent.autoProvisionedNow) {
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "hermes_chat.operations_agent_created",
+        entityType: "agent",
+        entityId: agent.id,
+        details: {
+          name: agent.name,
+          adapterType: agent.adapterType,
+          purpose: "hermes-operations-management",
+        },
+      });
+    }
+    res.json({
+      id: agent.id,
+      name: agent.name,
+      status: agent.status,
+      adapterType: agent.adapterType,
+      autoProvisionedNow: agent.autoProvisionedNow,
+    });
   });
 
   router.post("/companies/:companyId/hermes-chat/sessions", async (req, res) => {

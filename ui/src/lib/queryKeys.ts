@@ -135,6 +135,7 @@ export const queryKeys = {
   heartbeats: (companyId: string, agentId?: string) =>
     ["heartbeats", companyId, agentId] as const,
   hermesChat: {
+    operationsAgent: (companyId: string) => ["hermes-chat", companyId, "operations-agent"] as const,
     sessions: (companyId: string) => ["hermes-chat", companyId, "sessions"] as const,
     detail: (companyId: string, sessionId: string) =>
       ["hermes-chat", companyId, "sessions", sessionId] as const,
