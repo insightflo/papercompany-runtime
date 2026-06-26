@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -440,12 +440,14 @@ function getStepAssignee(
 // WorkflowRunGraph — read-only DAG visualization (default Execution Flow view)
 // [목적] mission workflow run 의 step 들을 dependency level(L→R) 배치 + SVG edge 로 시각화.
 //   read-only. node 선택 시 기존 WorkflowStepRow 를 detail rail 로 재사용(text mode 장점 섞기).
-// [수정시 주의] 좌표는 GRAPH_* 상수로 고정(cell 단위). cycle/미해결 dependency 방어.
+// [수정시 주의] 좌표는 frame width 에 맞춰 재계산. cycle/미해결 dependency 방어.
 // ---------------------------------------------------------------------------
 
-const GRAPH_COL_WIDTH = 240;
+const GRAPH_CONTAINER_X_PADDING = 24;
 const GRAPH_ROW_HEIGHT = 96;
-const GRAPH_NODE_WIDTH = 216;
+const GRAPH_NODE_MIN_WIDTH = 180;
+const GRAPH_NODE_MAX_WIDTH = 240;
+const GRAPH_COLUMN_MIN_GAP = 32;
 
 // [목적] step.dependencies 기반 topological level 계산(0 = entry). cycle/미존재 dep 방어.
 // [출력] stepId -> level. dep 없으면 0, 있으면 max(dep level)+1.
@@ -476,6 +478,34 @@ function computeStepLevels(steps: MissionWorkflowStep[]): Map<string, number> {
   return levels;
 }
 
+function useElementWidth<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [width, setWidth] = useState(0);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    const updateWidth = () => {
+      const nextWidth = Math.floor(element.clientWidth);
+      setWidth((previousWidth) => (previousWidth === nextWidth ? previousWidth : nextWidth));
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateWidth);
+      return () => window.removeEventListener("resize", updateWidth);
+    }
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return [ref, width] as const;
+}
+
 function WorkflowRunGraph({
   runs,
   missionId,
@@ -487,6 +517,7 @@ function WorkflowRunGraph({
 }) {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [graphFrameRef, graphFrameWidth] = useElementWidth<HTMLDivElement>();
 
   if (runs.length === 0) {
     return (
@@ -517,7 +548,24 @@ function WorkflowRunGraph({
     });
   });
   const numRows = Math.max(1, ...columns.map((columnSteps) => columnSteps.length));
-  const graphWidth = (maxLevel + 1) * GRAPH_COL_WIDTH;
+  const columnCount = maxLevel + 1;
+  const minGraphWidth =
+    columnCount * GRAPH_NODE_MIN_WIDTH + Math.max(0, columnCount - 1) * GRAPH_COLUMN_MIN_GAP;
+  const availableGraphWidth = graphFrameWidth > 0
+    ? Math.max(0, graphFrameWidth - GRAPH_CONTAINER_X_PADDING)
+    : 0;
+  const graphWidth = Math.max(availableGraphWidth, minGraphWidth);
+  const nodeWidth = Math.min(
+    GRAPH_NODE_MAX_WIDTH,
+    Math.max(
+      GRAPH_NODE_MIN_WIDTH,
+      (graphWidth - Math.max(0, columnCount - 1) * GRAPH_COLUMN_MIN_GAP) / columnCount,
+    ),
+  );
+  const columnGap = columnCount <= 1
+    ? 0
+    : Math.max(GRAPH_COLUMN_MIN_GAP, (graphWidth - nodeWidth * columnCount) / (columnCount - 1));
+  const columnStride = nodeWidth + columnGap;
   const graphHeight = numRows * GRAPH_ROW_HEIGHT;
 
   const edges: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
@@ -528,9 +576,9 @@ function WorkflowRunGraph({
       const source = positionByKey.get(`${run.id}:${dependencyId}`);
       if (!source) return;
       edges.push({
-        x1: source.col * GRAPH_COL_WIDTH + GRAPH_NODE_WIDTH,
+        x1: source.col * columnStride + nodeWidth,
         y1: source.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
-        x2: target.col * GRAPH_COL_WIDTH,
+        x2: target.col * columnStride,
         y2: target.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
       });
     });
@@ -594,13 +642,20 @@ function WorkflowRunGraph({
           No steps in this run.
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-md border border-border bg-muted/10 p-3">
-          <div className="relative" style={{ width: graphWidth, height: graphHeight, minWidth: "100%" }}>
+        <div ref={graphFrameRef} className="overflow-x-auto rounded-md border border-border bg-muted/10 p-3">
+          <div
+            className="relative"
+            style={{
+              width: graphFrameWidth > 0 ? graphWidth : "100%",
+              minWidth: minGraphWidth,
+              height: graphHeight,
+            }}
+          >
             <svg
               className="absolute inset-0 pointer-events-none text-border"
-              width={graphWidth}
+              width="100%"
               height={graphHeight}
-              style={{ minWidth: "100%" }}
+              viewBox={`0 0 ${graphWidth} ${graphHeight}`}
               aria-hidden="true"
             >
               {edges.map((edge, index) => (
@@ -641,9 +696,9 @@ function WorkflowRunGraph({
                     isSelected ? "ring-2 ring-foreground/40" : "",
                   )}
                   style={{
-                    left: position.col * GRAPH_COL_WIDTH,
+                    left: position.col * columnStride,
                     top: position.row * GRAPH_ROW_HEIGHT,
-                    width: GRAPH_NODE_WIDTH,
+                    width: nodeWidth,
                   }}
                 >
                   <div className="flex items-center gap-2 min-w-0">
