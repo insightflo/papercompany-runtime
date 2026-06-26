@@ -1377,6 +1377,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
 
   it("materializes selected execution units into a mission-scoped PAQO workflow DAG with ACTION gated before QA", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await db
+      .update(companies)
+      .set({ workProductRoot: "/tmp/paperclip-test-work-products" })
+      .where(eq(companies.id, companyId));
     const sourceWorkflowId = randomUUID();
     await db.insert(workflowDefinitions).values({
       id: sourceWorkflowId,
@@ -1428,12 +1432,14 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.name, "PAQO WBS: Validate PAQO workflow pivot"));
     expect(paqoDefinitions).toHaveLength(1);
-    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[]; agentId: string }>;
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[]; agentId: string; graphWorkProductRequired?: boolean }>;
     expect(paqoSteps.map((step) => step.name)).toEqual([
       "[ACTION] Research current workflow surfaces",
       "[QA] Verify mission result",
     ]);
     expect(paqoSteps[0]!.agentId).toBe(ownerAgentId);
+    expect(paqoSteps[0]!.graphWorkProductRequired).toBe(true);
+    expect(paqoSteps[1]!.graphWorkProductRequired).toBe(false);
     expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
     // [P5 control-flow loop] ACTION producer 에 QA rework back-edge 가 합성되었는지(wiring 회귀 감지).
     const paqoStepsRaw = paqoDefinitions[0]!.stepsJson as Array<{
@@ -1473,6 +1479,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       parentId: null,
     });
     expect(actionIssue?.title).not.toContain("PAQO WBS");
+    expect(actionIssue?.description).toContain("Deliverable output (use exactly this directory):");
+    expect(actionIssue?.description).toContain("WorkProduct registration contract:");
+    expect(actionIssue?.description).toContain("[ARTIFACT]: <absolute path>");
 
     const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     expect(activePlan?.refs).toMatchObject({

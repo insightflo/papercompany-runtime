@@ -1266,6 +1266,15 @@ function toNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
+function readOptionalBooleanMarker(value: unknown): boolean | null {
+  if (value === true || value === false) return value;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
+  if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+  return null;
+}
+
 function isCrossCompanyMissionUnit(unit: Record<string, unknown>): boolean {
   const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
   const sourceType = toNonEmptyString(sourceRef?.type)?.toLowerCase() ?? "";
@@ -1372,6 +1381,13 @@ function inferPaqoIssueGroup(unit: Record<string, unknown>, title: string): Paqo
   if (/\b(?:qa|quality|validation|validator|verify|verification)\b/u.test(kind)) return "qa";
   if (/\b(?:oversight|supervision|unblock|escalation)\b/u.test(kind)) return "oversight";
   return "action";
+}
+
+function readPaqoGraphWorkProductRequired(unit: Record<string, unknown>, group: PaqoIssueGroup): boolean {
+  return readOptionalBooleanMarker(unit.graphWorkProductRequired)
+    ?? readOptionalBooleanMarker(unit.workProductRequired)
+    ?? readOptionalBooleanMarker(unit.requiresWorkProduct)
+    ?? (group === "action");
 }
 
 function shortStableHash(value: unknown): string {
@@ -1519,11 +1535,13 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     const group = inferPaqoIssueGroup(unit, rawTitle);
     const title = stripIssueGroupPrefix(rawTitle);
     const groupLabel = group.toUpperCase();
+    const graphWorkProductRequired = readPaqoGraphWorkProductRequired(unit, group);
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
       name: `[${groupLabel}] ${title}`,
       agentId: assigneeAgentId,
       dependencies: [],
+      graphWorkProductRequired,
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
         "",
@@ -1542,6 +1560,7 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     name: "[QA] Verify mission result",
     agentId: mission.ownerAgentId,
     dependencies: plannedSteps.map((step) => step.id),
+    graphWorkProductRequired: false,
     description: [
       "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
       "",

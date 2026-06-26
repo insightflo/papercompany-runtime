@@ -419,6 +419,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         "- Do not invent or reuse assignee ids that are not listed in the Available runnable company roster.",
         "- Agents with status `paused`, `running`, `error`, `pending_approval`, or `terminated` are intentionally omitted and are not runnable execution assignees.",
         "- Use source/research units for researcher/scout agents, synthesis/report units for synthesis/editor agents, QA units for validator/QA agents, and oversight/recovery for the mission owner.",
+        "- Set `graphWorkProductRequired: true` on ACTION units that must create official deliverables; QA units should normally set `graphWorkProductRequired: false` and validate dependency workProducts.",
         "- Express execution order with `dependsOn` arrays on each non-root `selectedExecutionUnits` entry; root units must use `dependsOn: []`.",
         "- Use `dependsOn` values that exactly match upstream selected unit `id` or `sourceRef.id` values. The `steps` array is only human-readable phase notes and must not be the only place dependencies appear.",
         "- Do not rely on loose issue creation order, phase text, or assignee wakeups for ordering.",
@@ -440,6 +441,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
             reason: "Why this work unit is required",
             sourceRef: { type: "mission_plan_unit", id: "unit-source-1" },
             dependsOn: [],
+            graphWorkProductRequired: true,
           }, {
             id: "unit-synthesis-1",
             kind: "mission_plan_unit",
@@ -449,6 +451,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
             reason: "Why this synthesis unit is required",
             sourceRef: { type: "mission_plan_unit", id: "unit-synthesis-1" },
             dependsOn: ["unit-source-1"],
+            graphWorkProductRequired: true,
           }, {
             id: "unit-qa-1",
             kind: "mission_plan_unit",
@@ -458,6 +461,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
             reason: "Why this validation unit is required",
             sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" },
             dependsOn: ["unit-synthesis-1"],
+            graphWorkProductRequired: false,
           }],
           requiredInputs: [],
           successCriteria: [],
