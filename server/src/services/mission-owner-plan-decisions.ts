@@ -956,23 +956,16 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
   const missionRow = await loadMissionRow(db, companyId, missionId);
   const missionTitle = missionRow?.title ?? missionId;
-  // QA reviewer(qa/reviewer/validator role agent)가 있을 때만 PLAN-QA 게이트 적용.
-  // reviewer 가 없으면 게이트를 운영할 주체가 없으므로 원래 동작(즉시 materialize) 유지.
-  const qaGateEnabled = (await findMissionQaAssignee(db, companyId)) !== null;
 
-  // ── Plan-QA 게이트: 같은 decisionHash 가 이미 materialize 됐으면 통과, 아니면 QA verdict 대기 ──
+  // ── Plan-QA 게이트(항상 활성): 같은 decisionHash 가 이미 materialize 됐으면 통과, 아니면 QA verdict 대기 ──
   if (activeOwnerDecision?.decisionHash === decisionHash) {
-    if (!qaGateEnabled) {
-      if (activePlan) {
-        await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
-        await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
-      }
-      return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
-    }
     if (activePlan) {
       const activePlanRefs = isPlainObject(activePlan.refs) ? (activePlan.refs as Record<string, unknown>) : {};
       const paqoWorkflowRef = isPlainObject(activePlanRefs.paqoWorkflow) ? (activePlanRefs.paqoWorkflow as Record<string, unknown>) : null;
-      const alreadyMaterialized = Boolean(paqoWorkflowRef && typeof paqoWorkflowRef.workflowRunId === "string" && paqoWorkflowRef.workflowRunId.length > 0);
+      // local workflow 가 materialize 됐거나(local unit 이 있는 경우), 또는 이미 PASS 한 plan(cross-company 위주 등
+      // local workflow 가 없는 경우) 이면 재호출 시 멱등 noop.
+      const alreadyMaterialized = activePlanQa?.verdict === "pass"
+        || Boolean(paqoWorkflowRef && typeof paqoWorkflowRef.workflowRunId === "string" && paqoWorkflowRef.workflowRunId.length > 0);
       // (a) 이미 materialize → 게이트 통과 이력, 사이드이펙트 없이 noop
       if (alreadyMaterialized) {
         return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
@@ -984,7 +977,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
           await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
           await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "pass", verdict: "pass", reviewedAt: new Date().toISOString() } });
-          await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.materialized_after_qa", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId } });
+          await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, revision: activePlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}`, planQaIssueId: activePlanQa.issueId } });
           const refreshedPlan = await service.getActiveMissionPlan({ companyId, missionId });
           const finalPlan = refreshedPlan ?? activePlan;
           return { status: "recorded", missionPlanArtifact: finalPlan, revision: finalPlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
@@ -1005,22 +998,17 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
   }
 
-  // ── 새 decision (decisionHash 불일치) ──
-  if (!qaGateEnabled) {
-    const legacyRefs = mergeMissionPlanRefs(activePlan?.refs, { ...draftResult.draft.refs, ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash } });
-    const legacyArtifact = await service.createMissionPlanRevision({ companyId, missionId, ...(draftResult.draft.missionGoal ? { missionGoal: draftResult.draft.missionGoal } : {}), refs: legacyRefs, requiredInputs: draftResult.draft.requiredInputs, successCriteria: draftResult.draft.successCriteria, steps: draftResult.draft.steps });
-    await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: legacyArtifact.id, decisionHash });
-    await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: legacyArtifact.id, decisionHash, triggeredBy: actor.actorId });
-    await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: legacyArtifact.id, revision: legacyArtifact.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}` } });
-    return { status: "recorded", missionPlanArtifact: legacyArtifact, revision: legacyArtifact.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
-  }
-  // QA reviewer 있음 → PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연.
+  // ── 새 decision (decisionHash 불일치): revision 생성 + PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연 ──
   const planQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft });
   const refs = mergeMissionPlanRefs(activePlan?.refs, {
     ...draftResult.draft.refs,
     ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
     planQa: { issueId: planQaIssue.id, status: "pending", decisionHash },
   });
+  // 새 decision 는 이전 decision 의 materialization 결과(paqoWorkflow/crossCompanyDelegations)를 계승하지 않는다.
+  // PASS 시 idempotent branch 에서 새 decision 기준으로 materialize 한다.
+  delete (refs as Record<string, unknown>).paqoWorkflow;
+  delete (refs as Record<string, unknown>).crossCompanyDelegations;
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
     missionId,
@@ -1822,7 +1810,7 @@ async function findMissionQaAssignee(db: Db, companyId: string): Promise<string 
   const [candidate] = await db
     .select({ id: agents.id })
     .from(agents)
-    .where(and(eq(agents.companyId, companyId), inArray(agents.role, ["qa", "reviewer", "validator"]), eq(agents.status, "active")))
+    .where(and(eq(agents.companyId, companyId), inArray(agents.role, ["qa", "reviewer", "validator"]), inArray(agents.status, ["active", "idle"])))
     .limit(1);
   return candidate?.id ?? null;
 }
@@ -1850,12 +1838,17 @@ async function ensurePlanQaReviewIssue(input: {
     .limit(1);
   if (existing[0]) return existing[0];
   const assigneeAgentId = await findMissionQaAssignee(input.db, input.companyId);
+  const description = buildPlanQaReviewDescription({ missionGoal: input.missionGoal, draft: input.draft });
+  // reviewer 가 없어도 issue 는 만들고 materialize 는 금지. 할당 누락을 description 에 명시.
+  const fullDescription = assigneeAgentId
+    ? description
+    : `${description}\n\nQA reviewer assignment required (no qa/reviewer/validator agent on this mission yet).`;
   const created = await issueService(input.db).create(input.companyId, {
     missionId: input.missionId,
     originKind: "mission_plan_qa",
     originId,
     title: `[PLAN-QA] ${input.missionTitle}`,
-    description: buildPlanQaReviewDescription({ missionGoal: input.missionGoal, draft: input.draft }),
+    description: fullDescription,
     status: "todo",
     priority: "high",
     ...(assigneeAgentId ? { assigneeAgentId } : {}),

@@ -1177,7 +1177,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     if (result.status !== "recorded") return;
@@ -1302,7 +1302,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     // owner 에게 명시 할당 → drift 없음
     await db.update(issues).set({ assigneeAgentId: ownerAgentId }).where(eq(issues.id, planningIssueId));
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
   });
 
@@ -1424,7 +1424,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T00:00:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     const paqoDefinitions = await db
@@ -1552,7 +1552,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T00:10:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     const paqoDefinitions = await db
@@ -1626,7 +1626,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T00:30:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     const paqoDefinitions = await db
@@ -1727,7 +1727,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T00:45:00.000Z"),
     });
 
-    const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result1 = await recordThroughQaPass({ companyId, missionId });
     const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
 
     expect(result1.status).toBe("recorded");
@@ -1849,7 +1849,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T01:00:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     const paqoDefinitions = await db
@@ -1953,7 +1953,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T01:30:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     const paqoDefinitions = await db
@@ -2007,7 +2007,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T01:00:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
@@ -2221,7 +2221,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-01T00:05:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
 
     const paqoDefinitions = await db
@@ -2259,7 +2259,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
     if (result.status !== "recorded") return;
 
@@ -2340,7 +2340,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
     });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
     if (result.status !== "recorded") return;
 
@@ -2402,7 +2402,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     });
 
     // First call should record
-    const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result1 = await recordThroughQaPass({ companyId, missionId });
     expect(result1.status).toBe("recorded");
 
     // Second call should be noop with the same decision hash, including assessment content
@@ -2460,7 +2460,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
     });
 
-    const result1 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result1 = await recordThroughQaPass({ companyId, missionId });
     expect(result1.status).toBe("recorded");
     if (result1.status !== "recorded") return;
     expect(result1.revision).toBe(2);
@@ -2490,7 +2490,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       createdAt: new Date("2026-01-02T00:00:00.000Z"),
     });
 
-    const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result2 = await recordThroughQaPass({ companyId, missionId });
     expect(result2.status).toBe("recorded");
     if (result2.status !== "recorded") return;
     expect(result2.revision).toBe(3);
@@ -2647,6 +2647,21 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     return rows.length;
   }
 
+  // Plan-QA gate 가 항상 켜져 있으므로, materialization 을 assert 하는 기존 테스트는
+  // record → (PLAN-QA PASS 심기) → record 재호입 2-phase 로 구워야 materialize 된다.
+  async function recordThroughQaPass(opts: { companyId: string; missionId: string }) {
+    let result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: opts.companyId, missionId: opts.missionId });
+    if (result.status === "plan_qa_pending") {
+      const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId: opts.companyId, missionId: opts.missionId });
+      const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+      if (planQa?.issueId) {
+        await db.insert(issueComments).values({ companyId: opts.companyId, issueId: planQa.issueId, body: "Plan is sound.\nPASS" });
+      }
+      result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: opts.companyId, missionId: opts.missionId });
+    }
+    return result;
+  }
+
   it("plan-QA gate: a new decision creates a [PLAN-QA] issue and defers materialization (pending)", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
@@ -2669,7 +2684,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
     expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
     const runs = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
@@ -2731,8 +2746,40 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId, unitId: "unit-2" });
     await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId }); // pending #2
     await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId }); // PASS on new gate
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
     expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
+  });
+
+  it("plan-QA gate: a qa-role agent with status=idle is still selected as reviewer and the gate applies", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    const [qa] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "qa"))).limit(1);
+    if (qa) await db.update(agents).set({ status: "idle" }).where(eq(agents.id, qa.id));
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_pending");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+    const [planQaIssue] = await db.select({ assigneeAgentId: issues.assigneeAgentId }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(planQaIssue).toBeDefined();
+    expect(planQaIssue.assigneeAgentId).toBe(qa?.id ?? null);
+  });
+
+  it("plan-QA gate: with no qa/reviewer/validator agent the [PLAN-QA] issue is created unassigned and materialization stays blocked", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const wfId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "NoQA Source Workflow", stepsJson: [{ id: "run", name: "Run", dependencies: [] }] });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    const decision = { ...validDecision, missionId, selectedExecutionUnits: [{ id: "unit-1", kind: "workflow_definition_step", title: "Run smoke", reason: "x", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "run" } }] };
+    await db.insert(issueComments).values({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision) });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_pending");
+    const [planQaIssue] = await db.select({ assigneeAgentId: issues.assigneeAgentId, description: issues.description }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(planQaIssue).toBeDefined();
+    expect(planQaIssue.assigneeAgentId).toBeNull();
+    expect(planQaIssue.description).toContain("QA reviewer assignment required");
   });
 });
