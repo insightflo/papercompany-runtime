@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -2594,5 +2594,145 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(activityLog)
       .where(eq(activityLog.action, "mission.owner_plan.recorded"));
     expect(activities).toHaveLength(0);
+  });
+
+  // ── Plan-QA gate tests (QA reviewer 가 있으면 게이트 활성) ──
+
+  async function seedQaFixture() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+    const sourceWorkflowId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Plan QA Gate Company", issuePrefix: `PQ${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} },
+      { id: qaAgentId, companyId, name: "Report Validator", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} },
+    ]);
+    await db.insert(workflowDefinitions).values({ id: sourceWorkflowId, companyId, name: "Plan QA Source Workflow", stepsJson: [{ id: "scout", name: "Scout", dependencies: [] }] });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Plan QA mission", status: "active" });
+    await db.insert(issues).values({ id: planningIssueId, companyId, missionId, title: "Mission owner planning", originKind: "mission_main_executor_plan", status: "todo" });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    return { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId };
+  }
+
+  async function postDecisionComment(opts: { companyId: string; issueId: string; authorAgentId: string; missionId: string; sourceWorkflowId: string; unitId?: string }) {
+    const decision = {
+      ...validDecision,
+      missionId: opts.missionId,
+      selectedExecutionUnits: [{
+        id: opts.unitId ?? "unit-1",
+        kind: "workflow_definition_step",
+        title: "Run smoke",
+        reason: "source evidence",
+        sourceRef: { type: "workflow_definition_step", id: opts.sourceWorkflowId, stepId: "scout" },
+      }],
+    };
+    await db.insert(issueComments).values({ companyId: opts.companyId, issueId: opts.issueId, authorAgentId: opts.authorAgentId, body: decisionComment(decision) });
+  }
+
+  async function postPlanQaVerdict(opts: { companyId: string; missionId: string; verdict: "pass" | "request_changes"; authorAgentId: string; detail?: string }) {
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId: opts.companyId, missionId: opts.missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    const issueId = planQa?.issueId;
+    if (!issueId) throw new Error("no active PLAN-QA issue to verdict");
+    const body = opts.verdict === "pass" ? "Plan is sound.\nPASS" : `Plan has gaps.\nREQUEST_CHANGES: ${opts.detail ?? "needs work"}`;
+    await db.insert(issueComments).values({ companyId: opts.companyId, issueId, authorAgentId: opts.authorAgentId, body });
+  }
+
+  async function countWorkflowDefinitions(companyId: string) {
+    const rows = await db.select({ id: workflowDefinitions.id }).from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.companyId, companyId), eq(workflowDefinitions.name, `PAQO WBS: ${validDecision.missionGoal}`)));
+    return rows.length;
+  }
+
+  it("plan-QA gate: a new decision creates a [PLAN-QA] issue and defers materialization (pending)", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_pending");
+
+    const planQaIssues = await db.select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, description: issues.description }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa")));
+    expect(planQaIssues).toHaveLength(1);
+    expect(planQaIssues[0]!.assigneeAgentId).toBe(qaAgentId);
+    expect(planQaIssues[0]!.description).toContain("PASS");
+    expect(planQaIssues[0]!.description).toContain("REQUEST_CHANGES");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+  });
+
+  it("plan-QA gate: PASS verdict materializes the PAQO workflow and records verdict=pass", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
+    const runs = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(runs.length).toBeGreaterThan(0);
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { verdict?: string } | undefined;
+    expect(planQa?.verdict).toBe("pass");
+  });
+
+  it("plan-QA gate: REQUEST_CHANGES blocks materialization and reopens the PLAN issue to actionable", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, planningIssueId));
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    await postPlanQaVerdict({ companyId, missionId, verdict: "request_changes", authorAgentId: qaAgentId });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_changes_requested");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+    const [planIssue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, planningIssueId));
+    expect(planIssue.status).toBe("in_progress");
+  });
+
+  it("plan-QA gate: reprocessing the same decision hash does not duplicate the [PLAN-QA] issue and stays deferred", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(second.status).toBe("plan_qa_pending");
+
+    const planQaIssues = await db.select({ id: issues.id }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa")));
+    expect(planQaIssues).toHaveLength(1);
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+  });
+
+  it("plan-QA gate: a PASS verdict on an older decision hash does not pass a newer decision (no stale PASS leak)", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId }); // pending #1 (hash A)
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId }); // PASS on hash A gate
+
+    // newer decision (hash B) — must NOT be passed by the stale hash-A PASS
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId, unitId: "unit-2" });
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_pending");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+  });
+
+  it("plan-QA gate: after REQUEST_CHANGES a revised decision opens a new gate and materializes only on its own PASS", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId }); // pending #1
+    await postPlanQaVerdict({ companyId, missionId, verdict: "request_changes", authorAgentId: qaAgentId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId }); // changes_requested
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+
+    // revised decision (new hash) -> new gate
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId, unitId: "unit-2" });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId }); // pending #2
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId }); // PASS on new gate
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
   });
 });

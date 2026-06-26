@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
@@ -11,6 +11,8 @@ import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
+import { issueService } from "./issues.js";
+import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -747,6 +749,22 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
       diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
     }
   | {
+      status: "plan_qa_pending";
+      planningIssueId: string | null;
+      commentId?: string;
+      decisionHash: string;
+      planQaIssueId: string;
+      diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
+    }
+  | {
+      status: "plan_qa_changes_requested";
+      planningIssueId: string | null;
+      commentId?: string;
+      decisionHash: string;
+      planQaIssueId: string;
+      diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
+    }
+  | {
       status: "noop";
       reason: string;
       planningIssueId: string | null;
@@ -934,43 +952,74 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const service = missionPlanArtifactService(db);
   const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
   const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
+  const activePlanQa = readPlanQaRef(activePlan?.refs);
   const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
+  const missionRow = await loadMissionRow(db, companyId, missionId);
+  const missionTitle = missionRow?.title ?? missionId;
+  // QA reviewer(qa/reviewer/validator role agent)가 있을 때만 PLAN-QA 게이트 적용.
+  // reviewer 가 없으면 게이트를 운영할 주체가 없으므로 원래 동작(즉시 materialize) 유지.
+  const qaGateEnabled = (await findMissionQaAssignee(db, companyId)) !== null;
+
+  // ── Plan-QA 게이트: 같은 decisionHash 가 이미 materialize 됐으면 통과, 아니면 QA verdict 대기 ──
   if (activeOwnerDecision?.decisionHash === decisionHash) {
-    if (activePlan) {
-      await ensureCrossCompanyDelegationsForMissionOwnerPlan({
-        db,
-        companyId,
-        missionId,
-        draft: draftResult.draft,
-        missionPlanArtifactId: activePlan.id,
-        decisionHash,
-      });
-      await ensurePaqoWorkflowForMissionOwnerPlan({
-        db,
-        companyId,
-        missionId,
-        draft: draftResult.draft,
-        missionPlanArtifactId: activePlan.id,
-        decisionHash,
-        triggeredBy: actor.actorId,
-      });
+    if (!qaGateEnabled) {
+      if (activePlan) {
+        await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
+        await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
+      }
+      return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
     }
-    return {
-      status: "noop",
-      reason: "already_recorded",
-      planningIssueId: collected.planningIssueId,
-      commentId: collected.commentId,
-      decisionHash,
-      diagnostics: [],
-    };
+    if (activePlan) {
+      const activePlanRefs = isPlainObject(activePlan.refs) ? (activePlan.refs as Record<string, unknown>) : {};
+      const paqoWorkflowRef = isPlainObject(activePlanRefs.paqoWorkflow) ? (activePlanRefs.paqoWorkflow as Record<string, unknown>) : null;
+      const alreadyMaterialized = Boolean(paqoWorkflowRef && typeof paqoWorkflowRef.workflowRunId === "string" && paqoWorkflowRef.workflowRunId.length > 0);
+      // (a) 이미 materialize → 게이트 통과 이력, 사이드이펙트 없이 noop
+      if (alreadyMaterialized) {
+        return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
+      }
+      // (b) 같은 decisionHash 의 PLAN-QA 게이트 진행중 → verdict 로 분기
+      if (activePlanQa && activePlanQa.decisionHash === decisionHash && activePlanQa.issueId) {
+        const verdict = await readPlanQaVerdict({ db, planQaIssueId: activePlanQa.issueId });
+        if (verdict === "pass") {
+          await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
+          await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
+          await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "pass", verdict: "pass", reviewedAt: new Date().toISOString() } });
+          await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.materialized_after_qa", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId } });
+          const refreshedPlan = await service.getActiveMissionPlan({ companyId, missionId });
+          const finalPlan = refreshedPlan ?? activePlan;
+          return { status: "recorded", missionPlanArtifact: finalPlan, revision: finalPlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
+        }
+        if (verdict === "request_changes") {
+          await reopenPlanningIssueIfTerminal({ db, planningIssueId: collected.planningIssueId });
+          await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "request_changes", verdict: "request_changes", reviewedAt: new Date().toISOString() } });
+          return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
+        }
+        // pending / verdict 없음 → 대기 (어떤 경로에서도 materialize 금지)
+        return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
+      }
+      // (c) 같은 hash 인데 PLAN-QA 게이트 미생성(레거시 plan 진입) → 게이트 생성 후 대기
+      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft });
+      await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { issueId: legacyPlanQaIssue.id, status: "pending", decisionHash } });
+      return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: legacyPlanQaIssue.id, diagnostics: [] };
+    }
+    return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
   }
 
+  // ── 새 decision (decisionHash 불일치) ──
+  if (!qaGateEnabled) {
+    const legacyRefs = mergeMissionPlanRefs(activePlan?.refs, { ...draftResult.draft.refs, ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash } });
+    const legacyArtifact = await service.createMissionPlanRevision({ companyId, missionId, ...(draftResult.draft.missionGoal ? { missionGoal: draftResult.draft.missionGoal } : {}), refs: legacyRefs, requiredInputs: draftResult.draft.requiredInputs, successCriteria: draftResult.draft.successCriteria, steps: draftResult.draft.steps });
+    await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: legacyArtifact.id, decisionHash });
+    await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: legacyArtifact.id, decisionHash, triggeredBy: actor.actorId });
+    await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: legacyArtifact.id, revision: legacyArtifact.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}` } });
+    return { status: "recorded", missionPlanArtifact: legacyArtifact, revision: legacyArtifact.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
+  }
+  // QA reviewer 있음 → PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연.
+  const planQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft });
   const refs = mergeMissionPlanRefs(activePlan?.refs, {
     ...draftResult.draft.refs,
-    ownerPlanDecision: {
-      ...draftResult.draft.refs.ownerPlanDecision,
-      decisionHash,
-    },
+    ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
+    planQa: { issueId: planQaIssue.id, status: "pending", decisionHash },
   });
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
@@ -981,28 +1030,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     successCriteria: draftResult.draft.successCriteria,
     steps: draftResult.draft.steps,
   });
-  await ensureCrossCompanyDelegationsForMissionOwnerPlan({
-    db,
-    companyId,
-    missionId,
-    draft: draftResult.draft,
-    missionPlanArtifactId: missionPlanArtifact.id,
-    decisionHash,
-  });
-  await ensurePaqoWorkflowForMissionOwnerPlan({
-    db,
-    companyId,
-    missionId,
-    draft: draftResult.draft,
-    missionPlanArtifactId: missionPlanArtifact.id,
-    decisionHash,
-    triggeredBy: actor.actorId,
-  });
+  // 주의: pending 중 ensureCrossCompanyDelegationsForMissionOwnerPlan / ensurePaqoWorkflowForMissionOwnerPlan 호출 금지 — PASS 시 idempotent branch 에서 실행.
   await logActivity(db, {
     companyId,
     actorType: actor.actorType,
     actorId: actor.actorId,
-    action: "mission.owner_plan.recorded",
+    action: "mission.owner_plan.plan_qa_pending",
     entityType: "mission",
     entityId: missionId,
     agentId: actor.actorType === "agent" ? actor.actorId : null,
@@ -1014,19 +1047,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       decisionMakerKind: collected.author.kind,
       decisionMakerId: collected.author.id,
       decisionHash,
+      planQaIssueId: planQaIssue.id,
       idempotencyKey: `${collected.commentId}:${decisionHash}`,
     },
   });
 
-  return {
-    status: "recorded",
-    missionPlanArtifact,
-    revision: missionPlanArtifact.revision,
-    planningIssueId: collected.planningIssueId,
-    commentId: collected.commentId,
-    decisionHash,
-    diagnostics: [],
-  };
+  return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: planQaIssue.id, diagnostics: [] };
 }
 
 async function validateSelectedExecutionUnitSourceRefs({
@@ -1728,6 +1754,163 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     .update(missionPlanArtifacts)
     .set({ refs, updatedAt: new Date() })
     .where(eq(missionPlanArtifacts.id, activePlan.id));
+}
+
+// ---------------------------------------------------------------------------
+// Plan-QA gate helpers — [PLAN-QA] review issue 가 PASS verdict 를 낼 때까지
+//   PAQO workflow materialization 을 지연시킨다. originKind=mission_plan_qa,
+//   originId=plan-qa:{missionId}:{decisionHash} 로 query-before-create idempotency.
+// [수정시 영향] verdict 는 같은 decisionHash issue 에서만 읽는다(stale PASS 차단).
+// ---------------------------------------------------------------------------
+type PlanQaStatus = "pending" | "pass" | "request_changes";
+
+interface PlanQaRef {
+  issueId: string;
+  status: PlanQaStatus;
+  verdict?: ValidationVerdict;
+  decisionHash: string;
+  reviewedAt?: string;
+}
+
+function readPlanQaRef(refs: unknown): PlanQaRef | null {
+  if (!isPlainObject(refs) || !isPlainObject((refs as Record<string, unknown>).planQa)) return null;
+  const planQa = (refs as Record<string, unknown>).planQa as Record<string, unknown>;
+  const issueId = typeof planQa.issueId === "string" ? planQa.issueId : null;
+  const decisionHash = typeof planQa.decisionHash === "string" ? planQa.decisionHash : null;
+  if (!issueId || !decisionHash) return null;
+  const status: PlanQaStatus = planQa.status === "pass" || planQa.status === "request_changes" ? planQa.status : "pending";
+  const verdict: ValidationVerdict | undefined = planQa.verdict === "pass" || planQa.verdict === "request_changes" ? planQa.verdict : undefined;
+  const reviewedAt = typeof planQa.reviewedAt === "string" ? planQa.reviewedAt : undefined;
+  return { issueId, status, verdict, decisionHash, reviewedAt };
+}
+
+function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draft: PlanRevisionDraft }): string {
+  const lines: string[] = [
+    "Plan QA review gate. The mission owner plan decision is on hold until this review passes.",
+    "Verify the plan against the mission goal before releasing it for materialization.",
+    "",
+  ];
+  if (input.missionGoal) lines.push(`Mission goal: ${input.missionGoal}`, "");
+  lines.push(
+    "Checklist (judge against the mission goal):",
+    "- Are the mission goal's core verbs reflected in concrete steps?",
+    "- Does the plan need a URL / input normalization step? Is it present?",
+    "- Are parallel vs sequential dependencies appropriate (no over- or under-serialization)?",
+    "- Are content QA and publish smoke QA separated into distinct steps (not collapsed into one)?",
+    "- Is each step's assignee appropriate by role / capability / skill?",
+    "- Does each ACTION step have a clear work-product contract?",
+    "- Is QA not collapsed into a single terminal step?",
+    "",
+    "Verdict output format (required):",
+    "Finish your run output with exactly one standalone final line:",
+    "`PASS` (the plan is sound and may materialize) or `REQUEST_CHANGES: <specific gaps>` (the plan must be revised).",
+    "Do not include any prose after that final line.",
+  );
+  return lines.join("\n");
+}
+
+async function loadMissionRow(db: Db, companyId: string, missionId: string) {
+  const [row] = await db
+    .select({ id: missions.id, title: missions.title })
+    .from(missions)
+    .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
+    .limit(1);
+  return row ?? null;
+}
+
+async function findMissionQaAssignee(db: Db, companyId: string): Promise<string | null> {
+  const [candidate] = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), inArray(agents.role, ["qa", "reviewer", "validator"]), eq(agents.status, "active")))
+    .limit(1);
+  return candidate?.id ?? null;
+}
+
+async function ensurePlanQaReviewIssue(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  missionTitle: string;
+  planningIssueId: string | null;
+  decisionHash: string;
+  missionGoal?: string | null;
+  draft: PlanRevisionDraft;
+}): Promise<{ id: string }> {
+  const originId = `plan-qa:${input.missionId}:${input.decisionHash}`;
+  const existing = await input.db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, input.companyId),
+      eq(issues.originKind, "mission_plan_qa"),
+      eq(issues.originId, originId),
+      isNull(issues.hiddenAt),
+    ))
+    .limit(1);
+  if (existing[0]) return existing[0];
+  const assigneeAgentId = await findMissionQaAssignee(input.db, input.companyId);
+  const created = await issueService(input.db).create(input.companyId, {
+    missionId: input.missionId,
+    originKind: "mission_plan_qa",
+    originId,
+    title: `[PLAN-QA] ${input.missionTitle}`,
+    description: buildPlanQaReviewDescription({ missionGoal: input.missionGoal, draft: input.draft }),
+    status: "todo",
+    priority: "high",
+    ...(assigneeAgentId ? { assigneeAgentId } : {}),
+  });
+  return { id: created.id };
+}
+
+async function readPlanQaVerdict(input: { db: Db; planQaIssueId: string }): Promise<ValidationVerdict | null> {
+  const rows = await input.db
+    .select({ body: issueComments.body })
+    .from(issueComments)
+    .where(eq(issueComments.issueId, input.planQaIssueId));
+  const body = rows.map((row) => row.body ?? "").join("\n\n");
+  return readExplicitValidationVerdict(body);
+}
+
+async function updatePlanQaRef(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  missionPlanArtifactId: string;
+  patch: Partial<PlanQaRef>;
+}): Promise<void> {
+  const service = missionPlanArtifactService(input.db);
+  const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
+  if (!activePlan || activePlan.id !== input.missionPlanArtifactId) return;
+  const existing = readPlanQaRef(activePlan.refs);
+  const merged: PlanQaRef = {
+    issueId: input.patch.issueId ?? existing?.issueId ?? "",
+    status: input.patch.status ?? existing?.status ?? "pending",
+    verdict: input.patch.verdict ?? existing?.verdict,
+    decisionHash: input.patch.decisionHash ?? existing?.decisionHash ?? "",
+    reviewedAt: input.patch.reviewedAt ?? existing?.reviewedAt,
+  };
+  const refs = mergeMissionPlanRefs(activePlan.refs, { planQa: merged });
+  await input.db
+    .update(missionPlanArtifacts)
+    .set({ refs, updatedAt: new Date() })
+    .where(eq(missionPlanArtifacts.id, activePlan.id));
+}
+
+async function reopenPlanningIssueIfTerminal(input: { db: Db; planningIssueId: string | null }): Promise<void> {
+  if (!input.planningIssueId) return;
+  const [row] = await input.db
+    .select({ id: issues.id, status: issues.status })
+    .from(issues)
+    .where(eq(issues.id, input.planningIssueId))
+    .limit(1);
+  if (!row) return;
+  if (row.status === "done" || row.status === "cancelled" || row.status === "completed") {
+    await input.db
+      .update(issues)
+      .set({ status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, row.id));
+  }
 }
 
 function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decisionHash?: string } | null {
