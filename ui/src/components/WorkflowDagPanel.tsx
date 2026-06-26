@@ -24,6 +24,8 @@ import { GitBranch, User, Wrench } from "lucide-react";
 
 interface WorkflowDagPanelProps {
   missionId: string;
+  /** Default Execution Flow view: "graph" (default, read-only DAG) or "text" (classic run/step list). */
+  defaultMode?: "graph" | "text";
 }
 
 const ROLE_ORDER: MissionAgentRole[] = [
@@ -46,8 +48,9 @@ const ROLE_COLORS: Record<MissionAgentRole, string> = {
 // WorkflowDagPanel
 // ---------------------------------------------------------------------------
 
-export function WorkflowDagPanel({ missionId }: WorkflowDagPanelProps) {
+export function WorkflowDagPanel({ missionId, defaultMode = "graph" }: WorkflowDagPanelProps) {
   const { selectedCompanyId } = useCompany();
+  const [mode, setMode] = useState<"graph" | "text">(defaultMode);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -87,7 +90,36 @@ export function WorkflowDagPanel({ missionId }: WorkflowDagPanelProps) {
 
   return (
     <div className="space-y-6">
-      <WorkflowRunList runs={workflowRuns ?? []} missionId={missionId} agentMap={agentMap} />
+      <div className="flex items-center gap-1" role="group" aria-label="Execution flow view">
+        <button
+          type="button"
+          onClick={() => setMode("graph")}
+          aria-pressed={mode === "graph"}
+          className={cn(
+            "rounded-l-md border border-r-0 px-3 py-1 text-xs font-medium transition-colors",
+            mode === "graph" ? "bg-accent/60 text-foreground" : "bg-background text-muted-foreground hover:bg-accent/30",
+          )}
+        >
+          Graph
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("text")}
+          aria-pressed={mode === "text"}
+          className={cn(
+            "rounded-r-md border px-3 py-1 text-xs font-medium transition-colors",
+            mode === "text" ? "bg-accent/60 text-foreground" : "bg-background text-muted-foreground hover:bg-accent/30",
+          )}
+        >
+          Text
+        </button>
+      </div>
+
+      {mode === "graph" ? (
+        <WorkflowRunGraph runs={workflowRuns ?? []} missionId={missionId} agentMap={agentMap} />
+      ) : (
+        <WorkflowRunList runs={workflowRuns ?? []} missionId={missionId} agentMap={agentMap} />
+      )}
 
       {/* Agent roster grouped by role */}
       <AgentRoster missionId={missionId} agentMap={agentMap} />
@@ -402,6 +434,252 @@ function getStepAssignee(
     label: "Unassigned",
     title: "No agent or tool is assigned to this step yet.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRunGraph — read-only DAG visualization (default Execution Flow view)
+// [목적] mission workflow run 의 step 들을 dependency level(L→R) 배치 + SVG edge 로 시각화.
+//   read-only. node 선택 시 기존 WorkflowStepRow 를 detail rail 로 재사용(text mode 장점 섞기).
+// [수정시 주의] 좌표는 GRAPH_* 상수로 고정(cell 단위). cycle/미해결 dependency 방어.
+// ---------------------------------------------------------------------------
+
+const GRAPH_COL_WIDTH = 240;
+const GRAPH_ROW_HEIGHT = 96;
+const GRAPH_NODE_WIDTH = 216;
+
+// [목적] step.dependencies 기반 topological level 계산(0 = entry). cycle/미존재 dep 방어.
+// [출력] stepId -> level. dep 없으면 0, 있으면 max(dep level)+1.
+function computeStepLevels(steps: MissionWorkflowStep[]): Map<string, number> {
+  const byId = new Map(steps.map((step) => [step.stepId, step]));
+  const levels = new Map<string, number>();
+  const visiting = new Set<string>();
+  const resolve = (id: string): number => {
+    if (levels.has(id)) return levels.get(id)!;
+    const step = byId.get(id);
+    if (!step) {
+      levels.set(id, 0);
+      return 0;
+    }
+    if (visiting.has(id)) {
+      // cycle 방어 — 순환 dep 면 0으로 평탄화
+      levels.set(id, 0);
+      return 0;
+    }
+    visiting.add(id);
+    const knownDeps = step.dependencies.filter((depId) => byId.has(depId));
+    const level = knownDeps.length === 0 ? 0 : Math.max(...knownDeps.map((depId) => resolve(depId))) + 1;
+    visiting.delete(id);
+    levels.set(id, level);
+    return level;
+  };
+  steps.forEach((step) => resolve(step.stepId));
+  return levels;
+}
+
+function WorkflowRunGraph({
+  runs,
+  missionId,
+  agentMap,
+}: {
+  runs: MissionWorkflowRun[];
+  missionId: string;
+  agentMap: Record<string, string>;
+}) {
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+
+  if (runs.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-4 text-center">
+        <GitBranch className="h-6 w-6 mx-auto mb-2 text-muted-foreground" />
+        <p className="text-sm font-medium">No workflow runs for this mission yet.</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Mission-linked workflow runs will appear here once execution starts.
+        </p>
+      </div>
+    );
+  }
+
+  // 기본 run: running 중인 것 우선, 없으면 첫 run. 사용자가 run selector 로 변경 가능.
+  const runningRun = runs.find((run) => run.status === "running");
+  const run = runs.find((candidate) => candidate.id === selectedRunId) ?? runningRun ?? runs[0];
+
+  const levels = computeStepLevels(run.steps);
+  const maxLevel = run.steps.length === 0 ? 0 : Math.max(0, ...run.steps.map((step) => levels.get(step.stepId) ?? 0));
+  const columns: MissionWorkflowStep[][] = Array.from({ length: maxLevel + 1 }, () => []);
+  run.steps.forEach((step) => {
+    columns[levels.get(step.stepId) ?? 0]?.push(step);
+  });
+  const positionByKey = new Map<string, { col: number; row: number }>();
+  columns.forEach((columnSteps, col) => {
+    columnSteps.forEach((step, row) => {
+      positionByKey.set(`${run.id}:${step.stepId}`, { col, row });
+    });
+  });
+  const numRows = Math.max(1, ...columns.map((columnSteps) => columnSteps.length));
+  const graphWidth = (maxLevel + 1) * GRAPH_COL_WIDTH;
+  const graphHeight = numRows * GRAPH_ROW_HEIGHT;
+
+  const edges: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+  run.steps.forEach((step) => {
+    const target = positionByKey.get(`${run.id}:${step.stepId}`);
+    if (!target) return;
+    step.dependencies.forEach((dependencyId) => {
+      const source = positionByKey.get(`${run.id}:${dependencyId}`);
+      if (!source) return;
+      edges.push({
+        x1: source.col * GRAPH_COL_WIDTH + GRAPH_NODE_WIDTH,
+        y1: source.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
+        x2: target.col * GRAPH_COL_WIDTH,
+        y2: target.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
+      });
+    });
+  });
+
+  const selectedStep = selectedStepId ? run.steps.find((step) => step.stepId === selectedStepId) ?? null : null;
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-md border border-border p-4 space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium truncate">{run.workflowName ?? "Unnamed workflow"}</p>
+            <p className="text-xs text-muted-foreground font-mono truncate">{run.id}</p>
+          </div>
+          <span
+            className={cn(
+              "text-xs rounded border px-2 py-1 uppercase tracking-wide",
+              RUN_STATUS_TONE[run.status] ?? RUN_STATUS_TONE.pending,
+            )}
+          >
+            {formatStatusLabel(run.status)}
+          </span>
+        </div>
+        <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+          <span>Triggered by: {run.triggeredBy}</span>
+          <span>Started: {run.startedAt ? formatDateTime(run.startedAt) : "—"}</span>
+          <span>Ended: {run.completedAt ? formatDateTime(run.completedAt) : "—"}</span>
+          <span>Steps: {run.progress.totalSteps}</span>
+          <span>Completed: {run.progress.completedSteps}</span>
+          {run.progress.runningSteps > 0 ? <span>Running: {run.progress.runningSteps}</span> : null}
+          {run.progress.failedSteps > 0 ? <span>Failed: {run.progress.failedSteps}</span> : null}
+          {run.progress.skippedSteps > 0 ? <span>Skipped: {run.progress.skippedSteps}</span> : null}
+        </div>
+        {runs.length > 1 ? (
+          <div className="flex flex-wrap gap-1 pt-1">
+            {runs.map((candidateRun) => (
+              <button
+                key={candidateRun.id}
+                type="button"
+                onClick={() => {
+                  setSelectedRunId(candidateRun.id);
+                  setSelectedStepId(null);
+                }}
+                className={cn(
+                  "rounded border px-2 py-1 text-[11px] transition-colors",
+                  candidateRun.id === run.id
+                    ? "border-foreground/30 bg-accent/50 text-foreground"
+                    : "border-border text-muted-foreground hover:bg-accent/30",
+                )}
+              >
+                {candidateRun.workflowName ?? candidateRun.id.slice(0, 8)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      {run.steps.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border p-4 text-center text-sm text-muted-foreground">
+          No steps in this run.
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-md border border-border bg-muted/10 p-3">
+          <div className="relative" style={{ width: graphWidth, height: graphHeight, minWidth: "100%" }}>
+            <svg
+              className="absolute inset-0 pointer-events-none text-border"
+              width={graphWidth}
+              height={graphHeight}
+              style={{ minWidth: "100%" }}
+              aria-hidden="true"
+            >
+              {edges.map((edge, index) => (
+                <line
+                  key={index}
+                  x1={edge.x1}
+                  y1={edge.y1}
+                  x2={edge.x2}
+                  y2={edge.y2}
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                />
+              ))}
+            </svg>
+            {run.steps.map((step) => {
+              const position = positionByKey.get(`${run.id}:${step.stepId}`);
+              if (!position) return null;
+              const assignee = getStepAssignee(step, agentMap);
+              const isEntry = step.dependencies.length === 0;
+              const isSelected = selectedStepId === step.stepId;
+              const tone = STEP_STATUS_TONE[step.status] ?? STEP_STATUS_TONE.pending;
+              const emphasis =
+                step.status === "failed"
+                  ? "border-red-500/70"
+                  : step.status === "running"
+                    ? "border-blue-500/70"
+                    : "border-border";
+              return (
+                <button
+                  key={`${run.id}-${step.stepId}`}
+                  type="button"
+                  onClick={() => setSelectedStepId(isSelected ? null : step.stepId)}
+                  aria-pressed={isSelected}
+                  title={step.name}
+                  className={cn(
+                    "absolute text-left rounded-md border bg-background px-2.5 py-2 shadow-sm transition-colors hover:bg-accent/40",
+                    emphasis,
+                    isSelected ? "ring-2 ring-foreground/40" : "",
+                  )}
+                  style={{
+                    left: position.col * GRAPH_COL_WIDTH,
+                    top: position.row * GRAPH_ROW_HEIGHT,
+                    width: GRAPH_NODE_WIDTH,
+                  }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", tone)} />
+                    <span className="truncate text-xs font-medium">{step.name}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                    <span className="uppercase tracking-wide">{formatStatusLabel(step.status)}</span>
+                    {isEntry ? <span className="rounded border border-border px-1">Entry</span> : null}
+                    <span className="truncate">{assignee.label}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                    {step.issue ? <span className="font-mono">{step.issue.identifier ?? step.issue.id}</span> : null}
+                    {step.workProducts.length > 0 ? (
+                      <span className="rounded border border-border px-1">wp·{step.workProducts.length}</span>
+                    ) : null}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {selectedStep ? (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Selected step</p>
+          <WorkflowStepRow missionId={missionId} step={selectedStep} steps={run.steps} agentMap={agentMap} />
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Select a step node to see full detail (issue, assignee, tools, knowledge bases, work products).
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------

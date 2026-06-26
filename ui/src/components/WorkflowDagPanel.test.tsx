@@ -65,10 +65,32 @@ vi.mock("@tanstack/react-query", () => ({
                 startedAt: "2026-04-15T09:10:00",
                 completedAt: "2026-04-15T10:05:00",
               },
+              {
+                stepId: "review",
+                name: "Review",
+                type: "agent",
+                agentId: "",
+                dependencies: ["draft"],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: "issue-2",
+                issue: {
+                  id: "issue-2",
+                  identifier: "CMP-102",
+                  title: "Review brief",
+                  status: "todo",
+                  assigneeAgentId: "agent-1",
+                },
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
             ],
             progress: {
-              totalSteps: 1,
-              pendingSteps: 0,
+              totalSteps: 2,
+              pendingSteps: 1,
               runningSteps: 1,
               completedSteps: 0,
               failedSteps: 0,
@@ -122,7 +144,7 @@ vi.mock("@/lib/router", () => ({
 
 describe("WorkflowDagPanel", () => {
   it("renders mission workflow step detail with linked issue context", () => {
-    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" defaultMode="text" />);
 
     expect(html).toContain("Mission Workflow");
     expect(html).toContain("Triggered by: system");
@@ -152,5 +174,33 @@ describe("WorkflowDagPanel", () => {
     );
     expect(html.indexOf("Prepare the mission brief")).toBeLessThan(html.indexOf("Work products · 1"));
     expect(html.indexOf("Work products · 1")).toBeLessThan(html.indexOf("CMP-101"));
+  });
+
+  it("renders graph mode by default with step nodes, entry marker, and view toggle", () => {
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
+
+    // Graph/Text segmented control; Graph is the default active view.
+    expect(html).toContain(">Graph<");
+    expect(html).toContain(">Text<");
+    expect(html).toContain('aria-pressed="true"');
+    // Run header still present in graph mode.
+    expect(html).toContain("Mission Workflow");
+    expect(html).toContain("Triggered by: system");
+    // Step node renders name + status label + entry marker (draft has no dependencies).
+    expect(html).toContain("Draft");
+    expect(html).toContain("Entry");
+    expect(html).toContain("running");
+    // No node selected in static render -> detail hint shown (selection needs a browser).
+    expect(html).toContain("Select a step node");
+  });
+
+  it("renders dependency edges between levelled step nodes in graph mode", () => {
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
+
+    // review depends on draft -> an SVG edge line is drawn between the two nodes.
+    expect(html).toContain("Review");
+    expect(html).toContain("<line");
+    // draft stays the entry step (column 0); review is the downstream node.
+    expect(html).toContain("Entry");
   });
 });
