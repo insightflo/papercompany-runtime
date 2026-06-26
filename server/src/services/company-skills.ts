@@ -1681,7 +1681,31 @@ export function companySkillService(db: Db) {
   }
 
   async function createLocalSkill(companyId: string, input: CompanySkillCreateRequest): Promise<CompanySkill> {
-    const slug = normalizeSkillSlug(input.slug ?? input.name) ?? "skill";
+    const sourceLocator = input.sourceLocator?.trim();
+    if (sourceLocator) {
+      await ensureSkillInventoryCurrent(companyId);
+      const imports = await readLocalSkillImports(companyId, sourceLocator);
+      const requestedRef = input.slug?.trim();
+      const requestedSlug = normalizeSkillSlug(input.slug ?? "");
+      const matching = requestedSlug
+        ? imports.filter((skill) => skill.slug === requestedSlug || skill.key === requestedRef)
+        : imports;
+      if (matching.length === 0) {
+        throw unprocessable(`Skill ${requestedSlug ?? input.slug} was not found in the provided local path.`);
+      }
+      if (matching.length > 1) {
+        throw unprocessable("Multiple skills were found in the provided local path. Provide a slug to register one skill, or use Add source to import all.");
+      }
+      const imported = await upsertImportedSkills(companyId, [matching[0]!]);
+      return imported[0]!;
+    }
+
+    const name = input.name?.trim();
+    if (!name) {
+      throw unprocessable("Name is required when no local path is provided.");
+    }
+
+    const slug = normalizeSkillSlug(input.slug ?? name) ?? "skill";
     const managedRoot = resolveManagedSkillsRoot(companyId);
     const skillDir = path.resolve(managedRoot, slug);
     const skillFilePath = path.resolve(skillDir, "SKILL.md");
@@ -1692,11 +1716,11 @@ export function companySkillService(db: Db) {
       ? input.markdown
       : [
         "---",
-        `name: ${input.name}`,
+        `name: ${name}`,
         ...(input.description?.trim() ? [`description: ${input.description.trim()}`] : []),
         "---",
         "",
-        `# ${input.name}`,
+        `# ${name}`,
         "",
         input.description?.trim() ? input.description.trim() : "Describe what this skill does.",
         "",
@@ -1708,7 +1732,7 @@ export function companySkillService(db: Db) {
     const imported = await upsertImportedSkills(companyId, [{
       key: `company/${companyId}/${slug}`,
       slug,
-      name: asString(parsed.frontmatter.name) ?? input.name,
+      name: asString(parsed.frontmatter.name) ?? name,
       description: asString(parsed.frontmatter.description) ?? input.description?.trim() ?? null,
       markdown,
       sourceType: "local_path",

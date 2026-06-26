@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { companySkillCreateSchema } from "@paperclipai/shared";
 import {
   discoverProjectWorkspaceSkillDirectories,
   findMissingLocalSkillIds,
@@ -28,6 +29,18 @@ async function writeSkillDir(skillDir: string, name: string) {
 }
 
 describe("company skill import source parsing", () => {
+  it("accepts local path create payloads without a manual name", () => {
+    expect(companySkillCreateSchema.safeParse({
+      sourceLocator: "/srv/papercompany/company-skills/report-for-beginners",
+    }).success).toBe(true);
+  });
+
+  it("requires a name when create payload has no local path", () => {
+    expect(companySkillCreateSchema.safeParse({
+      description: "No name or path",
+    }).success).toBe(false);
+  });
+
   it("parses a skills.sh command without executing shell input", () => {
     const parsed = parseSkillImportSourceInput(
       "npx skills add https://github.com/vercel-labs/skills --skill find-skills",

@@ -252,6 +252,8 @@ function NewSkillForm({
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
+  const [sourceLocator, setSourceLocator] = useState("");
+  const canCreate = name.trim().length > 0 || sourceLocator.trim().length > 0;
 
   return (
     <div className="border-b border-border px-4 py-4">
@@ -268,6 +270,12 @@ function NewSkillForm({
           placeholder="optional-shortname"
           className="h-9 rounded-none border-0 border-b border-border px-0 shadow-none focus-visible:ring-0"
         />
+        <Input
+          value={sourceLocator}
+          onChange={(event) => setSourceLocator(event.target.value)}
+          placeholder="/srv/papercompany/company-skills/my-skill"
+          className="h-9 rounded-none border-0 border-b border-border px-0 shadow-none focus-visible:ring-0"
+        />
         <Textarea
           value={description}
           onChange={(event) => setDescription(event.target.value)}
@@ -280,8 +288,13 @@ function NewSkillForm({
           </Button>
           <Button
             size="sm"
-            onClick={() => onCreate({ name, slug: slug || null, description: description || null })}
-            disabled={isPending || name.trim().length === 0}
+            onClick={() => onCreate({
+              name: name.trim() || null,
+              slug: slug.trim() || null,
+              description: description.trim() || null,
+              sourceLocator: sourceLocator.trim() || null,
+            })}
+            disabled={isPending || !canCreate}
           >
             {isPending ? "Creating..." : "Create skill"}
           </Button>

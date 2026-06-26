@@ -108,10 +108,19 @@ export const companySkillProjectScanResultSchema = z.object({
 });
 
 export const companySkillCreateSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().nullable().optional(),
   slug: z.string().min(1).nullable().optional(),
   description: z.string().nullable().optional(),
   markdown: z.string().nullable().optional(),
+  sourceLocator: z.string().nullable().optional(),
+}).superRefine((value, ctx) => {
+  if (value.sourceLocator?.trim()) return;
+  if (value.name?.trim()) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["name"],
+    message: "Name is required when no local path is provided.",
+  });
 });
 
 export const companySkillFileDetailSchema = z.object({

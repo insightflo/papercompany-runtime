@@ -130,10 +130,11 @@ export interface CompanySkillProjectScanResult {
 }
 
 export interface CompanySkillCreateRequest {
-  name: string;
+  name?: string | null;
   slug?: string | null;
   description?: string | null;
   markdown?: string | null;
+  sourceLocator?: string | null;
 }
 
 export interface CompanySkillFileDetail {
