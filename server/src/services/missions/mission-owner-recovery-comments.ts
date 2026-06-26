@@ -5,6 +5,7 @@ import {
   buildMissionOwnerDecisionFormat,
   buildMissionOwnerDecisionWakeupDispatchedMarker,
   buildStaleSourceIssueWakeupDispatchedMarker,
+  buildWorkProductReuseWakeDispatchedMarker,
   extractMissionOwnerDecisionFromText,
   type ExtractedMissionOwnerDecision,
 } from "./mission-owner-recovery-events.js";
@@ -99,6 +100,38 @@ export function buildStaleSourceIssueWakeupDispatchedComment(input: {
     `Terminal heartbeat run: ${input.failedRunId} status=${input.failedRunStatus}`,
     `Target agent: ${input.targetAgentId}`,
     `Idempotency key: ${input.idempotencyKey}`,
+  ].join("\n");
+}
+
+export function buildWorkProductReuseWakeDispatchedComment(input: {
+  missionId: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  artifactPath: string;
+  stalledRecoveryIssueId: string;
+  stalledRunId: string;
+  stalledRunStatus: string;
+  targetAgentId: string;
+  idempotencyKey: string;
+}) {
+  return [
+    "### Mission supervision workProduct-reuse wakeup dispatched",
+    buildWorkProductReuseWakeDispatchedMarker({
+      missionId: input.missionId,
+      sourceIssueId: input.sourceIssueId,
+      artifactPath: input.artifactPath,
+      idempotencyKey: input.idempotencyKey,
+    }),
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    `Blocked: graphWorkProductRequired producer has no registered workProduct, but the deliverable file already exists on disk.`,
+    `Recovery issue ${input.stalledRecoveryIssueId} is stalled (heartbeat run ${input.stalledRunId} status=${input.stalledRunStatus}); the registration gap is the only missing step.`,
+    `Deliverable file already written: ${input.artifactPath}`,
+    `Target agent: ${input.targetAgentId}`,
+    `Idempotency key: ${input.idempotencyKey}`,
+    "Required action:",
+    `- Reuse the existing deliverable file at \`${input.artifactPath}\` (do not regenerate it).`,
+    `- Finish your run output with exactly one standalone final line \`[ARTIFACT]: ${input.artifactPath}\` so the system registers the workProduct automatically.`,
+    "- Do not POST or curl a workProduct registration. The [ARTIFACT] line is the only registration method.",
   ].join("\n");
 }
 

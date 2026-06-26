@@ -7,23 +7,27 @@ import { heartbeatRuns, issueComments, issues, missions } from "@paperclipai/db"
 import type { Db } from "@paperclipai/db";
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { logger } from "../../middleware/logger.js";
 import { issueService } from "../issues.js";
+import { workProductService } from "../work-products.js";
+import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "../workflow/dag-engine.js";
 import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "../mission-owner-plan-decisions.js";
 import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
 import type { MissionServiceDeps } from "../missions.js";
-import { buildMissionOwnerDecisionWakeupIdempotencyKey, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker } from "./mission-owner-recovery-events.js";
+import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
-import { buildRetrySourceIssueComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
+import { buildRetrySourceIssueComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
-import { buildMissionSupervisionContext } from "./mission-supervision-context.js";
+import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue } from "./mission-supervision-context.js";
 
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
@@ -116,6 +120,135 @@ export function createSupervision({ db, deps, ownerActions }: {
         safeToAutoApply: true,
       });
     }
+
+    // [목적] graphWorkProductRequired producer가 blocked 되었으나 workProduct 등록이 안 됐고,
+    //   기대 산출물 파일은 디스크에 이미 존재하며, 최근 recovery(unblock) issue가 timed_out/failed
+    //   로 stalled 된 경우 — 댓글만 남기지 않고 producer를 깨워 "기존 파일 재사용 + [ARTIFACT]: <path>
+    //   마지막 줄로 등록 완료" 시그널을 보낸다. idempotency: marker + idempotency key.
+    // [수정시 영향] wake 폭주 방지가 생명. marker/key/findExistingWorkflowResumeWake( app.ts wiring ) 의존.
+    const findExistingArtifactFile = (stepOutputDir: string): string | null => {
+      for (const name of ["index.html", "report.md", "evidence.json"]) {
+        const candidate = path.join(stepOutputDir, name);
+        try {
+          if (existsSync(candidate)) return candidate;
+        } catch {
+          // 권한/디렉토리 부재 등 stat 실패 = 파일 없음 취급
+        }
+      }
+      return null;
+    };
+
+    const tryDispatchWorkProductReuseWake = async (input: {
+      sourceIssue: MissionSupervisionIssue;
+      sourceLabel: string;
+      sourceComments: string[];
+    }): Promise<void> => {
+      if (!deps.onWorkProductReuseWakeRequested) return;
+      const { sourceIssue, sourceLabel, sourceComments } = input;
+      const producerAgentId = sourceIssue.assigneeAgentId;
+      if (!producerAgentId) return;
+
+      // (1) graphWorkProductRequired producer step run for this issue
+      const stepRowsForIssue = stepRowsByIssueId.get(sourceIssue.id) ?? [];
+      const producerStepRow = stepRowsForIssue.find(
+        (row) => asRecord(row.stepRun.metadata)?.graphWorkProductRequired === true,
+      );
+      if (!producerStepRow) return;
+
+      // (2) no registered workProduct yet
+      const registeredWorkProducts = await workProductService(db).listForIssue(sourceIssue.id);
+      if (registeredWorkProducts.length > 0) return;
+
+      // (3) recent stalled recovery (mission_main_executor_unblock for this source with a
+      //     timed_out/failed heartbeat run) — owner가 시도했으나 run이 죽은 상태
+      let stalledRecoveryIssue: MissionSupervisionIssue | null = null;
+      let stalledRun: MissionSupervisionHeartbeatRun | null = null;
+      for (const candidateIssue of missionIssues) {
+        if (candidateIssue.originKind !== "mission_main_executor_unblock") continue;
+        if (candidateIssue.originId !== sourceIssue.id) continue;
+        const runs = (heartbeatRunsByIssueId.get(candidateIssue.id) ?? [])
+          .slice()
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        const failed = runs.find(
+          (run) => run.status === "timed_out" || run.status === "failed" || run.errorCode === "execution_stale_timeout",
+        );
+        if (failed) {
+          stalledRecoveryIssue = candidateIssue;
+          stalledRun = failed;
+          break;
+        }
+      }
+      if (!stalledRecoveryIssue || !stalledRun) return;
+
+      // (4) 기대 산출물 파일이 stepOutputDir 에 실제 존재 — 파일이 없으면 자동 success 금지,
+      //     기존 comment/replan 경로에 맡김
+      const workProductPaths = await resolveMissionWorkProductPaths(db, {
+        companyId: mission.companyId,
+        missionId: mission.id,
+        // projectId 생략(null) — 회사 workProductRoot 가 우선이라 stepOutputDir 경로는 동일.
+        // dag-engine 도 company root 우선으로 조립하므로 producer 가 쓴 경로와 일치.
+        projectId: null,
+        workflowRunId: producerStepRow.run.id,
+        stepId: producerStepRow.stepRun.stepId,
+      });
+      const stepOutputDir = workProductPaths?.stepOutputDir ?? null;
+      if (!stepOutputDir) return;
+      const artifactPath = findExistingArtifactFile(stepOutputDir);
+      if (!artifactPath) return;
+
+      // (5) idempotency — 같은 source+artifact 에 대한 이미 발송된 wake면 skip
+      const idempotencyKey = buildWorkProductReuseWakeIdempotencyKey({
+        missionId: mission.id,
+        sourceIssueId: sourceIssue.id,
+        artifactPath,
+      });
+      const markerInput = { missionId: mission.id, sourceIssueId: sourceIssue.id, artifactPath, idempotencyKey };
+      if (hasWorkProductReuseWakeDispatchedMarker(sourceComments, markerInput)) return;
+
+      // (6) 발송: 재사용 지시 댓글 + producer wake (app.ts 가 heartbeat.wakeup 으로 연결,
+      //     findExistingWorkflowResumeWake 로 중복 wake 방지)
+      try {
+        const wakeComment = await issueService(db).addComment(
+          sourceIssue.id,
+          buildWorkProductReuseWakeDispatchedComment({
+            missionId: mission.id,
+            sourceIssueId: sourceIssue.id,
+            sourceLabel,
+            artifactPath,
+            stalledRecoveryIssueId: stalledRecoveryIssue.id,
+            stalledRunId: stalledRun.id,
+            stalledRunStatus: stalledRun.status,
+            targetAgentId: producerAgentId,
+            idempotencyKey,
+          }),
+          { agentId: mission.ownerAgentId },
+        );
+        await deps.onWorkProductReuseWakeRequested({
+          mission,
+          sourceIssue,
+          targetAgentId: producerAgentId,
+          artifactPath,
+          stalledRecoveryIssueId: stalledRecoveryIssue.id,
+          stalledRun: stalledRun,
+          idempotencyKey,
+          wakeCommentId: wakeComment.id,
+        });
+        findings.push(`workproduct_reuse_wakeup_dispatched: ${sourceLabel} blocked graphWorkProductRequired producer has no registered workProduct, but deliverable ${artifactPath} exists and recovery ${stalledRecoveryIssue.id} stalled (run ${stalledRun.id} ${stalledRun.status}); dispatched reuse wake to agent ${producerAgentId}`);
+        appliedActions.push({
+          type: "workproduct_reuse_wakeup",
+          missionId: mission.id,
+          sourceIssueId: sourceIssue.id,
+          artifactPath,
+          stalledRecoveryIssueId: stalledRecoveryIssue.id,
+          stalledRunId: stalledRun.id,
+          resultStatus: sourceIssue.status,
+          idempotencyKey,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        findings.push(`workproduct_reuse_wakeup_failed: ${sourceLabel} reuse wake dispatch failed — ${message}`);
+      }
+    };
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
@@ -805,6 +938,10 @@ export function createSupervision({ db, deps, ownerActions }: {
           addRecommendation({ type: "request_replan", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs recovery/replan evidence`, safeToAutoApply: false });
           addRecommendation({ type: "escalate_blocked", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs owner escalation or impossible-completion report`, safeToAutoApply: false });
         }
+        // workProduct-reuse recovery wake (헬퍼 위 참조). 활성 heartbeat 없을 때만.
+        if (!missionHasActiveHeartbeat) {
+          await tryDispatchWorkProductReuseWake({ sourceIssue: issue, sourceLabel: label, sourceComments: comments });
+        }
       }
     }
 
@@ -1171,7 +1308,9 @@ export function createSupervision({ db, deps, ownerActions }: {
                 ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
                 : action.type === "materialize_plan_decision"
                   ? `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}`
-                : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
+                  : action.type === "workproduct_reuse_wakeup"
+                    ? `- ${action.type}: source=${action.sourceIssueId} artifact=${action.artifactPath} stalled_run=${action.stalledRunId} result=${action.resultStatus}`
+                    : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
           : ["- None"]),
         "",
         "Main executor action:",

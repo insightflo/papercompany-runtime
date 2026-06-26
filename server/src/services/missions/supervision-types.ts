@@ -75,6 +75,15 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
   wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus;
   idempotencyKey: string;
+} | {
+  type: "workproduct_reuse_wakeup";
+  missionId: string;
+  sourceIssueId: string;
+  artifactPath: string;
+  stalledRecoveryIssueId: string;
+  stalledRunId: string;
+  resultStatus: string;
+  idempotencyKey: string;
 };
 
 export type MissionOwnerSupervisionResult = {

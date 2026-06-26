@@ -354,6 +354,17 @@ export type MissionStaleSourceIssueWakeupRequestedHandler = (input: {
   wakeCommentId?: string;
 }) => Promise<unknown> | unknown;
 
+export type MissionWorkProductReuseWakeRequestedHandler = (input: {
+  mission: MissionRow;
+  sourceIssue: typeof issues.$inferSelect;
+  targetAgentId: string;
+  artifactPath: string;
+  stalledRecoveryIssueId: string;
+  stalledRun: MissionSupervisionHeartbeatRun;
+  idempotencyKey: string;
+  wakeCommentId?: string;
+}) => Promise<unknown> | unknown;
+
 export type MissionOwnerPlanningIssueCreatedHandler = (input: {
   mission: MissionRow;
   issue: typeof issues.$inferSelect;
@@ -365,6 +376,7 @@ export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
   onStaleSourceIssueWakeupRequested?: MissionStaleSourceIssueWakeupRequestedHandler;
+  onWorkProductReuseWakeRequested?: MissionWorkProductReuseWakeRequestedHandler;
   onOwnerPlanningIssueCreated?: MissionOwnerPlanningIssueCreatedHandler;
   /** Cancel a heartbeat run (kills the process + updates DB + releases issue lock). */
   cancelHeartbeatRun?: (runId: string) => Promise<unknown>;

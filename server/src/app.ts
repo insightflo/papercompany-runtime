@@ -694,6 +694,47 @@ export async function createApp(
         wakeCommentId,
       },
     }),
+    onWorkProductReuseWakeRequested: async ({ mission, sourceIssue, targetAgentId, artifactPath, stalledRecoveryIssueId, stalledRun, idempotencyKey, wakeCommentId }) => {
+      // 동일 source 에 이미 workflow resume wake 가 있으면 중복 wake 방지( status: workflow_already_dispatched ).
+      const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
+        companyId: mission.companyId,
+        agentId: targetAgentId,
+        issueId: sourceIssue.id,
+      });
+      if (existingWorkflowWake) {
+        return {
+          status: "workflow_already_dispatched",
+          workflowWakeupRequestId: existingWorkflowWake.id,
+          runId: existingWorkflowWake.runId,
+        };
+      }
+      return heartbeat.wakeup(targetAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_workproduct_reuse_wakeup",
+        idempotencyKey,
+        payload: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          mutation: "mission_workproduct_reuse_wakeup",
+          artifactPath,
+          stalledRecoveryIssueId,
+          stalledRunId: stalledRun.id,
+          wakeCommentId,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision-monitor",
+        contextSnapshot: {
+          issueId: sourceIssue.id,
+          missionId: mission.id,
+          source: "mission_workproduct_reuse_wakeup",
+          artifactPath,
+          stalledRecoveryIssueId,
+          stalledRunId: stalledRun.id,
+          wakeCommentId,
+        },
+      });
+    },
   });
   missionOwnerSupervisionMonitor.start();
   process.once("exit", () => missionOwnerSupervisionMonitor.stop());

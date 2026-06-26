@@ -194,3 +194,34 @@ export function hasStaleSourceIssueWakeupDispatchedMarker(comments: string[], in
   const marker = buildStaleSourceIssueWakeupDispatchedMarker(input);
   return comments.some((comment) => comment.includes(marker));
 }
+
+// workProduct-reuse recovery wake: a blocked graphWorkProductRequired producer with no
+// registered workProduct, a stalled recovery issue, and the expected artifact file already on
+// disk. Keyed by the artifact path so a later different file can re-arm, while the dispatched
+// marker prevents repeat dispatch for the same input.
+export function buildWorkProductReuseWakeIdempotencyKey(input: {
+  missionId: string;
+  sourceIssueId: string;
+  artifactPath: string;
+}): string {
+  return `mission-workproduct-reuse-wakeup:${input.missionId}:${input.sourceIssueId}:${input.artifactPath}`;
+}
+
+export function buildWorkProductReuseWakeDispatchedMarker(input: {
+  missionId: string;
+  sourceIssueId: string;
+  artifactPath: string;
+  idempotencyKey: string;
+}): string {
+  return `<!-- mission-workproduct-reuse-wakeup-dispatched:${JSON.stringify(input)} -->`;
+}
+
+export function hasWorkProductReuseWakeDispatchedMarker(comments: string[], input: {
+  missionId: string;
+  sourceIssueId: string;
+  artifactPath: string;
+  idempotencyKey: string;
+}): boolean {
+  const marker = buildWorkProductReuseWakeDispatchedMarker(input);
+  return comments.some((comment) => comment.includes(marker));
+}

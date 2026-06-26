@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -1697,6 +1700,106 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const sourceBody = sourceComments.map((comment) => comment.body).join("\n");
     expect(sourceBody).toContain("mission-owner-decision-applied");
     expect(sourceBody).toContain("mission-owner-decision-wakeup-dispatched");
+  });
+
+  it("dispatches a workProduct-reuse wake when a blocked producer has no workProduct, a stalled recovery, and the artifact file exists", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const producerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const stepId = "build-tech-scout-html-report";
+    const timedOutRecoveryRunId = randomUUID();
+    const onWorkProductReuseWakeRequested = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-reuse", runId: "run-reuse" });
+
+    const workProductRoot = mkdtempSync(path.join(os.tmpdir(), "wf-reuse-"));
+    await db.insert(companies).values({ id: companyId, name: "WorkProduct Reuse Company", issuePrefix: `WR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false, workProductRoot });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: producerAgentId, companyId, name: "Producer Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "WorkProduct reuse mission", status: "active" });
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "Producer Workflow", stepsJson: [{ id: stepId, name: "Build report", dependencies: [], graphWorkProductRequired: true }] });
+    const svc = missionService(db, { onWorkProductReuseWakeRequested });
+
+    const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: producerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked producer (no workProduct)" });
+    await db.insert(workflowRuns).values({ id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system", status: "running" });
+    await db.insert(workflowStepRuns).values({ id: randomUUID(), workflowRunId, stepId, issueId: sourceIssue.id, status: "completed", metadata: { graphWorkProductRequired: true } });
+
+    // recovery (unblock) issue for the source whose heartbeat run timed out (RES-350 scenario)
+    const recoveryIssue = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "todo", title: "[Unblock] blocked producer" });
+    await db.insert(heartbeatRuns).values({ id: timedOutRecoveryRunId, companyId, agentId: ownerAgentId, issueId: recoveryIssue.id, status: "timed_out", startedAt: new Date("2026-06-25T00:00:00.000Z"), finishedAt: new Date("2026-06-25T00:30:00.000Z"), errorCode: "execution_stale_timeout" });
+
+    // expected artifact file already exists under the step output dir (registration is the only gap)
+    const stepOutputDir = path.join(workProductRoot, "missions", missionId, "runs", workflowRunId, "steps", stepId);
+    const artifactPath = path.join(stepOutputDir, "index.html");
+    mkdirSync(stepOutputDir, { recursive: true });
+    writeFileSync(artifactPath, "<html>report</html>");
+    // (no issueWorkProducts inserted for the source -> listForIssue is empty)
+
+    const result = await svc.runActiveMissionOwnerSupervision({ companyId, staleAfterMinutes: 1, now: new Date("2026-06-25T01:00:00.000Z") });
+    const idempotencyKey = `mission-workproduct-reuse-wakeup:${missionId}:${sourceIssue.id}:${artifactPath}`;
+
+    expect(result.missionIds).toContain(missionId);
+    expect(onWorkProductReuseWakeRequested).toHaveBeenCalledTimes(1);
+    expect(onWorkProductReuseWakeRequested).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ id: missionId }),
+      sourceIssue: expect.objectContaining({ id: sourceIssue.id }),
+      targetAgentId: producerAgentId,
+      artifactPath,
+      stalledRecoveryIssueId: recoveryIssue.id,
+      idempotencyKey,
+    }));
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workproduct_reuse_wakeup", sourceIssueId: sourceIssue.id, artifactPath, idempotencyKey }),
+    ]));
+    const sourceCommentRows = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
+    const sourceBody = sourceCommentRows.map((comment) => comment.body).join("\n");
+    expect(sourceBody).toContain("workProduct-reuse wakeup dispatched");
+    expect(sourceBody).toContain(`[ARTIFACT]: ${artifactPath}`);
+    expect(sourceBody).toContain(idempotencyKey);
+
+    // idempotent: a second sweep must NOT dispatch another reuse wake
+    await svc.runActiveMissionOwnerSupervision({ companyId, staleAfterMinutes: 1, now: new Date("2026-06-25T01:05:00.000Z") });
+    expect(onWorkProductReuseWakeRequested).toHaveBeenCalledTimes(1);
+
+    rmSync(workProductRoot, { recursive: true, force: true });
+  });
+
+  it("does not dispatch a workProduct-reuse wake when the artifact file is absent (no fake success)", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const producerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const stepId = "build-tech-scout-html-report";
+    const timedOutRecoveryRunId = randomUUID();
+    const onWorkProductReuseWakeRequested = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-reuse-2", runId: "run-reuse-2" });
+
+    const workProductRoot = mkdtempSync(path.join(os.tmpdir(), "wf-reuse-noop-"));
+    await db.insert(companies).values({ id: companyId, name: "WorkProduct Reuse Noop Company", issuePrefix: `WN${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false, workProductRoot });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: producerAgentId, companyId, name: "Producer Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "WorkProduct reuse noop mission", status: "active" });
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "Producer Workflow Noop", stepsJson: [{ id: stepId, name: "Build report", dependencies: [], graphWorkProductRequired: true }] });
+    const svc = missionService(db, { onWorkProductReuseWakeRequested });
+    const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: producerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked producer noop (no workProduct, no file)" });
+    await db.insert(workflowRuns).values({ id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system", status: "running" });
+    await db.insert(workflowStepRuns).values({ id: randomUUID(), workflowRunId, stepId, issueId: sourceIssue.id, status: "completed", metadata: { graphWorkProductRequired: true } });
+    const recoveryIssue = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "todo", title: "[Unblock] blocked producer noop" });
+    await db.insert(heartbeatRuns).values({ id: timedOutRecoveryRunId, companyId, agentId: ownerAgentId, issueId: recoveryIssue.id, status: "timed_out", startedAt: new Date("2026-06-25T00:00:00.000Z"), finishedAt: new Date("2026-06-25T00:30:00.000Z"), errorCode: "execution_stale_timeout" });
+    // intentionally DO NOT create the artifact file -> wake must not fire
+
+    const result = await svc.runActiveMissionOwnerSupervision({ companyId, staleAfterMinutes: 1, now: new Date("2026-06-25T01:00:00.000Z") });
+
+    expect(onWorkProductReuseWakeRequested).not.toHaveBeenCalled();
+    expect((result.missions[0]?.appliedActions ?? []).filter((action) => action.type === "workproduct_reuse_wakeup")).toEqual([]);
+
+    rmSync(workProductRoot, { recursive: true, force: true });
   });
 
   it("dispatches a retry_source_issue wakeup when an earlier apply marker exists without a dispatch marker", async () => {

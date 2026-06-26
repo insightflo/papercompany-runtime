@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionStaleSourceIssueWakeupRequestedHandler } from "./missions.js";
+import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MINUTES = 30;
@@ -13,6 +13,7 @@ export interface MissionOwnerSupervisionMonitorOptions {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
   onStaleSourceIssueWakeupRequested?: MissionStaleSourceIssueWakeupRequestedHandler;
+  onWorkProductReuseWakeRequested?: MissionWorkProductReuseWakeRequestedHandler;
 }
 
 export function createMissionOwnerSupervisionMonitor(
@@ -34,6 +35,7 @@ export function createMissionOwnerSupervisionMonitor(
         onOwnerActionCreated: options.onOwnerActionCreated,
         onOwnerDecisionRetrySourceIssueApplied: options.onOwnerDecisionRetrySourceIssueApplied,
         onStaleSourceIssueWakeupRequested: options.onStaleSourceIssueWakeupRequested,
+        onWorkProductReuseWakeRequested: options.onWorkProductReuseWakeRequested,
       }).runActiveMissionOwnerSupervision({
         staleAfterMinutes,
         applySafeActions,
