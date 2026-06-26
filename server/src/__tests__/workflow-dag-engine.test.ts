@@ -1357,6 +1357,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         "",
         "- Hallucinated label remains in the PNG.",
         "- Coverage is incomplete; do not deliver to Telegram.",
+        "",
+        "REQUEST_CHANGES: Hallucinated label and incomplete coverage remain.",
       ].join("\n"),
     });
     await db.insert(workflowStepRuns).values([
@@ -1529,7 +1531,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       issueId: validatorIssueId,
       authorAgentId: validatorAgentId,
       createdAt: new Date("2026-06-18T05:37:09.000Z"),
-      body: "Decision: REQUEST_CHANGES\nThree source-bound fidelity fixes are required on the synthesis issue.",
+      body: [
+        "Decision context: REQUEST_CHANGES",
+        "Three source-bound fidelity fixes are required on the synthesis issue.",
+        "",
+        "REQUEST_CHANGES: Three source-bound fidelity fixes are required on the synthesis issue.",
+      ].join("\n"),
     });
     await db.insert(workflowStepRuns).values([
       {
@@ -5970,7 +5977,18 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
   async function addQaVerdictComment(qaIssueId: string, companyId: string, qaAgentId: string, verdict: "REQUEST_CHANGES" | "PASS", at: string) {
     await db.insert(issueComments).values({
-      companyId, issueId: qaIssueId, authorAgentId: qaAgentId, createdAt: new Date(at), body: `Decision: ${verdict}\nValidation review complete.`,
+      companyId,
+      issueId: qaIssueId,
+      authorAgentId: qaAgentId,
+      createdAt: new Date(at),
+      body: [
+        `Prior state marker for review context: Decision: ${verdict}`,
+        "Validation review complete.",
+        "",
+        verdict === "REQUEST_CHANGES"
+          ? "REQUEST_CHANGES: Fix the validation gaps before delivery."
+          : "PASS",
+      ].join("\n"),
     });
   }
 
@@ -6008,6 +6026,31 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     // QA 는 이 sync 에서 리셋하지 않는다(producer 가 아직 재완료 전이라 validation-recheck 도 미발화).
     expect(qa.status).toBe("failed");
     expect(qa.iterationIndex).toBe(0);
+  });
+
+  it("[P4 control-flow loop] ignores non-terminal REQUEST_CHANGES mentions in QA comments", async () => {
+    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: qaIssueId,
+      authorAgentId: qaAgentId,
+      createdAt: new Date("2026-06-18T07:10:00.000Z"),
+      body: [
+        "Previous reviewer wrote REQUEST_CHANGES: missing glossary.",
+        "This comment is only explaining prior state and does not provide a final verdict.",
+        "Validation review still in progress.",
+      ].join("\n"),
+    });
+
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(rows.find((row) => row.stepId === "produce")!).toMatchObject({
+      status: "completed",
+      iterationIndex: 0,
+    });
+    const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
+    expect(producerComments.map((comment) => comment.body).join("\n")).not.toContain("Workflow QA rework request");
   });
 
   it("[P4 control-flow loop] carries QA heartbeat feedback into the producer rework issue before QA comment commit", async () => {

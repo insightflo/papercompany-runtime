@@ -34,6 +34,7 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { readExplicitValidationVerdict } from "./validation-verdict.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
@@ -2106,31 +2107,6 @@ function stringifyRunResultJson(value: unknown): string {
   }
 }
 
-function readExplicitValidationVerdict(value: string | null | undefined): "request_changes" | "pass" | null {
-  if (!value) return null;
-  const text = value.trim();
-  if (!text) return null;
-  const compact = text
-    .replace(/[`*_#]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (/^REQUEST[_\s-]?CHANGES$/iu.test(compact)) return "request_changes";
-  if (/^PASS$/iu.test(compact)) return "pass";
-
-  const explicitPatterns = [
-    /^(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
-    /\b(?:verdict|decision|outcome|status)\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
-    /\bvalidation\s+complete\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
-  ];
-  for (const pattern of explicitPatterns) {
-    const match = pattern.exec(compact);
-    const label = match?.[1];
-    if (!label) continue;
-    return /^PASS$/iu.test(label) ? "pass" : "request_changes";
-  }
-  return null;
-}
-
 function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): RequestChangesVerdict | null {
   const result = parseObject(run.resultJson);
   const candidates = [
@@ -2143,7 +2119,7 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
   ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
   let requestChangesCandidate: string | null = null;
   for (const candidate of candidates) {
-    const verdict = readExplicitValidationVerdict(candidate);
+    const verdict = readExplicitValidationVerdict(candidate, { allowLeadingVerdict: true });
     if (verdict === "pass") return null;
     if (verdict === "request_changes") {
       requestChangesCandidate = candidate;

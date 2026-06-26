@@ -31,6 +31,7 @@ import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
+import { readExplicitValidationVerdict } from "../validation-verdict.js";
 
 /**
  * Workflow step definition.
@@ -615,29 +616,6 @@ function isValidationGateCandidate(input: {
   );
 }
 
-function readExplicitValidationVerdict(value: string): "pass" | "request_changes" | null {
-  const compact = value
-    .replace(/[`*_#]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!compact) return null;
-  if (/^PASS\s+or\s+REQUEST[_\s-]?CHANGES\b/iu.test(compact)) return null;
-
-  const explicitPatterns = [
-    /^(REQUEST[_\s-]?CHANGES|PASS)(?:\b|[\s:：—–-])/iu,
-    /\b(?:verdict|decision|outcome|status|QA\s+verdict)\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
-    /\bvalidation\s+complete\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES|PASS)\b/iu,
-    /\bmission\s+validation\s+gate\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES)\b/iu,
-  ];
-  for (const pattern of explicitPatterns) {
-    const match = pattern.exec(compact);
-    const label = match?.[1];
-    if (!label) continue;
-    return /^PASS$/iu.test(label) ? "pass" : "request_changes";
-  }
-  return null;
-}
-
 async function writeQaRubricMarkdown(input: {
   filePath: string;
   run: typeof workflowRuns.$inferSelect;
@@ -839,7 +817,7 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
 
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
-    const verdict = readExplicitValidationVerdict(candidate);
+    const verdict = readExplicitValidationVerdict(candidate, { allowLeadingVerdict: true });
     if (verdict) return verdict;
   }
   return null;
