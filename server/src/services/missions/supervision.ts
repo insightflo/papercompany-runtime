@@ -252,6 +252,7 @@ export function createSupervision({ db, deps, ownerActions }: {
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
+      if (issue.originKind === "mission_plan_qa") continue;
       const ageMs = now.getTime() - issue.createdAt.getTime();
       const label = issue.identifier ?? issue.id;
       const runCount = heartbeatCountByIssueId.get(issue.id) ?? 0;

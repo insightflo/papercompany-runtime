@@ -1941,11 +1941,25 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
     return db.select().from(activityLog).where(eq(activityLog.action, "mission.owner_plan.recorded"));
   }
 
+  async function passPlanQaAndNudgePlanningIssue(input: { companyId: string; missionId: string; planningIssueId: string; ownerAgentId: string }) {
+    const plans = await activePlans(input.missionId);
+    const planQa = (plans[0]?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+    expect(planQa).toMatchObject({ issueId: expect.any(String), status: "pending" });
+    await db.insert(issueComments).values({
+      companyId: input.companyId,
+      issueId: planQa!.issueId!,
+      authorUserId: "board-user-test",
+      body: "Plan QA passed.\nPASS",
+    });
+    await svc.addComment(input.planningIssueId, "Re-check PLAN-QA gate after review.", { agentId: input.ownerAgentId });
+  }
+
   it("records an authorized owner planning decision comment as the active mission plan and audit activity", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
     const decision = validDecision(missionId, workflowDefinitionId);
 
     const comment = await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+    await passPlanQaAndNudgePlanningIssue({ companyId, missionId, planningIssueId, ownerAgentId });
 
     expect(comment).toEqual(expect.objectContaining({ issueId: planningIssueId, authorAgentId: ownerAgentId }));
     const plans = await activePlans(missionId);
@@ -2010,10 +2024,11 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
   });
 
   it("does not duplicate a revision or activity when the same planning decision is posted again", async () => {
-    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+    const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
     const decision = validDecision(missionId, workflowDefinitionId);
 
     await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+    await passPlanQaAndNudgePlanningIssue({ companyId, missionId, planningIssueId, ownerAgentId });
     await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
 
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
@@ -2022,10 +2037,11 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
   });
 
   it("does not duplicate a revision or activity when a later planning comment repeats the same latest decision", async () => {
-    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+    const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
     const decision = validDecision(missionId, workflowDefinitionId);
 
     await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+    await passPlanQaAndNudgePlanningIssue({ companyId, missionId, planningIssueId, ownerAgentId });
     await svc.addComment(planningIssueId, "Acknowledged; proceed with that plan.", { agentId: ownerAgentId });
 
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));

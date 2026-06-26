@@ -2655,7 +2655,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId: opts.companyId, missionId: opts.missionId });
       const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
       if (planQa?.issueId) {
-        await db.insert(issueComments).values({ companyId: opts.companyId, issueId: planQa.issueId, body: "Plan is sound.\nPASS" });
+        await db.insert(issueComments).values({ companyId: opts.companyId, issueId: planQa.issueId, authorUserId: "board-user-test", body: "Plan is sound.\nPASS" });
       }
       result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: opts.companyId, missionId: opts.missionId });
     }
@@ -2692,6 +2692,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { verdict?: string } | undefined;
     expect(planQa?.verdict).toBe("pass");
+    const [planQaIssue] = await db.select({ status: issues.status }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(planQaIssue.status).toBe("done");
   });
 
   it("plan-QA gate: REQUEST_CHANGES blocks materialization and reopens the PLAN issue to actionable", async () => {
@@ -2706,6 +2708,72 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
     const [planIssue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, planningIssueId));
     expect(planIssue.status).toBe("in_progress");
+    const [planQaIssue] = await db.select({ status: issues.status }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(planQaIssue.status).toBe("done");
+  });
+
+  it("plan-QA gate: the newest authorized explicit verdict wins by createdAt even when an older PASS is inserted later", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, planningIssueId));
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    expect(planQa?.issueId).toBeDefined();
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQa!.issueId!,
+      authorAgentId: qaAgentId,
+      body: "Newer review found a blocking gap.\nREQUEST_CHANGES: add publish smoke QA",
+      createdAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQa!.issueId!,
+      authorAgentId: qaAgentId,
+      body: "Older optimistic review.\nPASS",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_changes_requested");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+    const [planIssue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, planningIssueId));
+    expect(planIssue.status).toBe("in_progress");
+  });
+
+  it("plan-QA gate: ignores PASS verdicts from non-QA agents", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    expect(planQa?.issueId).toBeDefined();
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQa!.issueId!,
+      authorAgentId: ownerAgentId,
+      body: "Mission owner tries to approve their own plan.\nPASS",
+      createdAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+
+    const unauthorizedPass = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(unauthorizedPass.status).toBe("plan_qa_pending");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQa!.issueId!,
+      authorAgentId: qaAgentId,
+      body: "QA approves after review.\nPASS",
+      createdAt: new Date("2026-01-03T00:00:00.000Z"),
+    });
+
+    const qaPass = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(qaPass.status).toBe("recorded");
+    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
   });
 
   it("plan-QA gate: reprocessing the same decision hash does not duplicate the [PLAN-QA] issue and stays deferred", async () => {

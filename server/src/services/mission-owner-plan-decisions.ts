@@ -716,6 +716,7 @@ const CROSS_COMPANY_MISSION_SOURCE_TYPES = new Set([
   "external_company_mission",
 ]);
 const RUNNABLE_PLAN_ASSIGNEE_STATUSES = new Set(["active", "idle", "running"]);
+const PLAN_QA_VERDICT_AGENT_ROLES = new Set(["qa", "reviewer", "validator"]);
 const PLUGIN_WORKFLOW_ENTITY_SOURCE_TYPES = new Map<string, string[]>([
   ["plugin_workflow_definition", ["workflow-definition"]],
   ["plugin_workflow_definition_step", ["workflow-definition", "workflow-step-definition"]],
@@ -972,10 +973,11 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       }
       // (b) 같은 decisionHash 의 PLAN-QA 게이트 진행중 → verdict 로 분기
       if (activePlanQa && activePlanQa.decisionHash === decisionHash && activePlanQa.issueId) {
-        const verdict = await readPlanQaVerdict({ db, planQaIssueId: activePlanQa.issueId });
+        const verdict = await readPlanQaVerdict({ db, companyId, planQaIssueId: activePlanQa.issueId });
         if (verdict === "pass") {
           await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
           await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
+          await closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId });
           await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "pass", verdict: "pass", reviewedAt: new Date().toISOString() } });
           await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, revision: activePlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}`, planQaIssueId: activePlanQa.issueId } });
           const refreshedPlan = await service.getActiveMissionPlan({ companyId, missionId });
@@ -984,6 +986,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         }
         if (verdict === "request_changes") {
           await reopenPlanningIssueIfTerminal({ db, planningIssueId: collected.planningIssueId });
+          await closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId });
           await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "request_changes", verdict: "request_changes", reviewedAt: new Date().toISOString() } });
           return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
         }
@@ -1856,13 +1859,63 @@ async function ensurePlanQaReviewIssue(input: {
   return { id: created.id };
 }
 
-async function readPlanQaVerdict(input: { db: Db; planQaIssueId: string }): Promise<ValidationVerdict | null> {
+async function readPlanQaVerdict(input: { db: Db; companyId: string; planQaIssueId: string }): Promise<ValidationVerdict | null> {
+  const [planQaIssue] = await input.db
+    .select({ assigneeAgentId: issues.assigneeAgentId })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, input.companyId),
+      eq(issues.id, input.planQaIssueId),
+      eq(issues.originKind, "mission_plan_qa"),
+      isNull(issues.hiddenAt),
+    ))
+    .limit(1);
+  if (!planQaIssue) return null;
+
   const rows = await input.db
-    .select({ body: issueComments.body })
+    .select({
+      authorAgentId: issueComments.authorAgentId,
+      authorUserId: issueComments.authorUserId,
+      body: issueComments.body,
+    })
     .from(issueComments)
-    .where(eq(issueComments.issueId, input.planQaIssueId));
-  const body = rows.map((row) => row.body ?? "").join("\n\n");
-  return readExplicitValidationVerdict(body);
+    .where(and(eq(issueComments.companyId, input.companyId), eq(issueComments.issueId, input.planQaIssueId)))
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
+
+  const verdictRows = rows
+    .map((row) => ({ row, verdict: readExplicitValidationVerdict(row.body) }))
+    .filter((entry): entry is { row: typeof rows[number]; verdict: ValidationVerdict } => entry.verdict !== null);
+  const authorAgentIds = Array.from(new Set(verdictRows.map((entry) => entry.row.authorAgentId).filter((id): id is string => typeof id === "string" && id.length > 0)));
+  const agentRows = authorAgentIds.length > 0
+    ? await input.db
+      .select({ id: agents.id, role: agents.role, status: agents.status })
+      .from(agents)
+      .where(and(eq(agents.companyId, input.companyId), inArray(agents.id, authorAgentIds)))
+    : [];
+  const agentById = new Map(agentRows.map((row) => [row.id, row]));
+
+  for (const { row, verdict } of verdictRows) {
+    if (typeof row.authorUserId === "string" && row.authorUserId.trim().length > 0) {
+      return verdict;
+    }
+
+    const authorAgentId = row.authorAgentId;
+    if (!authorAgentId) continue;
+    if (planQaIssue.assigneeAgentId && authorAgentId === planQaIssue.assigneeAgentId) {
+      return verdict;
+    }
+
+    const authorAgent = agentById.get(authorAgentId);
+    if (
+      authorAgent
+      && PLAN_QA_VERDICT_AGENT_ROLES.has(authorAgent.role)
+      && RUNNABLE_PLAN_ASSIGNEE_STATUSES.has(authorAgent.status)
+    ) {
+      return verdict;
+    }
+  }
+
+  return null;
 }
 
 async function updatePlanQaRef(input: {
@@ -1888,6 +1941,13 @@ async function updatePlanQaRef(input: {
     .update(missionPlanArtifacts)
     .set({ refs, updatedAt: new Date() })
     .where(eq(missionPlanArtifacts.id, activePlan.id));
+}
+
+async function closePlanQaIssue(input: { db: Db; planQaIssueId: string }): Promise<void> {
+  await input.db
+    .update(issues)
+    .set({ status: "done", updatedAt: new Date() })
+    .where(and(eq(issues.id, input.planQaIssueId), eq(issues.originKind, "mission_plan_qa")));
 }
 
 async function reopenPlanningIssueIfTerminal(input: { db: Db; planningIssueId: string | null }): Promise<void> {

@@ -52,6 +52,7 @@ vi.mock("../adapters/index.js", () => ({
 }));
 
 import { classifyHeartbeatRunFailure, heartbeatService } from "../services/heartbeat.ts";
+import { recordLatestAuthorizedMissionOwnerPlanDecision } from "../services/mission-owner-plan-decisions.ts";
 import { secretService } from "../services/secrets.ts";
 
 type EmbeddedPostgresInstance = {
@@ -160,6 +161,57 @@ async function waitForActiveMissionPlanArtifact(
   }
   const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
   throw new Error(`Timed out waiting for active mission plan ${missionId}; count=${plans.length}`);
+}
+
+async function passPlanQaAndMaterialize(
+  db: ReturnType<typeof createDb>,
+  input: { companyId: string; missionId: string },
+) {
+  let activePlan = await waitForActivePlanWithPlanQa(db, input.missionId, 1_000);
+  if (!activePlan) {
+    const pendingResult = await recordLatestAuthorizedMissionOwnerPlanDecision({
+      db,
+      companyId: input.companyId,
+      missionId: input.missionId,
+      requestedBy: { actorType: "system", actorId: "test-suite" },
+    });
+    expect(pendingResult.status).toBe("plan_qa_pending");
+    activePlan = await waitForActivePlanWithPlanQa(db, input.missionId, 1_000);
+  }
+  const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+  expect(planQa).toMatchObject({ issueId: expect.any(String), status: "pending" });
+  await db.insert(issueComments).values({
+    companyId: input.companyId,
+    issueId: planQa!.issueId!,
+    authorUserId: "board-user-test",
+    body: "Plan QA passed.\nPASS",
+  });
+  const result = await recordLatestAuthorizedMissionOwnerPlanDecision({
+    db,
+    companyId: input.companyId,
+    missionId: input.missionId,
+    requestedBy: { actorType: "system", actorId: "test-suite" },
+  });
+  expect(result.status).toBe("recorded");
+}
+
+async function waitForActivePlanWithPlanQa(
+  db: ReturnType<typeof createDb>,
+  missionId: string,
+  timeoutMs: number,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [activePlan] = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId))
+      .then((plans) => plans.filter((plan) => plan.status === "active"));
+    const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    if (planQa?.issueId) return activePlan;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return null;
 }
 
 async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
@@ -1628,6 +1680,7 @@ describe("heartbeat context budget preflight", () => {
       planningIssueId,
       (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
+    await passPlanQaAndMaterialize(db, { companyId, missionId });
 
     const plan = await waitForActiveMissionPlanArtifact(
       db,
@@ -1749,6 +1802,7 @@ describe("heartbeat context budget preflight", () => {
     const commentBodies = comments.map((comment) => comment.body).join("\n\n");
     expect(commentBodies).toContain("### Captured PLAN decision output");
     expect(commentBodies).toContain("### Mission owner plan decision");
+    await passPlanQaAndMaterialize(db, { companyId, missionId });
 
     const plan = await waitForActiveMissionPlanArtifact(
       db,

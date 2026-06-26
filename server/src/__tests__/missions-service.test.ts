@@ -1391,6 +1391,31 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       expect.stringContaining("plan_decision_not_materialized"),
     ]));
     expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "materialize_plan_decision", missionId, resultStatus: "plan_qa_pending" }),
+    ]));
+    expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, missionId))).toHaveLength(0);
+
+    const [activePlan] = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId))
+      .then((plans) => plans.filter((plan) => plan.status === "active"));
+    const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+    expect(planQa).toMatchObject({ issueId: expect.any(String), status: "pending" });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQa!.issueId!,
+      authorUserId: "board-user-test",
+      body: "Plan QA passed.\nPASS",
+    });
+
+    const approved = await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-02T00:12:00.000Z"),
+      applySafeActions: true,
+    });
+    expect(approved.appliedActions).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "materialize_plan_decision", missionId, resultStatus: "recorded" }),
     ]));
     const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
