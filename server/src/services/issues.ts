@@ -36,7 +36,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
-import { recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
+import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
@@ -2077,7 +2077,7 @@ export function issueService(db: Db) {
           return comment ? redactIssueComment(comment, censorUsernameInLogs) : null;
         })),
 
-    addComment: async (issueId: string, body: string, actor: { agentId?: string; userId?: string }) => {
+    addComment: async (issueId: string, body: string, actor: { agentId?: string; userId?: string; enqueuePlanQaWakeup?: PlanQaWakeupHandler }) => {
       const issue = await db
         .select({
           id: issues.id,
@@ -2124,6 +2124,7 @@ export function issueService(db: Db) {
             companyId: issue.companyId,
             missionId: issue.missionId,
             requestedBy,
+            enqueuePlanQaWakeup: actor.enqueuePlanQaWakeup,
           });
         } catch (err) {
           logger.warn(

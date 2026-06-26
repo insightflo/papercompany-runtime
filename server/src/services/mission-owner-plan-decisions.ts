@@ -731,7 +731,17 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionInput = {
   companyId: string;
   missionId: string;
   requestedBy?: MaterializerActor;
+  enqueuePlanQaWakeup?: PlanQaWakeupHandler;
 };
+
+export type PlanQaWakeupHandler = (input: {
+  companyId: string;
+  agentId: string;
+  issueId: string;
+  issueStatus: string;
+  missionId: string;
+  planningIssueId: string | null;
+}) => Promise<unknown> | unknown;
 
 export type RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic = {
   code: string;
@@ -787,6 +797,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   companyId,
   missionId,
   requestedBy,
+  enqueuePlanQaWakeup,
 }: RecordLatestAuthorizedMissionOwnerPlanDecisionInput): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionResult> {
   const collected = await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
   if (!collected.ok) {
@@ -991,10 +1002,18 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
         }
         // pending / verdict 없음 → 대기 (어떤 경로에서도 materialize 금지)
+        await ensurePlanQaWakeupForIssue({
+          db,
+          enqueuePlanQaWakeup,
+          companyId,
+          planQaIssueId: activePlanQa.issueId,
+          missionId,
+          planningIssueId: collected.planningIssueId,
+        });
         return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
       }
       // (c) 같은 hash 인데 PLAN-QA 게이트 미생성(레거시 plan 진입) → 게이트 생성 후 대기
-      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft });
+      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
       await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { issueId: legacyPlanQaIssue.id, status: "pending", decisionHash } });
       return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: legacyPlanQaIssue.id, diagnostics: [] };
     }
@@ -1002,7 +1021,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   }
 
   // ── 새 decision (decisionHash 불일치): revision 생성 + PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연 ──
-  const planQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft });
+  const planQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
   const refs = mergeMissionPlanRefs(activePlan?.refs, {
     ...draftResult.draft.refs,
     ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
@@ -1827,10 +1846,11 @@ async function ensurePlanQaReviewIssue(input: {
   decisionHash: string;
   missionGoal?: string | null;
   draft: PlanRevisionDraft;
+  enqueuePlanQaWakeup?: PlanQaWakeupHandler;
 }): Promise<{ id: string }> {
   const originId = `plan-qa:${input.missionId}:${input.decisionHash}`;
   const existing = await input.db
-    .select({ id: issues.id })
+    .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
     .from(issues)
     .where(and(
       eq(issues.companyId, input.companyId),
@@ -1839,7 +1859,18 @@ async function ensurePlanQaReviewIssue(input: {
       isNull(issues.hiddenAt),
     ))
     .limit(1);
-  if (existing[0]) return existing[0];
+  if (existing[0]) {
+    await ensurePlanQaWakeup({
+      enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
+      agentId: existing[0].assigneeAgentId,
+      companyId: input.companyId,
+      issueId: existing[0].id,
+      issueStatus: existing[0].status,
+      missionId: input.missionId,
+      planningIssueId: input.planningIssueId,
+    });
+    return { id: existing[0].id };
+  }
   const assigneeAgentId = await findMissionQaAssignee(input.db, input.companyId);
   const description = buildPlanQaReviewDescription({ missionGoal: input.missionGoal, draft: input.draft });
   // reviewer 가 없어도 issue 는 만들고 materialize 는 금지. 할당 누락을 description 에 명시.
@@ -1856,7 +1887,70 @@ async function ensurePlanQaReviewIssue(input: {
     priority: "high",
     ...(assigneeAgentId ? { assigneeAgentId } : {}),
   });
+  await ensurePlanQaWakeup({
+    enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
+    agentId: created.assigneeAgentId,
+    companyId: input.companyId,
+    issueId: created.id,
+    issueStatus: created.status,
+    missionId: input.missionId,
+    planningIssueId: input.planningIssueId,
+  });
   return { id: created.id };
+}
+
+async function ensurePlanQaWakeup(input: {
+  enqueuePlanQaWakeup?: PlanQaWakeupHandler;
+  companyId: string;
+  agentId: string | null;
+  issueId: string;
+  issueStatus: string;
+  missionId: string;
+  planningIssueId: string | null;
+}): Promise<void> {
+  if (!input.enqueuePlanQaWakeup) return;
+  if (!input.agentId) return;
+  if (input.issueStatus === "backlog" || input.issueStatus === "blocked" || input.issueStatus === "done" || input.issueStatus === "cancelled") return;
+
+  await input.enqueuePlanQaWakeup({
+    companyId: input.companyId,
+    agentId: input.agentId,
+    issueId: input.issueId,
+    issueStatus: input.issueStatus,
+    missionId: input.missionId,
+    planningIssueId: input.planningIssueId,
+  });
+}
+
+async function ensurePlanQaWakeupForIssue(input: {
+  db: Db;
+  enqueuePlanQaWakeup?: PlanQaWakeupHandler;
+  companyId: string;
+  planQaIssueId: string;
+  missionId: string;
+  planningIssueId: string | null;
+}) {
+  const [planQaIssue] = await input.db
+    .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, input.companyId),
+      eq(issues.id, input.planQaIssueId),
+      eq(issues.originKind, "mission_plan_qa"),
+      isNull(issues.hiddenAt),
+    ))
+    .limit(1);
+  if (!planQaIssue) return;
+
+  await ensurePlanQaWakeup({
+    enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
+    companyId: input.companyId,
+    agentId: planQaIssue.assigneeAgentId,
+    issueId: planQaIssue.id,
+    issueStatus: planQaIssue.status,
+    missionId: input.missionId,
+    planningIssueId: input.planningIssueId,
+  });
 }
 
 async function readPlanQaVerdict(input: { db: Db; companyId: string; planQaIssueId: string }): Promise<ValidationVerdict | null> {

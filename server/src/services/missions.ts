@@ -61,6 +61,7 @@ import {
 import { isTerminalMissionStatus } from "./missions/shared-types.js";
 import { createOwnerActions } from "./missions/owner-actions.js";
 import { createSupervision } from "./missions/supervision.js";
+import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 // [목적] mission 생성 시점에 working.md를 미리 provisioning 하기 위해 import.
 // [외부 연결] create()에서 호출 → 첫 PLAN 런이 working.md를 발견하지 못해 실패하던 gap을 닫는다.
 import { ensureMissionWorkingNote } from "./missions/mission-working-note.js";
@@ -378,6 +379,7 @@ export interface MissionServiceDeps {
   onStaleSourceIssueWakeupRequested?: MissionStaleSourceIssueWakeupRequestedHandler;
   onWorkProductReuseWakeRequested?: MissionWorkProductReuseWakeRequestedHandler;
   onOwnerPlanningIssueCreated?: MissionOwnerPlanningIssueCreatedHandler;
+  onPlanQaIssueCreated?: PlanQaWakeupHandler;
   /** Cancel a heartbeat run (kills the process + updates DB + releases issue lock). */
   cancelHeartbeatRun?: (runId: string) => Promise<unknown>;
 }

@@ -1230,6 +1230,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         companyId: mission.companyId,
         missionId: mission.id,
         requestedBy: { actorType: "system", actorId: "mission-owner-supervision" },
+        enqueuePlanQaWakeup: deps.onPlanQaIssueCreated,
       });
       const refs = asRecord(result.status === "recorded" ? result.missionPlanArtifact.refs : undefined);
       const paqoWorkflow = asRecord(refs.paqoWorkflow);

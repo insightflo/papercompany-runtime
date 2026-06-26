@@ -47,6 +47,7 @@ import { buildContextSafeFileViews } from "../services/context-safe-file-views.j
 import { buildMaintenanceDecisionContext } from "../services/maintenance/decision-context.js";
 import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
+import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -71,6 +72,10 @@ export function issueRoutes(db: Db, storage: StorageService) {
   const svc = issueService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db);
+  const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
+    heartbeat,
+    { requestedByActorId: "issues-route-plan-qa", contextSource: "issues_route_plan_qa" },
+  );
   const agentsSvc = agentService(db);
   const projectsSvc = projectService(db);
   const goalsSvc = goalService(db);
@@ -1293,6 +1298,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       comment = await svc.addComment(id, commentBody, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
+        enqueuePlanQaWakeup,
       });
 
       await logActivity(db, {
@@ -1726,6 +1732,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const comment = await svc.addComment(id, req.body.body, {
       agentId: actor.agentId ?? undefined,
       userId: actor.actorType === "user" ? actor.actorId : undefined,
+      enqueuePlanQaWakeup,
     });
 
     if (actor.runId) {

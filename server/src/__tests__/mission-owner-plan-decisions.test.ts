@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentRuntimeState,
@@ -2665,8 +2665,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
   it("plan-QA gate: a new decision creates a [PLAN-QA] issue and defers materialization (pending)", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    const enqueuePlanQaWakeup = vi.fn();
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
     expect(result.status).toBe("plan_qa_pending");
 
     const planQaIssues = await db.select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, description: issues.description }).from(issues)
@@ -2675,6 +2676,15 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(planQaIssues[0]!.assigneeAgentId).toBe(qaAgentId);
     expect(planQaIssues[0]!.description).toContain("PASS");
     expect(planQaIssues[0]!.description).toContain("REQUEST_CHANGES");
+    expect(enqueuePlanQaWakeup).toHaveBeenCalledTimes(1);
+    expect(enqueuePlanQaWakeup).toHaveBeenCalledWith(expect.objectContaining({
+      companyId,
+      agentId: qaAgentId,
+      issueId: planQaIssues[0]!.id,
+      issueStatus: "todo",
+      missionId,
+      planningIssueId,
+    }));
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
   });
 
@@ -2779,13 +2789,20 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
   it("plan-QA gate: reprocessing the same decision hash does not duplicate the [PLAN-QA] issue and stays deferred", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
-    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-    const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const enqueuePlanQaWakeup = vi.fn();
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
+    const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
     expect(second.status).toBe("plan_qa_pending");
 
     const planQaIssues = await db.select({ id: issues.id }).from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa")));
     expect(planQaIssues).toHaveLength(1);
+    expect(enqueuePlanQaWakeup).toHaveBeenCalledTimes(2);
+    expect(enqueuePlanQaWakeup).toHaveBeenLastCalledWith(expect.objectContaining({
+      issueId: planQaIssues[0]!.id,
+      missionId,
+      planningIssueId,
+    }));
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
   });
 

@@ -66,6 +66,7 @@ import { createDeliveryRetryWorker } from "./services/srb/delivery-retry-worker.
 import { createNonceCleanupJob } from "./services/srb/nonce-cleanup.js";
 import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
 import { createMissionOwnerSupervisionMonitor } from "./services/mission-owner-supervision-monitor.js";
+import { createPlanQaWakeupHandler } from "./services/missions/plan-qa-wakeup.js";
 import { createAlertRules, setAlertRules } from "./services/alert-rules.js";
 import { createChannelRegistry } from "./channel/index.js";
 import { registerTelegramCommands } from "./channel/telegram/commands.js";
@@ -557,6 +558,10 @@ export async function createApp(
 
   // Initialize and start the scheduler
   const heartbeat = heartbeatService(db);
+  const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
+    heartbeat,
+    { requestedByActorId: "mission-owner-supervision-monitor", contextSource: "mission_owner_supervision_plan_qa" },
+  );
   const scheduler = createScheduler(db, {
     heartbeat: {
       enqueueWakeup: (agentId, opts) => heartbeat.wakeup(agentId, {
@@ -735,6 +740,7 @@ export async function createApp(
         },
       });
     },
+    onPlanQaIssueCreated: enqueuePlanQaWakeup,
   });
   missionOwnerSupervisionMonitor.start();
   process.once("exit", () => missionOwnerSupervisionMonitor.stop());

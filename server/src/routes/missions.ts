@@ -25,10 +25,15 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
+import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
 export function missionRoutes(db: Db) {
   const router = Router();
   const heartbeat = heartbeatService(db);
+  const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
+    heartbeat,
+    { requestedByActorId: "missions-route-plan-qa", contextSource: "missions_route_plan_qa" },
+  );
   const delegationSvc = missionDelegationService(db);
   const svc = missionService(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
@@ -137,6 +142,7 @@ export function missionRoutes(db: Db) {
         },
       });
     },
+    onPlanQaIssueCreated: enqueuePlanQaWakeup,
     cancelHeartbeatRun: (runId) => heartbeat.cancelRun(runId),
   });
 

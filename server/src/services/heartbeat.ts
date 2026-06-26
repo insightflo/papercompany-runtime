@@ -71,8 +71,9 @@ import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import { missionService } from "./missions.js";
-import { recordLatestAuthorizedMissionOwnerPlanDecision } from "./mission-owner-plan-decisions.js";
+import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
+import { createPlanQaWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import {
@@ -2474,6 +2475,7 @@ async function recordMissionOwnerPlanDecisionAfterComment(
   db: Db,
   issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">,
   actorAgentId: string | null,
+  enqueuePlanQaWakeup?: PlanQaWakeupHandler,
 ) {
   if (issue.originKind !== "mission_main_executor_plan" || !issue.missionId) return;
   try {
@@ -2482,6 +2484,7 @@ async function recordMissionOwnerPlanDecisionAfterComment(
       companyId: issue.companyId,
       missionId: issue.missionId,
       requestedBy: actorAgentId ? { actorType: "agent", actorId: actorAgentId } : undefined,
+      enqueuePlanQaWakeup,
     });
   } catch (err) {
     logger.warn(
@@ -2614,6 +2617,10 @@ export function heartbeatService(db: Db) {
   const wikiSvc = agentWikiService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
+  const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
+    { wakeup: (agentId, opts) => enqueueWakeup(agentId, opts) },
+    { requestedByActorId: "heartbeat-plan-qa", contextSource: "heartbeat_plan_qa" },
+  );
   const activeRunExecutions = new Set<string>();
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
@@ -5400,7 +5407,7 @@ export function heartbeatService(db: Db) {
               workspace: executionWorkspace,
               runtimeServices,
             }),
-            { agentId: agent.id },
+            { agentId: agent.id, enqueuePlanQaWakeup },
           );
         } catch (err) {
           await onLog(
@@ -5591,7 +5598,7 @@ export function heartbeatService(db: Db) {
                 workspace: executionWorkspace,
                 runtimeServices: adapterManagedRuntimeServices,
               }),
-              { agentId: agent.id },
+              { agentId: agent.id, enqueuePlanQaWakeup },
             );
           } catch (err) {
             await onLog(
@@ -5724,19 +5731,19 @@ export function heartbeatService(db: Db) {
             await issuesSvc.addComment(
               issueId,
               buildCodexAuthAutoBlockedComment({
-              ...codexAuthAutoBlock,
-              runId: run.id,
-            }),
-            { agentId: agent.id },
-          );
-        } catch (autoBlockErr) {
-          await onLog(
-            "stderr",
-            `[paperclip] Failed to auto-block issue after codex auth failure: ${
-              autoBlockErr instanceof Error ? autoBlockErr.message : String(autoBlockErr)
-            }\n`,
-          );
-        }
+                ...codexAuthAutoBlock,
+                runId: run.id,
+              }),
+              { agentId: agent.id, enqueuePlanQaWakeup },
+            );
+          } catch (autoBlockErr) {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to auto-block issue after codex auth failure: ${
+                autoBlockErr instanceof Error ? autoBlockErr.message : String(autoBlockErr)
+              }\n`,
+            );
+          }
       }
 
       const completedRun = { ...run, status } as typeof heartbeatRuns.$inferSelect;
@@ -6768,6 +6775,7 @@ export function heartbeatService(db: Db) {
         db,
         postTransactionMissionOwnerPlanDecision.issue,
         postTransactionMissionOwnerPlanDecision.actorAgentId,
+        enqueuePlanQaWakeup,
       );
     }
 
