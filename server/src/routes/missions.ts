@@ -14,6 +14,7 @@
  * - GET    /missions/:id/issues                      — Get mission issue tree
  * - GET    /missions/:id/workflow-runs               — List workflow runs for mission
  * - GET    /missions/:id/governance-thread           — Read mission governance thread
+ * - GET    /missions/:id/runtime-snapshot            — Read structured mission runtime snapshot
  */
 import { Router } from "express";
 import { type Db } from "@paperclipai/db";
@@ -26,6 +27,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
+import { loadMissionRuntimeSnapshot } from "../services/missions/mission-runtime-snapshot.js";
 import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
 export function missionRoutes(db: Db) {
@@ -544,6 +546,27 @@ export function missionRoutes(db: Db) {
       companyId: mission.companyId,
       events: thread.events,
       summary: thread.summary,
+    });
+  });
+
+  /**
+   * GET /missions/:id/runtime-snapshot
+   *
+   * Read structured mission runtime state for Ops/Hermes/oversight.
+   */
+  router.get("/missions/:id/runtime-snapshot", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+
+    const snapshot = await loadMissionRuntimeSnapshot(db, {
+      companyId: mission.companyId,
+      missionId: mission.id,
+    });
+
+    res.json({
+      missionId: mission.id,
+      companyId: mission.companyId,
+      snapshot,
     });
   });
 

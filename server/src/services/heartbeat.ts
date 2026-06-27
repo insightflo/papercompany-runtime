@@ -291,6 +291,63 @@ function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
 }
 
+export async function recordHeartbeatQueueTransitionEvent(db: Db, input: {
+  companyId: string;
+  missionId?: string | null;
+  issueId?: string | null;
+  wakeupRequestId?: string | null;
+  heartbeatRunId?: string | null;
+  workflowRunId?: string | null;
+  workflowStepRunId?: string | null;
+  eventType: string;
+  layer: string;
+  decision?: string | null;
+  reason?: string | null;
+  reasonCode?: string | null;
+  idempotencyKey: string;
+  payload?: Record<string, unknown>;
+}) {
+  try {
+    await db.insert(workflowTransitionEvents).values({
+      companyId: input.companyId,
+      missionId: input.missionId ?? null,
+      issueId: input.issueId ?? null,
+      wakeupRequestId: input.wakeupRequestId ?? null,
+      heartbeatRunId: input.heartbeatRunId ?? null,
+      workflowRunId: input.workflowRunId ?? null,
+      workflowStepRunId: input.workflowStepRunId ?? null,
+      eventType: input.eventType,
+      layer: input.layer,
+      decision: input.decision ?? null,
+      reason: input.reason ?? null,
+      reasonCode: input.reasonCode ?? null,
+      idempotencyKey: input.idempotencyKey,
+      payload: input.payload ?? {},
+    });
+  } catch {
+    // unique index on (company_id, idempotency_key) WHERE not null - duplicate, ignore
+  }
+}
+
+export async function recordHeartbeatRunTerminalTransitionEvent(
+  db: Db,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "wakeupRequestId" | "issueId" | "status" | "errorCode" | "error">,
+) {
+  if (!isTerminalHeartbeatRunStatus(run.status)) return;
+  await recordHeartbeatQueueTransitionEvent(db, {
+    companyId: run.companyId,
+    heartbeatRunId: run.id,
+    wakeupRequestId: run.wakeupRequestId,
+    issueId: run.issueId,
+    eventType: "queue_run_completed",
+    layer: "heartbeat",
+    decision: run.status,
+    reason: run.errorCode ?? run.error ?? "run_terminal",
+    reasonCode: run.errorCode ?? "run_terminal",
+    idempotencyKey: `queue-run-completed:${run.id}:${run.status}`,
+  });
+}
+
 function refreshStepInputManifest(context: Record<string, unknown>, taskKey: string | null) {
   context.paperclipStepInputManifest = buildStepInputManifest({
     taskKey,
@@ -3624,20 +3681,7 @@ export function heartbeatService(db: Db) {
     }
 
     // [Task 6C] queue_run_completed event for terminal status
-    if (updated && ["completed", "failed", "timed_out", "cancelled", "done"].includes(updated.status)) {
-      await recordQueueTransitionEvent({
-        companyId: updated.companyId,
-        heartbeatRunId: updated.id,
-        wakeupRequestId: updated.wakeupRequestId,
-        issueId: updated.issueId,
-        eventType: "queue_run_completed",
-        layer: "heartbeat",
-        decision: updated.status,
-        reason: updated.errorCode ?? updated.error ?? "run_terminal",
-        reasonCode: updated.errorCode ?? "run_terminal",
-        idempotencyKey: `queue-run-completed:${updated.id}:${updated.status}`,
-      });
-    }
+    if (updated) await recordHeartbeatRunTerminalTransitionEvent(db, updated);
 
     return updated;
   }
@@ -3672,26 +3716,7 @@ export function heartbeatService(db: Db) {
     idempotencyKey: string;
     payload?: Record<string, unknown>;
   }) {
-    try {
-      await db.insert(workflowTransitionEvents).values({
-        companyId: input.companyId,
-        missionId: input.missionId ?? null,
-        issueId: input.issueId ?? null,
-        wakeupRequestId: input.wakeupRequestId ?? null,
-        heartbeatRunId: input.heartbeatRunId ?? null,
-        workflowRunId: input.workflowRunId ?? null,
-        workflowStepRunId: input.workflowStepRunId ?? null,
-        eventType: input.eventType,
-        layer: input.layer,
-        decision: input.decision ?? null,
-        reason: input.reason ?? null,
-        reasonCode: input.reasonCode ?? null,
-        idempotencyKey: input.idempotencyKey,
-        payload: input.payload ?? {},
-      });
-    } catch {
-      // unique index on (company_id, idempotency_key) WHERE not null — duplicate, ignore
-    }
+    await recordHeartbeatQueueTransitionEvent(db, input);
   }
 
   async function appendRunEvent(
