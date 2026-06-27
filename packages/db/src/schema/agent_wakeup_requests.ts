@@ -22,6 +22,13 @@ export const agentWakeupRequests = pgTable(
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     error: text("error"),
+    // [AREA: structured-events Task 1C] typed queue columns — payload JSON 의존 축소.
+    // FK references omitted to avoid circular import (heartbeat_runs → agent_wakeup_requests → issues/workflow_runs → heartbeat_runs).
+    requestKind: text("request_kind"),
+    issueId: uuid("issue_id"),
+    missionId: uuid("mission_id"),
+    workflowRunId: uuid("workflow_run_id"),
+    workflowStepRunId: uuid("workflow_step_run_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -36,5 +43,10 @@ export const agentWakeupRequests = pgTable(
       table.requestedAt,
     ),
     agentRequestedIdx: index("agent_wakeup_requests_agent_requested_idx").on(table.agentId, table.requestedAt),
+    // [Task 1C] typed-column indexes for queue queries without JSONB ops.
+    requestKindIdx: index("agent_wakeup_requests_request_kind_idx").on(table.companyId, table.requestKind, table.status),
+    issueStatusIdx: index("agent_wakeup_requests_issue_status_idx").on(table.issueId, table.status),
+    missionStatusIdx: index("agent_wakeup_requests_mission_status_idx").on(table.companyId, table.missionId, table.status),
+    workflowStepStatusIdx: index("agent_wakeup_requests_workflow_step_status_idx").on(table.workflowStepRunId, table.status),
   }),
 );

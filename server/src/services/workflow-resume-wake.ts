@@ -14,7 +14,7 @@
 //   한 번 수정으로 양쪽에 반영된다.
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests } from "@paperclipai/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 
 export interface ExistingWorkflowResumeWake {
   id: string;
@@ -38,8 +38,17 @@ export async function findExistingWorkflowResumeWake(
       // RES-476: "completed" 제거. run 성공으로 종료된 stale wake 는 현재 todo 재작업을
       // 덮으면 안 된다. in-flight 상태만 인정한다.
       inArray(agentWakeupRequests.status, ["queued", "coalesced", "deferred_issue_execution"]),
-      sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
-      sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
+      // [Task 1C] typed columns 우선, JSON payload fallback (migration 전환기 임시 dual-query).
+      or(
+        and(
+          eq(agentWakeupRequests.issueId, input.issueId),
+          eq(agentWakeupRequests.requestKind, "workflow_resume"),
+        ),
+        and(
+          sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
+          sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
+        ),
+      ),
       // liveness guard: runId 가 없거나(아직 run 미생성) 가리키는 run 이 queued/running 일
       // 때만 "진행 중" 으로 인정. terminal run 은 커버하지 않는다.
       sql`(${agentWakeupRequests.runId} is null or exists (select 1 from heartbeat_runs where id = ${agentWakeupRequests.runId} and status in ('queued','running')))`,

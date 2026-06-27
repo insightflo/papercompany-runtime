@@ -7124,6 +7124,12 @@ export function heartbeatService(db: Db) {
         requestedByActorId: opts.requestedByActorId ?? null,
         idempotencyKey: opts.idempotencyKey ?? null,
         finishedAt: new Date(),
+        // [Task 1C] typed queue columns — payload JSON 의존 축소.
+        requestKind: readNonEmptyString((payload as Record<string, unknown> | null)?.kind as string) ?? readNonEmptyString((payload as Record<string, unknown> | null)?.mutation as string) ?? skipReason,
+        issueId: issueId ?? null,
+        missionId: readNonEmptyString(enrichedContextSnapshot.missionId) ?? null,
+        workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
+        workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
       });
     };
 
