@@ -1865,11 +1865,13 @@ async function ensurePlanQaReviewIssue(input: {
     ))
     .limit(1);
   if (existing[0]) {
-    const assigneeAgentId = existing[0].assigneeAgentId ?? await assignPlanQaReviewerIfAvailable({
-      db: input.db,
-      companyId: input.companyId,
-      planQaIssueId: existing[0].id,
-    });
+    const assigneeAgentId = existing[0].assigneeAgentId ?? (isPlanQaActionableStatus(existing[0].status)
+      ? await assignPlanQaReviewerIfAvailable({
+        db: input.db,
+        companyId: input.companyId,
+        planQaIssueId: existing[0].id,
+      })
+      : null);
     await ensurePlanQaWakeup({
       enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
       agentId: assigneeAgentId,
@@ -1929,6 +1931,12 @@ async function assignPlanQaReviewerIfAvailable(input: {
   return assigneeAgentId;
 }
 
+// [AREA: Plan QA / Task 0] terminal/unactionable 상태의 PLAN-QA issue는 재처리 시
+// assignee 를 붙이지 않고 wakeup 도 만들지 않는다(이미 끝난 검토를 다시 살리지 않음).
+function isPlanQaActionableStatus(status: string): boolean {
+  return status !== "backlog" && status !== "blocked" && status !== "done" && status !== "cancelled";
+}
+
 async function ensurePlanQaWakeup(input: {
   enqueuePlanQaWakeup?: PlanQaWakeupHandler;
   companyId: string;
@@ -1940,7 +1948,7 @@ async function ensurePlanQaWakeup(input: {
 }): Promise<void> {
   if (!input.enqueuePlanQaWakeup) return;
   if (!input.agentId) return;
-  if (input.issueStatus === "backlog" || input.issueStatus === "blocked" || input.issueStatus === "done" || input.issueStatus === "cancelled") return;
+  if (!isPlanQaActionableStatus(input.issueStatus)) return;
 
   await input.enqueuePlanQaWakeup({
     companyId: input.companyId,
@@ -1971,11 +1979,13 @@ async function ensurePlanQaWakeupForIssue(input: {
     ))
     .limit(1);
   if (!planQaIssue) return;
-  const assigneeAgentId = planQaIssue.assigneeAgentId ?? await assignPlanQaReviewerIfAvailable({
-    db: input.db,
-    companyId: input.companyId,
-    planQaIssueId: planQaIssue.id,
-  });
+  const assigneeAgentId = planQaIssue.assigneeAgentId ?? (isPlanQaActionableStatus(planQaIssue.status)
+    ? await assignPlanQaReviewerIfAvailable({
+      db: input.db,
+      companyId: input.companyId,
+      planQaIssueId: planQaIssue.id,
+    })
+    : null);
 
   await ensurePlanQaWakeup({
     enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,

@@ -2701,6 +2701,30 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
   });
 
+  it("plan-QA gate: does not assign or wake an existing terminal unassigned Plan QA issue during reprocess", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    const enqueuePlanQaWakeup = vi.fn();
+
+    // 1차 record: [PLAN-QA] issue 생성.
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
+    const [created] = await db.select({ id: issues.id }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(created).toBeTruthy();
+    // 이미 종료(done) + 미할당 상태로 시뮬레이션 — 과거 검토가 끝났으나 할당이 비어있는 경우.
+    await db.update(issues).set({ status: "done", assigneeAgentId: null, updatedAt: new Date() }).where(eq(issues.id, created!.id));
+    enqueuePlanQaWakeup.mockClear();
+
+    // [AREA: Plan QA / Task 0] 재처리 시 terminal/unactionable 상태면 재할당/재wakeup 금지.
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
+    const [planQaIssue] = await db.select({ assigneeAgentId: issues.assigneeAgentId, status: issues.status }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+
+    expect(planQaIssue?.status).toBe("done");
+    expect(planQaIssue?.assigneeAgentId).toBeNull();
+    expect(enqueuePlanQaWakeup).not.toHaveBeenCalled();
+  });
+
   it("plan-QA gate: PASS verdict materializes the PAQO workflow and records verdict=pass", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
