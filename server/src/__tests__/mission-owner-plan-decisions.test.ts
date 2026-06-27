@@ -30,6 +30,7 @@ import {
 import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
 import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
 import { setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
+import { issueService } from "../services/issues.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -69,6 +70,27 @@ function decisionComment(decision: Record<string, unknown>) {
 \`\`\`json
 ${JSON.stringify(decision)}
 \`\`\``;
+}
+
+function planQaScorecardPassComment() {
+  return `## Plan QA Verdict - test
+
+### Scorecard
+
+| Area | Score (0-2) | Evidence | Required fix if below 2 |
+|---|---:|---|---|
+| Goal coverage | 2 | Covered by concrete units. | - |
+| Step split / sequencing | 2 | Dependencies are explicit. | - |
+| Agent fit | 2 | Assignees match roles. | - |
+| Instruction quality | 2 | Instructions are actionable. | - |
+| Skill fit | 2 | Skills match the work. | - |
+| Tool / permission fit | 2 | Required tools are available. | - |
+| Work-product contract | 2 | Outputs are explicit. | - |
+| QA / recovery design | 2 | QA and recovery are separated. | - |
+
+### Summary
+
+The plan is complete and well-structured. All checklist items pass.`;
 }
 
 describe("parseMissionOwnerPlanDecision", () => {
@@ -2811,6 +2833,55 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     // no issue comment was posted (structured path, not comment-parse)
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, planningIssueId));
     expect(comments).toHaveLength(0);
+  });
+
+  it("comment hook stores PLAN and scorecard-only PLAN-QA results as structured rows before workflow materialization", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    const decision = {
+      ...validDecision,
+      missionId,
+      selectedExecutionUnits: [{
+        id: "unit-comment-hook",
+        kind: "workflow_definition_step",
+        title: "Run smoke",
+        reason: "source evidence",
+        selectionState: "selected",
+        sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
+      }],
+    };
+
+    await issueService(db).addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
+
+    const submissions = await db
+      .select()
+      .from(missionPlanDecisionSubmissions)
+      .where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]?.sourceCommentId).toBeTruthy();
+
+    const pendingPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const pendingPlanQa = (pendingPlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+    expect(pendingPlanQa?.status).toBe("pending");
+    expect(pendingPlanQa?.issueId).toBeTruthy();
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+
+    await issueService(db).addComment(pendingPlanQa!.issueId!, planQaScorecardPassComment(), { agentId: qaAgentId });
+
+    const verdictRows = await db
+      .select()
+      .from(missionPlanQaVerdicts)
+      .where(eq(missionPlanQaVerdicts.missionId, missionId));
+    expect(verdictRows).toHaveLength(1);
+    expect(verdictRows[0]?.verdict).toBe("pass");
+    expect(verdictRows[0]?.sourceCommentId).toBeTruthy();
+
+    const materializedPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const materializedPlanQa = (materializedPlan?.refs as Record<string, unknown> | undefined)?.planQa as { verdict?: string; status?: string } | undefined;
+    expect(materializedPlanQa?.status).toBe("pass");
+    expect(materializedPlanQa?.verdict).toBe("pass");
+    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
+    const runs = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(runs.length).toBeGreaterThan(0);
   });
 
   it("plan-QA gate: does not assign or wake an existing terminal unassigned Plan QA issue during reprocess", async () => {

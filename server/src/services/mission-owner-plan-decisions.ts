@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 import { missionDelegationService } from "./mission-delegations.js";
@@ -842,7 +842,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         commentId: preParsedDecision.commentId ?? "structured-submission",
         commentCreatedAt: null,
         author: {
-          kind: requestedBy?.actorType === "agent" ? "agent" : "user",
+          kind: requestedBy?.actorType === "agent" ? "agent" as const : "user" as const,
           id: requestedBy?.actorId ?? "structured-submission",
         },
         diagnostics: [] as Array<{ code: string; message: string; commentId?: string }>,
@@ -1009,6 +1009,19 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     });
   }
 
+  if (!preParsedDecision) {
+    await persistCommentDerivedOwnerPlanDecisionSubmission({
+      db,
+      companyId,
+      missionId,
+      planningIssueId: collected.planningIssueId,
+      author: collected.author,
+      sourceCommentId: collected.commentId,
+      decisionHash,
+      decision: collected.decision,
+    });
+  }
+
   const service = missionPlanArtifactService(db);
   const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
   const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
@@ -1035,6 +1048,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         const verdict = await readPlanQaVerdict({
           db,
           companyId,
+          missionId,
+          missionPlanArtifactId: activePlan.id,
           planQaIssueId: activePlanQa.issueId,
           decisionHash,
           afterCreatedAt: collected.decisionIssueOriginKind === "mission_plan_qa"
@@ -1121,6 +1136,32 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   });
 
   return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: planQaIssue.id, diagnostics: [] };
+}
+
+async function persistCommentDerivedOwnerPlanDecisionSubmission(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  planningIssueId: string;
+  author: MissionOwnerPlanDecisionAuthor;
+  sourceCommentId: string;
+  decisionHash: string;
+  decision: Record<string, unknown>;
+}): Promise<void> {
+  await input.db
+    .insert(missionPlanDecisionSubmissions)
+    .values({
+      companyId: input.companyId,
+      missionId: input.missionId,
+      planningIssueId: input.planningIssueId,
+      authorAgentId: input.author.kind === "agent" ? input.author.id : null,
+      authorUserId: input.author.kind === "user" ? input.author.id : null,
+      sourceCommentId: input.sourceCommentId,
+      decisionHash: input.decisionHash,
+      decision: input.decision,
+      status: "accepted",
+    })
+    .onConflictDoNothing();
 }
 
 async function validateSelectedExecutionUnitSourceRefs({
@@ -2079,6 +2120,8 @@ async function ensurePlanQaWakeupForIssue(input: {
 async function readPlanQaVerdict(input: {
   db: Db;
   companyId: string;
+  missionId: string;
+  missionPlanArtifactId?: string | null;
   planQaIssueId: string;
   decisionHash?: string | null;
   afterCreatedAt?: Date | null;
@@ -2125,6 +2168,7 @@ async function readPlanQaVerdict(input: {
 
   const rows = await input.db
     .select({
+      id: issueComments.id,
       authorAgentId: issueComments.authorAgentId,
       authorUserId: issueComments.authorUserId,
       body: issueComments.body,
@@ -2134,7 +2178,7 @@ async function readPlanQaVerdict(input: {
     .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
 
   const verdictRows = rows
-    .map((row) => ({ row, verdict: readExplicitValidationVerdict(row.body) }))
+    .map((row) => ({ row, verdict: readPlanQaCommentVerdict(row.body) }))
     .filter((entry): entry is { row: typeof rows[number]; verdict: ValidationVerdict } => entry.verdict !== null);
   const authorAgentIds = Array.from(new Set(verdictRows.map((entry) => entry.row.authorAgentId).filter((id): id is string => typeof id === "string" && id.length > 0)));
   const agentRows = authorAgentIds.length > 0
@@ -2147,12 +2191,36 @@ async function readPlanQaVerdict(input: {
 
   for (const { row, verdict } of verdictRows) {
     if (typeof row.authorUserId === "string" && row.authorUserId.trim().length > 0) {
+      await persistCommentDerivedPlanQaVerdict({
+        db: input.db,
+        companyId: input.companyId,
+        missionId: input.missionId,
+        missionPlanArtifactId: input.missionPlanArtifactId,
+        planQaIssueId: input.planQaIssueId,
+        reviewerAgentId: null,
+        reviewerUserId: row.authorUserId,
+        sourceCommentId: row.id,
+        decisionHash: input.decisionHash,
+        verdict,
+      });
       return verdict;
     }
 
     const authorAgentId = row.authorAgentId;
     if (!authorAgentId) continue;
     if (planQaIssue.assigneeAgentId && authorAgentId === planQaIssue.assigneeAgentId) {
+      await persistCommentDerivedPlanQaVerdict({
+        db: input.db,
+        companyId: input.companyId,
+        missionId: input.missionId,
+        missionPlanArtifactId: input.missionPlanArtifactId,
+        planQaIssueId: input.planQaIssueId,
+        reviewerAgentId: authorAgentId,
+        reviewerUserId: null,
+        sourceCommentId: row.id,
+        decisionHash: input.decisionHash,
+        verdict,
+      });
       return verdict;
     }
 
@@ -2162,11 +2230,81 @@ async function readPlanQaVerdict(input: {
       && PLAN_QA_VERDICT_AGENT_ROLES.has(authorAgent.role)
       && RUNNABLE_PLAN_ASSIGNEE_STATUSES.has(authorAgent.status)
     ) {
+      await persistCommentDerivedPlanQaVerdict({
+        db: input.db,
+        companyId: input.companyId,
+        missionId: input.missionId,
+        missionPlanArtifactId: input.missionPlanArtifactId,
+        planQaIssueId: input.planQaIssueId,
+        reviewerAgentId: authorAgentId,
+        reviewerUserId: null,
+        sourceCommentId: row.id,
+        decisionHash: input.decisionHash,
+        verdict,
+      });
       return verdict;
     }
   }
 
   return null;
+}
+
+function readPlanQaCommentVerdict(body: string): ValidationVerdict | null {
+  return readExplicitValidationVerdict(body) ?? readPlanQaScorecardVerdict(body);
+}
+
+function readPlanQaScorecardVerdict(body: string): ValidationVerdict | null {
+  if (!/plan\s+qa\s+verdict/iu.test(body) || !/scorecard/iu.test(body)) {
+    return null;
+  }
+
+  const scoreValues: number[] = [];
+  for (const line of body.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|")) continue;
+    const cells = trimmed
+      .split("|")
+      .map((cell) => cell.trim())
+      .filter((cell) => cell.length > 0);
+    if (cells.length < 4) continue;
+    if (/^area$/iu.test(cells[0]!) || /^-+$/u.test(cells[0]!)) continue;
+    const score = /^(0|1|2)$/u.exec(cells[1]!);
+    if (!score?.[1]) continue;
+    scoreValues.push(Number(score[1]));
+  }
+
+  if (scoreValues.length < 4) return null;
+  return scoreValues.every((score) => score === 2) ? "pass" : "request_changes";
+}
+
+async function persistCommentDerivedPlanQaVerdict(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  missionPlanArtifactId?: string | null;
+  planQaIssueId: string;
+  reviewerAgentId: string | null;
+  reviewerUserId: string | null;
+  sourceCommentId: string;
+  decisionHash?: string | null;
+  verdict: ValidationVerdict;
+}): Promise<void> {
+  if (!input.decisionHash) return;
+  await input.db
+    .insert(missionPlanQaVerdicts)
+    .values({
+      companyId: input.companyId,
+      missionId: input.missionId,
+      missionPlanArtifactId: input.missionPlanArtifactId ?? null,
+      planQaIssueId: input.planQaIssueId,
+      reviewerAgentId: input.reviewerAgentId,
+      reviewerUserId: input.reviewerUserId,
+      sourceCommentId: input.sourceCommentId,
+      decisionHash: input.decisionHash,
+      verdict: input.verdict,
+      diagnostics: [],
+    })
+    .onConflictDoNothing();
 }
 
 async function updatePlanQaRef(input: {
