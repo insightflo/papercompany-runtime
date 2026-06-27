@@ -2851,6 +2851,69 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(planQaIssue.assigneeAgentId).toBe(qa?.id ?? null);
   });
 
+  it("plan-QA gate: a qa-role agent with status=running is still selected and queued", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await db.update(agents).set({ status: "running" }).where(eq(agents.id, qaAgentId));
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    const enqueuePlanQaWakeup = vi.fn();
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
+
+    expect(result.status).toBe("plan_qa_pending");
+    const [planQaIssue] = await db.select({ assigneeAgentId: issues.assigneeAgentId }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(planQaIssue).toBeDefined();
+    expect(planQaIssue.assigneeAgentId).toBe(qaAgentId);
+    expect(enqueuePlanQaWakeup).toHaveBeenCalledWith(expect.objectContaining({
+      companyId,
+      agentId: qaAgentId,
+      missionId,
+      planningIssueId,
+    }));
+  });
+
+  it("plan-QA gate: reprocessing an unassigned gate assigns a newly available reviewer and queues it", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const sourceWorkflowId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: sourceWorkflowId, companyId, name: "Recover Plan QA Source Workflow", stepsJson: [{ id: "run", name: "Run", dependencies: [] }] });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const initial = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(initial.status).toBe("plan_qa_pending");
+    const [unassignedPlanQaIssue] = await db.select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(unassignedPlanQaIssue).toBeDefined();
+    expect(unassignedPlanQaIssue.assigneeAgentId).toBeNull();
+
+    const qaAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: qaAgentId,
+      companyId,
+      name: "Late Report Validator",
+      role: "qa",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    const enqueuePlanQaWakeup = vi.fn();
+    const recovered = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanQaWakeup });
+
+    expect(recovered.status).toBe("plan_qa_pending");
+    const [recoveredPlanQaIssue] = await db.select({ assigneeAgentId: issues.assigneeAgentId }).from(issues)
+      .where(eq(issues.id, unassignedPlanQaIssue.id)).limit(1);
+    expect(recoveredPlanQaIssue.assigneeAgentId).toBe(qaAgentId);
+    expect(enqueuePlanQaWakeup).toHaveBeenCalledWith(expect.objectContaining({
+      companyId,
+      agentId: qaAgentId,
+      issueId: unassignedPlanQaIssue.id,
+      missionId,
+      planningIssueId,
+    }));
+  });
+
   it("plan-QA gate: with no qa/reviewer/validator agent the [PLAN-QA] issue is created unassigned and materialization stays blocked", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     const wfId = randomUUID();

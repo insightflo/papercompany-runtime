@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
@@ -1832,7 +1832,12 @@ async function findMissionQaAssignee(db: Db, companyId: string): Promise<string 
   const [candidate] = await db
     .select({ id: agents.id })
     .from(agents)
-    .where(and(eq(agents.companyId, companyId), inArray(agents.role, ["qa", "reviewer", "validator"]), inArray(agents.status, ["active", "idle"])))
+    .where(and(
+      eq(agents.companyId, companyId),
+      inArray(agents.role, Array.from(PLAN_QA_VERDICT_AGENT_ROLES)),
+      inArray(agents.status, Array.from(RUNNABLE_PLAN_ASSIGNEE_STATUSES)),
+    ))
+    .orderBy(sql`case ${agents.status} when 'idle' then 0 when 'active' then 1 when 'running' then 2 else 3 end`, agents.createdAt)
     .limit(1);
   return candidate?.id ?? null;
 }
@@ -1860,9 +1865,14 @@ async function ensurePlanQaReviewIssue(input: {
     ))
     .limit(1);
   if (existing[0]) {
+    const assigneeAgentId = existing[0].assigneeAgentId ?? await assignPlanQaReviewerIfAvailable({
+      db: input.db,
+      companyId: input.companyId,
+      planQaIssueId: existing[0].id,
+    });
     await ensurePlanQaWakeup({
       enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
-      agentId: existing[0].assigneeAgentId,
+      agentId: assigneeAgentId,
       companyId: input.companyId,
       issueId: existing[0].id,
       issueStatus: existing[0].status,
@@ -1897,6 +1907,26 @@ async function ensurePlanQaReviewIssue(input: {
     planningIssueId: input.planningIssueId,
   });
   return { id: created.id };
+}
+
+async function assignPlanQaReviewerIfAvailable(input: {
+  db: Db;
+  companyId: string;
+  planQaIssueId: string;
+}): Promise<string | null> {
+  const assigneeAgentId = await findMissionQaAssignee(input.db, input.companyId);
+  if (!assigneeAgentId) return null;
+  await input.db
+    .update(issues)
+    .set({ assigneeAgentId, updatedAt: new Date() })
+    .where(and(
+      eq(issues.companyId, input.companyId),
+      eq(issues.id, input.planQaIssueId),
+      eq(issues.originKind, "mission_plan_qa"),
+      isNull(issues.assigneeAgentId),
+      isNull(issues.hiddenAt),
+    ));
+  return assigneeAgentId;
 }
 
 async function ensurePlanQaWakeup(input: {
@@ -1941,11 +1971,16 @@ async function ensurePlanQaWakeupForIssue(input: {
     ))
     .limit(1);
   if (!planQaIssue) return;
+  const assigneeAgentId = planQaIssue.assigneeAgentId ?? await assignPlanQaReviewerIfAvailable({
+    db: input.db,
+    companyId: input.companyId,
+    planQaIssueId: planQaIssue.id,
+  });
 
   await ensurePlanQaWakeup({
     enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
     companyId: input.companyId,
-    agentId: planQaIssue.assigneeAgentId,
+    agentId: assigneeAgentId,
     issueId: planQaIssue.id,
     issueStatus: planQaIssue.status,
     missionId: input.missionId,
