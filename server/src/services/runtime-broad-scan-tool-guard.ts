@@ -48,7 +48,7 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   if (!command) {
     return { blocked: false, reason: null, matchedCommand: null };
   }
-  const normalized = command.toLowerCase().trim();
+  const normalized = stripShellCommentLines(command.toLowerCase().trim());
   for (const segment of splitShellSegments(normalized)) {
     const matched = findBroadScanCommand(segment.command, allowedPaths, { stdinFromPipe: segment.stdinFromPipe });
     if (!matched) {
@@ -222,6 +222,19 @@ function shellTokenize(command: string) {
   }
   if (current) tokens.push(current);
   return tokens;
+}
+
+function stripShellCommentLines(command: string) {
+  return command
+    .split(/\r?\n/)
+    .map((line) => {
+      const shellScriptComment = line.match(/^(\s*(?:\/bin\/)?(?:ba)?sh\s+-[a-z]*c\s+['"]?)\s*#/);
+      if (shellScriptComment) return shellScriptComment[1];
+      if (line.trimStart().startsWith("#")) return "";
+      return line;
+    })
+    .join("\n")
+    .trim();
 }
 
 function splitShellSegments(command: string) {

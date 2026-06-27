@@ -386,6 +386,50 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     });
   });
 
+  it("does not treat prose comments containing the word find as a find command", () => {
+    const line = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "item_8",
+        type: "command_execution",
+        command: `/bin/bash -lc '# Try various API paths to find the correct one
+for path in "api" "api/v1" "api/v2" "v1"; do
+  status=$(curl -s -o /dev/null -w "%{http_code}" "$PAPERCLIP_API_URL/$path/companies/company-1/issues/issue-1")
+  echo "$path -> $status"
+done'`,
+        aggregated_output: "api -> 404\nv1 -> 200\n",
+        exit_code: 0,
+        status: "completed",
+      },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "codex_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          taskKey: null,
+          issueId: null,
+          projectId: null,
+          allowedContextKeys: [],
+          guardrails: { broadScanAllowed: false },
+          inputs: {
+            workspace: { available: true, source: "agent_home", workspaceId: null, projectId: null },
+            workspaceHints: { available: false, count: 0 },
+            runtimeServiceIntents: { available: false, count: 0 },
+            runtimeServices: { available: false, count: 0, primaryUrl: null },
+            fileViews: { available: false, count: 0, source: null },
+            sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
+  });
+
   it("blocks claude tool_use bash commands for repo-wide discovery", () => {
     const line = JSON.stringify({
       type: "assistant",
