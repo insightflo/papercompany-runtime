@@ -99,6 +99,19 @@ ${JSON.stringify({ ...validDecision, goal: "Use goal field" })}`);
     });
   });
 
+  it("parses a fenced json decision when the heading has a parenthesized revision note", () => {
+    const revisedDecision = { ...validDecision, selectedExecutionUnits: [{ id: "unit-revised" }] };
+    const result = parseMissionOwnerPlanDecision(`### Mission owner plan decision (rev 2 — QA REQUEST_CHANGES reflected)
+
+The mission owner revised the plan after QA feedback.
+
+\`\`\`json
+${JSON.stringify(revisedDecision)}
+\`\`\``);
+
+    expect(result).toEqual({ ok: true, decision: revisedDecision });
+  });
+
   it("returns the latest valid decision when multiple decision blocks exist", () => {
     const first = { ...validDecision, missionId: "mission-old" };
     const latest = { ...validDecision, missionId: "mission-latest", selectedExecutionUnits: [{ id: "unit-latest" }] };

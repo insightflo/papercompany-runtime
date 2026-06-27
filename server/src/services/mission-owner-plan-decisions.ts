@@ -88,7 +88,7 @@ export type FindLatestAuthorizedMissionOwnerPlanDecisionInput = {
 };
 
 const DECISION_HEADING = "### Mission owner plan decision";
-const DECISION_HEADING_PATTERN = /^### Mission owner plan decision\s*$/gm;
+const DECISION_HEADING_PATTERN = /^### Mission owner plan decision(?:\s+\([^)\n]+\))?\s*$/gm;
 const DEFAULT_MAX_COLLECTOR_DIAGNOSTICS = 20;
 
 export function parseMissionOwnerPlanDecision(text: string): MissionOwnerPlanDecisionParseResult {
@@ -244,7 +244,7 @@ function extractDecisionBlocks(text: string): string[] {
   const matches = [...text.matchAll(DECISION_HEADING_PATTERN)];
   return matches
     .map((match, index) => {
-      const blockStart = (match.index ?? 0) + DECISION_HEADING.length;
+      const blockStart = (match.index ?? 0) + match[0].length;
       const nextMatch = matches[index + 1];
       const blockEnd = nextMatch?.index ?? text.length;
       return text.slice(blockStart, blockEnd);
