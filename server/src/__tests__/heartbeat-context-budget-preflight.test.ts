@@ -20,6 +20,7 @@ import {
   documents,
   heartbeatRunEvents,
   heartbeatRuns,
+  workflowTransitionEvents,
   knowledgeBases,
   issueComments,
   issueDocuments,
@@ -428,6 +429,8 @@ describe("heartbeat context budget preflight", () => {
     // 이전 test 의 queued wakeup 이 다음 test 의 resumeQueuedRuns 에 의해 promote 되어 공유
     // executeSpy 카운트를 오염시키지 않도록 매 test 마다 전체 삭제(격리). 반드시 runs 정리 뒤(FK).
     await db.delete(agentWakeupRequests);
+    // [Task 6C] transition events 도 정리(event write latency 가 timing race 유발 방지)
+    await db.delete(workflowTransitionEvents);
     await db.delete(workspaceRuntimeServices);
     await db.delete(issueWorkProducts);
     await db.delete(issueDocuments);

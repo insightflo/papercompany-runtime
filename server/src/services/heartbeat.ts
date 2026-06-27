@@ -13,6 +13,7 @@ import {
   activityLog,
   heartbeatRunEvents,
   heartbeatRuns,
+  workflowTransitionEvents,
   documents,
   issueComments,
   issueDocuments,
@@ -3622,6 +3623,22 @@ export function heartbeatService(db: Db) {
       });
     }
 
+    // [Task 6C] queue_run_completed event for terminal status
+    if (updated && ["completed", "failed", "timed_out", "cancelled", "done"].includes(updated.status)) {
+      await recordQueueTransitionEvent({
+        companyId: updated.companyId,
+        heartbeatRunId: updated.id,
+        wakeupRequestId: updated.wakeupRequestId,
+        issueId: updated.issueId,
+        eventType: "queue_run_completed",
+        layer: "heartbeat",
+        decision: updated.status,
+        reason: updated.errorCode ?? updated.error ?? "run_terminal",
+        reasonCode: updated.errorCode ?? "run_terminal",
+        idempotencyKey: `queue-run-completed:${updated.id}:${updated.status}`,
+      });
+    }
+
     return updated;
   }
 
@@ -3635,6 +3652,46 @@ export function heartbeatService(db: Db) {
       .update(agentWakeupRequests)
       .set({ status, ...patch, updatedAt: new Date() })
       .where(eq(agentWakeupRequests.id, wakeupRequestId));
+  }
+
+  // [Task 6C] queue/run 상태전이를 workflow_transition_events 에 mirror (append-only).
+  // 기존 경로 제거/교체 없이 event 만 추가. unique index (company_id, idempotency_key) 로 중복 방지.
+  async function recordQueueTransitionEvent(input: {
+    companyId: string;
+    missionId?: string | null;
+    issueId?: string | null;
+    wakeupRequestId?: string | null;
+    heartbeatRunId?: string | null;
+    workflowRunId?: string | null;
+    workflowStepRunId?: string | null;
+    eventType: string;
+    layer: string;
+    decision?: string | null;
+    reason?: string | null;
+    reasonCode?: string | null;
+    idempotencyKey: string;
+    payload?: Record<string, unknown>;
+  }) {
+    try {
+      await db.insert(workflowTransitionEvents).values({
+        companyId: input.companyId,
+        missionId: input.missionId ?? null,
+        issueId: input.issueId ?? null,
+        wakeupRequestId: input.wakeupRequestId ?? null,
+        heartbeatRunId: input.heartbeatRunId ?? null,
+        workflowRunId: input.workflowRunId ?? null,
+        workflowStepRunId: input.workflowStepRunId ?? null,
+        eventType: input.eventType,
+        layer: input.layer,
+        decision: input.decision ?? null,
+        reason: input.reason ?? null,
+        reasonCode: input.reasonCode ?? null,
+        idempotencyKey: input.idempotencyKey,
+        payload: input.payload ?? {},
+      });
+    } catch {
+      // unique index on (company_id, idempotency_key) WHERE not null — duplicate, ignore
+    }
   }
 
   async function appendRunEvent(
@@ -4089,6 +4146,20 @@ export function heartbeatService(db: Db) {
       .returning()
       .then((rows) => rows[0] ?? null);
     if (!claimed) return null;
+
+    // [Task 6C] queue_run_started event (queued→running transition)
+    await recordQueueTransitionEvent({
+      companyId: claimed.companyId,
+      heartbeatRunId: claimed.id,
+      wakeupRequestId: claimed.wakeupRequestId,
+      issueId: claimed.issueId,
+      eventType: "queue_run_started",
+      layer: "heartbeat",
+      decision: "running",
+      reason: "claim_succeeded",
+      reasonCode: "claim_succeeded",
+      idempotencyKey: `queue-run-started:${claimed.id}`,
+    });
 
     publishLiveEvent({
       companyId: claimed.companyId,
@@ -7140,6 +7211,20 @@ export function heartbeatService(db: Db) {
         workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
         workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
       });
+      // [Task 6C] mirror queue_rejected transition event (all skip paths covered via writeSkippedRequest)
+      await recordQueueTransitionEvent({
+        companyId: agent.companyId,
+        missionId: readNonEmptyString(enrichedContextSnapshot.missionId) ?? null,
+        issueId: issueId ?? null,
+        workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
+        workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
+        eventType: "queue_rejected",
+        layer: "queue",
+        decision: "rejected",
+        reason: skipReason,
+        reasonCode: skipReason,
+        idempotencyKey: `queue-rejected:${agent.companyId}:${agentId}:${skipReason}:${issueId ?? "no-issue"}`,
+      });
     };
 
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
@@ -7643,6 +7728,35 @@ export function heartbeatService(db: Db) {
 
         return { kind: "queued" as const, run: newRun };
       });
+
+      // [Task 6C] mirror queue decision events based on enqueueWakeup outcome
+      if (outcome.kind === "queued" && outcome.run) {
+        await recordQueueTransitionEvent({
+          companyId: agent.companyId,
+          missionId: missionIdForWake,
+          issueId: issueId ?? null,
+          wakeupRequestId: outcome.run.wakeupRequestId,
+          heartbeatRunId: outcome.run.id,
+          eventType: "queue_accepted",
+          layer: "queue",
+          decision: "accepted",
+          reason: "heartbeat_run_created",
+          reasonCode: "heartbeat_run_created",
+          idempotencyKey: `queue-accepted:${outcome.run.wakeupRequestId ?? "no-wake"}:${outcome.run.id}`,
+        });
+      } else if (outcome.kind === "deferred" || outcome.kind === "coalesced") {
+        await recordQueueTransitionEvent({
+          companyId: agent.companyId,
+          missionId: missionIdForWake,
+          issueId: issueId ?? null,
+          eventType: "queue_waiting",
+          layer: "queue",
+          decision: "waiting",
+          reason: "active_run_or_execution_lock",
+          reasonCode: "active_run_or_execution_lock",
+          idempotencyKey: `queue-waiting:${agent.companyId}:${agentId}:${issueId ?? "no-issue"}`,
+        });
+      }
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
       if (outcome.kind === "coalesced") return outcome.run;
