@@ -69,7 +69,10 @@ export type LatestAuthorizedMissionOwnerPlanDecisionResult =
       ok: true;
       decision: MissionOwnerPlanDecisionPayload;
       planningIssueId: string;
+      decisionIssueId: string;
+      decisionIssueOriginKind: string | null;
       commentId: string;
+      commentCreatedAt: Date | null;
       author: MissionOwnerPlanDecisionAuthor;
       diagnostics: MissionOwnerPlanDecisionCollectorDiagnostic[];
     }
@@ -176,15 +179,33 @@ export async function findLatestAuthorizedMissionOwnerPlanDecision({
     return { ok: false, reason: "planning_issue_not_found", planningIssueId: null, diagnostics };
   }
 
+  const planQaIssues = await db
+    .select({ id: issues.id, originKind: issues.originKind })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, companyId),
+      eq(issues.missionId, missionId),
+      eq(issues.originKind, "mission_plan_qa"),
+      isNull(issues.hiddenAt),
+    ));
+  const candidateIssues = [
+    { id: planningIssue.id, originKind: "mission_main_executor_plan" },
+    ...planQaIssues,
+  ];
+  const candidateIssueIds = candidateIssues.map((issue) => issue.id);
+  const issueOriginKindById = new Map(candidateIssues.map((issue) => [issue.id, issue.originKind]));
+
   const comments = await db
     .select({
       id: issueComments.id,
+      issueId: issueComments.issueId,
       authorAgentId: issueComments.authorAgentId,
       authorUserId: issueComments.authorUserId,
       body: issueComments.body,
+      createdAt: issueComments.createdAt,
     })
     .from(issueComments)
-    .where(and(eq(issueComments.companyId, companyId), eq(issueComments.issueId, planningIssue.id)))
+    .where(and(eq(issueComments.companyId, companyId), inArray(issueComments.issueId, candidateIssueIds)))
     .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
 
   for (const comment of comments) {
@@ -226,7 +247,10 @@ export async function findLatestAuthorizedMissionOwnerPlanDecision({
       ok: true,
       decision: parsed.decision,
       planningIssueId: planningIssue.id,
+      decisionIssueId: comment.issueId,
+      decisionIssueOriginKind: issueOriginKindById.get(comment.issueId) ?? null,
       commentId: comment.id,
+      commentCreatedAt: comment.createdAt ?? null,
       author,
       diagnostics,
     };
@@ -813,7 +837,10 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         ok: true as const,
         decision: preParsedDecision.decision,
         planningIssueId: preParsedDecision.planningIssueId,
+        decisionIssueId: preParsedDecision.planningIssueId,
+        decisionIssueOriginKind: "structured_submission",
         commentId: preParsedDecision.commentId ?? "structured-submission",
+        commentCreatedAt: null,
         author: {
           kind: requestedBy?.actorType === "agent" ? "agent" : "user",
           id: requestedBy?.actorId ?? "structured-submission",
@@ -1005,7 +1032,15 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       }
       // (b) 같은 decisionHash 의 PLAN-QA 게이트 진행중 → verdict 로 분기
       if (activePlanQa && activePlanQa.decisionHash === decisionHash && activePlanQa.issueId) {
-        const verdict = await readPlanQaVerdict({ db, companyId, planQaIssueId: activePlanQa.issueId });
+        const verdict = await readPlanQaVerdict({
+          db,
+          companyId,
+          planQaIssueId: activePlanQa.issueId,
+          decisionHash,
+          afterCreatedAt: collected.decisionIssueOriginKind === "mission_plan_qa"
+            ? collected.commentCreatedAt
+            : null,
+        });
         if (verdict === "pass") {
           await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
           await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
@@ -1042,7 +1077,9 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   }
 
   // ── 새 decision (decisionHash 불일치): revision 생성 + PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연 ──
-  const planQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
+  const planQaIssue = collected.decisionIssueOriginKind === "mission_plan_qa"
+    ? { id: collected.decisionIssueId }
+    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
   const refs = mergeMissionPlanRefs(activePlan?.refs, {
     ...draftResult.draft.refs,
     ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
@@ -1825,12 +1862,32 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
   lines.push(
     "Checklist (judge against the mission goal):",
     "- Are the mission goal's core verbs reflected in concrete steps?",
+    "- Is the step split sufficient to deliver the goal without mixing unrelated failure modes?",
+    "- Does every step have a clear instruction: task target, required inputs, expected output, and success criteria?",
     "- Does the plan need a URL / input normalization step? Is it present?",
     "- Are parallel vs sequential dependencies appropriate (no over- or under-serialization)?",
     "- Are content QA and publish smoke QA separated into distinct steps (not collapsed into one)?",
     "- Is each step's assignee appropriate by role / capability / skill?",
+    "- Are requested skills attached to the right steps, and are unnecessary or unavailable skills avoided?",
+    "- Are required tools, permissions, and external systems explicit and available to the assigned agent?",
     "- Does each ACTION step have a clear work-product contract?",
     "- Is QA not collapsed into a single terminal step?",
+    "",
+    "Scorecard (include this table in your response before the final verdict):",
+    "| Area | Score (0-2) | Evidence | Required fix if below 2 |",
+    "|---|---:|---|---|",
+    "| Goal coverage |  |  |  |",
+    "| Step split / sequencing |  |  |  |",
+    "| Agent fit |  |  |  |",
+    "| Instruction quality |  |  |  |",
+    "| Skill fit |  |  |  |",
+    "| Tool / permission fit |  |  |  |",
+    "| Work-product contract |  |  |  |",
+    "| QA / recovery design |  |  |  |",
+    "",
+    "Hard blockers:",
+    "- Any score of 0 must be REQUEST_CHANGES.",
+    "- Any missing required output, unavailable assignee/tool/skill, or collapsed content/publish QA must be REQUEST_CHANGES.",
     "",
     "Verdict output format (required):",
     "Finish your run output with exactly one standalone final line:",
@@ -2019,16 +2076,26 @@ async function ensurePlanQaWakeupForIssue(input: {
   });
 }
 
-async function readPlanQaVerdict(input: { db: Db; companyId: string; planQaIssueId: string }): Promise<ValidationVerdict | null> {
+async function readPlanQaVerdict(input: {
+  db: Db;
+  companyId: string;
+  planQaIssueId: string;
+  decisionHash?: string | null;
+  afterCreatedAt?: Date | null;
+}): Promise<ValidationVerdict | null> {
   // [AREA: structured events / Task 4] structured-first: mission_plan_qa_verdicts 표에서 최신 verdict 읽기.
   // 없으면 comment-based fallback(기존 readExplicitValidationVerdict 경로 유지).
+  const structuredConditions = [
+    eq(missionPlanQaVerdicts.companyId, input.companyId),
+    eq(missionPlanQaVerdicts.planQaIssueId, input.planQaIssueId),
+  ];
+  if (input.decisionHash) {
+    structuredConditions.push(eq(missionPlanQaVerdicts.decisionHash, input.decisionHash));
+  }
   const [structuredVerdict] = await input.db
     .select({ verdict: missionPlanQaVerdicts.verdict })
     .from(missionPlanQaVerdicts)
-    .where(and(
-      eq(missionPlanQaVerdicts.companyId, input.companyId),
-      eq(missionPlanQaVerdicts.planQaIssueId, input.planQaIssueId),
-    ))
+    .where(and(...structuredConditions))
     .orderBy(desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
     .limit(1);
   if (structuredVerdict?.verdict === "pass" || structuredVerdict?.verdict === "request_changes") {
@@ -2048,6 +2115,14 @@ async function readPlanQaVerdict(input: { db: Db; companyId: string; planQaIssue
     .limit(1);
   if (!planQaIssue) return null;
 
+  const commentConditions = [
+    eq(issueComments.companyId, input.companyId),
+    eq(issueComments.issueId, input.planQaIssueId),
+  ];
+  if (input.afterCreatedAt) {
+    commentConditions.push(sql`${issueComments.createdAt} >= ${input.afterCreatedAt.toISOString()}`);
+  }
+
   const rows = await input.db
     .select({
       authorAgentId: issueComments.authorAgentId,
@@ -2055,7 +2130,7 @@ async function readPlanQaVerdict(input: { db: Db; companyId: string; planQaIssue
       body: issueComments.body,
     })
     .from(issueComments)
-    .where(and(eq(issueComments.companyId, input.companyId), eq(issueComments.issueId, input.planQaIssueId)))
+    .where(and(...commentConditions))
     .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
 
   const verdictRows = rows

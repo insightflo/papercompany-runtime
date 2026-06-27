@@ -2112,7 +2112,10 @@ export function issueService(db: Db) {
         .set({ updatedAt: new Date() })
         .where(eq(issues.id, issueId));
 
-      if (issue.originKind === "mission_main_executor_plan" && issue.missionId) {
+      if (
+        (issue.originKind === "mission_main_executor_plan" || issue.originKind === "mission_plan_qa") &&
+        issue.missionId
+      ) {
         const requestedBy = actor.agentId
           ? { actorType: "agent" as const, actorId: actor.agentId }
           : actor.userId

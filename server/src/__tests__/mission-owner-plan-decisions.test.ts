@@ -278,7 +278,10 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
       ok: true,
       decision,
       planningIssueId,
+      decisionIssueId: planningIssueId,
+      decisionIssueOriginKind: "mission_main_executor_plan",
       commentId,
+      commentCreatedAt: new Date("2026-01-01T00:00:00.000Z"),
       author: { kind: "agent", id: ownerAgentId },
       diagnostics: [],
     });
@@ -2643,6 +2646,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         kind: "workflow_definition_step",
         title: "Run smoke",
         reason: "source evidence",
+        selectionState: "selected",
         sourceRef: { type: "workflow_definition_step", id: opts.sourceWorkflowId, stepId: "scout" },
       }],
     };
@@ -2693,6 +2697,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(planQaIssues[0]!.assigneeAgentId).toBe(qaAgentId);
     expect(planQaIssues[0]!.description).toContain("PASS");
     expect(planQaIssues[0]!.description).toContain("REQUEST_CHANGES");
+    expect(planQaIssues[0]!.description).toContain("Scorecard");
+    expect(planQaIssues[0]!.description).toContain("Agent fit");
+    expect(planQaIssues[0]!.description).toContain("Skill fit");
+    expect(planQaIssues[0]!.description).toContain("Tool / permission fit");
     expect(enqueuePlanQaWakeup).toHaveBeenCalledTimes(1);
     expect(enqueuePlanQaWakeup).toHaveBeenCalledWith(expect.objectContaining({
       companyId,
@@ -2703,6 +2711,69 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       planningIssueId,
     }));
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
+  });
+
+  it("plan-QA gate: accepts a revised owner decision posted on the existing PLAN-QA issue and ignores stale prior verdicts", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId, unitId: "unit-original" });
+
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    const firstPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const firstPlanQa = (firstPlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    const planQaIssueId = firstPlanQa?.issueId;
+    expect(planQaIssueId).toBeTruthy();
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQaIssueId!,
+      authorAgentId: qaAgentId,
+      body: "Plan has gaps.\nREQUEST_CHANGES: split publish and QA",
+      createdAt: new Date("2027-01-01T00:01:00.000Z"),
+    });
+
+    const revisedDecision = {
+      ...validDecision,
+      missionId,
+      selectedExecutionUnits: [{
+        id: "unit-revised",
+        kind: "workflow_definition_step",
+        title: "Run revised smoke",
+        reason: "revised source evidence",
+        selectionState: "selected",
+        sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
+      }],
+    };
+    const revisedCommentCreatedAt = new Date("2027-01-01T00:02:00.000Z");
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQaIssueId!,
+      authorAgentId: ownerAgentId,
+      body: decisionComment(revisedDecision),
+      createdAt: revisedCommentCreatedAt,
+    });
+
+    const revisedPending = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(revisedPending.status).toBe("plan_qa_pending");
+
+    const revisedPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const revisedRefs = revisedPlan?.refs as Record<string, unknown>;
+    expect(revisedPlan?.revision).toBe(3);
+    expect((revisedRefs.planQa as { issueId?: string } | undefined)?.issueId).toBe(planQaIssueId);
+    expect(JSON.stringify(revisedRefs)).toContain("unit-revised");
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planQaIssueId!,
+      authorAgentId: qaAgentId,
+      body: "Plan is sound.\nPASS",
+      createdAt: new Date("2027-01-01T00:03:00.000Z"),
+    });
+
+    const materialized = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(materialized.status).toBe("recorded");
+    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
   });
 
   it("records a structured owner plan decision without reading issue comments (structured-events p3)", async () => {
@@ -3065,9 +3136,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       reviewedBy: { actorType: "agent", actorId: qaAgentId },
     });
 
-    // 2차 record → structured pass → materialize
+    // recordMissionPlanQaVerdict dual-writes a PASS comment; the issue comment hook may
+    // materialize immediately, so the explicit next tick is idempotent.
     const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-    expect(second.status).toBe("recorded");
+    expect(second.status).toBe("noop");
     expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
   });
 });

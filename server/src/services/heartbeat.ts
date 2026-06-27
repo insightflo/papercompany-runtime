@@ -2538,7 +2538,11 @@ async function recordMissionOwnerPlanDecisionAfterComment(
   actorAgentId: string | null,
   enqueuePlanQaWakeup?: PlanQaWakeupHandler,
 ) {
-  if (issue.originKind !== "mission_main_executor_plan" || !issue.missionId) return;
+  if (
+    issue.originKind !== "mission_main_executor_plan" &&
+    issue.originKind !== "mission_plan_qa"
+  ) return;
+  if (!issue.missionId) return;
   try {
     await recordLatestAuthorizedMissionOwnerPlanDecision({
       db,
