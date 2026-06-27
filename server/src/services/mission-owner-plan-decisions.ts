@@ -732,6 +732,12 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionInput = {
   missionId: string;
   requestedBy?: MaterializerActor;
   enqueuePlanQaWakeup?: PlanQaWakeupHandler;
+  /** Structured decision bypassing comment-parse (structured-events p3). */
+  preParsedDecision?: {
+    decision: Record<string, unknown>;
+    planningIssueId: string;
+    commentId?: string | null;
+  };
 };
 
 export type PlanQaWakeupHandler = (input: {
@@ -798,8 +804,23 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   missionId,
   requestedBy,
   enqueuePlanQaWakeup,
+  preParsedDecision,
 }: RecordLatestAuthorizedMissionOwnerPlanDecisionInput): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionResult> {
-  const collected = await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+  // [structured-events p3] structured submission 이 있으면 comment-parse 를 건너뛰고
+  //   동일한 validation+materialization chain 으로 직행.
+  const collected = preParsedDecision
+    ? {
+        ok: true as const,
+        decision: preParsedDecision.decision,
+        planningIssueId: preParsedDecision.planningIssueId,
+        commentId: preParsedDecision.commentId ?? "structured-submission",
+        author: {
+          kind: requestedBy?.actorType === "agent" ? "agent" : "user",
+          id: requestedBy?.actorId ?? "structured-submission",
+        },
+        diagnostics: [] as Array<{ code: string; message: string; commentId?: string }>,
+      }
+    : await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
   if (!collected.ok) {
     const base = {
       reason: collected.reason,

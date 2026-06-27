@@ -14,6 +14,7 @@ import {
   issues,
   missionDelegations,
   missionPlanArtifacts,
+  missionPlanDecisionSubmissions,
   missionPlanQaVerdicts,
   missions,
   workflowDefinitions,
@@ -27,6 +28,7 @@ import {
   recordLatestAuthorizedMissionOwnerPlanDecision,
 } from "../services/mission-owner-plan-decisions.js";
 import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
+import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
 import { setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -2701,6 +2703,43 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       planningIssueId,
     }));
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
+  });
+
+  it("records a structured owner plan decision without reading issue comments (structured-events p3)", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    const decision = {
+      ...validDecision,
+      missionId,
+      selectedExecutionUnits: [{
+        id: "unit-structured",
+        kind: "workflow_definition_step",
+        title: "Run smoke",
+        reason: "source evidence",
+        sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
+      }],
+    };
+
+    const result = await recordMissionOwnerPlanDecisionSubmission({
+      db,
+      companyId,
+      missionId,
+      planningIssueId,
+      decision,
+      requestedBy: { actorType: "agent", actorId: ownerAgentId },
+    });
+
+    // gate always active → plan_qa_pending (no materialize until PASS)
+    expect(result.status).toBe("plan_qa_pending");
+
+    const submissions = await db
+      .select()
+      .from(missionPlanDecisionSubmissions)
+      .where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]?.decisionHash).toBe(result.decisionHash);
+    // no issue comment was posted (structured path, not comment-parse)
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, planningIssueId));
+    expect(comments).toHaveLength(0);
   });
 
   it("plan-QA gate: does not assign or wake an existing terminal unassigned Plan QA issue during reprocess", async () => {
