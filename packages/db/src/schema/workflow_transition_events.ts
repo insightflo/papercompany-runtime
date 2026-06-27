@@ -1,4 +1,5 @@
-import { index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { agentWakeupRequests } from "./agent_wakeup_requests.js";
 import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
@@ -42,5 +43,10 @@ export const workflowTransitionEvents = pgTable(
       .on(table.heartbeatRunId, table.eventType),
     correlationIdx: index("workflow_transition_events_correlation_idx")
       .on(table.companyId, table.correlationId, table.createdAt),
+    // [Task 1D Step 5] partial unique index for event idempotency — prevents duplicate
+    // transition events with the same (company_id, idempotency_key) when key is non-null.
+    idempotencyKeyUq: uniqueIndex("workflow_transition_events_idempotency_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
   }),
 );

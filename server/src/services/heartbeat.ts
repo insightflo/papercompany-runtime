@@ -3792,6 +3792,12 @@ export function heartbeatService(db: Db) {
           status: "queued",
           requestedByActorType: "system",
           requestedByActorId: null,
+          requestKind: "process_lost_retry",
+          issueId: issueId ?? null,
+          missionId: retryMissionId ?? null,
+          workflowRunId: retryWorkflowRunId ?? null,
+          // retryStepId 는 stepId(text) 이지 workflow_step_runs.id(UUID)가 아님 → null.
+          workflowStepRunId: null,
           updatedAt: now,
         })
         .returning()
@@ -3936,6 +3942,9 @@ export function heartbeatService(db: Db) {
           status: "queued",
           requestedByActorType: "system",
           requestedByActorId: null,
+          requestKind: "adapter_fallback",
+          issueId: issueId ?? null,
+          missionId: fallbackMissionId ?? null,
           updatedAt: now,
         })
         .returning()
@@ -7151,6 +7160,20 @@ export function heartbeatService(db: Db) {
             .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
             .then((rows) => rows[0]?.missionId ?? null)
         : null);
+    // [AREA: structured-events Task 1D] typed queue context derived from payload/contextSnapshot.
+    // 모든 agent_wakeup_requests insert 경로에 mirror. payload 원본은 변경하지 않는다(호환성).
+    const typedQueueColumns = {
+      requestKind: readNonEmptyString((payload as Record<string, unknown> | null)?.["kind"] as string)
+        ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["mutation"] as string)
+        ?? reason
+        ?? source,
+      issueId: issueId ?? null,
+      missionId: (missionIdForWake ?? readNonEmptyString(enrichedContextSnapshot.missionId)) ?? null,
+      workflowRunId: (readNonEmptyString(enrichedContextSnapshot.workflowRunId)
+        ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowRunId"] as string)) ?? null,
+      workflowStepRunId: (readNonEmptyString(enrichedContextSnapshot.workflowStepRunId)
+        ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowStepRunId"] as string)) ?? null,
+    };
     if (missionIdForWake) {
       try {
         await assertMissionRuntimeAcceptsWork(db, {
@@ -7269,6 +7292,7 @@ export function heartbeatService(db: Db) {
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
+            ...typedQueueColumns,
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
@@ -7374,6 +7398,7 @@ export function heartbeatService(db: Db) {
               triggerDetail,
               reason: "issue_execution_same_name",
               payload,
+              ...typedQueueColumns,
               status: "coalesced",
               coalescedCount: 1,
               requestedByActorType: opts.requestedByActorType ?? null,
@@ -7444,6 +7469,7 @@ export function heartbeatService(db: Db) {
             triggerDetail,
             reason: "issue_execution_deferred",
             payload: deferredPayload,
+            ...typedQueueColumns,
             status: "deferred_issue_execution",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
@@ -7529,6 +7555,7 @@ export function heartbeatService(db: Db) {
               triggerDetail,
               reason,
               payload: queuedPayload,
+              ...typedQueueColumns,
               status: "queued",
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
@@ -7547,6 +7574,7 @@ export function heartbeatService(db: Db) {
             triggerDetail,
             reason,
             payload,
+            ...typedQueueColumns,
             status: "queued",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
@@ -7680,6 +7708,7 @@ export function heartbeatService(db: Db) {
         payload,
         status: "coalesced",
         coalescedCount: 1,
+        ...typedQueueColumns,
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
         idempotencyKey: opts.idempotencyKey ?? null,
@@ -7698,6 +7727,7 @@ export function heartbeatService(db: Db) {
         triggerDetail,
         reason,
         payload,
+        ...typedQueueColumns,
         status: "queued",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
