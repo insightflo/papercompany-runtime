@@ -116,6 +116,9 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
+// [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
+//   done/completed/cancelled(canceled)/closed 는 재시도 무의미 → request failed 로 종료.
+const PROMOTED_REJECT_ISSUE_STATUSES = new Set(["done", "completed", "cancelled", "canceled", "closed", "wontfix"]);
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
 // orphaned-but-alive child 강제 회수 시한. handle 상실 후에도 child pid 가 살아 reaper 가 process_detached
 // 로 매 tick defer 만 하던 무한 대기(CMPA-5519 ~72분 hang)를 상한으로 끊고 process_lost+retry 로 회수.
@@ -4474,8 +4477,15 @@ export function heartbeatService(db: Db) {
       .select({ agentId: heartbeatRuns.agentId })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.status, "queued"));
+    const queuedWakeups = await db
+      .select({ agentId: agentWakeupRequests.agentId })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.status, "queued"),
+        sql`${agentWakeupRequests.runId} is null`,
+      ));
 
-    const agentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
+    const agentIds = [...new Set([...queuedRuns, ...queuedWakeups].map((r) => r.agentId))];
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
@@ -4554,13 +4564,33 @@ export function heartbeatService(db: Db) {
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
         .orderBy(asc(heartbeatRuns.createdAt))
         .limit(availableSlots);
-      if (queuedRuns.length === 0) return [];
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of queuedRuns) {
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
       }
+
+      const remainingSlots = availableSlots - claimedRuns.length;
+      if (remainingSlots > 0) {
+        const promotedRuns = await promoteQueuedWakeupRequestsForAgent(agent, remainingSlots);
+        for (const promotedRun of promotedRuns) {
+          publishLiveEvent({
+            companyId: promotedRun.companyId,
+            type: "heartbeat.run.queued",
+            payload: {
+              runId: promotedRun.id,
+              agentId: promotedRun.agentId,
+              invocationSource: promotedRun.invocationSource,
+              triggerDetail: promotedRun.triggerDetail,
+              wakeupRequestId: promotedRun.wakeupRequestId,
+            },
+          });
+          const claimed = await claimQueuedRun(promotedRun);
+          if (claimed) claimedRuns.push(claimed);
+        }
+      }
+
       if (claimedRuns.length === 0) return [];
 
       for (const claimedRun of claimedRuns) {
@@ -4569,6 +4599,243 @@ export function heartbeatService(db: Db) {
         });
       }
       return claimedRuns;
+    });
+  }
+
+  async function promoteQueuedWakeupRequestsForAgent(
+    agent: typeof agents.$inferSelect,
+    limit: number,
+  ) {
+    if (limit <= 0) return [];
+    const pendingRequests = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, agent.companyId),
+        eq(agentWakeupRequests.agentId, agent.id),
+        eq(agentWakeupRequests.status, "queued"),
+        sql`${agentWakeupRequests.runId} is null`,
+      ))
+      .orderBy(asc(agentWakeupRequests.requestedAt))
+      .limit(Math.max(limit * 4, limit));
+
+    const promotedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+    for (const pendingRequest of pendingRequests) {
+      if (promotedRuns.length >= limit) break;
+      const promoted = await promoteQueuedWakeupRequest(agent, pendingRequest.id);
+      if (promoted) promotedRuns.push(promoted);
+    }
+    return promotedRuns;
+  }
+
+  async function promoteQueuedWakeupRequest(
+    agent: typeof agents.$inferSelect,
+    wakeupRequestId: string,
+  ) {
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`select id from agent_wakeup_requests where id = ${wakeupRequestId} for update`);
+      const request = await tx
+        .select()
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.id, wakeupRequestId),
+          eq(agentWakeupRequests.companyId, agent.companyId),
+          eq(agentWakeupRequests.agentId, agent.id),
+          eq(agentWakeupRequests.status, "queued"),
+          sql`${agentWakeupRequests.runId} is null`,
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (!request) return null;
+
+      // [거절] agent 가 실행 불가 상태면 run 도 만들지 않고 request 를 terminal-fail.
+      if (agent.status === "terminated" || agent.status === "paused" || agent.status === "pending_approval") {
+        await tx
+          .update(agentWakeupRequests)
+          .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: agent not runnable (status=${agent.status})`, updatedAt: new Date() })
+          .where(eq(agentWakeupRequests.id, request.id));
+        return null;
+      }
+
+      const requestPayload = parseObject(request.payload);
+      const queuedContext = parseObject(requestPayload[DEFERRED_WAKE_CONTEXT_KEY]);
+      const promotedPayload = { ...requestPayload };
+      delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
+
+      const promotedReason = readNonEmptyString(request.reason);
+      const promotedSource =
+        (readNonEmptyString(request.source) as WakeupOptions["source"]) ?? "automation";
+      const promotedTriggerDetail =
+        (readNonEmptyString(request.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
+
+      const {
+        contextSnapshot: promotedContextSnapshot,
+        issueIdFromPayload,
+        taskKey: promotedTaskKey,
+      } = enrichWakeContextSnapshot({
+        contextSnapshot: queuedContext,
+        reason: promotedReason,
+        source: promotedSource,
+        triggerDetail: promotedTriggerDetail,
+        payload: promotedPayload,
+      });
+      const promotedIssueId = readNonEmptyString(promotedContextSnapshot.issueId) ?? issueIdFromPayload;
+
+      const promotedIssue = promotedIssueId
+        ? await tx
+          .select({
+            id: issues.id,
+            companyId: issues.companyId,
+            projectId: issues.projectId,
+            missionId: issues.missionId,
+            status: issues.status,
+          })
+          .from(issues)
+          .where(and(eq(issues.id, promotedIssueId), eq(issues.companyId, agent.companyId)))
+          .then((rows) => rows[0] ?? null)
+        : null;
+
+      if (promotedIssueId && !promotedIssue) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            status: "failed",
+            finishedAt: new Date(),
+            error: "Queued wakeup could not be promoted: issue not found",
+            updatedAt: new Date(),
+          })
+          .where(eq(agentWakeupRequests.id, request.id));
+        return null;
+      }
+
+      // [거절] issue 가 이미 terminal 이면 재실행 무의미 → request terminal-fail.
+      if (promotedIssue && PROMOTED_REJECT_ISSUE_STATUSES.has(promotedIssue.status)) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`, updatedAt: new Date() })
+          .where(eq(agentWakeupRequests.id, request.id));
+        return null;
+      }
+
+      const missionIdForWake =
+        readNonEmptyString(promotedContextSnapshot.missionId) ??
+        readNonEmptyString(promotedPayload.missionId) ??
+        promotedIssue?.missionId ??
+        null;
+      if (missionIdForWake) {
+        const existingMissionRun = await tx
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.agentId, agent.id),
+            sql`heartbeat_runs.status in ('queued','running')`,
+            sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForWake}`,
+          ))
+          .limit(1);
+        if (existingMissionRun.length > 0) return null;
+
+        try {
+          await assertMissionRuntimeAcceptsWork(tx as unknown as Db, {
+            companyId: agent.companyId,
+            missionId: missionIdForWake,
+          });
+        } catch (err) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: "failed",
+              finishedAt: new Date(),
+              error: err instanceof Error ? err.message : "Queued wakeup could not be promoted: mission is terminal",
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, request.id));
+          return null;
+        }
+      }
+
+      const budgetBlock = await budgets.getInvocationBlock(agent.companyId, agent.id, {
+        issueId: promotedIssue?.id ?? promotedIssueId,
+        projectId: promotedIssue?.projectId ?? readNonEmptyString(promotedContextSnapshot.projectId),
+      });
+      if (budgetBlock) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            status: "failed",
+            finishedAt: new Date(),
+            error: budgetBlock.reason,
+            updatedAt: new Date(),
+          })
+          .where(eq(agentWakeupRequests.id, request.id));
+        return null;
+      }
+
+      const sessionBefore = await resolveSessionBeforeForWakeup(agent, promotedTaskKey, {
+        missionId: missionIdForWake,
+      });
+      const now = new Date();
+      const newRun = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: agent.companyId,
+          agentId: agent.id,
+          issueId: promotedIssueId,
+          invocationSource: promotedSource,
+          triggerDetail: promotedTriggerDetail,
+          status: "queued",
+          wakeupRequestId: request.id,
+          contextSnapshot: promotedContextSnapshot,
+          sessionIdBefore: sessionBefore,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          runId: newRun.id,
+          claimedAt: null,
+          finishedAt: null,
+          error: null,
+          updatedAt: now,
+        })
+        .where(eq(agentWakeupRequests.id, request.id));
+
+      if (promotedIssue) {
+        const startedIssue = await tx
+          .update(issues)
+          .set({
+            executionRunId: newRun.id,
+            checkoutRunId: newRun.id,
+            status: "in_progress",
+            startedAt: now,
+            executionAgentNameKey: normalizeAgentNameKey(agent.name),
+            executionLockedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(issues.id, promotedIssue.id), inArray(issues.status, ISSUE_RUN_START_STATUSES)))
+          .returning({ id: issues.id })
+          .then((rows) => rows[0] ?? null);
+
+        if (startedIssue) {
+          await tx.insert(activityLog).values({
+            companyId: promotedIssue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "issue.execution_started",
+            entityType: "issue",
+            entityId: promotedIssue.id,
+            agentId: agent.id,
+            runId: newRun.id,
+            details: {
+              previousStatus: promotedIssue.status,
+              nextStatus: "in_progress",
+              reason: "queued_wakeup_promoted",
+            },
+          });
+        }
+      }
+
+      return newRun;
     });
   }
 
@@ -7181,9 +7448,9 @@ export function heartbeatService(db: Db) {
         }
 
         // [B] 같은 mission 에 이미 queued/running run 이 있으면 새 run 을 만들지
-        // 않는다(중복 run/issue 차단). workflow 가 한 mission 의 여러 issue 를
-        // 만들 때 per-issue wake 가 각각 새 run 을 spawn 하는 것을 막아, 한 mission
-        // 안에서 같은 agent 가 동시에 여러 run 을 가지지 않게 한다.
+        // 않는다(중복 run/issue 차단). 대신 wakeup request 를 runId=null queued
+        // 상태로 남겨 실행요청 Queue 처럼 처리하고, agent/mission slot 이 비면
+        // startNextQueuedRunForAgent 가 실제 heartbeat run 으로 승격한다.
         const missionIdForDedup = readNonEmptyString(enrichedContextSnapshot.missionId);
         if (missionIdForDedup) {
           const existingMissionRun = await tx
@@ -7198,8 +7465,70 @@ export function heartbeatService(db: Db) {
             )
             .limit(1);
           if (existingMissionRun.length > 0) {
-            await writeSkippedRequest("heartbeat.mission_run_active");
-            return { kind: "skipped" as const };
+            const queuedPayload = {
+              ...(payload ?? {}),
+              issueId,
+              [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
+            };
+            const existingQueuedWake = await tx
+              .select()
+              .from(agentWakeupRequests)
+              .where(
+                and(
+                  eq(agentWakeupRequests.companyId, agent.companyId),
+                  eq(agentWakeupRequests.agentId, agentId),
+                  eq(agentWakeupRequests.status, "queued"),
+                  sql`${agentWakeupRequests.runId} is null`,
+                  sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                ),
+              )
+              .orderBy(asc(agentWakeupRequests.requestedAt))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+
+            if (existingQueuedWake) {
+              const existingQueuedPayload = parseObject(existingQueuedWake.payload);
+              const existingQueuedContext = parseObject(existingQueuedPayload[DEFERRED_WAKE_CONTEXT_KEY]);
+              const mergedQueuedContext = mergeCoalescedContextSnapshot(
+                existingQueuedContext,
+                enrichedContextSnapshot,
+              );
+              refreshStepInputManifest(
+                mergedQueuedContext,
+                deriveTaskKey(mergedQueuedContext, null),
+              );
+              const mergedQueuedPayload = {
+                ...existingQueuedPayload,
+                ...(payload ?? {}),
+                issueId,
+                [DEFERRED_WAKE_CONTEXT_KEY]: mergedQueuedContext,
+              };
+
+              await tx
+                .update(agentWakeupRequests)
+                .set({
+                  payload: mergedQueuedPayload,
+                  coalescedCount: (existingQueuedWake.coalescedCount ?? 0) + 1,
+                  updatedAt: new Date(),
+                })
+                .where(eq(agentWakeupRequests.id, existingQueuedWake.id));
+
+              return { kind: "deferred" as const };
+            }
+
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason,
+              payload: queuedPayload,
+              status: "queued",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+            });
+            return { kind: "deferred" as const };
           }
         }
 

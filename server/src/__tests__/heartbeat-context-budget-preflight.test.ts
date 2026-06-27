@@ -424,6 +424,10 @@ describe("heartbeat context budget preflight", () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     await db.delete(agentTaskSessions);
     await cleanupHeartbeatRunRecords(db);
+    // [AREA: wakeup queue] 새 skip→queued 동작이 agent_wakeup_requests 를 pending 상태로 남긴다.
+    // 이전 test 의 queued wakeup 이 다음 test 의 resumeQueuedRuns 에 의해 promote 되어 공유
+    // executeSpy 카운트를 오염시키지 않도록 매 test 마다 전체 삭제(격리). 반드시 runs 정리 뒤(FK).
+    await db.delete(agentWakeupRequests);
     await db.delete(workspaceRuntimeServices);
     await db.delete(issueWorkProducts);
     await db.delete(issueDocuments);

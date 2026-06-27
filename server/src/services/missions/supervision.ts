@@ -3,7 +3,7 @@
 // [파일 목적] mission owner supervision(감독/회복) 본체. runMainExecutorSupervision(1100+줄) +
 //   runActiveMissionOwnerSupervision. missions.ts 클로저 분해(P3).
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
-import { heartbeatRuns, issueComments, issues, missions } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issueComments, issues, missions } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -398,29 +398,57 @@ export function createSupervision({ db, deps, ownerActions }: {
       }
 
       if (isRecoverableQueueSource && ageMs >= staleAfterMs && !missionHasActiveHeartbeat && failedRunsForIssue.length === 0) {
-        findings.push(`stale_todo_no_active_execution: ${label} ${issue.status} while no mission issue has queued/running execution — ${issue.title}`);
-        addRecommendation({
-          type: "retry_unit_if_safe",
-          missionId: mission.id,
-          issueId: issue.id,
-          reason: `Queued issue ${label} remains ${issue.status} while no mission issue has active execution; owner should diagnose before retry/re-dispatch`,
-          safeToAutoApply: false,
-        });
-        addRecommendation({
-          type: "request_replan",
-          missionId: mission.id,
-          issueId: issue.id,
-          reason: `Mission has stale queued work but no active execution; owner should recover, replan, or escalate`,
-          safeToAutoApply: false,
-        });
-        if (issue.originKind !== "mission_main_executor_unblock" && !issue.hiddenAt && !isTerminalIssueStatus(issue.status)) {
-          await ownerActions.ensureMainExecutorUnblockIssue(mission, issue, {
-            renewAfterNoActionWaiting: true,
-            governanceEvidence: [
-              `stale_todo_no_active_execution: ${label} is ${issue.status}; no queued/running heartbeat run is active for any mission issue.`,
-              "Preferred recovery boundary: choose retry_source_issue when this source issue is still non-terminal and assigned to the original executor; todo status alone does not prove the work is running.",
-            ],
+        // [AREA: wakeup queue / Phase 1.5] 같은 issue 에 pending 실행요청(status=queued, runId null)이
+        // 있으면 "멈춤(stale)"이 아니라 엔진 승급을 기다리는 "대기" 상태다. 단 요청이 queue TTL 초과로
+        // 오래됐으면 promotion 이 막힌 진짜 stale 로 본다(mission_run_active 가 풀렸는데도 안 올라간 경우 등).
+        const pendingQueuedWakeup = await db
+          .select({ id: agentWakeupRequests.id, requestedAt: agentWakeupRequests.requestedAt })
+          .from(agentWakeupRequests)
+          .where(and(
+            eq(agentWakeupRequests.companyId, mission.companyId),
+            eq(agentWakeupRequests.status, "queued"),
+            sql`${agentWakeupRequests.runId} is null`,
+            sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+          ))
+          .limit(1);
+        const queueTtlMs = staleAfterMs * 4;
+        const pendingWakeupAgeMs = pendingQueuedWakeup[0] ? now.getTime() - pendingQueuedWakeup[0].requestedAt.getTime() : null;
+        const isWaitingOnQueue = pendingWakeupAgeMs !== null && pendingWakeupAgeMs < queueTtlMs;
+
+        if (isWaitingOnQueue) {
+          findings.push(`queued_waiting_for_execution: ${label} ${issue.status} has a pending execution-request (wakeup queue, age=${Math.round((pendingWakeupAgeMs ?? 0) / 1000)}s); waiting for engine promotion, not stale — ${issue.title}`);
+          addRecommendation({
+            type: "retry_unit_if_safe",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Queued issue ${label} is waiting on a pending execution-request (wakeup queue); give the engine time to promote before retry/re-dispatch`,
+            safeToAutoApply: false,
           });
+        } else {
+          findings.push(`stale_todo_no_active_execution: ${label} ${issue.status} while no mission issue has queued/running execution${pendingWakeupAgeMs !== null ? `; pending queue request aged past TTL (${Math.round((pendingWakeupAgeMs ?? 0) / 1000)}s)` : ""} — ${issue.title}`);
+          addRecommendation({
+            type: "retry_unit_if_safe",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Queued issue ${label} remains ${issue.status} while no mission issue has active execution; owner should diagnose before retry/re-dispatch`,
+            safeToAutoApply: false,
+          });
+          addRecommendation({
+            type: "request_replan",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Mission has stale queued work but no active execution; owner should recover, replan, or escalate`,
+            safeToAutoApply: false,
+          });
+          if (issue.originKind !== "mission_main_executor_unblock" && !issue.hiddenAt && !isTerminalIssueStatus(issue.status)) {
+            await ownerActions.ensureMainExecutorUnblockIssue(mission, issue, {
+              renewAfterNoActionWaiting: true,
+              governanceEvidence: [
+                `stale_todo_no_active_execution: ${label} is ${issue.status}; no queued/running heartbeat run is active for any mission issue.`,
+                "Preferred recovery boundary: choose retry_source_issue when this source issue is still non-terminal and assigned to the original executor; todo status alone does not prove the work is running.",
+              ],
+            });
+          }
         }
       }
       if (isRecoverableQueueSource && ageMs >= staleAfterMs && failedRunsForIssue.length > 0 && !hasActiveHeartbeat) {

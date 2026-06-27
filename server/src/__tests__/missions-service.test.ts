@@ -1627,6 +1627,45 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     }));
   });
 
+  it("treats a todo source with a pending queued execution-request as waiting, not stale (Phase 1.5)", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+
+    await db.insert(companies).values({ id: companyId, name: "Queue Wait Company", issuePrefix: `QW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Queue wait mission", status: "active" });
+    const svc = missionService(db);
+    const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "todo", title: "Todo source with pending queue request" });
+    // 옛날 createdAt → ageMs 가 staleAfter(1min) 를 넘게(10min).
+    await db.update(issues).set({ createdAt: new Date("2026-06-02T00:00:00.000Z"), updatedAt: new Date("2026-06-02T00:00:00.000Z") }).where(eq(issues.id, sourceIssue.id));
+    // pending execution-request (wakeup queue): status=queued, runId=null, payload.issueId=source.
+    // requestedAt 를 now 기준 2min 전으로 → TTL(staleAfter*4=4min) 이내 → 대기 상태.
+    await db.insert(agentWakeupRequests).values({
+      id: randomUUID(),
+      companyId,
+      agentId: workerAgentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId: sourceIssue.id },
+      status: "queued",
+      runId: null,
+      requestedAt: new Date("2026-06-02T00:08:00.000Z"),
+    });
+
+    const result = await svc.runActiveMissionOwnerSupervision({ companyId, staleAfterMinutes: 1, now: new Date("2026-06-02T00:10:00.000Z") });
+    const findings = result.missions[0]?.findings.join("\n") ?? "";
+
+    // [AREA: wakeup queue / Phase 1.5] pending queue request 가 있으므로 대기로 해석, stale 오판 방지.
+    expect(findings).toContain("queued_waiting_for_execution");
+    expect(findings).not.toContain("stale_todo_no_active_execution");
+  });
+
   it("does not directly wake a stale in_progress source after terminal heartbeat execution without diagnosis", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

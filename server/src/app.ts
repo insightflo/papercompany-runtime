@@ -2,7 +2,7 @@ import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { agentWakeupRequests, agents, type Db } from "@paperclipai/db";
+import { agents, type Db } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
@@ -66,6 +66,7 @@ import { createDeliveryRetryWorker } from "./services/srb/delivery-retry-worker.
 import { createNonceCleanupJob } from "./services/srb/nonce-cleanup.js";
 import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
 import { createMissionOwnerSupervisionMonitor } from "./services/mission-owner-supervision-monitor.js";
+import { findExistingWorkflowResumeWake } from "./services/workflow-resume-wake.js";
 import { createPlanQaWakeupHandler } from "./services/missions/plan-qa-wakeup.js";
 import { createAlertRules, setAlertRules } from "./services/alert-rules.js";
 import { createChannelRegistry } from "./channel/index.js";
@@ -847,26 +848,4 @@ export async function createApp(
   });
 
   return app;
-}
-
-async function findExistingWorkflowResumeWake(
-  db: Db,
-  input: { companyId: string; agentId: string; issueId: string },
-) {
-  return db
-    .select({
-      id: agentWakeupRequests.id,
-      runId: agentWakeupRequests.runId,
-    })
-    .from(agentWakeupRequests)
-    .where(and(
-      eq(agentWakeupRequests.companyId, input.companyId),
-      eq(agentWakeupRequests.agentId, input.agentId),
-      inArray(agentWakeupRequests.reason, ["workflow_step_runnable", "issue_execution_same_name"]),
-      inArray(agentWakeupRequests.status, ["queued", "completed", "coalesced", "deferred_issue_execution"]),
-      sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
-      sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
 }

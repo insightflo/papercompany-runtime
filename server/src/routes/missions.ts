@@ -16,9 +16,10 @@
  * - GET    /missions/:id/governance-thread           — Read mission governance thread
  */
 import { Router } from "express";
-import { agentWakeupRequests, type Db } from "@paperclipai/db";
+import { type Db } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { missionService } from "../services/missions.js";
+import { findExistingWorkflowResumeWake } from "../services/workflow-resume-wake.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -573,26 +574,4 @@ export function missionRoutes(db: Db) {
   });
 
   return router;
-}
-
-async function findExistingWorkflowResumeWake(
-  db: Db,
-  input: { companyId: string; agentId: string; issueId: string },
-) {
-  return db
-    .select({
-      id: agentWakeupRequests.id,
-      runId: agentWakeupRequests.runId,
-    })
-    .from(agentWakeupRequests)
-    .where(and(
-      eq(agentWakeupRequests.companyId, input.companyId),
-      eq(agentWakeupRequests.agentId, input.agentId),
-      inArray(agentWakeupRequests.reason, ["workflow_step_runnable", "issue_execution_same_name"]),
-      inArray(agentWakeupRequests.status, ["queued", "completed", "coalesced", "deferred_issue_execution"]),
-      sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
-      sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
 }
