@@ -14,6 +14,7 @@ import {
   issues,
   missionDelegations,
   missionPlanArtifacts,
+  missionPlanQaVerdicts,
   missions,
   workflowDefinitions,
   workflowRuns,
@@ -25,6 +26,7 @@ import {
   parseMissionOwnerPlanDecision,
   recordLatestAuthorizedMissionOwnerPlanDecision,
 } from "../services/mission-owner-plan-decisions.js";
+import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
 import { setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -2966,5 +2968,67 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(planQaIssue).toBeDefined();
     expect(planQaIssue.assigneeAgentId).toBeNull();
     expect(planQaIssue.description).toContain("QA reviewer assignment required");
+  });
+
+  it("structured plan-qa verdict: request_changes verdict is stored and readPlanQaVerdict returns it structured-first", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    // 1차 record → plan_qa_pending, [PLAN-QA] issue 생성
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; decisionHash?: string } | undefined;
+    expect(planQa?.issueId).toBeTruthy();
+
+    // structured verdict 저장(request_changes) — comment 없이 표에 직접
+    const verdictResult = await recordMissionPlanQaVerdict({
+      db,
+      companyId,
+      missionId,
+      planQaIssueId: planQa!.issueId!,
+      decisionHash: first.decisionHash ?? planQa!.decisionHash ?? "",
+      verdict: "request_changes",
+      diagnostics: [{ code: "missing_publish_readback_qa", message: "publish QA is missing" }],
+      reviewedBy: { actorType: "agent", actorId: qaAgentId },
+    });
+    expect(verdictResult.status).toBe("recorded");
+
+    // mission_plan_qa_verdicts 표에 row 존재
+    const verdictRows = await db.select().from(missionPlanQaVerdicts)
+      .where(eq(missionPlanQaVerdicts.planQaIssueId, planQa!.issueId!));
+    expect(verdictRows).toHaveLength(1);
+    expect(verdictRows[0]?.verdict).toBe("request_changes");
+
+    // 2차 record → readPlanQaVerdict 가 structured-first 로 읽어서 request_changes 적용
+    const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(second.status).toBe("plan_qa_changes_requested");
+  });
+
+  it("structured plan-qa verdict: pass verdict is stored and materialization proceeds on next tick", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; decisionHash?: string } | undefined;
+    expect(planQa?.issueId).toBeTruthy();
+
+    // structured verdict 저장(pass)
+    await recordMissionPlanQaVerdict({
+      db,
+      companyId,
+      missionId,
+      planQaIssueId: planQa!.issueId!,
+      decisionHash: first.decisionHash ?? planQa!.decisionHash ?? "",
+      verdict: "pass",
+      reviewedBy: { actorType: "agent", actorId: qaAgentId },
+    });
+
+    // 2차 record → structured pass → materialize
+    const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(second.status).toBe("recorded");
+    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
   });
 });

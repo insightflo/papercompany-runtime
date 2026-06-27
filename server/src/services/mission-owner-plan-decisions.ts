@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 import { missionDelegationService } from "./mission-delegations.js";
@@ -1999,6 +1999,22 @@ async function ensurePlanQaWakeupForIssue(input: {
 }
 
 async function readPlanQaVerdict(input: { db: Db; companyId: string; planQaIssueId: string }): Promise<ValidationVerdict | null> {
+  // [AREA: structured events / Task 4] structured-first: mission_plan_qa_verdicts 표에서 최신 verdict 읽기.
+  // 없으면 comment-based fallback(기존 readExplicitValidationVerdict 경로 유지).
+  const [structuredVerdict] = await input.db
+    .select({ verdict: missionPlanQaVerdicts.verdict })
+    .from(missionPlanQaVerdicts)
+    .where(and(
+      eq(missionPlanQaVerdicts.companyId, input.companyId),
+      eq(missionPlanQaVerdicts.planQaIssueId, input.planQaIssueId),
+    ))
+    .orderBy(desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
+    .limit(1);
+  if (structuredVerdict?.verdict === "pass" || structuredVerdict?.verdict === "request_changes") {
+    return structuredVerdict.verdict as ValidationVerdict;
+  }
+
+  // fallback: comment-based read (기존 로직 유지 — legacy parser)
   const [planQaIssue] = await input.db
     .select({ assigneeAgentId: issues.assigneeAgentId })
     .from(issues)
