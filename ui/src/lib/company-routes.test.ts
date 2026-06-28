@@ -13,6 +13,12 @@ describe("company mission routes", () => {
     expect(extractCompanyPrefixFromPath("/missions")).toBeNull();
   });
 
+  it("applies a company prefix to quality board navigation", () => {
+    expect(isBoardPathWithoutPrefix("/quality")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/quality")).toBeNull();
+    expect(applyCompanyPrefix("/quality", "RES")).toBe("/RES/quality");
+  });
+
   it("converts company-prefixed plugin routes into company-relative paths", () => {
     expect(toCompanyRelativePath("/CMPA/tool-registry")).toBe("/tool-registry");
   });
