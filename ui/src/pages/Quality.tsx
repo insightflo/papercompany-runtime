@@ -154,6 +154,10 @@ export function Quality() {
     (v: { itemId: string; verdictId: string; title: string }) => qualityApi.promoteAnchor(v.itemId, v.verdictId, v.title),
     "Promote anchor",
   );
+  const requestEvidenceMut = makeMut(
+    (v: { itemId: string; surfaces: string[] }) => qualityApi.requestEvidence(v.itemId, { requiredEvidenceSurfaces: v.surfaces }),
+    "Request evidence",
+  );
   const recordEvidenceMut = makeMut(
     (v: { itemId: string; surface: string; status: QualityEvidenceStatus }) =>
       qualityApi.recordEvidence(v.itemId, { surface: v.surface, status: v.status }),
@@ -265,6 +269,14 @@ export function Quality() {
                     {["manual", "user_feedback", "delivery_verification", "post_completion_audit"].map((o) => <option key={o}>{o}</option>)}
                   </select>
                 </label>
+                <label className="flex flex-col text-[11px] text-muted-foreground">
+                  target id
+                  <input className="mt-0.5 rounded border border-border bg-background px-2 py-1 text-[12px]" value={newItem.targetId} onChange={(e) => setNewItem({ ...newItem, targetId: e.target.value })} />
+                </label>
+                <label className="flex flex-col text-[11px] text-muted-foreground">
+                  failure type
+                  <input className="mt-0.5 rounded border border-border bg-background px-2 py-1 text-[12px]" value={newItem.failureType} onChange={(e) => setNewItem({ ...newItem, failureType: e.target.value })} />
+                </label>
                 <button type="button" disabled={!newItem.title.trim() || busy === "create"} onClick={() => run("create", createItemMut.mutateAsync({ title: newItem.title, targetType: newItem.targetType, triggerSource: newItem.triggerSource, targetId: newItem.targetId || undefined, failureType: newItem.failureType || undefined })).then(() => setNewItem({ ...newItem, title: "", targetId: "", failureType: "" }))} className="rounded border border-border bg-accent px-3 py-1 text-[12px] font-medium hover:bg-accent/70 disabled:opacity-50">
                   add
                 </button>
@@ -340,7 +352,10 @@ export function Quality() {
                     </p>
 
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <input type="text" placeholder="needs_evidence surfaces (comma-sep)" value={surfacesByItem[item.id] ?? ""} onChange={(e) => setSurfacesByItem({ ...surfacesByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-[11px]" />
+                      <input type="text" placeholder="evidence surfaces (comma-sep)" value={surfacesByItem[item.id] ?? ""} onChange={(e) => setSurfacesByItem({ ...surfacesByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-[11px]" />
+                      <button type="button" className="rounded border border-blue-500/40 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-500/10 disabled:opacity-50 dark:text-blue-400" disabled={busy === `${item.id}:req`} onClick={() => { const s = (surfacesByItem[item.id] ?? "").split(",").map((x) => x.trim()).filter(Boolean); if (s.length) void run(`${item.id}:req`, requestEvidenceMut.mutateAsync({ itemId: item.id, surfaces: s })); }}>
+                        request evidence
+                      </button>
                       {VERDICTS.map((v) => (
                         <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => handleVerdict(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
                           v === "pass" && "border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400",

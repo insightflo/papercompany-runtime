@@ -77,7 +77,7 @@ describe("quality-ui-helpers", () => {
     expect(recommendAction(item({ evidenceRefs: [{ id: "e1", surface: "public_url", status: "verified", blocking: false }] as never })).tone).toBe("info");
   });
 
-  it("isUnresolvedEvidence treats blocking + missing/failed/stale/insensitive as unresolved", () => {
+  it("isUnresolvedEvidence treats blocking + missing/failed/stale/insufficient as unresolved", () => {
     expect(isUnresolvedEvidence({ status: "verified", blocking: false })).toBe(false);
     expect(isUnresolvedEvidence({ status: "missing", blocking: false })).toBe(true);
     expect(isUnresolvedEvidence({ status: "verified", blocking: true })).toBe(true);
