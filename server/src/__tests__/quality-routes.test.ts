@@ -513,5 +513,38 @@ describeEmbeddedPostgres("quality routes", () => {
     const surfaces = first.reviewItem.evidenceRefs.map((r) => r.surface).sort();
     expect(surfaces).toEqual(["browser_readback", "public_url"]);
     expect(first.reviewItem.evidenceRefs.every((r) => r.blocking && r.status === "missing")).toBe(true);
+    // context for the collector is carried in expected + triggerMetadata.
+    expect(first.reviewItem.evidenceRefs[0].expected).toMatchObject({ qaStepId: "qa-delivery-readback" });
+  });
+
+  it("auto-creates a final QA / purpose-fitness failure review item (plan 8.1) and dedupes per mission", async () => {
+    const companyId = await seedCompany("QQ");
+    const missionId = await seedMission(companyId, "active");
+    const svc = qualityService(db);
+
+    const first = await svc.createFinalQaFailureReviewItem({
+      companyId,
+      missionId,
+      missionTitle: "Purpose-fitness mission",
+      failureType: "plan_goal_mismatch",
+      reason: "Plan QA requested changes.",
+    });
+    const second = await svc.createFinalQaFailureReviewItem({
+      companyId,
+      missionId,
+      missionTitle: "Purpose-fitness mission",
+      failureType: "plan_goal_mismatch",
+    });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.reviewItem.id).toBe(first.reviewItem.id);
+    expect(first.reviewItem).toMatchObject({
+      companyId,
+      missionId,
+      targetType: "mission_output",
+      triggerSource: "final_qa_failure",
+      failureType: "plan_goal_mismatch",
+    });
   });
 });

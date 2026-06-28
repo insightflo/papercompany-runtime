@@ -971,28 +971,68 @@ export function qualityService(db: Db) {
     missionId?: string | null;
     stepId: string;
     targetUrl?: string | null;
+    /** 수집자가 무엇을 어디서 확인해야 하는지 알 수 있게 expected/triggerMetadata 에 들어간다. */
+    context?: {
+      workflowRunId?: string | null;
+      qaIssueId?: string | null;
+      producerStepId?: string | null;
+    };
   }) {
+    const ctx = input.context ?? {};
+    // dedupe 단위를 좁힌다: URL 이 있으면 URL, 없으면 QA 이슈, 그것도 없으면 step.
+    const targetId = input.targetUrl ?? ctx.qaIssueId ?? input.stepId;
+    const expected = {
+      workflowRunId: ctx.workflowRunId ?? null,
+      qaStepId: input.stepId,
+      qaIssueId: ctx.qaIssueId ?? null,
+      producerStepId: ctx.producerStepId ?? null,
+    };
     return createReviewItem({
       companyId: input.companyId,
       missionId: input.missionId ?? null,
       title: `Delivery verification failed: ${input.stepId}`,
       targetType: "public_url",
       triggerSource: "delivery_verification",
-      targetId: input.targetUrl ?? input.stepId,
+      targetId,
       failureType: "delivery_url_404",
       priority: "high",
+      triggerMetadata: ctx,
       evidenceRefs: [
-        { surface: "public_url", status: "missing", blocking: true },
-        { surface: "browser_readback", status: "missing", blocking: true },
+        { surface: "public_url", status: "missing", blocking: true, expected },
+        { surface: "browser_readback", status: "missing", blocking: true, expected },
       ],
     });
   }
+
+  // [목적] mission quality contract / final QA(목적 적합성) 실패 → review item. plan 8.1.
+  //   targetId = missionId 로 미션 단위 dedupe. triggerSource = final_qa_failure.
+  async function createFinalQaFailureReviewItem(input: {
+    companyId: string;
+    missionId: string;
+    missionTitle: string;
+    failureType?: string | null;
+    reason?: string | null;
+  }) {
+    return createReviewItem({
+      companyId: input.companyId,
+      missionId: input.missionId,
+      title: `Final QA / purpose-fitness failure — ${input.missionTitle}`,
+      targetType: "mission_output",
+      triggerSource: "final_qa_failure",
+      targetId: input.missionId,
+      failureType: input.failureType ?? "plan_goal_mismatch",
+      priority: "high",
+      triggerMetadata: input.reason ? { reason: input.reason } : {},
+    });
+  }
+
 
   return {
     listCompanyQualityReviewItems,
     getReviewItemOwnership,
     createOversightStallReviewItem,
     createDeliveryFailureReviewItem,
+    createFinalQaFailureReviewItem,
     getReviewItemDetail,
     createReviewItem,
     requestEvidence,

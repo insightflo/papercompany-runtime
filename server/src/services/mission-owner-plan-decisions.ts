@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
+import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 import { missionDelegationService } from "./mission-delegations.js";
 import { workflowService } from "./workflow/engine.js";
@@ -1077,6 +1078,19 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           await reopenPlanningIssueIfTerminal({ db, planningIssueId: collected.planningIssueId });
           await closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId });
           await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "request_changes", verdict: "request_changes", reviewedAt: new Date().toISOString() } });
+          // Phase 5 (plan 8.1 mission quality contract / final QA failure): plan QA request_changes
+          // = purpose-fitness failure → best-effort company-scoped quality review item (per-mission dedupe).
+          try {
+            await qualityService(db).createFinalQaFailureReviewItem({
+              companyId,
+              missionId,
+              missionTitle,
+              failureType: "plan_goal_mismatch",
+              reason: "Plan QA requested changes (purpose-fitness / mission quality contract failure).",
+            });
+          } catch {
+            // swallowed: plan QA must not depend on the quality board.
+          }
           return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
         }
         // pending / verdict 없음 → 대기 (어떤 경로에서도 materialize 금지)

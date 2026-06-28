@@ -24,6 +24,7 @@ import {
   missions,
   pluginEntities,
   plugins,
+  qualityReviewItems,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -1515,6 +1516,21 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const missionResult = result.missions.find((entry) => entry.missionId === missionId);
     expect(missionResult?.findings).toEqual(expect.arrayContaining([
       expect.stringContaining("plan_submission_missing"),
+    ]));
+
+    // Phase 5 connection: the oversight stall must auto-create a company-scoped quality review item.
+    const oversightQualityItems = await db
+      .select()
+      .from(qualityReviewItems)
+      .where(eq(qualityReviewItems.missionId, missionId));
+    expect(oversightQualityItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        companyId,
+        missionId,
+        triggerSource: "oversight_stall",
+        targetType: "mission_output",
+        failureType: "plan_submission_missing",
+      }),
     ]));
     expect(missionResult?.recommendations).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "plan_submission_missing", issueId: planIssueId, safeToAutoApply: true }),
