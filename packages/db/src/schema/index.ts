@@ -105,3 +105,6 @@ export { qualityReviewItems } from "./quality_review_items.js";
 export { qualityEvidenceRefs } from "./quality_evidence_refs.js";
 export { missionQualityVerdicts } from "./mission_quality_verdicts.js";
 export { evaluatorAnchorCases } from "./evaluator_anchor_cases.js";
+export { evaluatorVersions } from "./evaluator_versions.js";
+export { evaluatorCandidateRuns } from "./evaluator_candidate_runs.js";
+export { qualityDailyReports } from "./quality_daily_reports.js";

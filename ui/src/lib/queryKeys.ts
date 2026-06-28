@@ -175,5 +175,12 @@ export const queryKeys = {
   },
   quality: {
     reviewItems: (companyId: string) => ["quality", companyId, "review-items"] as const,
+    reviewItem: (reviewItemId: string) => ["quality", "review-item", reviewItemId] as const,
+    summary: (companyId: string) => ["quality", companyId, "summary"] as const,
+    anchors: (companyId: string) => ["quality", companyId, "anchors"] as const,
+    evaluatorVersions: (companyId: string) => ["quality", companyId, "evaluator-versions"] as const,
+    candidateRuns: (companyId: string, versionId?: string) =>
+      ["quality", companyId, "candidate-runs", versionId ?? null] as const,
+    dailyReports: (companyId: string) => ["quality", companyId, "daily-reports"] as const,
   },
 };

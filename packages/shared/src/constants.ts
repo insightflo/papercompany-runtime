@@ -127,6 +127,8 @@ export const ISSUE_ORIGIN_KINDS = [
   "manual",
   "routine_execution",
   "quality_evidence_request",
+  "quality_correction_request",
+  "quality_evaluator_improvement",
 ] as const;
 export type IssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 
@@ -138,10 +140,16 @@ export const QUALITY_REVIEW_ITEM_STATUSES = [
   "detected",
   "awaiting_review",
   "evidence_collecting",
+  "verdict_submitted",
   "changes_requested",
+  "anchor_candidate",
+  "evaluator_replay_queued",
+  "evaluator_promoted",
+  "evaluator_rejected",
   "resolved_pass",
   "resolved_fail",
   "dismissed",
+  "closed",
 ] as const;
 export type QualityReviewItemStatus = (typeof QUALITY_REVIEW_ITEM_STATUSES)[number];
 
@@ -172,12 +180,23 @@ export const QUALITY_EVIDENCE_STATUSES = [
   "pending",
   "verified",
   "failed",
+  "insufficient",
   "stale",
+  "not_applicable",
 ] as const;
 export type QualityEvidenceStatus = (typeof QUALITY_EVIDENCE_STATUSES)[number];
 
 export const QUALITY_ANCHOR_STATUSES = ["candidate", "promoted", "rejected"] as const;
 export type QualityAnchorStatus = (typeof QUALITY_ANCHOR_STATUSES)[number];
+
+export const QUALITY_EVALUATOR_VERSION_STATUSES = ["production", "candidate", "rejected", "retired"] as const;
+export type QualityEvaluatorVersionStatus = (typeof QUALITY_EVALUATOR_VERSION_STATUSES)[number];
+
+export const QUALITY_EVALUATOR_RUN_STATUSES = ["queued", "running", "passed", "failed", "blocked"] as const;
+export type QualityEvaluatorRunStatus = (typeof QUALITY_EVALUATOR_RUN_STATUSES)[number];
+
+export const QUALITY_DAILY_REPORT_STATUSES = ["generated", "needs_attention"] as const;
+export type QualityDailyReportStatus = (typeof QUALITY_DAILY_REPORT_STATUSES)[number];
 
 export const GOAL_LEVELS = ["company", "team", "agent", "task"] as const;
 export type GoalLevel = (typeof GOAL_LEVELS)[number];

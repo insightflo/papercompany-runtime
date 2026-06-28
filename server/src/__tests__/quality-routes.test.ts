@@ -7,9 +7,12 @@ import {
   companies,
   createDb,
   evaluatorAnchorCases,
+  evaluatorCandidateRuns,
+  evaluatorVersions,
   issues,
   missions,
   missionQualityVerdicts,
+  qualityDailyReports,
   qualityEvidenceRefs,
   qualityReviewItems,
   type Db,
@@ -56,6 +59,9 @@ describeEmbeddedPostgres("quality routes", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(qualityDailyReports);
+    await db.delete(evaluatorCandidateRuns);
+    await db.delete(evaluatorVersions);
     await db.delete(evaluatorAnchorCases);
     await db.delete(missionQualityVerdicts);
     await db.delete(qualityEvidenceRefs);
@@ -299,5 +305,170 @@ describeEmbeddedPostgres("quality routes", () => {
       status: "candidate",
       failureType: "content_missing_core_concept",
     });
+  });
+
+  it("creates a review item via the manual endpoint and dedupes an identical open one", async () => {
+    const companyId = await seedCompany("QH");
+    const actor = { type: "board" as const, source: "session" as const, userId: "reviewer-h", companyIds: [companyId] };
+    const app = createApp(db, actor);
+
+    const first = await request(app).post(`/api/companies/${companyId}/quality/review-items`).send({
+      title: "Public page 404",
+      targetType: "public_url",
+      triggerSource: "delivery_verification",
+      targetId: "https://example.test/h",
+      failureType: "delivery_url_404",
+    });
+    expect(first.status).toBe(201);
+    expect(first.body.created).toBe(true);
+    const firstId = first.body.reviewItem.id;
+
+    const second = await request(app).post(`/api/companies/${companyId}/quality/review-items`).send({
+      title: "Public page 404 (dup)",
+      targetType: "public_url",
+      triggerSource: "delivery_verification",
+      targetId: "https://example.test/h",
+    });
+    expect(second.status).toBe(201);
+    expect(second.body.created).toBe(false);
+    expect(second.body.reviewItem.id).toBe(firstId);
+  });
+
+  it("records collected evidence and reopens the review item once all surfaces resolve", async () => {
+    const companyId = await seedCompany("QI");
+    const reviewItemId = randomUUID();
+    await db.insert(qualityReviewItems).values({
+      id: reviewItemId,
+      companyId,
+      title: "Evidence collecting item",
+      status: "evidence_collecting",
+      targetType: "public_url",
+      triggerSource: "delivery_verification",
+      triggerMetadata: {},
+      priority: "high",
+    });
+    await db.insert(qualityEvidenceRefs).values({
+      companyId,
+      reviewItemId,
+      surface: "browser_readback",
+      status: "missing",
+      blocking: true,
+    });
+    const actor = { type: "board" as const, source: "session" as const, userId: "reviewer-i", companyIds: [companyId] };
+
+    const res = await request(createApp(db, actor))
+      .post(`/api/quality/review-items/${reviewItemId}/evidence`)
+      .send({ surface: "browser_readback", status: "verified", sourceUrl: "https://example.test/i" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.reviewItem).toMatchObject({ id: reviewItemId, status: "awaiting_review" });
+    expect(res.body.reviewItem.evidenceRefs[0]).toMatchObject({ surface: "browser_readback", status: "verified" });
+  });
+
+  it("creates a correction issue on a fail verdict", async () => {
+    const companyId = await seedCompany("QJ");
+    const reviewItemId = randomUUID();
+    await db.insert(qualityReviewItems).values({
+      id: reviewItemId,
+      companyId,
+      title: "Misleading summary",
+      status: "awaiting_review",
+      targetType: "work_product",
+      triggerSource: "user_feedback",
+      triggerMetadata: {},
+      failureType: "content_missing_core_concept",
+      priority: "high",
+    });
+
+    const res = await request(createApp(db, {
+      type: "board", source: "session", userId: "reviewer-j", companyIds: [companyId],
+    }))
+      .post(`/api/quality/review-items/${reviewItemId}/verdict`)
+      .send({ verdict: "fail", reason: "Core concept missing." });
+
+    expect(res.status).toBe(201);
+    expect(res.body.reviewItem.status).toBe("anchor_candidate");
+    const correction = (await db.select().from(issues)).find((i) => i.originKind === "quality_correction_request");
+    expect(correction).toMatchObject({ companyId, status: "todo", originId: reviewItemId });
+  });
+
+  it("seeds an evaluator candidate + replay run on promote-anchor and gates production promotion on a passed replay", async () => {
+    const companyId = await seedCompany("QK");
+    const reviewItemId = randomUUID();
+    await db.insert(qualityReviewItems).values({
+      id: reviewItemId,
+      companyId,
+      title: "Anchor seed target",
+      status: "anchor_candidate",
+      targetType: "work_product",
+      triggerSource: "user_feedback",
+      triggerMetadata: {},
+      failureType: "qa_false_pass",
+      priority: "high",
+    });
+    const [verdict] = await db.insert(missionQualityVerdicts).values({
+      companyId,
+      reviewItemId,
+      targetType: "work_product",
+      verdict: "fail",
+      failureType: "qa_false_pass",
+      decidedByUserId: "reviewer-k",
+    }).returning();
+    const actor = { type: "board" as const, source: "session" as const, userId: "reviewer-k", companyIds: [companyId] };
+    const app = createApp(db, actor);
+
+    const promote = await request(app).post(`/api/quality/review-items/${reviewItemId}/promote-anchor`).send({ verdictId: verdict.id, title: "QA false pass anchor" });
+    expect(promote.status).toBe(201);
+
+    const [version] = await db.select().from(evaluatorVersions);
+    expect(version.status).toBe("candidate");
+    const [run] = await db.select().from(evaluatorCandidateRuns);
+    expect(run.status).toBe("queued");
+
+    // Production promotion must fail before a replay passes.
+    const blocked = await request(app).post(`/api/companies/${companyId}/quality/evaluator-versions/${version.id}/promote`).send({});
+    expect(blocked.status).toBe(422);
+
+    // Run the replay (deterministic pass), then promotion succeeds.
+    const replay = await request(app).post(`/api/companies/${companyId}/quality/candidate-runs/${run.id}/replay`).send({});
+    expect(replay.status).toBe(200);
+    expect(replay.body.status).toBe("passed");
+
+    const promoted = await request(app).post(`/api/companies/${companyId}/quality/evaluator-versions/${version.id}/promote`).send({});
+    expect(promoted.status).toBe(200);
+    expect(promoted.body.status).toBe("production");
+  });
+
+  it("generates a daily quality report with failure-type and evidence-gap summary", async () => {
+    const companyId = await seedCompany("QL");
+    await db.insert(qualityReviewItems).values([
+      { id: randomUUID(), companyId, title: "a", status: "awaiting_review", targetType: "public_url", triggerSource: "delivery_verification", triggerMetadata: {}, priority: "high", failureType: "delivery_url_404" },
+      { id: randomUUID(), companyId, title: "b", status: "evidence_collecting", targetType: "work_product", triggerSource: "manual", triggerMetadata: {}, priority: "medium", failureType: "evidence_incomplete" },
+    ]);
+    const res = await request(createApp(db, {
+      type: "board", source: "session", userId: "reviewer-l", companyIds: [companyId],
+    })).post(`/api/companies/${companyId}/quality/daily-reports/generate`).send({});
+
+    expect(res.status).toBe(201);
+    expect(res.body.report.summary.failureTypeCounts).toMatchObject({ delivery_url_404: 1, evidence_incomplete: 1 });
+    expect(res.body.report.summary.pendingReviewItems).toBe(1);
+    expect(res.body.report.summary.needsEvidenceOutstanding).toBe(1);
+  });
+
+  it("returns a company-scoped quality summary and blocks cross-company access", async () => {
+    const companyA = await seedCompany("QM");
+    const companyB = await seedCompany("QN");
+    await db.insert(qualityReviewItems).values({
+      id: randomUUID(), companyId: companyA, title: "s", status: "awaiting_review", targetType: "work_product", triggerSource: "manual", triggerMetadata: {}, priority: "medium",
+    });
+
+    const ok = await request(createApp(db, { type: "board", source: "session", userId: "r", companyIds: [companyA] }))
+      .get(`/api/companies/${companyA}/quality/summary`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.openReviewItems).toBe(1);
+
+    const blocked = await request(createApp(db, { type: "board", source: "session", userId: "r", companyIds: [companyB] }))
+      .get(`/api/companies/${companyA}/quality/summary`);
+    expect(blocked.status).toBe(403);
   });
 });

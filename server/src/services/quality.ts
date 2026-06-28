@@ -1,17 +1,41 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import {
+  evaluatorCandidateRuns,
   evaluatorAnchorCases,
+  evaluatorVersions,
   missionQualityVerdicts,
   missions,
+  qualityDailyReports,
   qualityEvidenceRefs,
   qualityReviewItems,
+  issues,
   type Db,
 } from "@paperclipai/db";
-import { notFound } from "../errors.js";
+import { notFound, unprocessable } from "../errors.js";
 import { issueService } from "./issues.js";
 
 const EVIDENCE_ISSUE_ORIGIN = "quality_evidence_request";
+const CORRECTION_ISSUE_ORIGIN = "quality_correction_request";
+const IMPROVEMENT_ISSUE_ORIGIN = "quality_evaluator_improvement";
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
+const CLOSED_REVIEW_ITEM_STATUSES = new Set(["resolved_pass", "resolved_fail", "dismissed", "closed", "evaluator_promoted", "evaluator_rejected"]);
+const UNRESOLVED_EVIDENCE_STATUSES = new Set(["missing", "failed", "stale", "insufficient"]);
+const REQUIRED_FAILURE_TYPES = [
+  "content_missing_core_concept",
+  "delivery_url_404",
+  "evidence_incomplete",
+  "plan_goal_mismatch",
+  "qa_false_pass",
+];
+const REQUIRED_EVIDENCE_SURFACES = [
+  "db_row",
+  "work_product",
+  "r2_object",
+  "public_url",
+  "browser_readback",
+  "run_transcript",
+  "issue_comment",
+];
 
 type TransactionDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type QualityWriteDb = Db | TransactionDb;
@@ -21,7 +45,7 @@ function resolveVerdictStatus(verdict: string): string {
     case "pass":
       return "resolved_pass";
     case "fail":
-      return "resolved_fail";
+      return "anchor_candidate";
     case "request_changes":
       return "changes_requested";
     case "dismissed":
@@ -90,7 +114,7 @@ function attachEvidenceRefs(
 
 function buildEvidenceIssueDescription(
   item: QualityReviewItemRow,
-  input: RecordVerdictInput,
+  input: { reason?: string | null; requiredEvidenceSurfaces?: string[] },
   followUpMissionId: string | undefined,
 ) {
   const lines = [
@@ -114,6 +138,74 @@ function buildEvidenceIssueDescription(
   return lines.join("\n");
 }
 
+function buildCorrectionIssueDescription(
+  item: QualityReviewItemRow,
+  input: { verdict: string; reason?: string | null; failureType?: string | null },
+  followUpMissionId: string | undefined,
+) {
+  const lines = [
+    "Quality Board requires correction before this result can be trusted.",
+    "",
+    `Review item: ${item.title}`,
+    `Verdict: ${input.verdict}`,
+    `Target: ${item.targetType}${item.targetId ? ` ${item.targetId}` : ""}`,
+    `Original mission: ${item.missionId ?? "none"}`,
+  ];
+  if (!followUpMissionId && item.missionId) {
+    lines.push("Follow-up issue is company-scoped because the original mission is already terminal or unavailable.");
+  }
+  const failureType = input.failureType ?? item.failureType;
+  if (failureType) lines.push(`Failure type: ${failureType}`);
+  if (input.reason?.trim()) {
+    lines.push("", "Reason:", input.reason.trim());
+  }
+  lines.push(
+    "",
+    "Required next action:",
+    "- Correct the target output against the original mission goal.",
+    "- Attach fresh evidence for the final user-visible or machine-consumed surface.",
+    "- Do not close this issue with only adjacent evidence such as a DB row when the user-facing URL/content is the real target.",
+  );
+  return lines.join("\n");
+}
+
+function buildEvaluatorImprovementIssueDescription(input: {
+  anchorTitle: string;
+  anchorId: string;
+  evaluatorVersionId: string;
+  candidateRunId: string;
+  reportId?: string;
+}) {
+  return [
+    "Quality Board created an evaluator improvement job from a promoted anchor.",
+    "",
+    `Anchor: ${input.anchorTitle}`,
+    `Anchor id: ${input.anchorId}`,
+    `Candidate evaluator version id: ${input.evaluatorVersionId}`,
+    `Replay run id: ${input.candidateRunId}`,
+    input.reportId ? `Daily report id: ${input.reportId}` : null,
+    "",
+    "Required next action:",
+    "- Replay the candidate evaluator against the promoted anchor corpus.",
+    "- Record coverage and regression findings before promoting any production evaluator.",
+    "- Do not change the evaluator for an already-running mission; apply only to the next run or epoch.",
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+function isUnresolvedEvidence(ref: Pick<QualityEvidenceRefRow, "status" | "blocking">) {
+  return ref.blocking || UNRESOLVED_EVIDENCE_STATUSES.has(ref.status);
+}
+
+function todayString(now = new Date()) {
+  return now.toISOString().slice(0, 10);
+}
+
+function countBy<T extends string>(values: T[]) {
+  const out: Record<string, number> = {};
+  for (const value of values) out[value] = (out[value] ?? 0) + 1;
+  return out;
+}
+
 export interface RecordVerdictInput {
   reviewItemId: string;
   decidedByUserId: string;
@@ -127,6 +219,49 @@ export interface PromoteAnchorInput {
   reviewItemId: string;
   verdictId: string;
   title: string;
+}
+
+export interface CreateReviewItemInput {
+  companyId: string;
+  missionId?: string | null;
+  title: string;
+  targetType: string;
+  targetId?: string | null;
+  triggerSource: string;
+  triggerMetadata?: Record<string, unknown>;
+  failureType?: string | null;
+  priority?: string;
+  evidenceRefs?: Array<{
+    surface: string;
+    expected?: Record<string, unknown>;
+    actual?: Record<string, unknown>;
+    status?: string;
+    sourceRunId?: string | null;
+    sourceUrl?: string | null;
+    freshnessExpiresAt?: Date | string | null;
+    blocking?: boolean;
+  }>;
+}
+
+export interface RequestEvidenceInput {
+  reviewItemId: string;
+  requestedByUserId?: string | null;
+  reason?: string | null;
+  requiredEvidenceSurfaces: string[];
+}
+
+export interface RecordEvidenceInput {
+  reviewItemId: string;
+  surface: string;
+  expected?: Record<string, unknown>;
+  actual?: Record<string, unknown>;
+  status: string;
+  collectedByActorType?: string | null;
+  collectedByActorId?: string | null;
+  sourceRunId?: string | null;
+  sourceUrl?: string | null;
+  freshnessExpiresAt?: Date | string | null;
+  blocking?: boolean;
 }
 
 export function qualityService(db: Db) {
@@ -232,6 +367,130 @@ export function qualityService(db: Db) {
     return item.missionId;
   }
 
+  // [목적] needs_evidence / requestEvidence 공용: 수집 issue + missing/blocking evidence ref 기록.
+  // [입력] tx(외부 트랜잭션), item, surfaces, reason. 멱등: 같은 surface 면 갱신 안 함.
+  async function openEvidenceCollection(
+    tx: TransactionDb,
+    item: QualityReviewItemRow,
+    surfaces: string[],
+    reason: string | null,
+  ) {
+    const title = `Quality evidence required: ${item.title || item.targetType}`;
+    const followUpMissionId = await resolveFollowUpMissionId(tx, item);
+    await issueSvc.createFromSrb(tx, item.companyId, {
+      missionId: followUpMissionId,
+      title,
+      description: buildEvidenceIssueDescription(item, { reason, requiredEvidenceSurfaces: surfaces }, followUpMissionId),
+      status: "todo",
+      originKind: EVIDENCE_ISSUE_ORIGIN,
+      originId: item.id,
+    });
+    if (surfaces.length > 0) {
+      const existing = await tx
+        .select({ surface: qualityEvidenceRefs.surface })
+        .from(qualityEvidenceRefs)
+        .where(
+          and(
+            eq(qualityEvidenceRefs.reviewItemId, item.id),
+            inArray(qualityEvidenceRefs.surface, surfaces),
+          ),
+        );
+      const have = new Set(existing.map((r) => r.surface));
+      const toInsert = surfaces
+        .filter((s) => !have.has(s))
+        .map((surface) => ({
+          companyId: item.companyId,
+          reviewItemId: item.id,
+          surface,
+          status: "missing",
+          blocking: true,
+        }));
+      if (toInsert.length > 0) {
+        await tx.insert(qualityEvidenceRefs).values(toInsert);
+      }
+    }
+  }
+
+  // [목적] fail/request_changes 공용: correction issue 생성(producer/owner 가 수정하도록).
+  async function openCorrectionFlow(
+    tx: TransactionDb,
+    item: QualityReviewItemRow,
+    verdict: string,
+    input: { reason?: string | null; failureType?: string | null },
+  ) {
+    const title = `Quality correction required: ${item.title || item.targetType}`;
+    const followUpMissionId = await resolveFollowUpMissionId(tx, item);
+    await issueSvc.createFromSrb(tx, item.companyId, {
+      missionId: followUpMissionId,
+      title,
+      description: buildCorrectionIssueDescription(item, { verdict, ...input }, followUpMissionId),
+      status: "todo",
+      originKind: CORRECTION_ISSUE_ORIGIN,
+      originId: item.id,
+    });
+  }
+
+  // [목적] promote-anchor 호출 시 evaluator candidate version + queued replay run + improvement issue 생성.
+  // [주의] replay run 이 passed 되기 전에는 production 승격 불가(promoteEvaluatorVersion 이 가드).
+  async function seedEvaluatorCandidateFromAnchor(
+    tx: TransactionDb,
+    anchor: Awaited<ReturnType<typeof promoteVerdictToAnchorRaw>>,
+  ) {
+    const [version] = await tx
+      .insert(evaluatorVersions)
+      .values({
+        companyId: anchor.companyId,
+        name: `Candidate from anchor: ${anchor.title}`,
+        evaluatorType: "quality_gate",
+        status: "candidate",
+        sourceAnchorCaseId: anchor.id,
+        coverageSummary: {},
+      })
+      .returning();
+    const [run] = await tx
+      .insert(evaluatorCandidateRuns)
+      .values({
+        companyId: anchor.companyId,
+        evaluatorVersionId: version.id,
+        anchorCaseId: anchor.id,
+        reviewItemId: anchor.reviewItemId,
+        status: "queued",
+        replayInput: { anchorId: anchor.id, failureType: anchor.failureType },
+      })
+      .returning();
+    const followUpMissionId = anchor.missionId
+      ? await resolveFollowUpMissionId(tx, {
+          id: anchor.reviewItemId,
+          companyId: anchor.companyId,
+          missionId: anchor.missionId,
+        } as QualityReviewItemRow)
+      : undefined;
+    await issueSvc.createFromSrb(tx, anchor.companyId, {
+      missionId: followUpMissionId,
+      title: `Evaluator improvement job: ${anchor.title}`,
+      description: buildEvaluatorImprovementIssueDescription({
+        anchorTitle: anchor.title,
+        anchorId: anchor.id,
+        evaluatorVersionId: version.id,
+        candidateRunId: run.id,
+      }),
+      status: "todo",
+      originKind: IMPROVEMENT_ISSUE_ORIGIN,
+      originId: version.id,
+    });
+    // review item 을 replay 대기 상태로 표시(이미 닫혀 있으면 유지).
+    await tx
+      .update(qualityReviewItems)
+      .set({ status: "evaluator_replay_queued", updatedAt: new Date() })
+      .where(
+        and(
+          eq(qualityReviewItems.id, anchor.reviewItemId),
+          eq(qualityReviewItems.companyId, anchor.companyId),
+        ),
+      );
+    return { version, run };
+  }
+
   async function recordQualityVerdict(input: RecordVerdictInput): Promise<{
     verdict: Awaited<ReturnType<typeof insertVerdictReturning>>;
     reviewItem: QualityReviewItemListItemWithEvidence;
@@ -259,44 +518,12 @@ export function qualityService(db: Db) {
         .where(eq(qualityReviewItems.id, item.id))
         .returning();
 
-      // Only needs_evidence opens the evidence collection path. Leave it unassigned for queue pickup.
+      // Verdict routing (plan 8.2): needs_evidence -> evidence collection;
+      // fail/request_changes -> correction issue. pass/dismissed just close.
       if (input.verdict === "needs_evidence") {
-        const title = `Quality evidence required: ${item.title || item.targetType}`;
-        const followUpMissionId = await resolveFollowUpMissionId(tx, item);
-        await issueSvc.createFromSrb(tx, item.companyId, {
-          missionId: followUpMissionId,
-          title,
-          description: buildEvidenceIssueDescription(item, input, followUpMissionId),
-          status: "todo",
-          originKind: EVIDENCE_ISSUE_ORIGIN,
-          originId: item.id,
-        });
-
-        if (surfaces.length > 0) {
-          // Keep this idempotent when the same surface is requested more than once.
-          const existing = await tx
-            .select({ surface: qualityEvidenceRefs.surface })
-            .from(qualityEvidenceRefs)
-            .where(
-              and(
-                eq(qualityEvidenceRefs.reviewItemId, item.id),
-                inArray(qualityEvidenceRefs.surface, surfaces),
-              ),
-            );
-          const have = new Set(existing.map((r) => r.surface));
-          const toInsert = surfaces
-            .filter((s) => !have.has(s))
-            .map((surface) => ({
-              companyId: item.companyId,
-              reviewItemId: item.id,
-              surface,
-              status: "missing",
-              blocking: true,
-            }));
-          if (toInsert.length > 0) {
-            await tx.insert(qualityEvidenceRefs).values(toInsert);
-          }
-        }
+        await openEvidenceCollection(tx, item, surfaces, input.reason ?? null);
+      } else if (input.verdict === "fail" || input.verdict === "request_changes") {
+        await openCorrectionFlow(tx, item, input.verdict, input);
       }
 
       const refs = await tx
@@ -326,8 +553,17 @@ export function qualityService(db: Db) {
     });
   }
 
+  // [목적] human 판정 → anchor case 승격 + evaluator candidate version/replay/improvement job 까지 한 트랜잭션.
   async function promoteVerdictToAnchor(input: PromoteAnchorInput) {
-    const [verdict] = await db
+    return db.transaction(async (tx) => {
+      const anchor = await promoteVerdictToAnchorRaw(tx, input);
+      await seedEvaluatorCandidateFromAnchor(tx, anchor);
+      return anchor;
+    });
+  }
+
+  async function promoteVerdictToAnchorRaw(tx: QualityWriteDb, input: PromoteAnchorInput) {
+    const [verdict] = await tx
       .select()
       .from(missionQualityVerdicts)
       .where(eq(missionQualityVerdicts.id, input.verdictId))
@@ -336,7 +572,7 @@ export function qualityService(db: Db) {
       throw notFound("Quality verdict not found for this review item");
     }
 
-    const evidenceRefs = await db
+    const evidenceRefs = await tx
       .select({
         surface: qualityEvidenceRefs.surface,
         status: qualityEvidenceRefs.status,
@@ -346,7 +582,7 @@ export function qualityService(db: Db) {
       .from(qualityEvidenceRefs)
       .where(eq(qualityEvidenceRefs.reviewItemId, input.reviewItemId));
 
-    const [anchor] = await db
+    const [anchor] = await tx
       .insert(evaluatorAnchorCases)
       .values({
         companyId: verdict.companyId,
@@ -364,11 +600,367 @@ export function qualityService(db: Db) {
     return anchor;
   }
 
+  // [목적] review item 자동/수동 생성. 같은 대상의 열린 item 이 있으면 멱등 반환(created:false).
+  // [외부 연결] final QA / delivery gate / oversight / user feedback 가 호출(plan 8.1).
+  async function createReviewItem(input: CreateReviewItemInput): Promise<{
+    reviewItem: QualityReviewItemListItemWithEvidence;
+    created: boolean;
+  }> {
+    const existing = await db
+      .select({ id: qualityReviewItems.id })
+      .from(qualityReviewItems)
+      .where(
+        and(
+          eq(qualityReviewItems.companyId, input.companyId),
+          eq(qualityReviewItems.targetType, input.targetType),
+          eq(qualityReviewItems.triggerSource, input.triggerSource),
+          input.targetId ? eq(qualityReviewItems.targetId, input.targetId) : eq(qualityReviewItems.targetId, ""),
+        ),
+      )
+      .orderBy(desc(qualityReviewItems.createdAt))
+      .limit(5);
+
+    let itemId: string;
+    let created = false;
+    const openExisting = existing.find((e) => true); // 최근 동일 대상이 있으면 재사용(멱등)
+    if (openExisting) {
+      itemId = openExisting.id;
+    } else {
+      const [row] = await db
+        .insert(qualityReviewItems)
+        .values({
+          companyId: input.companyId,
+          missionId: input.missionId ?? null,
+          title: input.title,
+          status: "awaiting_review",
+          targetType: input.targetType,
+          targetId: input.targetId ?? null,
+          triggerSource: input.triggerSource,
+          triggerMetadata: input.triggerMetadata ?? {},
+          failureType: input.failureType ?? null,
+          priority: input.priority ?? "medium",
+        })
+        .returning();
+      itemId = row.id;
+      created = true;
+      if (input.evidenceRefs && input.evidenceRefs.length > 0) {
+        await db.insert(qualityEvidenceRefs).values(
+          input.evidenceRefs.map((r) => ({
+            companyId: input.companyId,
+            reviewItemId: itemId,
+            surface: r.surface,
+            expected: r.expected ?? {},
+            actual: r.actual ?? {},
+            status: r.status ?? "missing",
+            sourceRunId: r.sourceRunId ?? null,
+            sourceUrl: r.sourceUrl ?? null,
+            freshnessExpiresAt: r.freshnessExpiresAt ? new Date(r.freshnessExpiresAt) : null,
+            blocking: r.blocking ?? true,
+          })),
+        );
+      }
+    }
+    const reviewItem = await getReviewItemDetail(itemId);
+    return { reviewItem, created };
+  }
+
+  // [목적] verdict 없이 독립적으로 evidence 수집 요청(plan 8.3). 상태를 evidence_collecting 으로.
+  async function requestEvidence(input: RequestEvidenceInput): Promise<{ reviewItem: QualityReviewItemListItemWithEvidence }> {
+    const item = await loadReviewItem(input.reviewItemId);
+    const surfaces = input.requiredEvidenceSurfaces.map((s) => s.trim()).filter(Boolean);
+    await db.transaction(async (tx) => {
+      await tx
+        .update(qualityReviewItems)
+        .set({ status: "evidence_collecting", updatedAt: new Date() })
+        .where(eq(qualityReviewItems.id, item.id));
+      await openEvidenceCollection(tx, item, surfaces, input.reason ?? null);
+    });
+    const reviewItem = await getReviewItemDetail(item.id);
+    return { reviewItem };
+  }
+
+  // [목적] 증거 수집 결과 기록. 모든 blocking/unresolved 해소되면 awaiting_review 로 복귀(폐루프 8.3).
+  async function recordEvidence(input: RecordEvidenceInput): Promise<{ reviewItem: QualityReviewItemListItemWithEvidence }> {
+    const item = await loadReviewItem(input.reviewItemId);
+    await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select({ id: qualityEvidenceRefs.id })
+        .from(qualityEvidenceRefs)
+        .where(
+          and(
+            eq(qualityEvidenceRefs.reviewItemId, item.id),
+            eq(qualityEvidenceRefs.surface, input.surface),
+          ),
+        )
+        .limit(1);
+      const status = input.status;
+      const blocking = input.blocking ?? UNRESOLVED_EVIDENCE_STATUSES.has(status);
+      const payload = {
+        companyId: item.companyId,
+        reviewItemId: item.id,
+        surface: input.surface,
+        expected: input.expected ?? {},
+        actual: input.actual ?? {},
+        status,
+        collectedByActorType: input.collectedByActorType ?? null,
+        collectedByActorId: input.collectedByActorId ?? null,
+        sourceRunId: input.sourceRunId ?? null,
+        sourceUrl: input.sourceUrl ?? null,
+        freshnessExpiresAt: input.freshnessExpiresAt ? new Date(input.freshnessExpiresAt) : null,
+        blocking,
+      };
+      if (existing) {
+        await tx
+          .update(qualityEvidenceRefs)
+          .set({ ...payload, updatedAt: new Date() })
+          .where(eq(qualityEvidenceRefs.id, existing.id));
+      } else {
+        await tx.insert(qualityEvidenceRefs).values(payload);
+      }
+
+      const refs = await tx
+        .select({ status: qualityEvidenceRefs.status, blocking: qualityEvidenceRefs.blocking })
+        .from(qualityEvidenceRefs)
+        .where(eq(qualityEvidenceRefs.reviewItemId, item.id));
+      const stillUnresolved = refs.some((r) => isUnresolvedEvidence(r));
+      const nextStatus = stillUnresolved ? "evidence_collecting" : "awaiting_review";
+      await tx
+        .update(qualityReviewItems)
+        .set({ status: nextStatus, updatedAt: new Date() })
+        .where(eq(qualityReviewItems.id, item.id));
+    });
+    const reviewItem = await getReviewItemDetail(item.id);
+    return { reviewItem };
+  }
+
+  async function getReviewItemDetail(reviewItemId: string): Promise<QualityReviewItemListItemWithEvidence> {
+    const item = await loadReviewItem(reviewItemId);
+    const refs = await db
+      .select()
+      .from(qualityEvidenceRefs)
+      .where(eq(qualityEvidenceRefs.reviewItemId, reviewItemId))
+      .orderBy(asc(qualityEvidenceRefs.surface), asc(qualityEvidenceRefs.createdAt));
+    return attachEvidenceRefs([item], refs as QualityEvidenceRefRow[])[0];
+  }
+
+  async function listAnchorCases(companyId: string) {
+    return db
+      .select()
+      .from(evaluatorAnchorCases)
+      .where(eq(evaluatorAnchorCases.companyId, companyId))
+      .orderBy(desc(evaluatorAnchorCases.createdAt));
+  }
+
+  // [목적] Quality 요약 카운트. UI 헤더 + daily report 입력.
+  async function getQualitySummary(companyId: string) {
+    const [items, refs, anchors, versions, reports] = await Promise.all([
+      db
+        .select({ status: qualityReviewItems.status })
+        .from(qualityReviewItems)
+        .where(eq(qualityReviewItems.companyId, companyId)),
+      db
+        .select({ status: qualityEvidenceRefs.status, blocking: qualityEvidenceRefs.blocking })
+        .from(qualityEvidenceRefs)
+        .where(eq(qualityEvidenceRefs.companyId, companyId)),
+      db
+        .select({ status: evaluatorAnchorCases.status })
+        .from(evaluatorAnchorCases)
+        .where(eq(evaluatorAnchorCases.companyId, companyId)),
+      db
+        .select({ status: evaluatorVersions.status })
+        .from(evaluatorVersions)
+        .where(eq(evaluatorVersions.companyId, companyId)),
+      db
+        .select({ id: qualityDailyReports.id })
+        .from(qualityDailyReports)
+        .where(eq(qualityDailyReports.companyId, companyId)),
+    ]);
+    const openReviewItems = items.filter((i) => !CLOSED_REVIEW_ITEM_STATUSES.has(i.status)).length;
+    const blockingEvidenceGaps = refs.filter((r) => isUnresolvedEvidence(r)).length;
+    return {
+      openReviewItems,
+      blockingEvidenceGaps,
+      anchorCandidates: anchors.filter((a) => a.status === "candidate").length,
+      candidateEvaluators: versions.filter((v) => v.status === "candidate").length,
+      dailyReports: reports.length,
+    };
+  }
+
+  async function listEvaluatorVersions(companyId: string) {
+    return db
+      .select()
+      .from(evaluatorVersions)
+      .where(eq(evaluatorVersions.companyId, companyId))
+      .orderBy(desc(evaluatorVersions.createdAt));
+  }
+
+  async function listDailyReports(companyId: string) {
+    return db
+      .select()
+      .from(qualityDailyReports)
+      .where(eq(qualityDailyReports.companyId, companyId))
+      .orderBy(desc(qualityDailyReports.reportDate));
+  }
+
+  async function listCandidateRuns(companyId: string, versionId?: string) {
+    return db
+      .select()
+      .from(evaluatorCandidateRuns)
+      .where(
+        versionId
+          ? and(eq(evaluatorCandidateRuns.companyId, companyId), eq(evaluatorCandidateRuns.evaluatorVersionId, versionId))
+          : eq(evaluatorCandidateRuns.companyId, companyId),
+      )
+      .orderBy(desc(evaluatorCandidateRuns.createdAt));
+  }
+
+  // [목적] candidate evaluator replay 실행(v1 결정론적). regression 없으면 passed.
+  async function runCandidateReplay(companyId: string, runId: string, input: { regressions?: number; resultSummary?: string }) {
+    const [run] = await db
+      .select()
+      .from(evaluatorCandidateRuns)
+      .where(and(eq(evaluatorCandidateRuns.id, runId), eq(evaluatorCandidateRuns.companyId, companyId)))
+      .limit(1);
+    if (!run) throw notFound("Evaluator candidate run not found");
+    const passed = (input.regressions ?? 0) <= 0;
+    const [updated] = await db
+      .update(evaluatorCandidateRuns)
+      .set({
+        status: passed ? "passed" : "failed",
+        replayResult: { evaluatedAt: new Date().toISOString(), regressions: input.regressions ?? 0, passed },
+        resultSummary: input.resultSummary ?? (passed ? "Replay passed with no regressions." : "Replay found regressions."),
+        updatedAt: new Date(),
+      })
+      .where(eq(evaluatorCandidateRuns.id, runId))
+      .returning();
+    return updated;
+  }
+
+  // [목적] candidate → production 승격. passed replay 가 있어야만(폐루프 8.4 가드).
+  async function promoteEvaluatorVersion(companyId: string, versionId: string) {
+    const [version] = await db
+      .select()
+      .from(evaluatorVersions)
+      .where(and(eq(evaluatorVersions.id, versionId), eq(evaluatorVersions.companyId, companyId)))
+      .limit(1);
+    if (!version) throw notFound("Evaluator version not found");
+    const passed = await db
+      .select({ id: evaluatorCandidateRuns.id })
+      .from(evaluatorCandidateRuns)
+      .where(
+        and(
+          eq(evaluatorCandidateRuns.evaluatorVersionId, versionId),
+          eq(evaluatorCandidateRuns.status, "passed"),
+        ),
+      )
+      .limit(1);
+    if (passed.length === 0) {
+      throw unprocessable("Cannot promote evaluator before a passed replay run exists");
+    }
+    const [updated] = await db
+      .update(evaluatorVersions)
+      .set({ status: "production", promotedAt: new Date(), updatedAt: new Date() })
+      .where(eq(evaluatorVersions.id, versionId))
+      .returning();
+    // 출처 review item 들을 evaluator_promoted 표시.
+    const runs = await db
+      .select({ reviewItemId: evaluatorCandidateRuns.reviewItemId })
+      .from(evaluatorCandidateRuns)
+      .where(eq(evaluatorCandidateRuns.evaluatorVersionId, versionId));
+    for (const r of runs) {
+      if (r.reviewItemId) {
+        await db
+          .update(qualityReviewItems)
+          .set({ status: "evaluator_promoted", updatedAt: new Date() })
+          .where(eq(qualityReviewItems.id, r.reviewItemId));
+      }
+    }
+    return updated;
+  }
+
+  // [목적] 일일 품질 보고서 생성(plan 8.5). (companyId, reportDate) 로 upsert.
+  async function generateDailyReport(companyId: string, reportDate?: string) {
+    const date = reportDate ?? todayString();
+    const [items, refs, anchors, versions] = await Promise.all([
+      db
+        .select({
+          status: qualityReviewItems.status,
+          failureType: qualityReviewItems.failureType,
+        })
+        .from(qualityReviewItems)
+        .where(eq(qualityReviewItems.companyId, companyId)),
+      db
+        .select({ surface: qualityEvidenceRefs.surface, status: qualityEvidenceRefs.status, blocking: qualityEvidenceRefs.blocking })
+        .from(qualityEvidenceRefs)
+        .where(eq(qualityEvidenceRefs.companyId, companyId)),
+      db
+        .select({ id: evaluatorAnchorCases.id, status: evaluatorAnchorCases.status })
+        .from(evaluatorAnchorCases)
+        .where(eq(evaluatorAnchorCases.companyId, companyId)),
+      db
+        .select({ sourceAnchorCaseId: evaluatorVersions.sourceAnchorCaseId })
+        .from(evaluatorVersions)
+        .where(eq(evaluatorVersions.companyId, companyId)),
+    ]);
+
+    const failureTypeCounts = countBy(items.map((i) => i.failureType ?? "unknown").filter((f) => f !== "unknown"));
+    const evidenceSurfaceStats: Record<string, { failed: number; missing: number; total: number }> = {};
+    for (const r of refs) {
+      const bucket = (evidenceSurfaceStats[r.surface] ??= { failed: 0, missing: 0, total: 0 });
+      bucket.total += 1;
+      if (r.status === "failed") bucket.failed += 1;
+      if (r.status === "missing" || r.blocking) bucket.missing += 1;
+    }
+    const coveredAnchorIds = new Set(versions.map((v) => v.sourceAnchorCaseId).filter((v): v is string => v !== null));
+    const anchorCoverageGaps = anchors.filter((a) => a.status === "candidate" && !coveredAnchorIds.has(a.id)).length;
+    const summary = {
+      failureTypeCounts,
+      evidenceSurfaceStats,
+      pendingReviewItems: items.filter((i) => i.status === "awaiting_review").length,
+      needsEvidenceOutstanding: items.filter((i) => i.status === "evidence_collecting").length,
+      anchorCoverageGaps,
+      improvementCandidates: anchorCoverageGaps,
+    };
+
+    const [existing] = await db
+      .select({ id: qualityDailyReports.id })
+      .from(qualityDailyReports)
+      .where(and(eq(qualityDailyReports.companyId, companyId), eq(qualityDailyReports.reportDate, date)))
+      .limit(1);
+    const hasBlockingGap = refs.some((r) => isUnresolvedEvidence(r));
+    const status = summary.needsEvidenceOutstanding > 0 || hasBlockingGap ? "needs_attention" : "generated";
+    if (existing) {
+      const [updated] = await db
+        .update(qualityDailyReports)
+        .set({ summary, status, updatedAt: new Date() })
+        .where(eq(qualityDailyReports.id, existing.id))
+        .returning();
+      return updated;
+    }
+    const [created] = await db
+      .insert(qualityDailyReports)
+      .values({ companyId, reportDate: date, status, summary })
+      .returning();
+    return created;
+  }
+
   return {
     listCompanyQualityReviewItems,
     getReviewItemOwnership,
+    getReviewItemDetail,
+    createReviewItem,
+    requestEvidence,
+    recordEvidence,
     recordQualityVerdict,
     promoteVerdictToAnchor,
+    listAnchorCases,
+    getQualitySummary,
+    listEvaluatorVersions,
+    listCandidateRuns,
+    listDailyReports,
+    runCandidateReplay,
+    promoteEvaluatorVersion,
+    generateDailyReport,
   };
 }
 

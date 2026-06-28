@@ -2,7 +2,10 @@
 
 import type {
   QualityAnchorStatus,
+  QualityDailyReportStatus,
   QualityEvidenceStatus,
+  QualityEvaluatorRunStatus,
+  QualityEvaluatorVersionStatus,
   QualityReviewItemStatus,
   QualityTargetType,
   QualityTriggerSource,
@@ -75,6 +78,81 @@ export interface QualityEvaluatorAnchorCase {
   updatedAt: string;
 }
 
+export interface QualityEvaluatorVersion {
+  id: string;
+  companyId: string;
+  name: string;
+  evaluatorType: string;
+  status: QualityEvaluatorVersionStatus;
+  sourceAnchorCaseId: string | null;
+  promptPatch: string | null;
+  coverageSummary: Record<string, unknown>;
+  promotedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QualityEvaluatorCandidateRun {
+  id: string;
+  companyId: string;
+  evaluatorVersionId: string;
+  anchorCaseId: string | null;
+  reviewItemId: string | null;
+  status: QualityEvaluatorRunStatus;
+  replayInput: Record<string, unknown>;
+  replayResult: Record<string, unknown>;
+  coverageSummary: Record<string, unknown>;
+  resultSummary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QualityDailyReport {
+  id: string;
+  companyId: string;
+  reportDate: string;
+  status: QualityDailyReportStatus;
+  summary: Record<string, unknown>;
+  sourceEvaluatorRunId: string | null;
+  improvementIssueId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QualitySummary {
+  openReviewItems: number;
+  blockingEvidenceGaps: number;
+  anchorCandidates: number;
+  candidateEvaluators: number;
+  dailyReports: number;
+}
+
+export interface CreateQualityReviewItemRequest {
+  missionId?: string | null;
+  title: string;
+  targetType: QualityTargetType;
+  targetId?: string | null;
+  triggerSource: QualityTriggerSource;
+  triggerMetadata?: Record<string, unknown>;
+  failureType?: string | null;
+  priority?: string;
+  evidenceRefs?: Array<{
+    surface: string;
+    expected?: Record<string, unknown>;
+    actual?: Record<string, unknown>;
+    status?: QualityEvidenceStatus;
+    sourceRunId?: string | null;
+    sourceUrl?: string | null;
+    freshnessExpiresAt?: string | null;
+    blocking?: boolean;
+  }>;
+}
+
+export interface CreateQualityReviewItemResponse {
+  reviewItem: QualityReviewItemListItem;
+  created: boolean;
+}
+
 export interface RecordQualityVerdictRequest {
   verdict: QualityVerdict;
   reason?: string;
@@ -87,9 +165,41 @@ export interface RecordQualityVerdictResponse {
   reviewItem: QualityReviewItemListItem;
 }
 
+export interface RequestQualityEvidenceRequest {
+  reason?: string;
+  requiredEvidenceSurfaces: string[];
+}
+
+export interface RequestQualityEvidenceResponse {
+  reviewItem: QualityReviewItemListItem;
+}
+
+export interface RecordQualityEvidenceRequest {
+  surface: string;
+  expected?: Record<string, unknown>;
+  actual?: Record<string, unknown>;
+  status: QualityEvidenceStatus;
+  sourceRunId?: string | null;
+  sourceUrl?: string | null;
+  freshnessExpiresAt?: string | null;
+  blocking?: boolean;
+}
+
+export interface RecordQualityEvidenceResponse {
+  reviewItem: QualityReviewItemListItem;
+}
+
 export interface PromoteQualityAnchorRequest {
   verdictId: string;
   title: string;
 }
 
 export type PromoteQualityAnchorResponse = QualityEvaluatorAnchorCase;
+
+export interface GenerateQualityDailyReportRequest {
+  reportDate?: string;
+}
+
+export interface GenerateQualityDailyReportResponse {
+  report: QualityDailyReport;
+}
