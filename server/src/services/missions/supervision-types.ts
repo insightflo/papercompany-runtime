@@ -17,6 +17,7 @@ export type MissionOwnerSupervisionRecommendationType =
   | "request_approval"
   | "escalate_blocked"
   | "materialize_plan_decision"
+  | "plan_submission_missing"
   | "materialize_artifact_from_comment"
   | "mark_impossible_with_evidence";
 
@@ -82,6 +83,13 @@ export type MissionOwnerSupervisionAppliedAction = {
   artifactPath: string;
   stalledRecoveryIssueId: string;
   stalledRunId: string;
+  resultStatus: string;
+  idempotencyKey: string;
+} | {
+  type: "plan_submission_missing";
+  missionId: string;
+  planIssueId: string;
+  succeededRunId: string;
   resultStatus: string;
   idempotencyKey: string;
 };

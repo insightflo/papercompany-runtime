@@ -1430,6 +1430,201 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(followUp.findings.join("\n")).not.toContain("plan_outdated");
   });
 
+  it("active supervision reopens a completed PLAN issue when the planning run succeeded without a structured submission", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planIssueId = randomUUID();
+    const oversightIssueId = randomUUID();
+    const succeededRunId = randomUUID();
+    const onPlanSubmissionMissing = vi.fn();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Planning Submission Missing Company",
+      issuePrefix: `PS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Planning submission missing mission",
+      status: "planning",
+    });
+    await db.insert(issues).values([
+      {
+        id: planIssueId,
+        companyId,
+        missionId,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_plan",
+        identifier: "PS-PLAN",
+        title: "[PLAN] Planning submission missing mission",
+        status: "done",
+        completedAt: new Date("2026-06-28T03:11:09.147Z"),
+      },
+      {
+        id: oversightIssueId,
+        companyId,
+        missionId,
+        assigneeAgentId: ownerAgentId,
+        originKind: "mission_main_executor_oversight",
+        identifier: "PS-OVERSIGHT",
+        title: "[OVERSIGHT] Planning submission missing mission",
+        status: "todo",
+      },
+    ]);
+    await db.insert(heartbeatRuns).values({
+      id: succeededRunId,
+      companyId,
+      agentId: ownerAgentId,
+      issueId: planIssueId,
+      invocationSource: "assignment",
+      status: "succeeded",
+      startedAt: new Date("2026-06-28T03:06:44.526Z"),
+      finishedAt: new Date("2026-06-28T03:11:09.108Z"),
+      createdAt: new Date("2026-06-28T03:06:44.502Z"),
+    });
+    await db.update(issues).set({
+      checkoutRunId: succeededRunId,
+      executionRunId: succeededRunId,
+      executionAgentNameKey: "mission-owner",
+      executionLockedAt: new Date("2026-06-28T03:06:44.526Z"),
+    }).where(eq(issues.id, planIssueId));
+
+    const result = await missionService(db, { onPlanSubmissionMissing }).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-28T03:14:00.000Z"),
+      applySafeActions: true,
+    });
+
+    expect(result.missionIds).toContain(missionId);
+    const missionResult = result.missions.find((entry) => entry.missionId === missionId);
+    expect(missionResult?.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("plan_submission_missing"),
+    ]));
+    expect(missionResult?.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "plan_submission_missing", issueId: planIssueId, safeToAutoApply: true }),
+    ]));
+    expect(missionResult?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "plan_submission_missing",
+        planIssueId,
+        succeededRunId,
+        resultStatus: "wakeup_requested",
+      }),
+    ]));
+
+    const [storedPlanIssue] = await db.select().from(issues).where(eq(issues.id, planIssueId));
+    expect(storedPlanIssue).toEqual(expect.objectContaining({
+      status: "todo",
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+      completedAt: null,
+    }));
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, planIssueId));
+    expect(comments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        body: expect.stringContaining("Mission owner plan submission required"),
+      }),
+    ]));
+    expect(comments.some((comment) => comment.body.includes(`mission-owner-plan-submission-missing:${missionId}:${planIssueId}:${succeededRunId}`))).toBe(true);
+    expect(onPlanSubmissionMissing).toHaveBeenCalledTimes(1);
+    expect(onPlanSubmissionMissing).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ id: missionId }),
+      planIssueId,
+      targetAgentId: ownerAgentId,
+      idempotencyKey: `mission-owner-plan-submission-missing:${missionId}:${planIssueId}:${succeededRunId}`,
+      wakeCommentId: expect.any(String),
+    }));
+
+    await missionService(db, { onPlanSubmissionMissing }).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-28T03:15:00.000Z"),
+      applySafeActions: true,
+    });
+    expect(onPlanSubmissionMissing).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat a reusable workflow mission without a PLAN issue as missing plan submission", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const onPlanSubmissionMissing = vi.fn();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Reusable Workflow Mission Company",
+      issuePrefix: `RW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Reusable workflow mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Reusable Workflow",
+      stepsJson: [{ id: "run", name: "Run", dependencies: [] }],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "manual",
+      status: "completed",
+      completedAt: new Date("2026-06-28T03:10:00.000Z"),
+    });
+
+    const result = await missionService(db, { onPlanSubmissionMissing }).runActiveMissionOwnerSupervision({
+      companyId,
+      missionIds: [missionId],
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-28T03:15:00.000Z"),
+      applySafeActions: true,
+    });
+
+    expect(result.missionIds).not.toContain(missionId);
+    expect(onPlanSubmissionMissing).not.toHaveBeenCalled();
+    const planIssues = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_plan"));
+    expect(planIssues).toHaveLength(0);
+  });
+
   it("re-wakes an existing stale owner-action issue with no heartbeat instead of duplicating it", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

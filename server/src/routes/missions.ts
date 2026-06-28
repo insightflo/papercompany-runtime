@@ -145,6 +145,30 @@ export function missionRoutes(db: Db) {
         },
       });
     },
+    onPlanSubmissionMissing: ({ mission, planIssueId, targetAgentId, idempotencyKey, wakeCommentId }) => {
+      return heartbeat.wakeup(targetAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_owner_plan_submission_missing",
+        idempotencyKey,
+        payload: {
+          issueId: planIssueId,
+          missionId: mission.id,
+          mutation: "mission_main_executor_plan",
+          wakeCommentId,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision",
+        contextSnapshot: {
+          issueId: planIssueId,
+          missionId: mission.id,
+          source: "mission_owner_plan_submission_missing",
+          wakeReason: "mission_owner_plan_submission_missing",
+          wakeCommentId,
+          forceFreshSession: true,
+        },
+      });
+    },
     onPlanQaIssueCreated: enqueuePlanQaWakeup,
     cancelHeartbeatRun: (runId) => heartbeat.cancelRun(runId),
   });
