@@ -40,7 +40,7 @@ import {
 } from "./edge-condition.js";
 import { resetStepRunForRework } from "./step-reset.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
-import { qualityService } from "../../quality.js";
+import { writeQualityFinding } from "../../quality-finding-writer.js";
 import type { StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -299,15 +299,21 @@ export async function applyBackEdgeReworkPass(
       })
     ) {
       try {
-        await qualityService(db).createDeliveryFailureReviewItem({
+        const qaIssueId = qaStepRun?.issueId ?? null;
+        const expected = { workflowRunId: run.id, qaStepId: qaStepDef.id, qaIssueId, producerStepId: step.id };
+        await writeQualityFinding(db, {
           companyId: run.companyId,
           missionId: run.missionId ?? null,
-          stepId: qaStepDef.id,
-          context: {
-            workflowRunId: run.id,
-            qaIssueId: qaStepRun?.issueId ?? null,
-            producerStepId: step.id,
-          },
+          title: `Delivery verification failed: ${qaStepDef.id}`,
+          targetType: "public_url",
+          triggerSource: "delivery_verification",
+          targetId: qaIssueId ? `${run.id}:${qaIssueId}` : `${run.id}:${qaStepDef.id}`,
+          failureType: "delivery_url_404",
+          triggerMetadata: expected,
+          evidenceRefs: [
+            { surface: "public_url", status: "missing", blocking: true, expected },
+            { surface: "browser_readback", status: "missing", blocking: true, expected },
+          ],
         });
       } catch {
         // swallowed: the rework loop must never depend on the quality board.

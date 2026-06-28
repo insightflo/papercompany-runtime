@@ -58,7 +58,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
-import { qualityService } from "./quality.js";
+import { writeQualityFinding } from "./quality-finding-writer.js";
 import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
@@ -6674,15 +6674,20 @@ export function heartbeatService(db: Db) {
         });
         postTransactionWorkflowIssueSyncIssueId = issue.id;
         // Phase 5 (plan 8.1 final QA / mission quality contract): completion QA run returned
-        // REQUEST_CHANGES → best-effort company-scoped quality review item (per-mission dedupe).
-        // qualityService writes via the top-level client (independent commit); never blocks heartbeat.
+        // REQUEST_CHANGES → best-effort quality review item via the thin writer (no heavy service
+        // import on the heartbeat hot path; per-mission dedupe). Never blocks heartbeat on failure.
         try {
-          await qualityService(db).createMissionQualityFailureReviewItem({
+          await writeQualityFinding(db, {
             companyId: issue.companyId,
             missionId: issue.missionId!,
+            title: `Final QA / purpose-fitness failure — mission ${issue.missionId}`,
+            targetType: "mission_output",
             triggerSource: "final_qa_failure",
+            targetId: issue.missionId!,
             failureType: "plan_goal_mismatch",
-            reason: (requestChangesVerdict as { excerpt?: string } | null)?.excerpt ?? "Final QA returned REQUEST_CHANGES.",
+            triggerMetadata: {
+              reason: (requestChangesVerdict as { excerpt?: string } | null)?.excerpt ?? "Final QA returned REQUEST_CHANGES.",
+            },
           });
         } catch {
           // swallowed: heartbeat validation must not depend on the quality board.
