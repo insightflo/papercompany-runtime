@@ -137,3 +137,31 @@ export function renderMissionQualityScoringLines(): string[] {
     "",
   ];
 }
+
+export const VERIFICATION_BEFORE_COMPLETION_MARKER = "## Verification Before Completion";
+
+export function renderVerificationBeforeCompletionGateLines(): string[] {
+  return [
+    VERIFICATION_BEFORE_COMPLETION_MARKER,
+    "",
+    "No PASS is allowed without fresh evidence gathered in this QA run.",
+    "- Identify every completion claim from the mission goal, success criteria, dependency workProducts, delivery manifests, and final user-visible or machine-consumed output contract.",
+    "- For each claim, name the proof surface and probe: browser/API/CLI/database/file/hash/content check, as appropriate to the declared output path.",
+    "- Run the probe now. Do not rely on upstream agent reports, issue status, registered workProducts, or earlier QA comments as completion proof.",
+    "- Read the full result: exit code, HTTP status, response body/HTML marker, database row, file metadata, object key, hash, or other objective output.",
+    "- Verify the evidence supports the exact claim. Mark partial, stale, ambiguous, missing, or adjacent-surface evidence as notVerified.",
+    "- If the proof surface is missing or ambiguous, REQUEST_CHANGES and state which claim cannot be verified. Do not infer a provider or substitute a nearby surface.",
+    "- PASS only when every required claim has fresh supporting evidence. Otherwise REQUEST_CHANGES with the exact missing or failed claim.",
+    "",
+    "Verdict evidence shape:",
+    "- verified: concrete claims with evidence and source/probe used.",
+    "- notVerified: required claims that failed, were stale, or had only adjacent evidence.",
+    "- unresolved: claims that could not be checked because the destination contract or access path is missing.",
+    "- finalVerdict: PASS or REQUEST_CHANGES.",
+    "",
+  ];
+}
+
+export function buildVerificationBeforeCompletionCriteria(): string {
+  return renderVerificationBeforeCompletionGateLines().join("\n").trimEnd();
+}

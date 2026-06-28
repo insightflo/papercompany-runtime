@@ -956,6 +956,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("purpose-fitness first");
     expect(rubric).toContain("5-axis scoring");
     expect(rubric).toContain("purposeFitness <= 3");
+    // [Verification Before Completion] QA verdict must be based on fresh claim/evidence checks.
+    expect(rubric).toContain("Verification Before Completion");
+    expect(rubric).toContain("fresh evidence");
+    expect(rubric).toContain("Identify every completion claim");
+    expect(rubric).toContain("notVerified");
   });
 
   it("injects a delivery verification gate for manual-onboarding publish workflows and blocks completion until readback passes", async () => {
@@ -1096,8 +1101,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(deliveryIssue?.description).toContain("QA grading rubric:");
     const rubricPath = deliveryIssue?.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
     expect(rubricPath).toBeTruthy();
-    expect(fs.readFileSync(rubricPath!, "utf8")).toContain("Delivery Verification");
-    expect(fs.readFileSync(rubricPath!, "utf8")).toContain("HTTP 200");
+    const deliveryRubric = fs.readFileSync(rubricPath!, "utf8");
+    expect(deliveryRubric).toContain("Verification Before Completion");
+    expect(deliveryRubric).toContain("fresh evidence");
+    expect(deliveryRubric).toContain("Delivery Verification");
+    expect(deliveryRubric).toContain("final consumer path");
+    expect(deliveryRubric).toContain("HTTP 200");
 
     await issueService(db).update(deliveryRun.issueId!, { status: "done" });
     await syncWorkflowRunForIssue(db, deliveryRun.issueId!);
@@ -1205,7 +1214,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubricPath).toBeTruthy();
     const rubric = fs.readFileSync(rubricPath!, "utf8");
     expect(rubric).toContain("Confirm the published item is visible.");
+    expect(rubric).toContain("Verification Before Completion");
+    expect(rubric).toContain("fresh evidence");
     expect(rubric).toContain("Delivery Verification");
+    expect(rubric).toContain("final consumer path");
     expect(rubric).toContain("HTTP 200");
   });
 

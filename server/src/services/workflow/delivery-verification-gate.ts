@@ -1,7 +1,8 @@
-// Delivery Verification Gate: 최종 공개 목적지 실제 반영을 검증하는 게이트 step 주입.
-// publish/deploy 완료만으로 PASS 금지 — hub/detail URL/R2 readback 요구.
+// Delivery Verification Gate: 최종 공개/소비 목적지 실제 반영을 검증하는 게이트 step 주입.
+// publish/deploy 완료만으로 PASS 금지. workProduct/delivery manifest 가 선언한 최종 경로를 readback 한다.
 
 import type { WorkflowStep } from "./dag-engine.js";
+import { buildVerificationBeforeCompletionCriteria } from "../missions/mission-quality-contract.js";
 
 // delivery readback 이 필요한 공개 목적지 단서만 매치(generic publish/deploy 는 제외 — regression 방지).
 const DELIVERY_KEYWORDS = /manual-onboarding|onboarding[- ]?hub|onboarding[- ]?publisher|r2|cloudflare|pages\.dev|public[- ]?hub|public[- ]?destination|final[- ]?public|website|site[- ]?html|회사게시|온보딩허브/iu;
@@ -59,16 +60,13 @@ export function synthesizeDeliveryVerificationGateStep(input: {
     dependencies: input.dependencyStepIds,
     graphWorkProductRequired: false,
     description: [
-      "Delivery Verification Gate. Verify the deliverable actually reached its final public destination.",
+      "Delivery Verification Gate. Verify the deliverable actually reached the final destination declared by the workflow output contract.",
       "Do NOT pass merely because the publish/deploy step completed, a workProduct was registered, or a local file exists.",
       "",
-      "Readback criteria (manual-onboarding / public hub):",
-      "- The hub/index page links to this deliverable.",
-      "- The detail URL returns HTTP 200 (not 404, not a stale redirect).",
-      "- The expected title/topic marker is present in the rendered HTML.",
-      "- R2/public object exists if applicable.",
+      buildVerificationBeforeCompletionCriteria(),
       "",
-      "If any readback fails (404, missing link, stale page, empty content), return REQUEST_CHANGES with the specific gap.",
+      buildDeliveryVerificationCriteria(),
+      "",
       "Finish your run output with exactly one standalone final line: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
     ].join("\n"),
   };
@@ -77,9 +75,13 @@ export function synthesizeDeliveryVerificationGateStep(input: {
 // PAQO qaStep description 주입용 readback criteria.
 export function buildDeliveryVerificationCriteria(): string {
   return [
-    "Delivery Verification: the deliverable must actually be reachable at its final public destination.",
-    "- Do not PASS merely because the publish step completed or a local file exists.",
-    "- Verify: hub/index link exists, detail URL HTTP 200, expected title/topic in HTML, R2 object present.",
-    "- 404/missing/stale → REQUEST_CHANGES.",
+    "Delivery Verification: the deliverable must be reachable at the final destination declared by the workProduct, delivery manifest, workflow step output contract, or mission success criteria.",
+    "- Do not PASS merely because the publish/deploy step completed, a local file exists, a storage object exists, or a catalog row/index entry exists.",
+    "- First identify the final consumer path: public URL, API endpoint, database record, object key, generated file path, repository location, or another explicit destination contract.",
+    "- If the final destination contract is missing or ambiguous, REQUEST_CHANGES instead of guessing a provider such as Oracle, A1, R2, AWS, Cloudflare, or local filesystem.",
+    "- For public HTTP artifacts: verify the final URL returns HTTP 200 or an expected canonical redirect, contains the expected title/topic/content marker, and is not stale.",
+    "- For hub/index/catalog flows: verify the index entry and then follow it to the final detail/resource path. The index row alone is supporting evidence, not completion proof.",
+    "- For storage-backed delivery: verify object/file existence, key/path, freshness/hash/size, and consumer accessibility when the consumer path is different from storage.",
+    "- 404, missing link, stale page, empty content, wrong artifact, missing object, or adjacent-surface-only evidence => REQUEST_CHANGES.",
   ].join("\n");
 }

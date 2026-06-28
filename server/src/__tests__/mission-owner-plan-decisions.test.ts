@@ -1899,7 +1899,12 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.name, "PAQO WBS: Validate ordered PLAN unit graph"));
     expect(paqoDefinitions).toHaveLength(1);
-    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[] }>;
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{
+      id: string;
+      name: string;
+      dependencies: string[];
+      description?: string;
+    }>;
     const researchA = paqoSteps.find((step) => step.name === "[ACTION] Research source A");
     const researchB = paqoSteps.find((step) => step.name === "[ACTION] Research source B");
     const synthesis = paqoSteps.find((step) => step.name === "[ACTION] Write HTML report");
@@ -1918,6 +1923,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       validator!.id,
     ]));
     expect(ownerQa?.dependencies).toHaveLength(4);
+    expect(ownerQa?.description).toContain("Verification Before Completion");
+    expect(ownerQa?.description).toContain("fresh evidence");
+    expect(ownerQa?.description).toContain("Identify every completion claim");
 
     const runs = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
     expect(runs).toHaveLength(1);

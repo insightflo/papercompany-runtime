@@ -3,7 +3,11 @@
 // 도출하는지 + 모호 goal 은 과차단 없이 clarify 만 내는지 검증.
 
 import { describe, expect, it } from "vitest";
-import { extractMissionQualityContract, renderMissionQualityContractSection } from "../services/missions/mission-quality-contract.js";
+import {
+  buildVerificationBeforeCompletionCriteria,
+  extractMissionQualityContract,
+  renderMissionQualityContractSection,
+} from "../services/missions/mission-quality-contract.js";
 
 describe("mission-quality-contract", () => {
   it("extracts beginner / deep-research / actionable signals from a Feynman-style brief", () => {
@@ -52,5 +56,15 @@ describe("mission-quality-contract", () => {
     const lines = renderMissionQualityContractSection(contract);
     expect(lines.join("\n")).toContain("## Mission quality contract");
     expect(lines.join("\n")).toContain("purposeFitness");
+  });
+
+  it("renders verification-before-completion criteria as a claim/evidence gate", () => {
+    const criteria = buildVerificationBeforeCompletionCriteria();
+    expect(criteria).toContain("Verification Before Completion");
+    expect(criteria).toContain("fresh evidence");
+    expect(criteria).toContain("Identify every completion claim");
+    expect(criteria).toContain("Do not infer a provider");
+    expect(criteria).toContain("notVerified");
+    expect(criteria).toContain("finalVerdict");
   });
 });

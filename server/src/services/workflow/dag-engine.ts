@@ -19,9 +19,11 @@ import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../mi
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
 import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
+  VERIFICATION_BEFORE_COMPLETION_MARKER,
   extractMissionQualityContract,
   renderMissionQualityContractSection,
   renderMissionQualityScoringLines,
+  renderVerificationBeforeCompletionGateLines,
 } from "../missions/mission-quality-contract.js";
 import {
   hasExistingDeliveryReadbackStep,
@@ -690,12 +692,16 @@ async function writeQaRubricMarkdown(input: {
         ...renderMissionQualityScoringLines(),
       ]
     : [];
+  const verificationGateLines = input.renderedStepDescription?.includes(VERIFICATION_BEFORE_COMPLETION_MARKER)
+    ? []
+    : renderVerificationBeforeCompletionGateLines();
   const body = [
     "# QA grading rubric",
     "",
     "This rubric is workflow-owned input for the QA/validator step. Do not invent a new grading standard; judge the dependency workProducts against this rubric.",
     "",
     ...qualityContractLines,
+    ...verificationGateLines,
     "## Workflow execution boundary",
     "",
     `- workflowRunId: ${input.run.id}`,

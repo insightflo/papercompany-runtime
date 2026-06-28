@@ -13,6 +13,7 @@ import { extractMissionIntent } from "./missions/mission-intent.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
+  buildVerificationBeforeCompletionCriteria,
   extractMissionQualityContract,
   renderMissionQualityContractSection,
 } from "./missions/mission-quality-contract.js";
@@ -1710,6 +1711,8 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     description: [
       "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
       "Mission quality contract / purpose-fitness first: verify the deliverable actually achieves the original mission goal (not merely that it is well-structured, published, or source-backed).",
+      "",
+      buildVerificationBeforeCompletionCriteria(),
       "",
       // [Delivery Verification Gate] publish/deploy plan → readback criteria 강화(중복 QA step 無, description 주입).
       isPublishPlan ? buildDeliveryVerificationCriteria() : null,

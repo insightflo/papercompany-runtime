@@ -66,6 +66,10 @@ describe("delivery-verification-gate", () => {
     expect(gate.graphWorkProductRequired).toBe(false);
     expect(gate.agentId).toBe("agent-1");
     expect(gate.description).toContain("Do NOT pass merely because the publish/deploy step completed");
+    expect(gate.description).toContain("Verification Before Completion");
+    expect(gate.description).toContain("fresh evidence");
+    expect(gate.description).toContain("Do not infer a provider");
+    expect(gate.description).toContain("delivery manifest");
     expect(gate.description).toContain("HTTP 200");
     expect(gate.description).toContain("REQUEST_CHANGES");
     expect(gate.description).toContain("PASS");
@@ -73,7 +77,10 @@ describe("delivery-verification-gate", () => {
 
   it("buildDeliveryVerificationCriteria: produces readback hard-stop text", () => {
     const criteria = buildDeliveryVerificationCriteria();
-    expect(criteria).toContain("reachable at its final public destination");
+    expect(criteria).toContain("final destination declared");
+    expect(criteria).toContain("final consumer path");
+    expect(criteria).toContain("Do not PASS merely because the publish/deploy step completed");
+    expect(criteria).toContain("instead of guessing a provider");
     expect(criteria).toContain("HTTP 200");
     expect(criteria).toContain("REQUEST_CHANGES");
   });
