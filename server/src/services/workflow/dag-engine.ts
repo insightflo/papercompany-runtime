@@ -23,6 +23,12 @@ import {
   renderMissionQualityContractSection,
   renderMissionQualityScoringLines,
 } from "../missions/mission-quality-contract.js";
+import {
+  hasExistingDeliveryReadbackStep,
+  isDeliveryRelevantStep,
+  strengthenDeliveryReadbackSteps,
+  synthesizeDeliveryVerificationGateStep,
+} from "./delivery-verification-gate.js";
 import { logActivity } from "../activity-log.js";
 import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/types.js";
 import {
@@ -491,7 +497,39 @@ async function loadWorkflowExecutionContext(db: Db, runId: string): Promise<Work
     run: typeof workflowRuns.$inferSelect;
     definition: typeof workflowDefinitions.$inferSelect;
   };
-  const steps = normalizeWorkflowStepsForExecution(definition.stepsJson);
+  let steps = normalizeWorkflowStepsForExecution(definition.stepsJson);
+  // [Delivery Verification Gate] static/reusable workflow with delivery step but no readback gate → inject in-memory.
+  // gate 는 in-memory steps 에 append(stepsJson 재 normalize 금지 — dependency lookup 누락 방지).
+  // dynamic_owner_plan bootstrap 은 제외(pending/skipped 꼬임 방지).
+  const definitionMeta = definition as typeof workflowDefinitions.$inferSelect & {
+    executionMode?: unknown;
+    dynamicPlanBootstrapOnly?: unknown;
+    workflowMode?: unknown;
+  };
+  if (
+    !isDynamicOwnerPlanWorkflowDefinition({
+      name: definition.name,
+      executionMode: definitionMeta.executionMode,
+      dynamicPlanBootstrapOnly: definitionMeta.dynamicPlanBootstrapOnly,
+      workflowMode: definitionMeta.workflowMode,
+      steps,
+    })
+  ) {
+    const deliverySteps = steps.filter(isDeliveryRelevantStep);
+    if (deliverySteps.length > 0 && hasExistingDeliveryReadbackStep(steps)) {
+      steps = strengthenDeliveryReadbackSteps(steps);
+    } else if (deliverySteps.length > 0) {
+      const gateAgentId = deliverySteps[deliverySteps.length - 1]?.agentId ?? "";
+      steps = [
+        ...steps,
+        synthesizeDeliveryVerificationGateStep({
+          dependencyStepIds: deliverySteps.map((step) => step.id),
+          agentId: gateAgentId,
+          definitionName: definition.name,
+        }),
+      ];
+    }
+  }
   const stepRuns = await db
     .select()
     .from(workflowStepRuns)

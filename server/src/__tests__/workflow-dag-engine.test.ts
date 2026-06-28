@@ -958,6 +958,257 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("purposeFitness <= 3");
   });
 
+  it("injects a delivery verification gate for manual-onboarding publish workflows and blocks completion until readback passes", async () => {
+    const companyId = randomUUID();
+    const producerAgentId = randomUUID();
+    const publisherAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const workProductRoot = `/tmp/wf-delivery-gate-${companyId}`;
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-delivery-gate" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Delivery Gate",
+      issuePrefix: `DG${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values([
+      {
+        id: producerAgentId,
+        companyId,
+        name: "HTML Producer",
+        role: "builder",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: publisherAgentId,
+        companyId,
+        name: "Manual Publisher",
+        role: "publisher",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: producerAgentId,
+      title: "Publish Feynman manual",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "manual-onboarding publish workflow",
+      stepsJson: [
+        {
+          id: "build-html",
+          name: "Build HTML",
+          agentId: producerAgentId,
+          dependencies: [],
+          description: "Build the manual HTML.",
+          graphWorkProductRequired: true,
+        },
+        {
+          id: "publish-manual-onboarding",
+          name: "Publish to manual-onboarding R2",
+          agentId: publisherAgentId,
+          dependencies: ["build-html"],
+          description: "Upload to the manual-onboarding public hub.",
+          graphWorkProductRequired: false,
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+      runDate: "2026-06-28",
+    });
+
+    await executeWorkflowRun(db, runId);
+    let stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRuns.map((row) => row.stepId).sort()).toEqual([
+      "build-html",
+      "delivery-verification-gate",
+      "publish-manual-onboarding",
+    ]);
+    expect(stepRuns.find((row) => row.stepId === "delivery-verification-gate")?.issueId).toBeNull();
+
+    const buildIssueId = stepRuns.find((row) => row.stepId === "build-html")!.issueId!;
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: buildIssueId,
+      type: "file",
+      provider: "local",
+      externalId: `${workProductRoot}/missions/${missionId}/runs/${runId}/steps/build-html/index.html`,
+      title: "index.html",
+      status: "active",
+      isPrimary: true,
+      metadata: {
+        path: `${workProductRoot}/missions/${missionId}/runs/${runId}/steps/build-html/index.html`,
+      },
+    });
+    await issueService(db).update(buildIssueId, { status: "done" });
+    await syncWorkflowRunForIssue(db, buildIssueId);
+
+    stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const publishIssueId = stepRuns.find((row) => row.stepId === "publish-manual-onboarding")!.issueId!;
+    expect(publishIssueId).toEqual(expect.any(String));
+    expect(stepRuns.find((row) => row.stepId === "delivery-verification-gate")?.issueId).toBeNull();
+
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: publishIssueId,
+      type: "url",
+      provider: "manual-onboarding",
+      externalId: "manual-onboarding/concepts/feynman-technique-v1/index.html",
+      url: "https://manual-onboarding.pages.dev/onboarding/concepts/feynman-technique-v1/index.html",
+      title: "Published manual URL",
+      status: "active",
+      isPrimary: true,
+      metadata: { section: "concepts" },
+    });
+    await issueService(db).update(publishIssueId, { status: "done" });
+    await syncWorkflowRunForIssue(db, publishIssueId);
+
+    stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const deliveryRun = stepRuns.find((row) => row.stepId === "delivery-verification-gate")!;
+    expect(deliveryRun.issueId).toEqual(expect.any(String));
+    const [runBeforeDeliveryQa] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(runBeforeDeliveryQa?.status).toBe("running");
+
+    const [deliveryIssue] = await db.select().from(issues).where(eq(issues.id, deliveryRun.issueId!));
+    expect(deliveryIssue?.description).toContain("QA grading rubric:");
+    const rubricPath = deliveryIssue?.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
+    expect(rubricPath).toBeTruthy();
+    expect(fs.readFileSync(rubricPath!, "utf8")).toContain("Delivery Verification");
+    expect(fs.readFileSync(rubricPath!, "utf8")).toContain("HTTP 200");
+
+    await issueService(db).update(deliveryRun.issueId!, { status: "done" });
+    await syncWorkflowRunForIssue(db, deliveryRun.issueId!);
+    const [completedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(completedRun?.status).toBe("completed");
+  });
+
+  it("strengthens an existing public readback QA step without appending a duplicate delivery gate", async () => {
+    const companyId = randomUUID();
+    const publisherAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const workProductRoot = `/tmp/wf-delivery-readback-${companyId}`;
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-existing-readback" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Existing Delivery Readback",
+      issuePrefix: `DR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values({
+      id: publisherAgentId,
+      companyId,
+      name: "Manual Publisher",
+      role: "publisher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: publisherAgentId,
+      title: "Publish with existing smoke QA",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "manual-onboarding publish with smoke QA",
+      stepsJson: [
+        {
+          id: "publish-manual-onboarding",
+          name: "Publish to manual-onboarding R2",
+          agentId: publisherAgentId,
+          dependencies: [],
+          description: "Upload to the manual-onboarding public hub.",
+        },
+        {
+          id: "publish-smoke-qa",
+          name: "[QA] 게시 smoke QA: R2 HTTP 200 + hub index 갱신 확인",
+          agentId: publisherAgentId,
+          dependencies: ["publish-manual-onboarding"],
+          description: "Confirm the published item is visible.",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+      runDate: "2026-06-28",
+    });
+
+    await executeWorkflowRun(db, runId);
+    let stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRuns.map((row) => row.stepId).sort()).toEqual([
+      "publish-manual-onboarding",
+      "publish-smoke-qa",
+    ]);
+    expect(stepRuns.some((row) => row.stepId === "delivery-verification-gate")).toBe(false);
+
+    const publishIssueId = stepRuns.find((row) => row.stepId === "publish-manual-onboarding")!.issueId!;
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: publishIssueId,
+      type: "url",
+      provider: "manual-onboarding",
+      externalId: "manual-onboarding/concepts/feynman-technique-v1/index.html",
+      url: "https://manual-onboarding.pages.dev/onboarding/concepts/feynman-technique-v1/index.html",
+      title: "Published manual URL",
+      status: "active",
+      isPrimary: true,
+      metadata: { section: "concepts" },
+    });
+    await issueService(db).update(publishIssueId, { status: "done" });
+    await syncWorkflowRunForIssue(db, publishIssueId);
+
+    stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(stepRuns.some((row) => row.stepId === "delivery-verification-gate")).toBe(false);
+    const smokeQaRun = stepRuns.find((row) => row.stepId === "publish-smoke-qa")!;
+    expect(smokeQaRun.issueId).toEqual(expect.any(String));
+
+    const [smokeQaIssue] = await db.select().from(issues).where(eq(issues.id, smokeQaRun.issueId!));
+    const rubricPath = smokeQaIssue?.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
+    expect(rubricPath).toBeTruthy();
+    const rubric = fs.readFileSync(rubricPath!, "utf8");
+    expect(rubric).toContain("Confirm the published item is visible.");
+    expect(rubric).toContain("Delivery Verification");
+    expect(rubric).toContain("HTTP 200");
+  });
+
   it("copies execution controls into workflow step run metadata when launching a step", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

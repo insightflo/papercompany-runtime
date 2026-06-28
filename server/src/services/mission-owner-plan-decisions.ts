@@ -16,6 +16,7 @@ import {
   extractMissionQualityContract,
   renderMissionQualityContractSection,
 } from "./missions/mission-quality-contract.js";
+import { buildDeliveryVerificationCriteria } from "./workflow/delivery-verification-gate.js";
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 
@@ -1695,6 +1696,11 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
   const plannedSteps = applyPlanStepDependencies(executableUnits, selectedSteps, draft.steps);
   if (plannedSteps.length === 0) return [];
 
+  // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.
+  const isPublishPlan = /publish|deploy|manual-onboarding|게시|온보딩|release|배포/iu.test(
+    `${draft.missionGoal ?? ""} ${plannedSteps.map((s) => `${s.name} ${s.description ?? ""}`).join(" ")}`,
+  );
+
   const qaStep: WorkflowStep = {
     id: `qa-${shortStableHash({ missionId: mission.id, actions: plannedSteps.map((step) => step.id), goal: draft.missionGoal })}`,
     name: "[QA] Verify mission result",
@@ -1705,6 +1711,9 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
       "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
       "Mission quality contract / purpose-fitness first: verify the deliverable actually achieves the original mission goal (not merely that it is well-structured, published, or source-backed).",
       "",
+      // [Delivery Verification Gate] publish/deploy plan → readback criteria 강화(중복 QA step 無, description 주입).
+      isPublishPlan ? buildDeliveryVerificationCriteria() : null,
+      isPublishPlan ? "" : null,
       draft.successCriteria.length > 0 ? `Success criteria: ${JSON.stringify(draft.successCriteria)}` : null,
       draft.steps.length > 0 ? `Planned steps: ${JSON.stringify(draft.steps)}` : null,
     ].filter(Boolean).join("\n"),
