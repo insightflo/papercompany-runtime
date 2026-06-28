@@ -4332,18 +4332,27 @@ describe("heartbeat context budget preflight", () => {
     }));
 
     const heartbeat = heartbeatService(db);
+    const runIds: string[] = [];
     for (let i = 0; i < 3; i += 1) {
       const run = await heartbeat.invoke(agentId, "on_demand", { missionId }, "manual", {
         actorType: "system",
         actorId: "test-suite",
       });
       expect(run).not.toBeNull();
+      runIds.push(run!.id);
       const finalized = await waitForRunTerminal(heartbeat, run!.id);
       expect(finalized.status).toBe("succeeded");
     }
 
-    expect(executeSpy).toHaveBeenCalledTimes(3);
-    const runtimes = executeSpy.mock.calls.map((call) => call[0].runtime as { sessionId: string | null; sessionDisplayId: string | null });
+    // [주의] 전체 suite 병렬 실행에서 background/queued run 이 executeSpy 를 1회 추가로 부를 수 있어
+    //   전역 카운트(3) 단정이 간헐 fail. 이 테스트가 직접 시작한 runId 로 필터링해 단정한다.
+    const ownCalls = executeSpy.mock.calls.filter(
+      (call) => runIds.includes((call[0] as { runId?: string }).runId ?? ""),
+    );
+    expect(ownCalls).toHaveLength(3);
+    const runtimes = ownCalls.map(
+      (call) => (call[0] as { runtime: { sessionId: string | null; sessionDisplayId: string | null } }).runtime,
+    );
     expect(runtimes.map((runtime) => runtime.sessionId)).toEqual([null, "mission-token-1", "mission-token-1"]);
     expect(runtimes.map((runtime) => runtime.sessionDisplayId)).toEqual([null, "mission-token-1", "mission-token-1"]);
 
