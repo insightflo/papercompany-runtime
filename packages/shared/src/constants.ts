@@ -123,8 +123,61 @@ export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 export const ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
 export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
 
-export const ISSUE_ORIGIN_KINDS = ["manual", "routine_execution"] as const;
+export const ISSUE_ORIGIN_KINDS = [
+  "manual",
+  "routine_execution",
+  "quality_evidence_request",
+] as const;
 export type IssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
+
+// Core Quality Board: company-scoped review queue for purpose-fitness failures,
+// evidence gaps, and human verdicts. See packages/db/src/schema/quality_*.ts +
+// evaluator_anchor_cases.ts. Values must stay in sync with the DB default text
+// columns (no enum constraint), so these lists are the single source of truth.
+export const QUALITY_REVIEW_ITEM_STATUSES = [
+  "detected",
+  "awaiting_review",
+  "evidence_collecting",
+  "changes_requested",
+  "resolved_pass",
+  "resolved_fail",
+  "dismissed",
+] as const;
+export type QualityReviewItemStatus = (typeof QUALITY_REVIEW_ITEM_STATUSES)[number];
+
+export const QUALITY_TRIGGER_SOURCES = [
+  "delivery_verification",
+  "post_completion_audit",
+  "user_feedback",
+  "manual",
+] as const;
+export type QualityTriggerSource = (typeof QUALITY_TRIGGER_SOURCES)[number];
+
+export const QUALITY_TARGET_TYPES = ["work_product", "public_url", "mission_output", "other"] as const;
+export type QualityTargetType = (typeof QUALITY_TARGET_TYPES)[number];
+
+// Human verdict vocabulary. request_changes asks for rework, needs_evidence asks for proof.
+export const QUALITY_VERDICTS = [
+  "pass",
+  "fail",
+  "request_changes",
+  "needs_evidence",
+  "dismissed",
+] as const;
+export type QualityVerdict = (typeof QUALITY_VERDICTS)[number];
+
+// Evidence surface lifecycle. Blocking is represented by a separate boolean column.
+export const QUALITY_EVIDENCE_STATUSES = [
+  "missing",
+  "pending",
+  "verified",
+  "failed",
+  "stale",
+] as const;
+export type QualityEvidenceStatus = (typeof QUALITY_EVIDENCE_STATUSES)[number];
+
+export const QUALITY_ANCHOR_STATUSES = ["candidate", "promoted", "rejected"] as const;
+export type QualityAnchorStatus = (typeof QUALITY_ANCHOR_STATUSES)[number];
 
 export const GOAL_LEVELS = ["company", "team", "agent", "task"] as const;
 export type GoalLevel = (typeof GOAL_LEVELS)[number];

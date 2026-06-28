@@ -173,4 +173,7 @@ export const queryKeys = {
     proposals: (companyId: string) => ["worktree-proposals", companyId] as const,
     proposalDetail: (id: string) => ["worktree-proposals", "detail", id] as const,
   },
+  quality: {
+    reviewItems: (companyId: string) => ["quality", companyId, "review-items"] as const,
+  },
 };

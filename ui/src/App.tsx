@@ -18,6 +18,7 @@ import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-rou
 
 const OnboardingWizard = lazy(async () => ({ default: (await import("./components/OnboardingWizard")).OnboardingWizard }));
 const Dashboard = lazy(async () => ({ default: (await import("./pages/Dashboard")).Dashboard }));
+const Quality = lazy(async () => ({ default: (await import("./pages/Quality")).Quality }));
 const Companies = lazy(async () => ({ default: (await import("./pages/Companies")).Companies }));
 const Agents = lazy(async () => ({ default: (await import("./pages/Agents")).Agents }));
 const AgentDetail = lazy(async () => ({ default: (await import("./pages/AgentDetail")).AgentDetail }));
@@ -154,6 +155,7 @@ function boardRoutes() {
     <>
       <Route index element={<Navigate to="missions" replace />} />
       <Route path="dashboard" element={lazyRoute(<Dashboard />)} />
+      <Route path="quality" element={lazyRoute(<Quality />)} />
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={lazyRoute(<Companies />)} />
       <Route path="company/settings" element={lazyRoute(<CompanySettings />)} />

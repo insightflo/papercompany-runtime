@@ -35,6 +35,7 @@ import { channelConfigRoutes } from "./routes/channel-config.js";
 import { hermesChatRoutes } from "./routes/hermes-chat.js";
 import { activityRoutes } from "./routes/activity.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
+import { qualityRoutes } from "./routes/quality.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { llmRoutes } from "./routes/llms.js";
@@ -350,6 +351,7 @@ export async function createApp(
   api.use(channelConfigRoutes(db));
   api.use(activityRoutes(db));
   api.use(dashboardRoutes(db));
+  api.use(qualityRoutes(db));
   api.use(sidebarBadgeRoutes(db));
   api.use(instanceSettingsRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();

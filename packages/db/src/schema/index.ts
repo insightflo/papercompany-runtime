@@ -101,3 +101,7 @@ export { channelConfigs } from "./channel_configs.js";
 export { missionPlanDecisionSubmissions } from "./mission_plan_decision_submissions.js";
 export { missionPlanQaVerdicts } from "./mission_plan_qa_verdicts.js";
 export { workflowTransitionEvents } from "./workflow_transition_events.js";
+export { qualityReviewItems } from "./quality_review_items.js";
+export { qualityEvidenceRefs } from "./quality_evidence_refs.js";
+export { missionQualityVerdicts } from "./mission_quality_verdicts.js";
+export { evaluatorAnchorCases } from "./evaluator_anchor_cases.js";

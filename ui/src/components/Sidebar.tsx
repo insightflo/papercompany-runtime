@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   GitPullRequest,
   Workflow,
+  ListChecks,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
@@ -135,6 +136,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/quality" label="Quality" icon={ListChecks} />
           <SidebarNavItem to="/org" label="Org" icon={Network} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/instructions" label="Instructions" icon={BookOpen} />

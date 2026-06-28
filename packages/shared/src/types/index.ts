@@ -1,6 +1,16 @@
 export type { Company } from "./company.js";
 export type { InstanceExperimentalSettings, InstanceGeneralSettings, InstanceSettings } from "./instance.js";
 export type {
+  QualityEvidenceRef,
+  QualityReviewItemListItem,
+  QualityVerdictRow,
+  QualityEvaluatorAnchorCase,
+  RecordQualityVerdictRequest,
+  RecordQualityVerdictResponse,
+  PromoteQualityAnchorRequest,
+  PromoteQualityAnchorResponse,
+} from "./quality.js";
+export type {
   CompanySkillSourceType,
   CompanySkillTrustLevel,
   CompanySkillCompatibility,

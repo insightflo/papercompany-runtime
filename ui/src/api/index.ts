@@ -17,6 +17,7 @@ export { approvalsApi } from "./approvals";
 export { costsApi } from "./costs";
 export { activityApi } from "./activity";
 export { dashboardApi } from "./dashboard";
+export { qualityApi } from "./quality";
 export { heartbeatsApi } from "./heartbeats";
 export { hermesChatApi } from "./hermesChat";
 export { instanceSettingsApi } from "./instanceSettings";
