@@ -979,8 +979,9 @@ export function qualityService(db: Db) {
     };
   }) {
     const ctx = input.context ?? {};
-    // dedupe 단위를 좁힌다: URL 이 있으면 URL, 없으면 QA 이슈, 그것도 없으면 step.
-    const targetId = input.targetUrl ?? ctx.qaIssueId ?? input.stepId;
+    // dedupe 단위를 run 까지 좁힌다: URL > run:qaIssue > run:step > qaIssue > step.
+    const fallback = ctx.qaIssueId ?? input.stepId;
+    const targetId = input.targetUrl ?? (ctx.workflowRunId ? `${ctx.workflowRunId}:${fallback}` : fallback);
     const expected = {
       workflowRunId: ctx.workflowRunId ?? null,
       qaStepId: input.stepId,
@@ -1004,21 +1005,24 @@ export function qualityService(db: Db) {
     });
   }
 
-  // [목적] mission quality contract / final QA(목적 적합성) 실패 → review item. plan 8.1.
-  //   targetId = missionId 로 미션 단위 dedupe. triggerSource = final_qa_failure.
-  async function createFinalQaFailureReviewItem(input: {
+  // [목적] mission quality contract / QA 목적 적합성 실패 → review item. plan 8.1.
+  //   caller 가 triggerSource(plan_qa_failure | final_qa_failure) 와 failureType 을 고른다.
+  //   targetId = missionId 로 미션 단위 dedupe.
+  async function createMissionQualityFailureReviewItem(input: {
     companyId: string;
     missionId: string;
-    missionTitle: string;
+    missionTitle?: string | null;
+    triggerSource: "plan_qa_failure" | "final_qa_failure";
     failureType?: string | null;
     reason?: string | null;
   }) {
+    const missionTitle = input.missionTitle?.trim() || `mission ${input.missionId}`;
     return createReviewItem({
       companyId: input.companyId,
       missionId: input.missionId,
-      title: `Final QA / purpose-fitness failure — ${input.missionTitle}`,
+      title: `${input.triggerSource === "plan_qa_failure" ? "Plan QA" : "Final QA"} / purpose-fitness failure — ${missionTitle}`,
       targetType: "mission_output",
-      triggerSource: "final_qa_failure",
+      triggerSource: input.triggerSource,
       targetId: input.missionId,
       failureType: input.failureType ?? "plan_goal_mismatch",
       priority: "high",
@@ -1032,7 +1036,7 @@ export function qualityService(db: Db) {
     getReviewItemOwnership,
     createOversightStallReviewItem,
     createDeliveryFailureReviewItem,
-    createFinalQaFailureReviewItem,
+    createMissionQualityFailureReviewItem,
     getReviewItemDetail,
     createReviewItem,
     requestEvidence,

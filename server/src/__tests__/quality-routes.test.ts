@@ -522,17 +522,19 @@ describeEmbeddedPostgres("quality routes", () => {
     const missionId = await seedMission(companyId, "active");
     const svc = qualityService(db);
 
-    const first = await svc.createFinalQaFailureReviewItem({
+    const first = await svc.createMissionQualityFailureReviewItem({
       companyId,
       missionId,
       missionTitle: "Purpose-fitness mission",
+      triggerSource: "final_qa_failure",
       failureType: "plan_goal_mismatch",
-      reason: "Plan QA requested changes.",
+      reason: "Final QA requested changes.",
     });
-    const second = await svc.createFinalQaFailureReviewItem({
+    const second = await svc.createMissionQualityFailureReviewItem({
       companyId,
       missionId,
       missionTitle: "Purpose-fitness mission",
+      triggerSource: "final_qa_failure",
       failureType: "plan_goal_mismatch",
     });
 

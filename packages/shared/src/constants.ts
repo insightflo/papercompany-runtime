@@ -157,6 +157,7 @@ export const QUALITY_TRIGGER_SOURCES = [
   "delivery_verification",
   "post_completion_audit",
   "oversight_stall",
+  "plan_qa_failure",
   "final_qa_failure",
   "user_feedback",
   "manual",

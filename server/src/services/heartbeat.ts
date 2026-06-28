@@ -58,6 +58,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { qualityService } from "./quality.js";
 import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
@@ -6672,6 +6673,20 @@ export function heartbeatService(db: Db) {
           },
         });
         postTransactionWorkflowIssueSyncIssueId = issue.id;
+        // Phase 5 (plan 8.1 final QA / mission quality contract): completion QA run returned
+        // REQUEST_CHANGES → best-effort company-scoped quality review item (per-mission dedupe).
+        // qualityService writes via the top-level client (independent commit); never blocks heartbeat.
+        try {
+          await qualityService(db).createMissionQualityFailureReviewItem({
+            companyId: issue.companyId,
+            missionId: issue.missionId!,
+            triggerSource: "final_qa_failure",
+            failureType: "qa_false_pass",
+            reason: (requestChangesVerdict as { excerpt?: string } | null)?.excerpt ?? "Final QA returned REQUEST_CHANGES.",
+          });
+        } catch {
+          // swallowed: heartbeat validation must not depend on the quality board.
+        }
         return {
           promotedRun: null,
           postTransactionRequestChangesOwnerAction: { sourceIssue: issue, run, verdict: requestChangesVerdict },

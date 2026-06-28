@@ -1078,13 +1078,14 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           await reopenPlanningIssueIfTerminal({ db, planningIssueId: collected.planningIssueId });
           await closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId });
           await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "request_changes", verdict: "request_changes", reviewedAt: new Date().toISOString() } });
-          // Phase 5 (plan 8.1 mission quality contract / final QA failure): plan QA request_changes
-          // = purpose-fitness failure → best-effort company-scoped quality review item (per-mission dedupe).
+          // Phase 5 (plan 8.1 mission quality contract): Plan-QA request_changes = purpose-fitness
+          // failure at the plan gate → best-effort company-scoped quality review item (per-mission dedupe).
           try {
-            await qualityService(db).createFinalQaFailureReviewItem({
+            await qualityService(db).createMissionQualityFailureReviewItem({
               companyId,
               missionId,
               missionTitle,
+              triggerSource: "plan_qa_failure",
               failureType: "plan_goal_mismatch",
               reason: "Plan QA requested changes (purpose-fitness / mission quality contract failure).",
             });

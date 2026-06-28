@@ -298,8 +298,8 @@ export async function applyBackEdgeReworkPass(
         description: (qaStepDef as { description?: string }).description,
       })
     ) {
-      void qualityService(db)
-        .createDeliveryFailureReviewItem({
+      try {
+        await qualityService(db).createDeliveryFailureReviewItem({
           companyId: run.companyId,
           missionId: run.missionId ?? null,
           stepId: qaStepDef.id,
@@ -308,8 +308,10 @@ export async function applyBackEdgeReworkPass(
             qaIssueId: qaStepRun?.issueId ?? null,
             producerStepId: step.id,
           },
-        })
-        .catch(() => {});
+        });
+      } catch {
+        // swallowed: the rework loop must never depend on the quality board.
+      }
     }
     if (stepRun.issueId) {
       await db.insert(issueComments).values({
