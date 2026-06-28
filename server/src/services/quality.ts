@@ -95,7 +95,26 @@ export interface QualityReviewItemRow {
 
 export type QualityReviewItemListItemWithEvidence = QualityReviewItemRow & {
   evidenceRefs: QualityEvidenceRefRow[];
+  missionTitle?: string | null;
+  missionStatus?: string | null;
 };
+
+// [목적] missionId 들의 title/status 를 한 번에 조회해 item 에 요약 부착(UI "현재 해결 여부" 용).
+async function attachMissionSummary(db: Db, items: QualityReviewItemListItemWithEvidence[]) {
+  const missionIds = Array.from(new Set(items.map((i) => i.missionId).filter((m): m is string => !!m)));
+  if (missionIds.length === 0) return items;
+  const rows = await db
+    .select({ id: missions.id, title: missions.title, status: missions.status })
+    .from(missions)
+    .where(inArray(missions.id, missionIds));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const item of items) {
+    const m = item.missionId ? byId.get(item.missionId) : undefined;
+    item.missionTitle = m?.title ?? null;
+    item.missionStatus = m?.status ?? null;
+  }
+  return items;
+}
 
 function attachEvidenceRefs(
   items: QualityReviewItemRow[],
@@ -354,7 +373,7 @@ export function qualityService(db: Db) {
       .where(inArray(qualityEvidenceRefs.reviewItemId, itemIds))
       .orderBy(asc(qualityEvidenceRefs.surface), asc(qualityEvidenceRefs.createdAt));
 
-    return attachEvidenceRefs(items, refs as QualityEvidenceRefRow[]);
+    return attachMissionSummary(db, attachEvidenceRefs(items, refs as QualityEvidenceRefRow[]));
   }
 
   async function resolveFollowUpMissionId(tx: TransactionDb, item: QualityReviewItemRow) {
@@ -743,7 +762,9 @@ export function qualityService(db: Db) {
       .from(qualityEvidenceRefs)
       .where(eq(qualityEvidenceRefs.reviewItemId, reviewItemId))
       .orderBy(asc(qualityEvidenceRefs.surface), asc(qualityEvidenceRefs.createdAt));
-    return attachEvidenceRefs([item], refs as QualityEvidenceRefRow[])[0];
+    const enriched = attachEvidenceRefs([item], refs as QualityEvidenceRefRow[]);
+    await attachMissionSummary(db, enriched);
+    return enriched[0];
   }
 
   async function listAnchorCases(companyId: string) {

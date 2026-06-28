@@ -46,6 +46,9 @@ export interface QualityReviewItemListItem {
   createdAt: string;
   updatedAt: string;
   evidenceRefs: QualityEvidenceRef[];
+  /** 소스 미션 요약(가능할 때). UI "현재 해결 여부" 표시용. */
+  missionTitle?: string | null;
+  missionStatus?: string | null;
 }
 
 export interface QualityVerdictRow {
