@@ -30,6 +30,7 @@ import {
   missions,
   missionSessions,
   projects,
+  qualityReviewItems,
   toolDefinitions,
   agentKbGrants,
   agentTaskSessions,
@@ -1107,6 +1108,18 @@ describe("heartbeat context budget preflight", () => {
         }),
       ]),
     );
+
+    // Phase 5 connection: final/completion QA REQUEST_CHANGES auto-creates a quality review item.
+    const qualityItems = await db.select().from(qualityReviewItems).where(eq(qualityReviewItems.missionId, missionId));
+    expect(qualityItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        companyId,
+        missionId,
+        triggerSource: "final_qa_failure",
+        failureType: "plan_goal_mismatch",
+        targetType: "mission_output",
+      }),
+    ]));
   });
 
   // Boundary coverage for the title-based REQUEST_CHANGES validation gate

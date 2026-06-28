@@ -6681,7 +6681,7 @@ export function heartbeatService(db: Db) {
             companyId: issue.companyId,
             missionId: issue.missionId!,
             triggerSource: "final_qa_failure",
-            failureType: "qa_false_pass",
+            failureType: "plan_goal_mismatch",
             reason: (requestChangesVerdict as { excerpt?: string } | null)?.excerpt ?? "Final QA returned REQUEST_CHANGES.",
           });
         } catch {
