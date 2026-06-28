@@ -2908,6 +2908,17 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(enqueuePlanQaWakeup).not.toHaveBeenCalled();
   });
 
+  it("plan-QA gate: description embeds Mission quality contract and purpose-fitness", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const [planQaIssue] = await db.select({ description: issues.description }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
+    expect(planQaIssue?.description).toContain("Mission quality contract");
+    expect(planQaIssue?.description).toContain("Purpose fitness");
+    expect(planQaIssue?.description).toContain("purpose-fitness first");
+  });
+
   it("plan-QA gate: PASS verdict materializes the PAQO workflow and records verdict=pass", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });

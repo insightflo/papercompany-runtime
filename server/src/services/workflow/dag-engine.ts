@@ -9,7 +9,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, heartbeatRuns, issues, issueComments, issueWorkProducts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService, extractExplicitArtifactPaths } from "../heartbeat.js";
@@ -17,6 +17,12 @@ import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
+import {
+  MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
+  extractMissionQualityContract,
+  renderMissionQualityContractSection,
+  renderMissionQualityScoringLines,
+} from "../missions/mission-quality-contract.js";
 import { logActivity } from "../activity-log.js";
 import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/types.js";
 import {
@@ -624,13 +630,34 @@ async function writeQaRubricMarkdown(input: {
   renderedStepDescription: string | null;
   dependencyIssueLines: string[];
   missingDependencyWorkProductLines: string[];
+  missionGoal?: string | null;
+  missionTitle?: string | null;
+  missionDescription?: string | null;
 }): Promise<void> {
   await mkdir(path.dirname(input.filePath), { recursive: true });
+  // [AREA: Mission Quality Contract] mission goal 에서 품질 contract 도출 → rubric 주입.
+  // goal 소스: active plan missionGoal 우선 → mission title+description fallback(caller 주입).
+  const qualityContractSource = input.missionGoal ?? input.missionTitle ?? null;
+  const qualityContractLines = qualityContractSource
+    ? [
+        MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
+        "",
+        ...renderMissionQualityContractSection(
+          extractMissionQualityContract({
+            missionGoal: input.missionGoal ?? "",
+            missionTitle: input.missionTitle,
+            missionDescription: input.missionDescription,
+          }),
+        ),
+        ...renderMissionQualityScoringLines(),
+      ]
+    : [];
   const body = [
     "# QA grading rubric",
     "",
     "This rubric is workflow-owned input for the QA/validator step. Do not invent a new grading standard; judge the dependency workProducts against this rubric.",
     "",
+    ...qualityContractLines,
     "## Workflow execution boundary",
     "",
     `- workflowRunId: ${input.run.id}`,
@@ -1363,6 +1390,30 @@ async function createWorkflowStepIssue(input: {
     ? path.join(workProductPaths.stepOutputDir, "qa-rubric.md")
     : null;
   if (qaRubricPath) {
+    // [AREA: Mission Quality Contract] mission goal/title/description 조회(active plan missionGoal 우선 → title+desc fallback).
+    let missionGoalForRubric: string | null = null;
+    let missionTitleForRubric: string | null = null;
+    let missionDescriptionForRubric: string | null = null;
+    if (input.run.missionId) {
+      const [missionRow] = await input.db
+        .select({ title: missions.title, description: missions.description })
+        .from(missions)
+        .where(and(eq(missions.companyId, input.run.companyId), eq(missions.id, input.run.missionId)))
+        .limit(1);
+      missionTitleForRubric = missionRow?.title ?? null;
+      missionDescriptionForRubric = (missionRow?.description as string | null) ?? null;
+      const [activePlanRow] = await input.db
+        .select({ missionGoal: missionPlanArtifacts.missionGoal })
+        .from(missionPlanArtifacts)
+        .where(and(
+          eq(missionPlanArtifacts.companyId, input.run.companyId),
+          eq(missionPlanArtifacts.missionId, input.run.missionId),
+          eq(missionPlanArtifacts.status, "active"),
+        ))
+        .orderBy(desc(missionPlanArtifacts.revision))
+        .limit(1);
+      missionGoalForRubric = (activePlanRow?.missionGoal as string | null) ?? null;
+    }
     await writeQaRubricMarkdown({
       filePath: qaRubricPath,
       run: input.run,
@@ -1371,6 +1422,9 @@ async function createWorkflowStepIssue(input: {
       renderedStepDescription,
       dependencyIssueLines,
       missingDependencyWorkProductLines,
+      missionGoal: missionGoalForRubric,
+      missionTitle: missionTitleForRubric,
+      missionDescription: missionDescriptionForRubric,
     });
   }
   const description = [

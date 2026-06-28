@@ -11,6 +11,11 @@ import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
+import {
+  MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
+  extractMissionQualityContract,
+  renderMissionQualityContractSection,
+} from "./missions/mission-quality-contract.js";
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 
@@ -1698,6 +1703,7 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     graphWorkProductRequired: false,
     description: [
       "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
+      "Mission quality contract / purpose-fitness first: verify the deliverable actually achieves the original mission goal (not merely that it is well-structured, published, or source-backed).",
       "",
       draft.successCriteria.length > 0 ? `Success criteria: ${JSON.stringify(draft.successCriteria)}` : null,
       draft.steps.length > 0 ? `Planned steps: ${JSON.stringify(draft.steps)}` : null,
@@ -1900,8 +1906,14 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
     "",
   ];
   if (input.missionGoal) lines.push(`Mission goal: ${input.missionGoal}`, "");
+  // [AREA: Mission Quality Contract] goal 에서 품질 수식어(초보자/심층/실행가능) 역추적 → 주입.
+  // 판정은 PLAN-QA agent 가 rubric 로(deterministic invalid 아님).
+  const qualityContract = extractMissionQualityContract({ missionGoal: input.missionGoal ?? "" });
+  lines.push(MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE, "");
+  lines.push(...renderMissionQualityContractSection(qualityContract));
   lines.push(
     "Checklist (judge against the mission goal):",
+    "- Purpose fitness — does the plan actually accomplish the mission's stated purpose (not just structure it)?",
     "- Are the mission goal's core verbs reflected in concrete steps?",
     "- Is the step split sufficient to deliver the goal without mixing unrelated failure modes?",
     "- Does every step have a clear instruction: task target, required inputs, expected output, and success criteria?",
@@ -1918,6 +1930,8 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
     "| Area | Score (0-2) | Evidence | Required fix if below 2 |",
     "|---|---:|---|---|",
     "| Goal coverage |  |  |  |",
+    "| Purpose fitness |  |  |  |",
+    "| User problem solving |  |  |  |",
     "| Step split / sequencing |  |  |  |",
     "| Agent fit |  |  |  |",
     "| Instruction quality |  |  |  |",

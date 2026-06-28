@@ -951,6 +951,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain(`workflowRunId: ${runId}`);
     expect(rubric).toContain("collect-evidence");
     expect(rubric).toContain("evidence.json");
+    // [Mission Quality Contract] qa-rubric 에 contract + purpose-fitness-first + 5-axis 주입 확인.
+    expect(rubric).toContain("Mission quality contract");
+    expect(rubric).toContain("purpose-fitness first");
+    expect(rubric).toContain("5-axis scoring");
+    expect(rubric).toContain("purposeFitness <= 3");
   });
 
   it("copies execution controls into workflow step run metadata when launching a step", async () => {
