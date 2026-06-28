@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   evaluatorCandidateRuns,
   evaluatorAnchorCases,
@@ -25,6 +25,7 @@ const REQUIRED_FAILURE_TYPES = [
   "delivery_url_404",
   "evidence_incomplete",
   "plan_goal_mismatch",
+  "plan_submission_missing",
   "qa_false_pass",
 ];
 const REQUIRED_EVIDENCE_SURFACES = [
@@ -606,15 +607,17 @@ export function qualityService(db: Db) {
     reviewItem: QualityReviewItemListItemWithEvidence;
     created: boolean;
   }> {
+    // [주의] dedupe: 같은 대상의 "열린" item 만 재사용. closed/resolved/promoted 는 새 item.
+    //   targetId 없으면 null 매칭(isNull). 빈 문자열 매칭은 insert 가 null 이라 놓침.
     const existing = await db
-      .select({ id: qualityReviewItems.id })
+      .select({ id: qualityReviewItems.id, status: qualityReviewItems.status })
       .from(qualityReviewItems)
       .where(
         and(
           eq(qualityReviewItems.companyId, input.companyId),
           eq(qualityReviewItems.targetType, input.targetType),
           eq(qualityReviewItems.triggerSource, input.triggerSource),
-          input.targetId ? eq(qualityReviewItems.targetId, input.targetId) : eq(qualityReviewItems.targetId, ""),
+          input.targetId ? eq(qualityReviewItems.targetId, input.targetId) : isNull(qualityReviewItems.targetId),
         ),
       )
       .orderBy(desc(qualityReviewItems.createdAt))
@@ -622,7 +625,7 @@ export function qualityService(db: Db) {
 
     let itemId: string;
     let created = false;
-    const openExisting = existing.find((e) => true); // 최근 동일 대상이 있으면 재사용(멱등)
+    const openExisting = existing.find((e) => !CLOSED_REVIEW_ITEM_STATUSES.has(e.status));
     if (openExisting) {
       itemId = openExisting.id;
     } else {
@@ -944,9 +947,52 @@ export function qualityService(db: Db) {
     return created;
   }
 
+  // [목적] Phase 5 자동 trigger 진입점들(plan 8.1). 감시/배포 검증 실패를 review item 으로.
+  //   targetId 로 좁혀 dedupe(회사 단위 과잉 누적 방지). 감시/루프는 await+try/catch 로 관측 가능.
+  async function createOversightStallReviewItem(input: {
+    companyId: string;
+    missionId: string;
+    missionTitle: string;
+  }) {
+    return createReviewItem({
+      companyId: input.companyId,
+      missionId: input.missionId,
+      title: `Oversight stall: plan submission missing — ${input.missionTitle}`,
+      targetType: "mission_output",
+      triggerSource: "oversight_stall",
+      targetId: input.missionId,
+      failureType: "plan_submission_missing",
+      priority: "high",
+    });
+  }
+
+  async function createDeliveryFailureReviewItem(input: {
+    companyId: string;
+    missionId?: string | null;
+    stepId: string;
+    targetUrl?: string | null;
+  }) {
+    return createReviewItem({
+      companyId: input.companyId,
+      missionId: input.missionId ?? null,
+      title: `Delivery verification failed: ${input.stepId}`,
+      targetType: "public_url",
+      triggerSource: "delivery_verification",
+      targetId: input.targetUrl ?? input.stepId,
+      failureType: "delivery_url_404",
+      priority: "high",
+      evidenceRefs: [
+        { surface: "public_url", status: "missing", blocking: true },
+        { surface: "browser_readback", status: "missing", blocking: true },
+      ],
+    });
+  }
+
   return {
     listCompanyQualityReviewItems,
     getReviewItemOwnership,
+    createOversightStallReviewItem,
+    createDeliveryFailureReviewItem,
     getReviewItemDetail,
     createReviewItem,
     requestEvidence,

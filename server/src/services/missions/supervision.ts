@@ -28,12 +28,15 @@ import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue } from "./mission-supervision-context.js";
+import { qualityService } from "../quality.js";
 
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
   deps: MissionServiceDeps;
   ownerActions: ReturnType<typeof createOwnerActions>;
 }) {
+  // Phase 5: best-effort quality review item auto-creation for oversight findings (plan 8.1).
+  const qSvc = qualityService(db);
 
   async function runMainExecutorSupervision(input: {
     missionId: string;
@@ -194,6 +197,17 @@ export function createSupervision({ db, deps, ownerActions }: {
     const planSubmissionMissingCandidate = await findPlanSubmissionMissingCandidate();
     if (planSubmissionMissingCandidate) {
       findings.push(`plan_submission_missing: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} succeeded_run=${planSubmissionMissingCandidate.succeededRun.id}`);
+      // Phase 5 (plan 8.1 oversight stall): auto-create a company-scoped quality review item.
+      // Awaited + try/catch so the quality board is observable/testable but never blocks supervision on its own failure.
+      try {
+        await qSvc.createOversightStallReviewItem({
+          companyId: mission.companyId,
+          missionId: mission.id,
+          missionTitle: mission.title,
+        });
+      } catch {
+        // swallowed intentionally: supervision must not depend on the quality board.
+      }
       addRecommendation({
         type: "plan_submission_missing",
         missionId: mission.id,

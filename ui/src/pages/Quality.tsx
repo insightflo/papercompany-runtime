@@ -193,11 +193,11 @@ export function Quality() {
     "Generate report",
   );
 
-  async function run<T>(key: string, p: Promise<T>) {
+  async function run<T>(key: string, p: Promise<T>): Promise<T> {
     setError(null);
     setBusy(key);
     try {
-      await p;
+      return await p;
     } finally {
       setBusy(null);
     }
@@ -206,8 +206,11 @@ export function Quality() {
   function handleVerdict(item: QualityReviewItemListItem, verdict: QualityVerdict) {
     const surfacesRaw = surfacesByItem[item.id]?.trim() ?? "";
     const requiredEvidenceSurfaces = verdict === "needs_evidence" && surfacesRaw ? surfacesRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-    void run(`${item.id}:verdict`, verdictMut.mutateAsync({ itemId: item.id, body: { verdict, requiredEvidenceSurfaces } })).then(() => {
-      // refresh last verdict via the returned reviewItem is not in this mutation shape; re-read detail lazily
+    void run(`${item.id}:verdict`, verdictMut.mutateAsync({ itemId: item.id, body: { verdict, requiredEvidenceSurfaces } })).then((result) => {
+      // recordVerdict returns {verdict, reviewItem}; capture the verdict id so promote-anchor works without manual input.
+      if (result?.verdict?.id) {
+        setLastVerdictByItem((prev) => ({ ...prev, [item.id]: { verdictId: result.verdict.id, verdict: result.verdict.verdict } }));
+      }
     });
   }
 
@@ -381,11 +384,16 @@ export function Quality() {
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <input type="text" placeholder="verdictId (from detail)" className="min-w-0 w-40 rounded border border-border bg-background px-2 py-0.5 text-[11px]" onChange={(e) => setLastVerdictByItem({ ...lastVerdictByItem, [item.id]: { verdictId: e.target.value, verdict: last?.verdict ?? "fail" } })} />
-                      <input type="text" placeholder="anchor title" value={anchorTitleByItem[item.id] ?? ""} onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px]" />
-                      <button type="button" disabled={!last?.verdictId || busy === `${item.id}:anchor`} onClick={() => last?.verdictId && run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: anchorTitleByItem[item.id]?.trim() || `Anchor: ${item.title}` }))} className="rounded border border-violet-500/40 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400">
-                        promote anchor
-                      </button>
+                      {!last?.verdictId && <span className="text-[11px] text-muted-foreground">record a verdict to enable anchor promotion</span>}
+                      {last?.verdictId && (
+                        <>
+                          <span className="text-[11px] text-muted-foreground">last: {last.verdict}</span>
+                          <input type="text" placeholder="anchor title" value={anchorTitleByItem[item.id] ?? ""} onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px]" />
+                          <button type="button" disabled={busy === `${item.id}:anchor`} onClick={() => run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: anchorTitleByItem[item.id]?.trim() || `Anchor: ${item.title}` }))} className="rounded border border-violet-500/40 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400">
+                            promote anchor
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );

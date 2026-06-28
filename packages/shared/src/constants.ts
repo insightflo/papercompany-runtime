@@ -156,6 +156,7 @@ export type QualityReviewItemStatus = (typeof QUALITY_REVIEW_ITEM_STATUSES)[numb
 export const QUALITY_TRIGGER_SOURCES = [
   "delivery_verification",
   "post_completion_audit",
+  "oversight_stall",
   "user_feedback",
   "manual",
 ] as const;

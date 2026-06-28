@@ -19,6 +19,7 @@ import {
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { qualityRoutes } from "../routes/quality.js";
+import { qualityService } from "../services/quality.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -470,5 +471,47 @@ describeEmbeddedPostgres("quality routes", () => {
     const blocked = await request(createApp(db, { type: "board", source: "session", userId: "r", companyIds: [companyB] }))
       .get(`/api/companies/${companyA}/quality/summary`);
     expect(blocked.status).toBe(403);
+  });
+
+  it("auto-creates an oversight stall review item (plan 8.1) and dedupes per mission", async () => {
+    const companyId = await seedCompany("QO");
+    const missionId = await seedMission(companyId, "active");
+    const svc = qualityService(db);
+
+    const first = await svc.createOversightStallReviewItem({ companyId, missionId, missionTitle: "Oversighted mission" });
+    const second = await svc.createOversightStallReviewItem({ companyId, missionId, missionTitle: "Oversighted mission" });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.reviewItem.id).toBe(first.reviewItem.id);
+    expect(first.reviewItem).toMatchObject({
+      companyId,
+      missionId,
+      targetType: "mission_output",
+      triggerSource: "oversight_stall",
+      status: "awaiting_review",
+      failureType: "plan_submission_missing",
+    });
+  });
+
+  it("auto-creates a delivery verification failure review item (plan 8.1) with missing evidence surfaces", async () => {
+    const companyId = await seedCompany("QP");
+    const svc = qualityService(db);
+
+    const first = await svc.createDeliveryFailureReviewItem({ companyId, stepId: "qa-delivery-readback" });
+    const second = await svc.createDeliveryFailureReviewItem({ companyId, stepId: "qa-delivery-readback" });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.reviewItem.id).toBe(first.reviewItem.id);
+    expect(first.reviewItem).toMatchObject({
+      companyId,
+      targetType: "public_url",
+      triggerSource: "delivery_verification",
+      failureType: "delivery_url_404",
+    });
+    const surfaces = first.reviewItem.evidenceRefs.map((r) => r.surface).sort();
+    expect(surfaces).toEqual(["browser_readback", "public_url"]);
+    expect(first.reviewItem.evidenceRefs.every((r) => r.blocking && r.status === "missing")).toBe(true);
   });
 });

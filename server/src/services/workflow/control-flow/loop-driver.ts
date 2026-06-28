@@ -39,6 +39,8 @@ import {
   type PredFacts,
 } from "./edge-condition.js";
 import { resetStepRunForRework } from "./step-reset.js";
+import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
+import { qualityService } from "../../quality.js";
 import type { StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -283,6 +285,23 @@ export async function applyBackEdgeReworkPass(
       attempt,
       reason: `qa_request_changes(back-edge ${step.id}←${firingEdge.stepId}, iteration ${currentIteration}/${maxIterations})`,
     });
+      // Phase 5 (plan 8.1 delivery verification): a delivery-relevant QA step returning request_changes
+      // → best-effort company-scoped quality review item with missing public_url/browser_readback surfaces.
+      // Swallow errors: the rework loop must never depend on the quality board.
+      const qaStepDef = steps.find((s) => s.id === firingEdge.stepId);
+      if (
+        qaStepDef &&
+        isDeliveryRelevantStep({
+          id: qaStepDef.id,
+          name: (qaStepDef as { name?: string }).name ?? qaStepDef.id,
+          description: (qaStepDef as { description?: string }).description,
+        })
+      ) {
+        // Phase 5 (plan 8.1 delivery verification): best-effort, never blocks the rework loop.
+        void qualityService(db)
+          .createDeliveryFailureReviewItem({ companyId: run.companyId, stepId: qaStepDef.id })
+          .catch(() => {});
+      }
     if (stepRun.issueId) {
       await db.insert(issueComments).values({
         companyId: run.companyId,
