@@ -51,9 +51,9 @@ export function qualityItemDisplayTitle(item: QualityReviewItemListItem): string
 export function decisionPrompt(status: string): string {
   switch (status) {
     case "awaiting_review":
-      return "Review and judge: pass / fail / request_changes / needs_evidence / dismissed.";
+      return "Review and judge: Pass / Fail / Request changes / Needs evidence / Dismiss.";
     case "detected":
-      return "Newly detected — review and judge: pass / fail / request_changes / needs_evidence / dismissed.";
+      return "Newly detected — review and judge: Pass / Fail / Request changes / Needs evidence / Dismiss.";
     case "evidence_collecting":
       return "Evidence is being collected. Record results below; the item returns here once all blocking surfaces resolve.";
     case "changes_requested":
@@ -121,7 +121,7 @@ export function recommendAction(item: QualityReviewItemListItem): { action: Reco
     return { action: "request_changes", why: `${unresolved.length} blocking/failed evidence surface(s) — fix or re-probe, then re-review.`, tone: "warn" };
   }
   if (item.evidenceRefs.length === 0) {
-    return { action: "needs_evidence", why: "No structured evidence and no rework signal — request a fresh probe before judging.", tone: "warn" };
+    return { action: "needs_evidence", why: "No structured evidence and no rework signal — choose Needs evidence if you cannot judge yet.", tone: "warn" };
   }
   return { action: null, why: "Evidence resolved — review the target, then pass or dismiss.", tone: "info" };
 }
@@ -282,7 +282,7 @@ export function qualityVerdictCommentPlaceholder(verdict: QualityVerdict): strin
     case "request_changes":
       return "Describe the rework to perform. This is not a place to request fresh evidence unless evidence is actually missing.";
     case "needs_evidence":
-      return "Describe which evidence surface is missing and what should be probed next.";
+      return "Describe which evidence surface is missing and what should be probed next. This is the evidence request.";
     case "fail":
       return "State the blocking quality failure and why it should be treated as a failure.";
     case "pass":

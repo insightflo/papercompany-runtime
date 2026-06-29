@@ -58,12 +58,18 @@ import type {
 
 const VERDICTS: QualityVerdict[] = ["pass", "fail", "request_changes", "needs_evidence", "dismissed"];
 const EVIDENCE_OPTIONS = ["verified", "failed", "insufficient", "missing", "stale", "not_applicable"];
+const EVIDENCE_SURFACE_OPTIONS = [
+  { value: "public_url", label: "public_url", description: "Published URL is reachable." },
+  { value: "browser_readback", label: "browser_readback", description: "Rendered page/content is checked in a browser." },
+  { value: "work_product", label: "work_product", description: "Registered work product or file resolves." },
+  { value: "api_probe", label: "api_probe", description: "API or database probe confirms the state." },
+] as const;
 type Tab = "queue" | "anchors" | "evaluators" | "reports";
 type VerdictDraft = {
   item: QualityReviewItemListItem;
   verdict: QualityVerdict;
   comment: string;
-  requiredEvidenceSurfaces: string;
+  requiredEvidenceSurfaces: string[];
 };
 
 const STATUS_TONE: Record<string, string> = {
@@ -124,6 +130,76 @@ function QualityHelp({ label, children }: { label: string; children: ReactNode }
   );
 }
 
+type LastVerdict = { verdictId: string; verdict: QualityVerdict };
+
+function inferredVerdictFromStatus(status: string): QualityVerdict | null {
+  switch (status) {
+    case "changes_requested":
+      return "request_changes";
+    case "evidence_collecting":
+      return "needs_evidence";
+    case "anchor_candidate":
+    case "resolved_fail":
+      return "fail";
+    case "resolved_pass":
+      return "pass";
+    case "dismissed":
+      return "dismissed";
+    default:
+      return null;
+  }
+}
+
+function reviewCompletionCopy(item: QualityReviewItemListItem, last: LastVerdict | undefined): {
+  verdict: QualityVerdict;
+  title: string;
+  body: string;
+  tone: "success" | "info" | "warn";
+} | null {
+  const verdict = last?.verdict ?? inferredVerdictFromStatus(item.status);
+  if (!verdict) return null;
+
+  switch (verdict) {
+    case "request_changes":
+      return {
+        verdict,
+        title: "Human review complete",
+        body: "Recorded verdict: Request changes. The correction flow is open; no more Quality input is required here unless this verdict was wrong.",
+        tone: "warn",
+      };
+    case "needs_evidence":
+      return {
+        verdict,
+        title: "Evidence request sent",
+        body: "Recorded verdict: Needs evidence. Wait for the named evidence surfaces, then review can resume.",
+        tone: "info",
+      };
+    case "fail":
+      return {
+        verdict,
+        title: "Human review complete",
+        body: "Recorded verdict: Fail. No more verdict input is required; optionally teach the evaluator if this should become a reusable rule.",
+        tone: "warn",
+      };
+    case "pass":
+      return {
+        verdict,
+        title: "Human review complete",
+        body: "Recorded verdict: Pass. This quality item is done.",
+        tone: "success",
+      };
+    case "dismissed":
+      return {
+        verdict,
+        title: "Human review complete",
+        body: "Recorded verdict: Dismiss. This item is no longer part of the active quality queue.",
+        tone: "info",
+      };
+    default:
+      return null;
+  }
+}
+
 export function Quality() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -133,7 +209,7 @@ export function Quality() {
   const [error, setError] = useState<string | null>(null);
   const [hideSmoke, setHideSmoke] = useState(false);
   const [expandedReason, setExpandedReason] = useState<Record<string, boolean>>({});
-  const [surfacesByItem, setSurfacesByItem] = useState<Record<string, string>>({});
+  const [editingVerdictByItem, setEditingVerdictByItem] = useState<Record<string, boolean>>({});
   const [anchorTitleByItem, setAnchorTitleByItem] = useState<Record<string, string>>({});
   const [lastVerdictByItem, setLastVerdictByItem] = useState<Record<string, { verdictId: string; verdict: QualityVerdict }>>({});
   const [evidenceEdit, setEvidenceEdit] = useState<Record<string, string>>({});
@@ -197,10 +273,6 @@ export function Quality() {
     (v: { itemId: string; verdictId: string; title: string }) => qualityApi.promoteAnchor(v.itemId, v.verdictId, v.title),
     "Promote anchor",
   );
-  const requestEvidenceMut = makeMut(
-    (v: { itemId: string; surfaces: string[] }) => qualityApi.requestEvidence(v.itemId, { requiredEvidenceSurfaces: v.surfaces }),
-    "Request evidence",
-  );
   const recordEvidenceMut = makeMut(
     (v: { itemId: string; surface: string; status: QualityEvidenceStatus }) =>
       qualityApi.recordEvidence(v.itemId, { surface: v.surface, status: v.status }),
@@ -236,20 +308,34 @@ export function Quality() {
       item,
       verdict,
       comment: qualityVerdictCommentDraft(item, verdict),
-      requiredEvidenceSurfaces: surfacesByItem[item.id]?.trim() ?? "",
+      requiredEvidenceSurfaces: [],
+    });
+  }
+
+  function toggleEvidenceSurface(surface: string) {
+    setVerdictDraft((draft) => {
+      if (!draft) return draft;
+      const selected = draft.requiredEvidenceSurfaces.includes(surface);
+      return {
+        ...draft,
+        requiredEvidenceSurfaces: selected
+          ? draft.requiredEvidenceSurfaces.filter((s) => s !== surface)
+          : [...draft.requiredEvidenceSurfaces, surface],
+      };
     });
   }
 
   function submitVerdictDraft() {
     if (!verdictDraft) return;
-    const { item, verdict, comment, requiredEvidenceSurfaces: surfacesRaw } = verdictDraft;
-    const requiredEvidenceSurfaces = verdict === "needs_evidence" && surfacesRaw
-      ? surfacesRaw.split(",").map((s) => s.trim()).filter(Boolean)
-      : undefined;
+    const { item, verdict, comment } = verdictDraft;
+    const requiredEvidenceSurfaces = verdict === "needs_evidence" ? verdictDraft.requiredEvidenceSurfaces : undefined;
     const reason = comment.trim() || undefined;
     setVerdictDraft(null);
     void run(`${item.id}:verdict`, verdictMut.mutateAsync({ itemId: item.id, body: { verdict, reason, requiredEvidenceSurfaces } })).then((result) => {
-      if (result?.verdict?.id) setLastVerdictByItem((prev) => ({ ...prev, [item.id]: { verdictId: result.verdict.id, verdict: result.verdict.verdict } }));
+      if (result?.verdict?.id) {
+        setLastVerdictByItem((prev) => ({ ...prev, [item.id]: { verdictId: result.verdict.id, verdict: result.verdict.verdict } }));
+        setEditingVerdictByItem((prev) => ({ ...prev, [item.id]: false }));
+      }
     });
   }
 
@@ -293,7 +379,7 @@ export function Quality() {
           </button>
         ))}
         <QualityHelp label={`${tab} tab`}>
-          {tab === "queue" && "Queue contains quality items that need a human decision now. Follow the recommendation when the visible reason is enough; request evidence only when you cannot judge yet."}
+          {tab === "queue" && "Queue contains quality items that need a human decision now. Follow the recommendation when the visible reason is enough; choose Needs evidence only when you cannot judge yet."}
           {tab === "anchors" && "Anchors are reusable precedents created from human verdicts. They help the evaluator catch the same kind of failure next time."}
           {tab === "evaluators" && "Evaluators are candidate automated checks created from anchors. Promote only candidates that pass replay."}
           {tab === "reports" && "Reports are dated summaries of Quality Board state. Regenerate a report after review items change."}
@@ -316,6 +402,21 @@ export function Quality() {
                 Hide test-only quality items so the queue focuses on real user-facing output decisions.
               </QualityHelp>
             </label>
+
+            <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[12px] font-semibold text-foreground">Queue review flow</span>
+                <QualityHelp label="queue review flow">
+                  Judge the target output, record one verdict, then stop. Anchor promotion is optional learning, not required rework routing.
+                </QualityHelp>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+                <span className="rounded bg-background px-1.5 py-0.5">1. Judge target</span>
+                <span className="rounded bg-background px-1.5 py-0.5">2. Record verdict</span>
+                <span className="rounded bg-background px-1.5 py-0.5">3. Done for reviewer</span>
+                <span className="rounded bg-background px-1.5 py-0.5">4. Optional: teach evaluator</span>
+              </div>
+            </div>
 
             <details className="rounded-lg border border-border bg-card p-3">
               <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium">
@@ -369,6 +470,8 @@ export function Quality() {
                 const displayTitle = qualityItemDisplayTitle(item);
                 const requestChangesRecommended = rec.action === "request_changes";
                 const expanded = expandedReason[item.id] ?? false;
+                const completion = reviewCompletionCopy(item, last);
+                const editingVerdict = editingVerdictByItem[item.id] ?? !completion;
                 return (
                   <div key={item.id} className="rounded-lg border border-border bg-card p-3">
                     <div className="flex flex-wrap items-center gap-2">
@@ -405,15 +508,43 @@ export function Quality() {
                       </div>
                     )}
 
-                    <div className={cn("mt-2 rounded border px-2.5 py-1.5", rec.tone === "warn" ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-muted/30")}>
-                      <div className="flex items-center gap-1.5">
-                        <p className="text-[12px] font-medium text-foreground">Recommended action: {recommendedActionLabel(rec.action)}</p>
-                        <QualityHelp label="recommended action">
-                          This is the verdict that best matches the visible reason and evidence. If it matches your judgment, choose the matching verdict button.
-                        </QualityHelp>
+                    {completion ? (
+                      <div className={cn(
+                        "mt-2 rounded border px-2.5 py-2",
+                        completion.tone === "success" && "border-emerald-500/40 bg-emerald-500/5",
+                        completion.tone === "info" && "border-blue-500/40 bg-blue-500/5",
+                        completion.tone === "warn" && "border-orange-500/40 bg-orange-500/5",
+                      )}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-[12px] font-semibold text-foreground">{completion.title}</p>
+                              <QualityHelp label="review complete">
+                                The human verdict has been recorded. You do not need to do another Quality Board action unless you want to correct the verdict or optionally teach the evaluator.
+                              </QualityHelp>
+                            </div>
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">{completion.body}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setEditingVerdictByItem((prev) => ({ ...prev, [item.id]: true }))}
+                            className="rounded border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent"
+                          >
+                            Edit verdict
+                          </button>
+                        </div>
                       </div>
-                      <p className={cn("mt-0.5 text-[11px]", rec.tone === "warn" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>{rec.why}</p>
-                    </div>
+                    ) : (
+                      <div className={cn("mt-2 rounded border px-2.5 py-1.5", rec.tone === "warn" ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-muted/30")}>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-[12px] font-medium text-foreground">Recommended action: {recommendedActionLabel(rec.action)}</p>
+                          <QualityHelp label="recommended action">
+                            This is the verdict that best matches the visible reason and evidence. If it matches your judgment, choose the matching verdict button.
+                          </QualityHelp>
+                        </div>
+                        <p className={cn("mt-0.5 text-[11px]", rec.tone === "warn" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>{rec.why}</p>
+                      </div>
+                    )}
 
                     {reason && (
                       <div className="mt-2">
@@ -438,14 +569,14 @@ export function Quality() {
                       <div className="flex items-center gap-1.5">
                         <p className="text-[11px] font-medium text-muted-foreground">Evidence</p>
                         <QualityHelp label="evidence">
-                          The trigger reason explains why this item was queued. Structured evidence is a separate probe or check. Judge when the reason is enough; use needs_evidence only when the required surface is missing.
+                          The trigger reason explains why this item was queued. If the required proof is missing and you cannot judge yet, choose Needs evidence and name the missing surfaces there.
                         </QualityHelp>
                       </div>
                       {item.evidenceRefs.length === 0 ? (
                         <p className={cn("text-[11px]", requestChangesRecommended ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400")}>
                           {requestChangesRecommended
-                            ? "No structured evidence — but the trigger reason is enough to request changes. Optionally add a fresh probe if you want more."
-                            : "No structured evidence — only the trigger reason above. Consider needs_evidence to request a fresh probe before judging."}
+                            ? "No structured evidence — but the trigger reason is enough to request changes. Use Needs evidence only if a required proof surface is actually missing."
+                            : "No structured evidence — only the trigger reason above. Choose Needs evidence if that means you cannot judge yet."}
                         </p>
                       ) : (
                         <ul className="mt-0.5 flex flex-col gap-0.5">
@@ -487,39 +618,50 @@ export function Quality() {
                       )}
                     </p>
 
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <input type="text" placeholder="evidence surfaces (comma-sep)" value={surfacesByItem[item.id] ?? ""} onChange={(e) => setSurfacesByItem({ ...surfacesByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-[11px]" />
-                      <QualityHelp label="evidence surfaces">
-                        Enter comma-separated surfaces that need checking, such as public_url, work_product, or api_probe. Request evidence pauses judgment until those checks are supplied.
-                      </QualityHelp>
-                      <button type="button" className="rounded border border-blue-500/40 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-500/10 disabled:opacity-50 dark:text-blue-400" disabled={busy === `${item.id}:req`} onClick={() => { const s = (surfacesByItem[item.id] ?? "").split(",").map((x) => x.trim()).filter(Boolean); if (s.length) void run(`${item.id}:req`, requestEvidenceMut.mutateAsync({ itemId: item.id, surfaces: s })); }}>
-                        request evidence
-                      </button>
-                      <QualityHelp label="verdict buttons">
-                        pass means the output meets the bar. fail means it fails outright. request_changes sends it back for rework. needs_evidence means you cannot judge yet. dismissed means duplicate or not relevant.
-                      </QualityHelp>
-                      {VERDICTS.map((v) => (
-                        <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => openVerdictDraft(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
-                          v === rec.action && "ring-2 ring-offset-1 ring-offset-card font-bold ring-foreground/50",
-                          v === "pass" && "border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400",
-                          v === "fail" && "border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-400",
-                          v === "request_changes" && "border-orange-500/40 text-orange-700 hover:bg-orange-500/10 dark:text-orange-400",
-                          v === "needs_evidence" && "border-blue-500/40 text-blue-700 hover:bg-blue-500/10 dark:text-blue-400",
-                          v === "dismissed" && "border-border text-muted-foreground hover:bg-accent")}>
-                          {v}
-                        </button>
-                      ))}
-                    </div>
+                    {editingVerdict && (
+                      <div className={cn("mt-2 flex flex-wrap items-center gap-1.5", completion && "rounded border border-border bg-muted/20 px-2.5 py-2")}>
+                        {completion && <span className="mr-1 text-[11px] font-medium text-foreground">Edit recorded verdict</span>}
+                        <QualityHelp label="verdict buttons">
+                          pass means the output meets the bar. fail means it fails outright. request_changes sends it back for rework. Needs evidence means you cannot judge yet and need more proof. dismissed means duplicate or not relevant.
+                        </QualityHelp>
+                        {VERDICTS.map((v) => (
+                          <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => openVerdictDraft(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
+                            v === rec.action && !completion && "ring-2 ring-offset-1 ring-offset-card font-bold ring-foreground/50",
+                            v === completion?.verdict && "ring-2 ring-offset-1 ring-offset-card ring-foreground/40",
+                            v === "pass" && "border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400",
+                            v === "fail" && "border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-400",
+                            v === "request_changes" && "border-orange-500/40 text-orange-700 hover:bg-orange-500/10 dark:text-orange-400",
+                            v === "needs_evidence" && "border-blue-500/40 text-blue-700 hover:bg-blue-500/10 dark:text-blue-400",
+                            v === "dismissed" && "border-border text-muted-foreground hover:bg-accent")}>
+                            {recommendedActionLabel(v)}
+                          </button>
+                        ))}
+                        {completion && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingVerdictByItem((prev) => ({ ...prev, [item.id]: false }))}
+                            className="rounded border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent"
+                          >
+                            Cancel edit
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     {last?.verdictId && (
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <span className="text-[11px] text-muted-foreground">last verdict: {last.verdict}</span>
-                        <input type="text" placeholder="anchor title" value={anchorTitleByItem[item.id] ?? ""} onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px]" />
-                        <QualityHelp label="promote anchor">
-                          Promote a verdict to an anchor when it should become reusable precedent for similar failures. Use this for clear quality rules you want the evaluator to remember.
-                        </QualityHelp>
-                        <button type="button" disabled={busy === `${item.id}:anchor`} onClick={() => run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: anchorTitleByItem[item.id]?.trim() || `Anchor: ${item.title}` }))} className="rounded border border-violet-500/40 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400">promote anchor</button>
-                      </div>
+                      <details className="mt-2 rounded border border-border bg-muted/20 px-2.5 py-2">
+                        <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground">
+                          Optional: teach evaluator from this verdict
+                        </summary>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <span className="text-[11px] text-muted-foreground">Recorded verdict: {recommendedActionLabel(last.verdict)}</span>
+                          <input type="text" placeholder="anchor title" value={anchorTitleByItem[item.id] ?? ""} onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px]" />
+                          <QualityHelp label="promote anchor">
+                            Promote a verdict only when it should become reusable precedent for similar failures. This is optional learning, not required to finish the request-changes flow.
+                          </QualityHelp>
+                          <button type="button" disabled={busy === `${item.id}:anchor`} onClick={() => run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: anchorTitleByItem[item.id]?.trim() || `Anchor: ${item.title}` }))} className="rounded border border-violet-500/40 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400">Promote anchor</button>
+                        </div>
+                      </details>
                     )}
                   </div>
                 );
@@ -662,7 +804,11 @@ export function Quality() {
           <DialogHeader>
             <DialogTitle>Record {verdictDraft ? recommendedActionLabel(verdictDraft.verdict) : "verdict"}</DialogTitle>
             <DialogDescription>
-              This note is saved with the human verdict. For request changes, write the rework instruction; do not ask for fresh evidence unless evidence is actually missing.
+              {verdictDraft?.verdict === "needs_evidence"
+                ? "This is the evidence request flow. Record it when you cannot judge yet, then name the missing evidence surfaces below."
+                : verdictDraft?.verdict === "request_changes"
+                  ? "This note is saved with the human verdict. Write the rework instruction; do not ask for fresh evidence unless evidence is actually missing."
+                  : "This note is saved with the human verdict."}
             </DialogDescription>
           </DialogHeader>
           {verdictDraft && (
@@ -689,16 +835,39 @@ export function Quality() {
                 />
               </label>
               {verdictDraft.verdict === "needs_evidence" && (
-                <label className="grid gap-1.5">
-                  <span className="text-[12px] font-medium text-foreground">Required evidence surfaces</span>
-                  <input
-                    type="text"
-                    value={verdictDraft.requiredEvidenceSurfaces}
-                    onChange={(event) => setVerdictDraft({ ...verdictDraft, requiredEvidenceSurfaces: event.target.value })}
-                    placeholder="public_url, work_product, api_probe"
-                    className="rounded border border-border bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
-                  />
-                </label>
+                <div className="grid gap-1.5">
+                  <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
+                    Required evidence surfaces
+                    <QualityHelp label="required evidence surfaces">
+                      Select the evidence surfaces that must be checked before a human can judge. Inactive chips are available choices; active chips will be requested.
+                    </QualityHelp>
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {EVIDENCE_SURFACE_OPTIONS.map((option) => {
+                      const selected = verdictDraft.requiredEvidenceSurfaces.includes(option.value);
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          aria-pressed={selected}
+                          title={option.description}
+                          onClick={() => toggleEvidenceSurface(option.value)}
+                          className={cn(
+                            "rounded border px-2 py-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            selected
+                              ? "border-primary bg-primary/10 text-primary"
+                              : "border-border bg-muted/20 text-muted-foreground hover:bg-accent hover:text-foreground",
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Select at least one surface to send the evidence request.
+                  </p>
+                </div>
               )}
             </div>
           )}
@@ -708,7 +877,11 @@ export function Quality() {
             </button>
             <button
               type="button"
-              disabled={!verdictDraft || busy === `${verdictDraft.item.id}:verdict`}
+              disabled={
+                !verdictDraft ||
+                busy === `${verdictDraft.item.id}:verdict` ||
+                (verdictDraft.verdict === "needs_evidence" && verdictDraft.requiredEvidenceSurfaces.length === 0)
+              }
               onClick={submitVerdictDraft}
               className="rounded border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >

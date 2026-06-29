@@ -61,7 +61,7 @@ describe("quality-ui-helpers", () => {
   });
 
   it("decisionPrompt gives actionable guidance per status", () => {
-    expect(decisionPrompt("awaiting_review")).toMatch(/pass \/ fail/);
+    expect(decisionPrompt("awaiting_review")).toMatch(/Pass \/ Fail/);
     expect(decisionPrompt("anchor_candidate")).toMatch(/anchor/i);
     expect(decisionPrompt("resolved_pass")).toMatch(/no action/i);
   });
@@ -81,7 +81,7 @@ describe("quality-ui-helpers", () => {
     const rec = recommendAction(item({ status: "awaiting_review", evidenceRefs: [] }));
     expect(rec.action).toBe("needs_evidence");
     expect(rec.tone).toBe("warn");
-    expect(rec.why).toMatch(/fresh probe/i);
+    expect(rec.why).toMatch(/cannot judge/i);
   });
 
   it("recommendAction recommends request_changes on blocking/failed evidence", () => {
@@ -209,6 +209,20 @@ describe("quality-ui-helpers", () => {
     expect(qualityVerdictCommentPlaceholder("request_changes")).toMatch(/rework/i);
     expect(qualityVerdictCommentPlaceholder("request_changes")).toMatch(/fresh evidence/i);
     expect(qualityVerdictCommentPlaceholder("needs_evidence")).toMatch(/evidence surface/i);
+    expect(qualityVerdictCommentPlaceholder("needs_evidence")).toMatch(/evidence request/i);
+  });
+
+  it("qualityVerdictCommentDraft frames needs_evidence as the evidence request flow", () => {
+    const draft = qualityVerdictCommentDraft(item({
+      title: "Unverified public URL",
+      triggerMetadata: {
+        reason: "Published report has no browser readback.",
+      },
+    }), "needs_evidence");
+
+    expect(draft).toContain("Need more evidence before judging Unverified public URL.");
+    expect(draft).toContain("Missing evidence:");
+    expect(draft).toContain("collect the named evidence surfaces");
   });
 
   it("indicatesRequestChanges detects reason text and request-changes failure types", () => {
