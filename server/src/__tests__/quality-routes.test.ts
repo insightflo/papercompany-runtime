@@ -371,7 +371,7 @@ describeEmbeddedPostgres("quality routes", () => {
     expect(res.body.reviewItem.evidenceRefs[0]).toMatchObject({ surface: "browser_readback", status: "verified" });
   });
 
-  it("creates a correction issue on a fail verdict", async () => {
+  it("creates a correction issue with the verdict note on a fail verdict", async () => {
     const companyId = await seedCompany("QJ");
     const reviewItemId = randomUUID();
     await db.insert(qualityReviewItems).values({
@@ -396,6 +396,10 @@ describeEmbeddedPostgres("quality routes", () => {
     expect(res.body.reviewItem.status).toBe("anchor_candidate");
     const correction = (await db.select().from(issues)).find((i) => i.originKind === "quality_correction_request");
     expect(correction).toMatchObject({ companyId, status: "todo", originId: reviewItemId });
+    expect(correction?.description).toContain("Reason:");
+    expect(correction?.description).toContain("Core concept missing.");
+    const verdict = (await db.select().from(missionQualityVerdicts)).find((v) => v.reviewItemId === reviewItemId);
+    expect(verdict?.reason).toBe("Core concept missing.");
   });
 
   it("seeds an evaluator candidate + replay run on promote-anchor and gates production promotion on a passed replay", async () => {

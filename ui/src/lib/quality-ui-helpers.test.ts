@@ -10,6 +10,8 @@ import {
   isUnresolvedEvidence,
   qualityDecisionFocus,
   qualityItemDisplayTitle,
+  qualityVerdictCommentDraft,
+  qualityVerdictCommentPlaceholder,
   recommendAction,
   recommendedActionLabel,
   renderReportLines,
@@ -169,6 +171,44 @@ describe("quality-ui-helpers", () => {
     expect(text).toContain("Target item: RES-614");
     expect(text).toContain("Mismatch: glossary definitions for PoC, AppSec, ToS are missing.");
     expect(text).toContain("Recommended action: Request changes");
+  });
+
+  it("qualityVerdictCommentDraft pre-fills a rework instruction for request_changes", () => {
+    const draft = qualityVerdictCommentDraft(item({
+      title: "Final QA / purpose-fitness failure - mission fb9d5e0c",
+      triggerSource: "final_qa_failure",
+      failureType: "plan_goal_mismatch",
+      missionTitle: "2026-06-29 tech-scout",
+      triggerMetadata: {
+        reason: "I validated RES-614's report draft. REQUEST_CHANGES: glossary definitions for PoC, AppSec, ToS are missing.",
+      },
+      qualityContext: {
+        missionGoal: "Create a Korean Tech Scout report that operators can judge.",
+        target: {
+          identifier: "RES-614",
+          title: "Synthesize Tech Scout report draft",
+          status: "done",
+          stepId: "synthesize-tech-scout-report-draft",
+          plannedOutput: "Synthesis Editor step. Write approved-source Korean Tech Scout markdown draft and save as report.md.",
+          workProductTitle: "report.md",
+        },
+        mismatchSummary: "glossary definitions for PoC, AppSec, ToS are missing.",
+        recommendedAction: "Request changes and route the affected producer step for rework.",
+      },
+    }), "request_changes");
+
+    expect(draft).toContain("Request changes for RES-614 - Synthesize Tech Scout report draft");
+    expect(draft).toContain("Planned output: Synthesis Editor step");
+    expect(draft).toContain("Work product: report.md");
+    expect(draft).toContain("Reason: glossary definitions for PoC, AppSec, ToS are missing.");
+    expect(draft).toContain("Route the affected producer step for rework");
+    expect(draft).toContain("No fresh evidence is needed");
+  });
+
+  it("qualityVerdictCommentPlaceholder tells request_changes users to write rework, not evidence", () => {
+    expect(qualityVerdictCommentPlaceholder("request_changes")).toMatch(/rework/i);
+    expect(qualityVerdictCommentPlaceholder("request_changes")).toMatch(/fresh evidence/i);
+    expect(qualityVerdictCommentPlaceholder("needs_evidence")).toMatch(/evidence surface/i);
   });
 
   it("indicatesRequestChanges detects reason text and request-changes failure types", () => {

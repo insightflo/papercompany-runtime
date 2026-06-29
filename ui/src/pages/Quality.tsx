@@ -18,6 +18,15 @@ import {
   HelpCircle,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { qualityApi } from "../api/quality";
@@ -33,6 +42,8 @@ import {
   isUnresolvedEvidence,
   qualityDecisionFocus,
   qualityItemDisplayTitle,
+  qualityVerdictCommentDraft,
+  qualityVerdictCommentPlaceholder,
   recommendAction,
   recommendedActionLabel,
   renderReportLines,
@@ -48,6 +59,12 @@ import type {
 const VERDICTS: QualityVerdict[] = ["pass", "fail", "request_changes", "needs_evidence", "dismissed"];
 const EVIDENCE_OPTIONS = ["verified", "failed", "insufficient", "missing", "stale", "not_applicable"];
 type Tab = "queue" | "anchors" | "evaluators" | "reports";
+type VerdictDraft = {
+  item: QualityReviewItemListItem;
+  verdict: QualityVerdict;
+  comment: string;
+  requiredEvidenceSurfaces: string;
+};
 
 const STATUS_TONE: Record<string, string> = {
   detected: "bg-muted text-muted-foreground",
@@ -121,6 +138,7 @@ export function Quality() {
   const [lastVerdictByItem, setLastVerdictByItem] = useState<Record<string, { verdictId: string; verdict: QualityVerdict }>>({});
   const [evidenceEdit, setEvidenceEdit] = useState<Record<string, string>>({});
   const [newItem, setNewItem] = useState({ title: "", targetType: "work_product", triggerSource: "manual", targetId: "", failureType: "" });
+  const [verdictDraft, setVerdictDraft] = useState<VerdictDraft | null>(null);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Quality" }]);
@@ -171,7 +189,7 @@ export function Quality() {
   }
 
   const verdictMut = makeMut(
-    (v: { itemId: string; body: { verdict: QualityVerdict; requiredEvidenceSurfaces?: string[] } }) =>
+    (v: { itemId: string; body: { verdict: QualityVerdict; reason?: string; requiredEvidenceSurfaces?: string[] } }) =>
       qualityApi.recordVerdict(v.itemId, v.body),
     "Verdict",
   );
@@ -213,10 +231,24 @@ export function Quality() {
     }
   }
 
-  function handleVerdict(item: QualityReviewItemListItem, verdict: QualityVerdict) {
-    const surfacesRaw = surfacesByItem[item.id]?.trim() ?? "";
-    const requiredEvidenceSurfaces = verdict === "needs_evidence" && surfacesRaw ? surfacesRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-    void run(`${item.id}:verdict`, verdictMut.mutateAsync({ itemId: item.id, body: { verdict, requiredEvidenceSurfaces } })).then((result) => {
+  function openVerdictDraft(item: QualityReviewItemListItem, verdict: QualityVerdict) {
+    setVerdictDraft({
+      item,
+      verdict,
+      comment: qualityVerdictCommentDraft(item, verdict),
+      requiredEvidenceSurfaces: surfacesByItem[item.id]?.trim() ?? "",
+    });
+  }
+
+  function submitVerdictDraft() {
+    if (!verdictDraft) return;
+    const { item, verdict, comment, requiredEvidenceSurfaces: surfacesRaw } = verdictDraft;
+    const requiredEvidenceSurfaces = verdict === "needs_evidence" && surfacesRaw
+      ? surfacesRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    const reason = comment.trim() || undefined;
+    setVerdictDraft(null);
+    void run(`${item.id}:verdict`, verdictMut.mutateAsync({ itemId: item.id, body: { verdict, reason, requiredEvidenceSurfaces } })).then((result) => {
       if (result?.verdict?.id) setLastVerdictByItem((prev) => ({ ...prev, [item.id]: { verdictId: result.verdict.id, verdict: result.verdict.verdict } }));
     });
   }
@@ -467,7 +499,7 @@ export function Quality() {
                         pass means the output meets the bar. fail means it fails outright. request_changes sends it back for rework. needs_evidence means you cannot judge yet. dismissed means duplicate or not relevant.
                       </QualityHelp>
                       {VERDICTS.map((v) => (
-                        <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => handleVerdict(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
+                        <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => openVerdictDraft(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
                           v === rec.action && "ring-2 ring-offset-1 ring-offset-card font-bold ring-foreground/50",
                           v === "pass" && "border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400",
                           v === "fail" && "border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-400",
@@ -624,6 +656,67 @@ export function Quality() {
           </div>
         )}
       </div>
+
+      <Dialog open={!!verdictDraft} onOpenChange={(open) => !open && setVerdictDraft(null)}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Record {verdictDraft ? recommendedActionLabel(verdictDraft.verdict) : "verdict"}</DialogTitle>
+            <DialogDescription>
+              This note is saved with the human verdict. For request changes, write the rework instruction; do not ask for fresh evidence unless evidence is actually missing.
+            </DialogDescription>
+          </DialogHeader>
+          {verdictDraft && (
+            <div className="grid gap-3">
+              <div className="rounded border border-border bg-muted/30 px-2.5 py-2">
+                <p className="text-[11px] font-medium text-muted-foreground">Review item</p>
+                <p className="mt-0.5 break-words text-sm font-medium text-foreground">{qualityItemDisplayTitle(verdictDraft.item)}</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Verdict: <span className="font-medium text-foreground">{verdictDraft.verdict}</span>
+                </p>
+              </div>
+              <label className="grid gap-1.5">
+                <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
+                  Verdict note
+                  <QualityHelp label="verdict note">
+                    This text becomes the instruction attached to the verdict. Request changes should say what to fix and where to send the work next.
+                  </QualityHelp>
+                </span>
+                <Textarea
+                  value={verdictDraft.comment}
+                  onChange={(event) => setVerdictDraft({ ...verdictDraft, comment: event.target.value })}
+                  placeholder={qualityVerdictCommentPlaceholder(verdictDraft.verdict)}
+                  className="min-h-36 text-sm"
+                />
+              </label>
+              {verdictDraft.verdict === "needs_evidence" && (
+                <label className="grid gap-1.5">
+                  <span className="text-[12px] font-medium text-foreground">Required evidence surfaces</span>
+                  <input
+                    type="text"
+                    value={verdictDraft.requiredEvidenceSurfaces}
+                    onChange={(event) => setVerdictDraft({ ...verdictDraft, requiredEvidenceSurfaces: event.target.value })}
+                    placeholder="public_url, work_product, api_probe"
+                    className="rounded border border-border bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
+                  />
+                </label>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <button type="button" onClick={() => setVerdictDraft(null)} className="rounded border border-border px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-accent">
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={!verdictDraft || busy === `${verdictDraft.item.id}:verdict`}
+              onClick={submitVerdictDraft}
+              className="rounded border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              Record verdict
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

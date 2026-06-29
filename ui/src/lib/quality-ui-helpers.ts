@@ -218,6 +218,82 @@ export function qualityDecisionFocus(item: QualityReviewItemListItem): QualityDe
   return { rows, source: ctx ? "structured" : "fallback" };
 }
 
+function targetForVerdictComment(item: QualityReviewItemListItem): string {
+  const target = item.qualityContext?.target ?? null;
+  const targetLabel = target ? targetStepLabel(target) : null;
+  const fallbackIssue = firstIssueIdentifierFromText(triggerReason(item.triggerMetadata));
+  const displayTitle = qualityItemDisplayTitle(item);
+  if (targetLabel) return targetLabel;
+  if (fallbackIssue && displayTitle) return `${fallbackIssue} (${displayTitle})`;
+  return displayTitle || item.title;
+}
+
+function mismatchForVerdictComment(item: QualityReviewItemListItem): string | null {
+  return cleanText(item.qualityContext?.mismatchSummary) ?? requestChangesSummary(triggerReason(item.triggerMetadata));
+}
+
+/**
+ * Default text for the verdict note editor.
+ * The note is stored as verdict.reason and becomes the rework/evidence instruction.
+ */
+export function qualityVerdictCommentDraft(item: QualityReviewItemListItem, verdict: QualityVerdict): string {
+  const target = targetForVerdictComment(item);
+  const mismatch = mismatchForVerdictComment(item);
+  const plannedOutput = cleanText(item.qualityContext?.target?.plannedOutput);
+  const workProduct = cleanText(item.qualityContext?.target?.workProductTitle);
+
+  if (verdict === "request_changes") {
+    const lines = [`Request changes for ${target}.`];
+    if (plannedOutput) lines.push(`Planned output: ${compact(plannedOutput, 260)}`);
+    if (workProduct) lines.push(`Work product: ${workProduct}.`);
+    if (mismatch) lines.push(`Reason: ${mismatch}`);
+    lines.push("Action: Route the affected producer step for rework. No fresh evidence is needed unless a required evidence surface is actually missing.");
+    return lines.join("\n");
+  }
+
+  if (verdict === "needs_evidence") {
+    return [
+      `Need more evidence before judging ${target}.`,
+      "Missing evidence: ",
+      "Action: collect the named evidence surfaces, then return this item to human review.",
+    ].join("\n");
+  }
+
+  if (verdict === "fail") {
+    const lines = [`Fail ${target}.`];
+    if (mismatch) lines.push(`Reason: ${mismatch}`);
+    lines.push("Action: treat this as a blocking quality failure and create a correction precedent if it should guide future reviews.");
+    return lines.join("\n");
+  }
+
+  if (verdict === "pass") {
+    return `Pass ${target}. The visible evidence and review context satisfy the quality bar.`;
+  }
+
+  if (verdict === "dismissed") {
+    return `Dismiss ${target}. Reason: duplicate, obsolete, or not relevant to the current quality decision.`;
+  }
+
+  return "";
+}
+
+export function qualityVerdictCommentPlaceholder(verdict: QualityVerdict): string {
+  switch (verdict) {
+    case "request_changes":
+      return "Describe the rework to perform. This is not a place to request fresh evidence unless evidence is actually missing.";
+    case "needs_evidence":
+      return "Describe which evidence surface is missing and what should be probed next.";
+    case "fail":
+      return "State the blocking quality failure and why it should be treated as a failure.";
+    case "pass":
+      return "Optional note explaining why this passes.";
+    case "dismissed":
+      return "State why this item is duplicate, obsolete, or not relevant.";
+    default:
+      return "Add a verdict note.";
+  }
+}
+
 /** 추천 verdict → 사람이 읽는 라벨(Queue 강조 라벨용). */
 export function recommendedActionLabel(action: RecommendedVerdict): string {
   switch (action) {
