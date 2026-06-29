@@ -128,6 +128,26 @@ const DETACHED_REAP_AFTER_MS = 30 * 60 * 1000;
 const DETACHED_GRACE_SEC = 5;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
+
+function workflowStepIdFromIssueDescription(description: string | null | undefined): string | null {
+  if (!description) return null;
+  return description.match(/(?:^|\n)-?\s*stepId:\s*([a-z0-9_-]+)/i)?.[1] ?? null;
+}
+
+function firstDependencyIssueFromDescription(description: string | null | undefined): {
+  targetStepId: string;
+  targetIssueIdentifier: string;
+  targetIssueTitle: string;
+} | null {
+  if (!description) return null;
+  const match = description.match(/\n-\s*([a-z0-9_-]+):\s*([A-Z][A-Z0-9]{1,9}-\d+)\s*\([^)]*\)\s*—\s*([^\n]+)/i);
+  if (!match) return null;
+  return {
+    targetStepId: match[1],
+    targetIssueIdentifier: match[2],
+    targetIssueTitle: match[3].trim(),
+  };
+}
 const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -6677,16 +6697,32 @@ export function heartbeatService(db: Db) {
         // REQUEST_CHANGES → best-effort quality review item via the thin writer (no heavy service
         // import on the heartbeat hot path; per-mission dedupe). Never blocks heartbeat on failure.
         try {
+          const dependencyTarget = firstDependencyIssueFromDescription(issue.description);
+          const qualityMissionTitle = await tx
+            .select({ title: missions.title })
+            .from(missions)
+            .where(eq(missions.id, issue.missionId!))
+            .limit(1)
+            .then((rows) => rows[0]?.title?.trim() || `mission ${issue.missionId}`);
           await writeQualityFinding(db, {
             companyId: issue.companyId,
             missionId: issue.missionId!,
-            title: `Final QA / purpose-fitness failure — mission ${issue.missionId}`,
+            title: `Final QA / purpose-fitness failure - ${qualityMissionTitle}`,
             targetType: "mission_output",
             triggerSource: "final_qa_failure",
             targetId: issue.missionId!,
             failureType: "plan_goal_mismatch",
             triggerMetadata: {
               reason: (requestChangesVerdict as { excerpt?: string } | null)?.excerpt ?? "Final QA returned REQUEST_CHANGES.",
+              sourceIssueId: issue.id,
+              sourceIssueIdentifier: issue.identifier,
+              sourceIssueTitle: issue.title,
+              sourceIssueStatus: issue.status,
+              sourceStepId: workflowStepIdFromIssueDescription(issue.description),
+              targetIssueIdentifier: dependencyTarget?.targetIssueIdentifier,
+              targetIssueTitle: dependencyTarget?.targetIssueTitle,
+              targetStepId: dependencyTarget?.targetStepId,
+              recommendedAction: "Request changes and route the affected producer step for rework; do not treat the mission's completed status as a pass for this quality finding.",
             },
           });
         } catch {

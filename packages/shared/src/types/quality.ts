@@ -49,6 +49,32 @@ export interface QualityReviewItemListItem {
   /** 소스 미션 요약(가능할 때). UI "현재 해결 여부" 표시용. */
   missionTitle?: string | null;
   missionStatus?: string | null;
+  /** 사람 판정용으로 서버가 유도한 맥락. 원본 metadata/reason보다 먼저 보여준다. */
+  qualityContext?: QualityReviewContext | null;
+}
+
+export interface QualityReviewContext {
+  missionGoal?: string | null;
+  target?: {
+    issueId?: string | null;
+    identifier?: string | null;
+    title?: string | null;
+    status?: string | null;
+    stepId?: string | null;
+    plannedOutput?: string | null;
+    workProductTitle?: string | null;
+    workProductPath?: string | null;
+  } | null;
+  sourceReview?: {
+    issueId?: string | null;
+    identifier?: string | null;
+    title?: string | null;
+    status?: string | null;
+    stepId?: string | null;
+  } | null;
+  mismatchSummary?: string | null;
+  recommendedAction?: string | null;
+  focusNote?: string | null;
 }
 
 export interface QualityVerdictRow {

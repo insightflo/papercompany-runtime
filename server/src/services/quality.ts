@@ -3,7 +3,9 @@ import {
   evaluatorCandidateRuns,
   evaluatorAnchorCases,
   evaluatorVersions,
+  issueWorkProducts,
   missionQualityVerdicts,
+  missionPlanArtifacts,
   missions,
   qualityDailyReports,
   qualityEvidenceRefs,
@@ -102,6 +104,29 @@ export type QualityReviewItemListItemWithEvidence = QualityReviewItemRow & {
   evidenceRefs: QualityEvidenceRefRow[];
   missionTitle?: string | null;
   missionStatus?: string | null;
+  qualityContext?: {
+    missionGoal?: string | null;
+    target?: {
+      issueId?: string | null;
+      identifier?: string | null;
+      title?: string | null;
+      status?: string | null;
+      stepId?: string | null;
+      plannedOutput?: string | null;
+      workProductTitle?: string | null;
+      workProductPath?: string | null;
+    } | null;
+    sourceReview?: {
+      issueId?: string | null;
+      identifier?: string | null;
+      title?: string | null;
+      status?: string | null;
+      stepId?: string | null;
+    } | null;
+    mismatchSummary?: string | null;
+    recommendedAction?: string | null;
+    focusNote?: string | null;
+  } | null;
 };
 
 // [목적] missionId 들의 title/status 를 한 번에 조회해 item 에 요약 부착(UI "현재 해결 여부" 용).
@@ -117,6 +142,147 @@ async function attachMissionSummary(db: Db, items: QualityReviewItemListItemWith
     const m = item.missionId ? byId.get(item.missionId) : undefined;
     item.missionTitle = m?.title ?? null;
     item.missionStatus = m?.status ?? null;
+  }
+  return items;
+}
+
+function stringMeta(meta: Record<string, unknown>, key: string): string | null {
+  const value = meta[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function triggerReasonText(meta: Record<string, unknown> | undefined): string | null {
+  const value = meta?.reason;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function firstIssueIdentifier(text: string | null): string | null {
+  if (!text) return null;
+  return text.match(/\b[A-Z][A-Z0-9]{1,9}-\d+\b/)?.[0] ?? null;
+}
+
+function sourceStepIdFromDescription(description: string | null | undefined): string | null {
+  if (!description) return null;
+  return description.match(/(?:^|\n)-?\s*stepId:\s*([a-z0-9_-]+)/i)?.[1] ?? null;
+}
+
+function plannedOutputFromDescription(description: string | null | undefined): string | null {
+  if (!description) return null;
+  const lines = description.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const stepLine = lines.find((line) => / step\./i.test(line) && /save|write|create|include|convert/i.test(line));
+  if (stepLine) return stepLine.length > 260 ? `${stepLine.slice(0, 257)}...` : stepLine;
+  const outputLine = lines.find((line) => /must create|deliverable|save .* as|write .* into/i.test(line));
+  if (outputLine) return outputLine.length > 260 ? `${outputLine.slice(0, 257)}...` : outputLine;
+  return null;
+}
+
+function mismatchSummaryFromReason(reason: string | null): string | null {
+  if (!reason) return null;
+  const requestChanges = reason.match(/REQUEST[_\s-]?CHANGES:\s*([\s\S]+)/i)?.[1]?.trim();
+  const summary = requestChanges || reason;
+  const normalized = summary.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > 360 ? `${normalized.slice(0, 357)}...` : normalized;
+}
+
+function shouldBuildQualityContext(item: QualityReviewItemListItemWithEvidence): boolean {
+  return item.failureType === "plan_goal_mismatch" || item.triggerSource === "plan_qa_failure" || item.triggerSource === "final_qa_failure";
+}
+
+async function attachQualityContext(db: Db, items: QualityReviewItemListItemWithEvidence[]) {
+  const relevant = items.filter(shouldBuildQualityContext);
+  if (relevant.length === 0) return items;
+
+  const missionIds = Array.from(new Set(relevant.map((item) => item.missionId).filter((id): id is string => !!id)));
+  const planRows = missionIds.length > 0
+    ? await db
+      .select({
+        missionId: missionPlanArtifacts.missionId,
+        missionGoal: missionPlanArtifacts.missionGoal,
+        revision: missionPlanArtifacts.revision,
+        updatedAt: missionPlanArtifacts.updatedAt,
+      })
+      .from(missionPlanArtifacts)
+      .where(inArray(missionPlanArtifacts.missionId, missionIds))
+      .orderBy(desc(missionPlanArtifacts.revision), desc(missionPlanArtifacts.updatedAt))
+    : [];
+  const missionGoalByMissionId = new Map<string, string>();
+  for (const row of planRows) {
+    if (!missionGoalByMissionId.has(row.missionId)) missionGoalByMissionId.set(row.missionId, row.missionGoal);
+  }
+
+  const targetIdentifiers = Array.from(new Set(relevant
+    .map((item) => stringMeta(item.triggerMetadata, "targetIssueIdentifier") ?? firstIssueIdentifier(triggerReasonText(item.triggerMetadata)))
+    .filter((identifier): identifier is string => !!identifier)));
+  const sourceIdentifiers = Array.from(new Set(relevant
+    .map((item) => stringMeta(item.triggerMetadata, "sourceIssueIdentifier"))
+    .filter((identifier): identifier is string => !!identifier)));
+  const identifiers = Array.from(new Set([...targetIdentifiers, ...sourceIdentifiers]));
+  const issueRows = identifiers.length > 0
+    ? await db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+        description: issues.description,
+      })
+      .from(issues)
+      .where(inArray(issues.identifier, identifiers))
+    : [];
+  const issueByIdentifier = new Map(issueRows.map((row) => [row.identifier, row]));
+  const issueIds = issueRows.map((row) => row.id);
+  const productRows = issueIds.length > 0
+    ? await db
+      .select({
+        issueId: issueWorkProducts.issueId,
+        title: issueWorkProducts.title,
+        isPrimary: issueWorkProducts.isPrimary,
+        metadata: issueWorkProducts.metadata,
+        createdAt: issueWorkProducts.createdAt,
+      })
+      .from(issueWorkProducts)
+      .where(inArray(issueWorkProducts.issueId, issueIds))
+      .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.createdAt))
+    : [];
+  const productByIssueId = new Map<string, typeof productRows[number]>();
+  for (const row of productRows) {
+    if (!productByIssueId.has(row.issueId)) productByIssueId.set(row.issueId, row);
+  }
+
+  for (const item of relevant) {
+    const reason = triggerReasonText(item.triggerMetadata);
+    const targetIdentifier = stringMeta(item.triggerMetadata, "targetIssueIdentifier") ?? firstIssueIdentifier(reason);
+    const targetIssue = targetIdentifier ? issueByIdentifier.get(targetIdentifier) : undefined;
+    const targetProduct = targetIssue ? productByIssueId.get(targetIssue.id) : undefined;
+    const sourceIdentifier = stringMeta(item.triggerMetadata, "sourceIssueIdentifier");
+    const sourceIssue = sourceIdentifier ? issueByIdentifier.get(sourceIdentifier) : undefined;
+    const workProductPath = typeof targetProduct?.metadata?.path === "string" ? targetProduct.metadata.path : null;
+    item.qualityContext = {
+      missionGoal: item.missionId ? missionGoalByMissionId.get(item.missionId) ?? null : null,
+      target: targetIssue ? {
+        issueId: targetIssue.id,
+        identifier: targetIssue.identifier,
+        title: targetIssue.title,
+        status: targetIssue.status,
+        stepId: stringMeta(item.triggerMetadata, "targetStepId") ?? sourceStepIdFromDescription(targetIssue.description),
+        plannedOutput: stringMeta(item.triggerMetadata, "plannedOutput") ?? plannedOutputFromDescription(targetIssue.description),
+        workProductTitle: targetProduct?.title ?? null,
+        workProductPath,
+      } : null,
+      sourceReview: sourceIssue ? {
+        issueId: sourceIssue.id,
+        identifier: sourceIssue.identifier,
+        title: sourceIssue.title,
+        status: sourceIssue.status,
+        stepId: stringMeta(item.triggerMetadata, "sourceStepId") ?? sourceStepIdFromDescription(sourceIssue.description),
+      } : null,
+      mismatchSummary: stringMeta(item.triggerMetadata, "mismatchSummary") ?? mismatchSummaryFromReason(reason),
+      recommendedAction: stringMeta(item.triggerMetadata, "recommendedAction") ?? "Request changes and route the affected producer step for rework; do not treat the mission's completed status as a pass for this quality finding.",
+      focusNote: item.missionStatus && TERMINAL_MISSION_STATUSES.has(item.missionStatus)
+        ? "The mission may already be terminal. Judge this quality finding by the target step and QA evidence, not by the mission status badge."
+        : "Judge the target step output against the mission goal and QA evidence.",
+    };
   }
   return items;
 }
@@ -378,7 +544,9 @@ export function qualityService(db: Db) {
       .where(inArray(qualityEvidenceRefs.reviewItemId, itemIds))
       .orderBy(asc(qualityEvidenceRefs.surface), asc(qualityEvidenceRefs.createdAt));
 
-    return attachMissionSummary(db, attachEvidenceRefs(items, refs as QualityEvidenceRefRow[]));
+    const enriched = attachEvidenceRefs(items, refs as QualityEvidenceRefRow[]);
+    await attachMissionSummary(db, enriched);
+    return attachQualityContext(db, enriched);
   }
 
   async function resolveFollowUpMissionId(tx: TransactionDb, item: QualityReviewItemRow) {
@@ -793,6 +961,7 @@ export function qualityService(db: Db) {
       .orderBy(asc(qualityEvidenceRefs.surface), asc(qualityEvidenceRefs.createdAt));
     const enriched = attachEvidenceRefs([item], refs as QualityEvidenceRefRow[]);
     await attachMissionSummary(db, enriched);
+    await attachQualityContext(db, enriched);
     return enriched[0];
   }
 

@@ -1118,6 +1118,7 @@ describe("heartbeat context budget preflight", () => {
         triggerSource: "final_qa_failure",
         failureType: "plan_goal_mismatch",
         targetType: "mission_output",
+        title: "Final QA / purpose-fitness failure - Validate report workflow",
       }),
     ]));
   });

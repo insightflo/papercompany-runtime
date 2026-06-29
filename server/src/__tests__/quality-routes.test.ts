@@ -10,8 +10,10 @@ import {
   evaluatorAnchorCases,
   evaluatorCandidateRuns,
   evaluatorVersions,
+  issueWorkProducts,
   issues,
   missions,
+  missionPlanArtifacts,
   missionQualityVerdicts,
   qualityDailyReports,
   qualityEvidenceRefs,
@@ -68,6 +70,8 @@ describeEmbeddedPostgres("quality routes", () => {
     await db.delete(missionQualityVerdicts);
     await db.delete(qualityEvidenceRefs);
     await db.delete(qualityReviewItems);
+    await db.delete(issueWorkProducts);
+    await db.delete(missionPlanArtifacts);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agents);
@@ -549,6 +553,87 @@ describeEmbeddedPostgres("quality routes", () => {
       triggerSource: "final_qa_failure",
       failureType: "plan_goal_mismatch",
     });
+  });
+
+  it("adds decision context for final QA plan-goal mismatch queue items", async () => {
+    const companyId = await seedCompany("QT");
+    const missionId = await seedMission(companyId, "completed");
+    const [mission] = await db.select({ ownerAgentId: missions.ownerAgentId }).from(missions).where(eq(missions.id, missionId));
+    expect(mission).toBeDefined();
+    await db.insert(missionPlanArtifacts).values({
+      companyId,
+      missionId,
+      ownerAgentId: mission!.ownerAgentId,
+      missionGoal: "Create a Korean Tech Scout report that operators can judge without external context.",
+      steps: [{ id: "synthesize-tech-scout-report-draft", output: "report.md" }],
+    });
+
+    const targetIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: targetIssueId,
+      companyId,
+      missionId,
+      identifier: "RES-614",
+      title: "Synthesize Tech Scout report draft",
+      status: "done",
+      originKind: "workflow_step",
+      description: [
+        "stepId: synthesize-tech-scout-report-draft",
+        "Synthesis Editor step. Write approved-source Korean Tech Scout markdown draft and save as report.md.",
+      ].join("\n"),
+    });
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: targetIssueId,
+      type: "file",
+      provider: "local",
+      title: "report.md",
+      status: "active",
+      isPrimary: true,
+      metadata: { path: "/srv/papercompany/projects/research-company/report.md" },
+    });
+
+    await db.insert(qualityReviewItems).values({
+      id: randomUUID(),
+      companyId,
+      missionId,
+      title: `Final QA / purpose-fitness failure - mission ${missionId}`,
+      status: "awaiting_review",
+      targetType: "mission_output",
+      targetId: missionId,
+      triggerSource: "final_qa_failure",
+      triggerMetadata: {
+        reason: "I validated RES-614's report draft. REQUEST_CHANGES: glossary definitions for PoC, AppSec, ToS are missing.",
+      },
+      failureType: "plan_goal_mismatch",
+      priority: "high",
+    });
+
+    const res = await request(createApp(db, {
+      type: "board",
+      source: "session",
+      userId: "reviewer-t",
+      companyIds: [companyId],
+    })).get(`/api/companies/${companyId}/quality/review-items`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].qualityContext).toMatchObject({
+      missionGoal: "Create a Korean Tech Scout report that operators can judge without external context.",
+      target: {
+        issueId: targetIssueId,
+        identifier: "RES-614",
+        title: "Synthesize Tech Scout report draft",
+        status: "done",
+        stepId: "synthesize-tech-scout-report-draft",
+        plannedOutput: "Synthesis Editor step. Write approved-source Korean Tech Scout markdown draft and save as report.md.",
+        workProductTitle: "report.md",
+        workProductPath: "/srv/papercompany/projects/research-company/report.md",
+      },
+      mismatchSummary: "glossary definitions for PoC, AppSec, ToS are missing.",
+    });
+    expect(res.body[0].qualityContext.recommendedAction).toMatch(/Request changes/);
+    expect(res.body[0].qualityContext.focusNote).toMatch(/mission may already be terminal/i);
   });
 
   it("dedupes a concurrent auto-create (same dedupe key) to a single open review item", async () => {

@@ -8,6 +8,8 @@ import {
   isClosedStatus,
   isSmokeSignal,
   isUnresolvedEvidence,
+  qualityDecisionFocus,
+  qualityItemDisplayTitle,
   recommendAction,
   recommendedActionLabel,
   renderReportLines,
@@ -62,6 +64,17 @@ describe("quality-ui-helpers", () => {
     expect(decisionPrompt("resolved_pass")).toMatch(/no action/i);
   });
 
+  it("qualityItemDisplayTitle replaces raw mission ids with the mission name for mission quality items", () => {
+    expect(qualityItemDisplayTitle(item({
+      title: "Final QA / purpose-fitness failure - mission fb9d5e0c-c61a-4cf3-b153-b63aa306642c",
+      triggerSource: "final_qa_failure",
+      failureType: "plan_goal_mismatch",
+      missionTitle: "2026-06-29 tech-scout",
+    }))).toBe("Final QA / purpose-fitness failure - 2026-06-29 tech-scout");
+
+    expect(qualityItemDisplayTitle(item({ title: "Manual review", missionTitle: "Mission A" }))).toBe("Manual review");
+  });
+
   it("recommendAction recommends needs_evidence when no evidence and no rework signal", () => {
     const rec = recommendAction(item({ status: "awaiting_review", evidenceRefs: [] }));
     expect(rec.action).toBe("needs_evidence");
@@ -103,6 +116,59 @@ describe("quality-ui-helpers", () => {
     const rec = recommendAction(item({ status: "awaiting_review", failureType: "final_qa_failure", triggerMetadata: {}, evidenceRefs: [] }));
     expect(rec.action).toBe("request_changes");
     expect(rec.why).toMatch(/Final QA/i);
+  });
+
+  it("qualityDecisionFocus explains the target step, planned output, mismatch, and action for final QA items", () => {
+    const focus = qualityDecisionFocus(item({
+      title: "Final QA / purpose-fitness failure - mission fb9d5e0c",
+      triggerSource: "final_qa_failure",
+      failureType: "plan_goal_mismatch",
+      missionTitle: "2026-06-29 tech-scout",
+      missionStatus: "completed",
+      triggerMetadata: {
+        reason: "I validated RES-614's report draft. REQUEST_CHANGES: glossary definitions for PoC, AppSec, ToS are missing.",
+      },
+      qualityContext: {
+        missionGoal: "Create a Korean Tech Scout report that operators can judge.",
+        target: {
+          identifier: "RES-614",
+          title: "Synthesize Tech Scout report draft",
+          status: "done",
+          stepId: "synthesize-tech-scout-report-draft",
+          plannedOutput: "Synthesis Editor step. Write approved-source Korean Tech Scout markdown draft and save as report.md.",
+          workProductTitle: "report.md",
+          workProductPath: "/srv/papercompany/report.md",
+        },
+        mismatchSummary: "glossary definitions for PoC, AppSec, ToS are missing.",
+        recommendedAction: "Request changes and route the affected producer step for rework.",
+        focusNote: "The mission may already be terminal. Judge this quality finding by the target step and QA evidence, not by the mission status badge.",
+      },
+    }));
+
+    expect(focus?.source).toBe("structured");
+    const text = focus?.rows.map((row) => `${row.label}: ${row.value}`).join("\n") ?? "";
+    expect(text).toContain("Target step: RES-614 - Synthesize Tech Scout report draft");
+    expect(text).toContain("Planned output: Synthesis Editor step");
+    expect(text).toContain("Mission goal: Create a Korean Tech Scout report");
+    expect(text).toContain("Mismatch: glossary definitions for PoC, AppSec, ToS are missing.");
+    expect(text).toContain("Recommended action: Request changes");
+    expect(text).toContain("mission may already be terminal");
+  });
+
+  it("qualityDecisionFocus falls back to the request-changes reason when structured context is absent", () => {
+    const focus = qualityDecisionFocus(item({
+      triggerSource: "final_qa_failure",
+      failureType: "plan_goal_mismatch",
+      triggerMetadata: {
+        reason: "I validated RES-614's report draft. REQUEST_CHANGES: glossary definitions for PoC, AppSec, ToS are missing.",
+      },
+    }));
+
+    expect(focus?.source).toBe("fallback");
+    const text = focus?.rows.map((row) => `${row.label}: ${row.value}`).join("\n") ?? "";
+    expect(text).toContain("Target item: RES-614");
+    expect(text).toContain("Mismatch: glossary definitions for PoC, AppSec, ToS are missing.");
+    expect(text).toContain("Recommended action: Request changes");
   });
 
   it("indicatesRequestChanges detects reason text and request-changes failure types", () => {

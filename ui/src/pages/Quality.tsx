@@ -31,6 +31,8 @@ import {
   isClosedStatus,
   isSmokeSignal,
   isUnresolvedEvidence,
+  qualityDecisionFocus,
+  qualityItemDisplayTitle,
   recommendAction,
   recommendedActionLabel,
   renderReportLines,
@@ -331,6 +333,8 @@ export function Quality() {
                 const smoke = isSmokeSignal(item);
                 const reason = triggerReason(item.triggerMetadata);
                 const rec = recommendAction(item);
+                const decisionFocus = qualityDecisionFocus(item);
+                const displayTitle = qualityItemDisplayTitle(item);
                 const requestChangesRecommended = rec.action === "request_changes";
                 const expanded = expandedReason[item.id] ?? false;
                 return (
@@ -341,16 +345,31 @@ export function Quality() {
                       {smoke && <SmokeBadge />}
                       <span className="text-[11px] text-muted-foreground">why: {item.triggerSource}{item.failureType ? ` · ${item.failureType}` : ""}</span>
                     </div>
-                    <p className="mt-1 text-sm font-medium text-foreground">{item.title}</p>
+                    <p className="mt-1 text-sm font-medium text-foreground">{displayTitle}</p>
 
-                    {reason && (
-                      <div className="mt-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[12px] text-foreground/80">
-                        {expanded || reason.length <= 160 ? reason : `${reason.slice(0, 160)}… `}
-                        {reason.length > 160 && (
-                          <button type="button" className="ml-1 text-[11px] text-blue-600 underline dark:text-blue-400" onClick={() => setExpandedReason((p) => ({ ...p, [item.id]: !p[item.id] }))}>
-                            {expanded ? "less" : "more"}
-                          </button>
-                        )}
+                    {decisionFocus && (
+                      <div className="mt-2 rounded border border-border bg-background/45 px-2.5 py-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="text-[12px] font-semibold text-foreground">Decision focus</p>
+                          {decisionFocus.source === "fallback" && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">derived from QA text</span>}
+                          <QualityHelp label="decision focus">
+                            Start here. This block names the output or step to judge, the plan or goal it was checked against, what mismatched, and the action the board recommends.
+                          </QualityHelp>
+                        </div>
+                        <dl className="mt-2 grid gap-1.5">
+                          {decisionFocus.rows.map((row) => (
+                            <div key={row.label} className="grid gap-0.5 sm:grid-cols-[8.5rem_minmax(0,1fr)]">
+                              <dt className="text-[11px] font-medium text-muted-foreground">{row.label}</dt>
+                              <dd className={cn(
+                                "min-w-0 break-words text-[12px] leading-relaxed",
+                                row.mono && "font-mono",
+                                row.tone === "warn" ? "text-amber-700 dark:text-amber-400" : row.tone === "muted" ? "text-muted-foreground" : "text-foreground/90",
+                              )}>
+                                {row.value}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
                       </div>
                     )}
 
@@ -363,6 +382,25 @@ export function Quality() {
                       </div>
                       <p className={cn("mt-0.5 text-[11px]", rec.tone === "warn" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>{rec.why}</p>
                     </div>
+
+                    {reason && (
+                      <div className="mt-2">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-[11px] font-medium text-muted-foreground">Raw QA excerpt</p>
+                          <QualityHelp label="raw QA excerpt">
+                            This is the original trigger text. Use it to audit details after reading Decision focus and Recommended action.
+                          </QualityHelp>
+                        </div>
+                        <div className="mt-0.5 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[12px] text-foreground/80">
+                          {expanded || reason.length <= 160 ? reason : `${reason.slice(0, 160)}... `}
+                          {reason.length > 160 && (
+                            <button type="button" className="ml-1 text-[11px] text-blue-600 underline dark:text-blue-400" onClick={() => setExpandedReason((p) => ({ ...p, [item.id]: !p[item.id] }))}>
+                              {expanded ? "less" : "more"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="mt-2">
                       <div className="flex items-center gap-1.5">
@@ -398,9 +436,9 @@ export function Quality() {
                     </div>
 
                     <p className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
-                      <span className="font-medium text-foreground">Mission:</span>
+                      <span className="font-medium text-foreground">{decisionFocus ? "Mission context:" : "Mission:"}</span>
                       <QualityHelp label="mission link">
-                        Open the source mission for context. Leave the quality verdict on this queue item; use the mission page only to inspect the background work.
+                        Open the source mission for context. A completed mission does not automatically pass this quality item; judge the target step or output shown above.
                       </QualityHelp>
                       {item.missionId ? (
                         <>

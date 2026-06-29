@@ -34,6 +34,19 @@ export function isClosedStatus(status: string): boolean {
   return CLOSED_STATUSES.has(status);
 }
 
+export function qualityItemDisplayTitle(item: QualityReviewItemListItem): string {
+  const missionTitle = cleanText(item.missionTitle);
+  const isMissionQualityItem =
+    item.triggerSource === "final_qa_failure" ||
+    item.triggerSource === "plan_qa_failure" ||
+    item.failureType === "plan_goal_mismatch";
+  if (missionTitle && isMissionQualityItem) {
+    const qaKind = item.triggerSource === "plan_qa_failure" ? "Plan QA" : "Final QA";
+    return `${qaKind} / purpose-fitness failure - ${missionTitle}`;
+  }
+  return item.title;
+}
+
 /** 상태별 "지금 무엇을 판단/해야 하나" 안내. */
 export function decisionPrompt(status: string): string {
   switch (status) {
@@ -111,6 +124,98 @@ export function recommendAction(item: QualityReviewItemListItem): { action: Reco
     return { action: "needs_evidence", why: "No structured evidence and no rework signal — request a fresh probe before judging.", tone: "warn" };
   }
   return { action: null, why: "Evidence resolved — review the target, then pass or dismiss.", tone: "info" };
+}
+
+export type QualityDecisionFocusRow = {
+  label: string;
+  value: string;
+  tone?: "default" | "warn" | "muted";
+  mono?: boolean;
+};
+
+export type QualityDecisionFocus = {
+  rows: QualityDecisionFocusRow[];
+  source: "structured" | "fallback";
+};
+
+function cleanText(value: string | null | undefined): string | null {
+  return value?.trim() || null;
+}
+
+function compact(value: string, max = 420): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized;
+}
+
+function requestChangesSummary(reason: string | null): string | null {
+  if (!reason) return null;
+  const requestChanges = reason.match(/REQUEST[_\s-]?CHANGES:\s*([\s\S]+)/i)?.[1]?.trim();
+  return compact(requestChanges || reason);
+}
+
+function firstIssueIdentifierFromText(text: string | null): string | null {
+  return text?.match(/\b[A-Z][A-Z0-9]{1,9}-\d+\b/)?.[0] ?? null;
+}
+
+function targetStepLabel(target: NonNullable<NonNullable<QualityReviewItemListItem["qualityContext"]>["target"]>): string | null {
+  const issue = [cleanText(target.identifier), cleanText(target.title)].filter(Boolean).join(" - ");
+  const step = cleanText(target.stepId);
+  if (issue && step) return `${issue} (${step})`;
+  return issue || step;
+}
+
+/**
+ * Human decision focus for Queue cards. This must answer:
+ * target step, planned output, mission goal, mismatch, and recommended action.
+ */
+export function qualityDecisionFocus(item: QualityReviewItemListItem): QualityDecisionFocus | null {
+  const ctx = item.qualityContext;
+  const rows: QualityDecisionFocusRow[] = [];
+  const target = ctx?.target ?? null;
+  const targetLabel = target ? targetStepLabel(target) : null;
+  const reason = triggerReason(item.triggerMetadata);
+  const fallbackIssue = firstIssueIdentifierFromText(reason);
+  const rec = recommendAction(item);
+
+  if (targetLabel) {
+    rows.push({ label: "Target step", value: targetLabel, tone: "default" });
+  } else if (fallbackIssue) {
+    rows.push({ label: "Target item", value: fallbackIssue, tone: "default", mono: true });
+  }
+
+  const plannedOutput = cleanText(target?.plannedOutput);
+  if (plannedOutput) rows.push({ label: "Planned output", value: compact(plannedOutput), tone: "default" });
+
+  const workProduct = [cleanText(target?.workProductTitle), cleanText(target?.workProductPath)].filter(Boolean).join(" - ");
+  if (workProduct) rows.push({ label: "Work product", value: compact(workProduct, 320), tone: "muted" });
+
+  const sourceReview = ctx?.sourceReview
+    ? [cleanText(ctx.sourceReview.identifier), cleanText(ctx.sourceReview.title), cleanText(ctx.sourceReview.stepId)].filter(Boolean).join(" - ")
+    : null;
+  if (sourceReview) rows.push({ label: "QA gate", value: compact(sourceReview, 320), tone: "muted" });
+
+  const missionGoal = cleanText(ctx?.missionGoal) ?? cleanText(item.missionTitle);
+  if (missionGoal) rows.push({ label: "Mission goal", value: compact(missionGoal), tone: "default" });
+
+  const mismatch = cleanText(ctx?.mismatchSummary) ?? requestChangesSummary(reason);
+  if (mismatch) rows.push({ label: "Mismatch", value: mismatch, tone: "warn" });
+
+  if (rec.action || ctx?.recommendedAction) {
+    const action = ctx?.recommendedAction
+      ? compact(ctx.recommendedAction)
+      : `${recommendedActionLabel(rec.action)} - ${rec.why}`;
+    rows.push({ label: "Recommended action", value: action, tone: rec.tone === "warn" ? "warn" : "default" });
+  }
+
+  const focusNote = cleanText(ctx?.focusNote);
+  if (focusNote) rows.push({ label: "Where to inspect", value: compact(focusNote, 320), tone: "muted" });
+
+  const shouldShowFallback =
+    item.failureType === "plan_goal_mismatch" ||
+    item.triggerSource === "final_qa_failure" ||
+    item.triggerSource === "plan_qa_failure";
+  if (rows.length === 0 || (!ctx && !shouldShowFallback)) return null;
+  return { rows, source: ctx ? "structured" : "fallback" };
 }
 
 /** 추천 verdict → 사람이 읽는 라벨(Queue 강조 라벨용). */
