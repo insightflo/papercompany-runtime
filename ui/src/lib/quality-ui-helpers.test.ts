@@ -9,6 +9,7 @@ import {
   isSmokeSignal,
   isUnresolvedEvidence,
   qualityDecisionFocus,
+  qualityAnchorTitleDraft,
   qualityItemDisplayTitle,
   qualityVerdictCommentDraft,
   qualityVerdictCommentPlaceholder,
@@ -203,6 +204,29 @@ describe("quality-ui-helpers", () => {
     expect(draft).toContain("Reason: glossary definitions for PoC, AppSec, ToS are missing.");
     expect(draft).toContain("Route the affected producer step for rework");
     expect(draft).toContain("No fresh evidence is needed");
+  });
+
+  it("qualityAnchorTitleDraft pre-fills an editable evaluator learning title from the verdict context", () => {
+    const draft = qualityAnchorTitleDraft(item({
+      title: "Final QA / purpose-fitness failure - mission fb9d5e0c",
+      triggerSource: "final_qa_failure",
+      failureType: "plan_goal_mismatch",
+      missionTitle: "2026-06-29 tech-scout",
+      triggerMetadata: {
+        reason: "I validated RES-614's report draft. REQUEST_CHANGES: glossary definitions for PoC, AppSec, ToS are missing.",
+      },
+      qualityContext: {
+        target: {
+          identifier: "RES-614",
+          title: "Synthesize Tech Scout report draft",
+          status: "done",
+          stepId: "synthesize-tech-scout-report-draft",
+        },
+        mismatchSummary: "glossary definitions for PoC, AppSec, ToS are missing.",
+      },
+    }), "request_changes");
+
+    expect(draft).toBe("Request changes: glossary definitions for PoC, AppSec, ToS are missing.");
   });
 
   it("qualityVerdictCommentPlaceholder tells request_changes users to write rework, not evidence", () => {

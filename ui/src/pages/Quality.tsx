@@ -40,6 +40,7 @@ import {
   isClosedStatus,
   isSmokeSignal,
   isUnresolvedEvidence,
+  qualityAnchorTitleDraft,
   qualityDecisionFocus,
   qualityItemDisplayTitle,
   qualityVerdictCommentDraft,
@@ -178,7 +179,7 @@ function reviewCompletionCopy(item: QualityReviewItemListItem, last: LastVerdict
       return {
         verdict,
         title: "Human review complete",
-        body: "Recorded verdict: Fail. No more verdict input is required; optionally teach the evaluator if this should become a reusable rule.",
+        body: "Recorded verdict: Fail. No more verdict input is required. Save a learning case below only if this should become a reusable evaluator rule.",
         tone: "warn",
       };
     case "pass":
@@ -334,6 +335,11 @@ export function Quality() {
     void run(`${item.id}:verdict`, verdictMut.mutateAsync({ itemId: item.id, body: { verdict, reason, requiredEvidenceSurfaces } })).then((result) => {
       if (result?.verdict?.id) {
         setLastVerdictByItem((prev) => ({ ...prev, [item.id]: { verdictId: result.verdict.id, verdict: result.verdict.verdict } }));
+        setAnchorTitleByItem((prev) => (
+          Object.prototype.hasOwnProperty.call(prev, item.id)
+            ? prev
+            : { ...prev, [item.id]: qualityAnchorTitleDraft(item, result.verdict.verdict) }
+        ));
         setEditingVerdictByItem((prev) => ({ ...prev, [item.id]: false }));
       }
     });
@@ -407,14 +413,14 @@ export function Quality() {
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-[12px] font-semibold text-foreground">Queue review flow</span>
                 <QualityHelp label="queue review flow">
-                  Judge the target output, record one verdict, then stop. Anchor promotion is optional learning, not required rework routing.
+                  Judge the target output, record one verdict, then stop. Saving a learning case is a separate evaluator-training step for reusable lessons.
                 </QualityHelp>
               </div>
               <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
                 <span className="rounded bg-background px-1.5 py-0.5">1. Judge target</span>
                 <span className="rounded bg-background px-1.5 py-0.5">2. Record verdict</span>
                 <span className="rounded bg-background px-1.5 py-0.5">3. Done for reviewer</span>
-                <span className="rounded bg-background px-1.5 py-0.5">4. Optional: teach evaluator</span>
+                <span className="rounded bg-background px-1.5 py-0.5">4. Save reusable evaluator learning</span>
               </div>
             </div>
 
@@ -520,7 +526,7 @@ export function Quality() {
                             <div className="flex items-center gap-1.5">
                               <p className="text-[12px] font-semibold text-foreground">{completion.title}</p>
                               <QualityHelp label="review complete">
-                                The human verdict has been recorded. You do not need to do another Quality Board action unless you want to correct the verdict or optionally teach the evaluator.
+                                The human verdict has been recorded. You do not need another verdict unless this one was wrong. Use evaluator learning below only when this verdict should become reusable precedent.
                               </QualityHelp>
                             </div>
                             <p className="mt-0.5 text-[11px] text-muted-foreground">{completion.body}</p>
@@ -648,21 +654,45 @@ export function Quality() {
                       </div>
                     )}
 
-                    {last?.verdictId && (
-                      <details className="mt-2 rounded border border-border bg-muted/20 px-2.5 py-2">
-                        <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground">
-                          Optional: teach evaluator from this verdict
-                        </summary>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <span className="text-[11px] text-muted-foreground">Recorded verdict: {recommendedActionLabel(last.verdict)}</span>
-                          <input type="text" placeholder="anchor title" value={anchorTitleByItem[item.id] ?? ""} onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px]" />
-                          <QualityHelp label="promote anchor">
-                            Promote a verdict only when it should become reusable precedent for similar failures. This is optional learning, not required to finish the request-changes flow.
-                          </QualityHelp>
-                          <button type="button" disabled={busy === `${item.id}:anchor`} onClick={() => run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: anchorTitleByItem[item.id]?.trim() || `Anchor: ${item.title}` }))} className="rounded border border-violet-500/40 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400">Promote anchor</button>
+                    {last?.verdictId && (() => {
+                      const anchorTitle = Object.prototype.hasOwnProperty.call(anchorTitleByItem, item.id)
+                        ? anchorTitleByItem[item.id]
+                        : qualityAnchorTitleDraft(item, last.verdict);
+                      const trimmedAnchorTitle = anchorTitle.trim();
+                      return (
+                        <div className="mt-2 rounded border border-violet-500/30 bg-violet-500/5 px-2.5 py-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <p className="text-[12px] font-semibold text-foreground">Evaluator learning case</p>
+                            <span className="rounded bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">Recorded verdict: {recommendedActionLabel(last.verdict)}</span>
+                            <QualityHelp label="evaluator learning">
+                              The verdict is already recorded. Saving this case is the extra step that turns it into reusable evaluator precedent. Save recurring or important rules; skip one-off, uncertain, or noisy cases.
+                            </QualityHelp>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-end gap-2">
+                            <label className="min-w-48 flex-1 text-[11px] font-medium text-muted-foreground">
+                              Case title
+                              <input
+                                type="text"
+                                value={anchorTitle}
+                                onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })}
+                                className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-[11px] font-normal text-foreground"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              disabled={!trimmedAnchorTitle || busy === `${item.id}:anchor`}
+                              onClick={() => run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: trimmedAnchorTitle }))}
+                              className="rounded border border-violet-500/40 px-2 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400"
+                            >
+                              Save training case
+                            </button>
+                          </div>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            This does not change the recorded verdict. It only teaches future evaluator checks with this example.
+                          </p>
                         </div>
-                      </details>
-                    )}
+                      );
+                    })()}
                   </div>
                 );
               })

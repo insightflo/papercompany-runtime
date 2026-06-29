@@ -233,6 +233,30 @@ function mismatchForVerdictComment(item: QualityReviewItemListItem): string | nu
 }
 
 /**
+ * Default title for saving a human verdict as an evaluator learning case.
+ * Operators can edit this, but it should start with the reusable lesson.
+ */
+export function qualityAnchorTitleDraft(item: QualityReviewItemListItem, verdict: QualityVerdict): string {
+  const target = targetForVerdictComment(item);
+  const lesson = mismatchForVerdictComment(item) ?? target;
+
+  switch (verdict) {
+    case "request_changes":
+      return `Request changes: ${compact(lesson, 96)}`;
+    case "needs_evidence":
+      return `Needs evidence: ${compact(lesson, 96)}`;
+    case "fail":
+      return `Failure: ${compact(lesson, 96)}`;
+    case "pass":
+      return `Pass: ${compact(target, 96)}`;
+    case "dismissed":
+      return `Dismissed: ${compact(target, 96)}`;
+    default:
+      return `Quality verdict: ${compact(target, 96)}`;
+  }
+}
+
+/**
  * Default text for the verdict note editor.
  * The note is stored as verdict.reason and becomes the rework/evidence instruction.
  */
