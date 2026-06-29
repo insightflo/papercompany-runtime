@@ -124,7 +124,7 @@ export function Quality() {
   const { data: versions } = useQuery({
     queryKey: cid ? queryKeys.quality.evaluatorVersions(cid) : ["quality", "evaluator-versions"],
     queryFn: () => qualityApi.listEvaluatorVersions(cid!),
-    enabled: !!cid && tab === "evaluators",
+    enabled: !!cid && (tab === "evaluators" || tab === "anchors"),
   });
   const { data: runs } = useQuery({
     queryKey: cid ? queryKeys.quality.candidateRuns(cid) : ["quality", "candidate-runs"],
