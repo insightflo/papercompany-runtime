@@ -5,7 +5,7 @@
  *   Reports: 사람이 읽는 일일 보고서 + 최신성 경고.
  * [외부 연결] ui/src/api/quality.ts, ui/src/lib/quality-ui-helpers.ts, server routes/quality.ts.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,7 +15,9 @@ import {
   FlaskConical,
   FileBarChart,
   Anchor,
+  HelpCircle,
 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { qualityApi } from "../api/quality";
@@ -81,6 +83,26 @@ function StatusPill({ status }: { status: string }) {
 
 function SmokeBadge() {
   return <span className="inline-flex items-center rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400">smoke/test</span>;
+}
+
+function QualityHelp({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip delayDuration={250}>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={`${label} help`}
+          onClick={(event) => event.stopPropagation()}
+          className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <HelpCircle className="h-3.5 w-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="max-w-[280px] text-xs leading-relaxed">
+        {children}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 export function Quality() {
@@ -210,6 +232,9 @@ export function Quality() {
         <div className="flex items-center gap-2">
           <ListChecks className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-base font-semibold">Quality</h1>
+          <QualityHelp label="Quality Board">
+            Use Quality Board to make human quality decisions on outputs. This is not the mission execution screen; record rework requests or evidence requests here.
+          </QualityHelp>
         </div>
         <div className="flex gap-2 text-center">
           {([
@@ -233,6 +258,12 @@ export function Quality() {
             {label}
           </button>
         ))}
+        <QualityHelp label={`${tab} tab`}>
+          {tab === "queue" && "Queue contains quality items that need a human decision now. Follow the recommendation when the visible reason is enough; request evidence only when you cannot judge yet."}
+          {tab === "anchors" && "Anchors are reusable precedents created from human verdicts. They help the evaluator catch the same kind of failure next time."}
+          {tab === "evaluators" && "Evaluators are candidate automated checks created from anchors. Promote only candidates that pass replay."}
+          {tab === "reports" && "Reports are dated summaries of Quality Board state. Regenerate a report after review items change."}
+        </QualityHelp>
       </nav>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
@@ -247,11 +278,17 @@ export function Quality() {
             <label className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
               <input type="checkbox" checked={hideSmoke} onChange={(e) => setHideSmoke(e.target.checked)} />
               hide smoke/test items
+              <QualityHelp label="hide smoke items">
+                Hide test-only quality items so the queue focuses on real user-facing output decisions.
+              </QualityHelp>
             </label>
 
             <details className="rounded-lg border border-border bg-card p-3">
               <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium">
                 <Plus className="h-4 w-4" /> Send to Quality Review (manual)
+                <QualityHelp label="manual review item">
+                  Create a quality review item manually when an output was not queued automatically. Add a title and target id so reviewers know what to inspect.
+                </QualityHelp>
               </summary>
               <div className="mt-3 flex flex-wrap items-end gap-2">
                 <label className="flex flex-col text-[11px] text-muted-foreground">
@@ -318,12 +355,22 @@ export function Quality() {
                     )}
 
                     <div className={cn("mt-2 rounded border px-2.5 py-1.5", rec.tone === "warn" ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-muted/30")}>
-                      <p className="text-[12px] font-medium text-foreground">Recommended action: {recommendedActionLabel(rec.action)}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-[12px] font-medium text-foreground">Recommended action: {recommendedActionLabel(rec.action)}</p>
+                        <QualityHelp label="recommended action">
+                          This is the verdict that best matches the visible reason and evidence. If it matches your judgment, choose the matching verdict button.
+                        </QualityHelp>
+                      </div>
                       <p className={cn("mt-0.5 text-[11px]", rec.tone === "warn" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>{rec.why}</p>
                     </div>
 
                     <div className="mt-2">
-                      <p className="text-[11px] font-medium text-muted-foreground">Evidence</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-[11px] font-medium text-muted-foreground">Evidence</p>
+                        <QualityHelp label="evidence">
+                          The trigger reason explains why this item was queued. Structured evidence is a separate probe or check. Judge when the reason is enough; use needs_evidence only when the required surface is missing.
+                        </QualityHelp>
+                      </div>
                       {item.evidenceRefs.length === 0 ? (
                         <p className={cn("text-[11px]", requestChangesRecommended ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400")}>
                           {requestChangesRecommended
@@ -350,8 +397,11 @@ export function Quality() {
                       )}
                     </div>
 
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      <span className="font-medium text-foreground">Mission:</span>{" "}
+                    <p className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                      <span className="font-medium text-foreground">Mission:</span>
+                      <QualityHelp label="mission link">
+                        Open the source mission for context. Leave the quality verdict on this queue item; use the mission page only to inspect the background work.
+                      </QualityHelp>
                       {item.missionId ? (
                         <>
                           <Link to={`/missions/${item.missionId}`} className="text-blue-600 underline-offset-2 hover:underline dark:text-blue-400">
@@ -369,9 +419,15 @@ export function Quality() {
 
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       <input type="text" placeholder="evidence surfaces (comma-sep)" value={surfacesByItem[item.id] ?? ""} onChange={(e) => setSurfacesByItem({ ...surfacesByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-[11px]" />
+                      <QualityHelp label="evidence surfaces">
+                        Enter comma-separated surfaces that need checking, such as public_url, work_product, or api_probe. Request evidence pauses judgment until those checks are supplied.
+                      </QualityHelp>
                       <button type="button" className="rounded border border-blue-500/40 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-500/10 disabled:opacity-50 dark:text-blue-400" disabled={busy === `${item.id}:req`} onClick={() => { const s = (surfacesByItem[item.id] ?? "").split(",").map((x) => x.trim()).filter(Boolean); if (s.length) void run(`${item.id}:req`, requestEvidenceMut.mutateAsync({ itemId: item.id, surfaces: s })); }}>
                         request evidence
                       </button>
+                      <QualityHelp label="verdict buttons">
+                        pass means the output meets the bar. fail means it fails outright. request_changes sends it back for rework. needs_evidence means you cannot judge yet. dismissed means duplicate or not relevant.
+                      </QualityHelp>
                       {VERDICTS.map((v) => (
                         <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => handleVerdict(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
                           v === rec.action && "ring-2 ring-offset-1 ring-offset-card font-bold ring-foreground/50",
@@ -389,6 +445,9 @@ export function Quality() {
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <span className="text-[11px] text-muted-foreground">last verdict: {last.verdict}</span>
                         <input type="text" placeholder="anchor title" value={anchorTitleByItem[item.id] ?? ""} onChange={(e) => setAnchorTitleByItem({ ...anchorTitleByItem, [item.id]: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px]" />
+                        <QualityHelp label="promote anchor">
+                          Promote a verdict to an anchor when it should become reusable precedent for similar failures. Use this for clear quality rules you want the evaluator to remember.
+                        </QualityHelp>
                         <button type="button" disabled={busy === `${item.id}:anchor`} onClick={() => run(`${item.id}:anchor`, promoteMut.mutateAsync({ itemId: item.id, verdictId: last.verdictId, title: anchorTitleByItem[item.id]?.trim() || `Anchor: ${item.title}` }))} className="rounded border border-violet-500/40 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-500/10 disabled:opacity-50 dark:text-violet-400">promote anchor</button>
                       </div>
                     )}
@@ -432,7 +491,12 @@ export function Quality() {
         {tab === "evaluators" && (
           <div className="flex flex-col gap-4">
             <section>
-              <h2 className="mb-2 text-[12px] font-semibold uppercase text-muted-foreground">Candidate versions</h2>
+              <div className="mb-2 flex items-center gap-1.5">
+                <h2 className="text-[12px] font-semibold uppercase text-muted-foreground">Candidate versions</h2>
+                <QualityHelp label="candidate evaluator versions">
+                  Candidate versions are automated evaluator drafts created from anchors. Replay past cases first, then promote only candidates that pass.
+                </QualityHelp>
+              </div>
               {(versions ?? []).length === 0 ? <p className="text-sm text-muted-foreground">No evaluator versions. Promoting an anchor seeds a candidate.</p> : (
                 <div className="flex flex-col gap-2">
                   {(versions ?? []).map((v) => {
@@ -447,9 +511,14 @@ export function Quality() {
                             {sourceAnchor && isSmokeSignal({ title: sourceAnchor.title }) && <SmokeBadge />}
                             <span className="font-medium text-sm">{v.name}</span>
                           </div>
-                          <button type="button" disabled={v.status !== "candidate" || !hasPassed || busy === `pv:${v.id}`} onClick={() => run(`pv:${v.id}`, promoteVersionMut.mutateAsync({ versionId: v.id }))} className="rounded border border-emerald-500/40 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-500/10 disabled:opacity-50 dark:text-emerald-400" title="A passed replay run is required before production promotion.">
-                            {v.status === "production" ? "production" : hasPassed ? "promote to production" : "replay required"}
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button type="button" disabled={v.status !== "candidate" || !hasPassed || busy === `pv:${v.id}`} onClick={() => run(`pv:${v.id}`, promoteVersionMut.mutateAsync({ versionId: v.id }))} className="rounded border border-emerald-500/40 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-500/10 disabled:opacity-50 dark:text-emerald-400" title="A passed replay run is required before production promotion.">
+                              {v.status === "production" ? "production" : hasPassed ? "promote to production" : "replay required"}
+                            </button>
+                            <QualityHelp label="promote evaluator">
+                              Production is the live operating evaluator. Promote only when the candidate has passed replay.
+                            </QualityHelp>
+                          </div>
                         </div>
                         <p className="mt-1 text-[12px] text-muted-foreground">
                           <span className="font-medium text-foreground">Source anchor:</span> {sourceAnchor?.title ?? "—"}{sourceAnchor?.failureType ? ` · ${sourceAnchor.failureType}` : ""}
@@ -462,9 +531,14 @@ export function Quality() {
                                 <span className={cn(r.status === "passed" ? "text-emerald-600 dark:text-emerald-400" : r.status === "failed" ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
                                   {r.status}: {replaySentence(r)}
                                 </span>
-                                <button type="button" disabled={busy === `replay:${r.id}`} onClick={() => run(`replay:${r.id}`, replayMut.mutateAsync({ runId: r.id }))} className="rounded border border-blue-500/40 px-1.5 py-0.5 text-blue-700 hover:bg-blue-500/10 disabled:opacity-50 dark:text-blue-400">
-                                  <FlaskConical className="mr-1 inline h-3 w-3" />replay
-                                </button>
+                                <div className="flex items-center gap-1.5">
+                                  <button type="button" disabled={busy === `replay:${r.id}`} onClick={() => run(`replay:${r.id}`, replayMut.mutateAsync({ runId: r.id }))} className="rounded border border-blue-500/40 px-1.5 py-0.5 text-blue-700 hover:bg-blue-500/10 disabled:opacity-50 dark:text-blue-400">
+                                    <FlaskConical className="mr-1 inline h-3 w-3" />replay
+                                  </button>
+                                  <QualityHelp label="replay evaluator">
+                                    Replay applies a candidate evaluator to past anchor cases to confirm it produces the expected judgment.
+                                  </QualityHelp>
+                                </div>
                               </li>
                             ))}
                           </ul>
@@ -480,9 +554,14 @@ export function Quality() {
 
         {tab === "reports" && (
           <div className="flex flex-col gap-3">
-            <button type="button" disabled={busy === "gen"} onClick={() => run("gen", generateReportMut.mutateAsync({}))} className="self-start rounded border border-border bg-accent px-3 py-1.5 text-[12px] font-medium hover:bg-accent/70 disabled:opacity-50">
-              <FileBarChart className="mr-1 inline h-3.5 w-3.5" />Generate today's report
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button type="button" disabled={busy === "gen"} onClick={() => run("gen", generateReportMut.mutateAsync({}))} className="rounded border border-border bg-accent px-3 py-1.5 text-[12px] font-medium hover:bg-accent/70 disabled:opacity-50">
+                <FileBarChart className="mr-1 inline h-3.5 w-3.5" />Generate today's report
+              </button>
+              <QualityHelp label="daily report">
+                Save the current queue and verdict state as today's report. Regenerate it after review items change so the summary stays current.
+              </QualityHelp>
+            </div>
             {(reports ?? []).length === 0 ? <EmptyState icon={FileBarChart} message="No daily reports yet." /> : (
               <div className="flex flex-col gap-2">
                 {[...(reports ?? [])].sort((a, b) => (a.reportDate < b.reportDate ? 1 : -1)).map((rp) => {
