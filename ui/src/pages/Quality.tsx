@@ -6,7 +6,7 @@
  * [외부 연결] ui/src/api/quality.ts, ui/src/lib/quality-ui-helpers.ts, server routes/quality.ts.
  */
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ListChecks,
