@@ -41,6 +41,11 @@ const REQUIRED_EVIDENCE_SURFACES = [
 type TransactionDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type QualityWriteDb = Db | TransactionDb;
 
+// [목적] partial unique index(0070) 동시 삽입 race 감지. Postgres unique_violation = 23505.
+export function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "code" in err && (err as { code?: unknown }).code === "23505";
+}
+
 function resolveVerdictStatus(verdict: string): string {
   switch (verdict) {
     case "pass":
@@ -648,38 +653,62 @@ export function qualityService(db: Db) {
     if (openExisting) {
       itemId = openExisting.id;
     } else {
-      const [row] = await db
-        .insert(qualityReviewItems)
-        .values({
-          companyId: input.companyId,
-          missionId: input.missionId ?? null,
-          title: input.title,
-          status: "awaiting_review",
-          targetType: input.targetType,
-          targetId: input.targetId ?? null,
-          triggerSource: input.triggerSource,
-          triggerMetadata: input.triggerMetadata ?? {},
-          failureType: input.failureType ?? null,
-          priority: input.priority ?? "medium",
-        })
-        .returning();
-      itemId = row.id;
-      created = true;
-      if (input.evidenceRefs && input.evidenceRefs.length > 0) {
-        await db.insert(qualityEvidenceRefs).values(
-          input.evidenceRefs.map((r) => ({
+      try {
+        const [row] = await db
+          .insert(qualityReviewItems)
+          .values({
             companyId: input.companyId,
-            reviewItemId: itemId,
-            surface: r.surface,
-            expected: r.expected ?? {},
-            actual: r.actual ?? {},
-            status: r.status ?? "missing",
-            sourceRunId: r.sourceRunId ?? null,
-            sourceUrl: r.sourceUrl ?? null,
-            freshnessExpiresAt: r.freshnessExpiresAt ? new Date(r.freshnessExpiresAt) : null,
-            blocking: r.blocking ?? true,
-          })),
-        );
+            missionId: input.missionId ?? null,
+            title: input.title,
+            status: "awaiting_review",
+            targetType: input.targetType,
+            targetId: input.targetId ?? null,
+            triggerSource: input.triggerSource,
+            triggerMetadata: input.triggerMetadata ?? {},
+            failureType: input.failureType ?? null,
+            priority: input.priority ?? "medium",
+          })
+          .returning();
+        itemId = row.id;
+        created = true;
+        if (input.evidenceRefs && input.evidenceRefs.length > 0) {
+          await db.insert(qualityEvidenceRefs).values(
+            input.evidenceRefs.map((r) => ({
+              companyId: input.companyId,
+              reviewItemId: itemId,
+              surface: r.surface,
+              expected: r.expected ?? {},
+              actual: r.actual ?? {},
+              status: r.status ?? "missing",
+              sourceRunId: r.sourceRunId ?? null,
+              sourceUrl: r.sourceUrl ?? null,
+              freshnessExpiresAt: r.freshnessExpiresAt ? new Date(r.freshnessExpiresAt) : null,
+              blocking: r.blocking ?? true,
+            })),
+          );
+        }
+      } catch (err) {
+        // [주의] 동시 삽입 race: partial unique index(0070) 가 잡음 → 상대가 먼저 넣은 open item 재조회.
+        if (isUniqueViolation(err)) {
+          const recon = await db
+            .select({ id: qualityReviewItems.id })
+            .from(qualityReviewItems)
+            .where(
+              and(
+                eq(qualityReviewItems.companyId, input.companyId),
+                eq(qualityReviewItems.targetType, input.targetType),
+                eq(qualityReviewItems.triggerSource, input.triggerSource),
+                input.targetId ? eq(qualityReviewItems.targetId, input.targetId) : isNull(qualityReviewItems.targetId),
+              ),
+            )
+            .orderBy(desc(qualityReviewItems.createdAt))
+            .limit(1);
+          const reconOpen = recon.find((r) => r.id);
+          if (!reconOpen) throw err;
+          itemId = reconOpen.id;
+        } else {
+          throw err;
+        }
       }
     }
     const reviewItem = await getReviewItemDetail(itemId);

@@ -66,27 +66,54 @@ export async function writeQualityFinding(
     return { reviewItemId: open.id, created: false };
   }
 
-  const [row] = await db
-    .insert(qualityReviewItems)
-    .values({
-      companyId: input.companyId,
-      missionId: input.missionId ?? null,
-      title: input.title,
-      status: "awaiting_review",
-      targetType: input.targetType,
-      targetId: input.targetId,
-      triggerSource: input.triggerSource,
-      triggerMetadata: input.triggerMetadata ?? {},
-      failureType: input.failureType,
-      priority: input.priority ?? "high",
-    })
-    .returning({ id: qualityReviewItems.id });
+  let reviewItemId: string;
+  let created = true;
+  try {
+    const [row] = await db
+      .insert(qualityReviewItems)
+      .values({
+        companyId: input.companyId,
+        missionId: input.missionId ?? null,
+        title: input.title,
+        status: "awaiting_review",
+        targetType: input.targetType,
+        targetId: input.targetId,
+        triggerSource: input.triggerSource,
+        triggerMetadata: input.triggerMetadata ?? {},
+        failureType: input.failureType,
+        priority: input.priority ?? "high",
+      })
+      .returning({ id: qualityReviewItems.id });
+    reviewItemId = row.id;
+  } catch (err) {
+    // [주의] 동시 삽입 race: partial unique index(0070) 가 잡음 → 상대가 먼저 넣은 open item 재조회.
+    if (err && typeof err === "object" && "code" in err && (err as { code?: unknown }).code === "23505") {
+      const recon = await db
+        .select({ id: qualityReviewItems.id })
+        .from(qualityReviewItems)
+        .where(
+          and(
+            eq(qualityReviewItems.companyId, input.companyId),
+            eq(qualityReviewItems.targetType, input.targetType),
+            eq(qualityReviewItems.triggerSource, input.triggerSource),
+            input.targetId ? eq(qualityReviewItems.targetId, input.targetId) : isNull(qualityReviewItems.targetId),
+          ),
+        )
+        .orderBy(desc(qualityReviewItems.createdAt))
+        .limit(1);
+      if (!recon[0]) throw err;
+      reviewItemId = recon[0].id;
+      created = false;
+    } else {
+      throw err;
+    }
+  }
 
-  if (input.evidenceRefs && input.evidenceRefs.length > 0) {
+  if (created && input.evidenceRefs && input.evidenceRefs.length > 0) {
     await db.insert(qualityEvidenceRefs).values(
       input.evidenceRefs.map((r) => ({
         companyId: input.companyId,
-        reviewItemId: row.id,
+        reviewItemId,
         surface: r.surface,
         status: r.status ?? "missing",
         blocking: r.blocking ?? true,
@@ -95,5 +122,5 @@ export async function writeQualityFinding(
       })),
     );
   }
-  return { reviewItemId: row.id, created: true };
+  return { reviewItemId, created };
 }

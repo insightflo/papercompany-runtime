@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -548,5 +549,34 @@ describeEmbeddedPostgres("quality routes", () => {
       triggerSource: "final_qa_failure",
       failureType: "plan_goal_mismatch",
     });
+  });
+
+  it("dedupes a concurrent auto-create (same dedupe key) to a single open review item", async () => {
+    const companyId = await seedCompany("QR");
+    const missionId = await seedMission(companyId, "active");
+    const svc = qualityService(db);
+    // 동일 key 동시 호출 → partial unique index(0070) 가 race 보호 → open item 1개.
+    const [a, b] = await Promise.all([
+      svc.createOversightStallReviewItem({ companyId, missionId, missionTitle: "Race mission" }),
+      svc.createOversightStallReviewItem({ companyId, missionId, missionTitle: "Race mission" }),
+    ]);
+    expect(a.reviewItem.id).toBe(b.reviewItem.id);
+    const rows = await db.select().from(qualityReviewItems).where(eq(qualityReviewItems.companyId, companyId));
+    expect(rows.filter((r) => r.status !== "closed").length).toBe(1);
+  });
+
+  it("allows a new item for the same target after the previous one is closed", async () => {
+    const companyId = await seedCompany("QS");
+    const missionId = await seedMission(companyId, "active");
+    const svc = qualityService(db);
+    const first = await svc.createOversightStallReviewItem({ companyId, missionId, missionTitle: "Closed mission" });
+    await db.update(qualityReviewItems).set({ status: "resolved_fail" }).where(eq(qualityReviewItems.id, first.reviewItem.id));
+
+    const second = await svc.createOversightStallReviewItem({ companyId, missionId, missionTitle: "Closed mission" });
+
+    expect(second.created).toBe(true);
+    expect(second.reviewItem.id).not.toBe(first.reviewItem.id);
+    const rows = await db.select().from(qualityReviewItems).where(eq(qualityReviewItems.companyId, companyId));
+    expect(rows.length).toBe(2);
   });
 });

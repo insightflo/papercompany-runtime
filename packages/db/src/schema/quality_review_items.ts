@@ -1,4 +1,5 @@
-import { index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { missions } from "./missions.js";
 
@@ -23,5 +24,8 @@ export const qualityReviewItems = pgTable(
     companyStatusIdx: index("quality_review_items_company_status_idx").on(table.companyId, table.status, table.createdAt),
     companyTriggerIdx: index("quality_review_items_company_trigger_idx").on(table.companyId, table.triggerSource, table.createdAt),
     missionIdx: index("quality_review_items_company_mission_idx").on(table.companyId, table.missionId, table.createdAt),
+    openDedupeUq: uniqueIndex("quality_review_items_open_dedupe_uq")
+      .on(table.companyId, table.targetType, table.triggerSource, table.targetId)
+      .where(sql`${table.status} not in ('resolved_pass', 'resolved_fail', 'dismissed', 'closed', 'evaluator_promoted', 'evaluator_rejected')`),
   }),
 );
