@@ -4,10 +4,12 @@ import {
   anchorReflectionStatus,
   decisionPrompt,
   evidenceLine,
+  indicatesRequestChanges,
   isClosedStatus,
   isSmokeSignal,
   isUnresolvedEvidence,
   recommendAction,
+  recommendedActionLabel,
   renderReportLines,
   replaySentence,
   triggerReason,
@@ -60,21 +62,64 @@ describe("quality-ui-helpers", () => {
     expect(decisionPrompt("resolved_pass")).toMatch(/no action/i);
   });
 
-  it("recommendAction warns when there is no structured evidence", () => {
+  it("recommendAction recommends needs_evidence when no evidence and no rework signal", () => {
     const rec = recommendAction(item({ status: "awaiting_review", evidenceRefs: [] }));
+    expect(rec.action).toBe("needs_evidence");
     expect(rec.tone).toBe("warn");
-    expect(rec.action).toMatch(/needs_evidence/);
+    expect(rec.why).toMatch(/fresh probe/i);
   });
 
-  it("recommendAction warns on blocking/failed evidence", () => {
+  it("recommendAction recommends request_changes on blocking/failed evidence", () => {
     const rec = recommendAction(item({ evidenceRefs: [{ id: "e1", surface: "public_url", status: "failed", blocking: true }] as never }));
+    expect(rec.action).toBe("request_changes");
     expect(rec.tone).toBe("warn");
-    expect(rec.action).toMatch(/blocking/i);
+    expect(rec.why).toMatch(/blocking/i);
   });
 
   it("recommendAction is informational when evidence resolves and for closed items", () => {
-    expect(recommendAction(item({ status: "resolved_pass" })).action).toMatch(/no action/i);
-    expect(recommendAction(item({ evidenceRefs: [{ id: "e1", surface: "public_url", status: "verified", blocking: false }] as never })).tone).toBe("info");
+    const closed = recommendAction(item({ status: "resolved_pass" }));
+    expect(closed.action).toBeNull();
+    expect(closed.why).toMatch(/no action/i);
+    const resolved = recommendAction(item({ evidenceRefs: [{ id: "e1", surface: "public_url", status: "verified", blocking: false }] as never }));
+    expect(resolved.action).toBeNull();
+    expect(resolved.tone).toBe("info");
+  });
+
+  it("recommendAction recommends request_changes when reason requests changes, even with no structured evidence (acceptance case)", () => {
+    const rec = recommendAction(item({
+      status: "awaiting_review",
+      triggerMetadata: { reason: "REQUEST_CHANGES: glossary terms PoC, AppSec, ToS are missing from the report." },
+      evidenceRefs: [],
+    }));
+    expect(rec.action).toBe("request_changes");
+    expect(rec.tone).toBe("warn");
+    // why must not steer toward needs_evidence
+    expect(rec.why).not.toMatch(/needs_evidence/i);
+    // raw concrete reason surfaces as the why
+    expect(rec.why).toMatch(/PoC|glossary/i);
+  });
+
+  it("recommendAction recommends request_changes for final_qa_failure failureType without a reason", () => {
+    const rec = recommendAction(item({ status: "awaiting_review", failureType: "final_qa_failure", triggerMetadata: {}, evidenceRefs: [] }));
+    expect(rec.action).toBe("request_changes");
+    expect(rec.why).toMatch(/Final QA/i);
+  });
+
+  it("indicatesRequestChanges detects reason text and request-changes failure types", () => {
+    expect(indicatesRequestChanges({ reason: "please rework the output", failureType: null })).toBe(true);
+    expect(indicatesRequestChanges({ reason: "REQUEST_CHANGES issued", failureType: null })).toBe(true);
+    expect(indicatesRequestChanges({ reason: null, failureType: "plan_qa_failure" })).toBe(true);
+    expect(indicatesRequestChanges({ reason: null, failureType: "delivery_verification" })).toBe(true);
+    expect(indicatesRequestChanges({ reason: null, failureType: "oversight_stall" })).toBe(false);
+    expect(indicatesRequestChanges({ reason: "all good", failureType: null })).toBe(false);
+    expect(indicatesRequestChanges({ reason: null, failureType: null })).toBe(false);
+  });
+
+  it("recommendedActionLabel maps verdicts to human-readable labels", () => {
+    expect(recommendedActionLabel("request_changes")).toBe("Request changes");
+    expect(recommendedActionLabel("needs_evidence")).toBe("Needs evidence");
+    expect(recommendedActionLabel("pass")).toBe("Pass");
+    expect(recommendedActionLabel(null)).toBe("Review and judge");
   });
 
   it("isUnresolvedEvidence treats blocking + missing/failed/stale/insufficient as unresolved", () => {

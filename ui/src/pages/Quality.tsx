@@ -6,6 +6,7 @@
  * [외부 연결] ui/src/api/quality.ts, ui/src/lib/quality-ui-helpers.ts, server routes/quality.ts.
  */
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ListChecks,
@@ -24,12 +25,12 @@ import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import {
   anchorReflectionStatus,
-  decisionPrompt,
   evidenceLine,
   isClosedStatus,
   isSmokeSignal,
   isUnresolvedEvidence,
   recommendAction,
+  recommendedActionLabel,
   renderReportLines,
   replaySentence,
   triggerReason,
@@ -293,6 +294,7 @@ export function Quality() {
                 const smoke = isSmokeSignal(item);
                 const reason = triggerReason(item.triggerMetadata);
                 const rec = recommendAction(item);
+                const requestChangesRecommended = rec.action === "request_changes";
                 const expanded = expandedReason[item.id] ?? false;
                 return (
                   <div key={item.id} className="rounded-lg border border-border bg-card p-3">
@@ -315,12 +317,19 @@ export function Quality() {
                       </div>
                     )}
 
-                    <p className="mt-2 text-[12px] text-muted-foreground"><span className="font-medium text-foreground">What to judge:</span> {decisionPrompt(item.status)}</p>
+                    <div className={cn("mt-2 rounded border px-2.5 py-1.5", rec.tone === "warn" ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-muted/30")}>
+                      <p className="text-[12px] font-medium text-foreground">Recommended action: {recommendedActionLabel(rec.action)}</p>
+                      <p className={cn("mt-0.5 text-[11px]", rec.tone === "warn" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>{rec.why}</p>
+                    </div>
 
                     <div className="mt-2">
                       <p className="text-[11px] font-medium text-muted-foreground">Evidence</p>
                       {item.evidenceRefs.length === 0 ? (
-                        <p className="text-[11px] text-amber-600 dark:text-amber-400">No structured evidence — only the trigger reason above. Consider needs_evidence to request a fresh probe before judging.</p>
+                        <p className={cn("text-[11px]", requestChangesRecommended ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400")}>
+                          {requestChangesRecommended
+                            ? "No structured evidence — but the trigger reason is enough to request changes. Optionally add a fresh probe if you want more."
+                            : "No structured evidence — only the trigger reason above. Consider needs_evidence to request a fresh probe before judging."}
+                        </p>
                       ) : (
                         <ul className="mt-0.5 flex flex-col gap-0.5">
                           {item.evidenceRefs.map((r) => {
@@ -341,14 +350,21 @@ export function Quality() {
                       )}
                     </div>
 
-                    <p className="mt-2 text-[12px]">
-                      <span className="font-medium text-foreground">Recommended:</span>{" "}
-                      <span className={rec.tone === "warn" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}>{rec.action}</span>
-                    </p>
-
                     <p className="mt-1 text-[11px] text-muted-foreground">
-                      <span className="font-medium text-foreground">Resolution:</span>{" "}
-                      {item.missionTitle ? `${item.missionTitle}${item.missionStatus ? ` (${item.missionStatus})` : ""}` : item.missionId ? `mission ${item.missionId.slice(0, 8)} — verify current status in the source mission` : "no mission link; verify at the target"}
+                      <span className="font-medium text-foreground">Mission:</span>{" "}
+                      {item.missionId ? (
+                        <>
+                          <Link to={`/missions/${item.missionId}`} className="text-blue-600 underline-offset-2 hover:underline dark:text-blue-400">
+                            {item.missionTitle ?? "open mission"}
+                          </Link>
+                          {item.missionStatus ? ` (${item.missionStatus})` : ""}
+                          <span className="ml-1 text-[10px] text-muted-foreground/70">{item.missionId.slice(0, 8)}</span>
+                        </>
+                      ) : item.missionTitle ? (
+                        <span>{item.missionTitle}{item.missionStatus ? ` (${item.missionStatus})` : ""}</span>
+                      ) : (
+                        <span>no mission link; verify at the target</span>
+                      )}
                     </p>
 
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -358,6 +374,7 @@ export function Quality() {
                       </button>
                       {VERDICTS.map((v) => (
                         <button key={v} type="button" disabled={busy === `${item.id}:verdict`} onClick={() => handleVerdict(item, v)} className={cn("rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-50",
+                          v === rec.action && "ring-2 ring-offset-1 ring-offset-card font-bold ring-foreground/50",
                           v === "pass" && "border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400",
                           v === "fail" && "border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-400",
                           v === "request_changes" && "border-orange-500/40 text-orange-700 hover:bg-orange-500/10 dark:text-orange-400",

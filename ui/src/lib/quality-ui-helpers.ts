@@ -8,6 +8,7 @@ import type {
   QualityDailyReport,
   QualityEvaluatorAnchorCase,
   QualityReviewItemListItem,
+  QualityVerdict,
 } from "@paperclipai/shared";
 
 export const UNRESOLVED_EVIDENCE_STATUSES = ["missing", "failed", "stale", "insufficient"];
@@ -60,19 +61,68 @@ export function decisionPrompt(status: string): string {
   }
 }
 
-/** 보수적·상태파생 추천 액션(LLM 없음). */
-export function recommendAction(item: QualityReviewItemListItem): { action: string; tone: "info" | "warn" } {
-  if (isClosedStatus(item.status)) return { action: "No action — closed.", tone: "info" };
-  if (item.status === "evidence_collecting") return { action: "Awaiting evidence collection. Keep this open until probes return.", tone: "info" };
-  if (item.status === "evaluator_replay_queued") return { action: "Await evaluator replay before promoting.", tone: "info" };
+/** REQUEST_CHANGES 신호 감지(자동 trigger 가 rework 를 요구했는지).
+ * [입력] reason=triggerMetadata.reason 원문, failureType=자동 trigger 파생 실패유형.
+ * [출력] true 면 추천 액션을 request_changes 로 통일(needs_evidence 억제).
+ * [주의] failureType 집합은 heartbeat/loop-driver/plan-QA 의 request_changes 게이트와 1:1. 추가 시 양쪽 확인.
+ */
+const REQUEST_CHANGES_REASON_RE = /request[_\s-]?changes|rework|재작업|수정\s*(필요|요청|해야)|changes?\s+requested|fix\s+required/i;
+const REQUEST_CHANGES_FAILURE_TYPES = new Set(["final_qa_failure", "plan_qa_failure", "delivery_verification"]);
+
+export function indicatesRequestChanges(input: { reason: string | null; failureType: string | null }): boolean {
+  return (
+    (!!input.reason && REQUEST_CHANGES_REASON_RE.test(input.reason)) ||
+    (input.failureType !== null && REQUEST_CHANGES_FAILURE_TYPES.has(input.failureType))
+  );
+}
+
+/** why 문장을 사람 판단용으로 정리. raw reason 이 판단 근거로 충분하면(길이 적당) 그대로, 아니면 게이트 출처 fallback. */
+function requestChangesWhy(item: QualityReviewItemListItem, reason: string | null): string {
+  const source =
+    item.failureType === "final_qa_failure" ? "Final QA" :
+    item.failureType === "plan_qa_failure" ? "Plan QA" :
+    item.failureType === "delivery_verification" ? "Delivery QA" :
+    null;
+  if (reason && reason.length <= 240) return reason;
+  if (source) return `${source} already requested changes with a concrete reason; send this back for rework instead of requesting fresh evidence.`;
+  return "A prior review step already requested changes; send this back for rework instead of requesting fresh evidence.";
+}
+
+/** 보수적·상태파생 추천 액션(LLM 없음). action = 강조할 verdict(없으면 null).
+ * [수정시 영향] REQUEST_CHANGES 신호가 needs_evidence 보다 우선 → reason/failureType 기반 rework 권장.
+ */
+export type RecommendedVerdict = QualityVerdict | null;
+
+export function recommendAction(item: QualityReviewItemListItem): { action: RecommendedVerdict; why: string; tone: "info" | "warn" } {
+  if (isClosedStatus(item.status)) return { action: null, why: "No action — item is closed.", tone: "info" };
+  if (item.status === "evidence_collecting") return { action: null, why: "Evidence is being collected. Keep this open until probes return.", tone: "info" };
+  if (item.status === "evaluator_replay_queued") return { action: null, why: "Await evaluator replay before promoting.", tone: "info" };
+
+  const reason = triggerReason(item.triggerMetadata);
+  if (indicatesRequestChanges({ reason, failureType: item.failureType })) {
+    return { action: "request_changes", why: requestChangesWhy(item, reason), tone: "warn" };
+  }
+
   const unresolved = item.evidenceRefs.filter(isUnresolvedEvidence);
-  if (item.evidenceRefs.length === 0) {
-    return { action: "No structured evidence — consider needs_evidence to request a fresh probe before judging.", tone: "warn" };
-  }
   if (unresolved.length > 0) {
-    return { action: `${unresolved.length} blocking/failed evidence surface(s) — consider fail or request_changes.`, tone: "warn" };
+    return { action: "request_changes", why: `${unresolved.length} blocking/failed evidence surface(s) — fix or re-probe, then re-review.`, tone: "warn" };
   }
-  return { action: "Evidence resolved — review the target, then pass or dismiss.", tone: "info" };
+  if (item.evidenceRefs.length === 0) {
+    return { action: "needs_evidence", why: "No structured evidence and no rework signal — request a fresh probe before judging.", tone: "warn" };
+  }
+  return { action: null, why: "Evidence resolved — review the target, then pass or dismiss.", tone: "info" };
+}
+
+/** 추천 verdict → 사람이 읽는 라벨(Queue 강조 라벨용). */
+export function recommendedActionLabel(action: RecommendedVerdict): string {
+  switch (action) {
+    case "request_changes": return "Request changes";
+    case "needs_evidence": return "Needs evidence";
+    case "pass": return "Pass";
+    case "fail": return "Fail";
+    case "dismissed": return "Dismiss";
+    default: return "Review and judge";
+  }
 }
 
 /** evidence ref 한 줄 요약(surface: status [+blocking] [+sourceUrl]). */
