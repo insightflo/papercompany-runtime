@@ -33,6 +33,9 @@ import { clampGraphCanvasScale, clampGraphInspectorWidth, graphEdgeMetadataFor, 
 import { GraphTriggerSummaryCard } from "./GraphTriggerSummaryCard.js";
 import { GraphEmptyState } from "./GraphEmptyState.js";
 import { useRawStepJsonEditor } from "./useRawStepJsonEditor.js";
+import { useGraphAgents } from "./useGraphAgents.js";
+import { useWorkflowGraphDerivedState } from "./useWorkflowGraphDerivedState.js";
+import { useWorkflowGraphMetadataHandlers } from "./useWorkflowGraphMetadataHandlers.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { GraphInspector } from "./GraphInspector.js";
 
@@ -72,27 +75,6 @@ function WorkflowGraphEditor({
   const [canvasScale, setCanvasScale] = useState<number>(1);
   const [graphInspectorWidth, setGraphInspectorWidth] = useState<number>(420);
   const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
-  const { selectedCompanyId: graphCompanyId } = useCompany();
-  const [graphAgents, setGraphAgents] = useState<{ id: string; name: string }[]>([]);
-  useEffect(() => {
-    const cid = graphCompanyId ?? "";
-    if (!cid.trim()) return;
-    let cancelled = false;
-    fetch(`${apiBaseUrl()}/api/companies/${encodeURIComponent(cid)}/agents`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data: unknown) => {
-        if (cancelled || !Array.isArray(data)) return;
-        setGraphAgents(
-          data
-            .filter((a): a is Record<string, unknown> => Boolean(a && typeof a === "object"))
-            .map((a) => ({ id: String(a.id ?? ""), name: String(a.name ?? a.id ?? "") })),
-        );
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [graphCompanyId]);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [connectingFromStepId, setConnectingFromStepId] = useState<string | null>(null);
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
@@ -103,20 +85,19 @@ function WorkflowGraphEditor({
   const graphNodeDragRef = React.useRef<GraphNodeDragState | null>(null);
   const graphCanvasPanRef = React.useRef<GraphCanvasPanState | null>(null);
   const suppressNodeClickRef = React.useRef<string | null>(null);
-  const displaySteps = useMemo(() => {
-    if (!runOverlaySteps) return steps;
-    const positionsById = new Map(steps.map((step) => [step.id, {
-      graphPositionX: step.graphPositionX,
-      graphPositionY: step.graphPositionY,
-    }]));
-    return runOverlaySteps.map((step) => {
-      const position = positionsById.get(step.id);
-      return position ? { ...step, ...position } : step;
-    });
-  }, [runOverlaySteps, steps]);
-  const graph = useMemo(() => buildWorkflowGraphModel(displaySteps), [displaySteps]);
-  const matchingNodeIds = useMemo(() => new Set<string>(), []);
-  const selectedStep = steps.find((step) => step.id === selectedStepId) ?? steps[0] ?? null;
+  const graphAgents = useGraphAgents();
+  const {
+    displaySteps, graph, matchingNodeIds, selectedStep, selectedGraphNode, selectedStepIdForKeyboard,
+    selectedGraphContext, selectedDataFlowMap, selectedPathSummary, selectedPathFailureHandlerId,
+    selectedPathFailureRouteSummary, selectedPathNodeIds, selectedContainerSummary, selectedGroup,
+    diagnostics, repairPlan, inspectorSummary, testDrawerSummary, evidenceSummary, workbenchSummary,
+    activeInspectorSection, showOverviewInspector, showEditInspector, showPolicyInspector,
+    showRawInspector, inspectorAccent, canvasHeight, canvasWidth, graphTriggerSummary,
+    selectedEdgeActionAnchor,
+  } = useWorkflowGraphDerivedState({
+    steps, runOverlaySteps, selectedStepId, selectedPathStepIds, failureHandlerStepId,
+    graphInspectorMode, triggerSummary, testInterfaceInput, selectedEdgeId,
+  });
   const {
     rawStepJsonText,
     rawStepJsonFeedback,
@@ -132,92 +113,11 @@ function WorkflowGraphEditor({
     setSelectedPathStepIds,
     setGraphError: (e: string) => setGraphError(e),
   });
-  const selectedGraphNode = selectedStep ? graph.nodes.find((node) => node.step.id === selectedStep.id) ?? null : null;
-  const selectedStepIdForKeyboard = selectedStep?.id ?? "";
-  const selectedGraphContext = selectedStep ? getWorkflowGraphStepContext(steps, selectedStep.id) : null;
-  const selectedDataFlowMap = useMemo<WorkflowGraphDataFlowMap | null>(
-    () => selectedStep ? buildWorkflowGraphDataFlowMap(steps, selectedStep.id) : null,
-    [selectedStep, steps],
-  );
-  const selectedPathSummary = useMemo<WorkflowGraphSelectionSummary>(
-    () => buildWorkflowGraphSelectionSummary(steps, selectedPathStepIds),
-    [steps, selectedPathStepIds],
-  );
-  const selectedPathFailureHandlerId = failureHandlerStepId || selectedPathSummary.outboundStepIds[0] || "";
-  const selectedPathFailureRouteSummary = useMemo<WorkflowGraphFailureRouteSummary>(
-    () => buildWorkflowGraphFailureRouteSummary(steps, selectedPathSummary.stepIds, selectedPathFailureHandlerId, {
-      label: "Selected path failure",
-      condition: "upstream step failed",
-    }),
-    [steps, selectedPathSummary.stepIds, selectedPathFailureHandlerId],
-  );
-  const selectedPathNodeIds = useMemo(
-    () => new Set(selectedPathSummary.stepIds),
-    [selectedPathSummary],
-  );
-  const selectedContainerSummary = useMemo<WorkflowGraphContainerSummary | null>(
-    () => {
-      const containerId = selectedStep?.graphContainerId.trim() ?? "";
-      return containerId ? buildWorkflowGraphContainerSummary(steps, containerId) : null;
-    },
-    [selectedStep, steps],
-  );
-  const selectedGroup = selectedStep?.graphGroupId.trim()
-    ? graph.groups.find((group) => group.id === selectedStep.graphGroupId.trim()) ?? null
-    : null;
-  const diagnostics = graph.diagnostics;
-  const repairPlan = useMemo<WorkflowGraphRepairPlan>(
-    () => buildWorkflowGraphRepairPlan(steps),
-    [steps],
-  );
-  const inspectorSummary = useMemo<WorkflowGraphInspectorSummary>(
-    () => buildWorkflowGraphInspectorSummary(steps, selectedStep?.id ?? "", selectedPathStepIds),
-    [selectedPathStepIds, selectedStep, steps],
-  );
-  const testDrawerSummary = useMemo<WorkflowGraphTestDrawerSummary>(
-    () => buildWorkflowGraphTestDrawerSummary(steps, selectedStep?.id ?? "", testInterfaceInput),
-    [selectedStep, steps, testInterfaceInput],
-  );
-  const evidenceSummary = useMemo<WorkflowGraphExecutionEvidenceSummary>(
-    () => buildWorkflowGraphExecutionEvidenceSummary(displaySteps, selectedStep?.id ?? ""),
-    [displaySteps, selectedStep],
-  );
-  const workbenchSummary = useMemo<WorkflowGraphWorkbenchSummary>(
-    () => buildWorkflowGraphWorkbenchSummary(steps, selectedStep?.id ?? "", selectedPathStepIds),
-    [selectedPathStepIds, selectedStep, steps],
-  );
-  const activeInspectorSection = inspectorSummary.sections.find((section) => section.mode === graphInspectorMode) ?? inspectorSummary.sections[0];
-  const showOverviewInspector = false;
-  const showEditInspector = graphInspectorMode === "edit";
-  const showPolicyInspector = graphInspectorMode === "policy";
-  const showRawInspector = graphInspectorMode === "raw";
-  const inspectorAccent = graphInspectorMode === "overview"
-    ? "#22c55e"
-    : graphInspectorMode === "edit"
-      ? "#38bdf8"
-      : graphInspectorMode === "policy"
-        ? "#f59e0b"
-        : graphInspectorMode === "raw"
-          ? "#a78bfa"
-          : "#fbbf24";
-  const canvasHeight = Math.max(360, ...graph.nodes.map((node) => node.y + 132), 360);
-  const canvasWidth = Math.max(620, ...graph.nodes.map((node) => node.x + 230), 620);
-  const graphTriggerSummary = triggerSummary ?? summarizeWorkflowGraphTriggers({});
-  const selectedEdgeActionAnchor = useMemo<GraphEdgeActionAnchor | null>(() => {
-    if (!selectedEdgeId) return null;
-    const edge = graph.edges.find((candidate) => candidate.id === selectedEdgeId);
-    if (!edge) return null;
-    const source = graph.nodes.find((node) => node.id === edge.source);
-    const target = graph.nodes.find((node) => node.id === edge.target);
-    if (!source || !target) return null;
-    const startX = source.x + 172;
-    const startY = source.y + 38;
-    const endX = target.x;
-    const endY = target.y + 38;
-    const midX = startX + Math.max(34, (endX - startX) / 2);
-    return { edge, x: midX, y: (startY + endY) / 2 };
-  }, [graph.edges, graph.nodes, selectedEdgeId]);
-
+  const {
+    updateSelected, updateEdge, updateSelectedGroupMetadata, updateSelectedAdvanced,
+    updateSelectedApproval, updateSelectedTesting, updateSelectedExecution, updateSelectedDataFlow,
+    updateSelectedResources, setSelectedNote, updateSelectedContainerMetadata,
+  } = useWorkflowGraphMetadataHandlers({ steps, onChange, selectedStep, setGraphError });
   useEffect(() => {
     const container = graphCanvasRef.current;
     if (!container) return undefined;
@@ -231,10 +131,6 @@ function WorkflowGraphEditor({
     return () => container.removeEventListener("wheel", handleWheel);
   }, [canvasScale]);
 
-  function updateSelected(patch: Partial<StepDraft>): void {
-    if (!selectedStep) return;
-    onChange(steps.map((step) => (step.id === selectedStep.id ? { ...step, ...patch } : step)));
-  }
 
   function updateStepGraphPosition(stepId: string, x: number, y: number): void {
     onChange(steps.map((step) => (step.id === stepId ? {
@@ -310,11 +206,6 @@ function WorkflowGraphEditor({
     onChange(disconnectSteps(steps, sourceId, targetId));
   }
 
-  function updateEdge(sourceId: string, patch: { kind?: string; label?: string; condition?: string }): void {
-    if (!selectedStep) return;
-    setGraphError("");
-    onChange(updateGraphEdgeMetadata(steps, sourceId, selectedStep.id, patch));
-  }
 
   function addAfter(stepId: string | null): void {
     const next = appendStepAfter(steps, stepId);
@@ -732,108 +623,13 @@ function WorkflowGraphEditor({
     onChange(setGraphGroupCollapsed(steps, selectedStep.graphGroupId, collapsed));
   }
 
-  function updateSelectedGroupMetadata(patch: { title?: string; color?: string; collapsedByDefault?: boolean }): void {
-    if (!selectedStep) return;
-    const groupId = selectedStep.graphGroupId.trim();
-    if (!groupId) {
-      onChange(steps.map((step) => step.id === selectedStep.id ? {
-        ...step,
-        ...(patch.title !== undefined ? { graphGroupTitle: patch.title } : {}),
-        ...(patch.color !== undefined ? { graphGroupColor: patch.color } : {}),
-        ...(patch.collapsedByDefault !== undefined ? { graphGroupCollapsedByDefault: patch.collapsedByDefault } : {}),
-      } : step));
-      return;
-    }
-    onChange(updateGraphGroupMetadata(steps, groupId, patch));
-  }
 
-  function updateSelectedAdvanced(patch: Partial<Pick<StepDraft, "onFailure" | "maxRetries" | "graphRetryDelaySeconds" | "graphRetryBackoff" | "graphRetryJitter" | "timeoutSeconds" | "graphSleepSeconds" | "graphSuspendUntil" | "graphSuspendTimeoutSeconds" | "graphSuspendTimeoutAction" | "graphEarlyReturn" | "graphEarlyReturnContentType" | "graphEarlyReturnSchema" | "graphErrorHandler" | "graphErrorHandlerScope" | "graphErrorHandlerInput" | "graphRestartBoundary" | "graphRestartStrategy" | "graphRestartInput" | "graphEarlyStopCondition" | "graphEarlyStopLabelSkipped">>): void {
-    if (!selectedStep) return;
-    const nextDraft = { ...selectedStep, ...patch };
-    onChange(updateStepAdvancedMetadata(steps, selectedStep.id, {
-      ...(Object.hasOwn(patch, "onFailure") ? { onFailure: nextDraft.onFailure } : {}),
-      ...(Object.hasOwn(patch, "maxRetries") ? { maxRetries: parseOptionalNonNegativeInteger(String(nextDraft.maxRetries ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphRetryDelaySeconds") ? { retryDelaySeconds: parseOptionalPositiveInteger(String(nextDraft.graphRetryDelaySeconds ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphRetryBackoff") ? { retryBackoff: nextDraft.graphRetryBackoff } : {}),
-      ...(Object.hasOwn(patch, "graphRetryJitter") ? { retryJitter: nextDraft.graphRetryJitter } : {}),
-      ...(Object.hasOwn(patch, "timeoutSeconds") ? { timeoutSeconds: parseOptionalPositiveInteger(String(nextDraft.timeoutSeconds ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphSleepSeconds") ? { sleepSeconds: parseOptionalPositiveInteger(String(nextDraft.graphSleepSeconds ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphSuspendUntil") ? { suspendUntil: nextDraft.graphSuspendUntil } : {}),
-      ...(Object.hasOwn(patch, "graphSuspendTimeoutSeconds") ? { suspendTimeoutSeconds: parseOptionalPositiveInteger(String(nextDraft.graphSuspendTimeoutSeconds ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphSuspendTimeoutAction") ? { suspendTimeoutAction: nextDraft.graphSuspendTimeoutAction } : {}),
-      ...(Object.hasOwn(patch, "graphEarlyReturn") ? { earlyReturn: nextDraft.graphEarlyReturn } : {}),
-      ...(Object.hasOwn(patch, "graphEarlyReturnContentType") ? { earlyReturnContentType: nextDraft.graphEarlyReturnContentType } : {}),
-      ...(Object.hasOwn(patch, "graphEarlyReturnSchema") ? { earlyReturnSchema: nextDraft.graphEarlyReturnSchema } : {}),
-      ...(Object.hasOwn(patch, "graphErrorHandler") ? { errorHandler: nextDraft.graphErrorHandler } : {}),
-      ...(Object.hasOwn(patch, "graphErrorHandlerScope") ? { errorHandlerScope: nextDraft.graphErrorHandlerScope } : {}),
-      ...(Object.hasOwn(patch, "graphErrorHandlerInput") ? { errorHandlerInput: nextDraft.graphErrorHandlerInput } : {}),
-      ...(Object.hasOwn(patch, "graphRestartBoundary") ? { restartBoundary: nextDraft.graphRestartBoundary } : {}),
-      ...(Object.hasOwn(patch, "graphRestartStrategy") ? { restartStrategy: nextDraft.graphRestartStrategy } : {}),
-      ...(Object.hasOwn(patch, "graphRestartInput") ? { restartInput: nextDraft.graphRestartInput } : {}),
-      ...(Object.hasOwn(patch, "graphEarlyStopCondition") ? { earlyStopCondition: nextDraft.graphEarlyStopCondition } : {}),
-      ...(Object.hasOwn(patch, "graphEarlyStopLabelSkipped") ? { earlyStopLabelSkipped: nextDraft.graphEarlyStopLabelSkipped } : {}),
-    }));
-  }
 
-  function updateSelectedApproval(patch: Partial<Pick<StepDraft, "graphApprovalRequired" | "graphApprovalPrompt" | "graphApprovalRecipients" | "graphApprovalTimeoutSeconds" | "graphApprovalTimeoutAction">>): void {
-    if (!selectedStep) return;
-    const nextDraft = { ...selectedStep, ...patch };
-    onChange(updateStepApprovalMetadata(steps, selectedStep.id, {
-      ...(Object.hasOwn(patch, "graphApprovalRequired") ? { required: nextDraft.graphApprovalRequired } : {}),
-      ...(Object.hasOwn(patch, "graphApprovalPrompt") ? { prompt: nextDraft.graphApprovalPrompt } : {}),
-      ...(Object.hasOwn(patch, "graphApprovalRecipients") ? { recipients: nextDraft.graphApprovalRecipients } : {}),
-      ...(Object.hasOwn(patch, "graphApprovalTimeoutSeconds") ? { timeoutSeconds: parseOptionalPositiveInteger(String(nextDraft.graphApprovalTimeoutSeconds ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphApprovalTimeoutAction") ? { timeoutAction: nextDraft.graphApprovalTimeoutAction } : {}),
-    }));
-  }
 
-  function updateSelectedTesting(patch: Partial<Pick<StepDraft, "graphMockEnabled" | "graphMockResult" | "graphPinnedResultRunId">>): void {
-    if (!selectedStep) return;
-    const nextDraft = { ...selectedStep, ...patch };
-    onChange(updateStepTestingMetadata(steps, selectedStep.id, {
-      ...(Object.hasOwn(patch, "graphMockEnabled") ? { mockEnabled: nextDraft.graphMockEnabled } : {}),
-      ...(Object.hasOwn(patch, "graphMockResult") ? { mockResult: nextDraft.graphMockResult } : {}),
-      ...(Object.hasOwn(patch, "graphPinnedResultRunId") ? { pinnedResultRunId: nextDraft.graphPinnedResultRunId } : {}),
-    }));
-  }
 
-  function updateSelectedExecution(patch: Partial<Pick<StepDraft, "graphConcurrencyKey" | "graphConcurrencyLimit" | "graphPriority" | "graphCacheEnabled" | "graphCacheTtlSeconds" | "graphDeleteAfterUse">>): void {
-    if (!selectedStep) return;
-    const nextDraft = { ...selectedStep, ...patch };
-    onChange(updateStepExecutionMetadata(steps, selectedStep.id, {
-      ...(Object.hasOwn(patch, "graphConcurrencyKey") ? { concurrencyKey: nextDraft.graphConcurrencyKey } : {}),
-      ...(Object.hasOwn(patch, "graphConcurrencyLimit") ? { concurrencyLimit: parseOptionalPositiveInteger(String(nextDraft.graphConcurrencyLimit ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphPriority") ? { priority: nextDraft.graphPriority } : {}),
-      ...(Object.hasOwn(patch, "graphCacheEnabled") ? { cacheEnabled: nextDraft.graphCacheEnabled } : {}),
-      ...(Object.hasOwn(patch, "graphCacheTtlSeconds") ? { cacheTtlSeconds: parseOptionalPositiveInteger(String(nextDraft.graphCacheTtlSeconds ?? "")) } : {}),
-      ...(Object.hasOwn(patch, "graphDeleteAfterUse") ? { deleteAfterUse: nextDraft.graphDeleteAfterUse } : {}),
-    }));
-  }
 
-  function updateSelectedDataFlow(patch: Partial<Pick<StepDraft, "graphInputExpression" | "graphOutputSchema" | "graphWorkProductRequired" | "graphWorkProductPattern">>): void {
-    if (!selectedStep) return;
-    const nextDraft = { ...selectedStep, ...patch };
-    onChange(updateStepDataFlowMetadata(steps, selectedStep.id, {
-      ...(Object.hasOwn(patch, "graphInputExpression") ? { inputExpression: nextDraft.graphInputExpression } : {}),
-      ...(Object.hasOwn(patch, "graphOutputSchema") ? { outputSchema: nextDraft.graphOutputSchema } : {}),
-      ...(Object.hasOwn(patch, "graphWorkProductRequired") ? { workProductRequired: nextDraft.graphWorkProductRequired } : {}),
-      ...(Object.hasOwn(patch, "graphWorkProductPattern") ? { workProductPattern: nextDraft.graphWorkProductPattern } : {}),
-    }));
-  }
 
-  function updateSelectedResources(patch: Partial<Pick<StepDraft, "graphResourceRefs" | "graphSecretRefs">>): void {
-    if (!selectedStep) return;
-    const nextDraft = { ...selectedStep, ...patch };
-    onChange(updateStepResourceMetadata(steps, selectedStep.id, {
-      ...(Object.hasOwn(patch, "graphResourceRefs") ? { resourceRefs: nextDraft.graphResourceRefs } : {}),
-      ...(Object.hasOwn(patch, "graphSecretRefs") ? { secretRefs: nextDraft.graphSecretRefs } : {}),
-    }));
-  }
 
-  function setSelectedNote(note: string): void {
-    if (!selectedStep) return;
-    onChange(updateStepNote(steps, selectedStep.id, note));
-  }
 
   function wrapSelectedPathInContainer(): void {
     if (!selectedStep) return;
@@ -905,27 +701,6 @@ function WorkflowGraphEditor({
     onChange(withStepDraftDefaults(clearWorkflowContainer(steps, containerId)));
   }
 
-  function updateSelectedContainerMetadata(patch: Partial<Pick<StepDraft, "graphContainerType" | "graphContainerTitle" | "graphContainerDescription" | "graphContainerMode" | "graphContainerCondition" | "graphContainerIterator" | "graphContainerSkipFailure" | "graphContainerRunInParallel" | "graphContainerParallelism">>): void {
-    if (!selectedStep) return;
-    const groupId = selectedStep.graphContainerId.trim();
-    const nextDraft = { ...selectedStep, ...patch };
-    const parsedParallelism = parseOptionalPositiveInteger(String(nextDraft.graphContainerParallelism ?? ""));
-    if (!groupId) {
-      onChange(steps.map((step) => step.id === selectedStep.id ? { ...step, ...patch } : step));
-      return;
-    }
-    onChange(updateContainerMetadata(steps, groupId, {
-      ...(Object.hasOwn(patch, "graphContainerType") ? { type: nextDraft.graphContainerType } : {}),
-      ...(Object.hasOwn(patch, "graphContainerTitle") ? { title: nextDraft.graphContainerTitle } : {}),
-      ...(Object.hasOwn(patch, "graphContainerDescription") ? { description: nextDraft.graphContainerDescription } : {}),
-      ...(Object.hasOwn(patch, "graphContainerMode") ? { mode: nextDraft.graphContainerMode } : {}),
-      ...(Object.hasOwn(patch, "graphContainerCondition") ? { condition: nextDraft.graphContainerCondition } : {}),
-      ...(Object.hasOwn(patch, "graphContainerIterator") ? { iterator: nextDraft.graphContainerIterator } : {}),
-      ...(Object.hasOwn(patch, "graphContainerSkipFailure") ? { skipFailure: nextDraft.graphContainerSkipFailure } : {}),
-      ...(Object.hasOwn(patch, "graphContainerRunInParallel") ? { runInParallel: nextDraft.graphContainerRunInParallel } : {}),
-      ...(Object.hasOwn(patch, "graphContainerParallelism") ? { parallelism: parsedParallelism } : {}),
-    }));
-  }
 
   if (steps.length === 0) {
     return <GraphEmptyState onAddEntry={() => addAfter(null)} onInsertPaletteNode={insertPaletteNode} />;
