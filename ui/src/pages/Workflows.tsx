@@ -19,6 +19,7 @@ import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
 import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, isRecord, normalizeMaxDailyRunsInput, parseJsonArrayField } from "./workflows/workflow-form-utils.js";
 import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
 import { WorkflowDefinitionsResizeHandle } from "./workflows/workflow-definitions-resize-handle.js";
+import { WorkflowPageHeader } from "./workflows/workflow-page-header.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
 import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
 import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
@@ -2288,46 +2289,15 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
 
   return (
     <div data-plugin-id={PLUGIN_ID} id="wf-page" style={pageStyle}>
-      <div id="wf-header" key="workflow-page-header" style={{ ...headerRowStyle, flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <h1 key="title" style={titleStyle}>Workflows</h1>
-          <button
-            type="button"
-            title={showHelp ? "도움말 닫기" : "도움말"}
-            aria-label="Help"
-            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "20px", height: "20px", borderRadius: "50%", border: "1px solid var(--muted-foreground, #94a3b8)", background: "transparent", color: "var(--muted-foreground, #94a3b8)", cursor: "pointer", fontSize: "12px", fontWeight: 700, padding: 0, lineHeight: 1 }}
-            onClick={() => setShowHelp(!showHelp)}
-          >
-            ?
-          </button>
-        </div>
-        <div key="header-actions" style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-          <button
-            key="new-workflow"
-            type="button"
-            style={showNewWorkflowForm ? { ...buttonStyle, ...buttonDisabledStyle } : primaryButtonStyle}
-            disabled={showNewWorkflowForm}
-            onClick={() => {
-              setCreateError("");
-              setShowNewWorkflowForm(true);
-            }}
-          >
-            + New Workflow
-          </button>
-          <button
-            key="refresh"
-            type="button"
-            onClick={() => {
-              void refreshOverview();
-            }}
-            disabled={isRefreshing}
-            style={isRefreshing ? { ...buttonStyle, ...buttonDisabledStyle } : buttonStyle}
-          >
-            {refreshButtonLabel}
-          </button>
-          <HelpIcon label="New Workflow opens the creation form. Refresh reloads workflow definitions and run status from the server." />
-        </div>
-      </div>
+      <WorkflowPageHeader
+        showHelp={showHelp}
+        onToggleHelp={() => setShowHelp(!showHelp)}
+        showNewWorkflowForm={showNewWorkflowForm}
+        onNewWorkflow={() => { setCreateError(""); setShowNewWorkflowForm(true); }}
+        isRefreshing={isRefreshing}
+        refreshButtonLabel={refreshButtonLabel}
+        onRefresh={refreshOverview}
+      />
 
       <section id="wf-definitions" key="definitions-section" style={{ ...workflowFocusSectionStyle, height: definitionsCollapsed || definitionsHeight === null ? "auto" : `${definitionsHeight}px`, overflow: definitionsHeight === null ? "visible" : "auto", minHeight: definitionsCollapsed ? "auto" : "200px" }}>
         <div key="definitions-toolbar" style={{ ...workflowFocusToolbarStyle, flexShrink: 0, height: "fit-content" }}>
