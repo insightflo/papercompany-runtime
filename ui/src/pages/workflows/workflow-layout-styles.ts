@@ -134,3 +134,11 @@ export const workflowSelectedWorkspaceStyle: CSSProperties = {
   minHeight: 0,
   overflow: "auto",
 };
+
+export const workflowSelectedEditorStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateRows: "auto minmax(0, 1fr) auto",
+  gap: "0",
+  minWidth: 0,
+  minHeight: 0,
+};
