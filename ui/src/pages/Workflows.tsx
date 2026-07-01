@@ -4,7 +4,7 @@ import { useCompany } from "../context/CompanyContext";
 import { buildManualRunFeedback, buildManualRunButtonState, findNewRunId, manualRunUnavailableMessage } from "./workflows/run-feedback.js";
 import { ActiveRunsTable, RecentRunsTable, WorkflowRunDebugStrip, WorkflowRunDrawer, workflowRunDrawerActionsStyle, workflowRunOverlayBannerStyle, type WorkflowRunDrawerMode } from "./workflows/workflow-runs.js";
 import { jsonToSteps, parseOptionalNonNegativeInteger, parseOptionalPositiveInteger, stepsToJson, withStepDraftDefaults, type StepDraft } from "./workflows/step-draft.js";
-import { appendStepAfter, applyStepRunsToGraphSteps, applyWorkflowGraphFailureRoute, assignStepsToContainer, assignStepsToGroup, buildWorkflowGraphContainerSummary, buildWorkflowGraphDataFlowMap, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphExecutionEvidenceSummary, buildWorkflowGraphExportSnapshot, buildWorkflowGraphFailureRouteSummary, buildWorkflowGraphInspectorSummary, buildWorkflowGraphModel, buildWorkflowGraphRepairPlan, buildWorkflowGraphRunDebugSummary, buildWorkflowGraphSelectionSummary, buildWorkflowGraphStructurePaletteSummary, buildWorkflowGraphTestDrawerSummary, buildWorkflowGraphWorkbenchSummary, clearStepsGroup, clearWorkflowContainer, connectSteps, disconnectSteps, duplicateWorkflowContainer, duplicateWorkflowStep, expandWorkflowGraphSelection, getWorkflowGraphStepContext, insertWorkflowStepFromPalette, normalizeGraphEdgeKind, normalizeGraphRunStatus, parseDependencies, parseWorkflowGraphYamlDraft, removeWorkflowStep, renameWorkflowStep, serializeWorkflowGraphExportSnapshot, setGraphGroupCollapsed, summarizeWorkflowGraphInterface, summarizeWorkflowGraphTriggers, updateContainerMetadata, updateGraphEdgeMetadata, updateGraphGroupMetadata, updateStepAdvancedMetadata, updateStepApprovalMetadata, updateStepDataFlowMetadata, updateStepExecutionMetadata, updateStepNote, updateStepResourceMetadata, updateStepTestingMetadata, type WorkflowGraphContainerSummary, type WorkflowGraphContainerType, type WorkflowGraphDataFlowMap, type WorkflowGraphDefinitionNavigatorItem, type WorkflowGraphEdge, type WorkflowGraphEdgeKind, type WorkflowGraphEdgeMetadataRecord, type WorkflowGraphExecutionEvidenceSummary, type WorkflowGraphExportFormat, type WorkflowGraphExportSnapshot, type WorkflowGraphFailureRouteSummary, type WorkflowGraphInspectorMode, type WorkflowGraphInspectorSummary, type WorkflowGraphInterfaceInput, type WorkflowGraphInterfaceSummary, type WorkflowGraphNavigatorFilter, type WorkflowGraphPaletteNodeKind, type WorkflowGraphRepairPlan, type WorkflowGraphRunStatus, type WorkflowGraphSelectionMode, type WorkflowGraphSelectionSummary, type WorkflowGraphStep, type WorkflowGraphStepContext, type WorkflowGraphTestDrawerSummary, type WorkflowGraphTestInputLibrarySummary, type WorkflowGraphTriggerSummary, type WorkflowGraphWorkbenchSummary } from "./workflows/workflow-graph.js";
+import { appendStepAfter, applyStepRunsToGraphSteps, applyWorkflowGraphFailureRoute, assignStepsToContainer, assignStepsToGroup, buildWorkflowGraphContainerSummary, buildWorkflowGraphDataFlowMap, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphExecutionEvidenceSummary, buildWorkflowGraphExportSnapshot, buildWorkflowGraphFailureRouteSummary, buildWorkflowGraphInspectorSummary, buildWorkflowGraphModel, buildWorkflowGraphRepairPlan, buildWorkflowGraphRunDebugSummary, buildWorkflowGraphSelectionSummary, buildWorkflowGraphStructurePaletteSummary, buildWorkflowGraphTestDrawerSummary, buildWorkflowGraphWorkbenchSummary, clearStepsGroup, clearWorkflowContainer, connectSteps, disconnectSteps, duplicateWorkflowContainer, duplicateWorkflowStep, expandWorkflowGraphSelection, getWorkflowGraphStepContext, insertWorkflowStepFromPalette, normalizeGraphEdgeKind, normalizeGraphRunStatus, parseDependencies, removeWorkflowStep, renameWorkflowStep, setGraphGroupCollapsed, summarizeWorkflowGraphInterface, summarizeWorkflowGraphTriggers, updateContainerMetadata, updateGraphEdgeMetadata, updateGraphGroupMetadata, updateStepAdvancedMetadata, updateStepApprovalMetadata, updateStepDataFlowMetadata, updateStepExecutionMetadata, updateStepNote, updateStepResourceMetadata, updateStepTestingMetadata, type WorkflowGraphContainerSummary, type WorkflowGraphContainerType, type WorkflowGraphDataFlowMap, type WorkflowGraphDefinitionNavigatorItem, type WorkflowGraphEdge, type WorkflowGraphEdgeKind, type WorkflowGraphEdgeMetadataRecord, type WorkflowGraphExecutionEvidenceSummary, type type type WorkflowGraphFailureRouteSummary, type WorkflowGraphInspectorMode, type WorkflowGraphInspectorSummary, type WorkflowGraphInterfaceInput, type type WorkflowGraphNavigatorFilter, type WorkflowGraphPaletteNodeKind, type WorkflowGraphRepairPlan, type WorkflowGraphRunStatus, type WorkflowGraphSelectionMode, type WorkflowGraphSelectionSummary, type WorkflowGraphStep, type WorkflowGraphStepContext, type WorkflowGraphTestDrawerSummary, type type WorkflowGraphTriggerSummary, type WorkflowGraphWorkbenchSummary } from "./workflows/workflow-graph.js";
 import { CREATE_PARENT_ISSUE_POLICIES, normalizeCreateParentIssuePolicy, type CreateParentIssuePolicy } from "./workflows/workflow-parent-policy.js";
 import type { PluginPageProps, PluginWidgetProps, StepEditorMode, ProjectOption, LabelOption, WorkflowToolOption, WorkflowToolGrant, WorkflowOverviewData, StatusFilter, WorkflowScopeFilter, WorkflowRestoreKind, WorkflowSummary, WorkflowRunSummary } from "./workflows/workflow-page-types.js";
 import { badgeRowStyle, buttonDisabledStyle, buttonStyle, dangerButtonStyle, filterTabStyle, graphPolicyBadgeStyle, headerRowStyle, inputStyle, mutedTextStyle, noticeStyle, pageStyle, primaryButtonStyle, sectionTitleStyle, selectStyle, statusBadgeStyle, textareaStyle, titleStyle, widgetCountStyle, widgetTitleStyle, widgetStyle } from "./workflows/workflow-page-styles.js";
@@ -13,6 +13,7 @@ import { ErrorState, FieldLabel, HelpIcon, HelpedText } from "./workflows/shared
 import { splitCommaList, WorkflowToolPicker } from "./workflows/workflow-tool-picker.js";
 import { GraphModeTabs, StepWorkspaceEditor, type StepWorkspaceGraphEditorProps } from "./workflows/step-workspace-editor.js";
 import { WorkflowGraphTestDrawer } from "./workflows/graph-editor/GraphTestDrawer.js";
+import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
 import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeActionAnchor, type GraphNodeDragState } from "./workflows/graph-editor/graphUiUtils.js";
 import { GraphCanvas } from "./workflows/graph-editor/GraphCanvas.js";
@@ -1760,151 +1761,6 @@ function WorkflowGraphEditor({
   );
 }
 
-function WorkflowInterfaceSummary({ summary }: { summary: WorkflowGraphInterfaceSummary }): JSX.Element {
-  return (
-    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" }}>
-      <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--foreground, #f8fafc)" }}>Flow interface</span>
-      {summary.badges.map((badge) => (
-        <span key={badge} style={statusBadgeStyle(badge === "No flow interface" ? "pending" : "running")}>{badge}</span>
-      ))}
-    </div>
-  );
-}
-
-function WorkflowInterfaceFields({
-  flowInputsText,
-  flowEnvVariablesText,
-  testInputPresetsText,
-  onFlowInputsTextChange,
-  onFlowEnvVariablesTextChange,
-  onTestInputPresetsTextChange,
-  summary,
-  testInputLibrary,
-}: {
-  flowInputsText: string;
-  flowEnvVariablesText: string;
-  testInputPresetsText: string;
-  onFlowInputsTextChange: (value: string) => void;
-  onFlowEnvVariablesTextChange: (value: string) => void;
-  onTestInputPresetsTextChange: (value: string) => void;
-  summary: WorkflowGraphInterfaceSummary;
-  testInputLibrary: WorkflowGraphTestInputLibrarySummary;
-}): JSX.Element {
-  return (
-    <div style={{ display: "grid", gap: "8px", padding: "8px", border: "1px solid var(--border, #334155)", borderRadius: "8px" }}>
-      <WorkflowInterfaceSummary summary={summary} />
-      <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
-        {testInputLibrary.badges.map((badge) => (
-          <span key={badge} style={{ ...graphPolicyBadgeStyle, color: "#38bdf8" }}>{badge}</span>
-        ))}
-      </div>
-      <label style={{ display: "grid", gap: "4px" }}>
-        <FieldLabel help="JSON array/object describing workflow-level inputs available to steps and test requests.">Flow inputs JSON</FieldLabel>
-        <textarea
-          style={{ ...textareaStyle, minHeight: "90px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={flowInputsText}
-          onChange={(event) => onFlowInputsTextChange(event.target.value)}
-          rows={4}
-        />
-      </label>
-      <label style={{ display: "grid", gap: "4px" }}>
-        <FieldLabel help="JSON environment variables exposed to workflow tests and graph input previews.">Flow env variables JSON</FieldLabel>
-        <textarea
-          style={{ ...textareaStyle, minHeight: "90px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={flowEnvVariablesText}
-          onChange={(event) => onFlowEnvVariablesTextChange(event.target.value)}
-          rows={4}
-        />
-      </label>
-      <label style={{ display: "grid", gap: "4px" }}>
-        <FieldLabel help="JSON presets that can be selected in Test flow to preview different request payloads.">Saved test inputs JSON</FieldLabel>
-        <textarea
-          style={{ ...textareaStyle, minHeight: "90px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={testInputPresetsText}
-          onChange={(event) => onTestInputPresetsTextChange(event.target.value)}
-          rows={4}
-        />
-      </label>
-    </div>
-  );
-}
-
-function WorkflowExportPreview({
-  snapshot,
-  onApplyYaml,
-}: {
-  snapshot: WorkflowGraphExportSnapshot;
-  onApplyYaml: (snapshot: WorkflowGraphExportSnapshot) => void;
-}): JSX.Element {
-  const [format, setFormat] = useState<WorkflowGraphExportFormat>("json");
-  const [yamlText, setYamlText] = useState<string>("");
-  const [yamlError, setYamlError] = useState<string>("");
-  const exportText = useMemo(() => serializeWorkflowGraphExportSnapshot(snapshot, format), [snapshot, format]);
-  useEffect(() => {
-    if (format === "yaml") {
-      setYamlText(serializeWorkflowGraphExportSnapshot(snapshot, "yaml"));
-      setYamlError("");
-    }
-  }, [format, snapshot]);
-
-  function applyYaml(): void {
-    const parsed = parseWorkflowGraphYamlDraft(yamlText);
-    if (parsed.error) {
-      setYamlError(parsed.error);
-      return;
-    }
-    setYamlError("");
-    onApplyYaml(parsed.snapshot);
-  }
-
-  return (
-    <div style={{ display: "grid", gap: "8px", padding: "8px", border: "1px solid var(--border, #334155)", borderRadius: "8px" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-        <HelpedText help="Export the graph draft as JSON/YAML, or edit YAML and apply it back to the draft." style={{ fontSize: "12px", fontWeight: 700, color: "var(--foreground, #f8fafc)" }}>Export / YAML edit</HelpedText>
-        <div style={{ display: "flex", gap: "6px" }}>
-          {(["json", "yaml"] as WorkflowGraphExportFormat[]).map((entry) => (
-            <button
-              key={entry}
-              type="button"
-              style={format === entry ? primaryButtonStyle : buttonStyle}
-              onClick={() => setFormat(entry)}
-            >
-              {entry.toUpperCase()}
-            </button>
-          ))}
-        </div>
-      </div>
-      {format === "yaml" ? (
-        <Fragment>
-          <FieldLabel help="Editable YAML version of the current graph draft. Apply parses this YAML back into the workflow draft.">YAML draft</FieldLabel>
-          <textarea
-            style={{ ...textareaStyle, minHeight: "190px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-            value={yamlText}
-            onChange={(event) => setYamlText(event.target.value)}
-            rows={8}
-          />
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-            {yamlError ? <span style={{ ...mutedTextStyle, color: "#f87171" }}>{yamlError}</span> : <span style={mutedTextStyle}>Edit YAML applies to the current draft.</span>}
-            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <button type="button" style={primaryButtonStyle} onClick={applyYaml}>Apply YAML</button>
-              <HelpIcon label="Parses the YAML and replaces the current draft graph if it is valid." />
-            </div>
-          </div>
-        </Fragment>
-      ) : (
-        <>
-        <FieldLabel help="Read-only export of the current graph draft in the selected format.">Export preview</FieldLabel>
-        <textarea
-          readOnly
-          style={{ ...textareaStyle, minHeight: "160px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={exportText}
-          rows={7}
-        />
-        </>
-      )}
-    </div>
-  );
-}
 
 function renderWorkflowGraphEditor(props: StepWorkspaceGraphEditorProps): JSX.Element {
   return <WorkflowGraphEditor {...props} />;
