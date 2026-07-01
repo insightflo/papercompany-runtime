@@ -13,10 +13,14 @@ const __ENV_RESTORE: Record<string, string | undefined> = {
   CODEX_HOME: process.env.CODEX_HOME,
   HOME: process.env.HOME,
   PAPERCLIP_API_KEY: process.env.PAPERCLIP_API_KEY,
+  PAPERCLIP_API_URL: process.env.PAPERCLIP_API_URL,
   PAPERCLIP_HOME: process.env.PAPERCLIP_HOME,
   PAPERCLIP_IN_WORKTREE: process.env.PAPERCLIP_IN_WORKTREE,
   PAPERCLIP_INSTANCE_ID: process.env.PAPERCLIP_INSTANCE_ID,
+  PAPERCLIP_LISTEN_HOST: process.env.PAPERCLIP_LISTEN_HOST,
+  PAPERCLIP_LISTEN_PORT: process.env.PAPERCLIP_LISTEN_PORT,
   PAPERCLIP_TEST_CAPTURE_PATH: process.env.PAPERCLIP_TEST_CAPTURE_PATH,
+  PORT: process.env.PORT,
 };
 
 async function writeFakeCodexCommand(commandPath: string): Promise<void> {
@@ -31,6 +35,8 @@ const payload = {
   paperclipEnvKeys: Object.keys(process.env)
     .filter((key) => key.startsWith("PAPERCLIP_"))
     .sort(),
+  paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
+  paperclipApiBaseUrl: process.env.PAPERCLIP_API_BASE_URL || null,
 };
 if (capturePath) {
   fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
@@ -80,6 +86,8 @@ type CapturePayload = {
   prompt: string;
   codexHome: string | null;
   paperclipEnvKeys: string[];
+  paperclipApiUrl?: string | null;
+  paperclipApiBaseUrl?: string | null;
 };
 
 type LogEntry = {
@@ -191,6 +199,74 @@ describe("codex execute", () => {
       else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the control-plane URL from context into the Codex child environment", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-api-url-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousPaperclipListenHost = process.env.PAPERCLIP_LISTEN_HOST;
+    const previousPaperclipListenPort = process.env.PAPERCLIP_LISTEN_PORT;
+    const previousPort = process.env.PORT;
+    delete process.env.PAPERCLIP_API_URL;
+    delete process.env.PAPERCLIP_LISTEN_HOST;
+    delete process.env.PAPERCLIP_LISTEN_PORT;
+    delete process.env.PORT;
+
+    try {
+      const result = await execute({
+        runId: "run-api-url",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {
+          paperclipApiUrl: "http://127.0.0.1:3100",
+          paperclipApiBaseUrl: "http://127.0.0.1:3100/api",
+        },
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.paperclipApiUrl).toBe("http://127.0.0.1:3100");
+      expect(capture.paperclipApiBaseUrl).toBe("http://127.0.0.1:3100/api");
+    } finally {
+      if (previousPaperclipApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
+      else process.env.PAPERCLIP_API_URL = previousPaperclipApiUrl;
+      if (previousPaperclipListenHost === undefined) delete process.env.PAPERCLIP_LISTEN_HOST;
+      else process.env.PAPERCLIP_LISTEN_HOST = previousPaperclipListenHost;
+      if (previousPaperclipListenPort === undefined) delete process.env.PAPERCLIP_LISTEN_PORT;
+      else process.env.PAPERCLIP_LISTEN_PORT = previousPaperclipListenPort;
+      if (previousPort === undefined) delete process.env.PORT;
+      else process.env.PORT = previousPort;
       await fs.rm(root, { recursive: true, force: true });
     }
   });

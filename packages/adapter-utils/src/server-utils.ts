@@ -196,11 +196,58 @@ export function redactEnvForLogs(env: Record<string, string>): Record<string, st
   return redacted;
 }
 
-export function buildPaperclipEnv(agent: { id: string; companyId: string }): Record<string, string> {
-  const apiBaseUrl = (rawUrl: string): string => {
-    const trimmed = rawUrl.replace(/\/+$/, "");
-    return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
-  };
+export type BuildPaperclipEnvOptions = {
+  context?: Record<string, unknown> | null;
+  apiUrl?: string | null;
+};
+
+function normalizePaperclipApiUrl(rawUrl: string): string | null {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed.replace(/\/+$/, ""));
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return trimmed;
+}
+
+function apiBaseUrl(rawUrl: string): string {
+  const trimmed = rawUrl.replace(/\/+$/, "");
+  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+}
+
+function stripApiSuffix(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/api") ? trimmed.slice(0, -4) : trimmed;
+}
+
+function readContextPaperclipApiUrl(context: Record<string, unknown> | null | undefined): string | null {
+  const rawApiUrl =
+    typeof context?.paperclipApiUrl === "string"
+      ? context.paperclipApiUrl
+      : typeof context?.paperclipControlPlaneUrl === "string"
+        ? context.paperclipControlPlaneUrl
+        : null;
+  if (rawApiUrl) {
+    const normalized = normalizePaperclipApiUrl(rawApiUrl);
+    if (normalized) return normalized;
+  }
+
+  const rawApiBaseUrl =
+    typeof context?.paperclipApiBaseUrl === "string"
+      ? context.paperclipApiBaseUrl
+      : typeof context?.paperclipControlPlaneApiBaseUrl === "string"
+        ? context.paperclipControlPlaneApiBaseUrl
+        : null;
+  return rawApiBaseUrl ? normalizePaperclipApiUrl(stripApiSuffix(rawApiBaseUrl)) : null;
+}
+
+export function buildPaperclipEnv(
+  agent: { id: string; companyId: string },
+  options: BuildPaperclipEnvOptions = {},
+): Record<string, string> {
   const resolveHostForUrl = (rawHost: string): string => {
     const host = rawHost.trim();
     if (!host || host === "0.0.0.0" || host === "::") return "localhost";
@@ -215,7 +262,11 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
     process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
   );
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
-  const apiUrl = process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`;
+  const apiUrl =
+    normalizePaperclipApiUrl(options.apiUrl ?? "") ??
+    readContextPaperclipApiUrl(options.context) ??
+    normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL ?? "") ??
+    `http://${runtimeHost}:${runtimePort}`;
   vars.PAPERCLIP_API_URL = apiUrl;
   vars.PAPERCLIP_API_BASE_URL = apiBaseUrl(apiUrl);
   return vars;

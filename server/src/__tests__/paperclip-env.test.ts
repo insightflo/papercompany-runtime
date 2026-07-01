@@ -48,6 +48,22 @@ describe("buildPaperclipEnv", () => {
     expect(env.PAPERCLIP_API_BASE_URL).toBe("http://localhost:3101/api");
   });
 
+  it("uses the control-plane URL carried in adapter context before falling back to process defaults", () => {
+    delete process.env.PAPERCLIP_API_URL;
+    delete process.env.PAPERCLIP_LISTEN_HOST;
+    delete process.env.PAPERCLIP_LISTEN_PORT;
+    delete process.env.HOST;
+    delete process.env.PORT;
+
+    const env = buildPaperclipEnv(
+      { id: "agent-1", companyId: "company-1" },
+      { context: { paperclipApiUrl: "http://127.0.0.1:3100" } },
+    );
+
+    expect(env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:3100");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://127.0.0.1:3100/api");
+  });
+
   it("formats IPv6 hosts safely in fallback URL generation", () => {
     delete process.env.PAPERCLIP_API_URL;
     process.env.PAPERCLIP_LISTEN_HOST = "::1";

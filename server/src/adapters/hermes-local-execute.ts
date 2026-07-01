@@ -572,7 +572,7 @@ export async function executeHermesLocal(
 
   const rawEnv: Record<string, unknown> = {
     ...process.env,
-    ...buildPaperclipEnv(ctx.agent),
+    ...buildPaperclipEnv(ctx.agent, { context: ctx.context }),
   };
   if (ctx.runId) rawEnv.PAPERCLIP_RUN_ID = ctx.runId;
   const taskId = cfgString(ctx.config?.taskId);

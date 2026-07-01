@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate } from "@paperclipai/adapter-utils";
+import { buildPaperclipEnv } from "@paperclipai/adapter-utils/server-utils";
 import { asBoolean, asNumber, parseObject } from "../adapters/utils.js";
 
 export interface ContextBudgetPreflightPolicy {
@@ -276,7 +277,7 @@ function buildEstimatedPaperclipEnv(input: {
   authTokenPresent: boolean;
 }) {
   const env: Record<string, string> = {
-    ...buildBasePaperclipEnv(input.agent),
+    ...buildPaperclipEnv(input.agent, { context: input.context }),
     PAPERCLIP_RUN_ID: input.runId,
   };
   const envConfig = parseObject(input.adapterConfig.env);
@@ -315,29 +316,4 @@ function buildEstimatedPaperclipEnv(input: {
     env.PAPERCLIP_API_KEY = "token";
   }
   return env;
-}
-
-function buildBasePaperclipEnv(agent: { id: string; companyId: string }) {
-  const apiBaseUrl = (rawUrl: string) => {
-    const trimmed = rawUrl.replace(/\/+$/, "");
-    return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
-  };
-  const resolveHostForUrl = (rawHost: string) => {
-    const host = rawHost.trim();
-    if (!host || host === "0.0.0.0" || host === "::") return "localhost";
-    if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
-    return host;
-  };
-
-  const runtimeHost = resolveHostForUrl(
-    process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
-  );
-  const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100";
-  const apiUrl = process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`;
-  return {
-    PAPERCLIP_AGENT_ID: agent.id,
-    PAPERCLIP_COMPANY_ID: agent.companyId,
-    PAPERCLIP_API_URL: apiUrl,
-    PAPERCLIP_API_BASE_URL: apiBaseUrl(apiUrl),
-  };
 }

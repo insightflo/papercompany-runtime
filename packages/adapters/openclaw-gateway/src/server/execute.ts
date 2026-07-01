@@ -316,7 +316,7 @@ function resolvePaperclipApiUrlOverride(value: unknown): string | null {
 function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
   const paperclipApiUrlOverride = resolvePaperclipApiUrlOverride(ctx.config.paperclipApiUrl);
   const paperclipEnv: Record<string, string> = {
-    ...buildPaperclipEnv(ctx.agent),
+    ...buildPaperclipEnv(ctx.agent, { context: ctx.context }),
     PAPERCLIP_RUN_ID: ctx.runId,
   };
 

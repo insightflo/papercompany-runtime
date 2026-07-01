@@ -467,6 +467,78 @@ describe("heartbeat context budget preflight", () => {
     }
   });
 
+  it("injects the current control-plane API URL into heartbeat adapter context", async () => {
+    const previousPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
+    const previousPaperclipListenHost = process.env.PAPERCLIP_LISTEN_HOST;
+    const previousPaperclipListenPort = process.env.PAPERCLIP_LISTEN_PORT;
+    const previousHost = process.env.HOST;
+    const previousPort = process.env.PORT;
+    delete process.env.PAPERCLIP_API_URL;
+    process.env.PAPERCLIP_LISTEN_HOST = "127.0.0.1";
+    process.env.PAPERCLIP_LISTEN_PORT = "3100";
+    delete process.env.HOST;
+    delete process.env.PORT;
+
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    let invocationContext: Record<string, unknown> | undefined;
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: "PAP",
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "API Context Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      executeSpy.mockImplementation(async ({ context }) => {
+        invocationContext = structuredClone(context) as Record<string, unknown>;
+        return successfulAdapterResult();
+      });
+
+      const heartbeat = heartbeatService(db);
+      const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual", {
+        actorType: "system",
+        actorId: "test-suite",
+      });
+      expect(run).not.toBeNull();
+
+      const finalized = await waitForRunTerminal(heartbeat, run!.id);
+      expect(finalized.status).toBe("succeeded");
+      expect(invocationContext).toMatchObject({
+        paperclipApiUrl: "http://127.0.0.1:3100",
+        paperclipApiBaseUrl: "http://127.0.0.1:3100/api",
+      });
+
+      const [persistedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+      expect(persistedRun?.contextSnapshot).toMatchObject({
+        paperclipApiUrl: "http://127.0.0.1:3100",
+        paperclipApiBaseUrl: "http://127.0.0.1:3100/api",
+      });
+    } finally {
+      if (previousPaperclipApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
+      else process.env.PAPERCLIP_API_URL = previousPaperclipApiUrl;
+      if (previousPaperclipListenHost === undefined) delete process.env.PAPERCLIP_LISTEN_HOST;
+      else process.env.PAPERCLIP_LISTEN_HOST = previousPaperclipListenHost;
+      if (previousPaperclipListenPort === undefined) delete process.env.PAPERCLIP_LISTEN_PORT;
+      else process.env.PAPERCLIP_LISTEN_PORT = previousPaperclipListenPort;
+      if (previousHost === undefined) delete process.env.HOST;
+      else process.env.HOST = previousHost;
+      if (previousPort === undefined) delete process.env.PORT;
+      else process.env.PORT = previousPort;
+    }
+  });
+
   it("attaches mission-owner-task context to mission_main_executor_unblock issues only by issue purpose", async () => {
     const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_unblock");
     let invocationContext: Record<string, unknown> | undefined;

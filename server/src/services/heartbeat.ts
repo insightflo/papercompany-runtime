@@ -748,6 +748,39 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function normalizePaperclipApiUrl(value: string | null | undefined): string | null {
+  const trimmed = value?.trim().replace(/\/+$/, "");
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return trimmed.endsWith("/api") ? trimmed.slice(0, -4) : trimmed;
+}
+
+function resolveHostForPaperclipApiUrl(value: string | null | undefined): string {
+  const host = value?.trim() ?? "";
+  if (!host || host === "0.0.0.0" || host === "::") return "localhost";
+  if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
+  return host;
+}
+
+function resolveCurrentPaperclipApiUrl(): string {
+  const explicit = normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL);
+  if (explicit) return explicit;
+  const host = resolveHostForPaperclipApiUrl(process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST);
+  const port = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
+  return `http://${host}:${port}`;
+}
+
+function applyPaperclipApiContext(context: Record<string, unknown>): void {
+  const apiUrl = resolveCurrentPaperclipApiUrl();
+  context.paperclipApiUrl = apiUrl;
+  context.paperclipApiBaseUrl = `${apiUrl.replace(/\/+$/, "")}/api`;
+}
+
 function isHermesOperationsLiaisonAgent(agent: Pick<typeof agents.$inferSelect, "name" | "adapterType" | "runtimeConfig" | "metadata">) {
   if (agent.adapterType !== "hermes_local") return false;
   const runtimeConfig = parseObject(agent.runtimeConfig);
@@ -5004,6 +5037,7 @@ export function heartbeatService(db: Db) {
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
+    applyPaperclipApiContext(context);
     const taskKey = deriveTaskKey(context, null);
     // Mission session branch: when missionId is present, session is keyed by
     // "mission:{missionId}" to ensure reuse across runs within the same mission.
