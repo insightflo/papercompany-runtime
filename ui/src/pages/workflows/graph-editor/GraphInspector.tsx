@@ -1,28 +1,23 @@
 // [파일 목적] 워크플로우 그래프 에디터의 인스펙터(우측 사이드 패널)를 렌더링하는 프레젠테이션 컴포넌트.
-// 선택된 스텝의 메타데이터 편집기, 승인/테스트/실행/데이터플로우 필드, 진단/복구계획/선택경로 요약 등을 표시한다.
-// [주요 흐름] (1) 인스펙터 모드 탭, (2) 진단/복구계획 블록(showOverviewInspector), (3) 선택경로/컨테이너 요약,
-// (4) 그래프 에러, (5) edit/policy/raw 모드별 선택 스텝 편집 필드.
-// [외부 연결] ../workflow-graph.js, ./graphStyles.js, ./graphUiUtils.js, ./GraphDrawers.js,
+// 선택된 스텝의 메타데이터 편집기, 승인/테스트/실행/데이터플로우 필드를 표시한다.
+// [주요 흐름] (1) 인스펙터 모드 탭, (2) overview 블록, (3) 그래프 에러,
+// (4) edit/policy/raw 모드별 선택 스텝 편집 필드.
+// [외부 연결] ../workflow-graph.js, ./graphStyles.js, ./GraphInspectorOverview.js,
 // ../workflow-page-styles.js, ../workflow-page-types.js, ../shared-controls.js, ../workflow-tool-picker.js,
 // ../step-editor.js, react.
 // [수정시 주의] 상태/핸들러를 직접 만들지 말고 코디네이터에서 props로 넘길 것. 루트 Workflows.tsx 역참조 금지.
 import * as React from "react";
-import { Fragment, type CSSProperties, type JSX, type ReactNode } from "react";
+import { Fragment, type CSSProperties, type JSX } from "react";
 import type { StepDraft } from "../step-draft.js";
 import {
   type WorkflowToolGrant,
   type WorkflowToolOption,
 } from "../workflow-page-types.js";
 import {
-  type WorkflowGraphContainerSummary,
   type WorkflowGraphContainerType,
   type WorkflowGraphDataFlowMap,
-  type WorkflowGraphExecutionEvidenceSummary,
   type WorkflowGraphInspectorMode,
   type WorkflowGraphInspectorSummary,
-  type WorkflowGraphModel,
-  type WorkflowGraphRepairPlan,
-  type WorkflowGraphSelectionSummary,
   normalizeGraphRunStatus,
 } from "../workflow-graph.js";
 import {
@@ -39,9 +34,8 @@ import {
 } from "../workflow-page-styles.js";
 import { FieldLabel, HelpIcon, HelpedText } from "../shared-controls.js";
 import { splitCommaList, WorkflowToolPicker } from "../workflow-tool-picker.js";
-import { graphDiagnosticRowStyle, graphSidebarStyle } from "./graphStyles.js";
-import { containerColor, graphIssueBadgeStyle } from "./graphUiUtils.js";
-import { WorkflowGraphExecutionEvidenceDrawer } from "./GraphDrawers.js";
+import { graphSidebarStyle } from "./graphStyles.js";
+import { GraphInspectorOverview, type GraphInspectorOverviewProps } from "./GraphInspectorOverview.js";
 
 // 인스펙터에서만 쓰이는 정책 <details> 스타일. 과거 Workflows.tsx 모듈 스코프에 있던 값을 그대로 옮김.
 const workflowPolicyDetailsStyle: CSSProperties = {
@@ -60,51 +54,32 @@ const workflowPolicyDetailsSummaryStyle: CSSProperties = {
   fontWeight: 800,
 };
 
-export interface GraphInspectorProps {
+export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "stepIds"> {
   steps: StepDraft[];
   selectedStep: StepDraft | null;
-  selectedContainerSummary: WorkflowGraphContainerSummary | null;
   selectedDataFlowMap: WorkflowGraphDataFlowMap | null;
   selectedGroup: { title: string; color: string; collapsed?: boolean; collapsedByDefault?: boolean } | null;
-  selectedPathSummary: WorkflowGraphSelectionSummary;
   inspectorSummary: WorkflowGraphInspectorSummary;
   activeInspectorSection: WorkflowGraphInspectorSummary["sections"][number];
-  evidenceSummary: WorkflowGraphExecutionEvidenceSummary;
-  repairPlan: WorkflowGraphRepairPlan;
-  diagnostics: WorkflowGraphModel["diagnostics"];
   graphError: string;
   graphInspectorMode: WorkflowGraphInspectorMode;
   inspectorAccent: string;
-  showOverviewInspector: boolean;
   showEditInspector: boolean;
   showPolicyInspector: boolean;
   showRawInspector: boolean;
-  showGraphDetails: boolean;
-  showGraphTestDrawer: boolean;
-  showGraphEvidenceDrawer: boolean;
   rawStepJsonText: string;
   rawStepJsonFeedback: { tone: "info" | "error" | "success"; message: string } | null;
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
   graphAgents: { id: string; name: string }[];
-  // 코디네이터가 이미 조립한 테스트 드로어 슬롯(루트 Workflows.tsx 컴포넌트를 역참조하지 않기 위함).
-  testDrawerSlot: ReactNode;
   // handlers
   setGraphInspectorMode: (mode: WorkflowGraphInspectorMode) => void;
   setShowGraphTestDrawer: (value: boolean) => void;
-  setShowGraphEvidenceDrawer: (value: boolean) => void;
   setRawStepJsonText: (value: string) => void;
   setRawStepJsonFeedback: (value: { tone: "info" | "error" | "success"; message: string } | null) => void;
-  selectStep: (stepId: string) => void;
   addAfter: (stepId: string | null) => void;
-  expandSelectedPath: (mode: "upstream" | "downstream" | "connected") => void;
-  clearSelectedPath: () => void;
-  groupSelectedGraphSelection: () => void;
-  wrapSelectedGraphSelection: (containerType: WorkflowGraphContainerType) => void;
   wrapSelectedPathInContainer: () => void;
   duplicateSelectedStep: () => void;
-  duplicateSelectedContainer: () => void;
-  clearSelectedContainer: () => void;
   clearSelectedGroup: () => void;
   groupSelectedWithDependencies: () => void;
   setSelectedGroupCollapsed: (collapsed: boolean) => void;
@@ -190,6 +165,8 @@ export function GraphInspector({
   validateRawSelectedStepJson,
   applyRawSelectedStepJson,
 }: GraphInspectorProps): JSX.Element {
+  const stepIds = React.useMemo(() => new Set(steps.map((step) => step.id)), [steps]);
+
   // 과거 coordinator 내부에 있던 헬퍼를 그대로 옮김. 클로저 의존성 없음.
   function renderDataFlowChips(values: string[], emptyLabel: string, tone: "normal" | "muted" | "error" = "normal"): JSX.Element {
     if (values.length === 0) {
@@ -237,312 +214,28 @@ export function GraphInspector({
             ))}
           </div>
         </div>
-        {showOverviewInspector && showGraphDetails ? (
-        <div key="graph-diagnostics" style={{ display: "grid", gap: "8px", paddingBottom: "8px", borderBottom: "1px solid var(--border, #334155)" }}>
-          <div key="diagnostics-header">
-            <p style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-              Graph diagnostics
-            </p>
-            <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
-              {diagnostics.issues.length === 0 ? "No structural issues detected." : `${diagnostics.issues.length} structural issue${diagnostics.issues.length === 1 ? "" : "s"} detected.`}
-            </p>
-          </div>
-          <div key="diagnostic-stats" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "6px" }}>
-            <div key="errors" style={graphDiagnosticRowStyle}>
-              <span style={{ ...mutedTextStyle, fontSize: "10px", textTransform: "uppercase" }}>Errors</span>
-              <strong style={{ fontSize: "16px" }}>{diagnostics.issueCountBySeverity.error}</strong>
-            </div>
-            <div key="entry" style={graphDiagnosticRowStyle}>
-              <span style={{ ...mutedTextStyle, fontSize: "10px", textTransform: "uppercase" }}>Entry</span>
-              <strong style={{ fontSize: "16px" }}>{diagnostics.entryStepIds.length}</strong>
-            </div>
-            <div key="terminal" style={graphDiagnosticRowStyle}>
-              <span style={{ ...mutedTextStyle, fontSize: "10px", textTransform: "uppercase" }}>Terminal</span>
-              <strong style={{ fontSize: "16px" }}>{diagnostics.terminalStepIds.length}</strong>
-            </div>
-          </div>
-          <div
-            key="repair-plan"
-            style={{
-              display: "grid",
-              gap: "7px",
-              padding: "8px",
-              border: "1px solid color-mix(in srgb, #38bdf8 34%, var(--border, #334155))",
-              borderRadius: "8px",
-              background: "color-mix(in srgb, #38bdf8 7%, transparent)",
-            }}
-          >
-            <div key="repair-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase" }}>
-                Repair plan
-              </span>
-              <span style={{ ...graphPolicyBadgeStyle, color: repairPlan.blocked ? "var(--destructive, #ef4444)" : "#38bdf8" }}>
-                {repairPlan.blocked ? "blocked" : "ready"}
-              </span>
-            </div>
-            <span key="repair-summary" style={{ ...mutedTextStyle, fontSize: "11px", lineHeight: 1.4 }}>
-              {repairPlan.summary}
-            </span>
-            <div key="repair-badges" style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-              {repairPlan.badges.map((badge) => (
-                <span key={badge} style={{ ...graphPolicyBadgeStyle, color: repairPlan.blocked ? "var(--destructive, #ef4444)" : "#38bdf8" }}>{badge}</span>
-              ))}
-            </div>
-            {repairPlan.items.length > 0 ? (
-              <div key="repair-items" style={{ display: "grid", gap: "6px" }}>
-                {repairPlan.items.slice(0, 4).map((item) => {
-                  const canFocus = Boolean(item.focusStepId && steps.some((step) => step.id === item.focusStepId));
-                  return (
-                    <div key={item.id} style={graphDiagnosticRowStyle}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-                        <strong style={{ fontSize: "12px", overflowWrap: "anywhere" }}>{item.title}</strong>
-                        {canFocus ? (
-                          <button
-                            type="button"
-                            style={{ ...buttonStyle, padding: "3px 8px", fontSize: "11px" }}
-                            onClick={() => selectStep(item.focusStepId)}
-                          >
-                            Focus
-                          </button>
-                        ) : null}
-                      </div>
-                      <p style={{ margin: "4px 0 0", color: "var(--muted-foreground, #94a3b8)", fontSize: "11px", lineHeight: 1.4 }}>
-                        {item.description}
-                      </p>
-                      <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "5px" }}>
-                        {item.badges.map((badge) => (
-                          <span key={badge} style={{ ...graphPolicyBadgeStyle, color: item.severity === "error" ? "var(--destructive, #ef4444)" : "#38bdf8" }}>{badge}</span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <Fragment key="repair-items-placeholder" />
-            )}
-          </div>
-          {diagnostics.issues.length > 0 ? (
-            <div key="diagnostic-issues" style={{ display: "grid", gap: "6px" }}>
-              {diagnostics.issues.map((issue) => {
-                const focusStepId = issue.stepId || issue.targetId || "";
-                const canFocus = Boolean(focusStepId && steps.some((step) => step.id === focusStepId));
-                return (
-                  <div key={issue.id} style={graphDiagnosticRowStyle}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-                      <span style={graphIssueBadgeStyle(issue.severity)}>{issue.code}</span>
-                      {canFocus ? (
-                        <button
-                          type="button"
-                          style={{ ...buttonStyle, padding: "3px 8px", fontSize: "11px" }}
-                          onClick={() => selectStep(focusStepId)}
-                        >
-                          Focus
-                        </button>
-                      ) : null}
-                    </div>
-                    <p style={{ margin: 0, color: "var(--muted-foreground, #94a3b8)", fontSize: "12px", lineHeight: 1.4 }}>
-                      {issue.message}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <Fragment key="diagnostic-issues-placeholder" />
-          )}
-          <div key="entry-steps" style={{ display: "grid", gap: "6px" }}>
-            <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Entry steps</span>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
-              {diagnostics.entryStepIds.length > 0 ? diagnostics.entryStepIds.map((stepId) => (
-                <button
-                  key={stepId}
-                  type="button"
-                  style={{ ...buttonStyle, padding: "3px 7px", fontSize: "11px" }}
-                  onClick={() => selectStep(stepId)}
-                >
-                  {stepId}
-                </button>
-              )) : <span style={{ ...mutedTextStyle, fontSize: "12px" }}>None</span>}
-            </div>
-          </div>
-          <div key="terminal-steps" style={{ display: "grid", gap: "6px" }}>
-            <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Terminal steps</span>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
-              {diagnostics.terminalStepIds.length > 0 ? diagnostics.terminalStepIds.map((stepId) => (
-                <button
-                  key={stepId}
-                  type="button"
-                  style={{ ...buttonStyle, padding: "3px 7px", fontSize: "11px" }}
-                  onClick={() => selectStep(stepId)}
-                >
-                  {stepId}
-                </button>
-              )) : <span style={{ ...mutedTextStyle, fontSize: "12px" }}>None</span>}
-            </div>
-          </div>
-        </div>
-        ) : (
-          <Fragment key="graph-diagnostics-placeholder" />
-        )}
-        {showOverviewInspector && showGraphTestDrawer ? (
-          testDrawerSlot
-        ) : (
-          <Fragment key="test-drawer-placeholder" />
-        )}
-        {showOverviewInspector && showGraphEvidenceDrawer ? (
-          <WorkflowGraphExecutionEvidenceDrawer
-            key="evidence-drawer"
-            summary={evidenceSummary}
-            onClose={() => setShowGraphEvidenceDrawer(false)}
-          />
-        ) : (
-          <Fragment key="evidence-drawer-placeholder" />
-        )}
-        {showOverviewInspector && showGraphDetails ? (
-        <div
-          key="selected-path-summary"
-          style={{
-            display: "grid",
-            gap: "7px",
-            padding: "8px",
-            border: "1px solid color-mix(in srgb, #22c55e 42%, var(--border, #334155))",
-            borderRadius: "8px",
-            background: "color-mix(in srgb, #22c55e 8%, transparent)",
-          }}
-        >
-          <div key="header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-            <span style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase" }}>
-              Selected path
-            </span>
-            <span style={{ ...graphPolicyBadgeStyle, color: selectedPathSummary.blocked ? "var(--destructive, #ef4444)" : "#22c55e" }}>
-              {selectedPathSummary.blocked ? "empty" : `${selectedPathSummary.stepIds.length} nodes`}
-            </span>
-          </div>
-          <span key="summary" style={{ ...mutedTextStyle, fontSize: "11px", lineHeight: 1.4 }}>
-            {selectedPathSummary.summary}
-          </span>
-          <div key="badges" style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            {selectedPathSummary.badges.map((badge) => (
-              <span key={badge} style={{ ...graphPolicyBadgeStyle, color: selectedPathSummary.blocked ? "var(--destructive, #ef4444)" : "#22c55e" }}>{badge}</span>
-            ))}
-          </div>
-          <div key="selection-mode-actions" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "6px" }}>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={() => expandSelectedPath("upstream")}>
-              Select upstream
-            </button>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={() => expandSelectedPath("downstream")}>
-              Select downstream
-            </button>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={() => expandSelectedPath("connected")}>
-              Select connected
-            </button>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={clearSelectedPath}>
-              Clear path
-            </button>
-          </div>
-          <div key="selection-actions" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "6px" }}>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={groupSelectedGraphSelection} disabled={selectedPathSummary.blocked}>
-              Group
-            </button>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={() => wrapSelectedGraphSelection("branch")} disabled={selectedPathSummary.blocked}>
-              Branch
-            </button>
-            <button type="button" style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }} onClick={() => wrapSelectedGraphSelection("loop")} disabled={selectedPathSummary.blocked}>
-              Loop
-            </button>
-          </div>
-          <div key="selection-boundaries" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: "6px" }}>
-            <div style={{ display: "grid", gap: "3px" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Steps</span>
-              {renderDataFlowChips(selectedPathSummary.stepIds, "No selected steps")}
-            </div>
-            <div style={{ display: "grid", gap: "3px" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Inbound</span>
-              {renderDataFlowChips(selectedPathSummary.inboundStepIds, "No inbound", "muted")}
-            </div>
-            <div style={{ display: "grid", gap: "3px" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Outbound</span>
-              {renderDataFlowChips(selectedPathSummary.outboundStepIds, "No outbound", "muted")}
-            </div>
-          </div>
-        </div>
-        ) : (
-          <Fragment key="selected-path-summary-placeholder" />
-        )}
-        {showOverviewInspector && showGraphDetails && selectedContainerSummary ? (
-          <div
-            key="selected-container-summary"
-            style={{
-              display: "grid",
-              gap: "7px",
-              padding: "8px",
-              border: `1px solid ${containerColor(selectedContainerSummary.type)}`,
-              borderRadius: "8px",
-              background: `color-mix(in srgb, ${containerColor(selectedContainerSummary.type)} 10%, transparent)`,
-            }}
-          >
-            <div key="header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase" }}>
-                Selected container
-              </span>
-              <span style={{ ...graphPolicyBadgeStyle, color: containerColor(selectedContainerSummary.type) }}>
-                {selectedContainerSummary.type}
-              </span>
-            </div>
-            <strong key="title" style={{ fontSize: "13px", overflowWrap: "anywhere" }}>{selectedContainerSummary.title}</strong>
-            <span key="summary" style={{ ...mutedTextStyle, fontSize: "11px", lineHeight: 1.4 }}>
-              {selectedContainerSummary.summary}
-            </span>
-            <div key="badges" style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-              {selectedContainerSummary.badges.map((badge) => (
-                <span key={badge} style={{ ...graphPolicyBadgeStyle, color: selectedContainerSummary.blocked ? "var(--destructive, #ef4444)" : containerColor(selectedContainerSummary.type) }}>{badge}</span>
-              ))}
-            </div>
-            <div key="container-actions" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-              <button
-                key="duplicate-container"
-                type="button"
-                style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }}
-                onClick={duplicateSelectedContainer}
-              >
-                Duplicate container
-              </button>
-              <button
-                key="clear-container"
-                type="button"
-                style={{ ...buttonStyle, justifyContent: "center", fontSize: "11px" }}
-                onClick={clearSelectedContainer}
-              >
-                Clear container
-              </button>
-            </div>
-            <div key="boundaries" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: "6px" }}>
-              <div style={{ display: "grid", gap: "3px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Steps</span>
-                {renderDataFlowChips(selectedContainerSummary.stepIds, "No steps")}
-              </div>
-              <div style={{ display: "grid", gap: "3px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Entry</span>
-                {renderDataFlowChips(selectedContainerSummary.entryStepIds, "No entry", "muted")}
-              </div>
-              <div style={{ display: "grid", gap: "3px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Exit</span>
-                {renderDataFlowChips(selectedContainerSummary.terminalStepIds, "No exit", "muted")}
-              </div>
-              <div style={{ display: "grid", gap: "3px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Inbound</span>
-                {renderDataFlowChips(selectedContainerSummary.inboundStepIds, "No inbound", "muted")}
-              </div>
-              <div style={{ display: "grid", gap: "3px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "10px" }}>Outbound</span>
-                {renderDataFlowChips(selectedContainerSummary.outboundStepIds, "No outbound", "muted")}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <Fragment key="selected-container-summary-placeholder" />
-        )}
+        <GraphInspectorOverview
+          key="graph-overview"
+          stepIds={stepIds}
+          selectedContainerSummary={selectedContainerSummary}
+          selectedPathSummary={selectedPathSummary}
+          evidenceSummary={evidenceSummary}
+          repairPlan={repairPlan}
+          diagnostics={diagnostics}
+          showOverviewInspector={showOverviewInspector}
+          showGraphDetails={showGraphDetails}
+          showGraphTestDrawer={showGraphTestDrawer}
+          showGraphEvidenceDrawer={showGraphEvidenceDrawer}
+          testDrawerSlot={testDrawerSlot}
+          setShowGraphEvidenceDrawer={setShowGraphEvidenceDrawer}
+          selectStep={selectStep}
+          expandSelectedPath={expandSelectedPath}
+          clearSelectedPath={clearSelectedPath}
+          groupSelectedGraphSelection={groupSelectedGraphSelection}
+          wrapSelectedGraphSelection={wrapSelectedGraphSelection}
+          duplicateSelectedContainer={duplicateSelectedContainer}
+          clearSelectedContainer={clearSelectedContainer}
+        />
         {graphError ? <p key="graph-error" style={noticeStyle("error")}>{graphError}</p> : <Fragment key="graph-error-placeholder" />}
         {selectedStep ? (
           <div key="selected-step-editor" style={{ display: "contents" }}>
