@@ -8,6 +8,7 @@
 // [수정시 주의] 상태/핸들러를 직접 만들지 말고 코디네이터에서 props로 넘길 것. 루트 Workflows.tsx 역참조 금지.
 import * as React from "react";
 import { Fragment, type CSSProperties, type JSX } from "react";
+import { GraphInspectorRawStep } from "./GraphInspectorRawStep.js";
 import type { StepDraft } from "../step-draft.js";
 import {
   type WorkflowToolGrant,
@@ -1215,79 +1216,16 @@ export function GraphInspector({
             ) : (
               <Fragment key="selected-step-policy-placeholder" />
             )}
-            {showRawInspector ? (
-              <div
-                key="selected-step-raw"
-                style={{
-                  display: "grid",
-                  gap: "8px",
-                  paddingTop: "8px",
-                  borderTop: "1px solid var(--border, #334155)",
-                }}
-              >
-                <div key="raw-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <HelpedText help="Editable raw JSON for the selected step. Validate checks syntax; Apply writes it back to the step draft." style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}>Selected step JSON</HelpedText>
-                    <button
-                      type="button"
-                      title="Copy JSON to clipboard"
-                      aria-label="Copy JSON"
-                      style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "22px", height: "22px", borderRadius: "4px", border: "1px solid var(--border, #334155)", background: "transparent", color: "var(--muted-foreground, #94a3b8)", cursor: "pointer", padding: 0 }}
-                      onClick={() => {
-                        navigator.clipboard.writeText(rawStepJsonText).then(() => {
-                          const btn = document.querySelector('[aria-label="Copy JSON"]');
-                          if (btn) { btn.textContent = "✓"; setTimeout(() => { btn.textContent = "⧉"; }, 1500); }
-                        });
-                      }}
-                    >
-                      <span style={{ fontSize: "12px", lineHeight: 1 }}>⧉</span>
-                    </button>
-                  </div>
-                  <span style={{ ...graphPolicyBadgeStyle, color: "#fbbf24" }}>{selectedStep.id}</span>
-                </div>
-                <FieldLabel help="Edit the selected step object as JSON. The JSON must remain an object with a unique id.">Raw step JSON</FieldLabel>
-                <textarea
-                  key="raw-json"
-                  style={{
-                    ...textareaStyle,
-                    minHeight: "260px",
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                    fontSize: "11px",
-                    lineHeight: 1.5,
-                    color: "var(--foreground, #f8fafc)",
-                    background: "color-mix(in srgb, var(--background, #020617) 88%, black)",
-                  }}
-                  value={rawStepJsonText}
-                  onChange={(event) => {
-                    setRawStepJsonText(event.target.value);
-                    setRawStepJsonFeedback(null);
-                  }}
-                  rows={14}
-                />
-                <div key="raw-actions" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                  {rawStepJsonFeedback ? (
-                    <span style={{ ...mutedTextStyle, fontSize: "11px", color: rawStepJsonFeedback.tone === "error" ? "var(--destructive, #ef4444)" : rawStepJsonFeedback.tone === "success" ? "#34d399" : "var(--muted-foreground, #94a3b8)" }}>
-                      {rawStepJsonFeedback.message}
-                    </span>
-                  ) : (
-                    <span style={{ ...mutedTextStyle, fontSize: "11px" }}>
-                      Edit one step object, then validate or apply it to the selected node.
-                    </span>
-                  )}
-                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                    <button type="button" style={buttonStyle} onClick={validateRawSelectedStepJson}>
-                      Validate
-                    </button>
-                    <button type="button" style={primaryButtonStyle} onClick={applyRawSelectedStepJson}>
-                      Apply
-                    </button>
-                    <HelpIcon label="Validate checks the JSON without changing the draft. Apply validates and updates the selected step." />
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <Fragment key="selected-step-raw-placeholder" />
-            )}
+            <GraphInspectorRawStep
+              showRawInspector={showRawInspector}
+              rawStepJsonText={rawStepJsonText}
+              rawStepJsonFeedback={rawStepJsonFeedback}
+              selectedStepId={selectedStep.id}
+              setRawStepJsonText={setRawStepJsonText}
+              setRawStepJsonFeedback={setRawStepJsonFeedback}
+              validateRawSelectedStepJson={validateRawSelectedStepJson}
+              applyRawSelectedStepJson={applyRawSelectedStepJson}
+            />
           </div>
         ) : (
           <Fragment key="selected-step-editor-placeholder" />
