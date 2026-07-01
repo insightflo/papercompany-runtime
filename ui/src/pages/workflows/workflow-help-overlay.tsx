@@ -1,4 +1,4 @@
-import { Fragment, type JSX } from "react";
+import { type JSX } from "react";
 import { mutedTextStyle } from "./workflow-page-styles.js";
 
 export function WorkflowHelpOverlay({ onClose }: { onClose: () => void }): JSX.Element {
@@ -64,7 +64,5 @@ export function WorkflowHelpOverlay({ onClose }: { onClose: () => void }): JSX.E
             </div>
           </div>
         </>
-      )}
-
   );
 }
