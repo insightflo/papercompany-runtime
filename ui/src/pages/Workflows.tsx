@@ -22,9 +22,9 @@ import { WorkflowDefinitionsResizeHandle } from "./workflows/workflow-definition
 import { WorkflowPageHeader } from "./workflows/workflow-page-header.js";
 import { WorkflowDefinitionsToolbar } from "./workflows/workflow-definitions-toolbar.js";
 import { WorkflowErrorState, WorkflowLoadingState } from "./workflows/workflow-page-states.js";
+import { WorkflowRunOverlayBanner } from "./workflows/workflow-run-overlay-banner.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
-import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
-import { formPanelStyle, workflowCreateShellStyle, workflowCreateHeaderStyle, workflowCreateIdentityStyle, workflowCreateActionsStyle, workflowCreateSetupStripStyle, workflowCreateFieldStyle, workflowCreateWorkspaceStyle, workflowManagementShellStyle, workflowSelectedHeaderStyle, workflowSelectedIdentityStyle, workflowSelectedSetupStripStyle, workflowSelectedWorkspaceStyle } from "./workflows/workflow-layout-styles.js";
+import { formPanelStyle, workflowCreateActionsStyle, workflowCreateFieldStyle, workflowCreateHeaderStyle, workflowCreateIdentityStyle, workflowCreateSetupStripStyle, workflowCreateShellStyle, workflowCreateWorkspaceStyle, workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle, workflowManagementShellStyle, workflowSelectedHeaderStyle, workflowSelectedIdentityStyle, workflowSelectedSetupStripStyle, workflowSelectedWorkspaceStyle } from "./workflows/workflow-layout-styles.js";
 import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
 import { WorkflowDefinitionRail } from "./workflows/workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
@@ -1800,34 +1800,14 @@ function DefinitionsTable({
                   <input style={inputStyle} value={editingTriggerLabels} onChange={(event) => setEditingTriggerLabels(event.target.value)} placeholder="daily-tech-research" />
                 </div>
               </div>
-              {inspectedRunId ? (
-                <div key="run-overlay-banner" style={workflowRunOverlayBannerStyle}>
-                  <div key="run-overlay-main" style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0, flexWrap: "wrap" }}>
-                    <strong style={{ fontSize: "13px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "280px" }}>
-                      Inspecting run
-                    </strong>
-                    <span style={statusBadgeStyle(inspectedRunSummary?.status ?? inspectedRunDetail.data?.run.status ?? "running")}>
-                      {inspectedRunSummary?.status ?? inspectedRunDetail.data?.run.status ?? (inspectedRunDetail.loading ? "loading" : "selected")}
-                    </span>
-                    <span style={graphPolicyBadgeStyle}>{inspectedRunSummary?.runLabel || inspectedRunId.slice(0, 8)}</span>
-                    {inspectedRunSummary?.startedAt ? <span style={graphPolicyBadgeStyle}>{formatDateTime(inspectedRunSummary.startedAt)}</span> : null}
-                    {inspectedRunDetail.data?.stepRuns ? <span style={graphPolicyBadgeStyle}>{inspectedRunDetail.data.stepRuns.length} step runs</span> : null}
-                    {inspectedRunDetail.error ? <span style={{ ...graphPolicyBadgeStyle, color: "var(--destructive, #ef4444)" }}>detail failed</span> : null}
-                  </div>
-                  <div key="run-overlay-actions" style={workflowRunDrawerActionsStyle}>
-                    <button type="button" style={buttonStyle} onClick={() => setInspectedRunId(null)}>
-                      Clear overlay
-                    </button>
-                    {inspectedRunId && runDrawerMode === "closed" ? (
-                      <button type="button" style={buttonStyle} onClick={() => setRunDrawerMode(inspectedRunSummary && editingWorkflowActiveRuns.some((run) => run.id === inspectedRunSummary.id) ? "active" : "recent")}>
-                        View run row
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              ) : (
-                <Fragment key="run-overlay-banner-placeholder" />
-              )}
+              <WorkflowRunOverlayBanner
+                runId={inspectedRunId}
+                runSummary={inspectedRunSummary}
+                runDetail={inspectedRunDetail}
+                drawerMode={runDrawerMode}
+                onCloseOverlay={() => setInspectedRunId(null)}
+                onViewRunRow={() => setRunDrawerMode(inspectedRunSummary && editingWorkflowActiveRuns.some((run) => run.id === inspectedRunSummary.id) ? "active" : "recent")}
+              />
               {editingWorkflowRunDebugSummary ? (
                 <WorkflowRunDebugStrip key="run-debug" summary={editingWorkflowRunDebugSummary} />
               ) : (
