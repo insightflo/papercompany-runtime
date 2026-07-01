@@ -17,6 +17,7 @@ import { filterRunsForWorkflows, hasRecurringWorkflowTrigger, isManualMissionPla
 import { WorkflowDefinitionList, WorkflowDefinitionMiniFlow } from "./workflows/workflow-definition-list.js";
 import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
 import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, isRecord, normalizeMaxDailyRunsInput, parseJsonArrayField } from "./workflows/workflow-form-utils.js";
+import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
 import { WorkflowDefinitionRail } from "./workflows/workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
@@ -138,62 +139,19 @@ const workflowCreateWorkspaceStyle: CSSProperties = {
   padding: "12px",
 };
 
-const workflowCreateAdvancedStyle: CSSProperties = {
-  display: "grid",
-  gap: "10px",
-  padding: "10px 12px",
-  borderTop: "1px solid var(--border, #334155)",
-  background: "color-mix(in srgb, var(--card, #0f172a) 82%, var(--background, #020617))",
-};
-
-const workflowCreateLabelStripStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "8px",
-  flexWrap: "wrap",
-  minWidth: 0,
-};
 
 
 
 
-function workflowScopeLabel(scope: WorkflowScopeFilter): string {
-  return scope === "manual_mission" ? "Manual Mission Plans" : "Reusable Workflows";
-}
 
-function workflowScopeDescription(scope: WorkflowScopeFilter): string {
-  return scope === "manual_mission"
-    ? "One-off planning DAGs created from manual missions. Keep these separate from reusable workflow definitions."
-    : "Repeatable workflow definitions for scheduled, label-triggered, API, or operator-run execution.";
-}
+
 
 
 type WorkflowRunHistoryScope = "all" | "selected";
 
 const LABEL_COLOR_PRESETS = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#8b5cf6", "#6366f1", "#ec4899"];
 
-function toggleLabelId(selectedIds: string[], labelId: string): string[] {
-  return selectedIds.includes(labelId)
-    ? selectedIds.filter((id) => id !== labelId)
-    : [...selectedIds, labelId];
-}
 
-function labelChipStyle(color: string, selected: boolean): CSSProperties {
-  return {
-    ...inputStyle,
-    width: "auto",
-    padding: "6px 10px",
-    border: `1px solid ${color}`,
-    background: selected ? color : "transparent",
-    color: selected ? "#ffffff" : color,
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "6px",
-    cursor: "pointer",
-    fontWeight: 600,
-    whiteSpace: "nowrap",
-  };
-}
 
 function countStatuses(activeRuns: WorkflowOverviewData["activeRuns"]): Array<{ status: string; count: number }> {
   const counts = new Map<string, number>();
@@ -236,59 +194,9 @@ const workflowManagementShellStyle: CSSProperties = {
 
 
 
-const workflowNavigatorSummaryGridStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: "6px",
-};
-
-const workflowNavigatorMetricStyle: CSSProperties = {
-  display: "grid",
-  gap: "2px",
-  minWidth: 0,
-  padding: "7px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "8px",
-  background: "var(--background, #020617)",
-};
-
-const workflowNavigatorFilterRowStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "5px",
-  minWidth: 0,
-  overflowX: "auto",
-  paddingBottom: "1px",
-};
-
-const workflowNavigatorFilterButtonStyle = (selected: boolean): CSSProperties => ({
-  display: "inline-flex",
-  alignItems: "center",
-  gap: "5px",
-  height: "28px",
-  padding: "0 8px",
-  border: `1px solid ${selected ? "color-mix(in srgb, #22c55e 46%, var(--border, #334155))" : "var(--border, #334155)"}`,
-  borderRadius: "8px",
-  background: selected
-    ? "color-mix(in srgb, #22c55e 9%, var(--background, #020617))"
-    : "var(--background, #020617)",
-  color: selected ? "var(--foreground, #f8fafc)" : "var(--muted-foreground, #94a3b8)",
-  fontSize: "11px",
-  fontWeight: 800,
-  whiteSpace: "nowrap",
-  cursor: "pointer",
-});
 
 
 
-
-const workflowSelectedEditorStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateRows: "auto minmax(0, 1fr) auto",
-  gap: "0",
-  minWidth: 0,
-  minHeight: 0,
-};
 
 const workflowSelectedHeaderStyle: CSSProperties = {
   display: "grid",
@@ -300,21 +208,7 @@ const workflowSelectedHeaderStyle: CSSProperties = {
   background: "color-mix(in srgb, var(--background, #020617) 90%, var(--card, #0f172a))",
 };
 
-const workflowSelectedHeaderMainStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "8px",
-  minWidth: 0,
-  flexWrap: "wrap",
-};
 
-const workflowSelectedHeaderActionsStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "flex-end",
-  gap: "6px",
-  flexWrap: "wrap",
-};
 
 const workflowSelectedIdentityStyle: CSSProperties = {
   display: "grid",
@@ -332,13 +226,6 @@ const workflowSelectedSetupStripStyle: CSSProperties = {
   borderTop: "1px solid var(--border, #334155)",
 };
 
-const workflowSelectedAdvancedStyle: CSSProperties = {
-  display: "grid",
-  gap: "10px",
-  gridColumn: "1 / -1",
-  paddingTop: "8px",
-  borderTop: "1px solid var(--border, #334155)",
-};
 
 const workflowSelectedWorkspaceStyle: CSSProperties = {
   minHeight: 0,
@@ -350,21 +237,7 @@ const workflowRunHistorySectionStyle: CSSProperties = {
   minHeight: "430px",
 };
 
-const workflowPolicyDetailsStyle: CSSProperties = {
-  display: "grid",
-  gap: "8px",
-  padding: "8px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "8px",
-  background: "color-mix(in srgb, var(--card, #0f172a) 48%, var(--background, #020617))",
-};
 
-const workflowPolicyDetailsSummaryStyle: CSSProperties = {
-  cursor: "pointer",
-  color: "var(--foreground, #f8fafc)",
-  fontSize: "12px",
-  fontWeight: 800,
-};
 
 function graphEdgeMetadataFor(step: StepDraft | null, sourceId: string): { kind: WorkflowGraphEdgeKind; label: string; condition: string } {
   const metadata = step?.graphEdgeMetadata?.[sourceId];
@@ -2790,69 +2663,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
         />
       </section>
 
-      {showHelp && (
-        <>
-          <div
-            key="help-overlay"
-            style={{ position: "fixed", inset: 0, zIndex: 9998, background: "transparent" }}
-            onClick={() => setShowHelp(false)}
-          />
-          <div
-            id="wf-help"
-            key="help-popup"
-            style={{
-              position: "absolute",
-              top: "44px",
-              left: "100px",
-              zIndex: 9999,
-              width: "440px",
-              maxHeight: "70vh",
-              overflowY: "auto",
-              padding: "16px",
-              borderRadius: "10px",
-              border: "1px solid var(--border, #334155)",
-              background: "var(--card, #0f172a)",
-              boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-            }}
-          >
-            <div key="help-content" style={mutedTextStyle}>
-              <p style={{ ...mutedTextStyle, fontWeight: 600, fontSize: "15px", marginBottom: "8px" }}>Workflow Engine 도움말</p>
-
-              <p style={{ ...mutedTextStyle, fontWeight: 600, marginTop: "12px" }}>기본 개념</p>
-              <ul style={{ margin: "4px 0", paddingLeft: "20px" }}>
-                <li><strong>Workflow</strong>: 여러 Step으로 구성된 자동화 파이프라인</li>
-                <li><strong>Step</strong>: Tool(시스템 실행) 또는 Agent(에이전트 작업) 유형</li>
-                <li><strong>Tool Step</strong>: Tool Registry에 등록된 도구를 시스템이 직접 실행</li>
-                <li><strong>Agent Step</strong>: 지정된 에이전트가 이슈를 받아 작업 수행</li>
-              </ul>
-
-              <p style={{ ...mutedTextStyle, fontWeight: 600, marginTop: "12px" }}>Step 설정</p>
-              <ul style={{ margin: "4px 0", paddingLeft: "20px" }}>
-                <li><strong>ID</strong>: 고유 식별자 (dependsOn에서 참조)</li>
-                <li><strong>Type</strong>: Tool(도구 실행) / Agent(에이전트 작업)</li>
-                <li><strong>Depends On</strong>: 선행 step ID (쉼표 구분, 비워두면 첫 step)</li>
-                <li><strong>Tools</strong>: Agent step에서 사용할 도구 이름 (사용법이 자동 전달됨)</li>
-                <li><strong>On Failure</strong>: 실패 시 정책 (retry/skip/abort)</li>
-              </ul>
-
-              <p style={{ ...mutedTextStyle, fontWeight: 600, marginTop: "12px" }}>변수</p>
-              <p style={mutedTextStyle}>Step title에 사용 가능한 변수:</p>
-              <ul style={{ margin: "4px 0", paddingLeft: "20px" }}>
-                <li><code>{"{$date}"}</code> — 실행 날짜 (2026-03-25)</li>
-                <li><code>{"{$runNumber}"}</code> — 당일 실행 번호 (1, 2, ...)</li>
-                <li><code>{"{$runLabel}"}</code> — 실행 라벨 (#2026-03-25-1)</li>
-                <li><code>{"{$workflowName}"}</code> — 워크플로우 이름</li>
-              </ul>
-
-              <p style={{ ...mutedTextStyle, fontWeight: 600, marginTop: "12px" }}>Schedule (Cron)</p>
-              <ul style={{ margin: "4px 0", paddingLeft: "20px" }}>
-                <li>형식: 분 시 일 월 요일 (예: <code>0 9 * * *</code> = 매일 9시)</li>
-                <li>Reconciler가 5분 간격으로 체크하여 실행</li>
-              </ul>
-            </div>
-          </div>
-        </>
-      )}
+      {showHelp && <WorkflowHelpOverlay onClose={() => setShowHelp(false)} />}
     </div>
   );
 }
