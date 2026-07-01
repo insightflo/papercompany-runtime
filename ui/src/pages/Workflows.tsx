@@ -92,6 +92,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
   const [activeRunsScope, setActiveRunsScope] = useState<WorkflowRunHistoryScope>("all");
   const [selectedHistoryWorkflowId, setSelectedHistoryWorkflowId] = useState<string | null>(null);
   const [navigatorSearch, setNavigatorSearch] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
   const [showNewWorkflowForm, setShowNewWorkflowForm] = useState(false);
   const [definitionsCollapsed, setDefinitionsCollapsed] = useState(false);
   const [definitionsHeight, setDefinitionsHeight] = useState<number | null>(null);

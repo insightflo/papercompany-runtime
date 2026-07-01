@@ -4,6 +4,7 @@ import type { CreateParentIssuePolicy } from "./workflow-parent-policy.js";
 import type { StepDraft } from "./step-draft.js";
 import { stepsToJson } from "./step-draft.js";
 import { buildWorkflowInterfaceMetadata, normalizeMaxDailyRunsInput } from "./workflow-form-utils.js";
+import { summarizeWorkflowGraphTriggers } from "./workflow-graph.js";
 import { createCompanyLabel, usePluginAction } from "./workflow-page-api.js";
 import { buttonDisabledStyle, buttonStyle, inputStyle, mutedTextStyle, primaryButtonStyle, selectStyle, textareaStyle } from "./workflow-page-styles.js";
 import { workflowCreateActionsStyle, workflowCreateFieldStyle, workflowCreateHeaderStyle, workflowCreateIdentityStyle, workflowCreateSetupStripStyle, workflowCreateShellStyle, workflowCreateWorkspaceStyle } from "./workflow-layout-styles.js";

@@ -1193,6 +1193,6 @@ function WorkflowGraphEditor({
   );
 }
 
-function renderWorkflowGraphEditor(props: StepWorkspaceGraphEditorProps): JSX.Element {
+export function renderWorkflowGraphEditor(props: StepWorkspaceGraphEditorProps): JSX.Element {
   return <WorkflowGraphEditor {...props} />;
 }

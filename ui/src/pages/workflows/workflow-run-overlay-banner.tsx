@@ -8,7 +8,7 @@ import { formatDateTime } from "./workflow-page-api.js";
 type InspectedRunDetail = {
   loading: boolean;
   error: unknown;
-  data?: { run: { status: string }; stepRuns?: Array<{ id: string }> };
+  data: { run: { status: string }; stepRuns?: Array<{ id: string }> } | null;
 };
 
 export function WorkflowRunOverlayBanner({
