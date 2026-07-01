@@ -11,8 +11,9 @@ import { badgeRowStyle, buttonDisabledStyle, buttonStyle, dangerButtonStyle, fil
 import { apiBaseUrl, createCompanyLabel, fetchCompanyLabels, formatDateTime, useAvailableWorkflowTools, useHostContext, usePluginAction, useWorkflowOverview, useWorkflowRunDetail } from "./workflows/workflow-page-api.js";
 import { ErrorState, FieldLabel, HelpIcon, HelpedText } from "./workflows/shared-controls.js";
 import { splitCommaList, WorkflowToolPicker } from "./workflows/workflow-tool-picker.js";
-import { GraphModeTabs, StepWorkspaceEditor, WorkflowTestPlanPreview, type StepWorkspaceGraphEditorProps } from "./workflows/step-workspace-editor.js";
-import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle, workflowGraphFocusLensToneColor, workflowGraphTestDrawerModeStyle, workflowGraphTestDrawerStyle } from "./workflows/graph-editor/graphStyles.js";
+import { GraphModeTabs, StepWorkspaceEditor, type StepWorkspaceGraphEditorProps } from "./workflows/step-workspace-editor.js";
+import { WorkflowGraphTestDrawer } from "./workflows/graph-editor/GraphTestDrawer.js";
+import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
 import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeActionAnchor, type GraphNodeDragState } from "./workflows/graph-editor/graphUiUtils.js";
 import { GraphCanvas } from "./workflows/graph-editor/GraphCanvas.js";
 import { GraphInspector } from "./workflows/graph-editor/GraphInspector.js";
@@ -623,56 +624,6 @@ function graphEdgeMetadataFor(step: StepDraft | null, sourceId: string): { kind:
   };
 }
 
-function WorkflowGraphTestDrawer({
-  summary,
-  steps,
-  interfaceInput,
-  onClose,
-}: {
-  summary: WorkflowGraphTestDrawerSummary;
-  steps: StepDraft[];
-  interfaceInput?: WorkflowGraphInterfaceInput;
-  onClose: () => void;
-}): JSX.Element {
-  return (
-    <div key="workflow-graph-test-drawer" style={workflowGraphTestDrawerStyle(summary.tone)}>
-      <div key="header" style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "8px", minWidth: 0 }}>
-        <div style={{ display: "grid", gap: "4px", minWidth: 0 }}>
-          <span style={{ ...mutedTextStyle, fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.04em", fontWeight: 800 }}>
-            Test drawer
-          </span>
-          <strong style={{ fontSize: "13px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary.title}</strong>
-          <span style={{ ...mutedTextStyle, fontSize: "11px", lineHeight: 1.35, overflowWrap: "anywhere" }}>{summary.summary}</span>
-        </div>
-        <button type="button" style={{ ...buttonStyle, padding: "4px 8px", fontSize: "11px" }} onClick={onClose}>
-          Close
-        </button>
-      </div>
-      <div key="badges" style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-        {summary.badges.slice(0, 5).map((badge) => (
-          <span key={badge} style={graphPolicyBadgeStyle}>{badge}</span>
-        ))}
-      </div>
-      <div key="modes" style={{ display: "grid", gap: "6px" }}>
-        {summary.modes.map((mode) => (
-          <div key={mode.id} style={workflowGraphTestDrawerModeStyle(mode.tone)}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", minWidth: 0 }}>
-              <strong style={{ fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mode.title}</strong>
-              <span style={{ ...graphPolicyBadgeStyle, color: workflowGraphFocusLensToneColor(mode.tone) }}>{mode.badges[0] ?? mode.tone}</span>
-            </div>
-            <span style={{ ...mutedTextStyle, fontSize: "11px", lineHeight: 1.35, overflowWrap: "anywhere" }}>{mode.summary}</span>
-          </div>
-        ))}
-      </div>
-      <details key="detailed-controls" open style={{ display: "grid", gap: "8px" }}>
-        <summary style={{ cursor: "pointer", color: "var(--muted-foreground, #94a3b8)", fontSize: "11px", fontWeight: 750 }}>
-          Execution controls
-        </summary>
-        <WorkflowTestPlanPreview steps={steps} interfaceInput={interfaceInput} />
-      </details>
-    </div>
-  );
-}
 
 function WorkflowGraphEditor({
   steps,
