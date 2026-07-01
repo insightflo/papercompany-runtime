@@ -33,4 +33,14 @@ describe("readExplicitValidationVerdict", () => {
     expect(readExplicitValidationVerdict("REQUEST_CHANGES\n- fix hallucinated label", { allowLeadingVerdict: true })).toBe("request_changes");
     expect(readExplicitValidationVerdict("PASS\n- all checks complete", { allowLeadingVerdict: true })).toBe("pass");
   });
+
+  it("ignores a leading markdown rule before a leading verdict", () => {
+    expect(readExplicitValidationVerdict([
+      "---",
+      "",
+      "**REQUEST_CHANGES: published URL points to the hub shell, not the detail page**",
+      "",
+      "The run succeeded, but delivery readback failed.",
+    ].join("\n"), { allowLeadingVerdict: true })).toBe("request_changes");
+  });
 });

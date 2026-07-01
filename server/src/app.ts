@@ -671,7 +671,7 @@ export async function createApp(
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey }) => {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
       const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
         companyId: mission.companyId,
         agentId: targetAgentId,
@@ -694,6 +694,7 @@ export async function createApp(
           missionId: mission.id,
           mutation: "mission_owner_decision_retry_source_issue",
           ownerActionIssueId: ownerActionIssue.id,
+          wakeCommentId,
         },
         requestedByActorType: "system",
         requestedByActorId: "mission-owner-supervision-monitor",
@@ -702,6 +703,7 @@ export async function createApp(
           missionId: mission.id,
           source: "mission_owner_decision_retry_source_issue",
           ownerActionIssueId: ownerActionIssue.id,
+          wakeCommentId,
         },
       });
     },

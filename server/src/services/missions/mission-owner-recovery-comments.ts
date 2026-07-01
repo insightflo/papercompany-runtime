@@ -79,6 +79,36 @@ export function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMis
   return null;
 }
 
+const REQUEST_CHANGES_SUMMARY_MAX_CHARS = 1600;
+
+function trimRequestChangesSummary(value: string): string {
+  const normalized = value
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (normalized.length <= REQUEST_CHANGES_SUMMARY_MAX_CHARS) return normalized;
+  return `${normalized.slice(0, REQUEST_CHANGES_SUMMARY_MAX_CHARS).trimEnd()}...`;
+}
+
+export function extractLatestRequestChangesSummary(texts: Array<string | null | undefined>): string | null {
+  for (const rawText of texts.slice().reverse()) {
+    const text = rawText?.trim();
+    if (!text) continue;
+
+    const matches = [...text.matchAll(/REQUEST[_\s-]?CHANGES\s*:?\s*/giu)];
+    const latestMatch = matches.at(-1);
+    if (!latestMatch || latestMatch.index === undefined) continue;
+
+    let summary = text.slice(latestMatch.index).trim();
+    const closingFenceIndex = summary.indexOf("\n```");
+    if (closingFenceIndex > 0) summary = summary.slice(0, closingFenceIndex).trim();
+    const nextHeadingIndex = summary.search(/\n#{1,6}\s/u);
+    if (nextHeadingIndex > 0) summary = summary.slice(0, nextHeadingIndex).trim();
+    return trimRequestChangesSummary(summary);
+  }
+  return null;
+}
+
 export function buildStaleSourceIssueWakeupDispatchedComment(input: {
   missionId: string;
   sourceIssueId: string;
@@ -176,6 +206,7 @@ export function buildRetrySourceIssueComment(input: {
   sourceIssueId: string;
   sourceLabel: string;
   decisionReason?: string;
+  requestChangesSummary?: string | null;
 }) {
   return [
     "### Mission owner retry applied",
@@ -189,6 +220,35 @@ export function buildRetrySourceIssueComment(input: {
     "Decision: retry_source_issue",
     "Action: explicit mission-owner retry action moved the source issue back to todo; wakeup dispatch, if requested, is recorded separately.",
     `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
+    input.requestChangesSummary
+      ? [
+          "",
+          "Latest REQUEST_CHANGES summary:",
+          "```text",
+          input.requestChangesSummary,
+          "```",
+        ].join("\n")
+      : null,
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+export function buildRetrySourceIssueRequestChangesContextComment(input: {
+  ownerActionIssueId: string;
+  ownerActionLabel: string;
+  sourceIssueId: string;
+  sourceLabel: string;
+  requestChangesSummary: string;
+}) {
+  return [
+    "### Mission owner retry REQUEST_CHANGES context",
+    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    "Use this latest validation objection when retrying the source issue.",
+    "",
+    "Latest REQUEST_CHANGES summary:",
+    "```text",
+    input.requestChangesSummary,
+    "```",
   ].join("\n");
 }
 

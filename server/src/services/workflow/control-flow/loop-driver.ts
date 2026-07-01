@@ -205,24 +205,39 @@ async function loadProducerDependencyArtifacts(input: {
 
 function buildProducerReworkComment(input: {
   producerStepId: string;
-  qaStepId: string;
-  qaIssueId: string | null;
+  qaFeedbacks: Array<{ qaStepId: string; qaIssueId: string | null; feedback: string | null }>;
   currentIteration: number;
   maxIterations: number;
-  feedback: string | null;
   dependencyArtifacts?: string | null;
 }): string {
+  // [QA loop hardening] 한 producer 에 여러 QA validator 가 동시 반려할 수 있다. 각 QA 의 feedback 을
+  //   별도 섹션으로 합쳐 하나의 rework comment 로 생산자에게 전달 → producer 가 QA verdict 단위가 아닌
+  //   한 번의 rework 사이클로 모든 반려를 처리하게 한다.
+  const qaList = input.qaFeedbacks
+    .map((q) => `- QA step \`${q.qaStepId}\` (issue ${q.qaIssueId ?? "unknown"}) requested changes`)
+    .join("\n");
+  const multi = input.qaFeedbacks.length > 1;
+  const feedbackSections = input.qaFeedbacks
+    .map((q, index) => {
+      const sectionHeader = multi ? `\n#### QA feedback ${index + 1}: \`${q.qaStepId}\`` : "";
+      const body = q.feedback
+        ?? "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.";
+      return `${sectionHeader}${sectionHeader ? "\n" : ""}${body}`;
+    })
+    .join("\n");
   return [
     "## Workflow QA rework request",
     "",
-    `QA step \`${input.qaStepId}\` requested changes, so producer step \`${input.producerStepId}\` was reset for rework.`,
-    `- QA issue: ${input.qaIssueId ?? "unknown"}`,
+    `Producer step \`${input.producerStepId}\` was reset for rework because the following QA validator(s) requested changes.`,
+    qaList,
     `- Rework iteration: ${input.currentIteration + 1}/${input.maxIterations}`,
-    "- Required: update the deliverable to address the QA feedback, save it in the assigned output directory, and finish with the required `[ARTIFACT]: <absolute path>` line.",
+    multi
+      ? "- Required: update the deliverable to address ALL listed QA feedback above, save it in the assigned output directory, and finish with the required `[ARTIFACT]: <absolute path>` line."
+      : "- Required: update the deliverable to address the QA feedback, save it in the assigned output directory, and finish with the required `[ARTIFACT]: <absolute path>` line.",
     "- Do not close this issue as already complete unless the requested changes are actually reflected in the deliverable.",
     input.dependencyArtifacts ?? null,
     "",
-    input.feedback ?? "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.",
+    feedbackSections,
   ]
     .filter((line) => line !== null)
     .join("\n");
@@ -255,68 +270,91 @@ export async function applyBackEdgeReworkPass(
     // pending/running(이미 돌고있거나 대기) 은 rework 대상 아님. terminal 만.
     if (!stepRun || !TERMINAL_STEP_RUN_STATUSES.has(stepRun.status)) continue;
 
-    const firingEdge = backEdges.find((edge) => conditionalEdgeHolds(edge, predsByStepId.get(edge.stepId)));
-    if (!firingEdge) continue;
-    const maxIterations = firingEdge.maxIterations!;
+    // [QA loop hardening] coalesce: 한 producer 에 여러 back-edge QA validator 가 달려 있을 때,
+    //   각 QA verdict 가 비동기로 도착한다고 해서 verdict 단위로 producer 를 따로 리셋하지 않는다.
+    //   같은 producer 산출물에 대한 모든 sibling QA 가 terminal 될 때까지 대기(barrier)한 뒤,
+    //   request_changes 들을 하나의 rework 사이클로 합쳐 producer iteration 을 1 만 소모하게 한다.
+    //   목적: maxIterations 가 QA verdict 단위가 아니라 producer rework 사이클 단위로 소모되도록.
+    const siblingQas = backEdges.map((edge) => {
+      const qaRun = stepRunMap.get(edge.stepId);
+      const pred = predsByStepId.get(edge.stepId);
+      const terminal = !!qaRun && TERMINAL_STEP_RUN_STATUSES.has(qaRun.status);
+      // rejected = 이 QA 가 terminal 이며 when(qa_request_changes) 이 성립(verdict=request_changes).
+      const rejected = conditionalEdgeHolds(edge, pred);
+      return { edge, qaRun, pred, terminal, rejected };
+    });
+    // barrier: sibling QA 중 pending/running(또는 아직 stepRun 자체가 없는) 이 있으면 이번 sync 에는
+    //   리셋하지 않고 다음 tick 에 재평가. conservative — 모든 relevant QA 가 끝난 뒤에만 rework.
+    if (!siblingQas.every((q) => q.terminal)) continue;
+    const rejectedQas = siblingQas.filter((q) => q.rejected);
+    if (rejectedQas.length === 0) continue; // 전원 pass(또는 반려 아님) → rework 없이 forward
+
+    // producer-level cap: iterationIndex 는 producer stepRun 에서 모든 back-edge 가 공유하므로,
+    //   cap 도 QA edge 단위가 아닌 producer 단위로 판정한다(여러 edge 의 max 이상치 사용).
+    const maxIterations = Math.max(...siblingQas.map((q) => q.edge.maxIterations!));
     const currentIteration = stepRun.iterationIndex ?? 0;
 
-    // back-edge 가 지금 발화해야 하는가? = back-edge 의 when(qa_request_changes) 이 선행(QA) facts 에 성립.
-    // classifyStepActivation 은 forward-gate 전용이라(P5: back-edge 제외) back-edge 발화 판정에 쓸 수 없다 —
-    // 여기선 back-edge 의 when 을 직접 평가한다(conditionalEdgeHolds). live verdict 가 predFacts 에 채워져 있다.
-    const predFacts = predsByStepId.get(firingEdge.stepId);
+    // cap: iteration_index(수행된 rework 수) 가 maxIterations 에 도달하면 더 리셋하지 않는다(bounded).
+    //   cap-exhausted → owner/replan 신호는 Patch 2 가 supervision 과 연결; 여기선 기존대로 terminal 유지.
+    if (currentIteration >= maxIterations) continue;
 
-    // cap: iteration_index(수행된 rework 수) 가 maxIterations 에 도달하면 더 않는다(bounded).
-    if (currentIteration >= maxIterations) {
-      // QA 가 여전히 반려여도 rework 기회 소진 → step 은 terminal 에 머물 → 워크플로 failed 수렴.
-      continue;
-    }
     const attempt: StepIterationAttempt = {
       iteration: currentIteration,
-      verdict: predFacts?.verdict === "pass" ? "pass" : "request_changes",
+      verdict: "request_changes",
       completedAt: new Date().toISOString(),
     };
-    const qaStepRun = stepRunMap.get(firingEdge.stepId);
-    const qaFeedback = await loadQaReworkFeedback({ db, qaIssueId: qaStepRun?.issueId ?? null });
     const dependencyArtifacts = await loadProducerDependencyArtifacts({ db, stepRunMap, producerStep: step });
+
+    // 모든 반려 QA 의 feedback 을 합쳐 하나의 rework comment 로 생산자에게 전달.
+    const qaFeedbacks = [];
+    for (const q of rejectedQas) {
+      qaFeedbacks.push({
+        qaStepId: q.edge.stepId,
+        qaIssueId: q.qaRun?.issueId ?? null,
+        feedback: await loadQaReworkFeedback({ db, qaIssueId: q.qaRun?.issueId ?? null }),
+      });
+    }
 
     await resetStepRunForRework({
       db,
       stepRun,
       companyId: run.companyId,
       attempt,
-      reason: `qa_request_changes(back-edge ${step.id}←${firingEdge.stepId}, iteration ${currentIteration}/${maxIterations})`,
+      reason: `qa_request_changes(merged back-edge ${step.id}←[${rejectedQas.map((q) => q.edge.stepId).join(",")}], iteration ${currentIteration}/${maxIterations})`,
     });
-    // Phase 5 (plan 8.1 delivery verification): delivery-relevant QA step returning request_changes
-    // → best-effort company-scoped quality review item. Narrow dedupe by QA issue id; carry run/step
-    // context in triggerMetadata + evidence `expected` so the collector knows what to probe.
-    const qaStepDef = steps.find((s) => s.id === firingEdge.stepId);
-    if (
-      qaStepDef &&
-      isDeliveryRelevantStep({
-        id: qaStepDef.id,
-        name: (qaStepDef as { name?: string }).name ?? qaStepDef.id,
-        description: (qaStepDef as { description?: string }).description,
-      })
-    ) {
-      try {
-        const qaIssueId = qaStepRun?.issueId ?? null;
-        const expected = { workflowRunId: run.id, qaStepId: qaStepDef.id, qaIssueId, producerStepId: step.id };
-        await writeQualityFinding(db, {
-          companyId: run.companyId,
-          missionId: run.missionId ?? null,
-          title: `Delivery verification failed: ${qaStepDef.id}`,
-          targetType: "public_url",
-          triggerSource: "delivery_verification",
-          targetId: qaIssueId ? `${run.id}:${qaIssueId}` : `${run.id}:${qaStepDef.id}`,
-          failureType: "delivery_url_404",
-          triggerMetadata: expected,
-          evidenceRefs: [
-            { surface: "public_url", status: "missing", blocking: true, expected },
-            { surface: "browser_readback", status: "missing", blocking: true, expected },
-          ],
-        });
-      } catch {
-        // swallowed: the rework loop must never depend on the quality board.
+    // Phase 5 (plan 8.1 delivery verification): 각 반려 QA 마다 best-effort company-scoped quality
+    //   review item. Narrow dedupe by QA issue id; carry run/step context in triggerMetadata +
+    //   evidence `expected` so the collector knows what to probe.
+    for (const q of rejectedQas) {
+      const qaStepDef = steps.find((s) => s.id === q.edge.stepId);
+      if (
+        qaStepDef &&
+        isDeliveryRelevantStep({
+          id: qaStepDef.id,
+          name: (qaStepDef as { name?: string }).name ?? qaStepDef.id,
+          description: (qaStepDef as { description?: string }).description,
+        })
+      ) {
+        try {
+          const qaIssueId = q.qaRun?.issueId ?? null;
+          const expected = { workflowRunId: run.id, qaStepId: qaStepDef.id, qaIssueId, producerStepId: step.id };
+          await writeQualityFinding(db, {
+            companyId: run.companyId,
+            missionId: run.missionId ?? null,
+            title: `Delivery verification failed: ${qaStepDef.id}`,
+            targetType: "public_url",
+            triggerSource: "delivery_verification",
+            targetId: qaIssueId ? `${run.id}:${qaIssueId}` : `${run.id}:${qaStepDef.id}`,
+            failureType: "delivery_url_404",
+            triggerMetadata: expected,
+            evidenceRefs: [
+              { surface: "public_url", status: "missing", blocking: true, expected },
+              { surface: "browser_readback", status: "missing", blocking: true, expected },
+            ],
+          });
+        } catch {
+          // swallowed: the rework loop must never depend on the quality board.
+        }
       }
     }
     if (stepRun.issueId) {
@@ -325,11 +363,9 @@ export async function applyBackEdgeReworkPass(
         issueId: stepRun.issueId,
         body: buildProducerReworkComment({
           producerStepId: step.id,
-          qaStepId: firingEdge.stepId,
-          qaIssueId: qaStepRun?.issueId ?? null,
+          qaFeedbacks,
           currentIteration,
           maxIterations,
-          feedback: qaFeedback,
           dependencyArtifacts,
         }),
       });

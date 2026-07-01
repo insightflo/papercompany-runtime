@@ -17,6 +17,7 @@ import {
   missionPlanDecisionSubmissions,
   missionPlanQaVerdicts,
   missions,
+  plugins,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -31,6 +32,7 @@ import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa
 import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
 import { setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
 import { issueService } from "../services/issues.js";
+import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -1088,6 +1090,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
   }, 60_000);
 
   afterEach(async () => {
+    setWorkflowToolStepExecutor(null);
     await db.delete(activityLog);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -1100,6 +1103,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(workflowDefinitions);
+    await db.delete(plugins);
     await db.delete(missions);
     await db.delete(agents);
     await db.delete(companies);
@@ -1163,6 +1167,40 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     });
 
     return { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId };
+  }
+
+  async function seedReadyResearchWorkbenchPlugin() {
+    await db.insert(plugins).values({
+      id: randomUUID(),
+      pluginKey: "insightflo.research-workbench",
+      packageName: "@insightflo/paperclip-research-workbench",
+      version: "0.1.0",
+      manifestJson: {
+        id: "insightflo.research-workbench",
+        displayName: "Research Workbench",
+        version: "0.1.0",
+        apiVersion: 1,
+        description: "Research Workbench",
+        capabilities: ["agent.tools.register"],
+        entrypoints: { worker: "./dist/worker.js" },
+        tools: [
+          {
+            name: "research-search",
+            displayName: "Research Search",
+            description: "Search the web and return structured evidence bundles.",
+            parametersSchema: {
+              type: "object",
+              properties: {
+                query: { type: "string" },
+                maxResults: { type: "number" },
+              },
+              required: ["query"],
+            },
+          },
+        ],
+      },
+      status: "ready",
+    });
   }
 
   // Test 1: Valid owner decision creates revision 2
@@ -1481,6 +1519,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     ]);
     expect(paqoSteps[0]!.agentId).toBe(ownerAgentId);
     expect(paqoSteps[0]!.graphWorkProductRequired).toBe(true);
+    expect("toolNames" in paqoSteps[0]!).toBe(false);
     expect(paqoSteps[1]!.graphWorkProductRequired).toBe(false);
     expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
     // [P5 control-flow loop] ACTION producer 에 QA rework back-edge 가 합성되었는지(wiring 회귀 감지).
@@ -1542,6 +1581,131 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(issues)
       .where(eq(issues.originKind, "mission_main_executor_oversight"));
     expect(oversightIssues).toHaveLength(0);
+  });
+
+  it("adds Research Workbench to search-oriented PLAN units only when the plugin is ready", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await seedReadyResearchWorkbenchPlugin();
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    await db.insert(issueComments).values({
+      id: randomUUID(),
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        missionGoal: "Research current market evidence",
+        selectedExecutionUnits: [
+          {
+            id: "unit-source-search",
+            kind: "mission_plan_unit",
+            title: "Search current external sources",
+            assigneeAgentId: ownerAgentId,
+            selectionState: "selected",
+            reason: "Need current source evidence before synthesis",
+            sourceRef: { type: "mission_plan_unit", id: "unit-source-search" },
+            dependsOn: [],
+          },
+        ],
+        ruleRefs: [],
+        kbRefs: [],
+        requiredInputs: [],
+        successCriteria: ["sources collected"],
+        steps: [],
+      }),
+      createdAt: new Date("2026-01-02T00:10:00.000Z"),
+    });
+
+    const result = await recordThroughQaPass({ companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Research current market evidence"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ name: string; toolNames?: string[] }>;
+    expect(paqoSteps[0]).toMatchObject({
+      name: "[ACTION] Search current external sources",
+      toolNames: ["insightflo.research-workbench:research-search"],
+    });
+  });
+
+  it("preserves PLAN-selected workflow tools, KBs, and skill rationale on materialized steps", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await seedReadyResearchWorkbenchPlugin();
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+    await missionPlanArtifactService(db).createInitialMissionPlan({
+      companyId,
+      missionId,
+      refs: {},
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    });
+
+    await db.insert(issueComments).values({
+      id: randomUUID(),
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        missionGoal: "Evaluate tools and skills before research",
+        selectedExecutionUnits: [
+          {
+            id: "unit-tool-fit",
+            kind: "mission_plan_unit",
+            title: "Collect cited evidence",
+            assigneeAgentId: ownerAgentId,
+            selectionState: "selected",
+            reason: "PLAN selected Research Workbench and the research skill for source collection",
+            sourceRef: { type: "mission_plan_unit", id: "unit-tool-fit" },
+            toolNames: ["insightflo.research-workbench:research-search"],
+            toolArgs: { maxResults: 3 },
+            knowledgeBaseIds: ["kb-research-policy"],
+            skillRefs: ["research-helper"],
+            dependsOn: [],
+          },
+        ],
+        ruleRefs: [],
+        kbRefs: [],
+        requiredInputs: [],
+        successCriteria: ["evidence bundle ready"],
+        steps: [],
+      }),
+      createdAt: new Date("2026-01-02T00:20:00.000Z"),
+    });
+
+    const result = await recordThroughQaPass({ companyId, missionId });
+
+    expect(result.status).toBe("recorded");
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Evaluate tools and skills before research"));
+    expect(paqoDefinitions).toHaveLength(1);
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{
+      toolNames?: string[];
+      toolArgs?: unknown;
+      knowledgeBaseIds?: string[];
+      description?: string;
+    }>;
+    expect(paqoSteps[0]).toMatchObject({
+      toolNames: ["insightflo.research-workbench:research-search"],
+      toolArgs: { maxResults: 3 },
+      knowledgeBaseIds: ["kb-research-policy"],
+    });
+    expect(paqoSteps[0]!.description).toContain("Skill refs considered by PLAN: research-helper");
   });
 
   it("does not materialize PAQO OVERSIGHT units as workflow DAG steps", async () => {
@@ -3231,5 +3395,134 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(second.status).toBe("noop");
     expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
+  });
+
+  it("[PLAN-QA structured PASS recovery] structured PASS row + pending active refs recovers on re-record (A1 stuck-state)", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    // materialization 이 실제로 실행되려면 workflow tool step executor 가 필요(recovery 단계).
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    const pendingPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const pendingPlanQa = (pendingPlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+    expect(pendingPlanQa?.status).toBe("pending");
+    expect(pendingPlanQa?.issueId).toBeTruthy();
+
+    // A1 stuck-state 재현: structured PASS verdict row 를 표에 직접 심는다.
+    //   issueService.addComment(dual-write) 경로를 우회해 materialization hook 이 터지지 않게 한다.
+    //   결과: verdict row=pass 인데 refs.planQa=pending, workflow 미실체화(A1 관측 상태와 동일).
+    await db.insert(missionPlanQaVerdicts).values({
+      companyId,
+      missionId,
+      planQaIssueId: pendingPlanQa!.issueId!,
+      reviewerAgentId: qaAgentId,
+      reviewerUserId: null,
+      sourceRunId: null,
+      sourceCommentId: null,
+      decisionHash: first.decisionHash ?? "",
+      verdict: "pass",
+      diagnostics: [],
+    }).onConflictDoNothing();
+
+    // stuck 전제 단언: verdict row=pass 인데 workflow 는 미실체화
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
+    const runsBefore = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(runsBefore.length).toBe(0);
+
+    // 후속 recordLatest → readPlanQaVerdict 가 structured-first 로 pass 판독 → 멱등 materialize 완수
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+    const recovered = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const recoveredPlanQa = (recovered?.refs as Record<string, unknown> | undefined)?.planQa as { status?: string; verdict?: string } | undefined;
+    expect(recoveredPlanQa?.status).toBe("pass");
+    expect(recoveredPlanQa?.verdict).toBe("pass");
+    const paqoWorkflow = (recovered?.refs as Record<string, unknown> | undefined)?.paqoWorkflow as { workflowRunId?: string } | undefined;
+    expect(paqoWorkflow?.workflowRunId).toBeTruthy();
+    const runsAfter = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(runsAfter.length).toBeGreaterThan(0);
+  });
+
+  it("[PLAN-QA materialization failure] writes durable diagnostic activity, stays pending, recovers on retry", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId } = await seedQaFixture();
+    // tool-bearing unit 으로 PAQO step 가 toolNames 를 갖게 한다. 그래야
+    //   assertWorkflowToolStepsReady(dag-engine.ts:189) 가 early-return 하지 않고
+    //   executor null 을 검사(198-200)해서 throw 한다. executor 자체를 throw 시켜도
+    //   dag-engine 이 삼키기 때문에(2196 catch → failToolStepRun, return false),
+    //   전파하려면 반드시 null-executor 경로로 ensurePaqo 를 터뜨려야 한다.
+    await db.update(companies).set({ workProductRoot: "/tmp/paperclip-test-work-products" }).where(eq(companies.id, companyId));
+    // plugin 을 등록해 tool 을 "selectable" 로 만든다. 그래야 createDefinition 이 통과하고,
+    //   throw 지점이 createDefinition(tool 미등록)이 아니라 executeWorkflowRun(executor null)이 된다.
+    await seedReadyResearchWorkbenchPlugin();
+    await db.insert(issueComments).values({
+      id: randomUUID(),
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        missionGoal: validDecision.missionGoal,
+        selectedExecutionUnits: [{
+          id: "unit-tool-fail",
+          kind: "mission_plan_unit",
+          title: "Collect cited evidence",
+          assigneeAgentId: ownerAgentId,
+          selectionState: "selected",
+          reason: "tool-bearing unit to force executor readiness check",
+          sourceRef: { type: "mission_plan_unit", id: "unit-tool-fail" },
+          toolNames: ["insightflo.research-workbench:research-search"],
+          dependsOn: [],
+        }],
+        ruleRefs: [],
+        kbRefs: [],
+        requiredInputs: [],
+        successCriteria: ["evidence bundle ready"],
+        steps: [],
+      }),
+    });
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });
+
+    // materialization 강제 실패: workflow tool step executor 를 끄면
+    //   ensurePaqoWorkflow → executeWorkflowRun → assertWorkflowToolStepsReady 가 throw.
+    setWorkflowToolStepExecutor(null);
+    let threw = false;
+    try {
+      await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+
+    // durable diagnostic: A1 사례처럼 stranded state 가 됐을 때 유일한 DB 단서.
+    const failed = await db.select().from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "mission.owner_plan.materialization_failed")));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.entityType).toBe("mission");
+    expect(failed[0]!.entityId).toBe(missionId);
+    expect(failed[0]!.details).toMatchObject({
+      step: "ensure_paqo_workflow",
+      decisionHash: first.decisionHash,
+    });
+    expect((failed[0]!.details as { error?: string }).error).toBeTruthy();
+
+    // 상태는 pending 유지(멱등 재시도 가능). updatePlanQaRef(pass) 는 throw 이후 단계라 미실행.
+    const stuckPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const stuckPlanQa = (stuckPlan?.refs as Record<string, unknown> | undefined)?.planQa as { status?: string } | undefined;
+    expect(stuckPlanQa?.status).toBe("pending");
+
+    // 재시도: executor 복구 → 후속 recordLatest 가 structured pass row 를 읽어 멱등하게 materialize 완수.
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+    const recovered = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const recoveredPlanQa = (recovered?.refs as Record<string, unknown> | undefined)?.planQa as { status?: string; verdict?: string } | undefined;
+    expect(recoveredPlanQa?.status).toBe("pass");
+    expect(recoveredPlanQa?.verdict).toBe("pass");
+    const paqoWorkflow = (recovered?.refs as Record<string, unknown> | undefined)?.paqoWorkflow as { workflowRunId?: string } | undefined;
+    expect(paqoWorkflow?.workflowRunId).toBeTruthy();
+    setWorkflowToolStepExecutor(null);
   });
 });

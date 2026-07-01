@@ -81,7 +81,7 @@ export function missionRoutes(db: Db) {
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey }) => {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
       const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
         companyId: mission.companyId,
         agentId: targetAgentId,
@@ -105,6 +105,7 @@ export function missionRoutes(db: Db) {
           ownerActionIssueId: ownerActionIssue.id,
           mutation: "mission_owner_retry_source_issue",
           sourceIssueId: sourceIssue.id,
+          wakeCommentId,
         },
         requestedByActorType: "system",
         requestedByActorId: "mission-owner-supervision",
@@ -114,6 +115,7 @@ export function missionRoutes(db: Db) {
           source: "mission_owner_retry_source_issue",
           ownerActionIssueId: ownerActionIssue.id,
           sourceIssueId: sourceIssue.id,
+          wakeCommentId,
         },
       });
     },

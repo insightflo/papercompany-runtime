@@ -89,9 +89,10 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
       intent,
       selectedExecutionUnits: [
         unit({ id: "u-research", title: "전달법 리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-synth", title: "보고서 합성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-        unit({ id: "u-publish", title: "site에 HTML 게시/배포", sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-        unit({ id: "u-qa", title: "[QA] 게시물 readback 검증", sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
+        unit({ id: "u-synth", title: "산출물 초안 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
+        unit({ id: "u-artifact-qa", title: "[QA] 산출물 내용/출처/형식 검증", dependsOn: ["u-synth"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
+        unit({ id: "u-publish", title: "site에 산출물 게시/배포", dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-qa", title: "[QA] 게시물 readback 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
       ],
     });
     const blocking = diag.filter((d) => d.severity === "invalid");
@@ -109,6 +110,34 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
     const codes = diag.map((d) => d.code);
     expect(codes).toContain("missing_publish_readback_qa");
     expect(diag.find((d) => d.code === "missing_publish_readback_qa")?.severity).toBe("invalid");
+  });
+
+  it("산출물 delivery plan 에서 artifact QA 가 없으면 missing_artifact_qa_before_delivery(invalid)", () => {
+    const diag = reviewPlanAgainstIntent({
+      intent,
+      selectedExecutionUnits: [
+        unit({ id: "u-research", title: "필요 조건 확인 및 템플릿 조사", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
+        unit({ id: "u-build", title: "템플릿 기반 대시보드 파일 생성", dependsOn: ["u-research"], sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
+        unit({ id: "u-publish", title: "Cloudflare Pages에 산출물 업로드", dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-readback", title: "[QA] 게시물 readback 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-readback" } }),
+      ],
+    });
+    expect(diag.map((d) => d.code)).toContain("missing_artifact_qa_before_delivery");
+    expect(diag.find((d) => d.code === "missing_artifact_qa_before_delivery")?.severity).toBe("invalid");
+  });
+
+  it("artifact QA 가 delivery 뒤에 있으면 invalid_artifact_qa_delivery_order(invalid)", () => {
+    const diag = reviewPlanAgainstIntent({
+      intent,
+      selectedExecutionUnits: [
+        unit({ id: "u-research", title: "필요 조건 확인 및 자료 조사", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
+        unit({ id: "u-build", title: "PPTX 덱 파일 제작", dependsOn: ["u-research"], sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
+        unit({ id: "u-publish", title: "site에 PPTX 업로드/게시", dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-artifact-qa", title: "[QA] 산출물 파일 품질 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
+      ],
+    });
+    expect(diag.map((d) => d.code)).toContain("invalid_artifact_qa_delivery_order");
+    expect(diag.find((d) => d.code === "invalid_artifact_qa_delivery_order")?.severity).toBe("invalid");
   });
 });
 
@@ -290,6 +319,4 @@ describe("resolveSitePublishTarget — path/env(presence only, no secret)", () =
     expect(target.cloudflare?.hasApiToken).toBe(false);
   });
 });
-
-
 

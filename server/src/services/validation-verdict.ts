@@ -5,6 +5,7 @@ export interface ReadExplicitValidationVerdictOptions {
 }
 
 const VERDICT_LABEL = String.raw`REQUEST[_\s-]?CHANGES|PASS`;
+const MARKDOWN_RULE_RE = /^[-*_]{3,}$/u;
 
 function normalizeVerdictLabel(label: string): ValidationVerdict {
   return /^PASS$/iu.test(label.trim()) ? "pass" : "request_changes";
@@ -46,7 +47,7 @@ export function readExplicitValidationVerdict(
   const lines = value
     .split(/\r?\n/u)
     .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0 && !MARKDOWN_RULE_RE.test(line.replace(/\s+/gu, "")));
   if (lines.length === 0) return null;
 
   const terminalVerdict = readVerdictFromLine(lines[lines.length - 1]!);

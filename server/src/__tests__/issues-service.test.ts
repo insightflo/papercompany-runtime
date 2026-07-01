@@ -30,6 +30,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.ts";
 import { createSrbPairSync } from "../services/srb/pair-sync.ts";
+import { setPublicUrlReadbackFetcher } from "../services/public-url-readback.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -59,6 +60,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
   }, 60_000);
 
   afterEach(async () => {
+    setPublicUrlReadbackFetcher(null);
     await db.delete(issueComments);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
@@ -640,6 +642,7 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
   }, 60_000);
 
   afterEach(async () => {
+    setPublicUrlReadbackFetcher(null);
     await db.delete(issueComments);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
@@ -655,6 +658,118 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  async function createManualOnboardingActionFixture() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+    const productUrl = "https://manual-onboarding.pages.dev/onboarding/concepts/feynman-method-v2/index.html";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Manual Onboarding Publisher",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Feynman method onboarding publish",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      assigneeAgentId: workerAgentId,
+      originKind: "workflow_execution",
+      title: "[ACTION] QA 통과 보고서를 manual-onboarding-publisher로 게시",
+      description: "Delivery Verification: public URL must contain the expected title/topic/content marker.",
+      status: "todo",
+      priority: "medium",
+    });
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId,
+      type: "preview_url",
+      provider: "manual_onboarding",
+      title: "파인만 방법론: 초보자를 위한 판단 보고서",
+      url: productUrl,
+      externalId: "concepts/feynman-method-v2/index.html",
+      status: "active",
+      isPrimary: true,
+      metadata: { source: "mission_owner_unblock_recovery" },
+    });
+
+    return { issueId, productUrl };
+  }
+
+  it("rejects delivery ACTION completion when the structured preview_url readback returns a hub shell", async () => {
+    const { issueId, productUrl } = await createManualOnboardingActionFixture();
+    let readbackUrl = "";
+    setPublicUrlReadbackFetcher(async (url) => {
+      readbackUrl = url;
+      return {
+        ok: true,
+        status: 200,
+        text: "<!doctype html><html><head><title>온보딩 라이브러리</title></head><body>hub</body></html>",
+      };
+    });
+
+    await expect(svc.update(issueId, { status: "done" })).rejects.toThrow(
+      "manual-onboarding hub shell",
+    );
+
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(readbackUrl).toBe(productUrl);
+    expect(issue?.status).toBe("todo");
+    expect(issue?.completedAt).toBeNull();
+  });
+
+  it("allows delivery ACTION completion when the structured preview_url readback contains the workProduct marker", async () => {
+    const { issueId, productUrl } = await createManualOnboardingActionFixture();
+    setPublicUrlReadbackFetcher(async (url) => {
+      expect(url).toBe(productUrl);
+      return {
+        ok: true,
+        status: 200,
+        text: "<!doctype html><title>파인만 방법론: 초보자를 위한 판단 보고서</title><main>파인만 방법론 설명</main>",
+      };
+    });
+
+    const updated = await svc.update(issueId, { status: "done" });
+
+    expect(updated).toEqual(expect.objectContaining({ id: issueId, status: "done" }));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(issue?.completedAt).toBeInstanceOf(Date);
   });
 
   it("repairs malformed same-run locks when executionRunId already matches the actor run", async () => {

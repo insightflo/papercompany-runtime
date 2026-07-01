@@ -14,12 +14,14 @@ import { notFound } from "../../errors.js";
 import { missionPlanArtifactService, summarizeMissionPlanForRuntime } from "../mission-plan-artifacts.js";
 import type { MissionPlanRuntimeSummary } from "../mission-plan-artifacts.js";
 import { listWorkflowDefinitions } from "../workflow/workflow-store.js";
+import { listWorkflowToolCatalog } from "../workflow/tool-catalog.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
 import type { MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import type { MissionRuleRef } from "./mission-rule-context.js";
 import { extractMissionIntent, type MissionIntent } from "./mission-intent.js";
 import { stat } from "node:fs/promises";
+import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 
 export const MISSION_OWNER_PLANNING_SOURCE_REF_VOCABULARY = [
   "native_workflow_run",
@@ -74,6 +76,7 @@ export type MissionOwnerPlanningAgentRosterEntry = {
   role: string;
   assignedAt: Date;
   capabilities: string | null;
+  desiredSkillKeys: string[];
 };
 
 export type MissionOwnerPlanningTodoMarker = {
@@ -86,6 +89,12 @@ export type MissionOwnerPlanningBoundedAssetSummary = {
   count: number;
   labels: string[];
   note?: string;
+  entries?: Array<{
+    name: string;
+    displayName: string;
+    source: string;
+    enabled: boolean;
+  }>;
 };
 
 /**
@@ -134,7 +143,7 @@ export type MissionOwnerPlanningDossier = {
     runtimeServices: MissionOwnerPlanningBoundedAssetSummary;
     ruleRefs: Array<Pick<MissionRuleRef, "id" | "key" | "name" | "mode" | "severity" | "action" | "reason">>;
     kbRefs: Array<{ id: string; name: string; type: string; reason: string }>;
-    agentRoster: Array<{ agentId: string; name: string | null; role: string; capabilities: string | null }>;
+    agentRoster: Array<{ agentId: string; name: string | null; role: string; capabilities: string | null; desiredSkillKeys: string[] }>;
     capabilityManifest: MissionOwnerPlanningCapabilityManifest;
     fileViews: MissionOwnerPlanningBoundedAssetSummary;
     executionSourceSummary: { unitCount: number; labels: string[] };
@@ -242,6 +251,32 @@ function unavailableSummary(note: string): MissionOwnerPlanningBoundedAssetSumma
   return { available: false, count: 0, labels: [], note };
 }
 
+async function listWorkflowToolSummary(db: Db, companyId: string): Promise<MissionOwnerPlanningBoundedAssetSummary> {
+  const catalog = await listWorkflowToolCatalog(db, companyId);
+  const usableTools = catalog.tools.filter((tool) => tool.enabled);
+  if (usableTools.length === 0) {
+    return {
+      available: false,
+      count: 0,
+      labels: [],
+      note: catalog.tools.length > 0
+        ? "Workflow tools exist but none are currently enabled/selectable."
+        : "No workflow tools are available for this company.",
+    };
+  }
+  return {
+    available: true,
+    count: usableTools.length,
+    labels: uniqueStrings(usableTools.map((tool) => `${tool.displayName} (${tool.name})`)),
+    entries: usableTools.slice(0, MAX_DOSSIER_LABELS).map((tool) => ({
+      name: tool.name,
+      displayName: tool.displayName,
+      source: tool.source,
+      enabled: tool.enabled,
+    })),
+  };
+}
+
 function workflowCandidateMatchReason(candidate: MissionOwnerPlanningWorkflowCandidate): string {
   if (candidate.matchedPurposeTokens.length > 0) {
     return `Matched mission tokens: ${candidate.matchedPurposeTokens.join(", ")}.`;
@@ -261,6 +296,7 @@ function buildPlanningDossier(input: {
   kbRefs: MissionOwnerPlanningKbRef[];
   agentRoster: MissionOwnerPlanningAgentRosterEntry[];
   capabilityManifest: MissionOwnerPlanningCapabilityManifest;
+  tools: MissionOwnerPlanningBoundedAssetSummary;
   todoMarkers: MissionOwnerPlanningTodoMarker[];
 }): MissionOwnerPlanningDossier {
   const extractedDeliverables = splitObjectiveFragments(input.mission.title, input.mission.description);
@@ -302,7 +338,7 @@ function buildPlanningDossier(input: {
     },
     assets: {
       workflowCandidates,
-      tools: unavailableSummary("No tool summary is available inside MissionOwnerPlanningContext; Slice 4B does not inspect tools outside already-provided runtime manifest data."),
+      tools: input.tools,
       runtimeServices: unavailableSummary("No runtime-service summary is available inside MissionOwnerPlanningContext; Slice 4B does not start or discover services."),
       ruleRefs: input.ruleRefs.map(({ id, key, name, mode, severity, action, reason }) => ({ id, key, name, mode, severity, action, reason })),
       kbRefs: input.kbRefs.map(({ id, name, type, agentId }) => ({
@@ -311,7 +347,7 @@ function buildPlanningDossier(input: {
         type,
         reason: `Granted to mission agent ${agentId}.`,
       })),
-      agentRoster: input.agentRoster.map(({ agentId, name, role, capabilities }) => ({ agentId, name, role, capabilities })),
+      agentRoster: input.agentRoster.map(({ agentId, name, role, capabilities, desiredSkillKeys }) => ({ agentId, name, role, capabilities, desiredSkillKeys })),
       capabilityManifest: input.capabilityManifest,
       fileViews: unavailableSummary("No file-view summary is available inside MissionOwnerPlanningContext; Slice 4B does not scan repositories or files."),
       executionSourceSummary: {
@@ -517,6 +553,7 @@ async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerP
       assignedAt: missionAgents.assignedAt,
       name: agents.name,
       capabilities: agents.capabilities,
+      adapterConfig: agents.adapterConfig,
     })
     .from(missionAgents)
     .leftJoin(agents, eq(missionAgents.agentId, agents.id))
@@ -529,6 +566,11 @@ async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerP
     role: row.role,
     assignedAt: row.assignedAt,
     capabilities: row.capabilities,
+    desiredSkillKeys: readPaperclipSkillSyncPreference(
+      row.adapterConfig && typeof row.adapterConfig === "object" && !Array.isArray(row.adapterConfig)
+        ? row.adapterConfig as Record<string, unknown>
+        : {},
+    ).desiredSkills,
   }));
 }
 
@@ -600,6 +642,7 @@ export async function buildMissionOwnerPlanningContext(
   // [P3] intent 로 capability 를 스코핑 — non-publish 미션에 publish capability 가 과다 주입되지 않게.
   const missionIntent = extractMissionIntent(mission.title, mission.description);
   const capabilityManifest = await listCompanySkillSummaries(db, input.companyId, missionIntent);
+  const tools = await listWorkflowToolSummary(db, input.companyId);
   const kbRefs = await listKbRefs(db, input.companyId, agentRoster);
   const todoMarkers: MissionOwnerPlanningTodoMarker[] = [];
 
@@ -624,6 +667,7 @@ export async function buildMissionOwnerPlanningContext(
     kbRefs,
     agentRoster,
     capabilityManifest,
+    tools,
     todoMarkers,
   });
 

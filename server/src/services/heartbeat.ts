@@ -78,6 +78,7 @@ import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-plann
 import { createPlanQaWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
+import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import {
   extractMissionOwnerDecisionFromText,
   MISSION_OWNER_DECISION_OPTIONS,
@@ -392,6 +393,15 @@ type WorkflowStepToolContext = {
   }>;
 };
 
+type ResolvedWorkflowToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  adapterType: string;
+  enabled: boolean;
+  instructions: string | null;
+};
+
 type WorkflowStepKnowledgeContext = {
   workflowRunId: string;
   workflowId: string;
@@ -456,10 +466,33 @@ async function resolveWorkflowStepToolContext(input: {
   const contract = await workflowService.getStepExecutionContractForIssue(input.db, input.issueId);
   if (!contract || contract.toolNames.length === 0) return null;
 
-  const definitions = await toolService.listDefinitions(input.db, {
-    companyId: input.companyId,
-  });
-  const definitionByName = new Map(definitions.map((definition) => [definition.name, definition]));
+  const [coreDefinitions, pluginDefinitions] = await Promise.all([
+    toolService.listDefinitions(input.db, {
+      companyId: input.companyId,
+    }),
+    listDefaultWorkflowPluginAgentTools(input.db),
+  ]);
+  const definitionByName = new Map<string, ResolvedWorkflowToolDefinition>();
+  for (const definition of coreDefinitions) {
+    definitionByName.set(definition.name, {
+      name: definition.name,
+      description: definition.description,
+      inputSchema: definition.inputSchema,
+      adapterType: definition.adapterType,
+      enabled: definition.enabled !== false,
+      instructions: readToolInstructions(definition.adapterConfig),
+    });
+  }
+  for (const definition of pluginDefinitions) {
+    definitionByName.set(definition.name, {
+      name: definition.name,
+      description: definition.description,
+      inputSchema: definition.inputSchema,
+      adapterType: "plugin",
+      enabled: true,
+      instructions: definition.instructions,
+    });
+  }
   const missingToolNames = contract.toolNames.filter((toolName) => !definitionByName.has(toolName));
   const disabledToolNames = contract.toolNames.filter((toolName) => definitionByName.get(toolName)?.enabled === false);
 
@@ -493,7 +526,7 @@ async function resolveWorkflowStepToolContext(input: {
         description: definition.description,
         inputSchema: definition.inputSchema,
         adapterType: definition.adapterType,
-        instructions: readToolInstructions(definition.adapterConfig),
+        instructions: definition.instructions,
       })),
   };
 }
@@ -968,6 +1001,7 @@ function extractIssueDeclaredArtifactTokens(text: string | null | undefined) {
  *   producer 자동 등록의 claimed artifact 추출 경로에서 호출한다.
  */
 const EXPLICIT_ARTIFACT_DECLARATION_RE = /`?\[?ARTIFACT\]?`?\s*:\s*[`'"]?(\/[^\s`'")\]\n]+)/giu;
+const EXPLICIT_ARTIFACT_URL_DECLARATION_RE = /`?\[?ARTIFACT\]?`?\s*:\s*[`'"]?(https?:\/\/[^\s`'")\]\n]+)/giu;
 
 export function extractExplicitArtifactPaths(...sources: Array<string | null | undefined>): string[] {
   const paths = new Set<string>();
@@ -979,6 +1013,29 @@ export function extractExplicitArtifactPaths(...sources: Array<string | null | u
     }
   }
   return Array.from(paths);
+}
+
+function normalizeExplicitArtifactUrl(value: string): string | null {
+  const candidate = stripArtifactTokenPunctuation(value);
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractExplicitArtifactUrls(...sources: Array<string | null | undefined>): string[] {
+  const urls = new Set<string>();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const match of source.matchAll(EXPLICIT_ARTIFACT_URL_DECLARATION_RE)) {
+      const url = normalizeExplicitArtifactUrl(match[1]!);
+      if (url) urls.add(url);
+    }
+  }
+  return Array.from(urls);
 }
 
 function artifactTokenRegexSource(token: string) {
@@ -1288,6 +1345,166 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   });
 
   return created ?? null;
+}
+
+function extractMissionOwnerUnblockArtifactUrl(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string | null {
+  const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  return extractExplicitArtifactUrls(text)[0] ?? null;
+}
+
+async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
+  tx: Pick<Db, "select" | "insert" | "update">;
+  ownerActionIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "originKind" | "originId">;
+  run: typeof heartbeatRuns.$inferSelect;
+  artifactUrl: string;
+  now: Date;
+}): Promise<{ sourceIssueId: string; workProductId: string | null } | null> {
+  const ownerActionIssue = input.ownerActionIssue;
+  if (
+    ownerActionIssue.originKind !== "mission_main_executor_unblock" ||
+    !ownerActionIssue.originId ||
+    !ownerActionIssue.missionId
+  ) {
+    return null;
+  }
+
+  const sourceIssue = await input.tx
+    .select({
+      id: issues.id,
+      companyId: issues.companyId,
+      projectId: issues.projectId,
+      missionId: issues.missionId,
+      identifier: issues.identifier,
+      title: issues.title,
+      status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+      hiddenAt: issues.hiddenAt,
+    })
+    .from(issues)
+    .where(and(eq(issues.id, ownerActionIssue.originId), eq(issues.companyId, ownerActionIssue.companyId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  if (!sourceIssue || sourceIssue.hiddenAt || sourceIssue.missionId !== ownerActionIssue.missionId) return null;
+  if (sourceIssue.status === "cancelled") return null;
+
+  const existingWorkProduct = await input.tx
+    .select({ id: issueWorkProducts.id })
+    .from(issueWorkProducts)
+    .where(and(
+      eq(issueWorkProducts.companyId, sourceIssue.companyId),
+      eq(issueWorkProducts.issueId, sourceIssue.id),
+      or(
+        eq(issueWorkProducts.url, input.artifactUrl),
+        eq(issueWorkProducts.externalId, input.artifactUrl),
+      ),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  let workProductId = existingWorkProduct?.id ?? null;
+  if (!workProductId) {
+    const hasExistingWorkProduct = await input.tx
+      .select({ id: issueWorkProducts.id })
+      .from(issueWorkProducts)
+      .where(eq(issueWorkProducts.issueId, sourceIssue.id))
+      .limit(1)
+      .then((rows) => Boolean(rows[0]));
+
+    const [created] = await input.tx
+      .insert(issueWorkProducts)
+      .values({
+        companyId: sourceIssue.companyId,
+        projectId: sourceIssue.projectId ?? null,
+        issueId: sourceIssue.id,
+        type: "preview_url",
+        provider: "mission_owner_unblock",
+        externalId: input.artifactUrl,
+        title: sourceIssue.title,
+        url: input.artifactUrl,
+        status: "active",
+        reviewState: "none",
+        isPrimary: !hasExistingWorkProduct,
+        healthStatus: "unknown",
+        summary: "Auto-registered from a successful mission-owner unblock run that emitted an [ARTIFACT] URL.",
+        metadata: {
+          autoRegisteredFrom: "mission_owner_unblock_artifact_url",
+          ownerActionIssueId: ownerActionIssue.id,
+          ownerActionIssueIdentifier: ownerActionIssue.identifier,
+          ownerActionRunId: input.run.id,
+        },
+        createdByRunId: input.run.id,
+      })
+      .returning({ id: issueWorkProducts.id });
+    workProductId = created?.id ?? null;
+
+    await input.tx.insert(activityLog).values({
+      companyId: sourceIssue.companyId,
+      actorType: "system",
+      actorId: "heartbeat",
+      action: "issue.work_product_auto_registered_from_owner_unblock_url",
+      entityType: "issue",
+      entityId: sourceIssue.id,
+      agentId: input.run.agentId,
+      runId: input.run.id,
+      details: {
+        workProductId,
+        artifactUrl: input.artifactUrl,
+        ownerActionIssueId: ownerActionIssue.id,
+      },
+    });
+  }
+
+  if (sourceIssue.status !== "done") {
+    await input.tx
+      .update(issues)
+      .set({
+        status: "done",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        completedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(and(eq(issues.id, sourceIssue.id), eq(issues.companyId, sourceIssue.companyId)));
+  }
+
+  await input.tx.insert(issueComments).values({
+    companyId: sourceIssue.companyId,
+    issueId: sourceIssue.id,
+    authorAgentId: input.run.agentId,
+    body: [
+      "### Mission owner unblock result applied",
+      `Owner-action issue: ${ownerActionIssue.identifier ?? ownerActionIssue.id} (${ownerActionIssue.id})`,
+      `Owner-action run: ${input.run.id}`,
+      "Action: successful owner-unblock run emitted an [ARTIFACT] URL, so the source issue was reconciled to done.",
+      workProductId ? `WorkProduct: ${workProductId}` : "WorkProduct: already registered",
+      `[ARTIFACT]: ${input.artifactUrl}`,
+    ].join("\n"),
+  });
+
+  await input.tx.insert(activityLog).values({
+    companyId: sourceIssue.companyId,
+    actorType: "system",
+    actorId: "heartbeat",
+    action: "mission.owner_unblock_source_completed_from_artifact_url",
+    entityType: "issue",
+    entityId: sourceIssue.id,
+    agentId: input.run.agentId,
+    runId: input.run.id,
+    details: {
+      previousStatus: sourceIssue.status,
+      nextStatus: "done",
+      ownerActionIssueId: ownerActionIssue.id,
+      artifactUrl: input.artifactUrl,
+      workProductId,
+    },
+  });
+
+  return { sourceIssueId: sourceIssue.id, workProductId };
 }
 
 function canCreateMissionOwnerUnblockForRequestChanges(issue: {
@@ -2049,6 +2266,18 @@ function buildMissionSessionSecretName(input: {
   adapterType: string;
 }) {
   return `mission-session:${input.missionId}:${input.agentId}:${input.adapterType}`;
+}
+
+function isRecoverableMissionSessionSecretReadError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof HttpError) {
+    return error.status === 400 && message.includes("Invalid local_encrypted secret material");
+  }
+  return (
+    message.includes("Unsupported state or unable to authenticate data") ||
+    message.includes("Invalid initialization vector") ||
+    message.includes("Invalid authentication tag length")
+  );
 }
 
 function normalizeSessionParams(params: Record<string, unknown> | null | undefined) {
@@ -3062,9 +3291,25 @@ export function heartbeatService(db: Db) {
       adapterType: input.adapterType,
     });
 
-    let sessionId = readNonEmptyString(
-      await secretsSvc.resolveSecretValue(input.agent.companyId, session.sessionSecretId, "latest"),
-    );
+    let sessionId: string | null;
+    try {
+      sessionId = readNonEmptyString(
+        await secretsSvc.resolveSecretValue(input.agent.companyId, session.sessionSecretId, "latest"),
+      );
+    } catch (err) {
+      if (!isRecoverableMissionSessionSecretReadError(err)) throw err;
+      const resetValue = seedSessionId ?? "";
+      logger.warn(
+        { err, missionId: input.missionId, agentId: input.agent.id, sessionSecretId: session.sessionSecretId },
+        "mission session secret could not be read; resetting session binding",
+      );
+      await secretsSvc.rotate(
+        session.sessionSecretId,
+        { value: resetValue },
+        { agentId: input.agent.id },
+      );
+      sessionId = readNonEmptyString(resetValue);
+    }
 
     if (!sessionId && seedSessionId) {
       await secretsSvc.rotate(
@@ -3127,11 +3372,21 @@ export function heartbeatService(db: Db) {
     sessionId: string | null;
   }) {
     const nextValue = input.sessionId ?? "";
-    const currentValue = await secretsSvc.resolveSecretValue(
-      input.agent.companyId,
-      input.sessionSecretId,
-      "latest",
-    );
+    let currentValue: string | null;
+    try {
+      currentValue = await secretsSvc.resolveSecretValue(
+        input.agent.companyId,
+        input.sessionSecretId,
+        "latest",
+      );
+    } catch (err) {
+      if (!isRecoverableMissionSessionSecretReadError(err)) throw err;
+      logger.warn(
+        { err, agentId: input.agent.id, sessionSecretId: input.sessionSecretId },
+        "mission session secret could not be read before persist; rotating replacement value",
+      );
+      currentValue = null;
+    }
     if (currentValue === nextValue) return;
     await secretsSvc.rotate(
       input.sessionSecretId,
@@ -6247,12 +6502,10 @@ export function heartbeatService(db: Db) {
         logCompressed: logSummary?.compressed ?? false,
       });
 
-      if (!latestTerminalRun) {
-        await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
-          finishedAt: new Date(),
-          error: adapterResult.errorMessage ?? null,
-        });
-      }
+      await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
+        finishedAt: latestTerminalRun?.finishedAt ?? new Date(),
+        error: latestTerminalRun?.error ?? adapterResult.errorMessage ?? null,
+      });
 
       if (finalizedRun) {
         await finalizeHermesChatRun(db, finalizedRun.id).catch((err) => {
@@ -6540,7 +6793,10 @@ export function heartbeatService(db: Db) {
   }
 
   async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
-    let postTransactionWorkflowIssueSyncIssueId: string | null = null;
+    const postTransactionWorkflowIssueSyncIssueIds = new Set<string>();
+    const queuePostTransactionWorkflowIssueSync = (issueId: string | null | undefined) => {
+      if (issueId) postTransactionWorkflowIssueSyncIssueIds.add(issueId);
+    };
     const transactionResult = await db.transaction(async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
@@ -6557,6 +6813,7 @@ export function heartbeatService(db: Db) {
           title: issues.title,
           description: issues.description,
           originKind: issues.originKind,
+          originId: issues.originId,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
@@ -6637,6 +6894,27 @@ export function heartbeatService(db: Db) {
       }
 
       const isLinkedToRun = issue.checkoutRunId === run.id || issue.executionRunId === run.id || issue.id === run.issueId;
+      const latestIssueRunId = run.status === "succeeded" && issue.status === "todo" && issue.id === run.issueId
+        ? await tx
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(and(eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.issueId, issue.id)))
+            .orderBy(desc(heartbeatRuns.createdAt))
+            .limit(1)
+            .then((rows) => rows[0]?.id ?? null)
+        : null;
+      const isRecoverableTodoSuccessfulRun =
+        run.status === "succeeded" &&
+        isLinkedToRun &&
+        issue.status === "todo" &&
+        !!issue.missionId &&
+        issue.id === run.issueId &&
+        latestIssueRunId === run.id &&
+        issue.assigneeAgentId === run.agentId &&
+        issue.originKind !== "mission_main_executor_oversight";
+      const successfulRunCanFinalizeIssue = issue.status === "in_progress" || isRecoverableTodoSuccessfulRun;
+      const successfulRunCanApplyCompletionGates =
+        issue.status === "in_progress" || issue.status === "done" || isRecoverableTodoSuccessfulRun;
       const shouldAutoCaptureMissionChildOutput =
         run.status === "succeeded" &&
         !!issue.missionId &&
@@ -6648,7 +6926,7 @@ export function heartbeatService(db: Db) {
       const shouldAutoCompleteSuccessfulIssue =
         run.status === "succeeded" &&
         isLinkedToRun &&
-        issue.status === "in_progress" &&
+        successfulRunCanFinalizeIssue &&
         issue.assigneeAgentId === run.agentId;
       const requestChangesVerdict = run.status === "succeeded" ? extractRequestChangesVerdict(run) : null;
       const shouldBlockRequestChangesVerdict =
@@ -6656,7 +6934,7 @@ export function heartbeatService(db: Db) {
         isLinkedToRun &&
         !!issue.missionId &&
         canApplyRequestChangesValidationGate(issue) &&
-        (issue.status === "in_progress" || issue.status === "done") &&
+        successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId;
       const claimedArtifactPaths =
         run.status === "succeeded" && isLinkedToRun && !!issue.missionId
@@ -6687,7 +6965,7 @@ export function heartbeatService(db: Db) {
         isLinkedToRun &&
         !!issue.missionId &&
         canApplyMissingWorkProductRegistrationGate(issue, stepRunRequiresWorkProduct) &&
-        (issue.status === "in_progress" || issue.status === "done") &&
+        successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId;
 
       if (shouldBlockRequestChangesVerdict) {
@@ -6726,7 +7004,7 @@ export function heartbeatService(db: Db) {
             verdict: "REQUEST_CHANGES",
           },
         });
-        postTransactionWorkflowIssueSyncIssueId = issue.id;
+        queuePostTransactionWorkflowIssueSync(issue.id);
         // Phase 5 (plan 8.1 final QA / mission quality contract): completion QA run returned
         // REQUEST_CHANGES → best-effort quality review item via the thin writer (no heavy service
         // import on the heartbeat hot path; per-mission dedupe). Never blocks heartbeat on failure.
@@ -6857,7 +7135,7 @@ export function heartbeatService(db: Db) {
             solution: "산출물 파일을 지정된 출력 디렉토리에 만들고 실행 출력 끝에 `[ARTIFACT]: <절대경로>` 한 줄을 남긴다. workProduct 등록은 시스템이 자동 처리하므로 POST/curl 등록을 시도하지 않는다.",
             errorCode: "workproduct_registration_missing",
           }, run.id);
-          postTransactionWorkflowIssueSyncIssueId = issue.id;
+          queuePostTransactionWorkflowIssueSync(issue.id);
           return null;
         }
       }
@@ -6917,11 +7195,30 @@ export function heartbeatService(db: Db) {
               missionStatus: mission.status,
             },
           });
-          postTransactionWorkflowIssueSyncIssueId = issue.id;
+          queuePostTransactionWorkflowIssueSync(issue.id);
           return {
             promotedRun: null,
             postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
           };
+        }
+      }
+
+      if (
+        run.status === "succeeded" &&
+        isLinkedToRun &&
+        issue.originKind === "mission_main_executor_unblock" &&
+        issue.missionId
+      ) {
+        const artifactUrl = extractMissionOwnerUnblockArtifactUrl(run);
+        if (artifactUrl) {
+          const applied = await applyMissionOwnerUnblockArtifactUrlToSource({
+            tx,
+            ownerActionIssue: issue,
+            run,
+            artifactUrl,
+            now: new Date(),
+          });
+          queuePostTransactionWorkflowIssueSync(applied?.sourceIssueId);
         }
       }
 
@@ -6972,7 +7269,7 @@ export function heartbeatService(db: Db) {
               : "successful_checked_out_run_auto_completed",
           },
         });
-        postTransactionWorkflowIssueSyncIssueId = issue.id;
+        queuePostTransactionWorkflowIssueSync(issue.id);
         return {
           promotedRun: null,
           postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
@@ -7249,9 +7546,11 @@ export function heartbeatService(db: Db) {
       await ensureMissionOwnerActionForRequestChanges(postTransactionRequestChangesOwnerAction);
     }
 
-    if (postTransactionWorkflowIssueSyncIssueId) {
+    if (postTransactionWorkflowIssueSyncIssueIds.size > 0) {
       const { workflowService } = await import("./workflow/engine.js");
-      await workflowService.syncRunStatusForIssue(db, postTransactionWorkflowIssueSyncIssueId);
+      for (const issueId of postTransactionWorkflowIssueSyncIssueIds) {
+        await workflowService.syncRunStatusForIssue(db, issueId);
+      }
     }
 
     if (!promotedRun) return;

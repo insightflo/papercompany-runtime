@@ -21,6 +21,7 @@ import {
 import { buildDeliveryVerificationCriteria } from "./workflow/delivery-verification-gate.js";
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
+import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -731,6 +732,57 @@ export function buildMissionOwnerPlanRevisionDraft({
 // ---------------------------------------------------------------------------
 
 const DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID = "mission-owner-plan-materializer";
+
+// [PLAN-QA structured PASS recovery] PASS verdict 이후 materialization 단계가
+//   throw 하면 refs.planQa 가 pending 으로 잔존하고, 상위(issues.ts addComment)는
+//   logger.warn 만 남긴 채 조용히 삼킨다 → A1 사례처럼 stranded state 가 DB 에
+//   단서 없이 남는다. 각 materialization step 을 labeled runner 로 감싸서 throw 시
+//   durable activity(mission.owner_plan.materialization_failed) 를 남기고 re-throw.
+//   상태는 pending 유지(멱등 재시도 가능). alreadyMaterialized/branch(b) 재진입으로
+//   후속 호출이 같은 decisionHash 의 materialization 을 끝까지 완수한다.
+interface OwnerPlanMaterializationFailureContext {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  decisionHash: string;
+  missionPlanArtifactId: string;
+  planningIssueId: string;
+  planQaIssueId: string;
+}
+
+async function runOwnerPlanMaterializationStep(
+  step: string,
+  context: OwnerPlanMaterializationFailureContext,
+  stepFn: () => Promise<void>,
+): Promise<void> {
+  try {
+    await stepFn();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // [수정시 영향] 이 activity 는 stranded mission 진단의 유일한 durable 단서.
+    //   step 라벨 + stack 까지 남기므로, A1 처럼 throw 원인이 환경 특정인 경우도
+    //   governance-thread / activity feed 에서 직접 확인 가능하다.
+    await logActivity(context.db, {
+      companyId: context.companyId,
+      actorType: "system",
+      actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID,
+      action: "mission.owner_plan.materialization_failed",
+      entityType: "mission",
+      entityId: context.missionId,
+      details: {
+        step,
+        decisionHash: context.decisionHash,
+        missionPlanArtifactId: context.missionPlanArtifactId,
+        planningIssueId: context.planningIssueId,
+        planQaIssueId: context.planQaIssueId,
+        error: message,
+        errorStack: error instanceof Error ? error.stack ?? null : null,
+      },
+    });
+    throw error;
+  }
+}
+
 const NATIVE_WORKFLOW_DEFINITION_SOURCE_TYPES = new Set([
   "workflow_definition",
   "workflow_definition_step",
@@ -904,7 +956,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   }
 
   // [ownership-drift invariant] planning issue(mission_main_executor_plan) assignee 가 mission.owner 와
-  //   불일치하면 materialization 이 막히는 현상을 fail-fast 진단(content QA 와 분리된 code).
+  //   불일치하면 materialization 이 막히는 현상을 fail-fast 진단(artifact QA 와 분리된 code).
   //   owner-actions 가 planning issue 를 mission.owner 에 assign 하므로, 정상 조건에선 일치한다.
   //   drift(재할당) 감지 시 명확한 diagnostic 로 차단 — silent block 회피.
   const [ownershipRow] = await db
@@ -1065,10 +1117,23 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
             : null,
         });
         if (verdict === "pass") {
-          await ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash });
-          await ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId });
-          await closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId });
-          await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "pass", verdict: "pass", reviewedAt: new Date().toISOString() } });
+          // [PLAN-QA structured PASS recovery] 각 step 을 labeled runner 로 감싸
+          //   throw 시 durable activity 를 남긴다. 어느 step 에서 죽었는지가 DB 에 남고,
+          //   refs.planQa 는 pending 으로 잔존해 후속 recordLatest 호출이 멱등하게 재완수.
+          const materializationFailureContext: OwnerPlanMaterializationFailureContext = {
+            db, companyId, missionId, decisionHash,
+            missionPlanArtifactId: activePlan.id,
+            planningIssueId: collected.planningIssueId,
+            planQaIssueId: activePlanQa.issueId,
+          };
+          await runOwnerPlanMaterializationStep("ensure_cross_company_delegations", materializationFailureContext, () =>
+            ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash }));
+          await runOwnerPlanMaterializationStep("ensure_paqo_workflow", materializationFailureContext, () =>
+            ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId }));
+          await runOwnerPlanMaterializationStep("close_plan_qa_issue", materializationFailureContext, () =>
+            closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId }));
+          await runOwnerPlanMaterializationStep("update_plan_qa_ref_pass", materializationFailureContext, () =>
+            updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "pass", verdict: "pass", reviewedAt: new Date().toISOString() } }));
           await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, revision: activePlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}`, planQaIssueId: activePlanQa.issueId } });
           const refreshedPlan = await service.getActiveMissionPlan({ companyId, missionId });
           const finalPlan = refreshedPlan ?? activePlan;
@@ -1561,6 +1626,72 @@ function readStringArray(value: unknown): string[] {
   return value.map((entry) => toNonEmptyString(entry)).filter((entry): entry is string => Boolean(entry));
 }
 
+function readSelectedUnitWorkflowToolNames(unit: Record<string, unknown>): string[] {
+  return Array.from(new Set([
+    ...readStringArray(unit.toolNames),
+    ...readStringArray(unit.tools),
+    toNonEmptyString(unit.toolName),
+  ].filter((value): value is string => Boolean(value))));
+}
+
+function readSelectedUnitWorkflowToolArgs(unit: Record<string, unknown>): unknown {
+  if (Object.prototype.hasOwnProperty.call(unit, "toolArgs")) return unit.toolArgs;
+  if (Object.prototype.hasOwnProperty.call(unit, "toolArguments")) return unit.toolArguments;
+  return undefined;
+}
+
+function readSelectedUnitKnowledgeBaseIds(unit: Record<string, unknown>): string[] {
+  return Array.from(new Set([
+    ...readStringArray(unit.knowledgeBaseIds),
+    ...readStringArray(unit.kbIds),
+    ...readStringArray(unit.kbRefs),
+  ]));
+}
+
+function readSelectedUnitSkillRefs(unit: Record<string, unknown>): string[] {
+  return Array.from(new Set([
+    ...readStringArray(unit.skillRefs),
+    ...readStringArray(unit.skillKeys),
+    ...readStringArray(unit.skills),
+  ]));
+}
+
+function selectedUnitSearchInstructionText(unit: Record<string, unknown>, title: string): string {
+  return [
+    title,
+    toNonEmptyString(unit.name),
+    toNonEmptyString(unit.kind),
+    toNonEmptyString(unit.reason),
+    toNonEmptyString(unit.description),
+    toNonEmptyString(unit.brief),
+    toNonEmptyString(unit.instructions),
+    toNonEmptyString(unit.query),
+    toNonEmptyString(unit.searchQuery),
+  ].filter((value): value is string => Boolean(value)).join("\n");
+}
+
+function selectedUnitNeedsResearchWorkbench(unit: Record<string, unknown>, title: string): boolean {
+  return /\b(?:research|search|web\s+search|source\s+evidence|source\s+discover(?:y|ies)|current\s+(?:facts|sources|external\s+facts)|lookup|scout|collect\s+sources?|find\s+sources?|citations?|evidence)\b|조사|검색|리서치|자료\s*수집|출처|근거\s*수집|웹\s*검색|최신\s*정보|레퍼런스/iu.test(
+    selectedUnitSearchInstructionText(unit, title),
+  );
+}
+
+function selectedUnitWorkflowToolNames(
+  unit: Record<string, unknown>,
+  title: string,
+  options: { researchWorkbenchAvailable: boolean },
+): string[] {
+  const toolNames = readSelectedUnitWorkflowToolNames(unit);
+  if (
+    options.researchWorkbenchAvailable
+    && selectedUnitNeedsResearchWorkbench(unit, title)
+    && !toolNames.includes(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME)
+  ) {
+    toolNames.push(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME);
+  }
+  return toolNames;
+}
+
 function selectedUnitRefIds(unit: Record<string, unknown>): string[] {
   const ids = [
     toNonEmptyString(unit.id),
@@ -1668,7 +1799,11 @@ function applyPlanStepDependencies(
   });
 }
 
-function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect): WorkflowStep[] {
+function buildPaqoWorkflowSteps(
+  draft: PlanRevisionDraft,
+  mission: typeof missions.$inferSelect,
+  options: { researchWorkbenchAvailable?: boolean } = {},
+): WorkflowStep[] {
   const selectedUnits = draft.refs.selectedExecutionUnits;
   const executableUnits = selectedUnits.filter((unit, index) => {
     const rawTitle =
@@ -1693,17 +1828,27 @@ function buildPaqoWorkflowSteps(draft: PlanRevisionDraft, mission: typeof missio
     const title = stripIssueGroupPrefix(rawTitle);
     const groupLabel = group.toUpperCase();
     const graphWorkProductRequired = readPaqoGraphWorkProductRequired(unit, group);
+    const toolNames = selectedUnitWorkflowToolNames(unit, title, {
+      researchWorkbenchAvailable: options.researchWorkbenchAvailable === true,
+    });
+    const toolArgs = readSelectedUnitWorkflowToolArgs(unit);
+    const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
+    const skillRefs = readSelectedUnitSkillRefs(unit);
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
       name: `[${groupLabel}] ${title}`,
       agentId: assigneeAgentId,
       dependencies: [],
       graphWorkProductRequired,
+      ...(toolNames.length > 0 ? { toolNames } : {}),
+      ...(toolArgs !== undefined ? { toolArgs } : {}),
+      ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
         "",
         `Mission: ${mission.title}`,
         `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
+        skillRefs.length > 0 ? `Skill refs considered by PLAN: ${skillRefs.join(", ")}` : null,
         toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
         sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
       ].filter(Boolean).join("\n"),
@@ -1845,7 +1990,10 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
 
   const localDraft = draftWithSelectedExecutionUnits(input.draft, selectedExecutionUnits);
   const workflowName = formatPaqoWorkflowName(localDraft, mission);
-  const steps = buildPaqoWorkflowSteps(localDraft, mission);
+  const defaultPluginToolNames = new Set((await listDefaultWorkflowPluginAgentTools(input.db)).map((tool) => tool.name));
+  const steps = buildPaqoWorkflowSteps(localDraft, mission, {
+    researchWorkbenchAvailable: defaultPluginToolNames.has(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME),
+  });
   if (steps.length === 0) return;
   const [existingDefinition] = await input.db
     .select()
@@ -1946,9 +2094,11 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
     "- Does every step have a clear instruction: task target, required inputs, expected output, and success criteria?",
     "- Does the plan need a URL / input normalization step? Is it present?",
     "- Are parallel vs sequential dependencies appropriate (no over- or under-serialization)?",
-    "- Are content QA and publish smoke QA separated into distinct steps (not collapsed into one)?",
+    "- Are artifact QA and delivery smoke/readback QA separated into distinct steps (not collapsed into one)?",
+    "- For delivery missions, does artifact QA run after artifact production and before deploy/publish/send, with destination readback/final QA after delivery?",
+    "- For deep-research missions with multiple named domains/perspectives, are source/research units split by domain or given explicit multi-query/toolArgs coverage instead of one vague search task?",
     "- Is each step's assignee appropriate by role / capability / skill?",
-    "- Are requested skills attached to the right steps, and are unnecessary or unavailable skills avoided?",
+    "- Are relevant skills reflected in assignee selection / skillRefs / reason, and are unnecessary or unavailable skills avoided?",
     "- Are required tools, permissions, and external systems explicit and available to the assigned agent?",
     "- Does each ACTION step have a clear work-product contract?",
     "- Is QA not collapsed into a single terminal step?",
@@ -1969,7 +2119,8 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
     "",
     "Hard blockers:",
     "- Any score of 0 must be REQUEST_CHANGES.",
-    "- Any missing required output, unavailable assignee/tool/skill, or collapsed content/publish QA must be REQUEST_CHANGES.",
+    "- Any missing required output, unavailable assignee/tool/skill, or collapsed artifact/delivery QA must be REQUEST_CHANGES.",
+    "- Any artifact QA scheduled after deploy/publish/send, or missing before delivery for a produced artifact, must be REQUEST_CHANGES.",
     "",
     "Verdict output format (required):",
     "Finish your run output with exactly one standalone final line:",

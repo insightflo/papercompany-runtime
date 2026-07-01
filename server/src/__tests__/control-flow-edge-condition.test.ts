@@ -82,6 +82,15 @@ describe("classifyStepActivation — legacy 호환성 (회귀 금지)", () => {
     const s = step("c", { dependencies: ["a"] });
     expect(classifyStepActivation(s, preds({ a: { status: "running" } }))).toMatchObject({ runnable: false, waiting: true });
   });
+  it("legacy dep 여러 개 중 하나만 completed 이면 downstream 은 아직 runnable 이 아니다", () => {
+    const s = step("synthesize-ai-news-report-draft", {
+      dependencies: ["audit-source-coverage", "draft-beginner-report-outline"],
+    });
+    expect(classifyStepActivation(s, preds({
+      "audit-source-coverage": { status: "completed" },
+      "draft-beginner-report-outline": { status: "running" },
+    }))).toMatchObject({ runnable: false, waiting: true, skippable: false });
+  });
   it("entry step(dep 없음) → runnable 즉시 발화", () => {
     expect(classifyStepActivation(step("root"), preds({})).runnable).toBe(true);
   });

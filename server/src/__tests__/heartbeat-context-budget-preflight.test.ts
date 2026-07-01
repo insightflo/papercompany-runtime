@@ -14,6 +14,7 @@ import {
   agentWakeupRequests,
   activityLog,
   companies,
+  companySecretVersions,
   companySecrets,
   companySkills,
   documentRevisions,
@@ -147,6 +148,21 @@ async function waitForIssueStatus(
   }
   const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
   throw new Error(`Timed out waiting for issue ${issueId}; latest status=${issue?.status ?? "missing"}`);
+}
+
+async function waitForWakeupRequestStatus(
+  db: ReturnType<typeof createDb>,
+  runId: string,
+  predicate: (request: typeof agentWakeupRequests.$inferSelect) => boolean,
+) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [request] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.runId, runId));
+    if (request && predicate(request)) return request;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const [request] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.runId, runId));
+  throw new Error(`Timed out waiting for wakeup request for run ${runId}; latest status=${request?.status ?? "missing"}`);
 }
 
 async function waitForActiveMissionPlanArtifact(
@@ -442,6 +458,7 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(missionPlanArtifacts);
+    await db.update(issues).set({ parentId: null });
     await db.delete(issues);
     await db.delete(toolDefinitions);
     await db.delete(agentKbGrants);
@@ -572,6 +589,62 @@ describe("heartbeat context budget preflight", () => {
     expect(serialized).toContain("Governance evidence: unavailable in this context builder");
     expect(serialized).toContain("### Mission owner decision");
     expect(serialized).not.toContain("source issue private detail should stay bounded");
+  });
+
+  it("reconciles a mission-owner unblock ARTIFACT URL back to the source issue", async () => {
+    const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_unblock");
+    const artifactUrl = "https://manual-onboarding.pages.dev/onboarding/concepts/feynman-method-v2/index.html";
+    executeSpy.mockResolvedValue({
+      ...successfulAdapterResult(),
+      resultJson: {
+        stdout: [
+          "### Mission owner decision",
+          "Decision: retry_source_issue",
+          "Source issue: PAP-SOURCE",
+          "Reason: published directly after operations deferral",
+          "",
+          `[ARTIFACT]: ${artifactUrl}`,
+        ].join("\n"),
+      },
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "on_demand",
+      { taskKey: "owner-action:unblock", issueId: fixture.ownerTaskIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const sourceIssue = await waitForIssueStatus(
+      db,
+      fixture.sourceIssueId,
+      (issue) => issue.status === "done" && issue.completedAt instanceof Date,
+    );
+    expect(sourceIssue).toEqual(expect.objectContaining({
+      status: "done",
+      completedAt: expect.any(Date),
+    }));
+
+    const products = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.sourceIssueId));
+    expect(products).toEqual([
+      expect.objectContaining({
+        type: "preview_url",
+        provider: "mission_owner_unblock",
+        externalId: artifactUrl,
+        url: artifactUrl,
+        isPrimary: true,
+        createdByRunId: finalized.id,
+      }),
+    ]);
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, fixture.sourceIssueId));
+    expect(comments.some((comment) => comment.body.includes("Mission owner unblock result applied"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes(`[ARTIFACT]: ${artifactUrl}`))).toBe(true);
   });
 
   it("defers Hermes Ops mission issue execution to the mission main executor", async () => {
@@ -1193,6 +1266,136 @@ describe("heartbeat context budget preflight", () => {
         title: "Final QA / purpose-fitness failure - Validate report workflow",
       }),
     ]));
+  });
+
+  it("blocks final QA when Codex stdout has a markdown-rule-prefixed REQUEST_CHANGES agent message", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Delivery",
+      issuePrefix: "PDL",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: agentId,
+        companyId,
+        name: "Final QA Agent",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { promptTemplate: "Verify mission result." },
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Manual onboarding publish",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PDL-QA",
+      title: "[QA] Verify mission result",
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: runId,
+          executionRunId: runId,
+        })
+        .where(eq(issues.id, issueId));
+      return {
+        ...successfulAdapterResult(),
+        resultJson: {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "item-final",
+                type: "agent_message",
+                text: [
+                  "---",
+                  "",
+                  "**REQUEST_CHANGES: workProduct preview URL points to the hub shell, not the detail content**",
+                  "",
+                  "Delivery readback saw HTTP 200, but the page body had the wrong title and zero topic markers.",
+                ].join("\n"),
+              },
+            }),
+          ].join("\n"),
+        },
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${issueId}`, issueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+    );
+    expect(updatedIssue).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) =>
+      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
+      comment.body.includes("hub shell")
+    )).toBe(true);
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "issue.validation_request_changes_auto_blocked",
+          entityType: "issue",
+          entityId: issueId,
+        }),
+      ]),
+    );
   });
 
   // Boundary coverage for the title-based REQUEST_CHANGES validation gate
@@ -3017,6 +3220,116 @@ describe("heartbeat context budget preflight", () => {
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
+  it("auto-registers an ARTIFACT path when a recovery run succeeds but the issue lifecycle is stale todo", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowRunId = randomUUID();
+    const issueId = randomUUID();
+    const workProductRoot = "/srv/papercompany/projects/research-company/produced_work";
+    const outputDir = `${workProductRoot}/missions/${missionId}/runs/${workflowRunId}/steps/reuse-existing-research`;
+    const artifactPath = `${outputDir}/feynman-methodology-storm-research.md`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Technology Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Reuse the existing artifact and emit its ARTIFACT line." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Research mission",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "PAP-REUSE",
+      title: "[ACTION] Reuse existing research artifact",
+      description: [
+        "Deliverable output (use exactly this directory):",
+        `- ${outputDir}`,
+        "- Write your deliverable file(s) into that directory.",
+        "- Then finish your run output with one line: [ARTIFACT]: <absolute path of the file you wrote there>.",
+      ].join("\n"),
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+    });
+
+    executeSpy.mockImplementation(async ({ onLog }) => {
+      await onLog("stdout", [
+        "Existing deliverable verified; re-emitting the registered artifact marker.",
+        `[ARTIFACT]: ${artifactPath}`,
+      ].join("\n"));
+      await db
+        .update(issues)
+        .set({
+          status: "todo",
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          completedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(issues.id, issueId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { taskKey: `issue:${issueId}`, issueId, missionId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    const updatedIssue = await waitForIssueStatus(
+      db,
+      issueId,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
+    );
+    expect(updatedIssue.completedAt).not.toBeNull();
+
+    const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
+    expect(workProducts).toHaveLength(1);
+    expect(workProducts[0]).toEqual(expect.objectContaining({
+      type: "file",
+      provider: "local",
+      externalId: artifactPath,
+      title: "feynman-methodology-storm-research.md",
+      isPrimary: true,
+      createdByRunId: finalized.id,
+    }));
+    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
+      path: artifactPath,
+      autoRegisteredFrom: "claimed_artifact_file",
+    }));
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+  });
+
   it("ignores prompt and instruction paths when checking registered workProducts", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -3075,7 +3388,7 @@ describe("heartbeat context budget preflight", () => {
         [
           "=== Narrative_Deep_Dive_2026-06-12_US.html ===",
           "/table: 4\\nkpi-grid: 2\\nrisk-grid: 2\\nscenario-grid: 2\\nreferences: 4",
-          "/Users/kwak/Projects/ai/papercompany/papercompany-runtime/skills/report-for-beginners/SKILL.md",
+          "/srv/papercompany/company-skills/report-for-beginners/SKILL.md",
           "/Users/kwak/Projects/ai/papercompany/papercompany-operations/scripts/paperclip-addon/agents/gazua/harry.md",
           "/Users/kwak/Projects/ai/gazua-dashboard/reports/beginner_html/dashboard/deep_dive/YYYYMM/Narrative_Deep_Dive_2026-06-12_US.html",
         ].join("\n"),
@@ -5784,6 +6097,87 @@ describe("heartbeat context budget preflight", () => {
     await waitForRunTerminal(heartbeat, retriedRun!.id);
   });
 
+  it("completes the wakeup request when a run is terminalized before the adapter returns", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Execution Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Issue completed before child exits",
+      status: "todo",
+      assigneeAgentId: agentId,
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      const finishedAt = new Date();
+      await db
+        .update(issues)
+        .set({
+          status: "done",
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          completedAt: finishedAt,
+          updatedAt: finishedAt,
+        })
+        .where(eq(issues.id, issueId));
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "succeeded",
+          finishedAt,
+          error: "Issue done but adapter child did not exit; terminated",
+          errorCode: "issue_done_child_not_exited",
+          updatedAt: finishedAt,
+        })
+        .where(eq(heartbeatRuns.id, runId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.wakeup(agentId, {
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "issue_assigned",
+      payload: { issueId },
+    });
+    expect(run).not.toBeNull();
+
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(finalized.errorCode).toBe("issue_done_child_not_exited");
+
+    const request = await waitForWakeupRequestStatus(
+      db,
+      run!.id,
+      (candidate) => candidate.status === "completed",
+    );
+    expect(request).toEqual(expect.objectContaining({
+      status: "completed",
+      error: "Issue done but adapter child did not exit; terminated",
+    }));
+    expect(request?.finishedAt).toBeInstanceOf(Date);
+  });
+
   it("refreshes the manifest inside deferred issue-execution wake payloads", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -6169,6 +6563,90 @@ describe("heartbeat context budget preflight", () => {
 
     const resolved = await secretService(db).resolveSecretValue(companyId, session!.sessionSecretId, "latest");
     expect(resolved).toBe("legacy-mission-session");
+  });
+
+  it("resets an unreadable mission-session secret instead of dropping the wakeup", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    let runtimeSessionIdSeen: string | null | undefined;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip Corrupt Mission Session",
+      issuePrefix: `PCM${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Mission Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const missionId = await db.insert(missions).values({
+      companyId,
+      ownerAgentId: agentId,
+      title: "Mission binding recovery",
+      status: "planning",
+    }).returning().then((rows) => rows[0]!.id);
+
+    const secret = await db.insert(companySecrets).values({
+      companyId,
+      name: `mission-session:${missionId}:${agentId}:codex_local`,
+      provider: "local_encrypted",
+      latestVersion: 1,
+      description: "corrupt test mission session",
+    }).returning().then((rows) => rows[0]!);
+    await db.insert(companySecretVersions).values({
+      secretId: secret.id,
+      version: 1,
+      material: {
+        scheme: "local_encrypted_v1",
+        iv: Buffer.alloc(12).toString("base64"),
+        tag: Buffer.alloc(16).toString("base64"),
+        ciphertext: Buffer.from("not-valid-for-this-tag").toString("base64"),
+      },
+      valueSha256: "corrupt-mission-session",
+    });
+    await db.insert(missionSessions).values({
+      missionId,
+      agentId,
+      companyId,
+      sessionSecretId: secret.id,
+      adapterType: "codex_local",
+    });
+
+    executeSpy.mockImplementationOnce(async ({ runtime }) => {
+      runtimeSessionIdSeen = runtime.sessionId ?? null;
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.wakeup(agentId, {
+      source: "scheduler",
+      triggerDetail: "schedule:corrupt-mission-session",
+      payload: { missionId },
+      reason: "scheduled_wakeup",
+    });
+
+    expect(run).not.toBeNull();
+    expect(run?.sessionIdBefore).toBeNull();
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(runtimeSessionIdSeen).toBeNull();
+
+    const [updatedSecret] = await db
+      .select()
+      .from(companySecrets)
+      .where(eq(companySecrets.id, secret.id))
+      .limit(1);
+    expect(updatedSecret?.latestVersion).toBe(2);
+    const resolved = await secretService(db).resolveSecretValue(companyId, secret.id, "latest");
+    expect(resolved).toBe("");
   });
 
   it("persists an early adapter session update on the heartbeat run before final result canonicalization", async () => {

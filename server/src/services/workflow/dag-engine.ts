@@ -850,7 +850,7 @@ async function commentOnValidationRecheckQueued(input: {
 type ValidationVerdict = "pass" | "request_changes";
 
 interface ValidationVerdictObservation {
-  verdict: ValidationVerdict;
+  verdict: ValidationVerdict | null;
   observedAt: Date | null;
 }
 
@@ -870,7 +870,7 @@ function setLatestValidationVerdict(
   verdict: ValidationVerdict | null,
   observedAt: Date | null,
 ): void {
-  if (!issueId || !verdict) return;
+  if (!issueId) return;
   const next = { verdict, observedAt };
   if (isNewerValidationVerdict(next, verdictsByIssueId.get(issueId))) {
     verdictsByIssueId.set(issueId, next);
@@ -897,9 +897,10 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
 }
 
 /**
- * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes) 를 heartbeat(성공) + comment
+ * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes|null) 를 heartbeat(성공) + comment
  *   에서 추출해 issueId→observation 맵으로 반환. P4 추출(DRY): syncStepRunsFromIssueState 와
  *   syncWorkflowRunState(loop-driver predFacts 빌드) 가 동일 verdict 원천을 공유. 관찰시간 최신 우선.
+ *   heartbeat 성공은 explicit verdict 가 없어도 null 관측으로 오래된 REQUEST_CHANGES 를 supersede 한다.
  * [수정시 영향] syncStepRunsFromIssueState 의 기존 verdict 로딩과 byte-identical 해야(회귀 금지).
  */
 async function loadLatestValidationVerdicts(
@@ -959,10 +960,12 @@ async function loadLatestValidationVerdicts(
   for (const comment of commentRows) {
     const observedAt = comment.createdAt ?? null;
     if (!isWithinCurrentExecutionWindow(comment.issueId, observedAt)) continue;
+    const verdict = readExplicitValidationVerdict(comment.body);
+    if (!verdict) continue;
     setLatestValidationVerdict(
       verdicts,
       comment.issueId,
-      readExplicitValidationVerdict(comment.body),
+      verdict,
       observedAt,
     );
   }
@@ -1008,6 +1011,8 @@ async function syncStepRunsFromIssueState(
     .map((stepRun) => stepRun.issueId!)
     .filter((issueId, index, all) => all.indexOf(issueId) === index);
   const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationCandidateIssueIds);
+  // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
+  const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
 
   const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
   for (const stepRun of stepRuns) {
@@ -1032,6 +1037,14 @@ async function syncStepRunsFromIssueState(
       .filter((time) => time > 0);
     if (dependencyCompletedTimes.length === 0) continue;
     if (Math.max(...dependencyCompletedTimes) <= latestVerdict.observedAt.getTime()) continue;
+    // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
+    //   재큐하지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가 한 번이라도
+    //   있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate re-queue
+    //   를 끊는다(A1 RES-424: 재실행 run 은 succeeded 였으나 PASS verdict 가 없어 구 REQUEST_CHANGES 로 재큐 반복).
+    //   이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재큐가 다시 허용된다.
+    const dependencyMaxCompletedAt = Math.max(...dependencyCompletedTimes);
+    const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
+    if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
 
     const now = new Date();
     const [updatedIssue] = await db
@@ -1567,6 +1580,28 @@ async function createWorkflowStepIssue(input: {
   });
 
   return createdIssue.id;
+}
+
+// [Patch 3 recheck idempotency] validation issue 별 latest succeeded heartbeat finishedAt.
+//   syncStepRunsFromIssueState 가 같은 producer generation 에 대해 중복 re-queue 하지 않도록 한다:
+//   "이미 recheck heartbeat 가 producer 최종 완료 이후에 성공했다면 재큐 금지" 판정 재료.
+//   A1 RES-424 사례: 재실행 run 은 succeeded 였으나 explicit PASS verdict 가 없어 latestValidationVerdict
+//   가 구 REQUEST_CHANGES 에 머물 → 이후 sync 마다 QA 가 todo 로 재큐되던 stale duplicate.
+async function loadLatestSucceededHeartbeatAt(db: Db, issueIds: string[]): Promise<Map<string, Date>> {
+  const latest = new Map<string, Date>();
+  if (issueIds.length === 0) return latest;
+  const rows = await db
+    .select({ issueId: heartbeatRuns.issueId, finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })
+    .from(heartbeatRuns)
+    .where(and(inArray(heartbeatRuns.issueId, issueIds), eq(heartbeatRuns.status, "succeeded")))
+    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
+  for (const row of rows) {
+    if (!row.issueId) continue;
+    if (latest.has(row.issueId)) continue; // desc 정렬 → 첫 행이 최신
+    const at = row.finishedAt ?? row.createdAt;
+    if (at) latest.set(row.issueId, at);
+  }
+  return latest;
 }
 
 async function wakeExistingWorkflowStepIssue(input: {

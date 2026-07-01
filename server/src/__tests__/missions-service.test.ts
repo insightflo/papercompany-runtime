@@ -1158,6 +1158,69 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceComments.map((comment) => comment.body).join("\n")).not.toContain("mission-owner-decision-wakeup-dispatched");
   });
 
+  it("[Patch 2 cap-exhausted] native-loop producer at rework cap → AUTO retry_source_issue is NOT skipped; routes to owner action (reopens producer)", async () => {
+    // 회귀 대상: producer rework cap(maxIterations) 이 소진된 native-loop 미션에서 AUTO(grace default)
+    //   retry_source_issue 가 기존엔 owner_action_skipped_native_loop 로 막혀 매달리고 있었다.
+    //   기대: cap 소진 시 guard 가 skip 을 풀고 owner_action_native_loop_cap_exhausted finding + producer 재오픈.
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const producerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const producerIssueId = randomUUID();
+    const qaIssueId = randomUUID();
+
+    await db.insert(companies).values({ id: companyId, name: "Cap Exhausted Company", issuePrefix: `CE${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: producerAgentId, companyId, name: "Producer Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: qaAgentId, companyId, name: "QA Agent", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Cap exhausted mission", status: "active" });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "cap-exhausted-loop",
+      stepsJson: [
+        { id: "produce", name: "Produce artifact", agentId: producerAgentId, dependencies: [], conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: 1 }], description: "Produce the artifact" },
+        { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA gate" },
+      ],
+    });
+    await db.insert(workflowRuns).values({ id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running", startedAt: new Date("2026-06-18T07:00:00.000Z") });
+    await db.insert(issues).values([
+      { id: producerIssueId, companyId, missionId, title: "cap-exhausted: Produce artifact", status: "done", assigneeAgentId: producerAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T07:01:00.000Z"), completedAt: new Date("2026-06-18T07:05:00.000Z") },
+      { id: qaIssueId, companyId, missionId, title: "cap-exhausted: Validate the produced artifact", status: "blocked", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T07:03:00.000Z") },
+    ]);
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "produce", issueId: producerIssueId, status: "completed", iterationIndex: 1, startedAt: new Date("2026-06-18T07:01:00.000Z"), completedAt: new Date("2026-06-18T07:05:00.000Z") },
+      { workflowRunId: runId, stepId: "qa-validate", issueId: qaIssueId, status: "failed", iterationIndex: 0, startedAt: new Date("2026-06-18T07:03:00.000Z"), completedAt: new Date("2026-06-18T07:10:00.000Z") },
+    ]);
+    // producer iterationIndex=1 == maxIterations=1 → cap exhausted.
+
+    const svc = missionService(db, {});
+    // 1차 supervision: qaIssue 가 blocked+stale → unblock issue 생성(originId=qaIssue).
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
+    const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0] ?? null);
+    expect(unblockIssue).toBeTruthy();
+    expect(unblockIssue!.originId).toBe(qaIssueId);
+    // grace window(20min) 을 넘기기 위해 unblock issue 의 createdAt 을 과거로 세팅(AUTO default 유도).
+    await db.update(issues).set({ createdAt: new Date("2026-06-18T07:00:00.000Z") }).where(eq(issues.id, unblockIssue!.id));
+
+    // 2차 supervision (applyOwnerDecisionActions + grace 초과) → AUTO retry_source_issue 발화.
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 30 * 60 * 1000), applyOwnerDecisionActions: true });
+
+    // cap exhausted → skip 안 함 → owner_action_native_loop_cap_exhausted finding + producer 재오픈.
+    expect(result.findings.join("\n")).toContain("owner_action_native_loop_cap_exhausted");
+    expect(result.findings.join("\n")).not.toContain("owner_action_skipped_native_loop");
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", missionId, sourceIssueId: producerIssueId }),
+    ]));
+    const producerAfter = await db.select().from(issues).where(eq(issues.id, producerIssueId)).then((rows) => rows[0]!);
+    expect(producerAfter.status).toBe("todo");
+  });
+
   it("does not apply retry_source_issue when the active plan says the source prerequisites are blocked", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1256,6 +1319,72 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceBody).toContain("mission-owner-decision-applied");
     expect(sourceBody).toContain("mission-owner-decision-wakeup-dispatched");
     expect(sourceBody).toContain(idempotencyKey);
+  });
+
+  it("carries the latest REQUEST_CHANGES summary into retry_source_issue comments and wake context", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-qa-summary", runId: "run-qa-summary" });
+
+    await db.insert(companies).values({ id: companyId, name: "Retry QA Summary Company", issuePrefix: `RQ${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Retry QA summary mission", status: "active" });
+
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
+    const sourceIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "Synthesize report draft",
+    });
+    const requestChangesSummary = "REQUEST_CHANGES: Tables in Top25 전체 표 have incorrect column counts because the 비고 column contains unescaped pipe characters.";
+    const ownerAction = await issueService(db).create(companyId, {
+      assigneeAgentId: ownerAgentId,
+      description: [
+        "Mission-owner signal from validation gate.",
+        "",
+        "### Validation excerpt",
+        "```text",
+        requestChangesSummary,
+        "```",
+      ].join("\n"),
+      missionId,
+      originKind: "mission_main_executor_unblock",
+      originId: sourceIssue.id,
+      status: "done",
+      title: "Retry report producer after QA request changes",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: ownerAction.id,
+      authorAgentId: ownerAgentId,
+      body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry with latest QA summary"].join("\n"),
+    });
+
+    await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-06-30T23:40:00.000Z"),
+      applyOwnerDecisionActions: true,
+      dispatchOwnerDecisionWakeups: true,
+    });
+
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
+      sourceIssue: expect.objectContaining({ id: sourceIssue.id }),
+      targetAgentId: workerAgentId,
+      wakeCommentId: expect.any(String),
+    }));
+    const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
+    const sourceBody = sourceComments.map((comment) => comment.body).join("\n");
+    expect(sourceBody).toContain("Latest REQUEST_CHANGES summary");
+    expect(sourceBody).toContain(requestChangesSummary);
   });
 
   it("marks retry_source_issue wakeup handled when workflow resume already dispatched it", async () => {

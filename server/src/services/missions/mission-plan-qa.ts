@@ -4,7 +4,7 @@
  *   gate(materialization 직전) 가 호출. LLM critique 는 hook 자리만 두고 MVP에선 no-op(full 확장점).
  * [설계 원칙]
  *   - enforcement 는 이 module, discovery 는 mission-owner-planning-context, runtime recovery 는 supervision.
- *     content QA 를 supervision 에 넣지 않는다(reactive가 되므로).
+ *     artifact QA 를 supervision 에 넣지 않는다(reactive가 되므로).
  *   - publish 계열 위반은 severity:"invalid"(materialization 차단). audience/scenario 위반은
  *     "needs_clarification"(MVP에선 log/attach, full 에서 Hermes Ops 가 사용자 질문으로 전환).
  *   - diagnostic 는 operator 가 이해 가능하게: code + "어떤 user intent 가 어떤 unit 을 필요로 하는지" message.
@@ -20,6 +20,8 @@ import { intentSignalsByCategory, type MissionIntent } from "./mission-intent.js
 export type PlanQaDiagnosticCode =
   | "missing_publish_unit"
   | "missing_publish_readback_qa"
+  | "missing_artifact_qa_before_delivery"
+  | "invalid_artifact_qa_delivery_order"
   | "missing_audience_split"
   | "missing_scenario_taxonomy";
 
@@ -98,6 +100,152 @@ function successCriteriaText(successCriteria: unknown[] | undefined): string {
     .join("\n");
 }
 
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
+
+function readUnitIdRefs(unit: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  for (const key of ["id", "unitId", "executionUnitId", "selectedExecutionUnitId"]) {
+    const value = unit[key];
+    if (typeof value === "string" && value.trim().length > 0) ids.push(value.trim());
+  }
+  if (unit.sourceRef && typeof unit.sourceRef === "object" && !Array.isArray(unit.sourceRef)) {
+    const sourceRef = unit.sourceRef as Record<string, unknown>;
+    for (const key of ["id", "issueId", "stepId", "unitId"]) {
+      const value = sourceRef[key];
+      if (typeof value === "string" && value.trim().length > 0) ids.push(value.trim());
+    }
+  }
+  return Array.from(new Set(ids));
+}
+
+function readUnitDependencyRefs(unit: Record<string, unknown>): string[] {
+  return Array.from(new Set([
+    ...readStringArray(unit.dependsOn),
+    ...readStringArray(unit.dependencies),
+    ...readStringArray(unit.after),
+  ]));
+}
+
+function buildDependencyIndex(selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>): number[][] {
+  const idToIndex = new Map<string, number>();
+  selectedExecutionUnits.forEach((unit, index) => {
+    for (const id of readUnitIdRefs(unit)) {
+      idToIndex.set(id, index);
+    }
+  });
+
+  return selectedExecutionUnits.map((unit, index) => {
+    const dependencyIndexes = readUnitDependencyRefs(unit)
+      .map((ref) => idToIndex.get(ref))
+      .filter((target): target is number => target !== undefined && target !== index);
+    return Array.from(new Set(dependencyIndexes));
+  });
+}
+
+function unitDependsOn(dependencyIndex: number[][], fromIndex: number, targetIndex: number): boolean {
+  const visited = new Set<number>();
+  const stack = [...(dependencyIndex[fromIndex] ?? [])];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current === targetIndex) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    stack.push(...(dependencyIndex[current] ?? []));
+  }
+  return false;
+}
+
+const STRICT_PUBLISH_UNIT_RE =
+  /\bmanual[-_\s]?onboarding\b|\bpublisher\b|\bcloudflare\b|\bpages\b|\bR2\b|\bpublish(?:ed|ing)?\b|\bdeploy(?:ed|ing|ment)?\b|\bupload(?:ed|ing)?\b|\bhost(?:ed|ing)?\b|게시|배포|업로드|출간|출판|올리(?!픽)|사이트\s*(?:게시|배포|업로드)|웹사이트\s*(?:게시|배포|업로드)/iu;
+const ARTIFACT_PRODUCER_DIRECT_RE =
+  /\breport[-_\s]?for[-_\s]?beginners\b|\bhtml[-_\s]?for[-_\s]?beginners\b|\bsynth(?:esis|esize)?\b|합성|종합/iu;
+const ARTIFACT_NOUN_RE =
+  /\bwork[-_\s]?product\b|\bartifact\b|\bdeliverable\b|\boutput\b|\basset\b|\btemplate\b|\breport\b|\bhtml\b|\bpdf\b|\bdeck\b|\bpptx\b|\bmarkdown\b|\bjson\b|\bcsv\b|\bdashboard\b|\bpage\b|\bfile\b|\bdocument\b|산출물|결과물|템플릿|자료|초안|원고|보고서|리포트|문서|페이지|대시보드|이미지|파일/iu;
+const ARTIFACT_PRODUCTION_VERB_RE =
+  /\bwrite\b|\bbuild\b|\bcreate\b|\bgenerate\b|\brender\b|\bcompile\b|\bpackage\b|\bdraft\b|\bproduce\b|작성|생성|제작|빌드|렌더|초안|만들|꾸리/iu;
+const QA_UNIT_RE =
+  /^\s*\[qa\]/iu;
+const QA_TEXT_RE =
+  /\bqa\b|\bverif(?:y|ied|ication)\b|\bvalid(?:ate|ated|ation)\b|\breview\b|검증|리뷰|확인/u;
+const ARTIFACT_QA_TEXT_RE =
+  /\bqa\b|\bverif(?:y|ied|ication)\b|\bvalid(?:ate|ated|ation)\b|\breview\b|\baudit\b|\bquality\b|검증|리뷰|검수|품질/u;
+const ARTIFACT_QA_RE =
+  /\bwork[-_\s]?product\b|\bartifact\b|\bdeliverable\b|\boutput\b|\basset\b|\btemplate\b|\bclaim\b|\bevidence\b|\bsource\b|\bcitation\b|\brubric\b|\bsuccess\s*criteria\b|\bacceptance\b|\bquality\b|\bcoverage\b|\bcontent\b|\bformat\b|\bfile\b|\bpreview\b|\brender\b|산출물|결과물|템플릿|자료|본문|내용|주장|근거|출처|품질|성공기준|수용기준|커버리지|형식|파일|미리보기|렌더|동작|검수/iu;
+
+function hasStrictPublishRole(unit: Record<string, unknown>): boolean {
+  return STRICT_PUBLISH_UNIT_RE.test(unitText(unit));
+}
+
+function hasArtifactProducerRole(unit: Record<string, unknown>): boolean {
+  const text = unitText(unit);
+  const producesArtifact =
+    ARTIFACT_PRODUCER_DIRECT_RE.test(text) ||
+    (ARTIFACT_NOUN_RE.test(text) && ARTIFACT_PRODUCTION_VERB_RE.test(text));
+  return producesArtifact && !QA_UNIT_RE.test(text) && !QA_TEXT_RE.test(text) && !hasStrictPublishRole(unit);
+}
+
+function hasArtifactQaRole(unit: Record<string, unknown>): boolean {
+  const text = unitText(unit);
+  return (QA_UNIT_RE.test(text) || ARTIFACT_QA_TEXT_RE.test(text)) && ARTIFACT_QA_RE.test(text);
+}
+
+function reviewArtifactQaDeliveryOrder(input: {
+  intent: MissionIntent;
+  selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>;
+}): PlanQaDiagnostic[] {
+  if (!input.intent.publish) return [];
+
+  const publishIndexes = input.selectedExecutionUnits
+    .map((unit, index) => ({ unit, index }))
+    .filter(({ unit }) => hasStrictPublishRole(unit))
+    .map(({ index }) => index);
+  if (publishIndexes.length === 0) return [];
+
+  const artifactProducerIndexes = input.selectedExecutionUnits
+    .map((unit, index) => ({ unit, index }))
+    .filter(({ unit }) => hasArtifactProducerRole(unit))
+    .map(({ index }) => index);
+  if (artifactProducerIndexes.length === 0) return [];
+
+  const artifactQaIndexes = input.selectedExecutionUnits
+    .map((unit, index) => ({ unit, index }))
+    .filter(({ unit }) => hasArtifactQaRole(unit))
+    .map(({ index }) => index);
+
+  if (artifactQaIndexes.length === 0) {
+    return [{
+      code: "missing_artifact_qa_before_delivery",
+      severity: "invalid",
+      message: "배포할 산출물을 만드는 plan 이지만 배포 전에 산출물 자체(내용/형식/필수 조건/근거/템플릿 적용 등)를 검증하는 QA unit 이 없습니다. 산출물 작성 후, 배포 전에 [QA] 산출물 검증 unit 을 추가하세요.",
+    }];
+  }
+
+  const dependencyIndex = buildDependencyIndex(input.selectedExecutionUnits);
+  const ordered = publishIndexes.every((publishIndex) =>
+    artifactQaIndexes.some((qaIndex) =>
+      unitDependsOn(dependencyIndex, publishIndex, qaIndex) &&
+      artifactProducerIndexes.some((producerIndex) => unitDependsOn(dependencyIndex, qaIndex, producerIndex)),
+    ),
+  );
+  const reversed = artifactQaIndexes.some((qaIndex) =>
+    publishIndexes.some((publishIndex) => unitDependsOn(dependencyIndex, qaIndex, publishIndex))) ||
+    artifactProducerIndexes.some((producerIndex) =>
+      artifactQaIndexes.some((qaIndex) => unitDependsOn(dependencyIndex, producerIndex, qaIndex)));
+
+  if (!ordered || reversed) {
+    return [{
+      code: "invalid_artifact_qa_delivery_order",
+      severity: "invalid",
+      message: "산출물 배포 workflow 의 순서가 잘못되었습니다. 조건 확인/사전 조사 → 산출물 작성 → [QA] 산출물 자체 검증 → 배포 → 배포 readback/최종 QA 순서가 되도록 dependsOn 을 수정하세요.",
+    }];
+  }
+
+  return [];
+}
+
 /**
  * [목적] intent 대 checklist 규칙을 적용해 diagnostic 들을 반환. 순수.
  * [규칙]
@@ -138,6 +286,7 @@ export function reviewPlanAgainstIntent(input: {
         message: `게시/배포 unit 은 있으나 게시물 검증(QA/readback) unit 이 없습니다 ${why}. 게시 후 산출물을 검증하는 [QA] unit 또는 readback 단계를 추가하세요.`,
       });
     }
+    diagnostics.push(...reviewArtifactQaDeliveryOrder({ intent, selectedExecutionUnits }));
   }
 
   if (intent.audienceSplit) {

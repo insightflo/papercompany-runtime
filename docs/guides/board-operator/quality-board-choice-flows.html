@@ -1,0 +1,2708 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quality Board 선택지별 상세 흐름 가이드</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f8f7f2;
+      --surface: #ffffff;
+      --surface-soft: #f1f5f9;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d8dde7;
+      --line-strong: #a9b3c3;
+      --green: #16784c;
+      --green-soft: #e5f6ee;
+      --orange: #b95512;
+      --orange-soft: #fff0df;
+      --red: #b42318;
+      --red-soft: #ffe8e5;
+      --blue: #1f5fbf;
+      --blue-soft: #e8f1ff;
+      --violet: #6d3bd1;
+      --violet-soft: #f1eaff;
+      --gray-soft: #eef1f4;
+      --shadow: 0 12px 36px rgba(23, 32, 51, 0.08);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.88), rgba(248,247,242,0.95) 22rem),
+        var(--paper);
+      color: var(--ink);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    code {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #f6f7f9;
+      padding: 0.08rem 0.32rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 1rem;
+      white-space: pre-wrap;
+    }
+
+    pre code {
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 72px;
+    }
+
+    .hero {
+      display: grid;
+      gap: 20px;
+      padding: 32px 0 24px;
+    }
+
+    .eyebrow {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      letter-spacing: 0;
+      line-height: 1.18;
+    }
+
+    h1 {
+      max-width: 900px;
+      font-size: clamp(2.1rem, 4vw, 4.4rem);
+    }
+
+    h2 {
+      font-size: clamp(1.5rem, 2.4vw, 2.3rem);
+    }
+
+    h3 {
+      font-size: 1.08rem;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .lead {
+      max-width: 840px;
+      color: #344054;
+      font-size: 1.06rem;
+    }
+
+    .top-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .button-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 0.5rem 0.8rem;
+      color: var(--ink);
+      font-size: 0.92rem;
+      font-weight: 700;
+      text-decoration: none;
+      box-shadow: 0 1px 0 rgba(23, 32, 51, 0.04);
+    }
+
+    .button-link.primary {
+      border-color: #1f5fbf;
+      background: #1f5fbf;
+      color: #fff;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: 24px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    .overview-section {
+      margin-bottom: 24px;
+    }
+
+    .spine {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 22px;
+      margin-bottom: 18px;
+    }
+
+    .spine-node {
+      position: relative;
+      min-height: 116px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      padding: 16px;
+    }
+
+    .spine-node:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -19px;
+      width: 16px;
+      height: 2px;
+      background: var(--line-strong);
+    }
+
+    .spine-node:not(:last-child)::before {
+      content: "";
+      position: absolute;
+      top: calc(50% - 4px);
+      right: -21px;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 7px solid var(--line-strong);
+    }
+
+    .spine-node .num {
+      display: inline-flex;
+      width: 26px;
+      height: 26px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: var(--ink);
+      color: #fff;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .spine-node strong {
+      display: block;
+      margin-top: 10px;
+      font-size: 1rem;
+    }
+
+    .spine-node p {
+      margin-top: 6px;
+      color: #475467;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .route-scroll {
+      max-width: 100%;
+      min-width: 0;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .route-board {
+      display: grid;
+      gap: 10px;
+      min-width: 1060px;
+    }
+
+    .route-header,
+    .route-row {
+      display: grid;
+      grid-template-columns: 1.18fr 0.82fr 1fr 1.1fr 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .route-header {
+      padding: 0 12px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .route-row {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfcfe;
+      padding: 12px;
+    }
+
+    .route-row.green {
+      border-left: 5px solid var(--green);
+    }
+
+    .route-row.orange {
+      border-left: 5px solid var(--orange);
+    }
+
+    .route-row.blue {
+      border-left: 5px solid var(--blue);
+    }
+
+    .route-row.red {
+      border-left: 5px solid var(--red);
+    }
+
+    .route-row.violet {
+      border-left: 5px solid var(--violet);
+    }
+
+    .route-row.gray {
+      border-left: 5px solid #667085;
+    }
+
+    .route-cell {
+      position: relative;
+      min-height: 92px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px;
+    }
+
+    .route-cell:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -11px;
+      width: 10px;
+      height: 2px;
+      background: var(--line-strong);
+    }
+
+    .route-cell:not(:last-child)::before {
+      content: "";
+      position: absolute;
+      top: calc(50% - 4px);
+      right: -14px;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 7px solid var(--line-strong);
+      z-index: 1;
+    }
+
+    .route-cell strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 0.9rem;
+      line-height: 1.25;
+    }
+
+    .route-cell p {
+      color: #475467;
+      font-size: 0.82rem;
+      line-height: 1.42;
+    }
+
+    .route-cell.choice {
+      background: #f8fafc;
+    }
+
+    .route-cell.done {
+      border-color: rgba(22, 120, 76, 0.35);
+      background: var(--green-soft);
+    }
+
+    .route-cell.wait {
+      border-color: rgba(31, 95, 191, 0.35);
+      background: var(--blue-soft);
+    }
+
+    .route-cell.warn {
+      border-color: rgba(185, 85, 18, 0.35);
+      background: var(--orange-soft);
+    }
+
+    .route-cell.block {
+      border-color: rgba(180, 35, 24, 0.35);
+      background: var(--red-soft);
+    }
+
+    .route-note {
+      margin-top: 14px;
+    }
+
+    .toc {
+      position: sticky;
+      top: 18px;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .toc strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+    }
+
+    .toc a {
+      display: block;
+      border-radius: 6px;
+      padding: 0.38rem 0.45rem;
+      color: #344054;
+      font-size: 0.88rem;
+      text-decoration: none;
+    }
+
+    .toc a:hover {
+      background: var(--surface-soft);
+      color: var(--ink);
+    }
+
+    .content {
+      display: grid;
+      gap: 22px;
+      min-width: 0;
+    }
+
+    .section {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.92);
+      padding: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .section > .section-head {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 16px;
+    }
+
+    .card h3 {
+      margin-bottom: 8px;
+    }
+
+    .card p + p {
+      margin-top: 8px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 0.18rem 0.55rem;
+      font-size: 0.78rem;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .tag.green {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .tag.orange {
+      background: var(--orange-soft);
+      color: var(--orange);
+    }
+
+    .tag.red {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .tag.blue {
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .tag.violet {
+      background: var(--violet-soft);
+      color: var(--violet);
+    }
+
+    .tag.gray {
+      background: var(--gray-soft);
+      color: #475467;
+    }
+
+    .flow-line {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 130px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 14px;
+    }
+
+    .flow-step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -10px;
+      width: 10px;
+      height: 2px;
+      background: var(--line-strong);
+    }
+
+    .flow-step .num {
+      display: inline-flex;
+      width: 24px;
+      height: 24px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: var(--ink);
+      color: #fff;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .flow-step strong {
+      display: block;
+      margin-top: 8px;
+      font-size: 0.95rem;
+    }
+
+    .flow-step span {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+
+    .decision-tree {
+      display: grid;
+      gap: 10px;
+    }
+
+    .decision-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 220px;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .question,
+    .answer {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 14px;
+    }
+
+    .question strong,
+    .answer strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .answer {
+      border-color: var(--line-strong);
+    }
+
+    .verdict {
+      display: grid;
+      gap: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+      padding: 18px;
+    }
+
+    .verdict-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .verdict-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .mini {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 12px;
+    }
+
+    .mini strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.86rem;
+    }
+
+    .mini p,
+    .mini li {
+      color: #344054;
+      font-size: 0.9rem;
+    }
+
+    ul,
+    ol {
+      margin: 0;
+      padding-left: 1.25rem;
+    }
+
+    li + li {
+      margin-top: 0.35rem;
+    }
+
+    .table-wrap {
+      max-width: 100%;
+      min-width: 0;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      font-size: 0.93rem;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 0.75rem;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f3f5f8;
+      color: #344054;
+      font-size: 0.78rem;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .callout {
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      background: var(--blue-soft);
+      padding: 14px;
+    }
+
+    .callout.orange {
+      border-left-color: var(--orange);
+      background: var(--orange-soft);
+    }
+
+    .callout.green {
+      border-left-color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .callout.violet {
+      border-left-color: var(--violet);
+      background: var(--violet-soft);
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .screen-box {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: #fbfcfe;
+      padding: 14px;
+    }
+
+    .screen-row {
+      display: grid;
+      grid-template-columns: 160px minmax(0, 1fr);
+      gap: 10px;
+      border-bottom: 1px dashed var(--line);
+      padding-bottom: 10px;
+    }
+
+    .screen-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .screen-row strong {
+      color: #344054;
+      font-size: 0.88rem;
+    }
+
+    .screen-row p {
+      color: #344054;
+      font-size: 0.94rem;
+    }
+
+    .checklist {
+      display: grid;
+      gap: 10px;
+    }
+
+    .choice-flow-set {
+      display: grid;
+      gap: 18px;
+      min-width: 0;
+    }
+
+    .choice-map {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fbfcfe;
+      padding: 16px;
+    }
+
+    .choice-map.pass {
+      border-top: 4px solid var(--green);
+    }
+
+    .choice-map.request {
+      border-top: 4px solid var(--orange);
+    }
+
+    .choice-map.evidence {
+      border-top: 4px solid var(--blue);
+    }
+
+    .choice-map.fail {
+      border-top: 4px solid var(--red);
+    }
+
+    .choice-map.dismiss {
+      border-top: 4px solid #667085;
+    }
+
+    .choice-map-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .choice-map-head p {
+      max-width: 760px;
+      color: #344054;
+      font-size: 0.94rem;
+    }
+
+    .flowchart {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: 132px minmax(0, 1fr);
+      gap: 10px;
+      align-items: stretch;
+      min-width: 0;
+    }
+
+    .actor {
+      display: flex;
+      min-height: 58px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f3f5f8;
+      color: #344054;
+      font-size: 0.82rem;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .steps {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(150px, 1fr);
+      gap: 22px;
+      min-width: 0;
+      overflow-x: auto;
+      padding: 0 3px 6px;
+    }
+
+    .step-node {
+      position: relative;
+      min-height: 96px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px;
+    }
+
+    .step-node::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -18px;
+      width: 14px;
+      height: 2px;
+      background: var(--line-strong);
+    }
+
+    .step-node:last-child::after {
+      display: none;
+    }
+
+    .step-node .step-label {
+      display: inline-flex;
+      min-width: 24px;
+      height: 24px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: #172033;
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 800;
+    }
+
+    .step-node strong {
+      display: block;
+      margin-top: 8px;
+      font-size: 0.9rem;
+      line-height: 1.25;
+    }
+
+    .step-node p {
+      margin-top: 5px;
+      color: #475467;
+      font-size: 0.82rem;
+      line-height: 1.42;
+    }
+
+    .step-node.system {
+      background: #f8fafc;
+    }
+
+    .step-node.end {
+      border-color: rgba(22, 120, 76, 0.35);
+      background: var(--green-soft);
+    }
+
+    .step-node.warn {
+      border-color: rgba(185, 85, 18, 0.35);
+      background: var(--orange-soft);
+    }
+
+    .step-node.block {
+      border-color: rgba(180, 35, 24, 0.35);
+      background: var(--red-soft);
+    }
+
+    .step-node.wait {
+      border-color: rgba(31, 95, 191, 0.35);
+      background: var(--blue-soft);
+    }
+
+    .branch-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .branch {
+      border: 1px dashed var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px;
+    }
+
+    .branch strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 0.88rem;
+    }
+
+    .branch p {
+      color: #475467;
+      font-size: 0.86rem;
+    }
+
+    .check {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px;
+    }
+
+    .check strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .footer-note {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        position: static;
+      }
+
+      .spine {
+        grid-template-columns: 1fr;
+      }
+
+      .spine-node:not(:last-child)::before,
+      .spine-node:not(:last-child)::after {
+        display: none;
+      }
+
+      .flow-line,
+      .grid-3,
+      .verdict-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-step:not(:last-child)::after {
+        display: none;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .page {
+        width: min(100% - 20px, 1180px);
+        padding-top: 18px;
+      }
+
+      .section {
+        padding: 16px;
+      }
+
+      .grid-2,
+      .decision-row,
+      .screen-row,
+      .flow-row,
+      .branch-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .top-actions {
+        align-items: stretch;
+      }
+
+      .button-link {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">Board operator guide</p>
+      <h1>Quality Board 선택지별 상세 흐름 가이드</h1>
+      <p class="lead">
+        Queue에서 어떤 버튼을 눌러야 하는지, 버튼을 누른 뒤 무엇이 끝났고 무엇이 남는지,
+        그리고 Anchors, Evaluators, Reports가 Queue 이후 어디에 붙는지 한 번에 판단하기 위한 문서입니다.
+      </p>
+      <div class="top-actions">
+        <a class="button-link primary" href="https://papercompany.showk.ing/RES/quality">Live Quality Board 열기</a>
+        <a class="button-link" href="#board-loop">전체 탭 루프 보기</a>
+        <a class="button-link" href="#overview-flow">전체 순서도 보기</a>
+        <a class="button-link" href="#quick-answer">가장 빠른 판단표로 이동</a>
+        <a class="button-link" href="#example-tech-scout">tech-scout 예시 보기</a>
+      </div>
+    </header>
+
+    <section id="board-loop" class="section overview-section">
+      <div class="section-head">
+        <h2>0. Quality Board 전체 탭 루프</h2>
+        <p class="subtle">
+          Quality Board는 Queue만 보는 화면이 아닙니다. Queue에서 사람 판정을 끝내고, 필요한 경우 그 판정을 anchor로 저장한 뒤,
+          evaluator 후보를 replay하고, 마지막으로 report로 현재 상태를 남기는 루프입니다.
+        </p>
+      </div>
+
+      <div class="flow-line" aria-label="Quality Board 전체 탭 루프">
+        <div class="flow-step">
+          <span class="num">1</span>
+          <strong>Queue</strong>
+          <span>사람이 review item을 보고 verdict를 기록합니다. 여기서 품질 판단 자체가 끝나거나 rework/evidence 흐름이 열립니다.</span>
+        </div>
+        <div class="flow-step">
+          <span class="num">2</span>
+          <strong>Save training case</strong>
+          <span>반복 가능한 verdict만 evaluator가 배울 사례로 저장합니다. 저장하지 않아도 Queue verdict는 유지됩니다.</span>
+        </div>
+        <div class="flow-step">
+          <span class="num">3</span>
+          <strong>Anchors</strong>
+          <span>저장된 human precedent를 봅니다. 이 anchor가 evaluator candidate에 반영됐는지 확인합니다.</span>
+        </div>
+        <div class="flow-step">
+          <span class="num">4</span>
+          <strong>Evaluators</strong>
+          <span>anchor에서 생긴 candidate evaluator를 replay합니다. replay가 passed여야 production으로 올릴 수 있습니다.</span>
+        </div>
+        <div class="flow-step">
+          <span class="num">5</span>
+          <strong>Reports</strong>
+          <span>오늘의 queue, evidence, anchor, evaluator 상태를 dated report로 저장합니다. 변경 후에는 다시 생성합니다.</span>
+        </div>
+      </div>
+
+      <div class="route-scroll route-note" aria-label="탭별 목적과 종료 조건">
+        <div class="route-board">
+          <div class="route-header" aria-hidden="true">
+            <span>탭</span>
+            <span>언제 보는가</span>
+            <span>주요 입력</span>
+            <span>저장/실행 후 생기는 것</span>
+            <span>끝났다고 보는 기준</span>
+          </div>
+
+          <div class="route-row orange">
+            <div class="route-cell">
+              <strong>Queue</strong>
+              <p>사람 판정이 필요한 review item이 있을 때 봅니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>매일 우선 확인</strong>
+              <p>가장 앞단입니다. 여기서 verdict가 없으면 나머지 탭으로 배울 재료도 없습니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Verdict note</strong>
+              <p>Pass, Request changes, Needs evidence, Fail, Dismiss 중 하나와 이유를 기록합니다.</p>
+            </div>
+            <div class="route-cell warn">
+              <strong>상태 변경 또는 issue 생성</strong>
+              <p>verdict에 따라 <code>resolved_pass</code>, <code>changes_requested</code>, <code>evidence_collecting</code> 등이 됩니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Human review complete</strong>
+              <p>화면에 recorded verdict가 보이면 사람 판정은 끝난 것입니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row violet">
+            <div class="route-cell">
+              <strong>Anchors</strong>
+              <p>저장된 학습 사례가 evaluator에 반영됐는지 확인할 때 봅니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Queue verdict 뒤</strong>
+              <p>Save training case를 누른 뒤 생성됩니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Case title</strong>
+              <p>사람이 수정한 reusable lesson 제목이 anchor의 핵심입니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Candidate evaluator 생성</strong>
+              <p>anchor 저장 시 evaluator candidate version과 queued replay run이 함께 만들어집니다.</p>
+            </div>
+            <div class="route-cell done">
+              <strong>Reflected in evaluator: yes</strong>
+              <p>source anchor가 evaluator version에 연결되어 있으면 반영된 상태입니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row blue">
+            <div class="route-cell">
+              <strong>Evaluators</strong>
+              <p>자동 평가기를 실제 운영에 올릴지 검증할 때 봅니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Anchor가 있을 때</strong>
+              <p>candidate version은 anchor에서 만들어집니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Replay</strong>
+              <p>과거 anchor case에 evaluator 후보를 적용해 같은 판단을 내는지 봅니다.</p>
+            </div>
+            <div class="route-cell wait">
+              <strong>passed 또는 failed replay</strong>
+              <p>regression이 없으면 passed, 있으면 failed입니다.</p>
+            </div>
+            <div class="route-cell done">
+              <strong>Production promotion</strong>
+              <p>passed replay가 있어야 production evaluator로 승격할 수 있습니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row gray">
+            <div class="route-cell">
+              <strong>Reports</strong>
+              <p>현재 Quality Board 상태를 날짜별 스냅샷으로 남길 때 봅니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>판정이나 증거 변경 후</strong>
+              <p>Queue 상태가 바뀌면 기존 report가 stale할 수 있습니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>Generate today&apos;s report</strong>
+              <p>오늘 날짜의 report를 생성하거나 같은 날짜 report를 갱신합니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>summary 저장</strong>
+              <p>pending review, needs evidence, anchor gap, evidence stats가 기록됩니다.</p>
+            </div>
+            <div class="route-cell done">
+              <strong>최신 report</strong>
+              <p>review item이 report 이후 업데이트되지 않았고, 상태가 현재 board를 설명하면 됩니다.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="overview-flow" class="section overview-section">
+      <div class="section-head">
+        <h2>1. Queue 선택지 판단 순서도</h2>
+        <p class="subtle">
+          먼저 이 순서도만 따라갑니다. 아래 상세 설명은 각 경로를 더 자세히 풀어쓴 것입니다.
+        </p>
+      </div>
+
+      <div class="spine" aria-label="Quality Board 공통 시작 흐름">
+        <div class="spine-node">
+          <span class="num">1</span>
+          <strong>Queue 카드가 들어온다</strong>
+          <p>Final QA, Plan QA, Delivery QA, 수동 등록 중 하나가 review item을 만듭니다.</p>
+        </div>
+        <div class="spine-node">
+          <span class="num">2</span>
+          <strong>카드를 같은 순서로 읽는다</strong>
+          <p>Decision focus → Recommended action → Raw QA excerpt → Evidence → Mission context 순서로 봅니다.</p>
+        </div>
+        <div class="spine-node">
+          <span class="num">3</span>
+          <strong>하나의 경로만 고른다</strong>
+          <p>판단 가능 여부와 결함 성격에 따라 아래 다섯 경로 중 하나로 내려갑니다.</p>
+        </div>
+      </div>
+
+      <div class="route-scroll" aria-label="선택지별 전체 경로">
+        <div class="route-board">
+          <div class="route-header" aria-hidden="true">
+            <span>보이는 상황</span>
+            <span>누를 버튼</span>
+            <span>저장 직후 상태</span>
+            <span>시스템이 여는 다음 일</span>
+            <span>사람이 다음에 볼 것</span>
+          </div>
+
+          <div class="route-row gray">
+            <div class="route-cell">
+              <strong>판단 대상이 아님</strong>
+              <p>중복, 오래됨, smoke/test, 또는 현재 산출물 판단과 무관합니다.</p>
+            </div>
+            <div class="route-cell choice">
+              <strong>Dismiss</strong>
+              <p>왜 제외하는지 한 줄로 씁니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong><code>dismissed</code></strong>
+              <p>활성 Queue에서 제외됩니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>후속 issue 없음</strong>
+              <p>수정 issue나 증거 issue를 만들지 않습니다.</p>
+            </div>
+            <div class="route-cell done">
+              <strong>끝</strong>
+              <p>품질 통과나 실패가 아니라 "판단하지 않음"으로 끝납니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row blue">
+            <div class="route-cell">
+              <strong>아직 판단 불가</strong>
+              <p>URL, 브라우저 readback, work product, API 상태가 없어서 결론을 못 냅니다.</p>
+            </div>
+            <div class="route-cell choice wait">
+              <strong>Needs evidence</strong>
+              <p>필요한 evidence chip을 선택하고, 무엇을 확인할지 씁니다.</p>
+            </div>
+            <div class="route-cell wait">
+              <strong><code>evidence_collecting</code></strong>
+              <p>선택한 surface가 missing/blocking evidence로 기록됩니다.</p>
+            </div>
+            <div class="route-cell wait">
+              <strong>Evidence issue 생성</strong>
+              <p><code>Quality evidence required</code> issue에서 증거를 수집합니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>증거 해결 후 Queue 복귀</strong>
+              <p>모든 blocking evidence가 해결되면 <code>awaiting_review</code>로 돌아와 다시 판정합니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row green">
+            <div class="route-cell">
+              <strong>기준을 만족함</strong>
+              <p>목표, planned output, rubric, 증거가 맞고 더 보낼 수정이 없습니다.</p>
+            </div>
+            <div class="route-cell choice done">
+              <strong>Pass</strong>
+              <p>왜 통과인지 짧게 남깁니다.</p>
+            </div>
+            <div class="route-cell done">
+              <strong><code>resolved_pass</code></strong>
+              <p>이 review item의 사람 판정은 끝납니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>후속 issue 없음</strong>
+              <p>증거 수집이나 수정 흐름을 열지 않습니다.</p>
+            </div>
+            <div class="route-cell done">
+              <strong>끝</strong>
+              <p>반복 가능한 통과 기준을 꼭 남길 때만 training case를 저장합니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row orange">
+            <div class="route-cell">
+              <strong>고칠 점이 구체적임</strong>
+              <p>산출물은 있고 판단도 가능하지만, 빠진 정의, 목표 불일치, 문구 결함 같은 rework가 필요합니다.</p>
+            </div>
+            <div class="route-cell choice warn">
+              <strong>Request changes</strong>
+              <p>무엇을 어디서 고칠지 rework 지시를 씁니다.</p>
+            </div>
+            <div class="route-cell warn">
+              <strong><code>changes_requested</code></strong>
+              <p>사람의 판정은 완료되고 수정 흐름이 열립니다.</p>
+            </div>
+            <div class="route-cell warn">
+              <strong>Correction issue 생성</strong>
+              <p><code>Quality correction required</code> issue에서 담당자가 산출물을 고칩니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>수정 후 재검토</strong>
+              <p>고친 산출물이 돌아오면 다시 Pass 또는 추가 Request changes로 판단합니다.</p>
+            </div>
+          </div>
+
+          <div class="route-row red">
+            <div class="route-cell">
+              <strong>차단성 품질 실패</strong>
+              <p>산출물이 없거나, 목표와 완전히 다르거나, 단순 수정 요청보다 강하게 막아야 합니다.</p>
+            </div>
+            <div class="route-cell choice block">
+              <strong>Fail</strong>
+              <p>왜 차단성 실패인지 씁니다.</p>
+            </div>
+            <div class="route-cell block">
+              <strong><code>anchor_candidate</code></strong>
+              <p>실패 판정이 저장되고 학습 후보 상태가 됩니다.</p>
+            </div>
+            <div class="route-cell block">
+              <strong>Correction issue 생성</strong>
+              <p>실패도 후속 처리 issue를 엽니다. 반복 규칙이면 training case 저장을 검토합니다.</p>
+            </div>
+            <div class="route-cell">
+              <strong>재작성 또는 차단 처리</strong>
+              <p>새 산출물이 생기면 별도 QA나 Quality review로 다시 확인합니다.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout violet route-note">
+        <strong>Record verdict 이후에 보이는 Evaluator learning case는 다른 흐름입니다.</strong>
+        <p>
+          위 표의 "저장 직후 상태"가 생기면 사람의 verdict는 이미 기록된 것입니다.
+          <code>Save training case</code>는 그 verdict를 나중 자동 평가기가 배울 사례로 남길 때만 누릅니다.
+        </p>
+      </div>
+    </section>
+
+    <div class="layout">
+      <nav class="toc" aria-label="문서 목차">
+        <strong>목차</strong>
+        <a href="#board-loop">0. 전체 탭 루프</a>
+        <a href="#overview-flow">1. Queue 선택지 순서도</a>
+        <a href="#mental-model">2. 기본 개념</a>
+        <a href="#screen-reading">3. Queue 카드 읽는 순서</a>
+        <a href="#decision-tree">4. 첫 판단 트리</a>
+        <a href="#quick-answer">5. 빠른 판단표</a>
+        <a href="#verdict-flows">6. 버튼별 상세 흐름</a>
+        <a href="#after-record">7. Record verdict 이후</a>
+        <a href="#evidence-surfaces">8. Evidence surfaces</a>
+        <a href="#learning-case">9. Evaluator learning case</a>
+        <a href="#tab-flows">10. Anchors/Evaluators/Reports</a>
+        <a href="#example-tech-scout">11. 실제 예시</a>
+        <a href="#common-mistakes">12. 흔한 오해</a>
+      </nav>
+
+      <div class="content">
+        <section id="mental-model" class="section">
+          <div class="section-head">
+            <h2>2. 기본 개념</h2>
+            <p class="subtle">Quality Board는 미션을 다시 실행하는 화면이 아니라, 산출물에 대한 사람의 품질 판정을 기록하는 화면입니다.</p>
+          </div>
+
+          <div class="grid-2">
+            <article class="card">
+              <span class="tag blue">필수 흐름</span>
+              <h3>판정 기록</h3>
+              <p>
+                Queue 항목을 보고 하나의 결론을 남깁니다. 결론은 <code>Pass</code>, <code>Request changes</code>,
+                <code>Needs evidence</code>, <code>Fail</code>, <code>Dismiss</code> 중 하나입니다.
+              </p>
+              <p>
+                이 단계가 Quality reviewer가 반드시 해야 하는 작업입니다.
+              </p>
+            </article>
+
+            <article class="card">
+              <span class="tag violet">별도 흐름</span>
+              <h3>Evaluator 학습 저장</h3>
+              <p>
+                이미 기록한 판정을 나중의 자동 평가기가 참고할 수 있는 사례로 저장합니다.
+                품질 판정 자체를 바꾸는 작업이 아닙니다.
+              </p>
+              <p>
+                반복될 규칙일 때만 저장합니다. 한 번뿐인 특수 상황이나 확신이 낮은 항목은 저장하지 않는 편이 낫습니다.
+              </p>
+            </article>
+          </div>
+
+          <div class="flow-line" aria-label="Quality Board 전체 흐름">
+            <div class="flow-step">
+              <span class="num">1</span>
+              <strong>Queue 항목 발생</strong>
+              <span>Final QA, Plan QA, Delivery QA, 수동 등록 등이 review item을 만듭니다.</span>
+            </div>
+            <div class="flow-step">
+              <span class="num">2</span>
+              <strong>사람이 대상 확인</strong>
+              <span>Decision focus, 추천 행동, 증거, Mission 링크를 순서대로 봅니다.</span>
+            </div>
+            <div class="flow-step">
+              <span class="num">3</span>
+              <strong>Verdict 기록</strong>
+              <span>하나의 버튼을 선택하고 Verdict note에 이유나 지시를 남깁니다.</span>
+            </div>
+            <div class="flow-step">
+              <span class="num">4</span>
+              <strong>처리 방향 결정</strong>
+              <span>Pass는 완료, Request changes는 rework, Needs evidence는 증거 수집으로 갑니다.</span>
+            </div>
+            <div class="flow-step">
+              <span class="num">5</span>
+              <strong>학습 사례 저장</strong>
+              <span>반복 규칙이면 제목을 다듬어 Save training case를 누릅니다.</span>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-reading" class="section">
+          <div class="section-head">
+            <h2>3. Queue 카드 읽는 순서</h2>
+            <p class="subtle">화면의 모든 문장을 같은 무게로 읽으면 헷갈립니다. 아래 순서대로 보면 판단이 빨라집니다.</p>
+          </div>
+
+          <div class="screen-box">
+            <div class="screen-row">
+              <strong>카드 제목</strong>
+              <p>
+                어떤 QA 단계에서 어떤 미션 산출물이 걸렸는지 보는 곳입니다.
+                <code>mission fb9d...</code> 같은 긴 ID만으로는 사람이 알 수 없으므로,
+                화면에는 미션 이름과 회사 경로가 포함된 링크가 있어야 합니다.
+              </p>
+            </div>
+            <div class="screen-row">
+              <strong>Decision focus</strong>
+              <p>
+                가장 먼저 읽습니다. Target step, Planned output, Mission goal, Mismatch, Recommended action이 있으면
+                이 블록이 실제 판단의 중심입니다.
+              </p>
+            </div>
+            <div class="screen-row">
+              <strong>Recommended action</strong>
+              <p>
+                화면이 제안하는 기본 버튼입니다. 이유 문장과 맞아야 합니다.
+                이유가 이미 구체적인 수정 지시라면 <code>Request changes</code>가 기본입니다.
+              </p>
+            </div>
+            <div class="screen-row">
+              <strong>Raw QA excerpt</strong>
+              <p>
+                원래 QA가 남긴 긴 설명입니다. Decision focus가 충분하지 않을 때 세부 근거를 확인하는 곳입니다.
+                긴 원문 자체를 처음부터 해석하려고 하지 않아도 됩니다.
+              </p>
+            </div>
+            <div class="screen-row">
+              <strong>Evidence</strong>
+              <p>
+                실제 산출물, URL, 브라우저 확인, API 확인 같은 증거 상태입니다.
+                단, 구조화된 evidence가 비어 있어도 QA 원문이 이미 판단 근거를 주면 <code>Needs evidence</code>가 아닐 수 있습니다.
+              </p>
+            </div>
+            <div class="screen-row">
+              <strong>Mission context</strong>
+              <p>
+                미션 원문을 열어 맥락을 확인하는 링크입니다. 링크는 <code>/&lt;company&gt;/missions/&lt;mission-id&gt;</code> 형태여야 합니다.
+                미션 상태가 완료여도, 이 Quality item이 자동으로 Pass가 되는 것은 아닙니다.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section id="decision-tree" class="section">
+          <div class="section-head">
+            <h2>4. 첫 판단 트리</h2>
+            <p class="subtle">버튼을 고르기 전 아래 질문을 위에서 아래로 답합니다.</p>
+          </div>
+
+          <div class="decision-tree">
+            <div class="decision-row">
+              <div class="question">
+                <strong>이 항목이 중복, 오래된 항목, smoke/test, 현재 판단 대상이 아닌가?</strong>
+                <p>예를 들어 이미 같은 건이 처리됐거나, 테스트용 항목이라 실제 품질 판단 대상이 아니면 여기서 끝냅니다.</p>
+              </div>
+              <div class="answer">
+                <span class="tag gray">Dismiss</span>
+                <p>Verdict note에 왜 제외하는지만 남깁니다.</p>
+              </div>
+            </div>
+
+            <div class="decision-row">
+              <div class="question">
+                <strong>현재 화면의 이유와 증거만으로 판단할 수 없는가?</strong>
+                <p>URL이 열리는지, work product가 존재하는지, 브라우저 readback이 필요한데 없어서 결론을 못 내리는 경우입니다.</p>
+              </div>
+              <div class="answer">
+                <span class="tag blue">Needs evidence</span>
+                <p>필요한 evidence surface chip을 선택하고, 무엇을 확인해야 하는지 적습니다.</p>
+              </div>
+            </div>
+
+            <div class="decision-row">
+              <div class="question">
+                <strong>대상 산출물이 기준을 만족하는가?</strong>
+                <p>목표, 계획, rubric, 증거가 맞고 더 보낼 수정이 없으면 통과입니다.</p>
+              </div>
+              <div class="answer">
+                <span class="tag green">Pass</span>
+                <p>이 Quality item은 완료됩니다.</p>
+              </div>
+            </div>
+
+            <div class="decision-row">
+              <div class="question">
+                <strong>산출물은 있지만 구체적으로 고칠 점이 있는가?</strong>
+                <p>QA가 이미 missing glossary, plan mismatch, formatting defect처럼 수정할 내용을 특정했다면 여기에 해당합니다.</p>
+              </div>
+              <div class="answer">
+                <span class="tag orange">Request changes</span>
+                <p>rework 지시를 남깁니다. 새 증거 요청이 기본이 아닙니다.</p>
+              </div>
+            </div>
+
+            <div class="decision-row">
+              <div class="question">
+                <strong>단순 rework가 아니라 품질 실패로 막아야 하는가?</strong>
+                <p>산출물이 없거나, 목표와 완전히 다르거나, 운영상 그대로 진행하면 안 되는 심각한 실패일 때입니다.</p>
+              </div>
+              <div class="answer">
+                <span class="tag red">Fail</span>
+                <p>차단성 실패로 기록합니다.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="quick-answer" class="section">
+          <div class="section-head">
+            <h2>5. 빠른 판단표</h2>
+            <p class="subtle">Queue에서 시간이 없을 때 이 표만 보고도 기본 선택을 할 수 있어야 합니다.</p>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>화면에서 보이는 상황</th>
+                  <th>누를 버튼</th>
+                  <th>Verdict note에 쓸 내용</th>
+                  <th>Record verdict 뒤 상태</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>산출물이 기준을 만족하고, 더 고칠 점이 없음</td>
+                  <td><span class="tag green">Pass</span></td>
+                  <td>왜 통과인지 한 문장으로 충분합니다.</td>
+                  <td>사람의 품질 판단은 끝납니다.</td>
+                </tr>
+                <tr>
+                  <td>산출물은 있고 판단도 가능하지만, 구체적으로 고쳐야 할 점이 있음</td>
+                  <td><span class="tag orange">Request changes</span></td>
+                  <td>무엇을 어디서 고칠지, rework로 보낼 이유를 씁니다.</td>
+                  <td>판정은 끝났고, 수정 작업 흐름으로 넘어갑니다.</td>
+                </tr>
+                <tr>
+                  <td>증거가 부족해 아직 Pass/Fail/Request changes를 판단할 수 없음</td>
+                  <td><span class="tag blue">Needs evidence</span></td>
+                  <td>어떤 증거 surface가 필요한지와 확인할 내용을 씁니다.</td>
+                  <td>증거 수집 상태가 되고, 증거가 돌아오면 다시 판단합니다.</td>
+                </tr>
+                <tr>
+                  <td>단순 수정 요청보다 강한 차단성 실패</td>
+                  <td><span class="tag red">Fail</span></td>
+                  <td>왜 품질 실패로 막아야 하는지 씁니다.</td>
+                  <td>실패 판정으로 기록됩니다.</td>
+                </tr>
+                <tr>
+                  <td>중복, 오래됨, 테스트 항목, 현재 판단 대상 아님</td>
+                  <td><span class="tag gray">Dismiss</span></td>
+                  <td>왜 제외하는지 씁니다.</td>
+                  <td>활성 Queue에서 제외됩니다.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="verdict-flows" class="section">
+          <div class="section-head">
+            <h2>6. 버튼별 상세 흐름</h2>
+            <p class="subtle">각 버튼은 같은 "기록" 버튼처럼 보여도 이후 흐름이 다릅니다.</p>
+          </div>
+
+          <div class="choice-flow-set" aria-label="선택지별 상세 흐름도">
+            <article class="choice-map pass" id="pass-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Pass 흐름도</h3>
+                  <p>산출물이 기준을 만족한다고 판단할 수 있을 때의 종료 흐름입니다.</p>
+                </div>
+                <span class="tag green">최종 상태: resolved_pass</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">Reviewer</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>Decision focus 확인</strong>
+                      <p>Target step, planned output, mission goal, mismatch를 읽습니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">2</span>
+                      <strong>통과 조건 확인</strong>
+                      <p>목표와 rubric을 만족하고, 더 고칠 항목이 없다고 판단합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">3</span>
+                      <strong>Pass 클릭</strong>
+                      <p>Record Pass dialog가 열립니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">4</span>
+                      <strong>Verdict note 입력</strong>
+                      <p>왜 통과인지 짧게 씁니다. 길게 쓸 필요는 없습니다.</p>
+                    </div>
+                    <div class="step-node end">
+                      <span class="step-label">5</span>
+                      <strong>Record verdict 클릭</strong>
+                      <p>이 항목에 대한 사람의 품질 판단은 끝납니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Quality Board</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>verdict row 저장</strong>
+                      <p>판정값 <code>pass</code>와 note를 저장합니다.</p>
+                    </div>
+                    <div class="step-node system end">
+                      <span class="step-label">B</span>
+                      <strong>상태 변경</strong>
+                      <p>review item 상태가 <code>resolved_pass</code>가 됩니다.</p>
+                    </div>
+                    <div class="step-node system end">
+                      <span class="step-label">C</span>
+                      <strong>후속 issue 없음</strong>
+                      <p>correction issue나 evidence issue를 새로 만들지 않습니다.</p>
+                    </div>
+                    <div class="step-node system end">
+                      <span class="step-label">D</span>
+                      <strong>화면 문구</strong>
+                      <p><code>Recorded verdict: Pass. This quality item is done.</code></p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">다음 담당자</div>
+                  <div class="steps">
+                    <div class="step-node end">
+                      <span class="step-label">끝</span>
+                      <strong>추가 작업 없음</strong>
+                      <p>미션 전체나 다른 산출물은 별도 이슈가 있을 때만 봅니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">선택</span>
+                      <strong>Evaluator learning은 보통 생략</strong>
+                      <p>반복 가능한 "통과 기준"을 꼭 남겨야 할 때만 저장합니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="choice-map request" id="request-changes-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Request changes 흐름도</h3>
+                  <p>판단은 가능하고 산출물도 있지만, 구체적인 수정이 필요할 때의 rework 흐름입니다.</p>
+                </div>
+                <span class="tag orange">최종 상태: changes_requested</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">Reviewer</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>문제 근거 확인</strong>
+                      <p>Mismatch 또는 Raw QA excerpt에서 고칠 지점이 이미 특정되어 있는지 봅니다.</p>
+                    </div>
+                    <div class="step-node warn">
+                      <span class="step-label">2</span>
+                      <strong>수정 요청 조건 확인</strong>
+                      <p>산출물은 존재하고, 증거 부족이 아니라 내용 결함이라고 판단합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">3</span>
+                      <strong>Request changes 클릭</strong>
+                      <p>Record Request changes dialog가 열립니다.</p>
+                    </div>
+                    <div class="step-node warn">
+                      <span class="step-label">4</span>
+                      <strong>Verdict note 작성</strong>
+                      <p>무엇을, 어디서, 왜 고칠지 씁니다. 새 증거 요청을 기본으로 쓰지 않습니다.</p>
+                    </div>
+                    <div class="step-node warn">
+                      <span class="step-label">5</span>
+                      <strong>Record verdict 클릭</strong>
+                      <p>사람의 판정은 여기서 완료됩니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Quality Board</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>verdict row 저장</strong>
+                      <p>판정값 <code>request_changes</code>와 rework note를 저장합니다.</p>
+                    </div>
+                    <div class="step-node system warn">
+                      <span class="step-label">B</span>
+                      <strong>상태 변경</strong>
+                      <p>review item 상태가 <code>changes_requested</code>가 됩니다.</p>
+                    </div>
+                    <div class="step-node system warn">
+                      <span class="step-label">C</span>
+                      <strong>correction issue 생성</strong>
+                      <p><code>Quality correction required: ...</code> 형태의 수정 issue가 <code>todo</code>로 열립니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">D</span>
+                      <strong>화면 문구</strong>
+                      <p><code>The correction flow is open; no more Quality input is required here unless this verdict was wrong.</code></p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Producer / Owner</div>
+                  <div class="steps">
+                    <div class="step-node warn">
+                      <span class="step-label">6</span>
+                      <strong>수정 issue 처리</strong>
+                      <p>담당 step이나 산출물 담당자가 note에 적힌 결함을 수정합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">7</span>
+                      <strong>수정 산출물 제출</strong>
+                      <p>수정된 work product나 보고서를 다시 QA로 보냅니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">8</span>
+                      <strong>다시 판단</strong>
+                      <p>수정 후에는 Pass, 다시 Request changes, Fail 중 하나로 재판정합니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Evaluator 학습</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">선택</span>
+                      <strong>Case title 확인</strong>
+                      <p>반복 규칙이면 제목을 "무엇을 배워야 하는가"로 다듬습니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">선택</span>
+                      <strong>Save training case</strong>
+                      <p>저장하면 future evaluator가 비슷한 결함을 더 잘 잡는 재료가 됩니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="choice-map evidence" id="needs-evidence-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Needs evidence 흐름도</h3>
+                  <p>증거가 부족해 아직 품질 결론을 낼 수 없을 때의 대기 및 복귀 흐름입니다.</p>
+                </div>
+                <span class="tag blue">최종 상태: evidence_collecting → awaiting_review</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">Reviewer</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>판단 불가 이유 확인</strong>
+                      <p>내용 결함이 아니라 proof surface가 없어서 결론을 못 내리는지 확인합니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">2</span>
+                      <strong>Needs evidence 클릭</strong>
+                      <p>Record Needs evidence dialog가 열립니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">3</span>
+                      <strong>Verdict note 작성</strong>
+                      <p>무슨 증거가 없어서 판단할 수 없는지 씁니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">4</span>
+                      <strong>Evidence chip 선택</strong>
+                      <p><code>public_url</code>, <code>browser_readback</code>, <code>work_product</code>, <code>api_probe</code> 중 필요한 항목을 고릅니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">5</span>
+                      <strong>Record verdict 클릭</strong>
+                      <p>chip이 하나도 없으면 저장할 수 없습니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Quality Board</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>verdict row 저장</strong>
+                      <p>판정값 <code>needs_evidence</code>와 evidence request note를 저장합니다.</p>
+                    </div>
+                    <div class="step-node system wait">
+                      <span class="step-label">B</span>
+                      <strong>상태 변경</strong>
+                      <p>review item 상태가 <code>evidence_collecting</code>이 됩니다.</p>
+                    </div>
+                    <div class="step-node system wait">
+                      <span class="step-label">C</span>
+                      <strong>evidence refs 생성</strong>
+                      <p>선택한 surface가 <code>missing</code>과 <code>blocking</code>으로 기록됩니다.</p>
+                    </div>
+                    <div class="step-node system wait">
+                      <span class="step-label">D</span>
+                      <strong>evidence issue 생성</strong>
+                      <p><code>Quality evidence required: ...</code> issue가 <code>todo</code>로 열립니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Evidence 담당자</div>
+                  <div class="steps">
+                    <div class="step-node wait">
+                      <span class="step-label">6</span>
+                      <strong>증거 수집</strong>
+                      <p>URL, 브라우저, work product, API 상태를 실제로 확인합니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">7</span>
+                      <strong>Evidence status 기록</strong>
+                      <p><code>verified</code>, <code>failed</code>, <code>insufficient</code>, <code>missing</code>, <code>stale</code>, <code>not_applicable</code> 중 하나로 기록합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">8</span>
+                      <strong>자동 분기</strong>
+                      <p>blocking unresolved가 남았는지에 따라 상태가 갈립니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="branch-grid">
+                <div class="branch">
+                  <strong>분기 A: 아직 unresolved evidence가 남음</strong>
+                  <p>하나라도 <code>missing</code>, <code>failed</code>, <code>insufficient</code>, <code>stale</code> 또는 blocking 상태면 계속 <code>evidence_collecting</code>입니다. 사람은 아직 최종 verdict를 내리지 않습니다.</p>
+                </div>
+                <div class="branch">
+                  <strong>분기 B: 모든 blocking evidence가 해결됨</strong>
+                  <p>상태가 <code>awaiting_review</code>로 돌아옵니다. 이때 사람이 다시 Queue에서 보고 <code>Pass</code>, <code>Request changes</code>, <code>Fail</code>, <code>Dismiss</code> 중 하나로 최종 판단합니다.</p>
+                </div>
+              </div>
+            </article>
+
+            <article class="choice-map fail" id="fail-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Fail 흐름도</h3>
+                  <p>수정 요청보다 강하게 품질 실패로 기록해야 할 때의 차단 및 학습 후보 흐름입니다.</p>
+                </div>
+                <span class="tag red">최종 상태: anchor_candidate</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">Reviewer</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>차단성 실패 확인</strong>
+                      <p>산출물이 없거나, 목표와 완전히 다르거나, 그대로 진행하면 안 되는지 봅니다.</p>
+                    </div>
+                    <div class="step-node block">
+                      <span class="step-label">2</span>
+                      <strong>Fail 클릭</strong>
+                      <p>Record Fail dialog가 열립니다.</p>
+                    </div>
+                    <div class="step-node block">
+                      <span class="step-label">3</span>
+                      <strong>Verdict note 작성</strong>
+                      <p>왜 차단성 실패인지, 어느 산출물 또는 step이 실패인지 씁니다.</p>
+                    </div>
+                    <div class="step-node block">
+                      <span class="step-label">4</span>
+                      <strong>Record verdict 클릭</strong>
+                      <p>사람의 실패 판정은 저장됩니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Quality Board</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>verdict row 저장</strong>
+                      <p>판정값 <code>fail</code>과 실패 이유를 저장합니다.</p>
+                    </div>
+                    <div class="step-node system block">
+                      <span class="step-label">B</span>
+                      <strong>상태 변경</strong>
+                      <p>review item 상태가 <code>anchor_candidate</code>가 됩니다.</p>
+                    </div>
+                    <div class="step-node system block">
+                      <span class="step-label">C</span>
+                      <strong>correction issue 생성</strong>
+                      <p><code>fail</code>도 수정 또는 후속 처리 issue를 엽니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">D</span>
+                      <strong>화면 문구</strong>
+                      <p><code>Recorded verdict: Fail. No more verdict input is required.</code></p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Owner / Rework</div>
+                  <div class="steps">
+                    <div class="step-node block">
+                      <span class="step-label">5</span>
+                      <strong>실패 원인 처리</strong>
+                      <p>산출물 재작성, 목표 재정렬, 누락 산출물 생성 등 후속 조치를 합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">6</span>
+                      <strong>재검토</strong>
+                      <p>새 산출물이 생기면 별도 Quality review 또는 QA로 다시 확인합니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Evaluator 학습</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">선택</span>
+                      <strong>Save training case</strong>
+                      <p>이 실패가 반복 규칙이면 anchor로 승격합니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">선택</span>
+                      <strong>candidate evaluator 생성</strong>
+                      <p>저장하면 evaluator candidate version과 replay run이 만들어집니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">선택</span>
+                      <strong>Evaluators 탭에서 replay</strong>
+                      <p>replay가 passed가 되어야 production evaluator로 승격할 수 있습니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="choice-map dismiss" id="dismiss-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Dismiss 흐름도</h3>
+                  <p>이 항목이 현재 품질 판단 대상이 아닐 때 활성 Queue에서 제외하는 흐름입니다.</p>
+                </div>
+                <span class="tag gray">최종 상태: dismissed</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">Reviewer</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>제외 조건 확인</strong>
+                      <p>중복, 오래됨, smoke/test, 대상 아님 중 하나인지 확인합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">2</span>
+                      <strong>Dismiss 클릭</strong>
+                      <p>Record Dismiss dialog가 열립니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">3</span>
+                      <strong>Verdict note 작성</strong>
+                      <p>왜 판단하지 않고 제외하는지 씁니다.</p>
+                    </div>
+                    <div class="step-node end">
+                      <span class="step-label">4</span>
+                      <strong>Record verdict 클릭</strong>
+                      <p>Queue 처리에서 제외됩니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Quality Board</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>verdict row 저장</strong>
+                      <p>판정값 <code>dismissed</code>와 제외 이유를 저장합니다.</p>
+                    </div>
+                    <div class="step-node system end">
+                      <span class="step-label">B</span>
+                      <strong>상태 변경</strong>
+                      <p>review item 상태가 <code>dismissed</code>가 됩니다.</p>
+                    </div>
+                    <div class="step-node system end">
+                      <span class="step-label">C</span>
+                      <strong>후속 issue 없음</strong>
+                      <p>correction issue나 evidence issue를 만들지 않습니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">다음 담당자</div>
+                  <div class="steps">
+                    <div class="step-node end">
+                      <span class="step-label">끝</span>
+                      <strong>품질 통과/실패가 아님</strong>
+                      <p>Dismiss는 "이 항목을 판단하지 않는다"는 뜻입니다. 산출물이 좋다는 뜻이 아닙니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">선택</span>
+                      <strong>Evaluator learning은 보통 생략</strong>
+                      <p>중복이나 오래된 항목은 evaluator 학습 사례로 저장하지 않는 편이 좋습니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="content">
+            <article class="verdict" id="pass-flow">
+              <div class="verdict-head">
+                <h3>Pass</h3>
+                <span class="tag green">통과</span>
+              </div>
+              <div class="verdict-grid">
+                <div class="mini">
+                  <strong>누르는 경우</strong>
+                  <ul>
+                    <li>대상 산출물이 목표와 rubric을 만족합니다.</li>
+                    <li>필요한 증거가 충분합니다.</li>
+                    <li>더 보낼 수정 지시가 없습니다.</li>
+                  </ul>
+                </div>
+                <div class="mini">
+                  <strong>입력할 내용</strong>
+                  <p>짧게 써도 됩니다. 예: <code>Pass RES-614. The report defines required terms and maps claims to sources.</code></p>
+                </div>
+                <div class="mini">
+                  <strong>누른 뒤 흐름</strong>
+                  <p>Quality reviewer 입장에서는 끝난 상태입니다. 학습 사례 저장은 보통 필요하지 않습니다.</p>
+                </div>
+              </div>
+              <div class="callout green">
+                <strong>주의</strong>
+                <p>Mission이 completed 또는 pass처럼 보여도, 그것만으로 Quality item을 Pass하면 안 됩니다. Queue가 묻는 것은 미션 전체가 아니라 이 카드의 target output입니다.</p>
+              </div>
+            </article>
+
+            <article class="verdict" id="request-changes-flow">
+              <div class="verdict-head">
+                <h3>Request changes</h3>
+                <span class="tag orange">수정 요청</span>
+              </div>
+              <div class="verdict-grid">
+                <div class="mini">
+                  <strong>누르는 경우</strong>
+                  <ul>
+                    <li>산출물은 존재합니다.</li>
+                    <li>화면의 이유만으로 문제를 판단할 수 있습니다.</li>
+                    <li>빠진 항목, 목표 불일치, operator-facing 문구 문제처럼 고칠 지점이 구체적입니다.</li>
+                  </ul>
+                </div>
+                <div class="mini">
+                  <strong>입력할 내용</strong>
+                  <p>rework 지시를 씁니다. "증거가 필요하다"가 아니라 "무엇을 고쳐라"가 중심입니다.</p>
+                </div>
+                <div class="mini">
+                  <strong>누른 뒤 흐름</strong>
+                  <p>사람의 판정은 기록됩니다. 이후에는 생산자나 담당 step이 산출물을 수정해야 합니다.</p>
+                </div>
+              </div>
+              <pre><code>Request changes for RES-614 report draft.
+Reason: The report uses PoC, AppSec, and ToS in operator-facing sections, but the glossary does not define them.
+Action: Add definitions for PoC, AppSec, and ToS, then return the report for QA. No fresh evidence is needed because the work product already exists.</code></pre>
+              <div class="callout orange">
+                <strong>핵심 구분</strong>
+                <p><code>Request changes</code>는 "판단을 못 하겠다"가 아닙니다. 이미 판단했고, 결론이 "수정해서 다시 가져와라"인 경우입니다.</p>
+              </div>
+            </article>
+
+            <article class="verdict" id="needs-evidence-flow">
+              <div class="verdict-head">
+                <h3>Needs evidence</h3>
+                <span class="tag blue">증거 필요</span>
+              </div>
+              <div class="verdict-grid">
+                <div class="mini">
+                  <strong>누르는 경우</strong>
+                  <ul>
+                    <li>현재 화면만으로는 판단을 내릴 수 없습니다.</li>
+                    <li>특정 proof surface가 빠져 있습니다.</li>
+                    <li>증거가 돌아오면 다시 Pass, Request changes, Fail 중 하나를 판단해야 합니다.</li>
+                  </ul>
+                </div>
+                <div class="mini">
+                  <strong>입력할 내용</strong>
+                  <p>Verdict note에는 "무슨 증거가 없어서 판단할 수 없는지"를 씁니다. 그리고 필요한 chip을 선택합니다.</p>
+                </div>
+                <div class="mini">
+                  <strong>누른 뒤 흐름</strong>
+                  <p>항목은 evidence collecting 상태로 갑니다. 증거가 채워지면 사람이 다시 판단해야 합니다.</p>
+                </div>
+              </div>
+              <pre><code>Need more evidence before judging RES-614.
+Missing evidence: browser_readback and work_product.
+Action: confirm the registered report file resolves and the published report renders in the browser, then return this item to human review.</code></pre>
+              <div class="callout">
+                <strong>주의</strong>
+                <p>긴 QA 원문이 어렵다는 이유만으로 <code>Needs evidence</code>를 누르지 않습니다. 원문 안에 이미 구체적인 실패 이유가 있으면 보통 <code>Request changes</code>입니다.</p>
+              </div>
+            </article>
+
+            <article class="verdict" id="fail-flow">
+              <div class="verdict-head">
+                <h3>Fail</h3>
+                <span class="tag red">실패</span>
+              </div>
+              <div class="verdict-grid">
+                <div class="mini">
+                  <strong>누르는 경우</strong>
+                  <ul>
+                    <li>산출물이 없거나 사용할 수 없습니다.</li>
+                    <li>목표와 완전히 다릅니다.</li>
+                    <li>단순 rework보다 강하게 품질 실패로 막아야 합니다.</li>
+                  </ul>
+                </div>
+                <div class="mini">
+                  <strong>입력할 내용</strong>
+                  <p>실패 이유와 차단해야 하는 이유를 씁니다. 재사용할 규칙이면 학습 사례로 저장할 수 있습니다.</p>
+                </div>
+                <div class="mini">
+                  <strong>누른 뒤 흐름</strong>
+                  <p>실패 판정으로 남습니다. 이후 처리 정책은 이 실패가 어떤 종류인지에 따라 달라집니다.</p>
+                </div>
+              </div>
+              <div class="callout orange">
+                <strong>Request changes와 차이</strong>
+                <p>수정해서 다시 가져오면 될 정도면 <code>Request changes</code>가 더 맞습니다. <code>Fail</code>은 산출물의 신뢰성이 크게 깨졌거나 그대로 흐름을 진행하면 안 되는 경우에 씁니다.</p>
+              </div>
+            </article>
+
+            <article class="verdict" id="dismiss-flow">
+              <div class="verdict-head">
+                <h3>Dismiss</h3>
+                <span class="tag gray">제외</span>
+              </div>
+              <div class="verdict-grid">
+                <div class="mini">
+                  <strong>누르는 경우</strong>
+                  <ul>
+                    <li>중복 항목입니다.</li>
+                    <li>이미 오래된 항목입니다.</li>
+                    <li>실제 품질 판단 대상이 아닙니다.</li>
+                  </ul>
+                </div>
+                <div class="mini">
+                  <strong>입력할 내용</strong>
+                  <p>왜 제외하는지 짧게 씁니다. 예: <code>Duplicate of the already reviewed RES-614 quality item.</code></p>
+                </div>
+                <div class="mini">
+                  <strong>누른 뒤 흐름</strong>
+                  <p>활성 Queue에서 빠집니다. 산출물 통과나 실패를 의미하지 않습니다.</p>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="after-record" class="section">
+          <div class="section-head">
+            <h2>7. Record verdict 이후 무엇이 끝난 것인가</h2>
+            <p class="subtle">사용자가 가장 헷갈리는 지점은 "버튼을 눌렀는데 또 뭔가 나타나는" 순간입니다.</p>
+          </div>
+
+          <div class="grid-2">
+            <article class="card">
+              <span class="tag green">끝난 것</span>
+              <h3>사람의 Quality 판정</h3>
+              <p>
+                <code>Recorded verdict: Request changes</code>처럼 보이면, 이 카드에 대한 사람의 판정은 이미 저장된 것입니다.
+                같은 버튼을 다시 누르는 것은 보통 필요하지 않습니다.
+              </p>
+              <p>
+                <code>Edit verdict</code>는 방금 판정이 잘못됐을 때만 씁니다.
+              </p>
+            </article>
+
+            <article class="card">
+              <span class="tag orange">남은 것</span>
+              <h3>판정 결과에 따른 후속 작업</h3>
+              <p>
+                <code>Request changes</code>라면 산출물 담당자가 수정해야 합니다.
+                <code>Needs evidence</code>라면 증거를 모아야 합니다.
+                <code>Pass</code>나 <code>Dismiss</code>는 보통 Queue 작업이 끝납니다.
+              </p>
+            </article>
+          </div>
+
+          <div class="callout violet" style="margin-top: 14px;">
+            <strong>왜 Evaluator learning case가 계속 보이나요?</strong>
+            <p>
+              그 패널은 "방금 판정을 나중 평가기가 배울 사례로 남길 것인가"를 묻는 별도 단계입니다.
+              품질 판정 완료와 별개입니다. 저장하지 않아도 방금 verdict가 취소되지는 않습니다.
+            </p>
+          </div>
+        </section>
+
+        <section id="evidence-surfaces" class="section">
+          <div class="section-head">
+            <h2>8. Evidence surfaces</h2>
+            <p class="subtle"><code>Needs evidence</code>를 선택할 때는 자유 입력 대신 chip으로 필요한 증거 표면을 고릅니다.</p>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Chip</th>
+                  <th>뜻</th>
+                  <th>선택하는 경우</th>
+                  <th>돌아온 뒤 판단</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>public_url</code></td>
+                  <td>게시된 URL이 존재하고 접근 가능한지</td>
+                  <td>산출물이 URL 형태인데 실제 공개 페이지 확인이 없을 때</td>
+                  <td>URL이 열리고 대상 내용이 맞으면 다음 verdict를 판단합니다.</td>
+                </tr>
+                <tr>
+                  <td><code>browser_readback</code></td>
+                  <td>브라우저에서 렌더링된 화면을 읽어 확인했는지</td>
+                  <td>HTML, 보고서, UI처럼 렌더링 결과가 품질 판단에 중요할 때</td>
+                  <td>브라우저에서 보이는 문구, 링크, 레이아웃을 기준으로 판단합니다.</td>
+                </tr>
+                <tr>
+                  <td><code>work_product</code></td>
+                  <td>등록된 산출물 파일이나 work product가 실제로 해석되는지</td>
+                  <td>시스템은 산출물이 있다고 말하지만 파일, 경로, 등록 상태가 불확실할 때</td>
+                  <td>산출물이 존재하면 내용 품질을 판단하고, 없으면 실패 또는 수정 요청을 판단합니다.</td>
+                </tr>
+                <tr>
+                  <td><code>api_probe</code></td>
+                  <td>API나 데이터베이스 상태가 실제로 맞는지</td>
+                  <td>화면 말고 런타임 상태, 등록 여부, 처리 상태가 핵심일 때</td>
+                  <td>상태가 확인되면 그 상태를 근거로 verdict를 기록합니다.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid-2" style="margin-top: 14px;">
+            <article class="card">
+              <h3>Evidence status를 기록할 때</h3>
+              <p>
+                기존 evidence row에는 <code>verified</code>, <code>failed</code>, <code>insufficient</code>,
+                <code>missing</code>, <code>stale</code>, <code>not_applicable</code> 상태를 기록할 수 있습니다.
+              </p>
+            </article>
+            <article class="card">
+              <h3>판단 기준</h3>
+              <p>
+                <code>missing</code>, <code>failed</code>, <code>insufficient</code>, <code>stale</code>가 blocking이면
+                아직 해결되지 않은 증거입니다. <code>verified</code>는 판단 가능한 증거입니다.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="learning-case" class="section">
+          <div class="section-head">
+            <h2>9. Evaluator learning case</h2>
+            <p class="subtle">이 단계는 "이번 verdict를 자동 평가기가 나중에 배울 규칙으로 저장할지"를 결정합니다.</p>
+          </div>
+
+          <div class="grid-2">
+            <article class="card">
+              <span class="tag violet">저장하는 경우</span>
+              <h3>반복 가능한 규칙일 때</h3>
+              <ul>
+                <li>앞으로도 비슷한 산출물이 같은 기준으로 걸릴 가능성이 높습니다.</li>
+                <li>한 문장 제목으로 재사용 규칙을 설명할 수 있습니다.</li>
+                <li>자동 평가기가 다음에 같은 실수를 더 잘 잡아야 합니다.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag gray">저장하지 않는 경우</span>
+              <h3>특수하거나 불확실할 때</h3>
+              <ul>
+                <li>이번 한 번만 해당하는 맥락입니다.</li>
+                <li>판정 근거가 불확실하거나 noisy합니다.</li>
+                <li>제목이 단순히 항목 이름만 반복하고 규칙을 담지 못합니다.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="table-wrap" style="margin-top: 14px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>필드/버튼</th>
+                  <th>무엇을 하는가</th>
+                  <th>좋은 입력</th>
+                  <th>피해야 할 입력</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Case title</td>
+                  <td>나중 evaluator가 배울 사례 제목입니다. 자동으로 채워지지만 사람이 수정할 수 있습니다.</td>
+                  <td><code>Request changes: operator-facing jargon must be defined in the glossary.</code></td>
+                  <td><code>tech-scout thing</code>, <code>fb9d5e0c</code>, <code>bad report</code></td>
+                </tr>
+                <tr>
+                  <td>Save training case</td>
+                  <td>기록된 verdict를 anchor case로 저장합니다. 이후 evaluator candidate와 replay 흐름의 재료가 됩니다.</td>
+                  <td>반복 규칙을 남길 때 누릅니다.</td>
+                  <td>품질 verdict를 끝내려고 누르는 버튼으로 오해하면 안 됩니다.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="tab-flows" class="section">
+          <div class="section-head">
+            <h2>10. Anchors, Evaluators, Reports 탭 흐름</h2>
+            <p class="subtle">
+              Queue에서 verdict를 기록한 뒤에도 Quality Board에는 세 가지 운영 흐름이 남습니다.
+              Anchors는 사람이 남긴 판단 사례, Evaluators는 자동 평가기 후보, Reports는 현재 상태 기록입니다.
+            </p>
+          </div>
+
+          <div class="choice-flow-set" aria-label="Anchors Evaluators Reports 상세 흐름도">
+            <article class="choice-map" id="anchors-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Anchors 흐름도</h3>
+                  <p>Anchor는 "이번 사람 판정을 다음에도 같은 기준으로 적용하라"는 재사용 사례입니다.</p>
+                </div>
+                <span class="tag violet">목표: reusable precedent 확인</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">Queue</div>
+                  <div class="steps">
+                    <div class="step-node warn">
+                      <span class="step-label">1</span>
+                      <strong>Verdict 기록 완료</strong>
+                      <p>Pass, Request changes, Needs evidence, Fail, Dismiss 중 하나가 먼저 저장되어 있어야 합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">2</span>
+                      <strong>반복 규칙인지 판단</strong>
+                      <p>비슷한 산출물이 다음에도 같은 기준으로 걸려야 하면 학습 사례로 저장합니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">3</span>
+                      <strong>Case title 다듬기</strong>
+                      <p>항목 이름이 아니라 evaluator가 배울 규칙을 제목에 씁니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">4</span>
+                      <strong>Save training case</strong>
+                      <p>이 버튼을 눌러 anchor를 만듭니다. Queue verdict 자체를 바꾸지는 않습니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">System</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>Anchor case 생성</strong>
+                      <p>human verdict, failure type, evidence refs, title이 anchor로 저장됩니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">B</span>
+                      <strong>Candidate evaluator 생성</strong>
+                      <p>anchor 저장과 함께 evaluator candidate version이 만들어집니다.</p>
+                    </div>
+                    <div class="step-node system wait">
+                      <span class="step-label">C</span>
+                      <strong>Queued replay run 생성</strong>
+                      <p>candidate가 과거 사례를 통과하는지 확인할 replay run이 대기 상태로 생깁니다.</p>
+                    </div>
+                    <div class="step-node system wait">
+                      <span class="step-label">D</span>
+                      <strong>Improvement issue 생성</strong>
+                      <p>자동 평가기 개선 작업 issue가 열립니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Anchors 탭</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">5</span>
+                      <strong>Anchor 목록 확인</strong>
+                      <p>title, failure type, human verdict, evidence refs를 봅니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">6</span>
+                      <strong>Precedent 문장 확인</strong>
+                      <p>비슷한 future output을 같은 방식으로 판단할 기준인지 봅니다.</p>
+                    </div>
+                    <div class="step-node done">
+                      <span class="step-label">7</span>
+                      <strong>Reflected in evaluator 확인</strong>
+                      <p><code>yes</code>면 evaluator version에 연결됐습니다. <code>not yet</code>이면 candidate 생성 또는 동기화가 필요합니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="callout violet route-note">
+                <strong>Anchors 탭에서 사용자가 직접 누르는 주요 버튼은 없습니다.</strong>
+                <p>
+                  Anchor 생성은 Queue의 <code>Save training case</code>에서 일어납니다.
+                  Anchors 탭은 저장된 precedent가 정확한지, evaluator에 반영됐는지 읽는 화면입니다.
+                </p>
+              </div>
+            </article>
+
+            <article class="choice-map evidence" id="evaluators-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Evaluators 흐름도</h3>
+                  <p>Evaluator는 anchor를 보고 만들어진 자동 평가기 후보입니다. 바로 운영에 올리지 않고 replay로 검증합니다.</p>
+                </div>
+                <span class="tag blue">목표: candidate → production</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">시작 조건</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>Anchor가 있어야 함</strong>
+                      <p>Queue에서 Save training case를 저장해야 candidate evaluator가 생깁니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">2</span>
+                      <strong>Candidate versions 확인</strong>
+                      <p>source anchor, version status, 연결된 replay runs를 봅니다.</p>
+                    </div>
+                    <div class="step-node wait">
+                      <span class="step-label">3</span>
+                      <strong>Replay 필요 여부 확인</strong>
+                      <p>버튼이 <code>replay required</code>면 아직 production 승격 조건을 만족하지 못했습니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Evaluator 탭</div>
+                  <div class="steps">
+                    <div class="step-node wait">
+                      <span class="step-label">4</span>
+                      <strong>Replay 클릭</strong>
+                      <p>candidate evaluator를 과거 anchor case에 적용합니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">5</span>
+                      <strong>Replay result 저장</strong>
+                      <p>regression이 없으면 <code>passed</code>, 있으면 <code>failed</code>입니다.</p>
+                    </div>
+                    <div class="step-node done">
+                      <span class="step-label">6</span>
+                      <strong>passed 확인</strong>
+                      <p>passed replay가 하나 이상 있어야 production 승격 버튼이 활성 의미를 갖습니다.</p>
+                    </div>
+                    <div class="step-node done">
+                      <span class="step-label">7</span>
+                      <strong>Promote to production</strong>
+                      <p>운영 자동 평가기로 승격합니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">System</div>
+                  <div class="steps">
+                    <div class="step-node system done">
+                      <span class="step-label">A</span>
+                      <strong>Evaluator status 변경</strong>
+                      <p>candidate version 상태가 <code>production</code>이 됩니다.</p>
+                    </div>
+                    <div class="step-node system done">
+                      <span class="step-label">B</span>
+                      <strong>Source review item 갱신</strong>
+                      <p>출처 review item은 <code>evaluator_promoted</code>로 표시됩니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">C</span>
+                      <strong>Reports에 반영 가능</strong>
+                      <p>이후 report를 다시 생성하면 evaluator/anchor 상태가 최신 summary에 반영됩니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="branch-grid">
+                <div class="branch">
+                  <strong>Replay failed</strong>
+                  <p>candidate evaluator가 과거 사례를 안정적으로 재현하지 못한 것입니다. production 승격하지 말고 evaluator 개선 issue를 봅니다.</p>
+                </div>
+                <div class="branch">
+                  <strong>Replay passed</strong>
+                  <p>candidate가 최소 조건을 통과했습니다. 운영에 반영할 준비가 된 경우에만 production으로 승격합니다.</p>
+                </div>
+              </div>
+            </article>
+
+            <article class="choice-map dismiss" id="reports-flowchart">
+              <div class="choice-map-head">
+                <div>
+                  <h3>Reports 흐름도</h3>
+                  <p>Reports는 현재 Quality Board 상태를 날짜별로 저장하는 요약입니다. 판정이나 evidence가 바뀌면 다시 생성해야 합니다.</p>
+                </div>
+                <span class="tag gray">목표: current dated summary</span>
+              </div>
+
+              <div class="flowchart">
+                <div class="flow-row">
+                  <div class="actor">사용자</div>
+                  <div class="steps">
+                    <div class="step-node">
+                      <span class="step-label">1</span>
+                      <strong>Queue 상태 확인</strong>
+                      <p>open review item, evidence collecting, changes requested가 남아 있는지 봅니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">2</span>
+                      <strong>Anchors/Evaluators 상태 확인</strong>
+                      <p>anchor coverage gap과 evaluator candidate 상태가 report에 들어갑니다.</p>
+                    </div>
+                    <div class="step-node">
+                      <span class="step-label">3</span>
+                      <strong>Generate today&apos;s report</strong>
+                      <p>오늘 날짜 report를 생성하거나 이미 있으면 갱신합니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">System</div>
+                  <div class="steps">
+                    <div class="step-node system">
+                      <span class="step-label">A</span>
+                      <strong>Summary 계산</strong>
+                      <p><code>pendingReviewItems</code>, <code>needsEvidenceOutstanding</code>, <code>anchorCoverageGaps</code>, evidence stats를 계산합니다.</p>
+                    </div>
+                    <div class="step-node system">
+                      <span class="step-label">B</span>
+                      <strong>Report status 결정</strong>
+                      <p>미해결 evidence가 있으면 <code>needs_attention</code>, 아니면 <code>generated</code>입니다.</p>
+                    </div>
+                    <div class="step-node system done">
+                      <span class="step-label">C</span>
+                      <strong>같은 날짜 report upsert</strong>
+                      <p>오늘 report가 있으면 덮어 갱신하고, 없으면 새로 만듭니다.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flow-row">
+                  <div class="actor">Reports 탭</div>
+                  <div class="steps">
+                    <div class="step-node done">
+                      <span class="step-label">4</span>
+                      <strong>요약 줄 읽기</strong>
+                      <p>pending review, needs evidence, anchor gaps, improvement candidates를 봅니다.</p>
+                    </div>
+                    <div class="step-node warn">
+                      <span class="step-label">5</span>
+                      <strong>Stale 경고 확인</strong>
+                      <p>report 생성 뒤 review item이 바뀌면 <code>updated since this report</code> 경고가 나옵니다.</p>
+                    </div>
+                    <div class="step-node done">
+                      <span class="step-label">6</span>
+                      <strong>필요하면 재생성</strong>
+                      <p>경고가 있거나 판정을 방금 바꿨다면 report를 다시 생성합니다.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="callout route-note">
+                <strong>Reports는 판단을 대신하지 않습니다.</strong>
+                <p>
+                  Report는 현재 상태를 저장한 요약입니다. Queue 항목을 Pass/Request changes로 바꾸거나
+                  evidence를 해결하는 실제 처리는 Queue와 Evidence 흐름에서 해야 합니다.
+                </p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="example-tech-scout" class="section">
+          <div class="section-head">
+            <h2>11. 실제 예시: Final QA / purpose-fitness failure - 2026-06-29 tech-scout</h2>
+            <p class="subtle">보고서 용어집 누락 사례를 화면에서 봤을 때의 판단 흐름입니다.</p>
+          </div>
+
+          <div class="callout orange">
+            <strong>권장 행동</strong>
+            <p>
+              이 케이스의 기본 행동은 <code>Request changes</code>입니다.
+              이유는 work product가 존재하고, QA가 이미 구체적인 수정 이유를 제시했기 때문입니다:
+              operator-facing 섹션에 <code>PoC</code>, <code>AppSec</code>, <code>ToS</code>가 나오지만 glossary 정의가 빠졌습니다.
+            </p>
+          </div>
+
+          <div class="grid-2" style="margin-top: 14px;">
+            <article class="card">
+              <h3>왜 Needs evidence가 아닌가</h3>
+              <p>
+                "No structured evidence"라는 문장이 보일 수 있지만, 긴 QA 원문 안에는 이미 판단 가능한 근거가 있습니다.
+                산출물이 존재하고 파일도 해석되며, 실패 이유는 "세 용어 정의 누락"으로 특정되어 있습니다.
+              </p>
+              <p>
+                따라서 새 증거를 요청하기보다 수정 지시를 보내는 것이 자연스럽습니다.
+              </p>
+            </article>
+            <article class="card">
+              <h3>왜 Mission pass만 보면 안 되나</h3>
+              <p>
+                Mission 상태는 전체 작업 흐름의 상태입니다. Queue의 이 항목은 RES-614 보고서 초안이 operator-facing 기준을 만족하는지 묻습니다.
+                미션이 완료되어도 산출물의 세부 품질 결함은 별도로 rework될 수 있습니다.
+              </p>
+            </article>
+          </div>
+
+          <h3 style="margin-top: 18px;">Verdict note 예시</h3>
+          <pre><code>Request changes for RES-614 report draft.
+Reason: The report exists and mostly passes, but glossary definitions for PoC, AppSec, and ToS are missing while those terms appear in operator-facing sections.
+Action: Add definitions for PoC, AppSec, and ToS to the glossary, then return the report for QA. Do not request fresh evidence unless the corrected report cannot be resolved.</code></pre>
+
+          <h3 style="margin-top: 18px;">Evaluator learning case 제목 예시</h3>
+          <pre><code>Request changes: operator-facing jargon must be defined in the glossary.</code></pre>
+        </section>
+
+        <section id="common-mistakes" class="section">
+          <div class="section-head">
+            <h2>12. 흔한 오해</h2>
+            <p class="subtle">Quality Board를 처음 볼 때 반복해서 헷갈리는 지점입니다.</p>
+          </div>
+
+          <div class="checklist">
+            <div class="check">
+              <strong>오해 1. "Evidence가 비어 있으면 무조건 Needs evidence다"</strong>
+              <p>아닙니다. QA 원문이 이미 구체적인 결함과 수정 방향을 제시하면 <code>Request changes</code>가 맞을 수 있습니다.</p>
+            </div>
+            <div class="check">
+              <strong>오해 2. "Request changes를 누른 뒤 또 뭔가 보이면 아직 안 끝난 것이다"</strong>
+              <p>사람의 verdict는 끝났습니다. 뒤에 보이는 Evaluator learning case는 별도 학습 저장 단계입니다.</p>
+            </div>
+            <div class="check">
+              <strong>오해 3. "Mission이 pass면 Quality item도 pass다"</strong>
+              <p>아닙니다. 미션 상태와 개별 산출물 품질 판단은 다릅니다. Queue 카드의 target output을 기준으로 판단합니다.</p>
+            </div>
+            <div class="check">
+              <strong>오해 4. "Fail과 Request changes는 비슷하다"</strong>
+              <p>다릅니다. 고쳐서 다시 가져오라는 뜻이면 <code>Request changes</code>입니다. 차단성 품질 실패로 기록해야 하면 <code>Fail</code>입니다.</p>
+            </div>
+            <div class="check">
+              <strong>오해 5. "Case title에는 아무거나 써도 된다"</strong>
+              <p>아닙니다. evaluator가 배울 재사용 규칙을 담아야 합니다. 항목 이름보다 "어떤 기준을 기억해야 하는지"가 중요합니다.</p>
+            </div>
+          </div>
+
+          <p class="footer-note">
+            요약: Queue에서는 먼저 사람이 판단 가능한지 확인합니다. 판단 가능하고 고칠 점이 구체적이면 <code>Request changes</code>,
+            판단 자체가 불가능하면 <code>Needs evidence</code>, 기준을 만족하면 <code>Pass</code>, 차단성 실패면 <code>Fail</code>,
+            판단 대상이 아니면 <code>Dismiss</code>입니다.
+          </p>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

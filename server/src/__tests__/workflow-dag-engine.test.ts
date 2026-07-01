@@ -6350,6 +6350,129 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(producerCommentBody).toContain("Add a glossary before approval");
   });
 
+  it("[QA loop hardening] two parallel QA validators both request_changes in one round → ONE producer rework with merged feedback (budget consumed once)", async () => {
+    // 회귀 대상(A1 live bug): 한 producer 에 달린 2개 back-edge QA 가 비동기로 verdict 를 낼 때
+    //   verdict 단위로 producer 가 따로 리셋되어 maxIterations 이 빨리 소진되던 문제.
+    //   기대: 같은 round 에 두 QA 가 모두 terminal+반려면 producer 리셋은 1회, iteration 0→1,
+    //   두 QA feedback 이 하나의 rework comment 에 합쳐 생산자에게 전달된다.
+    heartbeatWakeup.mockResolvedValue({ id: "queued-qa-loop-coalesce" });
+    const companyId = randomUUID();
+    const producerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const producerIssueId = randomUUID();
+    const claimsQaIssueId = randomUUID();
+    const readabilityQaIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "QA Loop Coalesce",
+      issuePrefix: `QC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      { id: producerAgentId, companyId, name: "Producer Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: qaAgentId, companyId, name: "QA Validator Agent", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: producerAgentId, title: "QA Loop Coalesce Mission", status: "active" });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "qa-loop-coalesce",
+      stepsJson: [
+        {
+          id: "produce",
+          name: "Produce artifact",
+          agentId: producerAgentId,
+          dependencies: [],
+          conditionalDependencies: [
+            { stepId: "qa-claims", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+            { stepId: "qa-readability", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+          ],
+          description: "Produce the artifact",
+        },
+        { id: "qa-claims", name: "Validate claims", agentId: qaAgentId, dependencies: ["produce"], description: "QA claims gate" },
+        { id: "qa-readability", name: "Validate readability", agentId: qaAgentId, dependencies: ["produce"], description: "QA readability gate" },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running", startedAt: new Date("2026-06-18T09:00:00.000Z"),
+    });
+    await db.insert(issues).values([
+      { id: producerIssueId, companyId, missionId, title: "qa-loop-coalesce: Produce artifact", status: "done", assigneeAgentId: producerAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T09:01:00.000Z"), completedAt: new Date("2026-06-18T09:05:00.000Z") },
+      { id: claimsQaIssueId, companyId, missionId, title: "qa-loop-coalesce: Validate claims", status: "blocked", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T09:03:00.000Z") },
+      { id: readabilityQaIssueId, companyId, missionId, title: "qa-loop-coalesce: Validate readability", status: "blocked", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originId: runId, originRunId: runId, startedAt: new Date("2026-06-18T09:03:00.000Z") },
+    ]);
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "produce", issueId: producerIssueId, status: "completed", startedAt: new Date("2026-06-18T09:01:00.000Z"), completedAt: new Date("2026-06-18T09:05:00.000Z") },
+      { workflowRunId: runId, stepId: "qa-claims", issueId: claimsQaIssueId, status: "failed", startedAt: new Date("2026-06-18T09:03:00.000Z"), completedAt: new Date("2026-06-18T09:09:00.000Z") },
+      { workflowRunId: runId, stepId: "qa-readability", issueId: readabilityQaIssueId, status: "failed", startedAt: new Date("2026-06-18T09:03:00.000Z"), completedAt: new Date("2026-06-18T09:10:00.000Z") },
+    ]);
+    // 두 QA 가 같은 producer 산출물을 서로 다른 이유로 동시 반려(각각 다른 feedback).
+    await db.insert(issueComments).values([
+      { companyId, issueId: claimsQaIssueId, authorAgentId: qaAgentId, createdAt: new Date("2026-06-18T09:09:00.000Z"), body: "Decision: REQUEST_CHANGES\n\nValidation review complete.\n\nREQUEST_CHANGES: Fix the claim sourcing gaps before delivery." },
+      { companyId, issueId: readabilityQaIssueId, authorAgentId: qaAgentId, createdAt: new Date("2026-06-18T09:10:00.000Z"), body: "Decision: REQUEST_CHANGES\n\nValidation review complete.\n\nREQUEST_CHANGES: Fix the readability gaps before delivery." },
+    ]);
+
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const produce = rows.find((row) => row.stepId === "produce")!;
+    // 리셋은 1회만 → iteration 0→1 (구 동작처럼 2로 jump 안 함).
+    expect(produce.status).toBe("pending");
+    expect(produce.iterationIndex).toBe(1);
+
+    // rework comment 도 1개, 두 QA feedback 이 모두 합쳐져 있어야 한다.
+    const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
+    const reworkComments = producerComments.filter((comment) => comment.body.includes("Workflow QA rework request"));
+    expect(reworkComments).toHaveLength(1);
+    const body = reworkComments[0]!.body;
+    expect(body).toContain("qa-claims");
+    expect(body).toContain("qa-readability");
+    expect(body).toContain("Fix the claim sourcing gaps");
+    expect(body).toContain("Fix the readability gaps");
+  });
+
+  it("[Patch 3 recheck idempotency] QA already re-checked (succeeded heartbeat >= producer completion) is NOT re-queued to todo on later sync", async () => {
+    // A1 RES-424 회귀: producer rework 가 REQUEST_CHANGES verdict 이후에 완료되면 recheck 가 QA 를
+    //   todo 로 requeue 한다. QA 가 재실행(succeeded heartbeat) 됐으나 explicit PASS verdict 가 없으면
+    //   latestValidationVerdict 가 구 REQUEST_CHANGES 에 머물러 이후 sync 마다 다시 requeue 되었다.
+    //   기대: producer 완료 이후 succeeded heartbeat 가 한 번이라도 있으면 같은 generation 에선 재큐 금지.
+    heartbeatWakeup.mockResolvedValue({ id: "queued-patch3-idempotency" });
+    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
+    // T1=07:10 REQUEST_CHANGES verdict (구 verdict).
+    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    // T2=07:15 producer rework 완료(verdict 이후 → 기존 로직은 requeue 조건).
+    await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:15:00.000Z") }).where(eq(issues.id, producerIssueId));
+    // T3=07:16 QA recheck heartbeat succeeded (producer 완료 이후, explicit verdict 없이).
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: qaAgentId,
+      issueId: qaIssueId,
+      status: "succeeded",
+      startedAt: new Date("2026-06-18T07:15:30.000Z"),
+      finishedAt: new Date("2026-06-18T07:16:00.000Z"),
+      resultJson: { note: "rechecked but emitted no explicit verdict" },
+    });
+
+    heartbeatWakeup.mockClear();
+    // 늦은 owner/comment 등으로 sync 가 다시 돌았다고 가정.
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    // QA 는 todo 로 재큐되지 않는다(idempotency). recheck comment 미추가 + wakeup 미발생.
+    const qaIssueAfter = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, qaIssueId)).then((rows) => rows[0]!);
+    expect(qaIssueAfter.status).not.toBe("todo");
+    const recheckComments = await db.select().from(issueComments).where(eq(issueComments.issueId, qaIssueId));
+    expect(recheckComments.filter((comment) => comment.body.includes("Workflow validation recheck")).length).toBe(0);
+    // recheck 가 QA 를 재큐하지 않았음의 직접 증거: recheck comment 0건(위) + issue 가 todo 로 바뀌지 않음(아래).
+    // (heartbeatWakeup 전역 카운트는 producer rework wake 등 다른 경로와 섞이므로 단언에서 제외.)
+    // producer 는 건드리지 않는다.
+    const producerAfter = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, producerIssueId)).then((rows) => rows[0]!);
+    expect(producerAfter.status).toBe("done");
+  });
+
   it("[P4 control-flow loop] maxIterations cap blocks further rework (no infinite loop): producer at cap is not reset", async () => {
     // 가즈아 무한 loop 회귀 가드: iteration_index 가 maxIterations 에 도달하면 더 이상 리셋하지 않는다.
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 1, initialProducerIteration: 1 });

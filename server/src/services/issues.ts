@@ -38,10 +38,20 @@ import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallbac
 import { getDefaultCompanyGoal } from "./goals.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
+import {
+  extractExpectedContentMarker,
+  isManualOnboardingHubShell,
+  readbackBodyContainsMarker,
+  readbackPublicUrl,
+} from "./public-url-readback.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
+const DELIVERY_VERIFICATION_CONTRACT_MARKER = "Delivery Verification:";
+const GENERIC_DELIVERY_MARKER_RE = /^(?:index(?:\.html)?|preview|url|public\s+url|published\s+url|artifact|deliverable)$/iu;
+const DELIVERY_READBACK_PROVIDERS = new Set(["manual_onboarding"]);
+const DELIVERY_READBACK_HOSTS = new Set(["manual-onboarding.pages.dev"]);
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
@@ -146,6 +156,160 @@ async function assertCanCompleteMissionOversightIssue(db: Db, issue: typeof issu
       `Cannot complete mission oversight while workflow step ${activeWorkflowStep.stepId} is ${activeWorkflowStep.status}.`,
     );
   }
+}
+
+function parseHttpUrl(value: string | null) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function metadataString(metadata: Record<string, unknown> | null | undefined, key: string) {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function metadataBoolean(metadata: Record<string, unknown> | null | undefined, key: string) {
+  return metadata?.[key] === true;
+}
+
+function addDeliveryMarker(markers: Set<string>, value: string | null | undefined) {
+  const marker = value?.trim();
+  if (!marker) return;
+  if (marker.length < 4) return;
+  if (GENERIC_DELIVERY_MARKER_RE.test(marker)) return;
+  markers.add(marker);
+}
+
+function buildDeliveryReadbackMarkers(product: typeof issueWorkProducts.$inferSelect) {
+  const markers = new Set<string>();
+  addDeliveryMarker(markers, metadataString(product.metadata, "expectedTitle"));
+  addDeliveryMarker(markers, metadataString(product.metadata, "title"));
+  addDeliveryMarker(markers, metadataString(product.metadata, "contentMarker"));
+  addDeliveryMarker(markers, metadataString(product.metadata, "marker"));
+  addDeliveryMarker(markers, metadataString(product.metadata, "topic"));
+  const deliveryReadback = product.metadata?.deliveryReadback;
+  if (deliveryReadback && typeof deliveryReadback === "object" && !Array.isArray(deliveryReadback)) {
+    const contract = deliveryReadback as Record<string, unknown>;
+    addDeliveryMarker(markers, typeof contract.expectedTitle === "string" ? contract.expectedTitle : null);
+    addDeliveryMarker(markers, typeof contract.contentMarker === "string" ? contract.contentMarker : null);
+    addDeliveryMarker(markers, typeof contract.marker === "string" ? contract.marker : null);
+    const expectedMarkers = contract.expectedMarkers;
+    if (Array.isArray(expectedMarkers)) {
+      for (const marker of expectedMarkers) {
+        addDeliveryMarker(markers, typeof marker === "string" ? marker : null);
+      }
+    }
+  }
+  addDeliveryMarker(markers, product.title);
+  addDeliveryMarker(markers, extractExpectedContentMarker(product.title));
+  return Array.from(markers);
+}
+
+function isManualOnboardingProduct(product: typeof issueWorkProducts.$inferSelect, url: URL) {
+  return product.provider === "manual_onboarding" || DELIVERY_READBACK_HOSTS.has(url.hostname);
+}
+
+function deliveryReadbackContractRequired(metadata: Record<string, unknown> | null | undefined) {
+  if (
+    metadataBoolean(metadata, "deliveryReadbackRequired") ||
+    metadataBoolean(metadata, "requiresDeliveryReadback") ||
+    metadataBoolean(metadata, "publicReadbackRequired")
+  ) {
+    return true;
+  }
+  const deliveryReadback = metadata?.deliveryReadback;
+  if (!deliveryReadback || typeof deliveryReadback !== "object" || Array.isArray(deliveryReadback)) return false;
+  const contract = deliveryReadback as Record<string, unknown>;
+  return contract.required === true;
+}
+
+function productRequiresDeliveryReadback(product: typeof issueWorkProducts.$inferSelect) {
+  const url = parseHttpUrl(product.url);
+  if (!url) return false;
+  return (
+    DELIVERY_READBACK_PROVIDERS.has(product.provider) ||
+    DELIVERY_READBACK_HOSTS.has(url.hostname) ||
+    deliveryReadbackContractRequired(product.metadata)
+  );
+}
+
+async function issueHasDeliveryReadbackContract(db: Db, issue: typeof issues.$inferSelect) {
+  const stepRun = await db
+    .select({ metadata: workflowStepRuns.metadata })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.issueId, issue.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  if (deliveryReadbackContractRequired(stepRun?.metadata ?? null)) return true;
+  return (issue.description ?? "").includes(DELIVERY_VERIFICATION_CONTRACT_MARKER);
+}
+
+async function verifyDeliveryReadbackProduct(product: typeof issueWorkProducts.$inferSelect) {
+  const url = parseHttpUrl(product.url);
+  if (!url) return `${product.title} has no HTTP(S) preview URL`;
+
+  const readback = await readbackPublicUrl(url.toString());
+  if (!readback.ok) return `${url.toString()} readback failed: ${readback.error ?? `HTTP ${readback.status}`}`;
+
+  if (isManualOnboardingProduct(product, url) && isManualOnboardingHubShell(readback.text)) {
+    return `${url.toString()} returned the manual-onboarding hub shell, not the detail content`;
+  }
+
+  const markers = buildDeliveryReadbackMarkers(product);
+  if (markers.length === 0) {
+    return `${product.title} has no expected content marker for public URL readback`;
+  }
+
+  const matchedMarker = markers.some((marker) => readbackBodyContainsMarker(readback, marker));
+  if (!matchedMarker) {
+    return `${url.toString()} does not contain expected content marker (${markers.join(" / ")})`;
+  }
+
+  return null;
+}
+
+async function assertDeliveryReadbackBeforeDone(db: Db, issue: typeof issues.$inferSelect) {
+  if (!issue.missionId) return;
+  if (issue.originKind !== "workflow_execution") return;
+  if (classifyIssueGroupPhase(issue) !== "action") return;
+
+  const products = await db
+    .select()
+    .from(issueWorkProducts)
+    .where(and(
+      eq(issueWorkProducts.companyId, issue.companyId),
+      eq(issueWorkProducts.issueId, issue.id),
+      eq(issueWorkProducts.type, "preview_url"),
+      ne(issueWorkProducts.status, "archived"),
+    ))
+    .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt));
+  const deliveryProducts = products.filter(productRequiresDeliveryReadback);
+  const contractRequiresReadback = deliveryProducts.length > 0 ? true : await issueHasDeliveryReadbackContract(db, issue);
+  const productsToVerify = deliveryProducts.length > 0 ? deliveryProducts : products;
+
+  if (!contractRequiresReadback) return;
+
+  if (productsToVerify.length === 0) {
+    throw unprocessable(
+      "Cannot complete delivery ACTION: no active preview_url workProduct is registered for public readback.",
+    );
+  }
+
+  const failures: string[] = [];
+  for (const product of productsToVerify) {
+    const failure = await verifyDeliveryReadbackProduct(product);
+    if (!failure) return;
+    failures.push(failure);
+  }
+
+  throw unprocessable(`Cannot complete delivery ACTION: ${failures.join("; ")}`);
 }
 
 export interface IssueFilters {
@@ -1454,6 +1618,7 @@ export function issueService(db: Db) {
       }
       if (issueData.status === "done" && existing.status !== "done") {
         await assertCanCompleteMissionOversightIssue(db, existing);
+        await assertDeliveryReadbackBeforeDone(db, existing);
       }
 
       if (existing.missionId && issueData.status && issueData.status !== "done" && issueData.status !== "cancelled") {

@@ -20,7 +20,7 @@ import type { createOwnerActions } from "./owner-actions.js";
 import type { MissionServiceDeps } from "../missions.js";
 import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
-import { buildRetrySourceIssueComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
+import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
@@ -719,6 +719,9 @@ export function createSupervision({ db, deps, ownerActions }: {
                 }
                 // A: 사장 지목이 없으면 DAG 역참조 — origin(QA) step 의 non-QA 생산자(위상 마지막)를 찾는다.
                 let producerReworkResolved = false;
+                // [Patch 2 cap-exhausted] producer rework budget. 기본 true = budget 을 알 수 없으면 기존 동작(skip) 유지.
+                //   producer 를 찾은 경우에만 iterationIndex vs max(producer back-edge maxIterations) 으로 계산한다.
+                let producerBudgetRemaining = true;
                 if (!sourceIssueId && issue.originId) {
                   const originStepRows = stepRowsByIssueId.get(issue.originId) ?? [];
                   const originStepId = originStepRows.map((row) => row.stepRun.stepId).find((id) => Boolean(id)) ?? null;
@@ -734,6 +737,15 @@ export function createSupervision({ db, deps, ownerActions }: {
                       if (producerRow?.stepRun.issueId) {
                         sourceIssueId = producerRow.stepRun.issueId;
                         producerReworkResolved = true;
+                        // [Patch 2 cap-exhausted] native loop 의 rework budget = producer iterationIndex vs
+                        //   producer back-edge 들의 maxIterations 최댓값(loop-driver 가 쓰는 producer-level cap 과 동일 기준).
+                        const producerIters = producerRow.stepRun.iterationIndex ?? 0;
+                        const producerStepDef = (dagSteps as DagStepLike[]).find((s) => (s as { id?: string }).id === producerStepId) ?? null;
+                        const backEdges = (producerStepDef as { conditionalDependencies?: Array<{ isBackEdge?: boolean; maxIterations?: number }> } | null)?.conditionalDependencies ?? [];
+                        const producerMaxIters = backEdges
+                          .filter((e) => e.isBackEdge === true && typeof e.maxIterations === "number")
+                          .reduce((max, e) => Math.max(max, e.maxIterations ?? 0), 0);
+                        producerBudgetRemaining = producerMaxIters > producerIters;
                       }
                     }
                   }
@@ -744,9 +756,15 @@ export function createSupervision({ db, deps, ownerActions }: {
                 // [P6 hybrid guard] native-loop 미션의 AUTO(owner 미결정 grace default) producer-rework 는 P4 loop-driver
                 //   가 QA-reject rework 를 이미 담당(maxIterations cap + iteration_index/attempts 추적)하므로 supervision 이
                 //   중복 재오픈/상충하지 않게 skip. owner-명시 rework(autoDefaulted=false)는 유지 — owner 수동 제어권 보존.
-                if (autoDefaulted && isProducerRework && missionHasNativeLoop) {
-                  findings.push(`owner_action_skipped_native_loop: ${label} AUTO producer-rework deferred — QA-reject rework owned by native loop(P4). source=${sourceLabel}`);
+                //   [Patch 2 cap-exhausted] 단, rework budget 이 남아있을 때만 skip. cap exhausted (iterationIndex >=
+                //   maxIterations) 이후엔 native loop 가 더 이상 rework 를 담당하지 않으므로 skip 을 풀고 owner action/replan
+                //   경로로 넘긴다(fall-through → 기존 owner-action 생성 라인으로 진입).
+                if (autoDefaulted && isProducerRework && missionHasNativeLoop && producerBudgetRemaining) {
+                  findings.push(`owner_action_skipped_native_loop: ${label} AUTO producer-rework deferred — QA-reject rework owned by native loop(P4), budget remaining. source=${sourceLabel}`);
                   break;
+                }
+                if (autoDefaulted && isProducerRework && missionHasNativeLoop && !producerBudgetRemaining) {
+                  findings.push(`owner_action_native_loop_cap_exhausted: ${label} producer rework cap exhausted — native loop no longer owns rework; routing to owner action/replan. source=${sourceLabel}`);
                 }
                 if (!sourceIssueId) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel, reason: "owner-action issue has no canonical originId source issue" }));
@@ -802,6 +820,15 @@ export function createSupervision({ db, deps, ownerActions }: {
                   break;
                 }
                 const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
+                const originComments = issue.originId && issue.originId !== sourceCandidate.id
+                  ? commentsByIssueId.get(issue.originId) ?? []
+                  : [];
+                const requestChangesSummary = extractLatestRequestChangesSummary([
+                  ...sourceComments,
+                  ...originComments,
+                  ...comments,
+                  issue.description,
+                ]);
                 const markerInput = { ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id, decision: "retry_source_issue" as const };
                 const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
                   missionId: mission.id,
@@ -825,13 +852,22 @@ export function createSupervision({ db, deps, ownerActions }: {
                         const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
                           ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
                           : null;
+                        const requestChangesContextComment = !wakeEvidenceComment && requestChangesSummary && !sourceComments.some((comment) => comment.includes("Latest REQUEST_CHANGES summary:") && comment.includes(requestChangesSummary))
+                          ? await issueService(db).addComment(sourceCandidate.id, buildRetrySourceIssueRequestChangesContextComment({
+                              ownerActionIssueId: issue.id,
+                              ownerActionLabel: label,
+                              sourceIssueId: sourceCandidate.id,
+                              sourceLabel: sourceCandidateLabel,
+                              requestChangesSummary,
+                            }), { agentId: mission.ownerAgentId })
+                          : null;
                         const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
                           mission,
                           ownerActionIssue: issue,
                           sourceIssue: sourceCandidate,
                           targetAgentId: sourceCandidate.assigneeAgentId,
                           idempotencyKey,
-                          wakeCommentId: wakeEvidenceComment?.id,
+                          wakeCommentId: wakeEvidenceComment?.id ?? requestChangesContextComment?.id,
                         });
                         wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                         await issueService(db).addComment(
@@ -878,7 +914,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   .update(issues)
                   .set({ status: "todo", updatedAt: now, ...(isProducerRework ? { completedAt: null } : {}) })
                   .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
-                await issueService(db).addComment(
+                const retryComment = await issueService(db).addComment(
                   sourceCandidate.id,
                   buildRetrySourceIssueComment({
                     ownerActionIssueId: issue.id,
@@ -886,6 +922,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                     sourceIssueId: sourceCandidate.id,
                     sourceLabel: sourceCandidateLabel,
                     decisionReason: ownerDecision.reason,
+                    requestChangesSummary,
                   }),
                   { agentId: mission.ownerAgentId },
                 );
@@ -904,7 +941,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                         sourceIssue: sourceCandidate,
                         targetAgentId: sourceCandidate.assigneeAgentId,
                         idempotencyKey,
-                        wakeCommentId: wakeEvidenceComment?.id,
+                        wakeCommentId: wakeEvidenceComment?.id ?? (requestChangesSummary ? retryComment.id : undefined),
                       });
                       wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                       await issueService(db).addComment(

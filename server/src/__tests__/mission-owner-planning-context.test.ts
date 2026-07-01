@@ -6,6 +6,7 @@ import {
   agentKbGrants,
   agents,
   companies,
+  companySkills,
   createDb,
   issueComments,
   issues,
@@ -58,6 +59,7 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     await db.delete(missionAgents);
     await db.delete(missions);
     await db.delete(agents);
+    await db.delete(companySkills);
     await db.delete(companies);
   });
 
@@ -389,7 +391,7 @@ describeEmbeddedPostgres("mission owner planning context", () => {
       expect.objectContaining({ agentId: first.helperAgentId, role: "observer", capabilities: "tech scout,research" }),
     ]));
     expect(context.planningDossier.assets.executionSourceSummary).toEqual(expect.objectContaining({ unitCount: 2 }));
-    expect(context.planningDossier.assets.tools).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not inspect tools/) }));
+    expect(context.planningDossier.assets.tools).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/No workflow tools/) }));
     expect(context.planningDossier.assets.runtimeServices).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not start or discover services/) }));
     expect(context.planningDossier.assets.fileViews).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not scan repositories or files/) }));
     expect(context.planningDossier.gaps).toEqual([expect.objectContaining({ key: "plugin_workflow_definition_reader_unconfirmed", severity: "info" })]);
@@ -420,6 +422,73 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     expect(context.planningDossier.gaps).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "kb_refs_unavailable", severity: "info" }),
       expect.objectContaining({ key: "manual_planning_required", severity: "needs_research" }),
+    ]));
+  });
+
+  it("surfaces selectable workflow tools and agent skill preferences for PLAN evaluation", async () => {
+    const seeded = await seedCompany("MOPTOOLS");
+    await db
+      .update(agents)
+      .set({ adapterConfig: { paperclipSkillSync: { desiredSkills: ["research-helper"] } } })
+      .where(eq(agents.id, seeded.helperAgentId));
+    await db.insert(companySkills).values({
+      id: randomUUID(),
+      companyId: seeded.companyId,
+      key: "research-helper",
+      slug: "research-helper",
+      name: "Research Helper",
+      description: "Helps collect and evaluate source evidence.",
+      markdown: "---\nname: research-helper\n---\n# Research Helper\n",
+      sourceType: "catalog",
+      sourceLocator: "test",
+      trustLevel: "markdown_only",
+      compatibility: "compatible",
+      fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+      metadata: {},
+    });
+    await db.insert(plugins).values({
+      id: randomUUID(),
+      pluginKey: "insightflo.research-workbench",
+      packageName: "@insightflo/paperclip-research-workbench",
+      version: "0.1.0",
+      manifestJson: {
+        id: "insightflo.research-workbench",
+        displayName: "Research Workbench",
+        version: "0.1.0",
+        apiVersion: 1,
+        tools: [
+          {
+            name: "research-search",
+            displayName: "Research Search",
+            description: "Search current web sources.",
+            parametersSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+          },
+        ],
+      } as never,
+      status: "ready",
+    });
+
+    const context = await buildMissionOwnerPlanningContext(db, { companyId: seeded.companyId, missionId: seeded.missionId });
+
+    expect(context.planningDossier.assets.tools).toEqual(expect.objectContaining({
+      available: true,
+      count: 1,
+      labels: ["Research Search (insightflo.research-workbench:research-search)"],
+      entries: [expect.objectContaining({
+        name: "insightflo.research-workbench:research-search",
+        displayName: "Research Search",
+        source: "plugin",
+        enabled: true,
+      })],
+    }));
+    expect(context.planningDossier.assets.agentRoster).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agentId: seeded.helperAgentId,
+        desiredSkillKeys: ["research-helper"],
+      }),
+    ]));
+    expect(context.planningDossier.assets.capabilityManifest.notableSkills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "research-helper", name: "Research Helper" }),
     ]));
   });
 
