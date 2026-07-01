@@ -139,6 +139,8 @@ export type WorkflowToolStepExecutionRequest = {
   toolName: string;
   args: unknown;
   requestId: string;
+  agentId?: string;
+  agentName?: string;
 };
 
 export type WorkflowToolStepExecutionResult = {
@@ -2176,6 +2178,8 @@ async function startIssueLessToolStepRun(input: {
     .where(eq(workflowStepRuns.id, stepRun.id));
 
   try {
+    const persistedStep = step as PersistedWorkflowStep;
+    const agentName = typeof persistedStep.agentName === "string" ? persistedStep.agentName.trim() : undefined;
     const dispatchResult = await workflowToolStepExecutor({
       companyId: run.companyId,
       workflowRunId: run.id,
@@ -2185,6 +2189,8 @@ async function startIssueLessToolStepRun(input: {
       toolName,
       args,
       requestId,
+      agentId: typeof step.agentId === "string" ? step.agentId.trim() : undefined,
+      agentName,
     });
     if (dispatchResult?.accepted !== false) {
       await db

@@ -15,6 +15,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { listWorkflowToolCatalog } from "../services/workflow/tool-catalog.js";
 import {
+  assertWorkflowToolReferencesSelectable,
   grantWorkflowToolToAgent,
   revokeWorkflowToolFromAgent,
   syncToolRegistryToolsToCore,
@@ -94,18 +95,16 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
       expect.objectContaining({
         name: "collect-evening",
         source: "core",
-        enabled: false,
-        unavailableReason: "Tool Registry plugin is not installed.",
+        enabled: true,
       }),
     ]);
     expect(catalog.grants).toEqual([
       { agentName: "Doraemon", toolName: "collect-evening", source: "core" },
     ]);
     expect(catalog.sources.core).toEqual({
-      available: false,
+      available: true,
       count: 1,
       grantCount: 1,
-      unavailableReason: "Tool Registry plugin is not installed.",
     });
     expect(catalog.sources.toolRegistry).toEqual({
       available: false,
@@ -117,7 +116,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
     });
   });
 
-  it("marks synced core tools inactive when the Tool Registry plugin is not ready", async () => {
+  it("keeps synced core tools active when the Tool Registry plugin is not ready", async () => {
     const companyId = randomUUID();
     const toolId = randomUUID();
     const pluginId = randomUUID();
@@ -160,11 +159,10 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
       expect.objectContaining({
         name: "collect-evening",
         source: "core",
-        enabled: false,
-        unavailableReason: "Tool Registry plugin is not ready (current status: error).",
+        enabled: true,
       }),
     ]);
-    expect(catalog.sources.core.available).toBe(false);
+    expect(catalog.sources.core.available).toBe(true);
     expect(catalog.sources.toolRegistry).toEqual({
       available: false,
       installed: true,
@@ -351,5 +349,87 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
     expect(catalog.grants).toEqual([
       { agentName: "Doraemon", toolName: "collect-evening", source: "core" },
     ]);
+  });
+
+  it("exposes Research Workbench search as a default workflow agent tool", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const researchPluginId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Research Tool Company",
+      issuePrefix: "RTC",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Research Agent",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(plugins).values({
+      id: researchPluginId,
+      pluginKey: "insightflo.research-workbench",
+      packageName: "@insightflo/paperclip-research-workbench",
+      version: "0.1.0",
+      manifestJson: {
+        id: "insightflo.research-workbench",
+        displayName: "Research Workbench",
+        version: "0.1.0",
+        apiVersion: 1,
+        description: "Research Workbench",
+        capabilities: ["agent.tools.register"],
+        entrypoints: { worker: "./dist/worker.js" },
+        tools: [
+          {
+            name: "research-search",
+            displayName: "Research Search",
+            description: "Search the web and return structured evidence bundles.",
+            parametersSchema: {
+              type: "object",
+              properties: {
+                query: { type: "string" },
+                maxResults: { type: "number" },
+              },
+              required: ["query"],
+            },
+          },
+        ],
+      },
+      status: "ready",
+    });
+
+    const catalog = await listWorkflowToolCatalog(db, companyId);
+
+    expect(catalog.tools).toContainEqual(expect.objectContaining({
+      name: "insightflo.research-workbench:research-search",
+      displayName: "Research Search",
+      source: "plugin",
+      enabled: true,
+      pluginId: researchPluginId,
+    }));
+    expect(catalog.grants).toContainEqual({
+      agentName: "Research Agent",
+      toolName: "insightflo.research-workbench:research-search",
+      source: "plugin",
+    });
+    await expect(assertWorkflowToolReferencesSelectable(db, {
+      companyId,
+      steps: [
+        {
+          id: "collect-sources",
+          name: "Collect sources",
+          type: "agent",
+          agentName: "Research Agent",
+          toolNames: ["insightflo.research-workbench:research-search"],
+        },
+      ],
+    })).resolves.toBeUndefined();
   });
 });

@@ -38,6 +38,7 @@ import {
   type ToolExecutionResult,
 } from "./plugin-tool-registry.js";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { isCoreIntegratedPluginKey } from "./core-integrated-plugins.js";
 import { logger } from "../middleware/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -261,6 +262,14 @@ export function createPluginToolDispatcher(
       return;
     }
 
+    if (isCoreIntegratedPluginKey(plugin.pluginKey)) {
+      log.debug(
+        { pluginId, pluginKey: plugin.pluginKey },
+        "skipping core-integrated plugin tool registration from DB",
+      );
+      return;
+    }
+
     const manifest = plugin.manifestJson;
     if (!manifest) {
       log.warn({ pluginId }, "plugin has no manifest, cannot register tools");
@@ -288,6 +297,11 @@ export function createPluginToolDispatcher(
   // -----------------------------------------------------------------------
 
   function handlePluginEnabled(payload: { pluginId: string; pluginKey: string }): void {
+    if (isCoreIntegratedPluginKey(payload.pluginKey)) {
+      log.debug({ pluginId: payload.pluginId, pluginKey: payload.pluginKey }, "core-integrated plugin enabled — skipping tool registration");
+      return;
+    }
+
     log.debug({ pluginId: payload.pluginId, pluginKey: payload.pluginKey }, "plugin enabled — registering tools");
     // Async registration from DB — we fire-and-forget since the lifecycle
     // event handler must be synchronous. Any errors are logged.
@@ -329,6 +343,14 @@ export function createPluginToolDispatcher(
 
         let totalTools = 0;
         for (const plugin of readyPlugins) {
+          if (isCoreIntegratedPluginKey(plugin.pluginKey)) {
+            log.debug(
+              { pluginId: plugin.id, pluginKey: plugin.pluginKey },
+              "skipping core-integrated plugin tools during dispatcher initialization",
+            );
+            continue;
+          }
+
           const manifest = plugin.manifestJson;
           if (manifest?.tools && manifest.tools.length > 0) {
             registry.registerPlugin(plugin.pluginKey, manifest, plugin.id);
@@ -432,6 +454,11 @@ export function createPluginToolDispatcher(
       manifest: PaperclipPluginManifestV1,
       pluginDbId?: string,
     ): void {
+      if (isCoreIntegratedPluginKey(pluginId)) {
+        log.debug({ pluginId, pluginDbId }, "skipping core-integrated plugin tool registration");
+        return;
+      }
+
       registry.registerPlugin(pluginId, manifest, pluginDbId);
     },
 

@@ -49,6 +49,7 @@ import type { PluginJobScheduler } from "./plugin-job-scheduler.js";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
+import { isCoreIntegratedPluginKey } from "./core-integrated-plugins.js";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -78,10 +79,6 @@ export const DEFAULT_LOCAL_PLUGIN_DIR = path.join(
   ".paperclip",
   "plugins",
 );
-
-const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
-  "insightflo.workflow-engine",
-]);
 
 export function resolveDevTsxLoaderPath(
   resolveModule: ModuleResolver = require.resolve as ModuleResolver,
@@ -1707,7 +1704,7 @@ export function pluginLoader(
       };
     }
 
-    if (CORE_INTEGRATED_PLUGIN_KEYS.has(pluginKey)) {
+    if (isCoreIntegratedPluginKey(pluginKey)) {
       log.info(
         { pluginId, pluginKey, version: plugin.version },
         "plugin-loader: skipping core-integrated plugin runtime activation",

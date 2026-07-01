@@ -29,4 +29,19 @@ describe("workflow tool availability", () => {
       reason: "Tool Registry plugin is not installed.",
     });
   });
+
+  it("treats selectable core tools as available despite legacy Tool Registry unavailable state", () => {
+    expect(getWorkflowToolSystemState([
+      {
+        name: "collect-evening",
+        displayName: "Collect evening",
+        description: "Collect evening inputs",
+        pluginId: "",
+        source: "core",
+        enabled: true,
+      },
+    ], { available: false, reason: "Tool Registry plugin is not installed." })).toEqual({
+      available: true,
+    });
+  });
 });

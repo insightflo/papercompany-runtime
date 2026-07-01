@@ -242,7 +242,17 @@ function getShimBlobUrl(specifier: "react" | "react-dom" | "react-dom/client" | 
         const R = globalThis.__paperclipPluginBridge__?.react;
         const withKey = ${applyJsxRuntimeKey.toString()};
         export const jsx = (type, props, key) => R.createElement(type, withKey(props, key));
-        export const jsxs = (type, props, key) => R.createElement(type, withKey(props, key));
+        export const jsxs = (type, props, key) => {
+          // jsxs carries multiple static children in props.children (array).
+          // Extract them and spread as variadic createElement args so React
+          // treats each as a positional child instead of one array child
+          // (array-as-child triggers false "missing key" warnings).
+          const cleaned = withKey(props, key);
+          const { children, ...rest } = cleaned;
+          if (Array.isArray(children)) return R.createElement(type, rest, ...children);
+          if (children !== undefined) return R.createElement(type, rest, children);
+          return R.createElement(type, rest);
+        };
         export const Fragment = R.Fragment;
       `;
       break;

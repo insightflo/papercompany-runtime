@@ -173,7 +173,7 @@ describe("plugin tool execution projectless run context", () => {
           enabled: true,
           adapterType: "builtin",
           adapterConfig: {
-            command: "printf '{\"ok\":true}'",
+            command: "node -e 'console.log(JSON.stringify({ ok: true }))' --",
             workingDirectory: process.cwd(),
             env: {},
             requiresApproval: false,

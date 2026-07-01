@@ -22,8 +22,8 @@ export function getWorkflowToolSystemState(
   tools: SelectableWorkflowTool[],
   explicitState?: WorkflowToolSystemState,
 ): WorkflowToolSystemState {
-  if (explicitState && !explicitState.available) return explicitState;
-  if (getSelectableWorkflowTools(tools).length === 0) {
+  const selectableTools = getSelectableWorkflowTools(tools);
+  if (selectableTools.length === 0) {
     return {
       available: false,
       reason: explicitState?.reason ?? "No workflow tools are available.",

@@ -60,6 +60,7 @@ import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
 import { createPluginHostServiceCleanup } from "./services/plugin-host-service-cleanup.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
+import { isCoreIntegratedPluginKey } from "./services/core-integrated-plugins.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import { heartbeatService } from "./services/heartbeat.js";
 import { createScheduler } from "./services/scheduler/index.js";
@@ -74,8 +75,9 @@ import { createChannelRegistry } from "./channel/index.js";
 import { registerTelegramCommands } from "./channel/telegram/commands.js";
 import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
-import { setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from "./services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from "./services/workflow/dag-engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
+import { checkCoreWorkflowToolsAvailable, executeCoreBuiltinWorkflowTool } from "./services/workflow/core-tool-executor.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
 import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
@@ -84,10 +86,6 @@ import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 type ApiAliasSurface = "work-items" | "work-contexts" | "execution-contexts" | "recurring-procedures";
-
-const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
-  "insightflo.workflow-engine",
-]);
 
 export function resolveViteHmrPort(serverPort: number): number {
   if (serverPort <= 55_535) {
@@ -383,58 +381,87 @@ export async function createApp(
     lifecycleManager: lifecycle,
     db,
   });
-  async function assertToolRegistryReadyForWorkflowTools(): Promise<void> {
-    const toolRegistryPlugin = await pluginRegistry.getByKey("insightflo.tool-registry");
-    if (!toolRegistryPlugin) {
-      throw new Error("Tool Registry plugin is not installed.");
-    }
-    if (toolRegistryPlugin.status !== "ready") {
-      throw new Error(`Tool Registry plugin is not ready (current status: ${toolRegistryPlugin.status}).`);
-    }
-    if (!workerManager.isRunning(toolRegistryPlugin.id)) {
-      throw new Error("Tool Registry plugin worker is not running.");
-    }
-  }
 
-  async function getReadyToolRegistryPluginId(): Promise<string> {
-    await assertToolRegistryReadyForWorkflowTools();
-    const toolRegistryPlugin = await pluginRegistry.getByKey("insightflo.tool-registry");
-    if (!toolRegistryPlugin) {
-      throw new Error("Tool Registry plugin is not installed.");
-    }
-    return toolRegistryPlugin.id;
-  }
-
-  setWorkflowToolStepReadinessChecker(async () => {
-    try {
-      await assertToolRegistryReadyForWorkflowTools();
+  setWorkflowToolStepReadinessChecker(async ({ companyId, toolNames }) => {
+    const nonPluginToolNames = toolNames.filter((toolName) => !toolDispatcher.getTool(toolName));
+    if (nonPluginToolNames.length === 0) {
       return { available: true };
-    } catch (error) {
-      return {
-        available: false,
-        reason: error instanceof Error ? error.message : String(error),
-      };
     }
+
+    return checkCoreWorkflowToolsAvailable(db, { companyId, toolNames: nonPluginToolNames });
   });
 
   setWorkflowToolStepExecutor(async (request) => {
-    const toolRegistryPluginId = await getReadyToolRegistryPluginId();
-
-    const result = await workerManager.call(toolRegistryPluginId, "performAction", {
-      key: "tool-registry.execute-workflow-tool",
-      params: {
-        requestId: request.requestId,
-        toolName: request.toolName,
-        args: request.args ?? {},
+    const registeredPluginTool = toolDispatcher.getTool(request.toolName);
+    if (registeredPluginTool) {
+      const execution = await toolDispatcher.executeTool(
+        request.toolName,
+        request.args ?? {},
+        {
+          agentId: "workflow-tool-step",
+          runId: request.workflowRunId,
+          companyId: request.companyId,
+          projectId: "",
+        },
+      );
+      const result = execution.result;
+      const stdout = result.content ?? (() => {
+        try {
+          return JSON.stringify(result.data ?? {});
+        } catch {
+          return "";
+        }
+      })();
+      await completeWorkflowToolStepFromResult(db, {
         companyId: request.companyId,
-        workflowRunId: request.workflowRunId,
-        workflowId: request.workflowId,
-        stepId: request.stepId,
         stepRunId: request.stepRunId,
+        requestId: request.requestId,
+        workflowRunId: request.workflowRunId,
+        stepId: request.stepId,
+        toolName: request.toolName,
+        success: !result.error,
+        stdout,
+        stderr: result.error ?? "",
+        exitCode: result.error ? 1 : 0,
+        error: result.error,
+      });
+      return { accepted: true };
+    }
+
+    const coreResult = await executeCoreBuiltinWorkflowTool({
+      db,
+      companyId: request.companyId,
+      agentId: request.agentId,
+      agentName: request.agentName,
+      toolName: request.toolName,
+      parameters: request.args ?? {},
+      stepEnv: {
+        PAPERCLIP_WORKFLOW_RUN_ID: request.workflowRunId,
+        PAPERCLIP_WORKFLOW_STEP_ID: request.stepId,
       },
-      renderEnvironment: null,
     });
-    return result && typeof result === "object" ? result : undefined;
+    const stdout = coreResult.body.content ?? (() => {
+      try {
+        return JSON.stringify(coreResult.body.data ?? {});
+      } catch {
+        return "";
+      }
+    })();
+    const success = coreResult.status === 200;
+    await completeWorkflowToolStepFromResult(db, {
+      companyId: request.companyId,
+      stepRunId: request.stepRunId,
+      requestId: request.requestId,
+      workflowRunId: request.workflowRunId,
+      stepId: request.stepId,
+      toolName: request.toolName,
+      success,
+      stdout,
+      stderr: coreResult.body.stderr ?? "",
+      exitCode: success ? 0 : 1,
+      error: success ? undefined : coreResult.body.error,
+    });
+    return { accepted: true };
   });
   const jobCoordinator = createPluginJobCoordinator({
     db,
@@ -842,7 +869,7 @@ export async function createApp(
       lifecycle,
       async (pluginId) => {
         const plugin = await pluginRegistry.getById(pluginId);
-        if (!plugin || CORE_INTEGRATED_PLUGIN_KEYS.has(plugin.pluginKey)) return null;
+        if (!plugin || isCoreIntegratedPluginKey(plugin.pluginKey)) return null;
         return plugin.packagePath ?? null;
       },
     )
@@ -854,7 +881,7 @@ export async function createApp(
         devWatcher
         && loaded.success
         && loaded.plugin.packagePath
-        && !CORE_INTEGRATED_PLUGIN_KEYS.has(loaded.plugin.pluginKey)
+        && !isCoreIntegratedPluginKey(loaded.plugin.pluginKey)
       ) {
         devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
       }

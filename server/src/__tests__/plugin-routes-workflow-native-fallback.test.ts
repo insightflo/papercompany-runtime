@@ -82,6 +82,47 @@ const workflowPlugin = {
   updatedAt: new Date("2026-04-01T00:00:00.000Z"),
 };
 
+function pluginWithSidebarContribution(pluginKey: string, displayName: string, installOrder: number) {
+  return {
+    id: `${pluginKey}-plugin-id`,
+    pluginKey,
+    packageName: `@test/${pluginKey}`,
+    version: "1.0.0",
+    apiVersion: 1,
+    categories: [],
+    manifestJson: {
+      id: pluginKey,
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName,
+      description: "Test plugin",
+      author: "papercompany",
+      categories: [],
+      capabilities: [],
+      entrypoints: {
+        worker: "dist/worker.js",
+        ui: "dist/ui",
+      },
+      ui: {
+        slots: [
+          {
+            type: "sidebar",
+            id: "sidebar-link",
+            displayName,
+            exportName: "SidebarLink",
+          },
+        ],
+      },
+    },
+    status: "ready",
+    installOrder,
+    packagePath: null,
+    lastError: null,
+    installedAt: new Date("2026-06-30T00:00:00.000Z"),
+    updatedAt: new Date("2026-06-30T00:00:00.000Z"),
+  };
+}
+
 function createApp(workerManager: { call: ReturnType<typeof vi.fn> }, db: unknown = {}) {
   const app = express();
   app.use(express.json());
@@ -133,6 +174,33 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       workflowId: "workflow-1",
       missionId: "mission-1",
       status: "running",
+    });
+  });
+
+  it("omits core-integrated workflow and Tool Registry UI contributions", async () => {
+    mockRegistry.listByStatus.mockResolvedValue([
+      pluginWithSidebarContribution("insightflo.workflow-engine", "Workflow Engine", 1),
+      pluginWithSidebarContribution("insightflo.tool-registry", "Tool Registry", 2),
+      pluginWithSidebarContribution("acme.sidebar", "Acme Sidebar", 3),
+    ]);
+
+    const res = await request(createApp({ call: vi.fn() }))
+      .get("/api/plugins/ui-contributions");
+
+    expect(res.status).toBe(200);
+    expect(res.body.map((item: { pluginKey: string }) => item.pluginKey)).toEqual([
+      "acme.sidebar",
+    ]);
+    expect(res.body[0]).toMatchObject({
+      pluginKey: "acme.sidebar",
+      displayName: "Acme Sidebar",
+      uiEntryFile: "index.js",
+      slots: [
+        expect.objectContaining({
+          type: "sidebar",
+          id: "sidebar-link",
+        }),
+      ],
     });
   });
 

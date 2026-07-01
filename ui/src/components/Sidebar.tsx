@@ -34,6 +34,7 @@ import { useInboxBadge } from "../hooks/useInboxBadge";
 import { useAfterInitialPaint } from "../hooks/useAfterInitialPaint";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
+import { CORE_INTEGRATED_PLUGIN_KEYS } from "@/plugins/core-integrated";
 
 interface SidebarProps {
   onOpenHermes?: () => void;
@@ -117,7 +118,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
           <PluginSlotOutlet
             slotTypes={["sidebar"]}
             context={pluginContext}
-            excludePluginKeys={["insightflo.workflow-engine"]}
+            excludePluginKeys={CORE_INTEGRATED_PLUGIN_KEYS}
             className="flex flex-col gap-0.5"
             itemClassName="text-[13px] font-medium"
             missingBehavior="placeholder"
@@ -166,7 +167,7 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
         <PluginSlotOutlet
           slotTypes={["sidebarPanel"]}
           context={pluginContext}
-          excludePluginKeys={["insightflo.workflow-engine"]}
+          excludePluginKeys={CORE_INTEGRATED_PLUGIN_KEYS}
           className="flex flex-col gap-3"
           itemClassName="rounded-lg border border-border p-3"
           missingBehavior="placeholder"

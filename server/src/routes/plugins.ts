@@ -17,27 +17,21 @@
  * @see doc/plugins/PLUGIN_SPEC.md for the full plugin specification
  */
 
-import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
-  agentToolGrants,
-  companies,
   heartbeatRuns,
-  issues,
+  companies,
   pluginEntities,
   pluginLogs,
   pluginWebhookDeliveries,
-  toolDefinitions,
-  workflowStepRuns,
 } from "@paperclipai/db";
 import type {
   PluginStatus,
@@ -51,8 +45,8 @@ import {
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { getPluginUiContributionMetadata, pluginLoader } from "../services/plugin-loader.js";
+import { isCoreIntegratedPluginKey } from "../services/core-integrated-plugins.js";
 import { logActivity } from "../services/activity-log.js";
-import { resolveMissionWorkProductPaths } from "../services/work-products/output-paths.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
@@ -71,8 +65,10 @@ import {
   completeWorkflowToolStepFromResult,
   type WorkflowExecutionMode,
 } from "../services/workflow/dag-engine.js";
-
-const execFile = promisify(execFileCallback);
+import {
+  executeCoreBuiltinWorkflowTool,
+  resolveRunStepEnv,
+} from "../services/workflow/core-tool-executor.js";
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -134,10 +130,6 @@ interface PluginHealthCheckResult {
 /** UUID v4 regex used for plugin ID route resolution. */
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-const CORE_INTEGRATED_PLUGIN_KEYS = new Set([
-  "insightflo.workflow-engine",
-]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -439,178 +431,6 @@ function workflowToolContractAllowsTool(contextSnapshot: unknown, toolName: stri
   return allowedToolNames.has(toolName);
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\"'\"'")}'`;
-}
-
-function parameterKeyToCliFlag(key: string): string {
-  return `--${key.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`).replace(/_/g, "-")}`;
-}
-
-function parametersToCliArgs(parameters: unknown): string[] {
-  const args = readObject(parameters);
-  const cliArgs: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    if (!key.trim() || value === undefined || value === null || value === false) continue;
-    const flag = parameterKeyToCliFlag(key);
-    if (value === true) {
-      cliArgs.push(flag);
-      continue;
-    }
-    const values = Array.isArray(value) ? value : [value];
-    for (const entry of values) {
-      if (entry === undefined || entry === null || entry === false) continue;
-      cliArgs.push(flag, String(entry));
-    }
-  }
-  return cliArgs;
-}
-
-/**
- * runId → heartbeat_runs(issueId/companyId) → issues(missionId/projectId)
- * → workflow_step_runs(workflowRunId/stepId) → resolveMissionWorkProductPaths → stepOutputDir.
- * core builtin workflow tool에게 step 컨텍스트 env를 전달해 tool이 큰 raw 결과를
- * agent context가 아닌 파일로 쓸 수 있게 한다. workflow step run이 아니면 빈 record.
- */
-async function resolveRunStepEnv(db: Db, runId: string): Promise<Record<string, string>> {
-  const run = await db
-    .select({ issueId: heartbeatRuns.issueId, companyId: heartbeatRuns.companyId })
-    .from(heartbeatRuns)
-    .where(eq(heartbeatRuns.id, runId))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!run?.issueId) return {};
-
-  const issue = await db
-    .select({ missionId: issues.missionId, projectId: issues.projectId })
-    .from(issues)
-    .where(eq(issues.id, run.issueId))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!issue?.missionId) return {};
-
-  const stepRun = await db
-    .select({ workflowRunId: workflowStepRuns.workflowRunId, stepId: workflowStepRuns.stepId })
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.issueId, run.issueId))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!stepRun) return {};
-
-  const paths = await resolveMissionWorkProductPaths(db, {
-    companyId: run.companyId,
-    missionId: issue.missionId,
-    projectId: issue.projectId,
-    workflowRunId: stepRun.workflowRunId,
-    stepId: stepRun.stepId,
-  });
-  const env: Record<string, string> = {
-    PAPERCLIP_WORKFLOW_RUN_ID: stepRun.workflowRunId,
-    PAPERCLIP_WORKFLOW_STEP_ID: stepRun.stepId,
-    PAPERCLIP_MISSION_ID: issue.missionId,
-  };
-  if (paths?.stepOutputDir) env.PAPERCLIP_STEP_OUTPUT_DIR = paths.stepOutputDir;
-  return env;
-}
-
-async function executeCoreBuiltinWorkflowTool(input: {
-  db: Db;
-  companyId: string;
-  agentId: string;
-  issueId?: string | null;
-  toolName: string;
-  parameters: unknown;
-  stepEnv?: Record<string, string>;
-}) {
-  const [tool] = await input.db
-    .select({
-      id: toolDefinitions.id,
-      name: toolDefinitions.name,
-      enabled: toolDefinitions.enabled,
-      adapterType: toolDefinitions.adapterType,
-      adapterConfig: toolDefinitions.adapterConfig,
-    })
-    .from(toolDefinitions)
-    .where(and(
-      eq(toolDefinitions.companyId, input.companyId),
-      eq(toolDefinitions.name, input.toolName),
-    ))
-    .limit(1);
-
-  if (!tool) return null;
-  if (!tool.enabled) {
-    return { status: 403 as const, body: { error: `Tool "${input.toolName}" is disabled` } };
-  }
-
-  const [grant] = await input.db
-    .select({ id: agentToolGrants.id })
-    .from(agentToolGrants)
-    .where(and(
-      eq(agentToolGrants.companyId, input.companyId),
-      eq(agentToolGrants.agentId, input.agentId),
-      eq(agentToolGrants.toolId, tool.id),
-    ))
-    .limit(1);
-  if (!grant) {
-    return { status: 403 as const, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
-  }
-
-  if (tool.adapterType !== "builtin") {
-    return {
-      status: 501 as const,
-      body: { error: `Core workflow tool "${input.toolName}" uses unsupported adapter type "${tool.adapterType}"` },
-    };
-  }
-
-  const adapterConfig = readObject(tool.adapterConfig);
-  const command = typeof adapterConfig.command === "string" ? adapterConfig.command.trim() : "";
-  if (!command) {
-    return { status: 422 as const, body: { error: `Core workflow tool "${input.toolName}" has no command configured` } };
-  }
-  if (adapterConfig.requiresApproval === true) {
-    return { status: 403 as const, body: { error: `Core workflow tool "${input.toolName}" requires approval` } };
-  }
-
-  const cwd = typeof adapterConfig.workingDirectory === "string" && adapterConfig.workingDirectory.trim()
-    ? adapterConfig.workingDirectory.trim()
-    : process.cwd();
-  const envConfig = readObject(adapterConfig.env);
-  const cliArgs = parametersToCliArgs(input.parameters);
-  const shellCommand = [command, ...cliArgs.map(shellQuote)].join(" ");
-  const { stdout, stderr } = await execFile("sh", ["-lc", shellCommand], {
-    cwd,
-    env: {
-      ...process.env,
-      ...Object.fromEntries(Object.entries(envConfig).map(([key, value]) => [key, String(value)])),
-      PAPERCLIP_COMPANY_ID: input.companyId,
-      PAPERCLIP_AGENT_ID: input.agentId,
-      ...(input.issueId ? { PAPERCLIP_TASK_ID: input.issueId } : {}),
-      ...(input.stepEnv ?? {}),
-    },
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 120_000,
-  });
-  const trimmedStdout = stdout.trim();
-  let parsed: unknown = undefined;
-  if (trimmedStdout) {
-    try {
-      parsed = JSON.parse(trimmedStdout);
-    } catch {
-      parsed = undefined;
-    }
-  }
-
-  return {
-    status: 200 as const,
-    body: {
-      content: trimmedStdout,
-      data: parsed ?? { stdout: trimmedStdout },
-      stderr: stderr.trim(),
-      tool: input.toolName,
-      source: "core",
-    },
-  };
-}
 
 /**
  * Create Express router for plugin management API.
@@ -670,6 +490,75 @@ export function pluginRoutes(
     loader,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
+
+  /**
+   * Compute plugin health checks, including the worker-reported `health` RPC.
+   * Shared by GET /plugins/:pluginId/health and /dashboard so both reflect
+   * worker truth (registry/manifest/status alone can report "healthy" while a
+   * configured backend is actually unreachable).
+   *
+   * Note: the worker health RPC returns the plugin's real state (degraded/error).
+   *   When status is not "ok", healthy is forced to false. An unsupported RPC or
+   *   timeout is treated as a failed check.
+   */
+  async function computePluginHealth(plugin: {
+    id: string;
+    status: string;
+    manifestJson: { id?: string } | null;
+    lastError: string | null;
+  }): Promise<PluginHealthCheckResult> {
+    const checks: PluginHealthCheckResult["checks"] = [];
+
+    checks.push({ name: "registry", passed: true, message: "Plugin found in registry" });
+
+    const hasValidManifest = Boolean(plugin.manifestJson?.id);
+    checks.push({
+      name: "manifest",
+      passed: hasValidManifest,
+      message: hasValidManifest ? "Manifest is valid" : "Manifest is invalid or missing",
+    });
+
+    const statusOk = plugin.status === "ready";
+    checks.push({ name: "status", passed: statusOk, message: `Current status: ${plugin.status}` });
+
+    const hasNoError = !plugin.lastError;
+    if (!hasNoError) {
+      checks.push({ name: "error_state", passed: false, message: plugin.lastError ?? undefined });
+    }
+
+    // Worker-reported health RPC (plugin truth). Only when a worker handle exists.
+    const wm = bridgeDeps?.workerManager ?? webhookDeps?.workerManager ?? null;
+    const handle = wm?.getWorker(plugin.id);
+    let workerHealthOk = true;
+    if (handle) {
+      try {
+        const diag = await handle.call("health", {} as Record<string, never>, 3000);
+        const ok = diag.status === "ok";
+        workerHealthOk = ok;
+        checks.push({
+          name: "worker_health",
+          passed: ok,
+          message: diag.message?.trim() ? diag.message : `Worker reports: ${diag.status}`,
+        });
+      } catch (err) {
+        workerHealthOk = false;
+        checks.push({
+          name: "worker_health",
+          passed: false,
+          message: `Worker health RPC failed: ${err instanceof Error ? err.message : "unknown error"}`,
+        });
+      }
+    }
+
+    const healthy = statusOk && hasValidManifest && hasNoError && workerHealthOk;
+    return {
+      pluginId: plugin.id,
+      status: plugin.status,
+      healthy,
+      checks,
+      lastError: plugin.lastError ?? undefined,
+    };
+  }
 
   const nativeWorkflowActionKeys = new Set([
     "create-workflow",
@@ -1240,7 +1129,7 @@ export function pluginRoutes(
     const plugins = await registry.listByStatus("ready");
 
     const contributions: PluginUiContribution[] = plugins
-      .filter((plugin) => !CORE_INTEGRATED_PLUGIN_KEYS.has(plugin.pluginKey))
+      .filter((plugin) => !isCoreIntegratedPluginKey(plugin.pluginKey))
       .map((plugin) => {
         // Safety check: manifestJson should always exist for ready plugins, but guard against null
         const manifest = plugin.manifestJson;
@@ -1405,7 +1294,7 @@ export function pluginRoutes(
         parameters: parameters ?? {},
         stepEnv,
       });
-      if (coreResult) {
+      if (coreResult.status !== 404 || coreResult.body.source === "core") {
         res.status(coreResult.status).json(coreResult.body);
         return;
       }
@@ -2292,49 +2181,7 @@ export function pluginRoutes(
       return;
     }
 
-    const checks: PluginHealthCheckResult["checks"] = [];
-
-    // Check 1: Plugin is registered
-    checks.push({
-      name: "registry",
-      passed: true,
-      message: "Plugin found in registry",
-    });
-
-    // Check 2: Manifest is valid
-    const hasValidManifest = Boolean(plugin.manifestJson?.id);
-    checks.push({
-      name: "manifest",
-      passed: hasValidManifest,
-      message: hasValidManifest ? "Manifest is valid" : "Manifest is invalid or missing",
-    });
-
-    // Check 3: Plugin status
-    const isHealthy = plugin.status === "ready";
-    checks.push({
-      name: "status",
-      passed: isHealthy,
-      message: `Current status: ${plugin.status}`,
-    });
-
-    // Check 4: No last error
-    const hasNoError = !plugin.lastError;
-    if (!hasNoError) {
-      checks.push({
-        name: "error_state",
-        passed: false,
-        message: plugin.lastError ?? undefined,
-      });
-    }
-
-    const result: PluginHealthCheckResult = {
-      pluginId: plugin.id,
-      status: plugin.status,
-      healthy: isHealthy && hasValidManifest && hasNoError,
-      checks,
-      lastError: plugin.lastError ?? undefined,
-    };
-
+    const result = await computePluginHealth(plugin);
     res.json(result);
   });
 
@@ -3105,45 +2952,8 @@ export function pluginRoutes(
       // Webhook data unavailable — leave empty
     }
 
-    // --- Health check (same logic as GET /health) ---
-    const checks: PluginHealthCheckResult["checks"] = [];
-
-    checks.push({
-      name: "registry",
-      passed: true,
-      message: "Plugin found in registry",
-    });
-
-    const hasValidManifest = Boolean(plugin.manifestJson?.id);
-    checks.push({
-      name: "manifest",
-      passed: hasValidManifest,
-      message: hasValidManifest ? "Manifest is valid" : "Manifest is invalid or missing",
-    });
-
-    const isHealthy = plugin.status === "ready";
-    checks.push({
-      name: "status",
-      passed: isHealthy,
-      message: `Current status: ${plugin.status}`,
-    });
-
-    const hasNoError = !plugin.lastError;
-    if (!hasNoError) {
-      checks.push({
-        name: "error_state",
-        passed: false,
-        message: plugin.lastError ?? undefined,
-      });
-    }
-
-    const health: PluginHealthCheckResult = {
-      pluginId: plugin.id,
-      status: plugin.status,
-      healthy: isHealthy && hasValidManifest && hasNoError,
-      checks,
-      lastError: plugin.lastError ?? undefined,
-    };
+    // --- Health check (shared with GET /health, includes worker health RPC) ---
+    const health = await computePluginHealth(plugin);
 
     res.json({
       pluginId: plugin.id,

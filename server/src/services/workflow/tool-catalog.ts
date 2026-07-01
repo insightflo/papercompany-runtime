@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { toolService } from "../tools/registry.js";
 import { notFound } from "../../errors.js";
 import type { WorkflowStep } from "./dag-engine.js";
+import { listDefaultWorkflowPluginAgentTools } from "./plugin-agent-tools.js";
 
 const TOOL_REGISTRY_PLUGIN_KEY = "insightflo.tool-registry";
 const TOOL_CONFIG_ENTITY_TYPE = "tool-config";
@@ -13,7 +14,7 @@ export type WorkflowToolCatalogTool = {
   name: string;
   displayName: string;
   description: string;
-  source: "core" | "tool-registry";
+  source: "core" | "tool-registry" | "plugin";
   enabled: boolean;
   pluginId?: string;
   unavailableReason?: string;
@@ -22,7 +23,7 @@ export type WorkflowToolCatalogTool = {
 export type WorkflowToolCatalogGrant = {
   agentName: string;
   toolName: string;
-  source?: "core" | "tool-registry";
+  source?: "core" | "tool-registry" | "plugin";
 };
 
 export type WorkflowToolCatalog = {
@@ -340,15 +341,21 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       ? `Tool Registry plugin is not ready (current status: ${toolRegistryPlugin.status}).`
       : "Tool Registry plugin is not installed.";
 
-  const coreDefinitions = await toolService.listDefinitions(db, { companyId });
+  const [coreDefinitions, pluginAgentTools, companyAgents] = await Promise.all([
+    toolService.listDefinitions(db, { companyId }),
+    listDefaultWorkflowPluginAgentTools(db),
+    db
+      .select({ name: agents.name })
+      .from(agents)
+      .where(eq(agents.companyId, companyId)),
+  ]);
   const coreTools: WorkflowToolCatalogTool[] = coreDefinitions
     .map((definition) => ({
       name: definition.name,
       displayName: definition.name,
       description: definition.description ?? "",
       source: "core" as const,
-      enabled: toolRegistryAvailable && definition.enabled !== false,
-      ...(toolRegistryUnavailableReason ? { unavailableReason: toolRegistryUnavailableReason } : {}),
+      enabled: definition.enabled !== false,
     }))
     .filter((tool) => tool.name.trim().length > 0);
   const coreGrants = await db
@@ -373,6 +380,23 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       source: "core" as const,
     }))
     .filter((grant) => grant.agentName.length > 0 && grant.toolName.length > 0);
+  const pluginTools: WorkflowToolCatalogTool[] = pluginAgentTools.map((tool) => ({
+    name: tool.name,
+    displayName: tool.displayName,
+    description: tool.description,
+    source: "plugin" as const,
+    enabled: true,
+    pluginId: tool.pluginId,
+  }));
+  const pluginGrantItems: WorkflowToolCatalogGrant[] = pluginAgentTools.flatMap((tool) =>
+    companyAgents
+      .map((agent) => ({
+        agentName: agent.name.trim(),
+        toolName: tool.name,
+        source: "plugin" as const,
+      }))
+      .filter((grant) => grant.agentName.length > 0 && grant.toolName.length > 0)
+  );
 
   const registryTools: WorkflowToolCatalogTool[] = [];
   let registryGrants: WorkflowToolCatalogGrant[] = [];
@@ -437,6 +461,9 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
   }
 
   const toolByName = new Map<string, WorkflowToolCatalogTool>();
+  for (const tool of pluginTools) {
+    toolByName.set(tool.name, tool);
+  }
   for (const tool of registryTools) {
     toolByName.set(tool.name, tool);
   }
@@ -446,13 +473,12 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
 
   return {
     tools: sortTools(Array.from(toolByName.values())),
-    grants: sortAndDedupeGrants([...registryGrants, ...coreGrantItems]),
+    grants: sortAndDedupeGrants([...pluginGrantItems, ...registryGrants, ...coreGrantItems]),
     sources: {
       core: {
-        available: toolRegistryAvailable,
+        available: true,
         count: coreTools.length,
         grantCount: coreGrantItems.length,
-        ...(toolRegistryUnavailableReason ? { unavailableReason: toolRegistryUnavailableReason } : {}),
       },
       toolRegistry: {
         available: toolRegistryAvailable,
