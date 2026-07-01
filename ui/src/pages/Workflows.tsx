@@ -18,14 +18,6 @@ import { WorkflowDefinitionList, WorkflowDefinitionMiniFlow } from "./workflows/
 import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
 import { WorkflowDefinitionRail } from "./workflows/workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
-
-const workflowSelectedEditorStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateRows: "auto minmax(0, 1fr) auto",
-  gap: "0",
-  minWidth: 0,
-  minHeight: 0,
-};
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
 import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeActionAnchor, type GraphNodeDragState } from "./workflows/graph-editor/graphUiUtils.js";
 import { GraphCanvas } from "./workflows/graph-editor/GraphCanvas.js";
@@ -353,6 +345,16 @@ const workflowNavigatorFilterButtonStyle = (selected: boolean): CSSProperties =>
   cursor: "pointer",
 });
 
+
+
+
+const workflowSelectedEditorStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateRows: "auto minmax(0, 1fr) auto",
+  gap: "0",
+  minWidth: 0,
+  minHeight: 0,
+};
 
 const workflowSelectedHeaderStyle: CSSProperties = {
   display: "grid",

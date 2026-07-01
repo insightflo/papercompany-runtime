@@ -1,7 +1,3 @@
-// [파일 목적] 워크플로우 인터페이스 요약/필드 + export(YAML/JSON) 미리보기 컴포넌트.
-// Workflows.tsx에서 WorkflowInterfaceSummary/Fields/ExportPreview 기계적 추출.
-// [외부 연결] ../workflow-graph.js, ../workflow-page-styles.js, ../shared-controls.js, react.
-// [주의] 동작 변경 없이. 루트 Workflows.tsx 역참조 금지.
 import { Fragment, useEffect, useMemo, useState, type JSX } from "react";
 import {
   parseWorkflowGraphYamlDraft,
@@ -10,9 +6,9 @@ import {
   type WorkflowGraphExportSnapshot,
   type WorkflowGraphInterfaceSummary,
   type WorkflowGraphTestInputLibrarySummary,
-} from "../workflow-graph.js";
-import { buttonStyle, graphPolicyBadgeStyle, mutedTextStyle, primaryButtonStyle, statusBadgeStyle, textareaStyle } from "../workflow-page-styles.js";
-import { FieldLabel, HelpIcon, HelpedText } from "../shared-controls.js";
+} from "./workflow-graph.js";
+import { buttonStyle, graphPolicyBadgeStyle, mutedTextStyle, primaryButtonStyle, statusBadgeStyle, textareaStyle } from "./workflow-page-styles.js";
+import { FieldLabel, HelpIcon, HelpedText } from "./shared-controls.js";
 
 export function WorkflowInterfaceSummary({ summary }: { summary: WorkflowGraphInterfaceSummary }): JSX.Element {
   return (
@@ -25,7 +21,7 @@ export function WorkflowInterfaceSummary({ summary }: { summary: WorkflowGraphIn
   );
 }
 
-function WorkflowInterfaceFields({
+export function WorkflowInterfaceFields({
   flowInputsText,
   flowEnvVariablesText,
   testInputPresetsText,
@@ -83,7 +79,7 @@ function WorkflowInterfaceFields({
   );
 }
 
-function WorkflowExportPreview({
+export function WorkflowExportPreview({
   snapshot,
   onApplyYaml,
 }: {
