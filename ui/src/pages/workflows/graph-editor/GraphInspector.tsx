@@ -8,6 +8,7 @@
 // [수정시 주의] 상태/핸들러를 직접 만들지 말고 코디네이터에서 props로 넘길 것. 루트 Workflows.tsx 역참조 금지.
 import * as React from "react";
 import { Fragment, type CSSProperties, type JSX } from "react";
+import { GraphInspectorPolicyRunNote } from "./GraphInspectorPolicyRunNote.js";
 import { GraphInspectorPolicyStructure } from "./GraphInspectorPolicyStructure.js";
 import { GraphInspectorPolicyDataFlow } from "./GraphInspectorPolicyDataFlow.js";
 import { GraphInspectorPolicyRuntime } from "./GraphInspectorPolicyRuntime.js";
@@ -23,7 +24,6 @@ import {
   type WorkflowGraphDataFlowMap,
   type WorkflowGraphInspectorMode,
   type WorkflowGraphInspectorSummary,
-  normalizeGraphRunStatus,
 } from "../workflow-graph.js";
 import {
   filterTabStyle,
@@ -315,60 +315,11 @@ export function GraphInspector({
               wrapSelectedPathInContainer={wrapSelectedPathInContainer}
               clearSelectedContainer={clearSelectedContainer}
             />
-            <div key="run-overlay" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <HelpedText help="Manual visual overlay values used to preview how a step looks with run state attached.">Run overlay</HelpedText>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Status badge to show on this step in the graph preview.">Run status</FieldLabel>
-                <select
-                  style={selectStyle}
-                  value={selectedStep.graphRunStatus}
-                  onChange={(event) => updateSelected({ graphRunStatus: normalizeGraphRunStatus(event.target.value) })}
-                >
-                  <option value="planned">Planned</option>
-                  <option value="running">Running</option>
-                  <option value="succeeded">Succeeded</option>
-                  <option value="failed">Failed</option>
-                  <option value="skipped">Skipped</option>
-                  <option value="paused">Paused</option>
-                </select>
-              </div>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Issue identifier shown in the run overlay for this step.">Issue identifier</FieldLabel>
-                <input
-                  style={inputStyle}
-                  value={selectedStep.graphRunIssueIdentifier}
-                  placeholder="Issue identifier"
-                  onChange={(event) => updateSelected({ graphRunIssueIdentifier: event.target.value })}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Timestamp text shown as the last update time in the overlay.">Updated at</FieldLabel>
-                <input
-                  style={inputStyle}
-                  value={selectedStep.graphRunUpdatedAt}
-                  placeholder="Updated at"
-                  onChange={(event) => updateSelected({ graphRunUpdatedAt: event.target.value })}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Short text summary shown for this step's run overlay.">Run summary</FieldLabel>
-                <textarea
-                  style={{ ...textareaStyle, minHeight: "64px" }}
-                  value={selectedStep.graphRunSummary}
-                  placeholder="Run summary"
-                  onChange={(event) => updateSelected({ graphRunSummary: event.target.value })}
-                />
-              </div>
-            </div>
-            <div key="sticky-note" style={{ display: "grid", gap: "4px" }}>
-              <FieldLabel help="Freeform note shown with the selected graph node for operator context.">Sticky note</FieldLabel>
-              <textarea
-                style={{ ...textareaStyle, minHeight: "72px" }}
-                value={selectedStep.graphNote}
-                placeholder="Markdown note for this node"
-                onChange={(event) => setSelectedNote(event.target.value)}
-              />
-            </div>
+            <GraphInspectorPolicyRunNote
+              selectedStep={selectedStep}
+              updateSelected={updateSelected}
+              setSelectedNote={setSelectedNote}
+            />
               </details>
             </div>
             </Fragment>
