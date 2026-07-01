@@ -68,7 +68,7 @@ export function WorkflowErrorState({
         <ErrorState
           key="error-state"
           message={message}
-          onRetry={onRetry}
+          onRetry={() => Promise.resolve(onRetry())}
           retrying={isRefreshing}
         />
       </div>

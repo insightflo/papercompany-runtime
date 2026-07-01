@@ -81,7 +81,7 @@ export function WorkflowRunSections({
           activeRuns={displayActiveRuns}
           companyId={companyId}
           onAbort={onAbortRun}
-          onRefreshOverview={onRefreshOverview}
+          onRefreshOverview={() => Promise.resolve(onRefreshOverview())}
           highlightedRunId={highlightedRunId}
         />
       </section>
@@ -117,7 +117,7 @@ export function WorkflowRunSections({
         <RecentRunsTable
           recentRuns={historyRuns}
           companyId={companyId}
-          onRefreshOverview={onRefreshOverview}
+          onRefreshOverview={() => Promise.resolve(onRefreshOverview())}
           highlightedRunId={highlightedRunId}
         />
       </section>

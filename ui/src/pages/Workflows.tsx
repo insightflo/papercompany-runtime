@@ -205,7 +205,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
         showHelp={showHelp}
         onToggleHelp={() => setShowHelp(!showHelp)}
         showNewWorkflowForm={showNewWorkflowForm}
-        onNewWorkflow={() => { setCreateError(""); setShowNewWorkflowForm(true); }}
+        onNewWorkflow={() => { setShowNewWorkflowForm(true); }}
         isRefreshing={isRefreshing}
         refreshButtonLabel={refreshButtonLabel}
         onRefresh={refreshOverview}
