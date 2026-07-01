@@ -20,6 +20,7 @@ import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, isRecord, norma
 import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
 import { WorkflowDefinitionsResizeHandle } from "./workflows/workflow-definitions-resize-handle.js";
 import { WorkflowPageHeader } from "./workflows/workflow-page-header.js";
+import { WorkflowDefinitionsToolbar } from "./workflows/workflow-definitions-toolbar.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
 import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
 import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
@@ -2300,44 +2301,20 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
       />
 
       <section id="wf-definitions" key="definitions-section" style={{ ...workflowFocusSectionStyle, height: definitionsCollapsed || definitionsHeight === null ? "auto" : `${definitionsHeight}px`, overflow: definitionsHeight === null ? "visible" : "auto", minHeight: definitionsCollapsed ? "auto" : "200px" }}>
-        <div key="definitions-toolbar" style={{ ...workflowFocusToolbarStyle, flexShrink: 0, height: "fit-content" }}>
-          <div key="definition-controls" style={workflowFocusToolbarGroupStyle}>
-            <label key="navigator-search-field" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <input
-                key="navigator-search"
-                style={{ ...inputStyle, width: "200px", fontSize: "12px" }}
-                value={navigatorSearch}
-                onChange={(event) => setNavigatorSearch(event.target.value)}
-                placeholder="Search workflows..."
-                aria-label="Search workflows"
-              />
-              <HelpIcon label="Filters the workflow list by name, description, or related metadata." />
-            </label>
-          </div>
-          <div key="scope-filter" style={workflowFocusToolbarGroupStyle}>
-            <button key="reusable" type="button" style={filterTabStyle(workflowScopeFilter === "reusable")} onClick={() => setWorkflowScopeFilter("reusable")}>
-              Reusable ({reusableWorkflows.length})
-            </button>
-            <button key="manual-mission" type="button" style={filterTabStyle(workflowScopeFilter === "manual_mission")} onClick={() => setWorkflowScopeFilter("manual_mission")}>
-              Manual ({manualMissionWorkflows.length})
-            </button>
-            <button key="active" type="button" style={filterTabStyle(workflowStatusFilter === "active")} onClick={() => setWorkflowStatusFilter("active")}>
-              활성 ({activeWorkflows.length})
-            </button>
-            <button key="archived" type="button" style={filterTabStyle(workflowStatusFilter === "archived")} onClick={() => setWorkflowStatusFilter("archived")}>
-              보관 ({archivedWorkflows.length})
-            </button>
-            <button
-              key="collapse-toggle"
-              type="button"
-              style={buttonStyle}
-              onClick={() => setDefinitionsCollapsed((prev) => !prev)}
-            >
-              {definitionsCollapsed ? "▼" : "▲"}
-            </button>
-            <HelpIcon label="Use Reusable/Manual to switch workflow categories, Active/Archived to switch status, and the arrow to collapse this list." />
-          </div>
-        </div>
+        <WorkflowDefinitionsToolbar
+          navigatorSearch={navigatorSearch}
+          onNavigatorSearchChange={setNavigatorSearch}
+          workflowScopeFilter={workflowScopeFilter}
+          onWorkflowScopeFilterChange={setWorkflowScopeFilter}
+          workflowStatusFilter={workflowStatusFilter}
+          onWorkflowStatusFilterChange={setWorkflowStatusFilter}
+          reusableCount={reusableWorkflows.length}
+          manualCount={manualMissionWorkflows.length}
+          activeCount={activeWorkflows.length}
+          archivedCount={archivedWorkflows.length}
+          definitionsCollapsed={definitionsCollapsed}
+          onToggleCollapsed={() => setDefinitionsCollapsed((prev) => !prev)}
+        />
         {!definitionsCollapsed && (
           <Fragment key="definitions-body">
         {showNewWorkflowForm ? (
