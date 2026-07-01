@@ -18,6 +18,7 @@ import { WorkflowDefinitionList, WorkflowDefinitionMiniFlow } from "./workflows/
 import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
 import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, isRecord, normalizeMaxDailyRunsInput, parseJsonArrayField } from "./workflows/workflow-form-utils.js";
 import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
+import { WorkflowDefinitionsResizeHandle } from "./workflows/workflow-definitions-resize-handle.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
 import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
 import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
@@ -2513,43 +2514,13 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
         )}
       </section>
 
-      {!definitionsCollapsed && (
-        <div
-          id="wf-resize-handle"
-          key="definitions-resize-handle"
-          style={{
-            height: "6px",
-            cursor: "ns-resize",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "var(--border, #334155)",
-            borderRadius: "3px",
-            margin: "-2px 0",
-            position: "relative",
-          }}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            definitionsStartY.current = e.clientY;
-            definitionsResizeRef.current = definitionsHeight ?? (e.currentTarget.previousElementSibling as HTMLElement)?.offsetHeight ?? 420;
-            const onMove = (ev: MouseEvent) => {
-              const delta = ev.clientY - definitionsStartY.current;
-              const next = Math.max(200, definitionsResizeRef.current + delta);
-              setDefinitionsHeight(next);
-            };
-            const onUp = () => {
-              window.removeEventListener("mousemove", onMove);
-              window.removeEventListener("mouseup", onUp);
-              document.body.style.cursor = "";
-            };
-            window.addEventListener("mousemove", onMove);
-            window.addEventListener("mouseup", onUp);
-            document.body.style.cursor = "ns-resize";
-          }}
-        >
-          <div style={{ width: "40px", height: "2px", background: "var(--muted-foreground, #94a3b8)", borderRadius: "1px" }} />
-        </div>
-      )}
+      <WorkflowDefinitionsResizeHandle
+        collapsed={definitionsCollapsed}
+        height={definitionsHeight}
+        resizeRef={definitionsResizeRef}
+        startYRef={definitionsStartY}
+        onHeightChange={setDefinitionsHeight}
+      />
 
       <WorkflowRunSections
         activeRunsScope={activeRunsScope}
