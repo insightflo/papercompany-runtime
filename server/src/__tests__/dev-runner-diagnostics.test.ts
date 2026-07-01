@@ -6,17 +6,37 @@ import {
   appendDevRunnerEvent,
   evaluateNodeRuntime,
   findRecentNodeCrashReports,
+  resolveDevServerStatusFilePath,
   resolveDevRunnerDiagnosticsPaths,
 } from "../../../scripts/dev-runner-diagnostics.mjs";
 
 describe("dev-runner diagnostics", () => {
-  it("resolves diagnostics paths under repo-local .paperclip by default", () => {
+  it("resolves diagnostics paths under Paperclip instance logs by default", () => {
     const repoRoot = path.join(os.tmpdir(), "paperclip-runtime");
-    expect(resolveDevRunnerDiagnosticsPaths(repoRoot, {})).toEqual({
-      logDir: path.join(repoRoot, ".paperclip"),
-      eventLogPath: path.join(repoRoot, ".paperclip", "dev-runner-events.ndjson"),
-      childLogPath: path.join(repoRoot, ".paperclip", "dev-runner-child.log"),
+    const home = path.join(repoRoot, "state", ".paperclip");
+    expect(resolveDevRunnerDiagnosticsPaths(repoRoot, {
+      PAPERCLIP_HOME: home,
+      PAPERCLIP_INSTANCE_ID: "local",
+    })).toEqual({
+      logDir: path.join(home, "instances", "local", "logs"),
+      eventLogPath: path.join(home, "instances", "local", "logs", "dev-runner-events.ndjson"),
+      childLogPath: path.join(home, "instances", "local", "logs", "dev-runner-child.log"),
     });
+  });
+
+  it("resolves dev server status under the Paperclip instance unless explicitly configured", () => {
+    const repoRoot = path.join(os.tmpdir(), "paperclip-runtime");
+    const home = path.join(repoRoot, "state", ".paperclip");
+    const explicit = path.join(repoRoot, "custom-status.json");
+
+    expect(resolveDevServerStatusFilePath(repoRoot, {
+      PAPERCLIP_HOME: home,
+      PAPERCLIP_INSTANCE_ID: "local",
+    })).toBe(path.join(home, "instances", "local", "dev-server-status.json"));
+    expect(resolveDevServerStatusFilePath(repoRoot, {
+      PAPERCLIP_HOME: home,
+      PAPERCLIP_DEV_SERVER_STATUS_FILE: explicit,
+    })).toBe(explicit);
   });
 
   it("appends structured event lines", () => {

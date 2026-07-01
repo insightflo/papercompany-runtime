@@ -251,6 +251,7 @@ describe("materializeProviderSkills", () => {
 
       expect(result.skillsDir).toBeNull();
       expect(result.created).toEqual([]);
+      await expect(stat(path.join(dir, "work", ".papercompany"))).rejects.toMatchObject({ code: "ENOENT" });
       await expect(stat(path.join(dir, "work", ".openclaw"))).rejects.toMatchObject({ code: "ENOENT" });
     });
   });

@@ -1,7 +1,0 @@
-{
-  "cmd": "git status --short --branch",
-  "cwd": "/Users/kwak/Projects/ai/papercompany/papercompany-runtime",
-  "exit_code": 0,
-  "stdout": "## main...origin/main\n?? docs/planning/artifacts/alpha-prime-producer-refactor-phase0-20260515T010802Z/\n",
-  "stderr": ""
-}

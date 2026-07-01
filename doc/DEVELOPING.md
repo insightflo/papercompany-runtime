@@ -76,12 +76,12 @@ This starts:
 
 `pnpm dev:once` now tracks backend-relevant file changes and pending migrations. When the current boot is stale, the board UI shows a `Restart required` banner. You can also enable guarded auto-restart in `Instance Settings > Experimental`, which waits for queued/running local agent runs to finish before restarting the dev server.
 
-Dev runner diagnostics are written to repo-local `.paperclip/` by default:
+Dev runner diagnostics are written under the active Paperclip instance logs directory by default:
 
-- `.paperclip/dev-runner-events.ndjson` records structured lifecycle events such as runner start, server child spawn/exit, shutdown signals, health probe transitions, and nearby Node crash reports.
-- `.paperclip/dev-runner-child.log` tees the child `@paperclipai/server` stdout/stderr stream so terminal output survives after a crash or shell restart.
+- `~/.paperclip/instances/default/logs/dev-runner-events.ndjson` records structured lifecycle events such as runner start, server child spawn/exit, shutdown signals, health probe transitions, and nearby Node crash reports.
+- `~/.paperclip/instances/default/logs/dev-runner-child.log` tees the child `@paperclipai/server` stdout/stderr stream so terminal output survives after a crash or shell restart.
 
-Set `PAPERCLIP_DEV_RUNNER_LOG_DIR=/path/to/logs` to move these diagnostics, or set `PAPERCLIP_DEV_RUNNER_HEALTH_INTERVAL_MS=0` to disable the background health probe.
+Set `PAPERCLIP_HOME=/path/to/home` to isolate all local runtime state outside the repo. Set `PAPERCLIP_DEV_RUNNER_LOG_DIR=/path/to/logs` to move only these diagnostics, or set `PAPERCLIP_DEV_RUNNER_HEALTH_INTERVAL_MS=0` to disable the background health probe.
 
 Tailscale/private-auth dev mode:
 

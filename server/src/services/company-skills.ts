@@ -85,11 +85,6 @@ type SkillSourceMeta = {
   workspaceCwd?: string;
 };
 
-const OPTIONAL_COMPANY_SKILL_SLUGS = new Set([
-  "html-for-beginners",
-  "report-for-beginners",
-]);
-
 export type LocalSkillInventoryMode = "full" | "project_root";
 
 export type ProjectSkillScanTarget = {
@@ -1441,7 +1436,6 @@ export function companySkillService(db: Db) {
       if (!stats?.isDirectory()) continue;
       const bundledSkills = await readLocalSkillImports(companyId, skillsRoot)
         .then((skills) => skills
-          .filter((skill) => !OPTIONAL_COMPANY_SKILL_SLUGS.has(skill.slug))
           .map((skill) => ({
             ...skill,
             key: deriveCanonicalSkillKey(companyId, {

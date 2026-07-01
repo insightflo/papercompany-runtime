@@ -181,13 +181,11 @@ export async function materializeProviderSkills(options: {
     warnings: [...resolution.warnings],
   };
 
-  const { promises: fs } = await import("node:fs");
-  await fs.mkdir(resolution.sidecarDir, { recursive: true });
-
   if (resolution.mode !== "provider_native" || !resolution.skillsDir) {
     return result;
   }
 
+  const { promises: fs } = await import("node:fs");
   await fs.mkdir(resolution.skillsDir, { recursive: true });
   const timestamp = options.timestamp ?? new Date().toISOString();
 

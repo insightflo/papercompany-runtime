@@ -11,6 +11,32 @@ const defaultCrashReportDirs = [
   path.join(os.homedir(), "Library", "Logs", "DiagnosticReports"),
   path.join(path.sep, "Library", "Logs", "DiagnosticReports"),
 ];
+const DEFAULT_INSTANCE_ID = "default";
+const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+function expandHomePrefix(value) {
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/")) return path.resolve(os.homedir(), value.slice(2));
+  return value;
+}
+
+function resolvePaperclipHomeDir(env = process.env) {
+  const envHome = env.PAPERCLIP_HOME?.trim();
+  if (envHome) return path.resolve(expandHomePrefix(envHome));
+  return path.resolve(os.homedir(), ".paperclip");
+}
+
+function resolvePaperclipInstanceId(env = process.env) {
+  const raw = env.PAPERCLIP_INSTANCE_ID?.trim() || DEFAULT_INSTANCE_ID;
+  if (!INSTANCE_ID_RE.test(raw)) {
+    throw new Error(`Invalid PAPERCLIP_INSTANCE_ID '${raw}'.`);
+  }
+  return raw;
+}
+
+function resolvePaperclipInstanceRoot(env = process.env) {
+  return path.resolve(resolvePaperclipHomeDir(env), "instances", resolvePaperclipInstanceId(env));
+}
 
 function asObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -30,13 +56,19 @@ function safeErrorPayload(error) {
 export function resolveDevRunnerDiagnosticsPaths(repoRoot, env = process.env) {
   const logDir = env.PAPERCLIP_DEV_RUNNER_LOG_DIR?.trim()
     ? path.resolve(env.PAPERCLIP_DEV_RUNNER_LOG_DIR.trim())
-    : path.join(repoRoot, ".paperclip");
+    : path.join(resolvePaperclipInstanceRoot(env), "logs");
 
   return {
     logDir,
     eventLogPath: path.join(logDir, "dev-runner-events.ndjson"),
     childLogPath: path.join(logDir, "dev-runner-child.log"),
   };
+}
+
+export function resolveDevServerStatusFilePath(repoRoot, env = process.env) {
+  const configured = env.PAPERCLIP_DEV_SERVER_STATUS_FILE?.trim();
+  if (configured) return path.resolve(configured);
+  return path.join(resolvePaperclipInstanceRoot(env), "dev-server-status.json");
 }
 
 export function appendDevRunnerEvent(eventLogPath, eventName, payload = {}) {

@@ -66,11 +66,15 @@ tests/release-smoke/playwright-report/
 # Runtime / temp
 tmp/
 tmp-*
+.tmp_*
 cli/tmp/
 data/
 /.hermes/
 /outputs/
 /working.md
+server/produced_work/
+server/research/
+server/macro_report_snapshot.txt
 
 # Scratch / seed scripts
 check-*.mjs
@@ -88,6 +92,17 @@ packages/db/seed-*.mjs
 .paperclip-local/
 .papercompany/
 /.agents/
+
+# Project-specific operations content lives outside papercompany-runtime
+docs/planning/artifacts/
+docs/planning/gazua-producer-ops-alignment-plan.md
+skills/html-for-beginners/
+skills/report-for-beginners/
+scripts/agent-wiki-dashboard.py
+scripts/gazua-*
+scripts/generate-company-assets.ts
+scripts/generate-org-chart-*
+scripts/setup-agent-config.sh
 
 # Doc maintenance
 .doc-review-cursor

@@ -6,7 +6,12 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
-import { createDevRunnerDiagnostics, evaluateNodeRuntime, PAPERCLIP_REQUIRED_NODE_MAJOR } from "./dev-runner-diagnostics.mjs";
+import {
+  createDevRunnerDiagnostics,
+  evaluateNodeRuntime,
+  PAPERCLIP_REQUIRED_NODE_MAJOR,
+  resolveDevServerStatusFilePath,
+} from "./dev-runner-diagnostics.mjs";
 
 const mode = process.argv[2] === "watch" ? "watch" : "dev";
 const cliArgs = process.argv.slice(3);
@@ -16,7 +21,7 @@ const gracefulShutdownTimeoutMs = 10_000;
 const changedPathSampleLimit = 5;
 const detachedServerChild = process.platform !== "win32";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const devServerStatusFilePath = path.join(repoRoot, ".paperclip", "dev-server-status.json");
+const devServerStatusFilePath = resolveDevServerStatusFilePath(repoRoot, process.env);
 const diagnostics = createDevRunnerDiagnostics({ repoRoot, env: process.env });
 const nodeRuntime = evaluateNodeRuntime({
   nodeVersion: process.version,
