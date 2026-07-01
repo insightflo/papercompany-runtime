@@ -24,6 +24,7 @@ import { WorkflowDefinitionsToolbar } from "./workflows/workflow-definitions-too
 import { WorkflowErrorState, WorkflowLoadingState } from "./workflows/workflow-page-states.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
 import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
+import { formPanelStyle, workflowCreateShellStyle, workflowCreateHeaderStyle, workflowCreateIdentityStyle, workflowCreateActionsStyle, workflowCreateSetupStripStyle, workflowCreateFieldStyle, workflowCreateWorkspaceStyle, workflowManagementShellStyle, workflowSelectedHeaderStyle, workflowSelectedIdentityStyle, workflowSelectedSetupStripStyle, workflowSelectedWorkspaceStyle } from "./workflows/workflow-layout-styles.js";
 import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
 import { WorkflowDefinitionRail } from "./workflows/workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
@@ -53,73 +54,13 @@ function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
 }
 
-const formPanelStyle: CSSProperties = {
-  display: "grid",
-  gap: "10px",
-  padding: "12px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "10px",
-  background: "var(--card, #0f172a)",
-};
 
-const workflowCreateShellStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateRows: "auto auto minmax(560px, 1fr) auto auto",
-  gap: 0,
-  minHeight: "760px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "10px",
-  background: "var(--card, #0f172a)",
-  overflow: "hidden",
-};
 
-const workflowCreateHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "flex-start",
-  justifyContent: "space-between",
-  gap: "12px",
-  padding: "12px",
-  borderBottom: "1px solid var(--border, #334155)",
-  background: "color-mix(in srgb, var(--background, #020617) 44%, var(--card, #0f172a))",
-  flexWrap: "wrap",
-};
 
-const workflowCreateIdentityStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(220px, 0.8fr) minmax(260px, 1.2fr)",
-  gap: "10px",
-  flex: "1 1 560px",
-  minWidth: 0,
-};
 
-const workflowCreateActionsStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "flex-end",
-  gap: "8px",
-  flexWrap: "wrap",
-};
 
-const workflowCreateSetupStripStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-  gap: "8px",
-  padding: "10px 12px",
-  borderBottom: "1px solid var(--border, #334155)",
-  background: "color-mix(in srgb, var(--card, #0f172a) 72%, var(--background, #020617))",
-};
 
-const workflowCreateFieldStyle: CSSProperties = {
-  display: "grid",
-  gap: "4px",
-  minWidth: 0,
-};
 
-const workflowCreateWorkspaceStyle: CSSProperties = {
-  display: "grid",
-  minHeight: 0,
-  padding: "12px",
-};
 
 
 
@@ -150,16 +91,6 @@ function clampGraphInspectorWidth(value: number): number {
   return Math.min(620, Math.max(320, Math.round(value)));
 }
 
-const workflowManagementShellStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "280px minmax(640px, 1fr)",
-  gap: "0",
-  minHeight: "620px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "8px",
-  overflow: "hidden",
-  background: "var(--background, #020617)",
-};
 
 
 
@@ -167,39 +98,12 @@ const workflowManagementShellStyle: CSSProperties = {
 
 
 
-const workflowSelectedHeaderStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: "8px 12px",
-  alignItems: "center",
-  padding: "8px 10px",
-  borderBottom: "1px solid var(--border, #334155)",
-  background: "color-mix(in srgb, var(--background, #020617) 90%, var(--card, #0f172a))",
-};
 
 
 
-const workflowSelectedIdentityStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(220px, 0.8fr) minmax(280px, 1.2fr)",
-  gap: "8px",
-  minWidth: 0,
-};
-
-const workflowSelectedSetupStripStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))",
-  gap: "8px",
-  gridColumn: "1 / -1",
-  paddingTop: "8px",
-  borderTop: "1px solid var(--border, #334155)",
-};
 
 
-const workflowSelectedWorkspaceStyle: CSSProperties = {
-  minHeight: 0,
-  overflow: "auto",
-};
+
 
 
 
