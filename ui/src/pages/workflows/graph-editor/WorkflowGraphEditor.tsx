@@ -31,6 +31,7 @@ import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } f
 import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeActionAnchor, type GraphNodeDragState } from "./graphUiUtils.js";
 import { clampGraphCanvasScale, clampGraphInspectorWidth, graphEdgeMetadataFor, isEditableKeyboardTarget, LABEL_COLOR_PRESETS } from "./WorkflowGraphEditorHelpers.js";
 import { GraphTriggerSummaryCard } from "./GraphTriggerSummaryCard.js";
+import { GraphEmptyState } from "./GraphEmptyState.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { GraphInspector } from "./GraphInspector.js";
 
@@ -979,23 +980,7 @@ function WorkflowGraphEditor({
   }
 
   if (steps.length === 0) {
-    return (
-      <div style={formPanelStyle}>
-        <p key="empty-message" style={mutedTextStyle}>No steps yet. Start with an entry node.</p>
-        <div key="empty-actions" style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-          <button key="add-entry" type="button" style={primaryButtonStyle} onClick={() => addAfter(null)}>
-            Add Entry Step
-          </button>
-          <div key="starter-palette" style={{ display: "contents" }}>
-            {graphPaletteItems.slice(0, 2).map((item) => (
-              <button key={item.kind} type="button" style={buttonStyle} onClick={() => insertPaletteNode(item.kind)}>
-                Start with {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <GraphEmptyState onAddEntry={() => addAfter(null)} onInsertPaletteNode={insertPaletteNode} />;
   }
 
   return (
