@@ -21,6 +21,7 @@ import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
 import { WorkflowDefinitionsResizeHandle } from "./workflows/workflow-definitions-resize-handle.js";
 import { WorkflowPageHeader } from "./workflows/workflow-page-header.js";
 import { WorkflowDefinitionsToolbar } from "./workflows/workflow-definitions-toolbar.js";
+import { WorkflowErrorState, WorkflowLoadingState } from "./workflows/workflow-page-states.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
 import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
 import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
@@ -2214,52 +2215,11 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
   const filteredWorkflows = workflowStatusFilter === "active" ? activeWorkflows : archivedWorkflows;
 
   if (overview.loading) {
-    return (
-      <div data-plugin-id={PLUGIN_ID} style={pageStyle}>
-        <div key="workflow-page-header" style={headerRowStyle}>
-          <h1 key="title" style={titleStyle}>Workflows</h1>
-          <button
-            key="refresh"
-            type="button"
-            onClick={() => {
-              void refreshOverview();
-            }}
-            disabled={isRefreshing}
-            style={isRefreshing ? { ...buttonStyle, ...buttonDisabledStyle } : buttonStyle}
-          >
-            {refreshButtonLabel}
-          </button>
-        </div>
-        <p key="loading" style={mutedTextStyle}>Loading workflows...</p>
-      </div>
-    );
+    return <WorkflowLoadingState pluginId={PLUGIN_ID} isRefreshing={isRefreshing} refreshButtonLabel={refreshButtonLabel} onRefresh={refreshOverview} />;
   }
 
   if (overview.error) {
-    return (
-      <div data-plugin-id={PLUGIN_ID} style={pageStyle}>
-        <div key="workflow-page-header" style={headerRowStyle}>
-          <h1 key="title" style={titleStyle}>Workflows</h1>
-          <button
-            key="refresh"
-            type="button"
-            onClick={() => {
-              void refreshOverview();
-            }}
-            disabled={isRefreshing}
-            style={isRefreshing ? { ...buttonStyle, ...buttonDisabledStyle } : buttonStyle}
-          >
-            {refreshButtonLabel}
-          </button>
-        </div>
-        <ErrorState
-          key="error-state"
-          message={`Failed to load workflows: ${overview.error.message}`}
-          onRetry={refreshOverview}
-          retrying={isRefreshing}
-        />
-      </div>
-    );
+    return <WorkflowErrorState pluginId={PLUGIN_ID} isRefreshing={isRefreshing} refreshButtonLabel={refreshButtonLabel} onRefresh={refreshOverview} message={`Failed to load workflows: ${overview.error.message}`} onRetry={refreshOverview} />;
   }
 
   const data = {
