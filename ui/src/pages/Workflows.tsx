@@ -16,6 +16,7 @@ import { WorkflowGraphTestDrawer } from "./workflows/graph-editor/GraphTestDrawe
 import { filterRunsForWorkflows, hasRecurringWorkflowTrigger, isManualMissionPlanWorkflow } from "./workflows/workflow-filters.js";
 import { WorkflowDefinitionList, WorkflowDefinitionMiniFlow } from "./workflows/workflow-definition-list.js";
 import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
+import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, isRecord, normalizeMaxDailyRunsInput, parseJsonArrayField } from "./workflows/workflow-form-utils.js";
 import { WorkflowDefinitionRail } from "./workflows/workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
@@ -207,79 +208,12 @@ function countStatuses(activeRuns: WorkflowOverviewData["activeRuns"]): Array<{ 
     .sort((left, right) => right.count - left.count || left.status.localeCompare(right.status));
 }
 
-function normalizeMaxDailyRunsInput(value: string): { value: number | undefined; error?: string } {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return { value: undefined };
-  }
 
-  const parsed = Number(trimmed);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    return { value: undefined, error: "maxDailyRuns는 0 이상의 정수여야 합니다." };
-  }
 
-  return { value: parsed };
-}
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
 
-function formatJsonArrayForForm(value: unknown): string {
-  return JSON.stringify(Array.isArray(value) ? value : [], null, 2);
-}
 
-function parseJsonArrayField(value: string, label: string): { value: unknown[]; error?: string } {
-  const trimmed = value.trim();
-  if (!trimmed) return { value: [] };
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (!Array.isArray(parsed)) {
-      return { value: [], error: `${label}는 JSON 배열이어야 합니다.` };
-    }
-    return { value: parsed };
-  } catch (error) {
-    return { value: [], error: `${label} JSON 파싱 실패: ${error instanceof Error ? error.message : String(error)}` };
-  }
-}
 
-function buildWorkflowInterfaceMetadata(
-  currentLegacyMetadata: unknown,
-  flowInputsText: string,
-  flowEnvVariablesText: string,
-  testInputPresetsText: string,
-): { value: Record<string, unknown>; error?: string } {
-  const parsedInputs = parseJsonArrayField(flowInputsText, "Flow inputs");
-  if (parsedInputs.error) return { value: {}, error: parsedInputs.error };
-  const parsedEnvVariables = parseJsonArrayField(flowEnvVariablesText, "Flow env variables");
-  if (parsedEnvVariables.error) return { value: {}, error: parsedEnvVariables.error };
-  const parsedTestInputPresets = parseJsonArrayField(testInputPresetsText, "Saved test inputs");
-  if (parsedTestInputPresets.error) return { value: {}, error: parsedTestInputPresets.error };
-  return {
-    value: {
-      ...(isRecord(currentLegacyMetadata) ? currentLegacyMetadata : {}),
-      graphFlowInputs: parsedInputs.value,
-      graphFlowEnvVariables: parsedEnvVariables.value,
-      graphTestInputPresets: parsedTestInputPresets.value,
-    },
-  };
-}
-
-function workflowStepsForExport(steps: StepDraft[], mode: StepEditorMode, jsonText: string): WorkflowGraphStep[] {
-  if (mode === "json") {
-    try {
-      const parsed = JSON.parse(jsonText) as unknown;
-      if (Array.isArray(parsed)) return parsed as WorkflowGraphStep[];
-    } catch {
-      // Keep export preview available while the JSON editor is temporarily invalid.
-    }
-  }
-  return stepsToJson(steps) as WorkflowGraphStep[];
-}
-
-function formatWorkflowGraphStepsForJsonEditor(steps: WorkflowGraphStep[]): string {
-  return JSON.stringify(steps, null, 2);
-}
 
 function clampGraphCanvasScale(value: number): number {
   return Math.min(1.8, Math.max(0.45, value));
