@@ -115,6 +115,8 @@ function workflowDefinitionForUi(
     name: definition.name,
     description: definition.description ?? "",
     status: definition.status ?? "active",
+    source: definition.source ?? "native",
+    sourceKind: definition.sourceKind ?? "workflow",
     triggerLabels: definition.triggerLabels ?? [],
     labelIds: definition.labelIds ?? [],
     schedule: definition.schedule ?? undefined,

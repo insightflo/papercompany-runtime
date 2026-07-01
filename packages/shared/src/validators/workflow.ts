@@ -39,9 +39,12 @@ export const workflowStepDefinitionSchema = z.object({
   agentName: z.string().optional(),
   agentId: optionalUuidSchema,
   assigneeAgentId: optionalUuidSchema,
-  // union accepts legacy string form ("true") on read; normalize coerces to boolean.
-  graphWorkProductRequired: z.union([z.boolean(), z.string()]).optional(),
-}).passthrough();
+    // union accepts legacy string form ("true") on read; normalize coerces to boolean.
+    graphWorkProductRequired: z.union([z.boolean(), z.string()]).optional(),
+    graphWorkProductPattern: z.string().optional(),
+    graphResourceRefs: z.array(z.string()).optional(),
+    graphSecretRefs: z.array(z.string()).optional(),
+  }).passthrough();
 
 export const workflowDefinitionSchema = z.object({
   id: z.string().uuid(),
@@ -162,6 +165,8 @@ export const createWorkflowDefinitionSchema = z.object({
   createParentIssuePolicy: z.string().nullable().optional(),
   executionMode: workflowExecutionModeSchema.nullable().optional(),
   dynamicPlanBootstrapOnly: z.boolean().optional(),
+  source: z.string().nullable().optional(),
+  sourceKind: z.string().nullable().optional(),
   legacyMetadata: metadataSchema.optional(),
 }).strict();
 

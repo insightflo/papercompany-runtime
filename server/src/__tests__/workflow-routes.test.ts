@@ -392,6 +392,34 @@ describe("workflow routes", () => {
     }));
   });
 
+  it("accepts workflow classification fields on create", async () => {
+    mockWorkflowService.createDefinition.mockResolvedValue(workflowDefinition({
+      source: "manual_mission",
+      sourceKind: "manual_mission",
+    }));
+
+    const res = await request(createApp())
+      .post(`/api/companies/${COMPANY_ID}/workflows`)
+      .send({
+        name: "Manual mission plan",
+        status: "active",
+        source: "manual_mission",
+        sourceKind: "manual_mission",
+        steps: [{ id: "step-1", title: "Research" }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockWorkflowService.createDefinition).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: COMPANY_ID,
+      source: "manual_mission",
+      sourceKind: "manual_mission",
+    }));
+    expect(res.body).toEqual(expect.objectContaining({
+      source: "manual_mission",
+      sourceKind: "manual_mission",
+    }));
+  });
+
   it("returns 422 for invalid DAG create errors", async () => {
     mockWorkflowService.createDefinition.mockRejectedValue(new Error("Invalid workflow DAG: Step review depends on unknown step missing"));
 
@@ -453,6 +481,35 @@ describe("workflow routes", () => {
           assigneeAgentId: undefined,
         }),
       ],
+    }));
+  });
+
+  it("accepts source/sourceKind when restoring archived workflows", async () => {
+    mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({ status: "archived" }));
+    mockWorkflowService.updateDefinition.mockResolvedValue(workflowDefinition({
+      status: "active",
+      source: "manual_mission",
+      sourceKind: "manual_mission",
+    }));
+
+    const res = await request(createApp())
+      .patch(`/api/workflows/${WORKFLOW_ID}`)
+      .send({
+        status: "active",
+        source: "manual_mission",
+        sourceKind: "manual_mission",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkflowService.updateDefinition).toHaveBeenCalledWith(expect.anything(), WORKFLOW_ID, expect.objectContaining({
+      status: "active",
+      source: "manual_mission",
+      sourceKind: "manual_mission",
+    }));
+    expect(res.body).toEqual(expect.objectContaining({
+      status: "active",
+      source: "manual_mission",
+      sourceKind: "manual_mission",
     }));
   });
 

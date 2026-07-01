@@ -33,10 +33,13 @@ export interface WorkflowStepDefinition {
    * true면 dag-engine이 출력 디렉토리 + `[ARTIFACT]:` 등록 contract를 issue에 주입하고
    * heartbeat가 missing-workProduct 자동등록 gate를 적용한다.
    * false는 "QA 단계"를 뜻하지 않는다 — 단지 산출물 contract 강제를 안 할 뿐. verdict는 별개.
-   * (UI graphWorkProductRequired 토글과 동일 필드.)
-   */
-  graphWorkProductRequired?: boolean;
-}
+     * (UI graphWorkProductRequired 토글과 동일 필드.)
+     */
+    graphWorkProductRequired?: boolean;
+    graphWorkProductPattern?: string;
+    graphResourceRefs?: string[];
+    graphSecretRefs?: string[];
+  }
 
 export interface WorkflowDefinitionDto {
   id: string;

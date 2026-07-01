@@ -1,12 +1,17 @@
 import * as React from "react";
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type FormEvent, type JSX } from "react";
+import { createPortal } from "react-dom";
 import { useCompany } from "../context/CompanyContext";
 import { openWorkProductInBrowser } from "../lib/workProductOpen";
 import { buildManualRunFeedback, buildManualRunButtonState, findNewRunId, manualRunUnavailableMessage } from "./workflows/run-feedback.js";
 import { buildIssueHref, buildMissionHref } from "./workflows/routes.js";
+import { emptyStep, jsonToSteps, parseOptionalNonNegativeInteger, parseOptionalPositiveInteger, stepsToJson, withStepDraftDefaults, type StepDraft } from "./workflows/step-draft.js";
 import { getSelectableWorkflowTools, getWorkflowToolSystemState, type WorkflowToolSystemState } from "./workflows/tool-availability.js";
 import { appendStepAfter, applyStepRunsToGraphSteps, applyWorkflowGraphFailureRoute, assignStepsToContainer, assignStepsToGroup, buildWorkflowGraphContainerSummary, buildWorkflowGraphDataFlowMap, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphExecutionEvidenceSummary, buildWorkflowGraphExportSnapshot, buildWorkflowGraphFailureRouteSummary, buildWorkflowGraphInspectorSummary, buildWorkflowGraphIterationTestPreview, buildWorkflowGraphModel, buildWorkflowGraphRepairPlan, buildWorkflowGraphRequestFillPreview, buildWorkflowGraphRestartPreview, buildWorkflowGraphRunDebugSummary, buildWorkflowGraphSelectionSummary, buildWorkflowGraphSingleStepTestPreview, buildWorkflowGraphStructurePaletteSummary, buildWorkflowGraphTestDrawerSummary, buildWorkflowGraphTestExecutionPreview, buildWorkflowGraphTestPlan, buildWorkflowGraphTestRequestPreview, buildWorkflowGraphWorkbenchSummary, clearStepsGroup, clearWorkflowContainer, connectSteps, disconnectSteps, duplicateWorkflowContainer, duplicateWorkflowStep, expandWorkflowGraphSelection, getWorkflowGraphStepContext, insertWorkflowStepFromPalette, normalizeGraphEdgeKind, normalizeGraphRunStatus, parseDependencies, parseWorkflowGraphYamlDraft, removeWorkflowStep, renameWorkflowStep, serializeWorkflowGraphExportSnapshot, setGraphGroupCollapsed, summarizeWorkflowGraphDraftDiff, summarizeWorkflowGraphInterface, summarizeWorkflowGraphTestInputLibrary, summarizeWorkflowGraphTriggers, updateContainerMetadata, updateGraphEdgeMetadata, updateGraphGroupMetadata, updateStepAdvancedMetadata, updateStepApprovalMetadata, updateStepDataFlowMetadata, updateStepExecutionMetadata, updateStepNote, updateStepResourceMetadata, updateStepTestingMetadata, type WorkflowGraphContainerSummary, type WorkflowGraphContainerType, type WorkflowGraphDataFlowMap, type WorkflowGraphDefinitionNavigatorItem, type WorkflowGraphDraftDiff, type WorkflowGraphEdge, type WorkflowGraphEdgeKind, type WorkflowGraphEdgeMetadataRecord, type WorkflowGraphExecutionEvidenceSummary, type WorkflowGraphExportFormat, type WorkflowGraphExportSnapshot, type WorkflowGraphFailureRouteSummary, type WorkflowGraphFocusLensTone, type WorkflowGraphInspectorMode, type WorkflowGraphInspectorSummary, type WorkflowGraphInterfaceInput, type WorkflowGraphInterfaceSummary, type WorkflowGraphIssueSeverity, type WorkflowGraphIterationTestPreview, type WorkflowGraphNavigatorFilter, type WorkflowGraphPaletteNodeKind, type WorkflowGraphRepairPlan, type WorkflowGraphRequestFillPreview, type WorkflowGraphRestartPreview, type WorkflowGraphRunDebugSummary, type WorkflowGraphRunDebugTileTone, type WorkflowGraphRunStatus, type WorkflowGraphSelectionMode, type WorkflowGraphSelectionSummary, type WorkflowGraphSingleStepTestPreview, type WorkflowGraphStep, type WorkflowGraphStepContext, type WorkflowGraphStructurePaletteActionId, type WorkflowGraphStructurePaletteSummary, type WorkflowGraphTestDrawerSummary, type WorkflowGraphTestExecutionPreview, type WorkflowGraphTestInputLibrarySummary, type WorkflowGraphTestPlan, type WorkflowGraphTestRequestPreview, type WorkflowGraphTriggerSummary, type WorkflowGraphWorkbenchSummary, type WorkflowGraphWorkProduct } from "./workflows/workflow-graph.js";
 import { CREATE_PARENT_ISSUE_POLICIES, normalizeCreateParentIssuePolicy, type CreateParentIssuePolicy } from "./workflows/workflow-parent-policy.js";
+
+export { jsonToSteps, stepsToJson };
+export type { StepDraft };
 
 const PLUGIN_ID = "paperclip.core-workflows";
 
@@ -50,96 +55,6 @@ function MissionRunLink({ missionId }: { missionId?: string | null }): JSX.Eleme
 }
 
 
-export type StepDraft = {
-  id: string;
-  title: string;
-  description: string;
-  type: "agent" | "tool";
-  toolName: string;
-  toolArgs: string;
-  agentId: string;
-  agentName: string;
-  tools: string;
-  dependsOn: string;
-  onFailure: string;
-  maxRetries: string | number;
-  graphRetryDelaySeconds: string | number;
-  graphRetryBackoff: string;
-  graphRetryJitter: boolean;
-  timeoutSeconds: string | number;
-  graphSleepSeconds: string | number;
-  graphSuspendUntil: string;
-  graphSuspendTimeoutSeconds: string | number;
-  graphSuspendTimeoutAction: string;
-  graphEarlyReturn: boolean;
-  graphEarlyReturnContentType: string;
-  graphEarlyReturnSchema: string;
-  graphErrorHandler: boolean;
-  graphErrorHandlerScope: string;
-  graphErrorHandlerInput: string;
-  graphRestartBoundary: boolean;
-  graphRestartStrategy: string;
-  graphRestartInput: string;
-  graphEarlyStopCondition: string;
-  graphEarlyStopLabelSkipped: boolean;
-  graphApprovalRequired: boolean;
-  graphApprovalPrompt: string;
-  graphApprovalRecipients: string;
-  graphApprovalTimeoutSeconds: string | number;
-  graphApprovalTimeoutAction: string;
-  graphMockEnabled: boolean;
-  graphMockResult: string;
-  graphPinnedResultRunId: string;
-  graphConcurrencyKey: string;
-  graphConcurrencyLimit: string | number;
-  graphPriority: string;
-  graphCacheEnabled: boolean;
-  graphCacheTtlSeconds: string | number;
-  graphDeleteAfterUse: boolean;
-  graphInputExpression: string;
-  graphOutputSchema: string;
-  graphWorkProductRequired: boolean;
-  graphWorkProductPattern: string;
-  graphResourceRefs: string;
-  graphSecretRefs: string;
-  graphPositionX: string | number;
-  graphPositionY: string | number;
-  graphGroupId: string;
-  graphGroupTitle: string;
-  graphGroupColor: string;
-  graphGroupCollapsed?: boolean;
-  graphGroupCollapsedByDefault: boolean;
-  graphContainerId: string;
-  graphContainerType: WorkflowGraphContainerType;
-  graphContainerTitle: string;
-  graphContainerDescription: string;
-  graphContainerMode: string;
-  graphContainerCondition: string;
-  graphContainerIterator: string;
-  graphContainerSkipFailure: boolean;
-  graphContainerRunInParallel: boolean;
-  graphContainerParallelism: string | number;
-  graphRunStatus: WorkflowGraphRunStatus;
-  graphRunStepRunId?: string;
-  graphRunIssueId?: string;
-  graphRunIssueIdentifier: string;
-  graphRunUpdatedAt: string;
-  graphRunSummary: string;
-  graphRunStartedAt?: string;
-  graphRunCompletedAt?: string;
-  graphRunLastDispatchAttemptAt?: string;
-  graphRunLastDispatchAcceptedAt?: string;
-  graphRunLastDispatchErrorAt?: string;
-  graphRunLastDispatchErrorSummary?: string;
-  graphRunLastDispatchRequestId?: string;
-  graphRunResultPreview?: string;
-  graphRunLogPreview?: string;
-  graphRunWorkProducts?: WorkflowGraphWorkProduct[];
-  graphNote: string;
-  graphEdgeMetadata: WorkflowGraphEdgeMetadataRecord;
-  extra: Record<string, unknown>;
-};
-
 type StepEditorMode = "graph" | "form" | "json";
 
 type ProjectOption = { id: string; name: string };
@@ -168,11 +83,13 @@ type WorkflowOverviewData = {
     status: string;
     triggerLabels?: string[];
     labelIds?: string[];
-    schedule?: string;
-    maxDailyRuns?: number;
-    timezone?: string;
-    deadlineTime?: string;
-    lastScheduledRunAt?: string;
+      schedule?: string;
+      maxDailyRuns?: number;
+      timezone?: string;
+      source?: string;
+      sourceKind?: string;
+      deadlineTime?: string;
+      lastScheduledRunAt?: string;
     lastScheduleError?: string;
     lastScheduleErrorAt?: string;
     projectId?: string;
@@ -439,6 +356,181 @@ const textareaStyle: CSSProperties = {
   resize: "vertical",
 };
 
+const helpIconStyle: CSSProperties = {
+  appearance: "none",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "16px",
+  height: "16px",
+  padding: 0,
+  border: "1px solid var(--border, #334155)",
+  borderRadius: "50%",
+  background: "transparent",
+  color: "var(--muted-foreground, #94a3b8)",
+  fontFamily: "inherit",
+  fontSize: "11px",
+  fontWeight: 700,
+  lineHeight: 1,
+  cursor: "pointer",
+  flex: "0 0 auto",
+  position: "relative",
+  userSelect: "none",
+};
+
+const helpTooltipStyle: CSSProperties = {
+  position: "fixed",
+  zIndex: 10000,
+  width: "min(280px, calc(100vw - 16px))",
+  padding: "8px 10px",
+  border: "1px solid var(--border, #334155)",
+  borderRadius: "8px",
+  background: "color-mix(in srgb, var(--popover, #020617) 94%, var(--background, #020617))",
+  color: "var(--popover-foreground, var(--foreground, #f8fafc))",
+  boxShadow: "0 12px 28px rgba(2, 6, 23, 0.42)",
+  fontSize: "12px",
+  fontWeight: 500,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
+  pointerEvents: "auto",
+};
+
+function HelpIcon({ label }: { label: string }): JSX.Element {
+  const tooltipId = React.useId();
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ left: number; top: number; placement: "above" | "below" }>({
+    left: 8,
+    top: 8,
+    placement: "below",
+  });
+
+  const updatePosition = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const tooltipWidth = Math.min(280, Math.max(120, window.innerWidth - 16));
+    const left = Math.min(Math.max(8, rect.left + rect.width / 2 - tooltipWidth / 2), Math.max(8, window.innerWidth - tooltipWidth - 8));
+    const shouldOpenAbove = rect.bottom + 92 > window.innerHeight && rect.top > 112;
+    setPosition({
+      left,
+      top: shouldOpenAbove ? rect.top - 8 : rect.bottom + 8,
+      placement: shouldOpenAbove ? "above" : "below",
+    });
+  }, []);
+
+  const showTooltip = useCallback(() => {
+    updatePosition();
+    setOpen(true);
+  }, [updatePosition]);
+
+  const closeTooltip = useCallback(() => {
+    setOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!open || typeof window === "undefined" || typeof document === "undefined") return undefined;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeTooltip();
+      }
+    };
+    const handleViewportChange = () => updatePosition();
+
+    document.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+    };
+  }, [closeTooltip, open, updatePosition]);
+
+  const tooltip = open && typeof document !== "undefined"
+    ? createPortal(
+      <div
+        id={tooltipId}
+        role="tooltip"
+        style={{
+          ...helpTooltipStyle,
+          left: `${position.left}px`,
+          top: `${position.top}px`,
+          transform: position.placement === "above" ? "translateY(-100%)" : undefined,
+        }}
+      >
+        {label}
+      </div>,
+      document.body,
+    )
+    : null;
+
+  return (
+    <>
+      <button
+        type="button"
+        ref={triggerRef}
+        aria-describedby={open ? tooltipId : undefined}
+        aria-expanded={open}
+        aria-label={label}
+        style={{
+          ...helpIconStyle,
+          borderColor: open ? "color-mix(in srgb, #38bdf8 56%, var(--border, #334155))" : "var(--border, #334155)",
+          color: open ? "#bae6fd" : helpIconStyle.color,
+          background: open ? "color-mix(in srgb, #38bdf8 14%, transparent)" : "transparent",
+        }}
+        onFocus={(event) => {
+          if (event.currentTarget.matches(":focus-visible")) {
+            showTooltip();
+          }
+        }}
+        onBlur={closeTooltip}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            closeTooltip();
+          }
+        }}
+        onPointerEnter={(event) => {
+          if (event.pointerType === "mouse" || event.pointerType === "pen") {
+            showTooltip();
+          }
+        }}
+        onPointerLeave={closeTooltip}
+      >
+        ?
+      </button>
+      {tooltip}
+    </>
+  );
+}
+
+function FieldLabel({ children, help }: { children: React.ReactNode; help: string }): JSX.Element {
+  return (
+    <label style={{ ...mutedTextStyle, display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px" }}>
+      <span>{children}</span>
+      <HelpIcon label={help} />
+    </label>
+  );
+}
+
+function HelpedText({
+  children,
+  help,
+  style,
+}: {
+  children: React.ReactNode;
+  help: string;
+  style?: CSSProperties;
+}): JSX.Element {
+  return (
+    <span style={{ ...mutedTextStyle, display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", ...style }}>
+      <span>{children}</span>
+      <HelpIcon label={help} />
+    </span>
+  );
+}
+
 const formPanelStyle: CSSProperties = {
   display: "grid",
   gap: "10px",
@@ -523,6 +615,35 @@ const workflowCreateLabelStripStyle: CSSProperties = {
   minWidth: 0,
 };
 
+const workflowConfirmOverlayStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 60,
+  display: "grid",
+  placeItems: "center",
+  padding: "24px",
+  background: "rgba(2, 6, 23, 0.62)",
+};
+
+const workflowConfirmDialogStyle: CSSProperties = {
+  display: "grid",
+  gap: "12px",
+  width: "min(520px, 100%)",
+  padding: "16px",
+  border: "1px solid var(--border, #334155)",
+  borderRadius: "10px",
+  background: "var(--card, #0f172a)",
+  boxShadow: "0 18px 48px rgba(0, 0, 0, 0.36)",
+};
+
+const workflowConfirmActionsStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-end",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: "8px",
+};
+
 const paginationBarStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -538,6 +659,7 @@ const paginationInfoStyle: CSSProperties = {
 
 type StatusFilter = "active" | "archived";
 type WorkflowScopeFilter = "reusable" | "manual_mission";
+type WorkflowRestoreKind = "reusable" | "manual";
 
 const filterTabStyle = (isActive: boolean): CSSProperties => ({
   padding: "6px 14px",
@@ -870,13 +992,18 @@ async function fetchAvailableWorkflowTools(companyId: string): Promise<{ tools: 
   const toolRegistry = sources.toolRegistry && typeof sources.toolRegistry === "object" && !Array.isArray(sources.toolRegistry)
     ? sources.toolRegistry as Record<string, unknown>
     : {};
+  const coreSource = sources.core && typeof sources.core === "object" && !Array.isArray(sources.core)
+    ? sources.core as Record<string, unknown>
+    : {};
   const toolsPayload = Array.isArray(pageData.tools) ? pageData.tools : [];
   const allTools = toolsPayload
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
     .map(normalizeWorkflowToolOption);
   const tools = getSelectableWorkflowTools(allTools);
+  const pluginToolsAvailable = tools.some((tool) => tool.source === "plugin");
+  const coreToolsAvailable = tools.some((tool) => tool.source === "core");
   const toolSystem = getWorkflowToolSystemState(allTools, {
-    available: toolRegistry.available === true,
+    available: coreSource.available === true || coreToolsAvailable || toolRegistry.available === true || pluginToolsAvailable,
     reason: typeof toolRegistry.unavailableReason === "string" ? toolRegistry.unavailableReason : undefined,
   });
 
@@ -1201,27 +1328,6 @@ function formatWorkflowGraphStepsForJsonEditor(steps: WorkflowGraphStep[]): stri
   return JSON.stringify(steps, null, 2);
 }
 
-function parseOptionalNonNegativeInteger(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number(trimmed);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function parseOptionalPositiveInteger(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number(trimmed);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function parseOptionalGraphPosition(value: unknown): number | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string" && !value.trim()) return undefined;
-  const parsed = typeof value === "number" ? value : Number(String(value).trim());
-  return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
-}
-
 function clampGraphCanvasScale(value: number): number {
   return Math.min(1.8, Math.max(0.45, value));
 }
@@ -1249,98 +1355,6 @@ const stepRowStyle: CSSProperties = {
   gridTemplateColumns: "1fr 1fr",
   gap: "8px",
 };
-
-function emptyStep(): StepDraft {
-  return {
-    id: "",
-    title: "",
-    description: "",
-    type: "agent",
-    toolName: "",
-    toolArgs: "{}",
-    agentId: "",
-    agentName: "",
-    tools: "",
-    dependsOn: "",
-    onFailure: "",
-    maxRetries: "",
-    graphRetryDelaySeconds: "",
-    graphRetryBackoff: "",
-    graphRetryJitter: false,
-    timeoutSeconds: "",
-    graphSleepSeconds: "",
-    graphSuspendUntil: "",
-    graphSuspendTimeoutSeconds: "",
-    graphSuspendTimeoutAction: "",
-    graphEarlyReturn: false,
-    graphEarlyReturnContentType: "",
-    graphEarlyReturnSchema: "",
-    graphErrorHandler: false,
-    graphErrorHandlerScope: "",
-    graphErrorHandlerInput: "",
-    graphRestartBoundary: false,
-    graphRestartStrategy: "",
-    graphRestartInput: "",
-    graphEarlyStopCondition: "",
-    graphEarlyStopLabelSkipped: false,
-    graphApprovalRequired: false,
-    graphApprovalPrompt: "",
-    graphApprovalRecipients: "",
-    graphApprovalTimeoutSeconds: "",
-    graphApprovalTimeoutAction: "",
-    graphMockEnabled: false,
-    graphMockResult: "",
-    graphPinnedResultRunId: "",
-    graphConcurrencyKey: "",
-    graphConcurrencyLimit: "",
-    graphPriority: "",
-    graphCacheEnabled: false,
-    graphCacheTtlSeconds: "",
-    graphDeleteAfterUse: false,
-    graphInputExpression: "",
-    graphOutputSchema: "",
-    graphWorkProductRequired: false,
-    graphWorkProductPattern: "",
-    graphResourceRefs: "",
-    graphSecretRefs: "",
-    graphPositionX: "",
-    graphPositionY: "",
-    graphGroupId: "",
-    graphGroupTitle: "",
-    graphGroupColor: "#64748b",
-    graphGroupCollapsed: undefined,
-    graphGroupCollapsedByDefault: false,
-    graphContainerId: "",
-    graphContainerType: "branch",
-    graphContainerTitle: "",
-    graphContainerDescription: "",
-    graphContainerMode: "branch-one",
-    graphContainerCondition: "",
-    graphContainerIterator: "",
-    graphContainerSkipFailure: false,
-    graphContainerRunInParallel: false,
-    graphContainerParallelism: "",
-    graphRunStatus: "planned",
-    graphRunIssueIdentifier: "",
-    graphRunUpdatedAt: "",
-    graphRunSummary: "",
-    graphNote: "",
-    graphEdgeMetadata: {},
-    extra: {},
-  };
-}
-
-function withStepDraftDefaults(steps: StepDraft[]): StepDraft[] {
-  return steps.map((step) => {
-    const next = { ...emptyStep() };
-    for (const [key, value] of Object.entries(step) as Array<[keyof StepDraft, StepDraft[keyof StepDraft]]>) {
-      if (value !== undefined) {
-        next[key] = value as never;
-      }
-    }
-    return next;
-  });
-}
 
 const collapsedStepHeaderStyle: CSSProperties = {
   display: "flex",
@@ -1461,6 +1475,7 @@ function StepEditor({
             </span>
           )}
           <button type="button" style={buttonStyle} onClick={add}>+ Add Step</button>
+          <HelpIcon label="Adds a new workflow step. When a step is selected, the new step is inserted after it and depends on that selected step." />
         </div>
       </div>
       {steps.map((step, i) => {
@@ -1526,21 +1541,21 @@ function StepEditor({
             </div>
             <div style={stepRowStyle} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>ID</label>
+                <FieldLabel help="Stable step id used by dependencies and runtime step runs. Keep it unique in this workflow.">ID</FieldLabel>
                 <input style={inputStyle} value={step.id} placeholder="gather" onChange={(e) => update(i, { id: e.target.value })} />
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Title</label>
+                <FieldLabel help="Human-readable step title shown in issues, graph nodes, and run history.">Title</FieldLabel>
                 <input style={inputStyle} value={step.title} placeholder="데이터 수집" onChange={(e) => update(i, { title: e.target.value })} />
               </div>
             </div>
             <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
-              <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Description (에이전트에게 전달할 작업 지시)</label>
+              <FieldLabel help="Instruction text passed to the selected agent or used to describe the tool step.">Description (에이전트에게 전달할 작업 지시)</FieldLabel>
               <textarea style={{ ...textareaStyle, minHeight: "120px" }} value={step.description} placeholder="수집된 데이터를 분석하여 보고서를 작성하세요." onChange={(e) => update(i, { description: e.target.value })} rows={2} />
             </div>
             <div style={stepRowStyle} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Type</label>
+                <FieldLabel help="Agent creates an issue for a worker. Tool runs an available workflow tool directly.">Type</FieldLabel>
                 <select style={selectStyle} value={step.type} onChange={(e) => {
                   const newType = e.target.value as "agent" | "tool";
                   if (newType === "tool" && availableTools.length === 0) return;
@@ -1562,7 +1577,7 @@ function StepEditor({
               <div style={{ display: "grid", gap: "4px" }}>
                 {step.type === "tool" ? (
                   <>
-                    <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool Name</label>
+                    <FieldLabel help="Authorized tool that this tool step runs. The picker only lists tools currently available to workflows.">Tool Name</FieldLabel>
                     <WorkflowToolPicker
                       value={step.toolName}
                       multiple={false}
@@ -1572,7 +1587,7 @@ function StepEditor({
                   </>
                 ) : (
                   <>
-                    <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent</label>
+                    <FieldLabel help="Worker assigned to this step. Changing this also trims tool access to grants for that agent.">Agent</FieldLabel>
                     <select style={selectStyle} value={step.agentId || agents.find((a) => a.name === step.agentName)?.id || ""} onChange={(e) => {
                   const selectedId = e.target.value;
                   const agent = agents.find((a) => a.id === selectedId);
@@ -1592,7 +1607,7 @@ function StepEditor({
             </div>
             {step.type === "tool" && (
               <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool Args (JSON)</label>
+                <FieldLabel help="JSON arguments passed to the workflow tool. Invalid JSON is saved as an empty object by the serializer.">Tool Args (JSON)</FieldLabel>
                 <textarea
                   style={{ ...textareaStyle, minHeight: "96px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
                   value={step.toolArgs}
@@ -1605,7 +1620,7 @@ function StepEditor({
             {step.type === "agent" && (
               <>
               <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent tool access</label>
+                <FieldLabel help="Tool or skill names this agent step may use. The picker only shows tools granted to the selected agent.">Agent tool / skill access</FieldLabel>
                 <WorkflowToolPicker
                   value={step.tools}
                   multiple={true}
@@ -1613,25 +1628,77 @@ function StepEditor({
                   onChange={(value) => update(i, { tools: value })}
                 />
               </div>
-              <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
-                <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
-                  <input
-                    type="checkbox"
-                    checked={step.graphWorkProductRequired}
-                    onChange={(e) => update(i, { graphWorkProductRequired: e.target.checked })}
-                  />
-                  Require registered work product
-                </label>
-              </div>
               </>
             )}
+            <div style={{ display: "grid", gap: "6px" }} onClick={(e) => e.stopPropagation()}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <span style={{ ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>Runtime output contract</span>
+                <HelpIcon label="Controls runtime behavior for produced artifacts, input/output contracts, resources, and secrets." />
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
+                <input
+                  type="checkbox"
+                  checked={step.graphWorkProductRequired}
+                  onChange={(e) => update(i, { graphWorkProductRequired: e.target.checked })}
+                />
+                Require registered work product
+                <HelpIcon label="When enabled, the runtime expects this step to register a work product before downstream artifact gates pass." />
+              </label>
+              <div style={stepRowStyle}>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Expected output path or filename pattern for the produced work product.">Work product pattern</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    value={step.graphWorkProductPattern}
+                    placeholder="reports/*.html"
+                    onChange={(e) => update(i, { graphWorkProductPattern: e.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Comma-separated runtime resources this step can read, such as files, datasets, or service assets.">Resource refs</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    value={step.graphResourceRefs}
+                    placeholder="kb:market-rules, file:brief"
+                    onChange={(e) => update(i, { graphResourceRefs: e.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Comma-separated secret references made available to the step by the runtime.">Secret refs</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    value={step.graphSecretRefs}
+                    placeholder="secret:telegram-token"
+                    onChange={(e) => update(i, { graphSecretRefs: e.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Optional input transform expression for upstream data handed to this step.">Input expression</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    value={step.graphInputExpression}
+                    placeholder="collect.result.summary"
+                    onChange={(e) => update(i, { graphInputExpression: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Optional JSON schema or text contract describing what this step should return.">Output schema</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "58px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+                  value={step.graphOutputSchema}
+                  placeholder={'{ "type": "object", "required": ["artifactPath"] }'}
+                  onChange={(e) => update(i, { graphOutputSchema: e.target.value })}
+                />
+              </div>
+            </div>
             <div style={stepRowStyle} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Depends On (comma-separated IDs)</label>
+                <FieldLabel help="Comma-separated upstream step ids. Empty means this can be an entry step.">Depends On / upstream IDs</FieldLabel>
                 <input style={inputStyle} value={step.dependsOn} placeholder={allIds.filter((id) => id !== step.id).join(", ") || "none"} onChange={(e) => update(i, { dependsOn: e.target.value })} />
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>On Failure</label>
+                <FieldLabel help="Runtime policy when this step fails. Retry uses Max Retries and retry delay/backoff below.">On Failure</FieldLabel>
                 <select style={selectStyle} value={step.onFailure} onChange={(e) => update(i, { onFailure: e.target.value })}>
                   <option value="">default</option>
                   <option value="retry">retry</option>
@@ -1641,7 +1708,7 @@ function StepEditor({
                 </select>
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Max Retries</label>
+                <FieldLabel help="Maximum number of retry attempts when the failure policy is retry.">Max Retries</FieldLabel>
                 <input
                   style={inputStyle}
                   type="number"
@@ -1653,7 +1720,7 @@ function StepEditor({
                 />
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Timeout Seconds</label>
+                <FieldLabel help="Step-level timeout in seconds. Leave blank to use the runtime default.">Timeout Seconds</FieldLabel>
                 <input
                   style={inputStyle}
                   type="number"
@@ -1664,9 +1731,39 @@ function StepEditor({
                   onChange={(e) => update(i, { timeoutSeconds: e.target.value })}
                 />
               </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Optional delay before retrying this step.">Retry delay seconds</FieldLabel>
+                <input
+                  style={inputStyle}
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={step.graphRetryDelaySeconds}
+                  placeholder="blank"
+                  onChange={(e) => update(i, { graphRetryDelaySeconds: e.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="How retry delay grows between attempts.">Retry backoff</FieldLabel>
+                <select style={selectStyle} value={step.graphRetryBackoff} onChange={(e) => update(i, { graphRetryBackoff: e.target.value })}>
+                  <option value="">none</option>
+                  <option value="fixed">fixed</option>
+                  <option value="linear">linear</option>
+                  <option value="exponential">exponential</option>
+                </select>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
+                <input
+                  type="checkbox"
+                  checked={step.graphRetryJitter}
+                  onChange={(e) => update(i, { graphRetryJitter: e.target.checked })}
+                />
+                Add retry jitter
+                <HelpIcon label="Adds small random timing variation so multiple retries do not all fire at exactly the same time." />
+              </label>
             </div>
             <div style={{ display: "grid", gap: "6px" }} onClick={(e) => e.stopPropagation()}>
-              <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Early Stop Condition</label>
+              <FieldLabel help="Optional expression that stops the workflow early when it evaluates as true. Leave blank for normal downstream execution.">Early Stop Condition</FieldLabel>
               <textarea
                 style={{ ...textareaStyle, minHeight: "54px" }}
                 value={step.graphEarlyStopCondition}
@@ -1680,6 +1777,7 @@ function StepEditor({
                   onChange={(e) => update(i, { graphEarlyStopLabelSkipped: e.target.checked })}
                 />
                 Label flow as skipped if stopped
+                <HelpIcon label="Marks the stopped path as skipped instead of treating the early stop as a normal success path." />
               </label>
             </div>
           </div>
@@ -1692,7 +1790,7 @@ function StepEditor({
 
 const graphShellStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(620px, 1fr) 340px",
+  gridTemplateColumns: "minmax(620px, 1fr) 8px 420px",
   gap: "0",
   alignItems: "stretch",
   minHeight: 0,
@@ -1703,12 +1801,28 @@ const graphShellStyle: CSSProperties = {
   background: "var(--background, #020617)",
 };
 
+function clampGraphInspectorWidth(value: number): number {
+  return Math.min(620, Math.max(320, Math.round(value)));
+}
+
 const graphWorkbenchMainStyle: CSSProperties = {
   display: "grid",
   gridTemplateRows: "minmax(360px, 1fr) auto",
   minWidth: 0,
   minHeight: 0,
+};
+
+const graphInspectorResizeHandleStyle: CSSProperties = {
+  width: "8px",
+  minWidth: "8px",
+  cursor: "col-resize",
+  background: "color-mix(in srgb, var(--border, #334155) 72%, var(--background, #020617))",
+  borderLeft: "1px solid var(--border, #334155)",
   borderRight: "1px solid var(--border, #334155)",
+  touchAction: "none",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
 };
 
 const graphStatusStripStyle: CSSProperties = {
@@ -2547,6 +2661,7 @@ function GraphModeTabs({
 }): JSX.Element {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+      <HelpIcon label="Switch between the graph canvas, structured form fields, and raw steps JSON. Leaving JSON mode validates and imports the JSON array." />
       {(["graph", "form", "json"] as const).map((entry) => (
         <button
           key={entry}
@@ -2803,6 +2918,9 @@ function WorkflowGraphEditor({
   const [showGraphTestDrawer, setShowGraphTestDrawer] = useState<boolean>(false);
   const [showGraphEvidenceDrawer, setShowGraphEvidenceDrawer] = useState<boolean>(false);
   const [canvasScale, setCanvasScale] = useState<number>(1);
+  const [graphInspectorWidth, setGraphInspectorWidth] = useState<number>(420);
+  const [rawStepJsonText, setRawStepJsonText] = useState<string>("");
+  const [rawStepJsonFeedback, setRawStepJsonFeedback] = useState<{ tone: "info" | "error" | "success"; message: string } | null>(null);
   const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
   const { selectedCompanyId: graphCompanyId } = useCompany();
   const [graphAgents, setGraphAgents] = useState<{ id: string; name: string }[]>([]);
@@ -2936,6 +3054,11 @@ function WorkflowGraphEditor({
     const midX = startX + Math.max(34, (endX - startX) / 2);
     return { edge, x: midX, y: (startY + endY) / 2 };
   }, [graph.edges, graph.nodes, selectedEdgeId]);
+
+  useEffect(() => {
+    setRawStepJsonText(selectedRawStepJson);
+    setRawStepJsonFeedback(null);
+  }, [selectedRawStepJson]);
 
   useEffect(() => {
     const container = graphCanvasRef.current;
@@ -3167,6 +3290,27 @@ function WorkflowGraphEditor({
 
   function stopGraphControlEvent(event: React.SyntheticEvent<HTMLElement>): void {
     event.stopPropagation();
+  }
+
+  function beginGraphInspectorResize(event: React.PointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startClientX = event.clientX;
+    const startWidth = graphInspectorWidth;
+    const onMove = (moveEvent: PointerEvent): void => {
+      setGraphInspectorWidth(clampGraphInspectorWidth(startWidth - (moveEvent.clientX - startClientX)));
+    };
+    const onUp = (): void => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
   }
 
   useEffect(() => {
@@ -3639,6 +3783,51 @@ function WorkflowGraphEditor({
     );
   }
 
+  function parseRawSelectedStepJson(): StepDraft | null {
+    if (!selectedStep) return null;
+    try {
+      const parsed = JSON.parse(rawStepJsonText) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setRawStepJsonFeedback({ tone: "error", message: "Selected step JSON must be one object." });
+        return null;
+      }
+      const [draft] = jsonToSteps([parsed as WorkflowOverviewData["workflows"][number]["steps"][number]]);
+      if (!draft?.id.trim()) {
+        setRawStepJsonFeedback({ tone: "error", message: "Selected step JSON must include a non-empty id." });
+        return null;
+      }
+      const duplicate = steps.some((step) => step.id !== selectedStep.id && step.id === draft.id);
+      if (duplicate) {
+        setRawStepJsonFeedback({ tone: "error", message: `Step id "${draft.id}" already exists.` });
+        return null;
+      }
+      return draft;
+    } catch (error) {
+      setRawStepJsonFeedback({ tone: "error", message: `JSON parse failed: ${error instanceof Error ? error.message : String(error)}` });
+      return null;
+    }
+  }
+
+  function validateRawSelectedStepJson(): void {
+    const parsed = parseRawSelectedStepJson();
+    if (!parsed) return;
+    setRawStepJsonFeedback({ tone: "success", message: `Valid step JSON for ${parsed.id}.` });
+  }
+
+    function applyRawSelectedStepJson(): void {
+      if (!selectedStep) return;
+      const parsed = parseRawSelectedStepJson();
+      if (!parsed) return;
+      const renamedSteps = parsed.id !== selectedStep.id
+        ? renameWorkflowStep(steps, selectedStep.id, parsed.id)
+        : steps;
+      onChange(renamedSteps.map((step) => (step.id === parsed.id ? parsed : step)));
+      setSelectedStepId(parsed.id);
+    setSelectedPathStepIds(parsed.id.trim() ? [parsed.id] : []);
+    setRawStepJsonFeedback({ tone: "success", message: `Applied JSON to ${parsed.id}.` });
+    setGraphError("");
+  }
+
   if (steps.length === 0) {
     return (
       <div style={formPanelStyle}>
@@ -3660,7 +3849,7 @@ function WorkflowGraphEditor({
   }
 
   return (
-    <div style={graphShellStyle}>
+    <div style={{ ...graphShellStyle, gridTemplateColumns: `minmax(620px, 1fr) 8px ${graphInspectorWidth}px` }}>
       {surface === "stacked" ? (
         <div
           key="graph-trigger-summary"
@@ -4235,6 +4424,17 @@ function WorkflowGraphEditor({
         </div>
       </div>
 
+      <div
+        key="graph-inspector-resize"
+        aria-label="Resize graph inspector"
+        role="separator"
+        style={graphInspectorResizeHandleStyle}
+        title="Drag to resize Inspector"
+        onPointerDown={beginGraphInspectorResize}
+      >
+        <span style={{ width: "2px", height: "42px", borderRadius: "2px", background: "var(--muted-foreground, #94a3b8)", opacity: 0.55 }} />
+      </div>
+
       <aside key="graph-sidebar" style={graphSidebarStyle}>
         <div key="graph-inspector-mode" style={{ display: "grid", gap: "8px", paddingBottom: "8px", borderBottom: "1px solid var(--border, #334155)" }}>
           <div key="inspector-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
@@ -4584,7 +4784,7 @@ function WorkflowGraphEditor({
             {showEditInspector ? (
             <Fragment key="selected-step-edit-fields">
             <div key="step-id-field" style={{ display: "grid", gap: "4px" }}>
-              <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Step ID</label>
+              <FieldLabel help="Stable step id used by dependencies, graph edges, and step-run records. Renaming updates the graph references.">Step ID</FieldLabel>
               <input
                 key="input"
                 style={inputStyle}
@@ -4593,11 +4793,11 @@ function WorkflowGraphEditor({
               />
             </div>
             <div key="step-title-field" style={{ display: "grid", gap: "4px" }}>
-              <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Title</label>
+              <FieldLabel help="Human-readable title shown on graph nodes, generated issues, and run history.">Title</FieldLabel>
               <input key="input" style={inputStyle} value={selectedStep.title} onChange={(event) => updateSelected({ title: event.target.value })} />
             </div>
             <div key="step-type-field" style={{ display: "grid", gap: "4px" }}>
-              <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Type</label>
+              <FieldLabel help="Agent creates a worker issue for an assignee. Tool runs an authorized workflow tool directly.">Type</FieldLabel>
               <select key="select" style={selectStyle} value={selectedStep.type} onChange={(event) => {
                 const newType = event.target.value as "agent" | "tool";
                 if (newType === "tool" && availableTools.length === 0) return;
@@ -4617,13 +4817,13 @@ function WorkflowGraphEditor({
               ) : null}
             </div>
             <div key="step-description-field" style={{ display: "grid", gap: "4px" }}>
-              <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Description</label>
+              <FieldLabel help="Instruction text passed to the agent or used to describe the tool step.">Description</FieldLabel>
               <textarea key="textarea" style={{ ...textareaStyle, minHeight: "76px" }} value={selectedStep.description} onChange={(event) => updateSelected({ description: event.target.value })} />
             </div>
             {selectedStep.type === "tool" ? (
               <Fragment key="tool-step-fields">
                 <div key="tool-name-field" style={{ display: "grid", gap: "4px" }}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool</label>
+                  <FieldLabel help="Authorized workflow tool this selected step will run. Unavailable selections remain visible for cleanup.">Tool</FieldLabel>
                   <WorkflowToolPicker
                     value={selectedStep.toolName}
                     multiple={false}
@@ -4632,7 +4832,7 @@ function WorkflowGraphEditor({
                   />
                 </div>
                 <div key="tool-args-field" style={{ display: "grid", gap: "4px" }}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool Args (JSON)</label>
+                  <FieldLabel help="JSON arguments sent to the selected workflow tool. Keep this valid JSON for predictable execution.">Tool Args (JSON)</FieldLabel>
                   <textarea
                     style={{ ...textareaStyle, minHeight: "92px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: "12px" }}
                     value={selectedStep.toolArgs}
@@ -4643,7 +4843,7 @@ function WorkflowGraphEditor({
             ) : (
               <Fragment key="agent-step-fields">
                 <div key="agent-name-field" style={{ display: "grid", gap: "4px" }}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent</label>
+                  <FieldLabel help="Agent assigned to execute this step. Changing the agent also trims tool grants to that agent.">Agent</FieldLabel>
                   <select style={selectStyle} value={selectedStep.agentId || graphAgents.find((a) => a.name === selectedStep.agentName)?.id || ""} onChange={(event) => {
                     const selectedId = event.target.value;
                     const agent = graphAgents.find((a) => a.id === selectedId);
@@ -4659,7 +4859,7 @@ function WorkflowGraphEditor({
                   </select>
                 </div>
                 <div key="agent-tool-access-field" style={{ display: "grid", gap: "4px" }}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Agent tool access</label>
+                  <FieldLabel help="Tools or skills this agent step may use while executing. The picker is filtered by grants for the selected agent.">Agent tool access</FieldLabel>
                   <WorkflowToolPicker
                     value={selectedStep.tools}
                     multiple={true}
@@ -4667,11 +4867,78 @@ function WorkflowGraphEditor({
                     onChange={(value) => updateSelected({ tools: value })}
                   />
                 </div>
-              </Fragment>
-            )}
-            <button key="add-downstream" type="button" style={primaryButtonStyle} onClick={() => addAfter(selectedStep.id)}>
-              Add downstream step
-            </button>
+                </Fragment>
+              )}
+              <div key="edit-runtime-contract" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>
+                  Runtime contract
+                  <HelpIcon label="Runtime-affecting output, resource, and secret settings for this selected step." />
+                </span>
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedStep.graphWorkProductRequired}
+                    onChange={(event) => updateSelectedDataFlow({ graphWorkProductRequired: event.target.checked })}
+                  />
+                  Require registered work product
+                  <HelpIcon label="When enabled, downstream artifact gates expect this step to register a work product." />
+                </label>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Expected output path or filename pattern for the work product this step must produce.">Work product pattern</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      value={selectedStep.graphWorkProductPattern}
+                    placeholder="reports/*.html"
+                      onChange={(event) => updateSelectedDataFlow({ graphWorkProductPattern: event.target.value })}
+                    />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                    <div style={{ display: "grid", gap: "4px" }}>
+                      <FieldLabel help="Optional input transform expression for upstream data handed to this step.">Input expression</FieldLabel>
+                      <input
+                        style={inputStyle}
+                        value={selectedStep.graphInputExpression}
+                        placeholder="collect.result.summary"
+                        onChange={(event) => updateSelectedDataFlow({ graphInputExpression: event.target.value })}
+                      />
+                    </div>
+                    <div style={{ display: "grid", gap: "4px" }}>
+                      <FieldLabel help="Optional JSON schema or text contract describing what this step should return.">Output schema</FieldLabel>
+                      <textarea
+                        style={{ ...textareaStyle, minHeight: "58px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+                        value={selectedStep.graphOutputSchema}
+                        placeholder={'{ "type": "object", "required": ["artifactPath"] }'}
+                        onChange={(event) => updateSelectedDataFlow({ graphOutputSchema: event.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Comma-separated resources this step can read at runtime.">Resource refs</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      value={selectedStep.graphResourceRefs}
+                      placeholder="kb:market-rules, file:brief"
+                      onChange={(event) => updateSelectedResources({ graphResourceRefs: event.target.value })}
+                    />
+                  </div>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Comma-separated secret references made available to this step.">Secret refs</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      value={selectedStep.graphSecretRefs}
+                      placeholder="secret:api-token"
+                      onChange={(event) => updateSelectedResources({ graphSecretRefs: event.target.value })}
+                    />
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <button key="add-downstream" type="button" style={primaryButtonStyle} onClick={() => addAfter(selectedStep.id)}>
+                  Add downstream step
+                </button>
+                <HelpIcon label="Creates a new step after the selected one and connects it as a downstream dependency." />
+              </div>
             <div key="node-actions" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
               <button type="button" style={buttonStyle} onClick={duplicateSelectedStep}>
                 Duplicate selected
@@ -4687,6 +4954,7 @@ function WorkflowGraphEditor({
               >
                 Delete selected
               </button>
+              <HelpIcon label="Duplicate copies the selected node and settings. Delete removes the selected node or relationship from the draft graph." />
             </div>
             </Fragment>
             ) : (
@@ -4695,7 +4963,11 @@ function WorkflowGraphEditor({
             {showPolicyInspector ? (
             <Fragment key="selected-step-policy-fields">
             <div key="advanced-policy" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Step policy</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
+                Step policy
+                <HelpIcon label="Failure, retry, wait, approval, execution, and testing controls for the selected step." />
+              </span>
+              <FieldLabel help="What the workflow engine should do when this step fails. Retry uses the retry fields below.">Failure policy</FieldLabel>
               <select
                 style={selectStyle}
                 value={selectedStep.onFailure}
@@ -4708,48 +4980,60 @@ function WorkflowGraphEditor({
                 <option value="escalate">Escalate</option>
               </select>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <input
-                  style={inputStyle}
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={selectedStep.maxRetries}
-                  placeholder={selectedStep.onFailure === "retry" ? "max retries (default 2)" : "max retries"}
-                  onChange={(event) => updateSelectedAdvanced({ maxRetries: event.target.value })}
-                />
-                <input
-                  style={inputStyle}
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={selectedStep.timeoutSeconds}
-                  placeholder="timeout seconds"
-                  onChange={(event) => updateSelectedAdvanced({ timeoutSeconds: event.target.value })}
-                />
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Maximum retry attempts for this step when retry is enabled. Zero disables retries.">Max retries</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={selectedStep.maxRetries}
+                    placeholder={selectedStep.onFailure === "retry" ? "max retries (default 2)" : "max retries"}
+                    onChange={(event) => updateSelectedAdvanced({ maxRetries: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Maximum seconds this step may run before the workflow marks it timed out.">Timeout seconds</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={selectedStep.timeoutSeconds}
+                    placeholder="timeout seconds"
+                    onChange={(event) => updateSelectedAdvanced({ timeoutSeconds: event.target.value })}
+                  />
+                </div>
               </div>
               <details key="advanced-policy-details" style={workflowPolicyDetailsStyle}>
                 <summary style={workflowPolicyDetailsSummaryStyle}>Advanced policy</summary>
                 <div key="advanced-policy-fields" style={{ display: "grid", gap: "8px", paddingTop: "8px" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <input
-                  style={inputStyle}
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={selectedStep.graphRetryDelaySeconds}
-                  placeholder="retry delay seconds"
-                  onChange={(event) => updateSelectedAdvanced({ graphRetryDelaySeconds: event.target.value })}
-                />
-                <select
-                  style={selectStyle}
-                  value={selectedStep.graphRetryBackoff}
-                  onChange={(event) => updateSelectedAdvanced({ graphRetryBackoff: event.target.value })}
-                >
-                  <option value="">No retry backoff</option>
-                  <option value="fixed">Fixed backoff</option>
-                  <option value="linear">Linear backoff</option>
-                  <option value="exponential">Exponential backoff</option>
-                </select>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Seconds to wait before retrying this step. Leave blank for the runtime default.">Retry delay seconds</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={selectedStep.graphRetryDelaySeconds}
+                    placeholder="retry delay seconds"
+                    onChange={(event) => updateSelectedAdvanced({ graphRetryDelaySeconds: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="How retry delay changes across attempts. Exponential increases fastest.">Retry backoff</FieldLabel>
+                  <select
+                    style={selectStyle}
+                    value={selectedStep.graphRetryBackoff}
+                    onChange={(event) => updateSelectedAdvanced({ graphRetryBackoff: event.target.value })}
+                  >
+                    <option value="">No retry backoff</option>
+                    <option value="fixed">Fixed backoff</option>
+                    <option value="linear">Linear backoff</option>
+                    <option value="exponential">Exponential backoff</option>
+                  </select>
+                </div>
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
@@ -4758,9 +5042,13 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedAdvanced({ graphRetryJitter: event.target.checked })}
                 />
                 Add retry jitter
+                <HelpIcon label="Adds small random timing variation to avoid many retries firing at the same instant." />
               </label>
               <div style={{ display: "grid", gap: "6px", paddingTop: "4px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Error handler</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
+                  Error handler
+                  <HelpIcon label="Routes failed-step payloads into a handler scope instead of letting the failure stand alone." />
+                </span>
                 <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                   <input
                     type="checkbox"
@@ -4768,28 +5056,38 @@ function WorkflowGraphEditor({
                     onChange={(event) => updateSelectedAdvanced({ graphErrorHandler: event.target.checked })}
                   />
                   Handle failed flow step payloads
+                  <HelpIcon label="Enables a handler path that receives failure details from this step." />
                 </label>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                  <select
-                    style={selectStyle}
-                    value={selectedStep.graphErrorHandlerScope}
-                    onChange={(event) => updateSelectedAdvanced({ graphErrorHandlerScope: event.target.value })}
-                  >
-                    <option value="">No handler scope</option>
-                    <option value="flow">Flow error handler</option>
-                    <option value="branch">Branch error handler</option>
-                    <option value="step">Step error handler</option>
-                  </select>
-                  <input
-                    style={inputStyle}
-                    value={selectedStep.graphErrorHandlerInput}
-                    placeholder="error payload expression"
-                    onChange={(event) => updateSelectedAdvanced({ graphErrorHandlerInput: event.target.value })}
-                  />
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Scope that should handle failures from this step.">Handler scope</FieldLabel>
+                    <select
+                      style={selectStyle}
+                      value={selectedStep.graphErrorHandlerScope}
+                      onChange={(event) => updateSelectedAdvanced({ graphErrorHandlerScope: event.target.value })}
+                    >
+                      <option value="">No handler scope</option>
+                      <option value="flow">Flow error handler</option>
+                      <option value="branch">Branch error handler</option>
+                      <option value="step">Step error handler</option>
+                    </select>
+                  </div>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Expression used to build the payload passed into the error handler.">Error payload expression</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      value={selectedStep.graphErrorHandlerInput}
+                      placeholder="error payload expression"
+                      onChange={(event) => updateSelectedAdvanced({ graphErrorHandlerInput: event.target.value })}
+                    />
+                  </div>
                 </div>
               </div>
               <div style={{ display: "grid", gap: "6px", paddingTop: "4px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Restart boundary</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
+                  Restart boundary
+                  <HelpIcon label="Controls whether a failed or paused workflow can resume from this step instead of rerunning everything." />
+                </span>
                 <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                   <input
                     type="checkbox"
@@ -4797,68 +5095,90 @@ function WorkflowGraphEditor({
                     onChange={(event) => updateSelectedAdvanced({ graphRestartBoundary: event.target.checked })}
                   />
                   Allow restart from this step
+                  <HelpIcon label="Marks this step as a legal recovery point for reruns and resumes." />
                 </label>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                  <select
-                    style={selectStyle}
-                    value={selectedStep.graphRestartStrategy}
-                    onChange={(event) => updateSelectedAdvanced({ graphRestartStrategy: event.target.value })}
-                  >
-                    <option value="">No restart strategy</option>
-                    <option value="copy-predecessors">Copy predecessors</option>
-                    <option value="fresh">Fresh restart</option>
-                    <option value="copy-branch">Copy branch/iteration</option>
-                  </select>
-                  <input
-                    style={inputStyle}
-                    value={selectedStep.graphRestartInput}
-                    placeholder="restart input or branch selector"
-                    onChange={(event) => updateSelectedAdvanced({ graphRestartInput: event.target.value })}
-                  />
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="How much existing context should be copied when restarting from this step.">Restart strategy</FieldLabel>
+                    <select
+                      style={selectStyle}
+                      value={selectedStep.graphRestartStrategy}
+                      onChange={(event) => updateSelectedAdvanced({ graphRestartStrategy: event.target.value })}
+                    >
+                      <option value="">No restart strategy</option>
+                      <option value="copy-predecessors">Copy predecessors</option>
+                      <option value="fresh">Fresh restart</option>
+                      <option value="copy-branch">Copy branch/iteration</option>
+                    </select>
+                  </div>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Optional selector or payload expression used when this step restarts.">Restart input</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      value={selectedStep.graphRestartInput}
+                      placeholder="restart input or branch selector"
+                      onChange={(event) => updateSelectedAdvanced({ graphRestartInput: event.target.value })}
+                    />
+                  </div>
                 </div>
               </div>
               <div style={{ display: "grid", gap: "6px", paddingTop: "4px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Wait controls</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
+                  Wait controls
+                  <HelpIcon label="Sleep and suspend settings that delay this step or wait for an external event." />
+                </span>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                  <input
-                    style={inputStyle}
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={selectedStep.graphSleepSeconds}
-                    placeholder="sleep seconds"
-                    onChange={(event) => updateSelectedAdvanced({ graphSleepSeconds: event.target.value })}
-                  />
-                  <input
-                    style={inputStyle}
-                    value={selectedStep.graphSuspendUntil}
-                    placeholder="Suspend until event"
-                    onChange={(event) => updateSelectedAdvanced({ graphSuspendUntil: event.target.value })}
-                  />
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Seconds to pause before continuing this step.">Sleep seconds</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={selectedStep.graphSleepSeconds}
+                      placeholder="sleep seconds"
+                      onChange={(event) => updateSelectedAdvanced({ graphSleepSeconds: event.target.value })}
+                    />
+                  </div>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="External event or condition that must occur before the step resumes.">Suspend until event</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      value={selectedStep.graphSuspendUntil}
+                      placeholder="Suspend until event"
+                      onChange={(event) => updateSelectedAdvanced({ graphSuspendUntil: event.target.value })}
+                    />
+                  </div>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                  <input
-                    style={inputStyle}
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={selectedStep.graphSuspendTimeoutSeconds}
-                    placeholder="suspend timeout seconds"
-                    onChange={(event) => updateSelectedAdvanced({ graphSuspendTimeoutSeconds: event.target.value })}
-                  />
-                  <select
-                    style={selectStyle}
-                    value={selectedStep.graphSuspendTimeoutAction}
-                    onChange={(event) => updateSelectedAdvanced({ graphSuspendTimeoutAction: event.target.value })}
-                  >
-                    <option value="">No suspend timeout action</option>
-                    <option value="resume">Resume on timeout</option>
-                    <option value="cancel">Cancel on timeout</option>
-                  </select>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Maximum seconds to wait for the suspend event before applying the timeout action.">Suspend timeout seconds</FieldLabel>
+                    <input
+                      style={inputStyle}
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={selectedStep.graphSuspendTimeoutSeconds}
+                      placeholder="suspend timeout seconds"
+                      onChange={(event) => updateSelectedAdvanced({ graphSuspendTimeoutSeconds: event.target.value })}
+                    />
+                  </div>
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="What to do if the suspend timeout is reached.">Suspend timeout action</FieldLabel>
+                    <select
+                      style={selectStyle}
+                      value={selectedStep.graphSuspendTimeoutAction}
+                      onChange={(event) => updateSelectedAdvanced({ graphSuspendTimeoutAction: event.target.value })}
+                    >
+                      <option value="">No suspend timeout action</option>
+                      <option value="resume">Resume on timeout</option>
+                      <option value="cancel">Cancel on timeout</option>
+                    </select>
+                  </div>
                 </div>
               </div>
               <div style={{ display: "grid", gap: "6px", paddingTop: "4px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Early response</span>
+                <HelpedText help="Controls the immediate response returned to synchronous or webhook-style callers before the whole workflow finishes.">Early response</HelpedText>
                 <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                   <input
                     type="checkbox"
@@ -4866,26 +5186,36 @@ function WorkflowGraphEditor({
                     onChange={(event) => updateSelectedAdvanced({ graphEarlyReturn: event.target.checked })}
                   />
                   Return this step for sync/webhook callers
+                  <HelpIcon label="When enabled, this step's output can be returned as the caller-facing response." />
                 </label>
-                <input
-                  style={inputStyle}
-                  value={selectedStep.graphEarlyReturnContentType}
-                  placeholder="response content type"
-                  onChange={(event) => updateSelectedAdvanced({ graphEarlyReturnContentType: event.target.value })}
-                />
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Content type for the early response, such as application/json or text/plain.">Response content type</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    value={selectedStep.graphEarlyReturnContentType}
+                    placeholder="response content type"
+                    onChange={(event) => updateSelectedAdvanced({ graphEarlyReturnContentType: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Schema or contract describing the early response payload.">Early response schema</FieldLabel>
+                  <textarea
+                    style={{ ...textareaStyle, minHeight: "58px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}
+                    value={selectedStep.graphEarlyReturnSchema}
+                    placeholder={'Early response schema, e.g. { "required": ["publicUrl"] }'}
+                    onChange={(event) => updateSelectedAdvanced({ graphEarlyReturnSchema: event.target.value })}
+                  />
+                </div>
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Expression that stops this flow early when it evaluates true.">Early stop condition</FieldLabel>
                 <textarea
-                  style={{ ...textareaStyle, minHeight: "58px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}
-                  value={selectedStep.graphEarlyReturnSchema}
-                  placeholder={'Early response schema, e.g. { "required": ["publicUrl"] }'}
-                  onChange={(event) => updateSelectedAdvanced({ graphEarlyReturnSchema: event.target.value })}
+                  style={{ ...textareaStyle, minHeight: "58px" }}
+                  value={selectedStep.graphEarlyStopCondition}
+                  placeholder="Early stop condition"
+                  onChange={(event) => updateSelectedAdvanced({ graphEarlyStopCondition: event.target.value })}
                 />
               </div>
-              <textarea
-                style={{ ...textareaStyle, minHeight: "58px" }}
-                value={selectedStep.graphEarlyStopCondition}
-                placeholder="Early stop condition"
-                onChange={(event) => updateSelectedAdvanced({ graphEarlyStopCondition: event.target.value })}
-              />
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -4893,10 +5223,11 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedAdvanced({ graphEarlyStopLabelSkipped: event.target.checked })}
                 />
                 Label flow as skipped if stopped
+                <HelpIcon label="Marks steps bypassed by the early-stop condition as skipped instead of leaving them ambiguous." />
               </label>
             </div>
             <div key="approval-gate" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Approval gate</span>
+              <HelpedText help="Adds a human approval pause before this step can continue.">Approval gate</HelpedText>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -4904,70 +5235,92 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedApproval({ graphApprovalRequired: event.target.checked })}
                 />
                 Suspend until approved
+                <HelpIcon label="When enabled, execution pauses and waits for approval before this step proceeds." />
               </label>
-              <textarea
-                style={{ ...textareaStyle, minHeight: "58px" }}
-                value={selectedStep.graphApprovalPrompt}
-                placeholder="Approval prompt"
-                onChange={(event) => updateSelectedApproval({ graphApprovalPrompt: event.target.value })}
-              />
-              <input
-                style={inputStyle}
-                value={selectedStep.graphApprovalRecipients}
-                placeholder="Approvers, comma-separated"
-                onChange={(event) => updateSelectedApproval({ graphApprovalRecipients: event.target.value })}
-              />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Message shown to approvers so they know what they are approving.">Approval prompt</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "58px" }}
+                  value={selectedStep.graphApprovalPrompt}
+                  placeholder="Approval prompt"
+                  onChange={(event) => updateSelectedApproval({ graphApprovalPrompt: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Comma-separated approver identifiers or groups allowed to approve this gate.">Approvers</FieldLabel>
                 <input
                   style={inputStyle}
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={selectedStep.graphApprovalTimeoutSeconds}
-                  placeholder="timeout seconds"
-                  onChange={(event) => updateSelectedApproval({ graphApprovalTimeoutSeconds: event.target.value })}
+                  value={selectedStep.graphApprovalRecipients}
+                  placeholder="Approvers, comma-separated"
+                  onChange={(event) => updateSelectedApproval({ graphApprovalRecipients: event.target.value })}
                 />
-                <select
-                  style={selectStyle}
-                  value={selectedStep.graphApprovalTimeoutAction}
-                  onChange={(event) => updateSelectedApproval({ graphApprovalTimeoutAction: event.target.value })}
-                >
-                  <option value="">No timeout action</option>
-                  <option value="cancel">Cancel on timeout</option>
-                  <option value="resume">Resume on timeout</option>
-                </select>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Seconds to wait for approval before the timeout action is applied.">Approval timeout seconds</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={selectedStep.graphApprovalTimeoutSeconds}
+                    placeholder="timeout seconds"
+                    onChange={(event) => updateSelectedApproval({ graphApprovalTimeoutSeconds: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="What the workflow should do if approval does not arrive in time.">Approval timeout action</FieldLabel>
+                  <select
+                    style={selectStyle}
+                    value={selectedStep.graphApprovalTimeoutAction}
+                    onChange={(event) => updateSelectedApproval({ graphApprovalTimeoutAction: event.target.value })}
+                  >
+                    <option value="">No timeout action</option>
+                    <option value="cancel">Cancel on timeout</option>
+                    <option value="resume">Resume on timeout</option>
+                  </select>
+                </div>
               </div>
             </div>
             <div key="execution-controls" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Execution controls</span>
+              <HelpedText help="Runtime scheduling controls for concurrency, priority, caching, and retention.">Execution controls</HelpedText>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <input
-                  style={inputStyle}
-                  value={selectedStep.graphConcurrencyKey}
-                  placeholder="concurrency key"
-                  onChange={(event) => updateSelectedExecution({ graphConcurrencyKey: event.target.value })}
-                />
-                <input
-                  style={inputStyle}
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={selectedStep.graphConcurrencyLimit}
-                  placeholder="concurrency limit"
-                  onChange={(event) => updateSelectedExecution({ graphConcurrencyLimit: event.target.value })}
-                />
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Shared key used to group steps that should not run too many copies at once.">Concurrency key</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    value={selectedStep.graphConcurrencyKey}
+                    placeholder="concurrency key"
+                    onChange={(event) => updateSelectedExecution({ graphConcurrencyKey: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Maximum number of steps with this concurrency key that may run together.">Concurrency limit</FieldLabel>
+                  <input
+                    style={inputStyle}
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={selectedStep.graphConcurrencyLimit}
+                    placeholder="concurrency limit"
+                    onChange={(event) => updateSelectedExecution({ graphConcurrencyLimit: event.target.value })}
+                  />
+                </div>
               </div>
-              <select
-                style={selectStyle}
-                value={selectedStep.graphPriority}
-                onChange={(event) => updateSelectedExecution({ graphPriority: event.target.value })}
-              >
-                <option value="">Default priority</option>
-                <option value="low">Low priority</option>
-                <option value="normal">Normal priority</option>
-                <option value="high">High priority</option>
-                <option value="critical">Critical priority</option>
-              </select>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Relative scheduling priority for this step.">Priority</FieldLabel>
+                <select
+                  style={selectStyle}
+                  value={selectedStep.graphPriority}
+                  onChange={(event) => updateSelectedExecution({ graphPriority: event.target.value })}
+                >
+                  <option value="">Default priority</option>
+                  <option value="low">Low priority</option>
+                  <option value="normal">Normal priority</option>
+                  <option value="high">High priority</option>
+                  <option value="critical">Critical priority</option>
+                </select>
+              </div>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -4975,16 +5328,20 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedExecution({ graphCacheEnabled: event.target.checked })}
                 />
                 Cache step result
+                <HelpIcon label="Reuses this step result while the cache entry is valid." />
               </label>
-              <input
-                style={inputStyle}
-                type="number"
-                min={1}
-                step={1}
-                value={selectedStep.graphCacheTtlSeconds}
-                placeholder="cache ttl seconds"
-                onChange={(event) => updateSelectedExecution({ graphCacheTtlSeconds: event.target.value })}
-              />
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="How long the cached result remains valid, in seconds.">Cache TTL seconds</FieldLabel>
+                <input
+                  style={inputStyle}
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={selectedStep.graphCacheTtlSeconds}
+                  placeholder="cache ttl seconds"
+                  onChange={(event) => updateSelectedExecution({ graphCacheTtlSeconds: event.target.value })}
+                />
+              </div>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -4992,22 +5349,29 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedExecution({ graphDeleteAfterUse: event.target.checked })}
                 />
                 Delete logs and results after use
+                <HelpIcon label="Deletes transient run logs/results after downstream consumers have used them." />
               </label>
             </div>
             <div key="data-flow-contract" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Data flow contract</span>
-              <textarea
-                style={{ ...textareaStyle, minHeight: "58px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-                value={selectedStep.graphInputExpression}
-                placeholder="Input transform, e.g. select.result.summary"
-                onChange={(event) => updateSelectedDataFlow({ graphInputExpression: event.target.value })}
-              />
-              <textarea
-                style={{ ...textareaStyle, minHeight: "72px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-                value={selectedStep.graphOutputSchema}
-                placeholder={'Output schema, e.g. { "type": "object", "required": ["htmlPath"] }'}
-                onChange={(event) => updateSelectedDataFlow({ graphOutputSchema: event.target.value })}
-              />
+              <HelpedText help="Defines how this step receives upstream data and what output contract downstream gates should expect.">Data flow contract</HelpedText>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Expression that transforms upstream results into this step's input.">Input transform</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "58px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+                  value={selectedStep.graphInputExpression}
+                  placeholder="Input transform, e.g. select.result.summary"
+                  onChange={(event) => updateSelectedDataFlow({ graphInputExpression: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="JSON schema or text contract describing the result this step must return.">Output schema</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "72px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+                  value={selectedStep.graphOutputSchema}
+                  placeholder={'Output schema, e.g. { "type": "object", "required": ["htmlPath"] }'}
+                  onChange={(event) => updateSelectedDataFlow({ graphOutputSchema: event.target.value })}
+                />
+              </div>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -5015,13 +5379,17 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedDataFlow({ graphWorkProductRequired: event.target.checked })}
                 />
                 Require registered work product
+                <HelpIcon label="Requires this step to produce a registered work product before artifact-dependent downstream steps pass." />
               </label>
-              <input
-                style={inputStyle}
-                value={selectedStep.graphWorkProductPattern}
-                placeholder="Expected output path pattern"
-                onChange={(event) => updateSelectedDataFlow({ graphWorkProductPattern: event.target.value })}
-              />
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Expected output path or filename pattern for the required work product.">Work product pattern</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphWorkProductPattern}
+                  placeholder="Expected output path pattern"
+                  onChange={(event) => updateSelectedDataFlow({ graphWorkProductPattern: event.target.value })}
+                />
+              </div>
               {selectedDataFlowMap ? (
                 <div
                   style={{
@@ -5084,22 +5452,28 @@ function WorkflowGraphEditor({
               ) : null}
             </div>
             <div key="resource-bindings" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Resource bindings</span>
-              <input
-                style={inputStyle}
-                value={selectedStep.graphResourceRefs}
-                placeholder="Resources, comma-separated"
-                onChange={(event) => updateSelectedResources({ graphResourceRefs: event.target.value })}
-              />
-              <input
-                style={inputStyle}
-                value={selectedStep.graphSecretRefs}
-                placeholder="Secret references, comma-separated"
-                onChange={(event) => updateSelectedResources({ graphSecretRefs: event.target.value })}
-              />
+              <HelpedText help="Binds runtime-visible resources and secret references to this step.">Resource bindings</HelpedText>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Comma-separated resource references this step may read.">Resources</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphResourceRefs}
+                  placeholder="Resources, comma-separated"
+                  onChange={(event) => updateSelectedResources({ graphResourceRefs: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Comma-separated secret references exposed to this step.">Secret references</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphSecretRefs}
+                  placeholder="Secret references, comma-separated"
+                  onChange={(event) => updateSelectedResources({ graphSecretRefs: event.target.value })}
+                />
+              </div>
             </div>
             <div key="testing-overrides" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Testing overrides</span>
+              <HelpedText help="Overrides used by test previews and focused step testing without changing normal runtime behavior.">Testing overrides</HelpedText>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -5107,40 +5481,56 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedTesting({ graphMockEnabled: event.target.checked })}
                 />
                 Mock step result while testing
+                <HelpIcon label="Uses the mock result below during test previews instead of requiring the real step to run." />
               </label>
-              <textarea
-                style={{ ...textareaStyle, minHeight: "72px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-                value={selectedStep.graphMockResult}
-                placeholder={'{ "status": "ok" }'}
-                onChange={(event) => updateSelectedTesting({ graphMockResult: event.target.value })}
-              />
-              <input
-                style={inputStyle}
-                value={selectedStep.graphPinnedResultRunId}
-                placeholder="Pinned run or step result id"
-                onChange={(event) => updateSelectedTesting({ graphPinnedResultRunId: event.target.value })}
-              />
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="JSON-like result returned for this step in test previews when mock mode is enabled.">Mock result</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "72px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+                  value={selectedStep.graphMockResult}
+                  placeholder={'{ "status": "ok" }'}
+                  onChange={(event) => updateSelectedTesting({ graphMockResult: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Existing run or step result id to reuse during test previews.">Pinned result id</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphPinnedResultRunId}
+                  placeholder="Pinned run or step result id"
+                  onChange={(event) => updateSelectedTesting({ graphPinnedResultRunId: event.target.value })}
+                />
+              </div>
             </div>
             <div key="graph-group" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Graph group</span>
-              <input
-                style={inputStyle}
-                value={selectedStep.graphGroupId}
-                placeholder="group-id"
-                onChange={(event) => updateSelected({ graphGroupId: event.target.value })}
-              />
-              <input
-                style={inputStyle}
-                value={selectedGroup?.title ?? selectedStep.graphGroupTitle}
-                placeholder="Group title"
-                onChange={(event) => updateSelectedGroupMetadata({ title: event.target.value })}
-              />
-              <input
-                type="color"
-                style={{ ...inputStyle, height: "36px", padding: "4px" }}
-                value={(selectedGroup?.color ?? selectedStep.graphGroupColor) || "#64748b"}
-                onChange={(event) => updateSelectedGroupMetadata({ color: event.target.value })}
-              />
+              <HelpedText help="Visual grouping metadata used to organize graph nodes.">Graph group</HelpedText>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Group id shared by steps that should appear in the same visual group.">Group ID</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphGroupId}
+                  placeholder="group-id"
+                  onChange={(event) => updateSelected({ graphGroupId: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Human-readable title shown on the group frame.">Group title</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedGroup?.title ?? selectedStep.graphGroupTitle}
+                  placeholder="Group title"
+                  onChange={(event) => updateSelectedGroupMetadata({ title: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Accent color used for the visual group.">Group color</FieldLabel>
+                <input
+                  type="color"
+                  style={{ ...inputStyle, height: "36px", padding: "4px" }}
+                  value={(selectedGroup?.color ?? selectedStep.graphGroupColor) || "#64748b"}
+                  onChange={(event) => updateSelectedGroupMetadata({ color: event.target.value })}
+                />
+              </div>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
@@ -5148,86 +5538,117 @@ function WorkflowGraphEditor({
                   onChange={(event) => updateSelectedGroupMetadata({ collapsedByDefault: event.target.checked })}
                 />
                 Collapsed by default
+                <HelpIcon label="Starts this group collapsed when the graph first renders." />
               </label>
-              <button type="button" style={buttonStyle} onClick={groupSelectedWithDependencies}>
-                Group with upstream steps
-              </button>
-              {selectedStep.graphGroupId.trim() ? (
-                <button
-                  type="button"
-                  style={buttonStyle}
-                  onClick={() => setSelectedGroupCollapsed(!(selectedGroup?.collapsed ?? selectedStep.graphGroupCollapsed ?? false))}
-                >
-                  {(selectedGroup?.collapsed ?? selectedStep.graphGroupCollapsed ?? false) ? "Expand selected group" : "Collapse selected group"}
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <button type="button" style={buttonStyle} onClick={groupSelectedWithDependencies}>
+                  Group with upstream steps
                 </button>
+                <HelpIcon label="Creates or updates a group that includes the selected step and its upstream dependencies." />
+              </div>
+              {selectedStep.graphGroupId.trim() ? (
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    style={buttonStyle}
+                    onClick={() => setSelectedGroupCollapsed(!(selectedGroup?.collapsed ?? selectedStep.graphGroupCollapsed ?? false))}
+                  >
+                    {(selectedGroup?.collapsed ?? selectedStep.graphGroupCollapsed ?? false) ? "Expand selected group" : "Collapse selected group"}
+                  </button>
+                  <HelpIcon label="Temporarily toggles visibility for the selected group in the graph canvas." />
+                </div>
               ) : (
                 <Fragment key="collapse-group-placeholder" />
               )}
-              <button type="button" style={buttonStyle} onClick={clearSelectedGroup}>
-                Clear selected group
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <button type="button" style={buttonStyle} onClick={clearSelectedGroup}>
+                  Clear selected group
+                </button>
+                <HelpIcon label="Removes the selected step from its current visual group." />
+              </div>
             </div>
             <div key="flow-container" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Flow container</span>
-              <select
-                style={selectStyle}
-                value={selectedStep.graphContainerType}
-                onChange={(event) => updateSelectedContainerMetadata({
-                  graphContainerType: event.target.value as WorkflowGraphContainerType,
-                  graphContainerMode: event.target.value === "loop" ? "for-each" : "branch-one",
-                })}
-              >
-                <option value="branch">Branch</option>
-                <option value="loop">Loop</option>
-              </select>
-              <input
-                style={inputStyle}
-                value={selectedStep.graphContainerId}
-                placeholder="container-id"
-                onChange={(event) => updateSelected({ graphContainerId: event.target.value })}
-              />
-              <input
-                style={inputStyle}
-                value={selectedStep.graphContainerTitle}
-                placeholder="Container title"
-                onChange={(event) => updateSelectedContainerMetadata({ graphContainerTitle: event.target.value })}
-              />
-              <textarea
-                style={{ ...textareaStyle, minHeight: "64px" }}
-                value={selectedStep.graphContainerDescription}
-                placeholder="Container description"
-                onChange={(event) => updateSelectedContainerMetadata({ graphContainerDescription: event.target.value })}
-              />
-              <select
-                style={selectStyle}
-                value={selectedStep.graphContainerMode || (selectedStep.graphContainerType === "loop" ? "for-each" : "branch-one")}
-                onChange={(event) => updateSelectedContainerMetadata({ graphContainerMode: event.target.value })}
-              >
-                {selectedStep.graphContainerType === "loop" ? [
-                  <option key="for-each" value="for-each">For each</option>,
-                  <option key="while" value="while">While</option>,
-                ] : [
-                  <option key="branch-one" value="branch-one">Run first matching branch</option>,
-                  <option key="branch-all" value="branch-all">Run all matching branches</option>,
-                ]}
-              </select>
-              {selectedStep.graphContainerType === "branch" ? (
-                <textarea
-                  key="branch-condition"
-                  style={{ ...textareaStyle, minHeight: "58px" }}
-                  value={selectedStep.graphContainerCondition}
-                  placeholder="Branch condition"
-                  onChange={(event) => updateSelectedContainerMetadata({ graphContainerCondition: event.target.value })}
+              <HelpedText help="Branch and loop metadata that controls grouped execution paths in the graph.">Flow container</HelpedText>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Container type: branch selects conditional paths; loop repeats over items or conditions.">Container type</FieldLabel>
+                <select
+                  style={selectStyle}
+                  value={selectedStep.graphContainerType}
+                  onChange={(event) => updateSelectedContainerMetadata({
+                    graphContainerType: event.target.value as WorkflowGraphContainerType,
+                    graphContainerMode: event.target.value === "loop" ? "for-each" : "branch-one",
+                  })}
+                >
+                  <option value="branch">Branch</option>
+                  <option value="loop">Loop</option>
+                </select>
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Container id shared by all steps inside the same branch or loop.">Container ID</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphContainerId}
+                  placeholder="container-id"
+                  onChange={(event) => updateSelected({ graphContainerId: event.target.value })}
                 />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Human-readable title shown for the branch or loop container.">Container title</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphContainerTitle}
+                  placeholder="Container title"
+                  onChange={(event) => updateSelectedContainerMetadata({ graphContainerTitle: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Short description of what this branch or loop is responsible for.">Container description</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "64px" }}
+                  value={selectedStep.graphContainerDescription}
+                  placeholder="Container description"
+                  onChange={(event) => updateSelectedContainerMetadata({ graphContainerDescription: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Execution mode inside this container, such as first matching branch or all matching branches.">Container mode</FieldLabel>
+                <select
+                  style={selectStyle}
+                  value={selectedStep.graphContainerMode || (selectedStep.graphContainerType === "loop" ? "for-each" : "branch-one")}
+                  onChange={(event) => updateSelectedContainerMetadata({ graphContainerMode: event.target.value })}
+                >
+                  {selectedStep.graphContainerType === "loop" ? [
+                    <option key="for-each" value="for-each">For each</option>,
+                    <option key="while" value="while">While</option>,
+                  ] : [
+                    <option key="branch-one" value="branch-one">Run first matching branch</option>,
+                    <option key="branch-all" value="branch-all">Run all matching branches</option>,
+                  ]}
+                </select>
+              </div>
+              {selectedStep.graphContainerType === "branch" ? (
+                <div key="branch-condition-field" style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="Condition expression that decides whether this branch path should run.">Branch condition</FieldLabel>
+                  <textarea
+                    key="branch-condition"
+                    style={{ ...textareaStyle, minHeight: "58px" }}
+                    value={selectedStep.graphContainerCondition}
+                    placeholder="Branch condition"
+                    onChange={(event) => updateSelectedContainerMetadata({ graphContainerCondition: event.target.value })}
+                  />
+                </div>
               ) : (
                 <Fragment key="loop-settings">
-                  <textarea
-                    key="iterator"
-                    style={{ ...textareaStyle, minHeight: "58px" }}
-                    value={selectedStep.graphContainerIterator}
-                    placeholder="Iterator expression"
-                    onChange={(event) => updateSelectedContainerMetadata({ graphContainerIterator: event.target.value })}
-                  />
+                  <div key="iterator-field" style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Expression that returns the items or condition used by this loop.">Iterator expression</FieldLabel>
+                    <textarea
+                      key="iterator"
+                      style={{ ...textareaStyle, minHeight: "58px" }}
+                      value={selectedStep.graphContainerIterator}
+                      placeholder="Iterator expression"
+                      onChange={(event) => updateSelectedContainerMetadata({ graphContainerIterator: event.target.value })}
+                    />
+                  </div>
                   <div key="loop-toggles" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
                     <label key="parallel" style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                       <input
@@ -5236,6 +5657,7 @@ function WorkflowGraphEditor({
                         onChange={(event) => updateSelectedContainerMetadata({ graphContainerRunInParallel: event.target.checked })}
                       />
                       Run in parallel
+                      <HelpIcon label="Runs loop iterations concurrently instead of one at a time." />
                     </label>
                     <label key="skip-failure" style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                       <input
@@ -5244,62 +5666,84 @@ function WorkflowGraphEditor({
                         onChange={(event) => updateSelectedContainerMetadata({ graphContainerSkipFailure: event.target.checked })}
                       />
                       Skip failure
+                      <HelpIcon label="Allows later iterations or branches to continue when one path fails." />
                     </label>
                   </div>
-                  <input
-                    key="parallelism"
-                    style={inputStyle}
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={selectedStep.graphContainerParallelism}
-                    placeholder="parallelism"
-                    onChange={(event) => updateSelectedContainerMetadata({ graphContainerParallelism: event.target.value })}
-                  />
+                  <div key="parallelism-field" style={{ display: "grid", gap: "4px" }}>
+                    <FieldLabel help="Maximum concurrent loop iterations when parallel mode is enabled.">Parallelism</FieldLabel>
+                    <input
+                      key="parallelism"
+                      style={inputStyle}
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={selectedStep.graphContainerParallelism}
+                      placeholder="parallelism"
+                      onChange={(event) => updateSelectedContainerMetadata({ graphContainerParallelism: event.target.value })}
+                    />
+                  </div>
                 </Fragment>
               )}
-              <button key="wrap" type="button" style={buttonStyle} onClick={wrapSelectedPathInContainer}>
-                Wrap selected path
-              </button>
-              <button key="clear" type="button" style={buttonStyle} onClick={clearSelectedContainer}>
-                Clear selected container
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <button key="wrap" type="button" style={buttonStyle} onClick={wrapSelectedPathInContainer}>
+                  Wrap selected path
+                </button>
+                <HelpIcon label="Places the currently selected path into the configured branch or loop container." />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <button key="clear" type="button" style={buttonStyle} onClick={clearSelectedContainer}>
+                  Clear selected container
+                </button>
+                <HelpIcon label="Removes the selected step from its branch or loop container." />
+              </div>
             </div>
             <div key="run-overlay" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Run overlay</span>
-              <select
-                style={selectStyle}
-                value={selectedStep.graphRunStatus}
-                onChange={(event) => updateSelected({ graphRunStatus: normalizeGraphRunStatus(event.target.value) })}
-              >
-                <option value="planned">Planned</option>
-                <option value="running">Running</option>
-                <option value="succeeded">Succeeded</option>
-                <option value="failed">Failed</option>
-                <option value="skipped">Skipped</option>
-                <option value="paused">Paused</option>
-              </select>
-              <input
-                style={inputStyle}
-                value={selectedStep.graphRunIssueIdentifier}
-                placeholder="Issue identifier"
-                onChange={(event) => updateSelected({ graphRunIssueIdentifier: event.target.value })}
-              />
-              <input
-                style={inputStyle}
-                value={selectedStep.graphRunUpdatedAt}
-                placeholder="Updated at"
-                onChange={(event) => updateSelected({ graphRunUpdatedAt: event.target.value })}
-              />
-              <textarea
-                style={{ ...textareaStyle, minHeight: "64px" }}
-                value={selectedStep.graphRunSummary}
-                placeholder="Run summary"
-                onChange={(event) => updateSelected({ graphRunSummary: event.target.value })}
-              />
+              <HelpedText help="Manual visual overlay values used to preview how a step looks with run state attached.">Run overlay</HelpedText>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Status badge to show on this step in the graph preview.">Run status</FieldLabel>
+                <select
+                  style={selectStyle}
+                  value={selectedStep.graphRunStatus}
+                  onChange={(event) => updateSelected({ graphRunStatus: normalizeGraphRunStatus(event.target.value) })}
+                >
+                  <option value="planned">Planned</option>
+                  <option value="running">Running</option>
+                  <option value="succeeded">Succeeded</option>
+                  <option value="failed">Failed</option>
+                  <option value="skipped">Skipped</option>
+                  <option value="paused">Paused</option>
+                </select>
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Issue identifier shown in the run overlay for this step.">Issue identifier</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphRunIssueIdentifier}
+                  placeholder="Issue identifier"
+                  onChange={(event) => updateSelected({ graphRunIssueIdentifier: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Timestamp text shown as the last update time in the overlay.">Updated at</FieldLabel>
+                <input
+                  style={inputStyle}
+                  value={selectedStep.graphRunUpdatedAt}
+                  placeholder="Updated at"
+                  onChange={(event) => updateSelected({ graphRunUpdatedAt: event.target.value })}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Short text summary shown for this step's run overlay.">Run summary</FieldLabel>
+                <textarea
+                  style={{ ...textareaStyle, minHeight: "64px" }}
+                  value={selectedStep.graphRunSummary}
+                  placeholder="Run summary"
+                  onChange={(event) => updateSelected({ graphRunSummary: event.target.value })}
+                />
+              </div>
             </div>
             <div key="sticky-note" style={{ display: "grid", gap: "4px" }}>
-              <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Sticky note</label>
+              <FieldLabel help="Freeform note shown with the selected graph node for operator context.">Sticky note</FieldLabel>
               <textarea
                 style={{ ...textareaStyle, minHeight: "72px" }}
                 value={selectedStep.graphNote}
@@ -5325,14 +5769,14 @@ function WorkflowGraphEditor({
               >
                 <div key="raw-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <span style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.04em" }}>Selected step JSON</span>
+                    <HelpedText help="Editable raw JSON for the selected step. Validate checks syntax; Apply writes it back to the step draft." style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}>Selected step JSON</HelpedText>
                     <button
                       type="button"
                       title="Copy JSON to clipboard"
                       aria-label="Copy JSON"
                       style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "22px", height: "22px", borderRadius: "4px", border: "1px solid var(--border, #334155)", background: "transparent", color: "var(--muted-foreground, #94a3b8)", cursor: "pointer", padding: 0 }}
                       onClick={() => {
-                        navigator.clipboard.writeText(selectedRawStepJson).then(() => {
+                        navigator.clipboard.writeText(rawStepJsonText).then(() => {
                           const btn = document.querySelector('[aria-label="Copy JSON"]');
                           if (btn) { btn.textContent = "✓"; setTimeout(() => { btn.textContent = "⧉"; }, 1500); }
                         });
@@ -5343,9 +5787,9 @@ function WorkflowGraphEditor({
                   </div>
                   <span style={{ ...graphPolicyBadgeStyle, color: "#fbbf24" }}>{selectedStep.id}</span>
                 </div>
+                <FieldLabel help="Edit the selected step object as JSON. The JSON must remain an object with a unique id.">Raw step JSON</FieldLabel>
                 <textarea
                   key="raw-json"
-                  readOnly
                   style={{
                     ...textareaStyle,
                     minHeight: "260px",
@@ -5355,12 +5799,33 @@ function WorkflowGraphEditor({
                     color: "var(--foreground, #f8fafc)",
                     background: "color-mix(in srgb, var(--background, #020617) 88%, black)",
                   }}
-                  value={selectedRawStepJson}
+                  value={rawStepJsonText}
+                  onChange={(event) => {
+                    setRawStepJsonText(event.target.value);
+                    setRawStepJsonFeedback(null);
+                  }}
                   rows={14}
                 />
-                <p key="raw-note" style={{ margin: 0, color: "var(--muted-foreground, #94a3b8)", fontSize: "11px", lineHeight: 1.4 }}>
-                  Raw JSON is read-only here. Use Edit or Policy for graph-safe changes, or switch to the JSON tab for bulk edits.
-                </p>
+                <div key="raw-actions" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                  {rawStepJsonFeedback ? (
+                    <span style={{ ...mutedTextStyle, fontSize: "11px", color: rawStepJsonFeedback.tone === "error" ? "var(--destructive, #ef4444)" : rawStepJsonFeedback.tone === "success" ? "#34d399" : "var(--muted-foreground, #94a3b8)" }}>
+                      {rawStepJsonFeedback.message}
+                    </span>
+                  ) : (
+                    <span style={{ ...mutedTextStyle, fontSize: "11px" }}>
+                      Edit one step object, then validate or apply it to the selected node.
+                    </span>
+                  )}
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <button type="button" style={buttonStyle} onClick={validateRawSelectedStepJson}>
+                      Validate
+                    </button>
+                    <button type="button" style={primaryButtonStyle} onClick={applyRawSelectedStepJson}>
+                      Apply
+                    </button>
+                    <HelpIcon label="Validate checks the JSON without changing the draft. Apply validates and updates the selected step." />
+                  </div>
+                </div>
               </div>
             ) : (
               <Fragment key="selected-step-raw-placeholder" />
@@ -6129,7 +6594,7 @@ function WorkflowInterfaceFields({
         ))}
       </div>
       <label style={{ display: "grid", gap: "4px" }}>
-        <span style={mutedTextStyle}>Flow inputs JSON</span>
+        <FieldLabel help="JSON array/object describing workflow-level inputs available to steps and test requests.">Flow inputs JSON</FieldLabel>
         <textarea
           style={{ ...textareaStyle, minHeight: "90px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
           value={flowInputsText}
@@ -6138,7 +6603,7 @@ function WorkflowInterfaceFields({
         />
       </label>
       <label style={{ display: "grid", gap: "4px" }}>
-        <span style={mutedTextStyle}>Flow env variables JSON</span>
+        <FieldLabel help="JSON environment variables exposed to workflow tests and graph input previews.">Flow env variables JSON</FieldLabel>
         <textarea
           style={{ ...textareaStyle, minHeight: "90px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
           value={flowEnvVariablesText}
@@ -6147,7 +6612,7 @@ function WorkflowInterfaceFields({
         />
       </label>
       <label style={{ display: "grid", gap: "4px" }}>
-        <span style={mutedTextStyle}>Saved test inputs JSON</span>
+        <FieldLabel help="JSON presets that can be selected in Test flow to preview different request payloads.">Saved test inputs JSON</FieldLabel>
         <textarea
           style={{ ...textareaStyle, minHeight: "90px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
           value={testInputPresetsText}
@@ -6190,7 +6655,7 @@ function WorkflowExportPreview({
   return (
     <div style={{ display: "grid", gap: "8px", padding: "8px", border: "1px solid var(--border, #334155)", borderRadius: "8px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--foreground, #f8fafc)" }}>Export / YAML edit</span>
+        <HelpedText help="Export the graph draft as JSON/YAML, or edit YAML and apply it back to the draft." style={{ fontSize: "12px", fontWeight: 700, color: "var(--foreground, #f8fafc)" }}>Export / YAML edit</HelpedText>
         <div style={{ display: "flex", gap: "6px" }}>
           {(["json", "yaml"] as WorkflowGraphExportFormat[]).map((entry) => (
             <button
@@ -6206,6 +6671,7 @@ function WorkflowExportPreview({
       </div>
       {format === "yaml" ? (
         <Fragment>
+          <FieldLabel help="Editable YAML version of the current graph draft. Apply parses this YAML back into the workflow draft.">YAML draft</FieldLabel>
           <textarea
             style={{ ...textareaStyle, minHeight: "190px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
             value={yamlText}
@@ -6214,16 +6680,22 @@ function WorkflowExportPreview({
           />
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
             {yamlError ? <span style={{ ...mutedTextStyle, color: "#f87171" }}>{yamlError}</span> : <span style={mutedTextStyle}>Edit YAML applies to the current draft.</span>}
-            <button type="button" style={primaryButtonStyle} onClick={applyYaml}>Apply YAML</button>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button type="button" style={primaryButtonStyle} onClick={applyYaml}>Apply YAML</button>
+              <HelpIcon label="Parses the YAML and replaces the current draft graph if it is valid." />
+            </div>
           </div>
         </Fragment>
       ) : (
+        <>
+        <FieldLabel help="Read-only export of the current graph draft in the selected format.">Export preview</FieldLabel>
         <textarea
           readOnly
           style={{ ...textareaStyle, minHeight: "160px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
           value={exportText}
           rows={7}
         />
+        </>
       )}
     </div>
   );
@@ -6372,7 +6844,8 @@ function WorkflowTestPlanPreview({
           <span style={{ ...mutedTextStyle, fontSize: "11px" }}>{plan.summary}</span>
         </div>
         <label style={{ display: "flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
-          Stop at
+          <span>Stop at</span>
+          <HelpIcon label="Preview a partial workflow run that stops at the selected step." />
           <select
             style={{ ...selectStyle, minWidth: "150px" }}
             value={targetStepId}
@@ -6386,7 +6859,8 @@ function WorkflowTestPlanPreview({
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
-          Saved input
+          <span>Saved input</span>
+          <HelpIcon label="Choose one saved test input preset for the preview request." />
           <select
             style={{ ...selectStyle, minWidth: "160px" }}
             value={selectedTestPresetName}
@@ -6399,7 +6873,8 @@ function WorkflowTestPlanPreview({
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
-          Restart from
+          <span>Restart from</span>
+          <HelpIcon label="Preview which previous results can be reused when restarting from this step." />
           <select
             style={{ ...selectStyle, minWidth: "150px" }}
             value={restartStepId}
@@ -6413,7 +6888,8 @@ function WorkflowTestPlanPreview({
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
-          Test this step
+          <span>Test this step</span>
+          <HelpIcon label="Builds a focused single-step test request with upstream context." />
           <select
             style={{ ...selectStyle, minWidth: "150px" }}
             value={singleStepTestId}
@@ -6427,7 +6903,8 @@ function WorkflowTestPlanPreview({
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px" }}>
-          Test iteration
+          <span>Test iteration</span>
+          <HelpIcon label="Preview one loop iteration by choosing a loop container and sample item." />
           <select
             style={{ ...selectStyle, minWidth: "150px" }}
             value={iterationContainerId}
@@ -6599,7 +7076,7 @@ function WorkflowTestPlanPreview({
         <span style={{ ...mutedTextStyle, fontSize: "11px" }}>{iterationPreview.summary}</span>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "8px" }}>
           <label style={{ display: "grid", gap: "4px" }}>
-            <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Iteration index</span>
+            <FieldLabel help="Zero-based loop item index used in the iteration preview.">Iteration index</FieldLabel>
             <input
               style={{ ...inputStyle, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
               value={iterationIndexText}
@@ -6616,22 +7093,28 @@ function WorkflowTestPlanPreview({
             {renderStepChips(iterationPreview.skippedStepIds, "No outside steps", "muted")}
           </div>
         </div>
-        <textarea
-          style={{ ...textareaStyle, minHeight: "92px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={iterationItemText}
-          rows={4}
-          placeholder='{"market":"KR","date":"2026-06-13"}'
-          onChange={(event) => setIterationItemText(event.target.value)}
-        />
+        <div style={{ display: "grid", gap: "4px" }}>
+          <FieldLabel help="Sample JSON item passed into the selected loop iteration preview.">Iteration item JSON</FieldLabel>
+          <textarea
+            style={{ ...textareaStyle, minHeight: "92px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+            value={iterationItemText}
+            rows={4}
+            placeholder='{"market":"KR","date":"2026-06-13"}'
+            onChange={(event) => setIterationItemText(event.target.value)}
+          />
+        </div>
         {iterationItemPreview.error ? (
           <span style={{ ...mutedTextStyle, fontSize: "11px", color: "var(--destructive, #ef4444)" }}>{iterationItemPreview.error}</span>
         ) : null}
-        <textarea
-          readOnly
-          style={{ ...textareaStyle, minHeight: "120px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={iterationPreview.requestJson}
-          rows={6}
-        />
+        <div style={{ display: "grid", gap: "4px" }}>
+          <FieldLabel help="Read-only request JSON generated for the selected loop iteration.">Iteration request preview</FieldLabel>
+          <textarea
+            readOnly
+            style={{ ...textareaStyle, minHeight: "120px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+            value={iterationPreview.requestJson}
+            rows={6}
+          />
+        </div>
       </div>
       <div style={{ display: "grid", gap: "4px" }}>
         <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Restart preview</span>
@@ -6661,7 +7144,7 @@ function WorkflowTestPlanPreview({
         </div>
       </div>
       <div style={{ display: "grid", gap: "4px" }}>
-        <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Fill from request JSON</span>
+        <FieldLabel help="Paste a request JSON sample to map incoming body/query values into workflow test arguments.">Fill from request JSON</FieldLabel>
         <textarea
           style={{ ...textareaStyle, minHeight: "92px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
           value={requestFillText}
@@ -6691,7 +7174,7 @@ function WorkflowTestPlanPreview({
             ) : null}
           </div>
         ) : null}
-        <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Test request preview</span>
+        <FieldLabel help="Read-only request JSON that would be sent by the current test flow configuration.">Test request preview</FieldLabel>
         <textarea
           readOnly
           style={{ ...textareaStyle, minHeight: "120px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
@@ -6700,6 +7183,43 @@ function WorkflowTestPlanPreview({
         />
       </div>
     </div>
+    );
+  }
+
+function WorkflowDraftCompactDisclosure({
+  diff,
+  steps,
+  interfaceInput,
+}: {
+  diff: WorkflowGraphDraftDiff | null;
+  steps: StepDraft[];
+  interfaceInput?: WorkflowGraphInterfaceInput;
+}): JSX.Element {
+  return (
+    <details
+      style={{
+        display: "grid",
+        gap: "8px",
+        padding: "8px",
+        border: "1px solid var(--border, #334155)",
+        borderRadius: "8px",
+        background: "color-mix(in srgb, var(--card, #0f172a) 58%, transparent)",
+      }}
+    >
+      <summary style={{ cursor: "pointer", color: "var(--foreground, #f8fafc)", fontSize: "12px", fontWeight: 700 }}>
+        Draft details
+        <span style={{ ...graphPolicyBadgeStyle, marginLeft: "8px", color: diff?.hasChanges ? "#fbbf24" : "#34d399" }}>
+          {diff?.hasChanges ? "unsaved" : "saved"}
+        </span>
+        <span style={{ ...graphPolicyBadgeStyle, marginLeft: "6px" }}>
+          {steps.length} steps
+        </span>
+      </summary>
+      <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+        {diff ? <WorkflowDraftDiffSummary key="draft-diff" diff={diff} /> : null}
+        <WorkflowTestPlanPreview key="test-flow" steps={steps} interfaceInput={interfaceInput} />
+      </div>
+    </details>
   );
 }
 
@@ -6737,6 +7257,22 @@ function StepWorkspaceEditor({
   const draftDiff = useMemo<WorkflowGraphDraftDiff | null>(() => {
     return baseSteps ? summarizeWorkflowGraphDraftDiff(baseSteps, steps) : null;
   }, [baseSteps, steps]);
+  const jsonSyntaxFeedback = useMemo<{ tone: "success" | "error"; message: string } | null>(() => {
+    if (mode !== "json") return null;
+    const trimmed = jsonText.trim();
+    if (!trimmed) {
+      return { tone: "error", message: "steps JSON 배열을 입력하세요." };
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (!Array.isArray(parsed)) {
+        return { tone: "error", message: "steps는 JSON 배열이어야 합니다." };
+      }
+      return { tone: "success", message: `Valid JSON array (${parsed.length} steps).` };
+    } catch (error) {
+      return { tone: "error", message: `JSON 파싱 실패: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }, [jsonText, mode]);
 
   function switchMode(nextMode: StepEditorMode): void {
     if (nextMode === mode) return;
@@ -6768,363 +7304,47 @@ function StepWorkspaceEditor({
           <span key="label" style={{ ...mutedTextStyle, fontWeight: 600 }}>Steps</span>
           <GraphModeTabs key="tabs" mode={mode} onChange={switchMode} />
         </div>
-      ) : (
-        <Fragment key="step-editor-toolbar-placeholder" />
-      )}
-      {mode === "graph" ? (
-        <Fragment key="graph-workspace">
-          <WorkflowGraphEditor key="graph-editor" steps={steps} runOverlaySteps={runOverlaySteps} onChange={onChange} triggerSummary={triggerSummary} testInterfaceInput={testInterfaceInput} availableTools={availableTools} availableToolGrants={availableToolGrants} surface={surface} />
-          {surface === "stacked" ? (
-            <details
-              key="graph-workspace-details"
-              style={{
-                display: "grid",
-                gap: "8px",
-                padding: "8px",
-                border: "1px solid var(--border, #334155)",
-                borderRadius: "8px",
-                background: "color-mix(in srgb, var(--card, #0f172a) 58%, transparent)",
-              }}
-            >
-              <summary style={{ cursor: "pointer", color: "var(--foreground, #f8fafc)", fontSize: "12px", fontWeight: 700 }}>
-                Test, diff, and execution preview
-              </summary>
-              <div style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
-                {draftDiff ? <WorkflowDraftDiffSummary key="draft-diff" diff={draftDiff} /> : null}
-                <WorkflowTestPlanPreview key="test-flow" steps={steps} interfaceInput={testInterfaceInput} />
-              </div>
-            </details>
-          ) : (
-            <Fragment key="graph-workspace-details-placeholder" />
-          )}
-        </Fragment>
-      ) : mode === "json" ? (
-        <Fragment key="json-workspace">
-          {draftDiff ? <WorkflowDraftDiffSummary key="draft-diff" diff={draftDiff} /> : null}
-          <WorkflowTestPlanPreview key="test-flow" steps={steps} interfaceInput={testInterfaceInput} />
-        <textarea
-          key="json-editor"
-          style={{ ...textareaStyle, minHeight: "250px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
-          value={jsonText}
-          onChange={(event) => onJsonTextChange(event.target.value)}
-          rows={10}
-        />
-        </Fragment>
-      ) : (
-        <Fragment key="form-workspace">
-          {draftDiff ? <WorkflowDraftDiffSummary key="draft-diff" diff={draftDiff} /> : null}
-          <WorkflowTestPlanPreview key="test-flow" steps={steps} interfaceInput={testInterfaceInput} />
-          <StepEditor key="form-editor" steps={steps} onChange={onChange} availableTools={availableTools} availableToolGrants={availableToolGrants} />
-        </Fragment>
-      )}
+        ) : (
+          <Fragment key="step-editor-toolbar-placeholder" />
+        )}
+        {surface === "stacked" && mode !== "json" ? (
+          <WorkflowDraftCompactDisclosure key="draft-details" diff={draftDiff} steps={steps} interfaceInput={testInterfaceInput} />
+        ) : (
+          <Fragment key="draft-details-placeholder" />
+        )}
+        {mode === "graph" ? (
+          <Fragment key="graph-workspace">
+            <WorkflowGraphEditor key="graph-editor" steps={steps} runOverlaySteps={runOverlaySteps} onChange={onChange} triggerSummary={triggerSummary} testInterfaceInput={testInterfaceInput} availableTools={availableTools} availableToolGrants={availableToolGrants} surface={surface} />
+          </Fragment>
+        ) : mode === "json" ? (
+          <Fragment key="json-workspace">
+            <textarea
+              key="json-editor"
+              style={{ ...textareaStyle, minHeight: "250px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
+              value={jsonText}
+              onChange={(event) => onJsonTextChange(event.target.value)}
+              rows={10}
+            />
+            {jsonSyntaxFeedback ? (
+              <span
+                key="json-syntax-feedback"
+                style={{
+                  ...mutedTextStyle,
+                  fontSize: "11px",
+                  color: jsonSyntaxFeedback.tone === "success" ? "#34d399" : "var(--destructive, #ef4444)",
+                }}
+              >
+                {jsonSyntaxFeedback.message}
+              </span>
+            ) : null}
+          </Fragment>
+        ) : (
+          <Fragment key="form-workspace">
+            <StepEditor key="form-editor" steps={steps} onChange={onChange} availableTools={availableTools} availableToolGrants={availableToolGrants} />
+          </Fragment>
+        )}
     </div>
   );
-}
-
-export function stepsToJson(drafts: StepDraft[]): unknown[] {
-  const safeText = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
-  const safeCsv = (value: unknown): string[] => safeText(value).split(",").map((entry) => entry.trim()).filter(Boolean);
-  return drafts.map((d) => {
-    const step: Record<string, unknown> = {
-      ...d.extra,
-      id: safeText(d.id),
-      title: safeText(d.title),
-      description: safeText(d.description) || undefined,
-      type: d.type,
-      dependsOn: safeCsv(d.dependsOn),
-    };
-    if (d.type === "tool") {
-      step.toolName = safeText(d.toolName);
-      try { step.toolArgs = JSON.parse(d.toolArgs || "{}"); } catch { step.toolArgs = {}; }
-    } else {
-      // Stale agentId from the generic `extra` bag must never survive an agent
-      // change. Persist a consistent agentId+agentName pair; clear both when no
-      // agent is set so the server falls back to name-only resolution.
-      delete step.agentId;
-      if (safeText(d.agentName)) {
-        step.agentName = safeText(d.agentName);
-        if (safeText(d.agentId)) step.agentId = safeText(d.agentId);
-      }
-      const toolsList = safeCsv(d.tools);
-      if (toolsList.length > 0) step.tools = toolsList;
-    }
-    if (d.onFailure) step.onFailure = d.onFailure;
-    const maxRetries = parseOptionalNonNegativeInteger(String(d.maxRetries ?? ""));
-    if (maxRetries !== undefined) step.maxRetries = maxRetries;
-    const graphRetryDelaySeconds = parseOptionalPositiveInteger(String(d.graphRetryDelaySeconds ?? ""));
-    if (graphRetryDelaySeconds !== undefined) step.graphRetryDelaySeconds = graphRetryDelaySeconds;
-    if (safeText(d.graphRetryBackoff)) step.graphRetryBackoff = safeText(d.graphRetryBackoff);
-    if (d.graphRetryJitter) step.graphRetryJitter = true;
-    const timeoutSeconds = parseOptionalPositiveInteger(String(d.timeoutSeconds ?? ""));
-    if (timeoutSeconds !== undefined) step.timeoutSeconds = timeoutSeconds;
-    const graphSleepSeconds = parseOptionalPositiveInteger(String(d.graphSleepSeconds ?? ""));
-    if (graphSleepSeconds !== undefined) step.graphSleepSeconds = graphSleepSeconds;
-    if (safeText(d.graphSuspendUntil)) step.graphSuspendUntil = safeText(d.graphSuspendUntil);
-    const graphSuspendTimeoutSeconds = parseOptionalPositiveInteger(String(d.graphSuspendTimeoutSeconds ?? ""));
-    if (graphSuspendTimeoutSeconds !== undefined) step.graphSuspendTimeoutSeconds = graphSuspendTimeoutSeconds;
-    if (safeText(d.graphSuspendTimeoutAction)) step.graphSuspendTimeoutAction = safeText(d.graphSuspendTimeoutAction);
-    if (d.graphEarlyReturn) step.graphEarlyReturn = true;
-    if (safeText(d.graphEarlyReturnContentType)) step.graphEarlyReturnContentType = safeText(d.graphEarlyReturnContentType);
-    if (safeText(d.graphEarlyReturnSchema)) step.graphEarlyReturnSchema = safeText(d.graphEarlyReturnSchema);
-    if (d.graphErrorHandler) step.graphErrorHandler = true;
-    if (safeText(d.graphErrorHandlerScope)) step.graphErrorHandlerScope = safeText(d.graphErrorHandlerScope);
-    if (safeText(d.graphErrorHandlerInput)) step.graphErrorHandlerInput = safeText(d.graphErrorHandlerInput);
-    if (d.graphRestartBoundary) step.graphRestartBoundary = true;
-    if (safeText(d.graphRestartStrategy)) step.graphRestartStrategy = safeText(d.graphRestartStrategy);
-    if (safeText(d.graphRestartInput)) step.graphRestartInput = safeText(d.graphRestartInput);
-    if (safeText(d.graphEarlyStopCondition)) step.graphEarlyStopCondition = safeText(d.graphEarlyStopCondition);
-    if (d.graphEarlyStopLabelSkipped) step.graphEarlyStopLabelSkipped = true;
-    if (d.graphApprovalRequired) step.graphApprovalRequired = true;
-    if (safeText(d.graphApprovalPrompt)) step.graphApprovalPrompt = safeText(d.graphApprovalPrompt);
-    if (safeText(d.graphApprovalRecipients)) step.graphApprovalRecipients = safeText(d.graphApprovalRecipients);
-    const graphApprovalTimeoutSeconds = parseOptionalPositiveInteger(String(d.graphApprovalTimeoutSeconds ?? ""));
-    if (graphApprovalTimeoutSeconds !== undefined) step.graphApprovalTimeoutSeconds = graphApprovalTimeoutSeconds;
-    if (safeText(d.graphApprovalTimeoutAction)) step.graphApprovalTimeoutAction = safeText(d.graphApprovalTimeoutAction);
-    if (d.graphMockEnabled) step.graphMockEnabled = true;
-    if (safeText(d.graphMockResult)) step.graphMockResult = safeText(d.graphMockResult);
-    if (safeText(d.graphPinnedResultRunId)) step.graphPinnedResultRunId = safeText(d.graphPinnedResultRunId);
-    if (safeText(d.graphConcurrencyKey)) step.graphConcurrencyKey = safeText(d.graphConcurrencyKey);
-    const graphConcurrencyLimit = parseOptionalPositiveInteger(String(d.graphConcurrencyLimit ?? ""));
-    if (graphConcurrencyLimit !== undefined) step.graphConcurrencyLimit = graphConcurrencyLimit;
-    if (safeText(d.graphPriority)) step.graphPriority = safeText(d.graphPriority);
-    if (d.graphCacheEnabled) step.graphCacheEnabled = true;
-    const graphCacheTtlSeconds = parseOptionalPositiveInteger(String(d.graphCacheTtlSeconds ?? ""));
-    if (graphCacheTtlSeconds !== undefined) step.graphCacheTtlSeconds = graphCacheTtlSeconds;
-    if (d.graphDeleteAfterUse) step.graphDeleteAfterUse = true;
-    if (safeText(d.graphInputExpression)) step.graphInputExpression = safeText(d.graphInputExpression);
-    if (safeText(d.graphOutputSchema)) step.graphOutputSchema = safeText(d.graphOutputSchema);
-    if (d.graphWorkProductRequired) step.graphWorkProductRequired = true;
-    if (safeText(d.graphWorkProductPattern)) step.graphWorkProductPattern = safeText(d.graphWorkProductPattern);
-    const graphResourceRefs = safeCsv(d.graphResourceRefs);
-    if (graphResourceRefs.length > 0) step.graphResourceRefs = Array.from(new Set(graphResourceRefs));
-    const graphSecretRefs = safeCsv(d.graphSecretRefs);
-    if (graphSecretRefs.length > 0) step.graphSecretRefs = Array.from(new Set(graphSecretRefs));
-    const graphPositionX = parseOptionalGraphPosition(d.graphPositionX);
-    const graphPositionY = parseOptionalGraphPosition(d.graphPositionY);
-    if (graphPositionX !== undefined) step.graphPositionX = graphPositionX;
-    if (graphPositionY !== undefined) step.graphPositionY = graphPositionY;
-    if (safeText(d.graphGroupId)) step.graphGroupId = safeText(d.graphGroupId);
-    if (safeText(d.graphGroupTitle)) step.graphGroupTitle = safeText(d.graphGroupTitle);
-    if (safeText(d.graphGroupColor)) step.graphGroupColor = safeText(d.graphGroupColor);
-    if (d.graphGroupCollapsed) step.graphGroupCollapsed = true;
-    if (d.graphGroupCollapsedByDefault) step.graphGroupCollapsedByDefault = true;
-    if (safeText(d.graphContainerId)) step.graphContainerId = safeText(d.graphContainerId);
-    if (safeText(d.graphContainerType)) step.graphContainerType = safeText(d.graphContainerType);
-    if (safeText(d.graphContainerTitle)) step.graphContainerTitle = safeText(d.graphContainerTitle);
-    if (safeText(d.graphContainerDescription)) step.graphContainerDescription = safeText(d.graphContainerDescription);
-    if (safeText(d.graphContainerMode)) step.graphContainerMode = safeText(d.graphContainerMode);
-    if (safeText(d.graphContainerCondition)) step.graphContainerCondition = safeText(d.graphContainerCondition);
-    if (safeText(d.graphContainerIterator)) step.graphContainerIterator = safeText(d.graphContainerIterator);
-    if (d.graphContainerSkipFailure) step.graphContainerSkipFailure = true;
-    if (d.graphContainerRunInParallel) step.graphContainerRunInParallel = true;
-    const graphContainerParallelism = parseOptionalPositiveInteger(String(d.graphContainerParallelism ?? ""));
-    if (graphContainerParallelism !== undefined) step.graphContainerParallelism = graphContainerParallelism;
-    if (safeText(d.graphRunStatus) && d.graphRunStatus !== "planned") step.graphRunStatus = safeText(d.graphRunStatus);
-    if (safeText(d.graphRunIssueIdentifier)) step.graphRunIssueIdentifier = safeText(d.graphRunIssueIdentifier);
-    if (safeText(d.graphRunUpdatedAt)) step.graphRunUpdatedAt = safeText(d.graphRunUpdatedAt);
-    if (safeText(d.graphRunSummary)) step.graphRunSummary = safeText(d.graphRunSummary);
-    if (safeText(d.graphNote)) step.graphNote = safeText(d.graphNote);
-    const graphEdgeMetadata = d.graphEdgeMetadata ?? {};
-    if (Object.keys(graphEdgeMetadata).length > 0) step.graphEdgeMetadata = graphEdgeMetadata;
-    return step;
-  });
-}
-
-export function jsonToSteps(steps: WorkflowOverviewData["workflows"][number]["steps"]): StepDraft[] {
-  return steps.map((s) => {
-    const raw = s as Record<string, unknown>;
-    const rawToolArgs = raw.toolArgs;
-    const extra = { ...raw };
-    for (const key of [
-      "id",
-      "title",
-      "name",
-      "description",
-      "type",
-      "toolName",
-      "toolArgs",
-      "agentId",
-      "agentName",
-      "tools",
-      "toolNames",
-      "dependsOn",
-      "dependencies",
-      "onFailure",
-      "maxRetries",
-      "graphRetryDelaySeconds",
-      "graphRetryBackoff",
-      "graphRetryJitter",
-      "timeoutSeconds",
-      "graphSleepSeconds",
-      "graphSuspendUntil",
-      "graphSuspendTimeoutSeconds",
-      "graphSuspendTimeoutAction",
-      "graphEarlyReturn",
-      "graphEarlyReturnContentType",
-      "graphEarlyReturnSchema",
-      "graphErrorHandler",
-      "graphErrorHandlerScope",
-      "graphErrorHandlerInput",
-      "graphRestartBoundary",
-      "graphRestartStrategy",
-      "graphRestartInput",
-      "graphEarlyStopCondition",
-      "graphEarlyStopLabelSkipped",
-      "graphApprovalRequired",
-      "graphApprovalPrompt",
-      "graphApprovalRecipients",
-      "graphApprovalTimeoutSeconds",
-      "graphApprovalTimeoutAction",
-      "graphMockEnabled",
-      "graphMockResult",
-      "graphPinnedResultRunId",
-      "graphConcurrencyKey",
-      "graphConcurrencyLimit",
-      "graphPriority",
-      "graphCacheEnabled",
-      "graphCacheTtlSeconds",
-      "graphDeleteAfterUse",
-      "graphInputExpression",
-      "graphOutputSchema",
-      "graphWorkProductRequired",
-      "graphWorkProductPattern",
-      "graphResourceRefs",
-      "graphSecretRefs",
-      "graphPositionX",
-      "graphPositionY",
-      "graphGroupId",
-      "graphGroupTitle",
-      "graphGroupColor",
-      "graphGroupCollapsed",
-      "graphGroupCollapsedByDefault",
-      "graphContainerId",
-      "graphContainerType",
-      "graphContainerTitle",
-      "graphContainerDescription",
-      "graphContainerMode",
-      "graphContainerCondition",
-      "graphContainerIterator",
-      "graphContainerSkipFailure",
-      "graphContainerRunInParallel",
-      "graphContainerParallelism",
-      "graphRunStatus",
-      "graphRunIssueIdentifier",
-      "graphRunUpdatedAt",
-      "graphRunSummary",
-      "graphNote",
-      "graphEdgeMetadata",
-    ]) {
-      delete extra[key];
-    }
-    const rawGraphEdgeMetadata = raw.graphEdgeMetadata && typeof raw.graphEdgeMetadata === "object" && !Array.isArray(raw.graphEdgeMetadata)
-      ? raw.graphEdgeMetadata as WorkflowGraphEdgeMetadataRecord
-      : {};
-    return {
-      id: s.id,
-      title: s.title,
-      description: raw.description as string || "",
-      type: (s.type as "agent" | "tool") || "agent",
-      toolName: s.toolName || "",
-      toolArgs: JSON.stringify(
-        rawToolArgs && typeof rawToolArgs === "object" ? rawToolArgs : {},
-        null,
-        2,
-      ),
-      agentId: typeof raw.agentId === "string" ? raw.agentId : "",
-      agentName: s.agentName || "",
-      tools: Array.isArray(raw.tools)
-        ? (raw.tools as string[]).join(", ")
-        : Array.isArray(raw.toolNames)
-          ? (raw.toolNames as string[]).join(", ")
-          : "",
-      dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.join(", ") : parseDependencies(raw.dependencies).join(", "),
-      onFailure: typeof raw.onFailure === "string" ? raw.onFailure : "",
-      maxRetries: typeof raw.maxRetries === "number" || typeof raw.maxRetries === "string" ? String(raw.maxRetries) : "",
-      graphRetryDelaySeconds: typeof raw.graphRetryDelaySeconds === "number" || typeof raw.graphRetryDelaySeconds === "string" ? String(raw.graphRetryDelaySeconds) : "",
-      graphRetryBackoff: typeof raw.graphRetryBackoff === "string" ? raw.graphRetryBackoff : "",
-      graphRetryJitter: raw.graphRetryJitter === true || raw.graphRetryJitter === "true",
-      timeoutSeconds: typeof raw.timeoutSeconds === "number" || typeof raw.timeoutSeconds === "string" ? String(raw.timeoutSeconds) : "",
-      graphSleepSeconds: typeof raw.graphSleepSeconds === "number" || typeof raw.graphSleepSeconds === "string" ? String(raw.graphSleepSeconds) : "",
-      graphSuspendUntil: typeof raw.graphSuspendUntil === "string" ? raw.graphSuspendUntil : "",
-      graphSuspendTimeoutSeconds: typeof raw.graphSuspendTimeoutSeconds === "number" || typeof raw.graphSuspendTimeoutSeconds === "string" ? String(raw.graphSuspendTimeoutSeconds) : "",
-      graphSuspendTimeoutAction: typeof raw.graphSuspendTimeoutAction === "string" ? raw.graphSuspendTimeoutAction : "",
-      graphEarlyReturn: raw.graphEarlyReturn === true || raw.graphEarlyReturn === "true",
-      graphEarlyReturnContentType: typeof raw.graphEarlyReturnContentType === "string" ? raw.graphEarlyReturnContentType : "",
-      graphEarlyReturnSchema: typeof raw.graphEarlyReturnSchema === "string" ? raw.graphEarlyReturnSchema : "",
-      graphErrorHandler: raw.graphErrorHandler === true || raw.graphErrorHandler === "true",
-      graphErrorHandlerScope: typeof raw.graphErrorHandlerScope === "string" ? raw.graphErrorHandlerScope : "",
-      graphErrorHandlerInput: typeof raw.graphErrorHandlerInput === "string" ? raw.graphErrorHandlerInput : "",
-      graphRestartBoundary: raw.graphRestartBoundary === true || raw.graphRestartBoundary === "true",
-      graphRestartStrategy: typeof raw.graphRestartStrategy === "string" ? raw.graphRestartStrategy : "",
-      graphRestartInput: typeof raw.graphRestartInput === "string" ? raw.graphRestartInput : "",
-      graphEarlyStopCondition: typeof raw.graphEarlyStopCondition === "string" ? raw.graphEarlyStopCondition : "",
-      graphEarlyStopLabelSkipped: raw.graphEarlyStopLabelSkipped === true || raw.graphEarlyStopLabelSkipped === "true",
-      graphApprovalRequired: raw.graphApprovalRequired === true || raw.graphApprovalRequired === "true",
-      graphApprovalPrompt: typeof raw.graphApprovalPrompt === "string" ? raw.graphApprovalPrompt : "",
-      graphApprovalRecipients: Array.isArray(raw.graphApprovalRecipients)
-        ? (raw.graphApprovalRecipients as string[]).join(", ")
-        : typeof raw.graphApprovalRecipients === "string"
-          ? raw.graphApprovalRecipients
-          : "",
-      graphApprovalTimeoutSeconds: typeof raw.graphApprovalTimeoutSeconds === "number" || typeof raw.graphApprovalTimeoutSeconds === "string" ? String(raw.graphApprovalTimeoutSeconds) : "",
-      graphApprovalTimeoutAction: typeof raw.graphApprovalTimeoutAction === "string" ? raw.graphApprovalTimeoutAction : "",
-      graphMockEnabled: raw.graphMockEnabled === true || raw.graphMockEnabled === "true",
-      graphMockResult: typeof raw.graphMockResult === "string" ? raw.graphMockResult : "",
-      graphPinnedResultRunId: typeof raw.graphPinnedResultRunId === "string" ? raw.graphPinnedResultRunId : "",
-      graphConcurrencyKey: typeof raw.graphConcurrencyKey === "string" ? raw.graphConcurrencyKey : "",
-      graphConcurrencyLimit: typeof raw.graphConcurrencyLimit === "number" || typeof raw.graphConcurrencyLimit === "string" ? String(raw.graphConcurrencyLimit) : "",
-      graphPriority: typeof raw.graphPriority === "string" ? raw.graphPriority : "",
-      graphCacheEnabled: raw.graphCacheEnabled === true || raw.graphCacheEnabled === "true",
-      graphCacheTtlSeconds: typeof raw.graphCacheTtlSeconds === "number" || typeof raw.graphCacheTtlSeconds === "string" ? String(raw.graphCacheTtlSeconds) : "",
-      graphDeleteAfterUse: raw.graphDeleteAfterUse === true || raw.graphDeleteAfterUse === "true",
-      graphInputExpression: typeof raw.graphInputExpression === "string" ? raw.graphInputExpression : "",
-      graphOutputSchema: typeof raw.graphOutputSchema === "string" ? raw.graphOutputSchema : "",
-      graphWorkProductRequired: raw.graphWorkProductRequired === true || raw.graphWorkProductRequired === "true",
-      graphWorkProductPattern: typeof raw.graphWorkProductPattern === "string" ? raw.graphWorkProductPattern : "",
-      graphResourceRefs: Array.isArray(raw.graphResourceRefs)
-        ? (raw.graphResourceRefs as string[]).join(", ")
-        : typeof raw.graphResourceRefs === "string"
-          ? raw.graphResourceRefs
-          : "",
-      graphSecretRefs: Array.isArray(raw.graphSecretRefs)
-        ? (raw.graphSecretRefs as string[]).join(", ")
-        : typeof raw.graphSecretRefs === "string"
-          ? raw.graphSecretRefs
-          : "",
-      graphPositionX: typeof raw.graphPositionX === "number" || typeof raw.graphPositionX === "string" ? String(raw.graphPositionX) : "",
-      graphPositionY: typeof raw.graphPositionY === "number" || typeof raw.graphPositionY === "string" ? String(raw.graphPositionY) : "",
-      graphGroupId: typeof raw.graphGroupId === "string" ? raw.graphGroupId : "",
-      graphGroupTitle: typeof raw.graphGroupTitle === "string" ? raw.graphGroupTitle : "",
-      graphGroupColor: typeof raw.graphGroupColor === "string" && raw.graphGroupColor.trim() ? raw.graphGroupColor : "#64748b",
-      graphGroupCollapsed: raw.graphGroupCollapsed === true || raw.graphGroupCollapsed === "true"
-        ? true
-        : raw.graphGroupCollapsed === false || raw.graphGroupCollapsed === "false"
-          ? false
-          : undefined,
-      graphGroupCollapsedByDefault: raw.graphGroupCollapsedByDefault === true || raw.graphGroupCollapsedByDefault === "true",
-      graphContainerId: typeof raw.graphContainerId === "string" ? raw.graphContainerId : "",
-      graphContainerType: raw.graphContainerType === "loop" ? "loop" : "branch",
-      graphContainerTitle: typeof raw.graphContainerTitle === "string" ? raw.graphContainerTitle : "",
-      graphContainerDescription: typeof raw.graphContainerDescription === "string" ? raw.graphContainerDescription : "",
-      graphContainerMode: typeof raw.graphContainerMode === "string"
-        ? raw.graphContainerMode
-        : raw.graphContainerType === "loop"
-          ? "for-each"
-          : "branch-one",
-      graphContainerCondition: typeof raw.graphContainerCondition === "string" ? raw.graphContainerCondition : "",
-      graphContainerIterator: typeof raw.graphContainerIterator === "string" ? raw.graphContainerIterator : "",
-      graphContainerSkipFailure: raw.graphContainerSkipFailure === true || raw.graphContainerSkipFailure === "true",
-      graphContainerRunInParallel: raw.graphContainerRunInParallel === true || raw.graphContainerRunInParallel === "true",
-      graphContainerParallelism: typeof raw.graphContainerParallelism === "number" || typeof raw.graphContainerParallelism === "string" ? String(raw.graphContainerParallelism) : "",
-      graphRunStatus: normalizeGraphRunStatus(raw.graphRunStatus),
-      graphRunIssueIdentifier: typeof raw.graphRunIssueIdentifier === "string" ? raw.graphRunIssueIdentifier : "",
-      graphRunUpdatedAt: typeof raw.graphRunUpdatedAt === "string" ? raw.graphRunUpdatedAt : "",
-      graphRunSummary: typeof raw.graphRunSummary === "string" ? raw.graphRunSummary : "",
-      graphNote: typeof raw.graphNote === "string" ? raw.graphNote : "",
-      graphEdgeMetadata: rawGraphEdgeMetadata,
-      extra,
-    };
-  });
 }
 
 function ErrorState({
@@ -7597,6 +7817,10 @@ function WorkflowDefinitionList({
                     </button>
                   </Fragment>
                 )}
+                <HelpIcon label={normalizedStatus === "archived"
+                  ? "Restores this archived workflow and asks whether it should return as reusable or manual."
+                  : "Open Graph edits this workflow. Run starts it. Pause/Activate changes status. Archive moves it out of active lists."}
+                />
               </div>
               {runButtonState.notice && normalizedStatus !== "archived" ? (
                 <span style={{ ...mutedTextStyle, color: "#fbbf24", fontSize: "11px", textAlign: "right" }}>
@@ -7674,6 +7898,7 @@ function DefinitionsTable({
   const [editingFlowEnvVariablesText, setEditingFlowEnvVariablesText] = useState("[]");
   const [editingTestInputPresetsText, setEditingTestInputPresetsText] = useState("[]");
   const [pendingWorkflowId, setPendingWorkflowId] = useState<string | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<WorkflowOverviewData["workflows"][number] | null>(null);
   const [tableError, setTableError] = useState<string>("");
   const [tableNotice, setTableNotice] = useState<{ tone: "info" | "success"; message: string } | null>(null);
   const [graphShellDismissed, setGraphShellDismissed] = useState<boolean>(false);
@@ -7983,24 +8208,38 @@ function DefinitionsTable({
     }
   }
 
-  async function onRestoreWorkflow(workflow: WorkflowOverviewData["workflows"][number]): Promise<void> {
+  async function onRestoreWorkflow(workflow: WorkflowOverviewData["workflows"][number], kind: WorkflowRestoreKind): Promise<void> {
     setPendingWorkflowId(workflow.id);
     setTableError("");
     try {
+      // 복원 종류에 따라 source/sourceKind 도 갱신. shared PATCH schema 가 source/sourceKind 를
+      // 허용하고 workflow-store update 가 patch 를 통과시킨다.
+      const sourcePatch = kind === "manual"
+        ? { source: "manual_mission", sourceKind: "manual_mission" }
+        : { source: "native", sourceKind: "workflow" };
       await updateWorkflow({
         companyId,
         workflowId: workflow.id,
         id: workflow.id,
-        patch: { status: "active" },
+        patch: { status: "active", ...sourcePatch },
         status: "active",
+        ...sourcePatch,
       });
       await refreshOverview();
+      setTableNotice({ tone: "success", message: `${workflow.name} 복원 완료 (${kind === "manual" ? "Manual mission plan" : "Reusable procedure"})` });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setTableError(`복원 실패: ${message}`);
     } finally {
       setPendingWorkflowId(null);
     }
+  }
+
+  function confirmRestoreWorkflow(kind: WorkflowRestoreKind): void {
+    const target = restoreTarget;
+    if (!target) return;
+    setRestoreTarget(null);
+    void onRestoreWorkflow(target, kind);
   }
 
   if (workflows.length === 0) {
@@ -8030,11 +8269,56 @@ function DefinitionsTable({
     filter: navigatorFilter,
   });
 
-  return (
-    <div style={{ display: "grid", gap: "8px" }}>
-      {tableError ? <p key="table-error" style={noticeStyle("error")}>{tableError}</p> : null}
-      {tableNotice ? <p key="table-notice" style={noticeStyle(tableNotice.tone)}>{tableNotice.message}</p> : null}
-      {editingWorkflow ? (
+    return (
+      <div style={{ display: "grid", gap: "8px" }}>
+        {tableError ? <p key="table-error" style={noticeStyle("error")}>{tableError}</p> : null}
+        {tableNotice ? <p key="table-notice" style={noticeStyle(tableNotice.tone)}>{tableNotice.message}</p> : null}
+        {restoreTarget ? (
+          <div
+            key="restore-workflow-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="restore-workflow-title"
+            style={workflowConfirmOverlayStyle}
+            onClick={() => setRestoreTarget(null)}
+          >
+            <div style={workflowConfirmDialogStyle} onClick={(event) => event.stopPropagation()}>
+              <div style={{ display: "grid", gap: "4px" }}>
+                <strong id="restore-workflow-title" style={{ fontSize: "15px", color: "var(--foreground, #f8fafc)" }}>
+                  Restore archived workflow
+                </strong>
+                <span style={{ ...mutedTextStyle, fontSize: "12px", lineHeight: 1.45 }}>
+                  Choose how to classify "{restoreTarget.name}" when it becomes active again.
+                </span>
+              </div>
+              <div style={{ display: "grid", gap: "6px" }}>
+                <span style={{ ...mutedTextStyle, fontSize: "12px" }}>
+                  Reusable workflows appear with normal saved procedures. Manual workflows stay grouped with one-off mission plans.
+                </span>
+              </div>
+              <div style={workflowConfirmActionsStyle}>
+                <button type="button" style={buttonStyle} onClick={() => setRestoreTarget(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  style={primaryButtonStyle}
+                  onClick={() => confirmRestoreWorkflow("reusable")}
+                >
+                  Restore as reusable
+                </button>
+                <button
+                  type="button"
+                  style={primaryButtonStyle}
+                  onClick={() => confirmRestoreWorkflow("manual")}
+                >
+                  Restore as manual
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {editingWorkflow ? (
         <div id="wf-editor" key="selected-workflow-shell" style={{ ...workflowManagementShellStyle, gridTemplateColumns: railCollapsed ? "36px minmax(640px, 1fr)" : "280px minmax(640px, 1fr)" }}>
           <aside id="wf-rail" key="workflow-rail" style={railCollapsed ? { ...workflowDefinitionRailStyle, padding: "6px", gridTemplateRows: "auto" } : workflowDefinitionRailStyle}>
             {railCollapsed ? (
@@ -8159,11 +8443,11 @@ function DefinitionsTable({
               </div>
               <div key="workflow-main" style={workflowSelectedIdentityStyle}>
                 <div key="name-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>Workflow name</label>
+                  <FieldLabel help="Name shown in workflow lists, run history, and generated run labels.">Workflow name</FieldLabel>
                   <input style={inputStyle} value={editingName} onChange={(event) => setEditingName(event.target.value)} required />
                 </div>
                 <div key="description-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>Description</label>
+                  <FieldLabel help="Short operator-facing summary of what this workflow does.">Description</FieldLabel>
                   <textarea
                     style={{ ...textareaStyle, minHeight: "38px" }}
                     value={editingDescription}
@@ -8174,7 +8458,7 @@ function DefinitionsTable({
               </div>
               <div key="workflow-setup-strip" style={workflowSelectedSetupStripStyle}>
                 <div key="status-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Status</label>
+                  <FieldLabel help="Workflow availability. Active can run, paused stays saved, archived is hidden from active operation.">Status</FieldLabel>
                   <select style={selectStyle} value={editingStatus} onChange={(event) => setEditingStatus(event.target.value)}>
                     <option value="active">active</option>
                     <option value="paused">paused</option>
@@ -8182,26 +8466,26 @@ function DefinitionsTable({
                   </select>
                 </div>
                 <div key="schedule-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Schedule (cron)</label>
+                  <FieldLabel help="Cron expression for scheduled runs. Leave blank for manual or label-triggered runs only.">Schedule (cron)</FieldLabel>
                   <input style={inputStyle} value={editingSchedule} onChange={(event) => setEditingSchedule(event.target.value)} placeholder="0 9 * * *" />
                 </div>
                 <div key="timezone-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Timezone</label>
+                  <FieldLabel help="Timezone used to interpret the cron schedule.">Timezone</FieldLabel>
                   <input style={inputStyle} value={editingTimezone} onChange={(event) => setEditingTimezone(event.target.value)} placeholder="Asia/Seoul" />
                 </div>
                 <div key="project-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Project</label>
+                  <FieldLabel help="Optional project that generated issues and runs should be associated with.">Project</FieldLabel>
                   <select style={selectStyle} value={editingProjectId} onChange={(event) => setEditingProjectId(event.target.value)}>
                     <option value="">— none —</option>
                     {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
                   </select>
                 </div>
                 <div key="max-daily-runs-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Max Daily Runs</label>
+                  <FieldLabel help="Daily run cap for scheduled or label-triggered execution. Blank uses the default limit.">Max Daily Runs</FieldLabel>
                   <input style={inputStyle} type="number" min={0} step={1} value={editingMaxDailyRuns} onChange={(event) => setEditingMaxDailyRuns(event.target.value)} placeholder="blank=1/day" />
                 </div>
                 <div key="trigger-labels-field" style={workflowCreateFieldStyle}>
-                  <label style={{ ...mutedTextStyle, fontSize: "11px" }}>Trigger Labels</label>
+                  <FieldLabel help="Comma-separated issue labels that can trigger this workflow.">Trigger Labels</FieldLabel>
                   <input style={inputStyle} value={editingTriggerLabels} onChange={(event) => setEditingTriggerLabels(event.target.value)} placeholder="daily-tech-research" />
                 </div>
               </div>
@@ -8285,7 +8569,7 @@ function DefinitionsTable({
           editingWorkflowId={editingWorkflowId}
           onOpenGraph={beginEdit}
           onRunWorkflow={(workflow) => { void onRunWorkflow(workflow); }}
-          onRestoreWorkflow={(workflow) => { void onRestoreWorkflow(workflow); }}
+          onRestoreWorkflow={(workflow) => setRestoreTarget(workflow)}
           onDeleteWorkflow={(workflow) => { void onDeleteWorkflow(workflow); }}
           onToggleStatus={(workflow) => { void onToggleStatus(workflow); }}
         />
@@ -8474,10 +8758,10 @@ function ActiveRunsTable({
               <tr key={`${runKey}:summary`} style={isHighlighted ? highlightedRunRowStyle : undefined}>
                 <td key="workflow" style={tdStyle}>{run.workflowName}</td>
                 <td key="run" style={tdStyle}>
-	                  {run.runLabel && <span key="label" style={{ fontSize: "12px", fontWeight: 600 }}>{run.runLabel}</span>}
-	                  {isHighlighted ? <span key="highlight" style={{ ...statusBadgeStyle("running"), marginLeft: "6px" }}>new</span> : null}
-	                  {isInspected ? <span key="inspected" style={{ ...graphPolicyBadgeStyle, marginLeft: "6px", color: "#38bdf8" }}>overlay</span> : null}
-	                </td>
+                    {run.runLabel && <span key="label" style={{ fontSize: "12px", fontWeight: 600 }}>{run.runLabel}</span>}
+                    {isHighlighted ? <span key="highlight" style={{ ...statusBadgeStyle("running"), marginLeft: "6px" }}>new</span> : null}
+                    {isInspected ? <span key="inspected" style={{ ...graphPolicyBadgeStyle, marginLeft: "6px", color: "#38bdf8" }}>overlay</span> : null}
+                  </td>
                 <td key="issue" style={tdStyle}>
                   {run.parentIssueId && (
                     <a
@@ -8511,16 +8795,16 @@ function ActiveRunsTable({
                           return next;
                         });
                       }}
-	                    >
-	                      {isExpanded ? "Hide Steps" : "View Steps"}
-	                    </button>
-	                    {onInspectRun ? (
-	                      <button type="button" style={isInspected ? primaryButtonStyle : buttonStyle} onClick={() => onInspectRun(run.id)}>
-	                        Inspect
-	                      </button>
-	                    ) : null}
-	                    <button type="button" style={dangerButtonStyle} onClick={() => onAbort(run.id)}>Abort</button>
-	                  </div>
+                      >
+                        {isExpanded ? "Hide Steps" : "View Steps"}
+                      </button>
+                      {onInspectRun ? (
+                        <button type="button" style={isInspected ? primaryButtonStyle : buttonStyle} onClick={() => onInspectRun(run.id)}>
+                          Inspect
+                        </button>
+                      ) : null}
+                      <button type="button" style={dangerButtonStyle} onClick={() => onAbort(run.id)}>Abort</button>
+                    </div>
                 </td>
               </tr>
               {isExpanded ? (
@@ -8638,10 +8922,10 @@ function RecentRunsTable({
               <tr key={`${runKey}:summary`} style={isHighlighted ? highlightedRunRowStyle : undefined}>
                 <td key="workflow" style={tdStyle}>{run.workflowName}</td>
                 <td key="run" style={tdStyle}>
-	                  {run.runLabel && <span key="label" style={{ fontSize: "12px", fontWeight: 600 }}>{run.runLabel}</span>}
-	                  {isHighlighted ? <span key="highlight" style={{ ...statusBadgeStyle("running"), marginLeft: "6px" }}>new</span> : null}
-	                  {isInspected ? <span key="inspected" style={{ ...graphPolicyBadgeStyle, marginLeft: "6px", color: "#38bdf8" }}>overlay</span> : null}
-	                </td>
+                    {run.runLabel && <span key="label" style={{ fontSize: "12px", fontWeight: 600 }}>{run.runLabel}</span>}
+                    {isHighlighted ? <span key="highlight" style={{ ...statusBadgeStyle("running"), marginLeft: "6px" }}>new</span> : null}
+                    {isInspected ? <span key="inspected" style={{ ...graphPolicyBadgeStyle, marginLeft: "6px", color: "#38bdf8" }}>overlay</span> : null}
+                  </td>
                 <td key="trigger" style={tdStyle}>{formatTriggerSource(run.triggerSource)}</td>
                 <td key="issue" style={tdStyle}>
                   {run.parentIssueId ? (
@@ -8688,7 +8972,7 @@ function RecentRunsTable({
                       </button>
                     ) : null}
                   </div>
-	                </td>
+                  </td>
               </tr>
               {isExpanded ? (
                 <tr key={`${runKey}:detail`}>
@@ -9075,20 +9359,24 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
           >
             {refreshButtonLabel}
           </button>
+          <HelpIcon label="New Workflow opens the creation form. Refresh reloads workflow definitions and run status from the server." />
         </div>
       </div>
 
       <section id="wf-definitions" key="definitions-section" style={{ ...workflowFocusSectionStyle, height: definitionsCollapsed || definitionsHeight === null ? "auto" : `${definitionsHeight}px`, overflow: definitionsHeight === null ? "visible" : "auto", minHeight: definitionsCollapsed ? "auto" : "200px" }}>
         <div key="definitions-toolbar" style={{ ...workflowFocusToolbarStyle, flexShrink: 0, height: "fit-content" }}>
           <div key="definition-controls" style={workflowFocusToolbarGroupStyle}>
-            <input
-              key="navigator-search"
-              style={{ ...inputStyle, width: "200px", fontSize: "12px" }}
-              value={navigatorSearch}
-              onChange={(event) => setNavigatorSearch(event.target.value)}
-              placeholder="Search workflows..."
-              aria-label="Search workflows"
-            />
+            <label key="navigator-search-field" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <input
+                key="navigator-search"
+                style={{ ...inputStyle, width: "200px", fontSize: "12px" }}
+                value={navigatorSearch}
+                onChange={(event) => setNavigatorSearch(event.target.value)}
+                placeholder="Search workflows..."
+                aria-label="Search workflows"
+              />
+              <HelpIcon label="Filters the workflow list by name, description, or related metadata." />
+            </label>
           </div>
           <div key="scope-filter" style={workflowFocusToolbarGroupStyle}>
             <button key="reusable" type="button" style={filterTabStyle(workflowScopeFilter === "reusable")} onClick={() => setWorkflowScopeFilter("reusable")}>
@@ -9111,6 +9399,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
             >
               {definitionsCollapsed ? "▼" : "▲"}
             </button>
+            <HelpIcon label="Use Reusable/Manual to switch workflow categories, Active/Archived to switch status, and the arrow to collapse this list." />
           </div>
         </div>
         {!definitionsCollapsed && (
@@ -9120,7 +9409,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
             <div key="create-header" style={workflowCreateHeaderStyle}>
               <div key="identity" style={workflowCreateIdentityStyle}>
                 <div key="name-field" style={workflowCreateFieldStyle}>
-                  <label key="label" style={{ ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>Workflow name</label>
+                  <FieldLabel help="Name shown in lists, editor headers, and run history.">Workflow name</FieldLabel>
                   <input
                     key="input"
                     style={inputStyle}
@@ -9131,7 +9420,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
                   />
                 </div>
                 <div key="description-field" style={workflowCreateFieldStyle}>
-                  <label key="label" style={{ ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>Description</label>
+                  <FieldLabel help="Short summary of what this workflow is intended to automate.">Description</FieldLabel>
                   <textarea
                     key="textarea"
                     style={{ ...textareaStyle, minHeight: "38px" }}
@@ -9159,20 +9448,21 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
                 >
                   Cancel
                 </button>
+                <HelpIcon label="Save creates the workflow. Cancel clears this draft. Mode tabs choose graph, form, or raw JSON step editing." />
               </div>
             </div>
 
             <div key="create-setup-strip" style={workflowCreateSetupStripStyle}>
               <div key="schedule-field" style={workflowCreateFieldStyle}>
-                <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Schedule (cron)</label>
+                <FieldLabel help="Cron expression for automatic scheduled runs. Leave blank if this workflow is only manual or label-triggered.">Schedule (cron)</FieldLabel>
                 <input key="input" style={inputStyle} value={newSchedule} onChange={(e) => setNewSchedule(e.target.value)} placeholder="0 9 * * *" />
               </div>
               <div key="timezone-field" style={workflowCreateFieldStyle}>
-                <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Timezone</label>
+                <FieldLabel help="Timezone used to interpret the cron schedule.">Timezone</FieldLabel>
                 <input key="input" style={inputStyle} value={newTimezone} onChange={(e) => setNewTimezone(e.target.value)} placeholder="Asia/Seoul" />
               </div>
               <div key="project-field" style={workflowCreateFieldStyle}>
-                <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Project</label>
+                <FieldLabel help="Optional project to attach generated issues and runs to.">Project</FieldLabel>
                 <select key="select" style={selectStyle} value={newProjectId} onChange={(e) => setNewProjectId(e.target.value)}>
                   {[
                     <option key="none" value="">— none —</option>,
@@ -9181,11 +9471,11 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
                 </select>
               </div>
               <div key="max-daily-runs-field" style={workflowCreateFieldStyle}>
-                <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Max Daily Runs</label>
+                <FieldLabel help="Daily execution cap for this workflow. Blank uses the server default.">Max Daily Runs</FieldLabel>
                 <input key="input" style={inputStyle} type="number" min={0} step={1} value={newMaxDailyRuns} onChange={(e) => setNewMaxDailyRuns(e.target.value)} placeholder="blank=1/day" />
               </div>
               <div key="trigger-labels-field" style={workflowCreateFieldStyle}>
-                <label key="label" style={{ ...mutedTextStyle, fontSize: "11px" }}>Trigger labels</label>
+                <FieldLabel help="Comma-separated issue labels that should trigger this workflow.">Trigger labels</FieldLabel>
                 <input
                   key="input"
                   style={inputStyle}
@@ -9320,6 +9610,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
             >
               Selected ({selectedActiveRuns.length})
             </button>
+            <HelpIcon label="Switches active runs between all visible workflows and the workflow selected in the definitions list." />
           </div>
         </div>
         <ActiveRunsTable
@@ -9356,6 +9647,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
             >
               Selected ({selectedHistoryRuns.length})
             </button>
+            <HelpIcon label="Switches run history between all visible workflows and the workflow selected in the definitions list." />
           </div>
         </div>
         <RecentRunsTable

@@ -80,12 +80,25 @@ describe("Workflows editor serialization — stale assignee (AREA-1)", () => {
     expect(JSON.stringify(out)).not.toMatch(/STALE/);
   });
 
-  it("round-trip of a freshly authored producer step keeps graphWorkProductRequired", () => {
-    // Belts-and-suspenders: the workProduct flag survives the same serialization
-    // path the assignee fix touched (AREA-2 UI exposure relies on this).
-    const out = roundTrip({ agentName: "Producer", agentId: "P1", graphWorkProductRequired: true });
+    it("round-trip of a freshly authored producer step keeps graphWorkProductRequired", () => {
+      // Belts-and-suspenders: the workProduct flag survives the same serialization
+      // path the assignee fix touched (AREA-2 UI exposure relies on this).
+      const out = roundTrip({ agentName: "Producer", agentId: "P1", graphWorkProductRequired: true });
     expect(out.graphWorkProductRequired).toBe(true);
-    expect(out.agentId).toBe("P1");
-    expect(out.agentName).toBe("Producer");
+      expect(out.agentId).toBe("P1");
+      expect(out.agentName).toBe("Producer");
+    });
+
+    it("round-trips work product pattern plus resource and secret refs", () => {
+      const out = roundTrip({
+        graphWorkProductRequired: true,
+        graphWorkProductPattern: "reports/*.html",
+        graphResourceRefs: ["kb:market-rules", "file:brief"],
+        graphSecretRefs: ["secret:api-token"],
+      });
+      expect(out.graphWorkProductRequired).toBe(true);
+      expect(out.graphWorkProductPattern).toBe("reports/*.html");
+      expect(out.graphResourceRefs).toEqual(["kb:market-rules", "file:brief"]);
+      expect(out.graphSecretRefs).toEqual(["secret:api-token"]);
+    });
   });
-});
