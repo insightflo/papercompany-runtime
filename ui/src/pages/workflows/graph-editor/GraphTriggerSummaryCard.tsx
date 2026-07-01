@@ -7,7 +7,7 @@ export function GraphTriggerSummaryCard({
   surface,
   graphTriggerSummary,
 }: {
-  surface: string;
+  surface: "stacked" | "focus";
   graphTriggerSummary: WorkflowGraphTriggerSummary;
 }): JSX.Element {
   if (surface !== "stacked") return <Fragment />;

@@ -7,7 +7,7 @@ import { jsonToSteps, parseOptionalNonNegativeInteger, parseOptionalPositiveInte
 import { appendStepAfter, applyStepRunsToGraphSteps, applyWorkflowGraphFailureRoute, assignStepsToContainer, assignStepsToGroup, buildWorkflowGraphContainerSummary, buildWorkflowGraphDataFlowMap, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphExecutionEvidenceSummary, buildWorkflowGraphExportSnapshot, buildWorkflowGraphFailureRouteSummary, buildWorkflowGraphInspectorSummary, buildWorkflowGraphModel, buildWorkflowGraphRepairPlan, buildWorkflowGraphRunDebugSummary, buildWorkflowGraphSelectionSummary, buildWorkflowGraphStructurePaletteSummary, buildWorkflowGraphTestDrawerSummary, buildWorkflowGraphWorkbenchSummary, clearStepsGroup, clearWorkflowContainer, connectSteps, disconnectSteps, duplicateWorkflowContainer, duplicateWorkflowStep, expandWorkflowGraphSelection, getWorkflowGraphStepContext, insertWorkflowStepFromPalette, normalizeGraphEdgeKind, normalizeGraphRunStatus, parseDependencies, removeWorkflowStep, renameWorkflowStep, setGraphGroupCollapsed, summarizeWorkflowGraphInterface, summarizeWorkflowGraphTriggers, updateContainerMetadata, updateGraphEdgeMetadata, updateGraphGroupMetadata, updateStepAdvancedMetadata, updateStepApprovalMetadata, updateStepDataFlowMetadata, updateStepExecutionMetadata, updateStepNote, updateStepResourceMetadata, updateStepTestingMetadata, type WorkflowGraphContainerSummary, type WorkflowGraphContainerType, type WorkflowGraphDataFlowMap, type WorkflowGraphDefinitionNavigatorItem, type WorkflowGraphEdge, type WorkflowGraphEdgeKind, type WorkflowGraphEdgeMetadataRecord, type WorkflowGraphExecutionEvidenceSummary, type WorkflowGraphFailureRouteSummary, type WorkflowGraphInspectorMode, type WorkflowGraphInspectorSummary, type WorkflowGraphInterfaceInput, type WorkflowGraphNavigatorFilter, type WorkflowGraphPaletteNodeKind, type WorkflowGraphRepairPlan, type WorkflowGraphRunStatus, type WorkflowGraphSelectionMode, type WorkflowGraphSelectionSummary, type WorkflowGraphStep, type WorkflowGraphStepContext, type WorkflowGraphTestDrawerSummary, type WorkflowGraphTriggerSummary, type WorkflowGraphWorkbenchSummary } from "../workflow-graph.js";
 import { CREATE_PARENT_ISSUE_POLICIES, normalizeCreateParentIssuePolicy, type CreateParentIssuePolicy } from "../workflow-parent-policy.js";
 import type { PluginPageProps, PluginWidgetProps, StepEditorMode, ProjectOption, LabelOption, WorkflowToolOption, WorkflowToolGrant, WorkflowOverviewData, StatusFilter, WorkflowScopeFilter, WorkflowRestoreKind, WorkflowSummary, WorkflowRunSummary } from "../workflow-page-types.js";
-import { badgeRowStyle, buttonDisabledStyle, buttonStyle, dangerButtonStyle, filterTabStyle, graphPolicyBadgeStyle, headerRowStyle, inputStyle, mutedTextStyle, noticeStyle, pageStyle, primaryButtonStyle, sectionTitleStyle, selectStyle, statusBadgeStyle, textareaStyle, titleStyle, widgetCountStyle, widgetTitleStyle, widgetStyle } from "../workflow-page-styles.js";
+import { badgeRowStyle, buttonDisabledStyle, buttonStyle, dangerButtonStyle, filterTabStyle, headerRowStyle, inputStyle, noticeStyle, pageStyle, primaryButtonStyle, sectionTitleStyle, selectStyle, statusBadgeStyle, textareaStyle, titleStyle, widgetCountStyle, widgetTitleStyle, widgetStyle } from "../workflow-page-styles.js";
 import { apiBaseUrl, createCompanyLabel, fetchCompanyLabels, formatDateTime, useAvailableWorkflowTools, useHostContext, usePluginAction, useWorkflowOverview, useWorkflowRunDetail } from "../workflow-page-api.js";
 import { ErrorState, FieldLabel, HelpIcon, HelpedText } from "../shared-controls.js";
 import { splitCommaList, WorkflowToolPicker } from "../workflow-tool-picker.js";
@@ -32,6 +32,7 @@ import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeAct
 import { clampGraphCanvasScale, clampGraphInspectorWidth, graphEdgeMetadataFor, isEditableKeyboardTarget, LABEL_COLOR_PRESETS } from "./WorkflowGraphEditorHelpers.js";
 import { GraphTriggerSummaryCard } from "./GraphTriggerSummaryCard.js";
 import { GraphEmptyState } from "./GraphEmptyState.js";
+import { useRawStepJsonEditor } from "./useRawStepJsonEditor.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { GraphInspector } from "./GraphInspector.js";
 
@@ -70,8 +71,6 @@ function WorkflowGraphEditor({
   const [showGraphEvidenceDrawer, setShowGraphEvidenceDrawer] = useState<boolean>(false);
   const [canvasScale, setCanvasScale] = useState<number>(1);
   const [graphInspectorWidth, setGraphInspectorWidth] = useState<number>(420);
-  const [rawStepJsonText, setRawStepJsonText] = useState<string>("");
-  const [rawStepJsonFeedback, setRawStepJsonFeedback] = useState<{ tone: "info" | "error" | "success"; message: string } | null>(null);
   const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
   const { selectedCompanyId: graphCompanyId } = useCompany();
   const [graphAgents, setGraphAgents] = useState<{ id: string; name: string }[]>([]);
@@ -118,6 +117,21 @@ function WorkflowGraphEditor({
   const graph = useMemo(() => buildWorkflowGraphModel(displaySteps), [displaySteps]);
   const matchingNodeIds = useMemo(() => new Set<string>(), []);
   const selectedStep = steps.find((step) => step.id === selectedStepId) ?? steps[0] ?? null;
+  const {
+    rawStepJsonText,
+    rawStepJsonFeedback,
+    setRawStepJsonText,
+    setRawStepJsonFeedback,
+    validateRawSelectedStepJson,
+    applyRawSelectedStepJson,
+  } = useRawStepJsonEditor({
+    selectedStep,
+    steps,
+    onChange,
+    setSelectedStepId,
+    setSelectedPathStepIds,
+    setGraphError: (e: string) => setGraphError(e),
+  });
   const selectedGraphNode = selectedStep ? graph.nodes.find((node) => node.step.id === selectedStep.id) ?? null : null;
   const selectedStepIdForKeyboard = selectedStep?.id ?? "";
   const selectedGraphContext = selectedStep ? getWorkflowGraphStepContext(steps, selectedStep.id) : null;
@@ -182,15 +196,13 @@ function WorkflowGraphEditor({
     : graphInspectorMode === "edit"
       ? "#38bdf8"
       : graphInspectorMode === "policy"
-        ? "#a78bfa"
-        : "#fbbf24";
-  const graphTriggerSummary = triggerSummary ?? summarizeWorkflowGraphTriggers({});
-  const selectedRawStepJson = useMemo(
-    () => selectedStep ? JSON.stringify(stepsToJson([selectedStep])[0], null, 2) : "",
-    [selectedStep],
-  );
-  const canvasWidth = Math.max(620, ...graph.nodes.map((node) => node.x + 230), 620);
+        ? "#f59e0b"
+        : graphInspectorMode === "raw"
+          ? "#a78bfa"
+          : "#fbbf24";
   const canvasHeight = Math.max(360, ...graph.nodes.map((node) => node.y + 132), 360);
+  const canvasWidth = Math.max(620, ...graph.nodes.map((node) => node.x + 230), 620);
+  const graphTriggerSummary = triggerSummary ?? summarizeWorkflowGraphTriggers({});
   const selectedEdgeActionAnchor = useMemo<GraphEdgeActionAnchor | null>(() => {
     if (!selectedEdgeId) return null;
     const edge = graph.edges.find((candidate) => candidate.id === selectedEdgeId);
@@ -205,11 +217,6 @@ function WorkflowGraphEditor({
     const midX = startX + Math.max(34, (endX - startX) / 2);
     return { edge, x: midX, y: (startY + endY) / 2 };
   }, [graph.edges, graph.nodes, selectedEdgeId]);
-
-  useEffect(() => {
-    setRawStepJsonText(selectedRawStepJson);
-    setRawStepJsonFeedback(null);
-  }, [selectedRawStepJson]);
 
   useEffect(() => {
     const container = graphCanvasRef.current;
@@ -918,65 +925,6 @@ function WorkflowGraphEditor({
       ...(Object.hasOwn(patch, "graphContainerRunInParallel") ? { runInParallel: nextDraft.graphContainerRunInParallel } : {}),
       ...(Object.hasOwn(patch, "graphContainerParallelism") ? { parallelism: parsedParallelism } : {}),
     }));
-  }
-
-  function renderDataFlowChips(values: string[], emptyLabel: string, tone: "normal" | "muted" | "error" = "normal"): JSX.Element {
-    if (values.length === 0) {
-      return <span style={{ ...mutedTextStyle, fontSize: "11px" }}>{emptyLabel}</span>;
-    }
-    const color = tone === "error" ? "var(--destructive, #ef4444)" : tone === "muted" ? "var(--muted-foreground, #94a3b8)" : "#14b8a6";
-    return (
-      <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-        {values.map((value) => (
-          <span key={value} style={{ ...graphPolicyBadgeStyle, color }}>{value}</span>
-        ))}
-      </div>
-    );
-  }
-
-  function parseRawSelectedStepJson(): StepDraft | null {
-    if (!selectedStep) return null;
-    try {
-      const parsed = JSON.parse(rawStepJsonText) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        setRawStepJsonFeedback({ tone: "error", message: "Selected step JSON must be one object." });
-        return null;
-      }
-      const [draft] = jsonToSteps([parsed as WorkflowOverviewData["workflows"][number]["steps"][number]]);
-      if (!draft?.id.trim()) {
-        setRawStepJsonFeedback({ tone: "error", message: "Selected step JSON must include a non-empty id." });
-        return null;
-      }
-      const duplicate = steps.some((step) => step.id !== selectedStep.id && step.id === draft.id);
-      if (duplicate) {
-        setRawStepJsonFeedback({ tone: "error", message: `Step id "${draft.id}" already exists.` });
-        return null;
-      }
-      return draft;
-    } catch (error) {
-      setRawStepJsonFeedback({ tone: "error", message: `JSON parse failed: ${error instanceof Error ? error.message : String(error)}` });
-      return null;
-    }
-  }
-
-  function validateRawSelectedStepJson(): void {
-    const parsed = parseRawSelectedStepJson();
-    if (!parsed) return;
-    setRawStepJsonFeedback({ tone: "success", message: `Valid step JSON for ${parsed.id}.` });
-  }
-
-    function applyRawSelectedStepJson(): void {
-      if (!selectedStep) return;
-      const parsed = parseRawSelectedStepJson();
-      if (!parsed) return;
-      const renamedSteps = parsed.id !== selectedStep.id
-        ? renameWorkflowStep(steps, selectedStep.id, parsed.id)
-        : steps;
-      onChange(renamedSteps.map((step) => (step.id === parsed.id ? parsed : step)));
-      setSelectedStepId(parsed.id);
-    setSelectedPathStepIds(parsed.id.trim() ? [parsed.id] : []);
-    setRawStepJsonFeedback({ tone: "success", message: `Applied JSON to ${parsed.id}.` });
-    setGraphError("");
   }
 
   if (steps.length === 0) {
