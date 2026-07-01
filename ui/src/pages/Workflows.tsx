@@ -19,6 +19,8 @@ import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
 import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, isRecord, normalizeMaxDailyRunsInput, parseJsonArrayField } from "./workflows/workflow-form-utils.js";
 import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
+import { workflowFocusSectionStyle, workflowFocusToolbarGroupStyle, workflowFocusToolbarStyle } from "./workflows/workflow-layout-styles.js";
+import { WorkflowRunSections, type WorkflowRunHistoryScope } from "./workflows/workflow-run-sections.js";
 import { WorkflowDefinitionRail } from "./workflows/workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
@@ -46,31 +48,6 @@ function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   const tagName = target.tagName.toLowerCase();
   return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
 }
-
-const workflowFocusSectionStyle: CSSProperties = {
-  display: "grid",
-  gap: "8px",
-  padding: "10px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "8px",
-  background: "color-mix(in srgb, var(--card, #0f172a) 58%, var(--background, #020617))",
-};
-
-const workflowFocusToolbarStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: "8px",
-  flexWrap: "wrap",
-};
-
-const workflowFocusToolbarGroupStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "6px",
-  flexWrap: "wrap",
-  minWidth: 0,
-};
 
 const formPanelStyle: CSSProperties = {
   display: "grid",
@@ -148,7 +125,6 @@ const workflowCreateWorkspaceStyle: CSSProperties = {
 
 
 
-type WorkflowRunHistoryScope = "all" | "selected";
 
 const LABEL_COLOR_PRESETS = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#8b5cf6", "#6366f1", "#ec4899"];
 
@@ -221,10 +197,6 @@ const workflowSelectedWorkspaceStyle: CSSProperties = {
   overflow: "auto",
 };
 
-const workflowRunHistorySectionStyle: CSSProperties = {
-  ...workflowFocusSectionStyle,
-  minHeight: "430px",
-};
 
 
 
@@ -2579,78 +2551,24 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
         </div>
       )}
 
-      <section id="wf-active-runs" key="active-runs-section" style={workflowFocusSectionStyle}>
-        <div key="active-runs-toolbar" style={workflowFocusToolbarStyle}>
-          <div key="active-runs-title" style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
-            <h2 key="title" style={{ ...sectionTitleStyle, fontSize: "14px" }}>Active Runs</h2>
-            {activeRunsScope === "selected" && selectedHistoryWorkflow ? (
-              <span key="selected-name" style={{ ...mutedTextStyle, fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {selectedHistoryWorkflow.name}
-              </span>
-            ) : (
-              <Fragment key="active-selected-name-placeholder" />
-            )}
-          </div>
-          <div key="active-runs-filters" style={workflowFocusToolbarGroupStyle}>
-            <button key="all" type="button" style={filterTabStyle(activeRunsScope === "all")} onClick={() => setActiveRunsScope("all")}>
-              All ({scopedActiveRuns.length})
-            </button>
-            <button
-              key="selected"
-              type="button"
-              style={canFilterSelectedHistory ? filterTabStyle(activeRunsScope === "selected") : { ...filterTabStyle(activeRunsScope === "selected"), ...buttonDisabledStyle }}
-              disabled={!canFilterSelectedHistory}
-              onClick={() => setActiveRunsScope("selected")}
-            >
-              Selected ({selectedActiveRuns.length})
-            </button>
-            <HelpIcon label="Switches active runs between all visible workflows and the workflow selected in the definitions list." />
-          </div>
-        </div>
-        <ActiveRunsTable
-          activeRuns={displayActiveRuns}
-          companyId={companyId}
-          onAbort={handleAbortRun}
-          onRefreshOverview={refreshOverview}
-          highlightedRunId={highlightedRunId}
-        />
-      </section>
-
-      <section id="wf-run-history" key="run-history-section" style={workflowRunHistorySectionStyle}>
-        <div key="run-history-toolbar" style={workflowFocusToolbarStyle}>
-          <div key="run-history-title" style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
-            <h2 key="title" style={{ ...sectionTitleStyle, fontSize: "14px" }}>Run History</h2>
-            {runHistoryScope === "selected" && selectedHistoryWorkflow ? (
-              <span key="selected-name" style={{ ...mutedTextStyle, fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {selectedHistoryWorkflow.name}
-              </span>
-            ) : (
-              <Fragment key="selected-name-placeholder" />
-            )}
-          </div>
-          <div key="run-history-filters" style={workflowFocusToolbarGroupStyle}>
-            <button key="all" type="button" style={filterTabStyle(runHistoryScope === "all")} onClick={() => setRunHistoryScope("all")}>
-              All ({scopedRecentRuns.length})
-            </button>
-            <button
-              key="selected"
-              type="button"
-              style={canFilterSelectedHistory ? filterTabStyle(runHistoryScope === "selected") : { ...filterTabStyle(runHistoryScope === "selected"), ...buttonDisabledStyle }}
-              disabled={!canFilterSelectedHistory}
-              onClick={() => setRunHistoryScope("selected")}
-            >
-              Selected ({selectedHistoryRuns.length})
-            </button>
-            <HelpIcon label="Switches run history between all visible workflows and the workflow selected in the definitions list." />
-          </div>
-        </div>
-        <RecentRunsTable
-          recentRuns={historyRuns}
-          companyId={companyId}
-          onRefreshOverview={refreshOverview}
-          highlightedRunId={highlightedRunId}
-        />
-      </section>
+      <WorkflowRunSections
+        activeRunsScope={activeRunsScope}
+        runHistoryScope={runHistoryScope}
+        onActiveRunsScopeChange={setActiveRunsScope}
+        onRunHistoryScopeChange={setRunHistoryScope}
+        selectedHistoryWorkflow={selectedHistoryWorkflow}
+        scopedActiveRuns={scopedActiveRuns}
+        selectedActiveRuns={selectedActiveRuns}
+        displayActiveRuns={displayActiveRuns}
+        canFilterSelectedHistory={canFilterSelectedHistory}
+        scopedRecentRuns={scopedRecentRuns}
+        selectedHistoryRuns={selectedHistoryRuns}
+        historyRuns={historyRuns}
+        companyId={companyId}
+        onAbortRun={handleAbortRun}
+        onRefreshOverview={refreshOverview}
+        highlightedRunId={highlightedRunId}
+      />
 
       {showHelp && <WorkflowHelpOverlay onClose={() => setShowHelp(false)} />}
     </div>
