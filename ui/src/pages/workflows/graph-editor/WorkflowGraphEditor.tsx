@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type JSX } from "react";
+import { Fragment, useEffect, useState, type CSSProperties, type FormEvent, type JSX } from "react";
 import { useCompany } from "../../../context/CompanyContext";
 import { buildManualRunFeedback, buildManualRunButtonState, findNewRunId, manualRunUnavailableMessage } from "../run-feedback.js";
 import { ActiveRunsTable, RecentRunsTable, WorkflowRunDebugStrip, WorkflowRunDrawer, workflowRunDrawerActionsStyle, workflowRunOverlayBannerStyle, type WorkflowRunDrawerMode } from "../workflow-runs.js";
@@ -28,14 +28,15 @@ import { WorkflowRunSections, type WorkflowRunHistoryScope } from "../workflow-r
 import { WorkflowDefinitionRail } from "../workflow-definition-rail.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "../workflow-interface-editor.js";
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./graphStyles.js";
-import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeActionAnchor, type GraphNodeDragState } from "./graphUiUtils.js";
-import { clampGraphCanvasScale, clampGraphInspectorWidth, graphEdgeMetadataFor, isEditableKeyboardTarget, LABEL_COLOR_PRESETS } from "./WorkflowGraphEditorHelpers.js";
+import { type GraphContextMenuState, type GraphNodeDragState } from "./graphUiUtils.js";
+import { graphEdgeMetadataFor, isEditableKeyboardTarget, LABEL_COLOR_PRESETS } from "./WorkflowGraphEditorHelpers.js";
 import { GraphTriggerSummaryCard } from "./GraphTriggerSummaryCard.js";
 import { GraphEmptyState } from "./GraphEmptyState.js";
 import { useRawStepJsonEditor } from "./useRawStepJsonEditor.js";
 import { useGraphAgents } from "./useGraphAgents.js";
 import { useWorkflowGraphDerivedState } from "./useWorkflowGraphDerivedState.js";
 import { useWorkflowGraphMetadataHandlers } from "./useWorkflowGraphMetadataHandlers.js";
+import { useWorkflowGraphCanvasViewport } from "./useWorkflowGraphCanvasViewport.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { GraphInspector } from "./GraphInspector.js";
 
@@ -72,18 +73,11 @@ function WorkflowGraphEditor({
   const [showGraphDetails, setShowGraphDetails] = useState<boolean>(false);
   const [showGraphTestDrawer, setShowGraphTestDrawer] = useState<boolean>(false);
   const [showGraphEvidenceDrawer, setShowGraphEvidenceDrawer] = useState<boolean>(false);
-  const [canvasScale, setCanvasScale] = useState<number>(1);
-  const [graphInspectorWidth, setGraphInspectorWidth] = useState<number>(420);
   const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [connectingFromStepId, setConnectingFromStepId] = useState<string | null>(null);
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
-  const [isCanvasPanning, setIsCanvasPanning] = useState<boolean>(false);
-  const [canvasPanX, setCanvasPanX] = useState<number>(0);
-  const [canvasPanY, setCanvasPanY] = useState<number>(0);
-  const graphCanvasRef = React.useRef<HTMLDivElement | null>(null);
   const graphNodeDragRef = React.useRef<GraphNodeDragState | null>(null);
-  const graphCanvasPanRef = React.useRef<GraphCanvasPanState | null>(null);
   const suppressNodeClickRef = React.useRef<string | null>(null);
   const graphAgents = useGraphAgents();
   const {
@@ -118,18 +112,25 @@ function WorkflowGraphEditor({
     updateSelectedApproval, updateSelectedTesting, updateSelectedExecution, updateSelectedDataFlow,
     updateSelectedResources, setSelectedNote, updateSelectedContainerMetadata,
   } = useWorkflowGraphMetadataHandlers({ steps, onChange, selectedStep, setGraphError });
-  useEffect(() => {
-    const container = graphCanvasRef.current;
-    if (!container) return undefined;
-    const handleWheel = (event: WheelEvent): void => {
-      event.preventDefault();
-      closeGraphContextMenu();
-      const direction = event.deltaY > 0 ? -1 : 1;
-      setCanvasScaleFromPoint(canvasScale + direction * 0.1, event.clientX, event.clientY);
-    };
-    container.addEventListener("wheel", handleWheel, { passive: false });
-    return () => container.removeEventListener("wheel", handleWheel);
-  }, [canvasScale]);
+
+  const closeGraphContextMenu = React.useCallback((): void => {
+    setGraphContextMenu(null);
+  }, []);
+
+  const {
+    canvasScale,
+    canvasPanX,
+    canvasPanY,
+    graphInspectorWidth,
+    graphCanvasRef,
+    isCanvasPanning,
+    setCanvasScaleFromPoint,
+    centerCanvasOnGraphPoint,
+    beginCanvasPan,
+    handleCanvasPointerMove,
+    endCanvasPan,
+    beginGraphInspectorResize,
+  } = useWorkflowGraphCanvasViewport({ closeGraphContextMenu });
 
 
   function updateStepGraphPosition(stepId: string, x: number, y: number): void {
@@ -138,23 +139,6 @@ function WorkflowGraphEditor({
       graphPositionX: Math.round(x),
       graphPositionY: Math.round(y),
     } : step)));
-  }
-
-  function setCanvasScaleFromPoint(nextScale: number, clientX?: number, clientY?: number): void {
-    const container = graphCanvasRef.current;
-    const normalizedScale = clampGraphCanvasScale(nextScale);
-    if (!container || clientX === undefined || clientY === undefined) {
-      setCanvasScale(normalizedScale);
-      return;
-    }
-    const rect = container.getBoundingClientRect();
-    const offsetX = clientX - rect.left;
-    const offsetY = clientY - rect.top;
-    const graphX = (-canvasPanX + offsetX) / canvasScale;
-    const graphY = (-canvasPanY + offsetY) / canvasScale;
-    setCanvasScale(normalizedScale);
-    setCanvasPanX(offsetX - graphX * normalizedScale);
-    setCanvasPanY(offsetY - graphY * normalizedScale);
   }
 
   function renameSelectedStep(nextStepId: string): void {
@@ -224,22 +208,14 @@ function WorkflowGraphEditor({
   }
 
   function centerSelectedGraphStep(): void {
-    if (!selectedGraphNode || !graphCanvasRef.current) return;
-    const container = graphCanvasRef.current;
-    const nodeCenterX = (selectedGraphNode.x + 86) * canvasScale;
-    const nodeCenterY = (selectedGraphNode.y + 38) * canvasScale;
-    setCanvasPanX(container.clientWidth / 2 - nodeCenterX);
-    setCanvasPanY(container.clientHeight / 2 - nodeCenterY);
+    if (!selectedGraphNode) return;
+    centerCanvasOnGraphPoint(selectedGraphNode.x + 86, selectedGraphNode.y + 38);
   }
 
   function centerGraphStep(stepId: string): void {
     const node = graph.nodes.find((candidate) => candidate.step.id === stepId);
-    if (!node || !graphCanvasRef.current) return;
-    const container = graphCanvasRef.current;
-    const nodeCenterX = (node.x + 86) * canvasScale;
-    const nodeCenterY = (node.y + 38) * canvasScale;
-    setCanvasPanX(container.clientWidth / 2 - nodeCenterX);
-    setCanvasPanY(container.clientHeight / 2 - nodeCenterY);
+    if (!node) return;
+    centerCanvasOnGraphPoint(node.x + 86, node.y + 38);
   }
 
   function runWorkbenchAction(actionId: string): void {
@@ -341,27 +317,6 @@ function WorkflowGraphEditor({
     event.stopPropagation();
   }
 
-  function beginGraphInspectorResize(event: React.PointerEvent<HTMLDivElement>): void {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const startClientX = event.clientX;
-    const startWidth = graphInspectorWidth;
-    const onMove = (moveEvent: PointerEvent): void => {
-      setGraphInspectorWidth(clampGraphInspectorWidth(startWidth - (moveEvent.clientX - startClientX)));
-    };
-    const onUp = (): void => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }
-
   useEffect(() => {
     if (!selectedStepIdForKeyboard && !selectedEdgeId) return undefined;
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -380,10 +335,6 @@ function WorkflowGraphEditor({
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [graph.edges, selectedEdgeId, selectedStepIdForKeyboard, steps]);
-
-  function closeGraphContextMenu(): void {
-    setGraphContextMenu(null);
-  }
 
   function handleCanvasClick(): void {
     closeGraphContextMenu();
@@ -453,41 +404,6 @@ function WorkflowGraphEditor({
     event.preventDefault();
     event.stopPropagation();
     connectPendingEdgeTo(targetId);
-  }
-
-  function beginCanvasPan(event: React.PointerEvent<HTMLDivElement>): void {
-    const target = event.target as HTMLElement;
-    if (target.closest("[data-graph-node='true'], [data-graph-toolbar='true'], [data-graph-menu='true'], [data-graph-edge='true'], [data-graph-handle='true'], [data-graph-edge-remove='true']")) return;
-    if (event.button !== 0 && event.button !== 1) return;
-    closeGraphContextMenu();
-    graphCanvasPanRef.current = {
-      pointerId: event.pointerId,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startPanX: canvasPanX,
-      startPanY: canvasPanY,
-    };
-    setIsCanvasPanning(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function handleCanvasPointerMove(event: React.PointerEvent<HTMLDivElement>): void {
-    const pan = graphCanvasPanRef.current;
-    if (!pan || pan.pointerId !== event.pointerId) return;
-    setCanvasPanX(pan.startPanX + (event.clientX - pan.startClientX));
-    setCanvasPanY(pan.startPanY + (event.clientY - pan.startClientY));
-  }
-
-  function endCanvasPan(event: React.PointerEvent<HTMLDivElement>): void {
-    const pan = graphCanvasPanRef.current;
-    if (!pan || pan.pointerId !== event.pointerId) return;
-    graphCanvasPanRef.current = null;
-    setIsCanvasPanning(false);
-    try {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture may already be released by the browser.
-    }
   }
 
   function beginNodeDrag(event: React.PointerEvent<HTMLButtonElement>, stepId: string, x: number, y: number): void {
