@@ -6,3 +6,9 @@ packages:
   - server
   - ui
   - cli
+allowBuilds:
+  '@embedded-postgres/darwin-arm64': set this to true or false
+  es5-ext: set this to true or false
+  esbuild: set this to true or false
+  re2: set this to true or false
+  sharp: set this to true or false
