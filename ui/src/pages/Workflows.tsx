@@ -15,6 +15,7 @@ import { GraphModeTabs, StepWorkspaceEditor, type StepWorkspaceGraphEditorProps 
 import { WorkflowGraphTestDrawer } from "./workflows/graph-editor/GraphTestDrawer.js";
 import { filterRunsForWorkflows, hasRecurringWorkflowTrigger, isManualMissionPlanWorkflow } from "./workflows/workflow-filters.js";
 import { WorkflowDefinitionList, WorkflowDefinitionMiniFlow } from "./workflows/workflow-definition-list.js";
+import { WorkflowRestoreDialog } from "./workflows/workflow-restore-dialog.js";
 import { WorkflowExportPreview, WorkflowInterfaceFields, WorkflowInterfaceSummary } from "./workflows/workflow-interface-editor.js";
 import { graphInspectorResizeHandleStyle, graphPaletteItems, graphShellStyle } from "./workflows/graph-editor/graphStyles.js";
 import { type GraphCanvasPanState, type GraphContextMenuState, type GraphEdgeActionAnchor, type GraphNodeDragState } from "./workflows/graph-editor/graphUiUtils.js";
@@ -151,34 +152,6 @@ const workflowCreateLabelStripStyle: CSSProperties = {
   minWidth: 0,
 };
 
-const workflowConfirmOverlayStyle: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  zIndex: 60,
-  display: "grid",
-  placeItems: "center",
-  padding: "24px",
-  background: "rgba(2, 6, 23, 0.62)",
-};
-
-const workflowConfirmDialogStyle: CSSProperties = {
-  display: "grid",
-  gap: "12px",
-  width: "min(520px, 100%)",
-  padding: "16px",
-  border: "1px solid var(--border, #334155)",
-  borderRadius: "10px",
-  background: "var(--card, #0f172a)",
-  boxShadow: "0 18px 48px rgba(0, 0, 0, 0.36)",
-};
-
-const workflowConfirmActionsStyle: CSSProperties = {
-  display: "flex",
-  justifyContent: "flex-end",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: "8px",
-};
 
 
 
@@ -2075,51 +2048,13 @@ function DefinitionsTable({
       <div style={{ display: "grid", gap: "8px" }}>
         {tableError ? <p key="table-error" style={noticeStyle("error")}>{tableError}</p> : null}
         {tableNotice ? <p key="table-notice" style={noticeStyle(tableNotice.tone)}>{tableNotice.message}</p> : null}
-        {restoreTarget ? (
-          <div
-            key="restore-workflow-confirm"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="restore-workflow-title"
-            style={workflowConfirmOverlayStyle}
-            onClick={() => setRestoreTarget(null)}
-          >
-            <div style={workflowConfirmDialogStyle} onClick={(event) => event.stopPropagation()}>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <strong id="restore-workflow-title" style={{ fontSize: "15px", color: "var(--foreground, #f8fafc)" }}>
-                  Restore archived workflow
-                </strong>
-                <span style={{ ...mutedTextStyle, fontSize: "12px", lineHeight: 1.45 }}>
-                  Choose how to classify "{restoreTarget.name}" when it becomes active again.
-                </span>
-              </div>
-              <div style={{ display: "grid", gap: "6px" }}>
-                <span style={{ ...mutedTextStyle, fontSize: "12px" }}>
-                  Reusable workflows appear with normal saved procedures. Manual workflows stay grouped with one-off mission plans.
-                </span>
-              </div>
-              <div style={workflowConfirmActionsStyle}>
-                <button type="button" style={buttonStyle} onClick={() => setRestoreTarget(null)}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  style={primaryButtonStyle}
-                  onClick={() => confirmRestoreWorkflow("reusable")}
-                >
-                  Restore as reusable
-                </button>
-                <button
-                  type="button"
-                  style={primaryButtonStyle}
-                  onClick={() => confirmRestoreWorkflow("manual")}
-                >
-                  Restore as manual
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
+            {restoreTarget ? (
+              <WorkflowRestoreDialog
+                workflow={restoreTarget}
+                onCancel={() => setRestoreTarget(null)}
+                onConfirm={confirmRestoreWorkflow}
+              />
+            ) : null}
         {editingWorkflow ? (
         <div id="wf-editor" key="selected-workflow-shell" style={{ ...workflowManagementShellStyle, gridTemplateColumns: railCollapsed ? "36px minmax(640px, 1fr)" : "280px minmax(640px, 1fr)" }}>
           <aside id="wf-rail" key="workflow-rail" style={railCollapsed ? { ...workflowDefinitionRailStyle, padding: "6px", gridTemplateRows: "auto" } : workflowDefinitionRailStyle}>
