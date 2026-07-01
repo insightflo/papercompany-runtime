@@ -8,6 +8,7 @@
 // [수정시 주의] 상태/핸들러를 직접 만들지 말고 코디네이터에서 props로 넘길 것. 루트 Workflows.tsx 역참조 금지.
 import * as React from "react";
 import { Fragment, type CSSProperties, type JSX } from "react";
+import { GraphInspectorPolicyRuntime } from "./GraphInspectorPolicyRuntime.js";
 import { GraphInspectorPolicyAdvanced } from "./GraphInspectorPolicyAdvanced.js";
 import { GraphInspectorEditStep } from "./GraphInspectorEditStep.js";
 import { GraphInspectorRawStep } from "./GraphInspectorRawStep.js";
@@ -304,132 +305,11 @@ export function GraphInspector({
                   selectedStep={selectedStep}
                   updateSelectedAdvanced={updateSelectedAdvanced}
                 />
-            <div key="approval-gate" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <HelpedText help="Adds a human approval pause before this step can continue.">Approval gate</HelpedText>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
-                <input
-                  type="checkbox"
-                  checked={selectedStep.graphApprovalRequired}
-                  onChange={(event) => updateSelectedApproval({ graphApprovalRequired: event.target.checked })}
-                />
-                Suspend until approved
-                <HelpIcon label="When enabled, execution pauses and waits for approval before this step proceeds." />
-              </label>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Message shown to approvers so they know what they are approving.">Approval prompt</FieldLabel>
-                <textarea
-                  style={{ ...textareaStyle, minHeight: "58px" }}
-                  value={selectedStep.graphApprovalPrompt}
-                  placeholder="Approval prompt"
-                  onChange={(event) => updateSelectedApproval({ graphApprovalPrompt: event.target.value })}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Comma-separated approver identifiers or groups allowed to approve this gate.">Approvers</FieldLabel>
-                <input
-                  style={inputStyle}
-                  value={selectedStep.graphApprovalRecipients}
-                  placeholder="Approvers, comma-separated"
-                  onChange={(event) => updateSelectedApproval({ graphApprovalRecipients: event.target.value })}
-                />
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <div style={{ display: "grid", gap: "4px" }}>
-                  <FieldLabel help="Seconds to wait for approval before the timeout action is applied.">Approval timeout seconds</FieldLabel>
-                  <input
-                    style={inputStyle}
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={selectedStep.graphApprovalTimeoutSeconds}
-                    placeholder="timeout seconds"
-                    onChange={(event) => updateSelectedApproval({ graphApprovalTimeoutSeconds: event.target.value })}
-                  />
-                </div>
-                <div style={{ display: "grid", gap: "4px" }}>
-                  <FieldLabel help="What the workflow should do if approval does not arrive in time.">Approval timeout action</FieldLabel>
-                  <select
-                    style={selectStyle}
-                    value={selectedStep.graphApprovalTimeoutAction}
-                    onChange={(event) => updateSelectedApproval({ graphApprovalTimeoutAction: event.target.value })}
-                  >
-                    <option value="">No timeout action</option>
-                    <option value="cancel">Cancel on timeout</option>
-                    <option value="resume">Resume on timeout</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-            <div key="execution-controls" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
-              <HelpedText help="Runtime scheduling controls for concurrency, priority, caching, and retention.">Execution controls</HelpedText>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <div style={{ display: "grid", gap: "4px" }}>
-                  <FieldLabel help="Shared key used to group steps that should not run too many copies at once.">Concurrency key</FieldLabel>
-                  <input
-                    style={inputStyle}
-                    value={selectedStep.graphConcurrencyKey}
-                    placeholder="concurrency key"
-                    onChange={(event) => updateSelectedExecution({ graphConcurrencyKey: event.target.value })}
-                  />
-                </div>
-                <div style={{ display: "grid", gap: "4px" }}>
-                  <FieldLabel help="Maximum number of steps with this concurrency key that may run together.">Concurrency limit</FieldLabel>
-                  <input
-                    style={inputStyle}
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={selectedStep.graphConcurrencyLimit}
-                    placeholder="concurrency limit"
-                    onChange={(event) => updateSelectedExecution({ graphConcurrencyLimit: event.target.value })}
-                  />
-                </div>
-              </div>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Relative scheduling priority for this step.">Priority</FieldLabel>
-                <select
-                  style={selectStyle}
-                  value={selectedStep.graphPriority}
-                  onChange={(event) => updateSelectedExecution({ graphPriority: event.target.value })}
-                >
-                  <option value="">Default priority</option>
-                  <option value="low">Low priority</option>
-                  <option value="normal">Normal priority</option>
-                  <option value="high">High priority</option>
-                  <option value="critical">Critical priority</option>
-                </select>
-              </div>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
-                <input
-                  type="checkbox"
-                  checked={selectedStep.graphCacheEnabled}
-                  onChange={(event) => updateSelectedExecution({ graphCacheEnabled: event.target.checked })}
-                />
-                Cache step result
-                <HelpIcon label="Reuses this step result while the cache entry is valid." />
-              </label>
-              <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="How long the cached result remains valid, in seconds.">Cache TTL seconds</FieldLabel>
-                <input
-                  style={inputStyle}
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={selectedStep.graphCacheTtlSeconds}
-                  placeholder="cache ttl seconds"
-                  onChange={(event) => updateSelectedExecution({ graphCacheTtlSeconds: event.target.value })}
-                />
-              </div>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
-                <input
-                  type="checkbox"
-                  checked={selectedStep.graphDeleteAfterUse}
-                  onChange={(event) => updateSelectedExecution({ graphDeleteAfterUse: event.target.checked })}
-                />
-                Delete logs and results after use
-                <HelpIcon label="Deletes transient run logs/results after downstream consumers have used them." />
-              </label>
-            </div>
+            <GraphInspectorPolicyRuntime
+              selectedStep={selectedStep}
+              updateSelectedApproval={updateSelectedApproval}
+              updateSelectedExecution={updateSelectedExecution}
+            />
             <div key="data-flow-contract" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
               <HelpedText help="Defines how this step receives upstream data and what output contract downstream gates should expect.">Data flow contract</HelpedText>
               <div style={{ display: "grid", gap: "4px" }}>
