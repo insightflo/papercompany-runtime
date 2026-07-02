@@ -3,15 +3,15 @@ import { buildManualRunFeedback, findNewRunId, manualRunUnavailableMessage } fro
 import type { WorkflowRunDrawerMode } from "./workflow-runs.js";
 import { jsonToSteps, stepsToJson, type StepDraft } from "./step-draft.js";
 import { applyStepRunsToGraphSteps, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphRunDebugSummary, type WorkflowGraphNavigatorFilter } from "./workflow-graph.js";
-import { normalizeCreateParentIssuePolicy, type CreateParentIssuePolicy } from "./workflow-parent-policy.js";
+import type { CreateParentIssuePolicy } from "./workflow-parent-policy.js";
 import type { StepEditorMode, ProjectOption, LabelOption, WorkflowToolOption, WorkflowToolGrant, WorkflowOverviewData, WorkflowRestoreKind, WorkflowRunSummary } from "./workflow-page-types.js";
 import { mutedTextStyle, noticeStyle } from "./workflow-page-styles.js";
 import { createCompanyLabel, usePluginAction, useWorkflowRunDetail } from "./workflow-page-api.js";
 import { filterRunsForWorkflows } from "./workflow-filters.js";
 import { WorkflowDefinitionList } from "./workflow-definition-list.js";
 import { WorkflowRestoreDialog } from "./workflow-restore-dialog.js";
+import { buildWorkflowDefinitionEditDraft, emptyWorkflowDefinitionEditDraft, type WorkflowDefinitionEditDraft } from "./workflow-definition-edit-draft.js";
 import { buildWorkflowDefinitionEditPatch } from "./workflow-definition-edit-patch.js";
-import { formatJsonArrayForForm } from "./workflow-form-utils.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflow-sidebar-and-widget.js";
 import { WorkflowDefinitionEditorShell } from "./workflow-definition-editor-shell.js";
 import { renderWorkflowGraphEditor } from "./graph-editor/WorkflowGraphEditor.js";
@@ -91,6 +91,28 @@ export function DefinitionsTable({
     setTableNotice(null);
   }
 
+  function applyEditDraft(draft: WorkflowDefinitionEditDraft): void {
+    setEditingName(draft.name);
+    setEditingDescription(draft.description);
+    setEditingStatus(draft.status);
+    setEditingTriggerLabels(draft.triggerLabels);
+    setEditingLabelIds(draft.labelIds);
+    setShowNewLabelForm(draft.showNewLabelForm);
+    setNewLabelName(draft.newLabelName);
+    setNewLabelColor(draft.newLabelColor);
+    setEditingSchedule(draft.schedule);
+    setEditingMaxDailyRuns(draft.maxDailyRuns);
+    setEditingTimezone(draft.timezone);
+    setEditingProjectId(draft.projectId);
+    setEditingCreateParentIssuePolicy(draft.createParentIssuePolicy);
+    setEditingSteps(draft.steps);
+    setEditStepMode(draft.stepMode);
+    setEditJsonText(draft.jsonText);
+    setEditingFlowInputsText(draft.flowInputsText);
+    setEditingFlowEnvVariablesText(draft.flowEnvVariablesText);
+    setEditingTestInputPresetsText(draft.testInputPresetsText);
+  }
+
   function beginEdit(workflow: WorkflowOverviewData["workflows"][number]): void {
     clearTableFeedback();
     setGraphShellDismissed(false);
@@ -98,60 +120,14 @@ export function DefinitionsTable({
     setInspectedRunId(null);
     setEditingWorkflowId(workflow.id);
     onEditingWorkflowChange?.(workflow.id);
-    setEditingName(workflow.name);
-    setEditingDescription(workflow.description);
-    setEditingStatus(workflow.status);
-    setEditingTriggerLabels((workflow.triggerLabels ?? []).join(", "));
-    setEditingLabelIds(workflow.labelIds ?? []);
-    setShowNewLabelForm(false);
-    setNewLabelName("");
-    setNewLabelColor("#6366f1");
-    const rawWorkflow = workflow as Record<string, unknown>;
-    const rawSchedule = rawWorkflow.schedule;
-    const rawProjectId = rawWorkflow.projectId;
-    const rawTimezone = rawWorkflow.timezone;
-    const rawMaxDailyRuns = rawWorkflow.maxDailyRuns;
-    const rawCreateParentIssuePolicy = rawWorkflow.createParentIssuePolicy;
-    setEditingSchedule(typeof rawSchedule === "string" ? rawSchedule : "");
-    setEditingProjectId(typeof rawProjectId === "string" ? rawProjectId : "");
-    setEditingTimezone(typeof rawTimezone === "string" && rawTimezone.trim() ? rawTimezone : "Asia/Seoul");
-    setEditingCreateParentIssuePolicy(normalizeCreateParentIssuePolicy(rawCreateParentIssuePolicy));
-    setEditingMaxDailyRuns(
-      typeof rawMaxDailyRuns === "number" && Number.isFinite(rawMaxDailyRuns)
-        ? String(Math.trunc(rawMaxDailyRuns))
-        : "",
-    );
-    setEditingSteps(jsonToSteps(workflow.steps));
-    setEditStepMode("graph");
-    setEditJsonText(JSON.stringify(workflow.steps, null, 2));
-    setEditingFlowInputsText(formatJsonArrayForForm(workflow.legacyMetadata?.graphFlowInputs));
-    setEditingFlowEnvVariablesText(formatJsonArrayForForm(workflow.legacyMetadata?.graphFlowEnvVariables));
-    setEditingTestInputPresetsText(formatJsonArrayForForm(workflow.legacyMetadata?.graphTestInputPresets));
+    applyEditDraft(buildWorkflowDefinitionEditDraft(workflow));
   }
 
   function cancelEdit(): void {
     setGraphShellDismissed(true);
     setEditingWorkflowId(null);
     onEditingWorkflowChange?.(null);
-    setEditingName("");
-    setEditingDescription("");
-    setEditingStatus("active");
-    setEditingTriggerLabels("");
-    setEditingLabelIds([]);
-    setShowNewLabelForm(false);
-    setNewLabelName("");
-    setNewLabelColor("#6366f1");
-    setEditingSchedule("");
-    setEditingMaxDailyRuns("");
-    setEditingTimezone("Asia/Seoul");
-    setEditingProjectId("");
-    setEditingCreateParentIssuePolicy("when_multiple_steps");
-    setEditingSteps([]);
-    setEditStepMode("graph");
-    setEditJsonText("");
-    setEditingFlowInputsText("[]");
-    setEditingFlowEnvVariablesText("[]");
-    setEditingTestInputPresetsText("[]");
+    applyEditDraft(emptyWorkflowDefinitionEditDraft());
     setRunDrawerMode("closed");
     setInspectedRunId(null);
     clearTableFeedback();
