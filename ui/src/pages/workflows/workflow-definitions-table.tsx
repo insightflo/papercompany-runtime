@@ -10,7 +10,8 @@ import { createCompanyLabel, usePluginAction, useWorkflowRunDetail } from "./wor
 import { filterRunsForWorkflows } from "./workflow-filters.js";
 import { WorkflowDefinitionList } from "./workflow-definition-list.js";
 import { WorkflowRestoreDialog } from "./workflow-restore-dialog.js";
-import { buildWorkflowInterfaceMetadata, formatJsonArrayForForm, normalizeMaxDailyRunsInput } from "./workflow-form-utils.js";
+import { buildWorkflowDefinitionEditPatch } from "./workflow-definition-edit-patch.js";
+import { formatJsonArrayForForm } from "./workflow-form-utils.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflow-sidebar-and-widget.js";
 import { WorkflowDefinitionEditorShell } from "./workflow-definition-editor-shell.js";
 import { renderWorkflowGraphEditor } from "./graph-editor/WorkflowGraphEditor.js";
@@ -203,46 +204,30 @@ export function DefinitionsTable({
     setPendingWorkflowId(workflowId);
     setTableError("");
     try {
-      const parsedMaxDailyRuns = normalizeMaxDailyRunsInput(editingMaxDailyRuns);
-      if (parsedMaxDailyRuns.error) {
-        setTableError(parsedMaxDailyRuns.error);
-        return;
-      }
-      const triggerLabels = editingTriggerLabels.split(",").map((l) => l.trim()).filter(Boolean);
-      const labelIds = editingLabelIds.map((l) => l.trim()).filter(Boolean);
-      let steps: unknown[];
-      if (editStepMode === "json") {
-        try {
-          steps = JSON.parse(editJsonText);
-          if (!Array.isArray(steps)) { setTableError("steps는 JSON 배열이어야 합니다."); return; }
-        } catch (e) { setTableError(`JSON 파싱 실패: ${e instanceof Error ? e.message : String(e)}`); return; }
-      } else {
-        steps = stepsToJson(editingSteps);
-      }
-      const legacyMetadata = buildWorkflowInterfaceMetadata(
-        workflows.find((workflow) => workflow.id === workflowId)?.legacyMetadata,
-        editingFlowInputsText,
-        editingFlowEnvVariablesText,
-        editingTestInputPresetsText,
-      );
-      if (legacyMetadata.error) {
-        setTableError(legacyMetadata.error);
-        return;
-      }
-      const patch = {
+      const patchResult = buildWorkflowDefinitionEditPatch({
         name: nextName,
-        description: editingDescription.trim(),
-        status: editingStatus.trim() || "active",
-        triggerLabels,
-        labelIds,
-        steps,
-        schedule: editingSchedule.trim(),
-        maxDailyRuns: parsedMaxDailyRuns.value,
-        timezone: editingTimezone.trim(),
-        projectId: editingProjectId.trim(),
+        description: editingDescription,
+        status: editingStatus,
+        triggerLabels: editingTriggerLabels,
+        labelIds: editingLabelIds,
+        schedule: editingSchedule,
+        maxDailyRuns: editingMaxDailyRuns,
+        timezone: editingTimezone,
+        projectId: editingProjectId,
         createParentIssuePolicy: editingCreateParentIssuePolicy,
-        legacyMetadata: legacyMetadata.value,
-      };
+        editStepMode,
+        editJsonText,
+        editingSteps,
+        currentLegacyMetadata: workflows.find((workflow) => workflow.id === workflowId)?.legacyMetadata,
+        flowInputsText: editingFlowInputsText,
+        flowEnvVariablesText: editingFlowEnvVariablesText,
+        testInputPresetsText: editingTestInputPresetsText,
+      });
+      if ("error" in patchResult) {
+        setTableError(patchResult.error);
+        return;
+      }
+      const { patch } = patchResult;
       const updated = await updateWorkflow({
         companyId,
         workflowId,
