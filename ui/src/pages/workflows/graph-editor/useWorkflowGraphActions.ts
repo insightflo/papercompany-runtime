@@ -1,13 +1,8 @@
 import * as React from "react";
 import { useEffect } from "react";
-import { withStepDraftDefaults, type StepDraft } from "../step-draft.js";
+import type { StepDraft } from "../step-draft.js";
 import {
   appendStepAfter,
-  applyWorkflowGraphFailureRoute,
-  assignStepsToContainer,
-  assignStepsToGroup,
-  clearStepsGroup,
-  clearWorkflowContainer,
   connectSteps,
   disconnectSteps,
   duplicateWorkflowContainer,
@@ -16,9 +11,7 @@ import {
   insertWorkflowStepFromPalette,
   removeWorkflowStep,
   renameWorkflowStep,
-  setGraphGroupCollapsed,
   type WorkflowGraphContainerSummary,
-  type WorkflowGraphContainerType,
   type WorkflowGraphEdge,
   type WorkflowGraphFailureRouteSummary,
   type WorkflowGraphInspectorMode,
@@ -29,21 +22,16 @@ import {
 } from "../workflow-graph.js";
 import type { GraphContextMenuState, GraphEdgeActionAnchor } from "./graphUiUtils.js";
 import {
-  buildDependencyGroupAssignment,
-  buildDownstreamContainerAssignment,
-  buildSelectionContainerAssignment,
-  buildSelectionGroupAssignment,
-  getDirectDownstreamStepIds,
   getFirstNewStepId,
   getNodeContextSelectionMode,
   getSelectedStepIdAfterAdd,
   getSelectedStepIdAfterDelete,
   getSelectedStepIdAfterDuplicate,
-  getUpstreamStepIds,
   isGraphCanvasViewAction,
   isGraphPaletteNodeAction,
   isGraphPathSelectionAction,
 } from "./workflowGraphActionHelpers.js";
+import { createWorkflowGraphStructureActions } from "./workflowGraphStructureActions.js";
 import { isEditableKeyboardTarget } from "./WorkflowGraphEditorHelpers.js";
 
 type SetState<T> = React.Dispatch<React.SetStateAction<T>>;
@@ -179,6 +167,26 @@ export function useWorkflowGraphActions({
     if (!node) return;
     centerCanvasOnGraphPoint(node.x + 86, node.y + 38);
   }
+
+  const {
+    groupSelectedWithDependencies,
+    clearSelectedGroup,
+    setSelectedGroupCollapsed,
+    wrapSelectedPathInContainer,
+    wrapSelectedGraphSelection,
+    groupSelectedGraphSelection,
+    routeSelectedPathFailures,
+    clearSelectedContainer,
+  } = createWorkflowGraphStructureActions({
+    steps,
+    onChange,
+    selectedStep,
+    selectedContainerSummary,
+    selectedPathSummary,
+    selectedPathFailureRouteSummary,
+    setSelectedStepId,
+    setGraphError,
+  });
 
   function runWorkbenchAction(actionId: string): void {
     if (actionId === "fit-canvas") {
@@ -421,62 +429,6 @@ export function useWorkflowGraphActions({
     if (actionId === "select-target") {
       selectStep(targetId);
     }
-  }
-
-  function groupSelectedWithDependencies(): void {
-    if (!selectedStep) return;
-    const upstreamIds = getUpstreamStepIds(selectedStep);
-    const stepIds = Array.from(new Set([...upstreamIds, selectedStep.id]));
-    onChange(assignStepsToGroup(steps, stepIds, buildDependencyGroupAssignment(selectedStep)));
-  }
-
-  function clearSelectedGroup(): void {
-    if (!selectedStep) return;
-    onChange(clearStepsGroup(steps, [selectedStep.id]));
-  }
-
-  function setSelectedGroupCollapsed(collapsed: boolean): void {
-    if (!selectedStep || !selectedStep.graphGroupId.trim()) return;
-    onChange(setGraphGroupCollapsed(steps, selectedStep.graphGroupId, collapsed));
-  }
-
-  function wrapSelectedPathInContainer(): void {
-    if (!selectedStep) return;
-    const downstreamIds = getDirectDownstreamStepIds(steps, selectedStep.id);
-    const stepIds = Array.from(new Set([selectedStep.id, ...downstreamIds]));
-    onChange(assignStepsToContainer(steps, stepIds, buildDownstreamContainerAssignment(selectedStep)));
-  }
-
-  function wrapSelectedGraphSelection(containerType: WorkflowGraphContainerType): void {
-    if (!selectedStep || selectedPathSummary.blocked || selectedPathSummary.stepIds.length === 0) return;
-    onChange(assignStepsToContainer(steps, selectedPathSummary.stepIds, buildSelectionContainerAssignment(selectedStep, containerType)));
-  }
-
-  function groupSelectedGraphSelection(): void {
-    if (!selectedStep || selectedPathSummary.blocked || selectedPathSummary.stepIds.length === 0) return;
-    onChange(assignStepsToGroup(steps, selectedPathSummary.stepIds, buildSelectionGroupAssignment(selectedStep)));
-  }
-
-  function routeSelectedPathFailures(): void {
-    if (selectedPathFailureRouteSummary.blocked) return;
-    try {
-      setGraphError("");
-      onChange(applyWorkflowGraphFailureRoute(steps, selectedPathSummary.stepIds, selectedPathFailureRouteSummary.handlerStepId, {
-        label: selectedPathFailureRouteSummary.label,
-        condition: selectedPathFailureRouteSummary.condition,
-        handlerScope: "selected-path",
-        handlerInput: "{{ error }}",
-      }));
-      setSelectedStepId(selectedPathFailureRouteSummary.handlerStepId);
-    } catch (error) {
-      setGraphError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function clearSelectedContainer(): void {
-    const containerId = selectedContainerSummary?.id ?? selectedStep?.graphContainerId.trim() ?? "";
-    if (!containerId) return;
-    onChange(withStepDraftDefaults(clearWorkflowContainer(steps, containerId)));
   }
 
   return {
