@@ -101,7 +101,7 @@ export function AccessGroupDetail({
         </div>
       )}
       {!detailLoading && !detailError && (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-4">
           <div className="space-y-2">
             <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Members

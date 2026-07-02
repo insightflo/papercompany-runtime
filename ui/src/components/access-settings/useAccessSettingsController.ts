@@ -200,6 +200,10 @@ export function useAccessSettingsController(selectedCompanyId: string | null) {
     updateGroupPermissionsMutation.isPending;
   const accessLoading = accessMembersQuery.isLoading || permissionGroupsQuery.isLoading;
   const accessError = accessMembersQuery.error ?? permissionGroupsQuery.error;
+  const retryAccess = () => {
+    void accessMembersQuery.refetch();
+    void permissionGroupsQuery.refetch();
+  };
 
   return {
     accessError,
@@ -223,6 +227,7 @@ export function useAccessSettingsController(selectedCompanyId: string | null) {
     setNewGroupDescription,
     setNewGroupName,
     setSelectedGroupId,
+    retryAccess,
     createGroup: () => createGroupMutation.mutate(),
     deleteSelectedGroup: () => {
       if (!selectedGroup) return;

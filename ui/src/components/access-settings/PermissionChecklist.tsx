@@ -16,7 +16,7 @@ export function PermissionChecklist({
   onToggle: (permissionKey: PermissionKey, checked: boolean) => void;
 }) {
   return (
-    <div className="grid gap-2 sm:grid-cols-2">
+    <div className="grid gap-2 xl:grid-cols-2">
       {PERMISSION_KEYS.map((permissionKey) => (
         <label
           key={permissionKey}

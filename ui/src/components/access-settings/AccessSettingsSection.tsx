@@ -1,4 +1,5 @@
 import { ShieldCheck, Users } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AccessGroupsView } from "./AccessGroupsView";
 import { AccessUsersView } from "./AccessUsersView";
@@ -20,6 +21,7 @@ export function AccessSettingsSection({ selectedCompanyId }: { selectedCompanyId
     newGroupDescription,
     newGroupName,
     permissionGroups,
+    retryAccess,
     saveSelectedGroup,
     selectedGroup,
     selectedGroupDetail,
@@ -63,63 +65,69 @@ export function AccessSettingsSection({ selectedCompanyId }: { selectedCompanyId
           <div className="mt-4 text-sm text-muted-foreground">Loading access settings...</div>
         )}
         {accessError && (
-          <div className="mt-4 text-sm text-destructive">
-            {getErrorMessage(accessError, "Failed to load access settings.")}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 px-3 py-2 text-sm">
+            <span className="text-destructive">
+              Access settings failed to load:{" "}
+              {getErrorMessage(accessError, "Request failed.")}
+            </span>
+            <Button size="sm" variant="outline" onClick={retryAccess}>
+              Retry
+            </Button>
           </div>
         )}
 
         {!accessLoading && !accessError && (
-            <Tabs defaultValue="users" className="mt-4">
-              <TabsList variant="line" className="justify-start">
-                <TabsTrigger value="users" className="gap-1.5">
-                  <Users className="h-3.5 w-3.5" />
-                  Users
-                </TabsTrigger>
-                <TabsTrigger value="groups" className="gap-1.5">
-                  <ShieldCheck className="h-3.5 w-3.5" />
-                  Groups
-                </TabsTrigger>
-              </TabsList>
+          <Tabs defaultValue="users" className="mt-4">
+            <TabsList variant="line" className="justify-start">
+              <TabsTrigger value="users" className="gap-1.5">
+                <Users className="h-3.5 w-3.5" />
+                Users
+              </TabsTrigger>
+              <TabsTrigger value="groups" className="gap-1.5">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                Groups
+              </TabsTrigger>
+            </TabsList>
 
-              <TabsContent value="users" className="mt-4">
-                <AccessUsersView
-                  members={userMembers}
-                  groupById={groupById}
-                  disabled={updateMemberPermissionsPending}
-                  onToggleGrant={toggleUserGrant}
-                />
-              </TabsContent>
+            <TabsContent value="users" className="mt-4">
+              <AccessUsersView
+                members={userMembers}
+                groupById={groupById}
+                disabled={updateMemberPermissionsPending}
+                onToggleGrant={toggleUserGrant}
+              />
+            </TabsContent>
 
-              <TabsContent value="groups" className="mt-4">
-                <AccessGroupsView
-                  permissionGroups={permissionGroups}
-                  userMembers={userMembers}
-                  selectedGroupId={selectedGroupId}
-                  selectedGroup={selectedGroup}
-                  selectedGroupDetail={selectedGroupDetail}
-                  selectedGroupDetailLoading={selectedGroupDetailQuery.isLoading}
-                  selectedGroupDetailError={selectedGroupDetailQuery.error}
-                  newGroupName={newGroupName}
-                  newGroupDescription={newGroupDescription}
-                  editingGroupName={editingGroupName}
-                  editingGroupDescription={editingGroupDescription}
-                  creating={createGroupPending}
-                  disabled={groupMutationPending}
-                  onSelectGroup={setSelectedGroupId}
-                  onNewGroupNameChange={setNewGroupName}
-                  onNewGroupDescriptionChange={setNewGroupDescription}
-                  onEditingGroupNameChange={setEditingGroupName}
-                  onEditingGroupDescriptionChange={setEditingGroupDescription}
-                  onCreateGroup={createGroup}
-                  onSaveGroup={saveSelectedGroup}
-                  onToggleStatus={toggleGroupStatus}
-                  onDeleteGroup={deleteSelectedGroup}
-                  onToggleMember={toggleGroupMember}
-                  onToggleGrant={toggleGroupGrant}
-                />
-              </TabsContent>
-            </Tabs>
-          )}
+            <TabsContent value="groups" className="mt-4">
+              <AccessGroupsView
+                permissionGroups={permissionGroups}
+                userMembers={userMembers}
+                selectedGroupId={selectedGroupId}
+                selectedGroup={selectedGroup}
+                selectedGroupDetail={selectedGroupDetail}
+                selectedGroupDetailLoading={selectedGroupDetailQuery.isLoading}
+                selectedGroupDetailError={selectedGroupDetailQuery.error}
+                newGroupName={newGroupName}
+                newGroupDescription={newGroupDescription}
+                editingGroupName={editingGroupName}
+                editingGroupDescription={editingGroupDescription}
+                creating={createGroupPending}
+                disabled={groupMutationPending}
+                onSelectGroup={setSelectedGroupId}
+                onNewGroupNameChange={setNewGroupName}
+                onNewGroupDescriptionChange={setNewGroupDescription}
+                onEditingGroupNameChange={setEditingGroupName}
+                onEditingGroupDescriptionChange={setEditingGroupDescription}
+                onCreateGroup={createGroup}
+                onSaveGroup={saveSelectedGroup}
+                onToggleStatus={toggleGroupStatus}
+                onDeleteGroup={deleteSelectedGroup}
+                onToggleMember={toggleGroupMember}
+                onToggleGrant={toggleGroupGrant}
+              />
+            </TabsContent>
+          </Tabs>
+        )}
       </div>
     </div>
   );
