@@ -1,4 +1,10 @@
-import type { AgentAdapterType, JoinRequest } from "@paperclipai/shared";
+import type {
+  AgentAdapterType,
+  CompanyMembership,
+  JoinRequest,
+  PermissionKey,
+  PrincipalPermissionGrant,
+} from "@paperclipai/shared";
 import { api } from "./client";
 
 type InviteSummary = {
@@ -92,6 +98,46 @@ type CompanyInviteCreated = {
   inviteMessage?: string | null;
 };
 
+export type AccessGrantInput = {
+  permissionKey: PermissionKey;
+  scope?: Record<string, unknown> | null;
+};
+
+export type PermissionGroup = {
+  id: string;
+  companyId: string;
+  name: string;
+  description: string | null;
+  status: "active" | "suspended";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PermissionGroupMember = {
+  id: string;
+  companyId: string;
+  groupId: string;
+  userId: string;
+  status: "active" | "suspended";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CompanyAccessMember = CompanyMembership & {
+  grants: PrincipalPermissionGrant[];
+  groupMemberships: Array<{ groupId: string; status: string }>;
+  user?: {
+    id: string;
+    name: string | null;
+    email: string | null;
+  } | null;
+};
+
+export type PermissionGroupDetail = PermissionGroup & {
+  members: PermissionGroupMember[];
+  grants: PrincipalPermissionGrant[];
+};
+
 export const accessApi = {
   createCompanyInvite: (
     companyId: string,
@@ -126,6 +172,58 @@ export const accessApi = {
 
   listJoinRequests: (companyId: string, status: "pending_approval" | "approved" | "rejected" = "pending_approval") =>
     api.get<JoinRequest[]>(`/companies/${companyId}/join-requests?status=${status}`),
+
+  listMembers: (companyId: string) =>
+    api.get<CompanyAccessMember[]>(`/companies/${companyId}/members`),
+
+  updateMemberPermissions: (
+    companyId: string,
+    memberId: string,
+    grants: AccessGrantInput[],
+  ) =>
+    api.patch<CompanyMembership>(`/companies/${companyId}/members/${memberId}/permissions`, {
+      grants,
+    }),
+
+  listPermissionGroups: (companyId: string) =>
+    api.get<PermissionGroup[]>(`/companies/${companyId}/permission-groups`),
+
+  createPermissionGroup: (
+    companyId: string,
+    input: { name: string; description?: string | null; status?: "active" | "suspended" },
+  ) => api.post<PermissionGroup>(`/companies/${companyId}/permission-groups`, input),
+
+  getPermissionGroup: (companyId: string, groupId: string) =>
+    api.get<PermissionGroupDetail>(`/companies/${companyId}/permission-groups/${groupId}`),
+
+  updatePermissionGroup: (
+    companyId: string,
+    groupId: string,
+    input: { name?: string; description?: string | null; status?: "active" | "suspended" },
+  ) => api.patch<PermissionGroup>(`/companies/${companyId}/permission-groups/${groupId}`, input),
+
+  deletePermissionGroup: (companyId: string, groupId: string) =>
+    api.delete<void>(`/companies/${companyId}/permission-groups/${groupId}`),
+
+  updatePermissionGroupMembers: (
+    companyId: string,
+    groupId: string,
+    input: { addUserIds?: string[]; removeUserIds?: string[] },
+  ) =>
+    api.put<PermissionGroupMember[]>(
+      `/companies/${companyId}/permission-groups/${groupId}/members`,
+      input,
+    ),
+
+  updatePermissionGroupPermissions: (
+    companyId: string,
+    groupId: string,
+    grants: AccessGrantInput[],
+  ) =>
+    api.patch<PrincipalPermissionGrant[]>(
+      `/companies/${companyId}/permission-groups/${groupId}/permissions`,
+      { grants },
+    ),
 
   approveJoinRequest: (companyId: string, requestId: string) =>
     api.post<JoinRequest>(`/companies/${companyId}/join-requests/${requestId}/approve`, {}),

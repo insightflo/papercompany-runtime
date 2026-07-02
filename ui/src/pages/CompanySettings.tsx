@@ -15,6 +15,7 @@ import {
   ToggleField,
   HintIcon
 } from "../components/agent-config-primitives";
+import { AccessSettingsSection } from "../components/access-settings/AccessSettingsSection";
 
 type AgentSnippetInput = {
   onboardingTextUrl: string;
@@ -425,6 +426,8 @@ export function CompanySettings() {
           />
         </div>
       </div>
+
+      <AccessSettingsSection selectedCompanyId={selectedCompanyId} />
 
       {/* Invites */}
       <div className="space-y-4">
