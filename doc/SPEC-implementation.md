@@ -72,6 +72,7 @@ V1 implementation extends this baseline into a company-centric, governance-aware
 - Server-computed step input manifest attached to heartbeat adapter context before execution
 - Cost event ingestion and rollups (agent/task/project/company)
 - Budget settings and hard-stop enforcement
+- Company-scoped user and permission-group management for authenticated board users
 - Board web UI for dashboard, org chart, tasks, agents, approvals, costs
 - Agent-facing API contract (task read/write, heartbeat report, cost report)
 - Auditable activity log for all mutating actions
@@ -82,7 +83,7 @@ V1 implementation extends this baseline into a company-centric, governance-aware
 - Revenue/expense accounting beyond model/token costs
 - Knowledge base subsystem
 - Public marketplace (ClipHub)
-- Multi-board governance or role-based human permission granularity
+- Multi-board governance or role-based human permission granularity beyond company-scoped user and permission-group grants
 - Automatic self-healing orchestration (auto-reassign/retry planners)
 
 ## 6. Architecture
@@ -207,6 +208,25 @@ Invariants:
 - `revoked_at` timestamptz null
 
 Invariant: plaintext key shown once at creation; only hash stored.
+
+## 7.3.1 `permission_groups`
+
+- `id` uuid pk
+- `company_id` uuid fk `companies.id` not null
+- `name` text not null
+- `description` text null
+- `status` enum: `active | suspended` default `active`
+
+Invariant: group names are unique within a company. Permission groups are grant targets for board-user permissions only; they do not create agent principals.
+
+## 7.3.2 `permission_group_members`
+
+- `id` uuid pk
+- `company_id` uuid fk `companies.id` not null
+- `group_id` uuid fk `permission_groups.id` not null
+- `user_id` uuid fk `users.id` not null
+
+Invariant: group membership is company-scoped. A user only inherits grants from active groups in the same company.
 
 ## 7.4 `goals`
 
@@ -451,8 +471,17 @@ Side effects:
 ## 9.1 Board Auth
 
 - Session-based auth for human operator
-- Board has full read/write across all companies in deployment
+- `local_trusted` board context and instance admins have full read/write across all companies in deployment
+- Authenticated non-admin board users must have active company membership and the named permission required by each guarded route
 - Every board mutation writes to `activity_log`
+
+## 9.1.1 Company User and Group Permissions
+
+- Direct user grants are stored as principal permission grants with `principal_type = user`.
+- Permission-group grants are stored as principal permission grants with `principal_type = group`.
+- A board user has a permission when either the user has a direct active grant or an active permission group containing that user has the grant.
+- Permission-management routes require `users:manage_permissions`, except for local trusted board context and instance-admin bypass.
+- Mutating direct user grants, permission groups, group membership, and group grants writes to `activity_log`.
 
 ## 9.2 Agent Auth
 
@@ -514,6 +543,17 @@ All endpoints are under `/api` and return JSON.
 - `POST /agents/:agentId/terminate`
 - `POST /agents/:agentId/keys` (create API key)
 - `POST /agents/:agentId/heartbeat/invoke`
+
+## 10.3.1 Company Access
+
+- `GET /companies/:companyId/members`
+- `PATCH /companies/:companyId/members/:memberId/permissions`
+- `GET /companies/:companyId/permission-groups`
+- `POST /companies/:companyId/permission-groups`
+- `PATCH /companies/:companyId/permission-groups/:groupId`
+- `DELETE /companies/:companyId/permission-groups/:groupId`
+- `PUT /companies/:companyId/permission-groups/:groupId/members`
+- `PATCH /companies/:companyId/permission-groups/:groupId/permissions`
 
 ## 10.4 Tasks (Issues)
 
