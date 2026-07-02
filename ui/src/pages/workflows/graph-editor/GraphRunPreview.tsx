@@ -8,10 +8,7 @@ import { buttonDisabledStyle, buttonStyle, graphPolicyBadgeStyle, mutedTextStyle
 import { formatDateTime } from "../workflow-page-api.js";
 import { graphCanvasStyle, graphCanvasToolButtonStyle, graphCanvasToolGroupStyle, graphCanvasToolLabelStyle, graphCanvasViewToolDockStyle, graphCanvasViewToolLayerStyle, graphNodeStyle, graphSidebarStyle } from "./graphStyles.js";
 import { containerColor, graphEdgeColor, graphEdgeDashArray, graphEdgeDisplayLabel, type GraphCanvasPanState } from "./graphUiUtils.js";
-
-function clampGraphCanvasScale(value: number): number {
-  return Math.min(1.8, Math.max(0.45, value));
-}
+import { clampGraphCanvasScale } from "./WorkflowGraphEditorHelpers.js";
 
 export function WorkflowRunGraphPreview({
   steps,
