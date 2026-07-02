@@ -1,0 +1,106 @@
+import type {
+  WorkflowGraphContainerType,
+  WorkflowGraphEdgeMetadataRecord,
+  WorkflowGraphRunStatus,
+  WorkflowGraphWorkProduct,
+} from "./workflow-graph.js";
+
+export type StepDraft = {
+  id: string;
+  title: string;
+  description: string;
+  type: "agent" | "tool";
+  toolName: string;
+  toolArgs: string;
+  agentId: string;
+  agentName: string;
+  tools: string;
+  dependsOn: string;
+  onFailure: string;
+  maxRetries: string | number;
+  graphRetryDelaySeconds: string | number;
+  graphRetryBackoff: string;
+  graphRetryJitter: boolean;
+  timeoutSeconds: string | number;
+  graphSleepSeconds: string | number;
+  graphSuspendUntil: string;
+  graphSuspendTimeoutSeconds: string | number;
+  graphSuspendTimeoutAction: string;
+  graphEarlyReturn: boolean;
+  graphEarlyReturnContentType: string;
+  graphEarlyReturnSchema: string;
+  graphErrorHandler: boolean;
+  graphErrorHandlerScope: string;
+  graphErrorHandlerInput: string;
+  graphRestartBoundary: boolean;
+  graphRestartStrategy: string;
+  graphRestartInput: string;
+  graphEarlyStopCondition: string;
+  graphEarlyStopLabelSkipped: boolean;
+  graphApprovalRequired: boolean;
+  graphApprovalPrompt: string;
+  graphApprovalRecipients: string;
+  graphApprovalTimeoutSeconds: string | number;
+  graphApprovalTimeoutAction: string;
+  graphMockEnabled: boolean;
+  graphMockResult: string;
+  graphPinnedResultRunId: string;
+  graphConcurrencyKey: string;
+  graphConcurrencyLimit: string | number;
+  graphPriority: string;
+  graphCacheEnabled: boolean;
+  graphCacheTtlSeconds: string | number;
+  graphDeleteAfterUse: boolean;
+  graphInputExpression: string;
+  graphOutputSchema: string;
+  graphWorkProductRequired: boolean;
+  graphWorkProductPattern: string;
+  graphResourceRefs: string;
+  graphSecretRefs: string;
+  graphPositionX: string | number;
+  graphPositionY: string | number;
+  graphGroupId: string;
+  graphGroupTitle: string;
+  graphGroupColor: string;
+  graphGroupCollapsed?: boolean;
+  graphGroupCollapsedByDefault: boolean;
+  graphContainerId: string;
+  graphContainerType: WorkflowGraphContainerType;
+  graphContainerTitle: string;
+  graphContainerDescription: string;
+  graphContainerMode: string;
+  graphContainerCondition: string;
+  graphContainerIterator: string;
+  graphContainerSkipFailure: boolean;
+  graphContainerRunInParallel: boolean;
+  graphContainerParallelism: string | number;
+  graphRunStatus: WorkflowGraphRunStatus;
+  graphRunStepRunId?: string;
+  graphRunIssueId?: string;
+  graphRunIssueIdentifier: string;
+  graphRunUpdatedAt: string;
+  graphRunSummary: string;
+  graphRunStartedAt?: string;
+  graphRunCompletedAt?: string;
+  graphRunLastDispatchAttemptAt?: string;
+  graphRunLastDispatchAcceptedAt?: string;
+  graphRunLastDispatchErrorAt?: string;
+  graphRunLastDispatchErrorSummary?: string;
+  graphRunLastDispatchRequestId?: string;
+  graphRunResultPreview?: string;
+  graphRunLogPreview?: string;
+  graphRunWorkProducts?: WorkflowGraphWorkProduct[];
+  graphNote: string;
+  graphEdgeMetadata: WorkflowGraphEdgeMetadataRecord;
+  extra: Record<string, unknown>;
+};
+
+export type WorkflowStepDraftInput = Array<{
+  id: string;
+  title: string;
+  type?: string;
+  toolName?: string;
+  agentName?: string;
+  dependsOn?: string[];
+  [key: string]: unknown;
+}>;
