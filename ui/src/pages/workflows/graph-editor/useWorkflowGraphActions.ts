@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useEffect } from "react";
-import { parseOptionalPositiveInteger, withStepDraftDefaults, type StepDraft } from "../step-draft.js";
+import { withStepDraftDefaults, type StepDraft } from "../step-draft.js";
 import {
   appendStepAfter,
   applyWorkflowGraphFailureRoute,
@@ -14,7 +14,6 @@ import {
   duplicateWorkflowStep,
   expandWorkflowGraphSelection,
   insertWorkflowStepFromPalette,
-  parseDependencies,
   removeWorkflowStep,
   renameWorkflowStep,
   setGraphGroupCollapsed,
@@ -29,6 +28,22 @@ import {
   type WorkflowGraphSelectionSummary,
 } from "../workflow-graph.js";
 import type { GraphContextMenuState, GraphEdgeActionAnchor } from "./graphUiUtils.js";
+import {
+  buildDependencyGroupAssignment,
+  buildDownstreamContainerAssignment,
+  buildSelectionContainerAssignment,
+  buildSelectionGroupAssignment,
+  getDirectDownstreamStepIds,
+  getFirstNewStepId,
+  getNodeContextSelectionMode,
+  getSelectedStepIdAfterAdd,
+  getSelectedStepIdAfterDelete,
+  getSelectedStepIdAfterDuplicate,
+  getUpstreamStepIds,
+  isGraphCanvasViewAction,
+  isGraphPaletteNodeAction,
+  isGraphPathSelectionAction,
+} from "./workflowGraphActionHelpers.js";
 import { isEditableKeyboardTarget } from "./WorkflowGraphEditorHelpers.js";
 
 type SetState<T> = React.Dispatch<React.SetStateAction<T>>;
@@ -144,16 +159,13 @@ export function useWorkflowGraphActions({
   function addAfter(stepId: string | null): void {
     const next = appendStepAfter(steps, stepId);
     onChange(next);
-    const insertedIndex = stepId ? steps.findIndex((step) => step.id === stepId) + 1 : next.length - 1;
-    setSelectedStepId(next[Math.max(0, insertedIndex)]?.id ?? null);
+    setSelectedStepId(getSelectedStepIdAfterAdd(steps, next, stepId));
   }
 
   function insertPaletteNode(kind: WorkflowGraphPaletteNodeKind): void {
-    const beforeIds = new Set(steps.map((step) => step.id));
     const next = insertWorkflowStepFromPalette(steps, selectedStep?.id ?? null, kind);
     onChange(next);
-    const insertedStep = next.find((step) => !beforeIds.has(step.id));
-    setSelectedStepId(insertedStep?.id ?? selectedStep?.id ?? next[0]?.id ?? null);
+    setSelectedStepId(getFirstNewStepId(steps, next) ?? selectedStep?.id ?? next[0]?.id ?? null);
     setGraphError("");
   }
 
@@ -186,11 +198,11 @@ export function useWorkflowGraphActions({
       setShowGraphDetails(true);
       return;
     }
-    if (actionId === "agent" || actionId === "tool" || actionId === "branch" || actionId === "loop" || actionId === "approval" || actionId === "failure-handler") {
+    if (isGraphPaletteNodeAction(actionId)) {
       insertPaletteNode(actionId);
       return;
     }
-    if (actionId === "upstream" || actionId === "downstream" || actionId === "connected") {
+    if (isGraphPathSelectionAction(actionId)) {
       expandSelectedPath(actionId);
       return;
     }
@@ -214,8 +226,7 @@ export function useWorkflowGraphActions({
   function duplicateStep(stepId: string): void {
     const next = duplicateWorkflowStep(steps, stepId);
     onChange(next);
-    const insertedIndex = steps.findIndex((step) => step.id === stepId) + 1;
-    setSelectedStepId(next[Math.max(0, insertedIndex)]?.id ?? stepId);
+    setSelectedStepId(getSelectedStepIdAfterDuplicate(steps, next, stepId));
   }
 
   function duplicateSelectedStep(): void {
@@ -225,18 +236,15 @@ export function useWorkflowGraphActions({
 
   function duplicateSelectedContainer(): void {
     if (!selectedContainerSummary) return;
-    const beforeIds = new Set(steps.map((step) => step.id));
     const next = duplicateWorkflowContainer(steps, selectedContainerSummary.id);
     onChange(next);
-    const copiedStep = next.find((step) => !beforeIds.has(step.id));
-    setSelectedStepId(copiedStep?.id ?? selectedStep?.id ?? next[0]?.id ?? null);
+    setSelectedStepId(getFirstNewStepId(steps, next) ?? selectedStep?.id ?? next[0]?.id ?? null);
   }
 
   function deleteStep(stepId: string): void {
-    const selectedIndex = steps.findIndex((step) => step.id === stepId);
     const next = removeWorkflowStep(steps, stepId);
     onChange(next);
-    setSelectedStepId(next[Math.min(Math.max(selectedIndex, 0), Math.max(next.length - 1, 0))]?.id ?? null);
+    setSelectedStepId(getSelectedStepIdAfterDelete(steps, next, stepId));
   }
 
   function deleteSelectedStep(): void {
@@ -374,10 +382,10 @@ export function useWorkflowGraphActions({
       centerGraphStep(stepId);
       return;
     }
-    if (actionId === "select-upstream" || actionId === "select-downstream" || actionId === "select-connected") {
-      const mode = actionId.replace("select-", "") as WorkflowGraphSelectionMode;
+    const selectionMode = getNodeContextSelectionMode(actionId);
+    if (selectionMode) {
       setSelectedStepId(stepId);
-      setSelectedPathStepIds(expandWorkflowGraphSelection(steps, [stepId], mode));
+      setSelectedPathStepIds(expandWorkflowGraphSelection(steps, [stepId], selectionMode));
       return;
     }
     if (actionId === "connect-selected-to-this" && selectedStep && selectedStep.id !== stepId) {
@@ -391,11 +399,11 @@ export function useWorkflowGraphActions({
 
   function runCanvasContextAction(actionId: string): void {
     closeGraphContextMenu();
-    if (actionId === "fit-canvas" || actionId === "actual-size" || actionId === "center-selected") {
+    if (isGraphCanvasViewAction(actionId)) {
       runWorkbenchAction(actionId);
       return;
     }
-    if (actionId === "agent" || actionId === "tool" || actionId === "branch" || actionId === "loop" || actionId === "approval" || actionId === "failure-handler") {
+    if (isGraphPaletteNodeAction(actionId)) {
       insertPaletteNode(actionId);
     }
   }
@@ -417,14 +425,9 @@ export function useWorkflowGraphActions({
 
   function groupSelectedWithDependencies(): void {
     if (!selectedStep) return;
-    const upstreamIds = parseDependencies(selectedStep.dependsOn);
+    const upstreamIds = getUpstreamStepIds(selectedStep);
     const stepIds = Array.from(new Set([...upstreamIds, selectedStep.id]));
-    const groupId = selectedStep.graphGroupId.trim() || `${selectedStep.id}-group`;
-    onChange(assignStepsToGroup(steps, stepIds, {
-      id: groupId,
-      title: selectedStep.graphGroupTitle.trim() || "Workflow group",
-      color: selectedStep.graphGroupColor.trim() || "#64748b",
-    }));
+    onChange(assignStepsToGroup(steps, stepIds, buildDependencyGroupAssignment(selectedStep)));
   }
 
   function clearSelectedGroup(): void {
@@ -439,50 +442,19 @@ export function useWorkflowGraphActions({
 
   function wrapSelectedPathInContainer(): void {
     if (!selectedStep) return;
-    const downstreamIds = steps
-      .filter((step) => parseDependencies(step.dependsOn).includes(selectedStep.id))
-      .map((step) => step.id);
+    const downstreamIds = getDirectDownstreamStepIds(steps, selectedStep.id);
     const stepIds = Array.from(new Set([selectedStep.id, ...downstreamIds]));
-    const containerId = selectedStep.graphContainerId.trim() || `${selectedStep.id}-${selectedStep.graphContainerType}`;
-    onChange(assignStepsToContainer(steps, stepIds, {
-      id: containerId,
-      type: selectedStep.graphContainerType,
-      title: selectedStep.graphContainerTitle.trim() || (selectedStep.graphContainerType === "loop" ? "Loop container" : "Branch container"),
-      description: selectedStep.graphContainerDescription.trim(),
-      mode: selectedStep.graphContainerMode,
-      condition: selectedStep.graphContainerCondition,
-      iterator: selectedStep.graphContainerIterator,
-      skipFailure: selectedStep.graphContainerSkipFailure,
-      runInParallel: selectedStep.graphContainerRunInParallel,
-      parallelism: parseOptionalPositiveInteger(String(selectedStep.graphContainerParallelism ?? "")),
-    }));
+    onChange(assignStepsToContainer(steps, stepIds, buildDownstreamContainerAssignment(selectedStep)));
   }
 
   function wrapSelectedGraphSelection(containerType: WorkflowGraphContainerType): void {
     if (!selectedStep || selectedPathSummary.blocked || selectedPathSummary.stepIds.length === 0) return;
-    const containerId = selectedStep.graphContainerId.trim() || `${selectedStep.id}-${containerType}`;
-    onChange(assignStepsToContainer(steps, selectedPathSummary.stepIds, {
-      id: containerId,
-      type: containerType,
-      title: selectedStep.graphContainerTitle.trim() || (containerType === "loop" ? "Loop selection" : "Branch selection"),
-      description: selectedStep.graphContainerDescription.trim(),
-      mode: containerType === "loop" ? "for-each" : "branch-one",
-      condition: selectedStep.graphContainerCondition,
-      iterator: selectedStep.graphContainerIterator,
-      skipFailure: selectedStep.graphContainerSkipFailure,
-      runInParallel: selectedStep.graphContainerRunInParallel,
-      parallelism: parseOptionalPositiveInteger(String(selectedStep.graphContainerParallelism ?? "")),
-    }));
+    onChange(assignStepsToContainer(steps, selectedPathSummary.stepIds, buildSelectionContainerAssignment(selectedStep, containerType)));
   }
 
   function groupSelectedGraphSelection(): void {
     if (!selectedStep || selectedPathSummary.blocked || selectedPathSummary.stepIds.length === 0) return;
-    const groupId = selectedStep.graphGroupId.trim() || `${selectedStep.id}-selection`;
-    onChange(assignStepsToGroup(steps, selectedPathSummary.stepIds, {
-      id: groupId,
-      title: selectedStep.graphGroupTitle.trim() || "Selected path",
-      color: selectedStep.graphGroupColor.trim() || "#22c55e",
-    }));
+    onChange(assignStepsToGroup(steps, selectedPathSummary.stepIds, buildSelectionGroupAssignment(selectedStep)));
   }
 
   function routeSelectedPathFailures(): void {
