@@ -16,23 +16,13 @@ import {
   type WorkflowGraphModel,
   type WorkflowGraphWorkbenchSummary,
 } from "../workflow-graph.js";
-import { buttonDisabledStyle, graphPolicyBadgeStyle, statusBadgeStyle } from "../workflow-page-styles.js";
+import { graphPolicyBadgeStyle, statusBadgeStyle } from "../workflow-page-styles.js";
 import {
-  graphCanvasEditToolDockStyle,
-  graphCanvasEditToolLayerStyle,
   graphCanvasStyle,
-  graphCanvasToolButtonStyle,
-  graphCanvasToolGroupStyle,
-  graphCanvasToolLabelStyle,
-  graphCanvasViewToolDockStyle,
-  graphCanvasViewToolLayerStyle,
-  graphContextMenuButtonStyle,
-  graphContextMenuStyle,
   graphEdgeRemoveButtonStyle,
   graphNodeInputHandleStyle,
   graphNodeOutputHandleStyle,
   graphNodeStyle,
-  graphStatusStripStyle,
   graphWorkbenchMainStyle,
 } from "./graphStyles.js";
 import {
@@ -43,7 +33,9 @@ import {
   type GraphContextMenuState,
   type GraphEdgeActionAnchor,
 } from "./graphUiUtils.js";
-import { GraphZoomIcon } from "./GraphToolbar.js";
+import { GraphCanvasEditTools, GraphCanvasViewTools } from "./GraphCanvasControls.js";
+import { GraphCanvasContextMenu } from "./GraphCanvasContextMenu.js";
+import { GraphCanvasStatusStrip } from "./GraphCanvasStatusStrip.js";
 
 export interface GraphCanvasProps {
   graph: WorkflowGraphModel;
@@ -140,7 +132,6 @@ export function GraphCanvas({
   addAfter,
   handleDeleteGraphObjectPointerDown,
 }: GraphCanvasProps): JSX.Element {
-  const statusStripAccentColor = "#38bdf8";
   return (
     <div key="graph-workbench-main" style={graphWorkbenchMainStyle}>
       <div
@@ -154,83 +145,21 @@ export function GraphCanvas({
         onContextMenu={handleCanvasContextMenu}
         onClick={handleCanvasClick}
       >
-        <div key="graph-canvas-edit-tools-layer" style={graphCanvasEditToolLayerStyle}>
-          <div
-            key="graph-canvas-edit-tools"
-            data-graph-toolbar="true"
-            style={graphCanvasEditToolDockStyle}
-            onPointerDown={stopGraphControlEvent}
-            onPointerUp={stopGraphControlEvent}
-            onClick={stopGraphControlEvent}
-          >
-            <div key="object-tools" aria-label="Object editing tools" style={graphCanvasToolGroupStyle}>
-              <span style={graphCanvasToolLabelStyle}>Edit</span>
-              <button type="button" style={graphCanvasToolButtonStyle} title="Add downstream step" aria-label="Add downstream step" onClick={() => addAfter(selectedStep?.id ?? null)}>
-                +
-              </button>
-              <button
-                type="button"
-                style={selectedStep || selectedEdgeActionAnchor ? { ...graphCanvasToolButtonStyle, color: "var(--destructive, #ef4444)" } : { ...graphCanvasToolButtonStyle, ...buttonDisabledStyle }}
-                title={selectedEdgeActionAnchor ? "Delete selected relationship" : "Delete selected step"}
-                aria-label={selectedEdgeActionAnchor ? "Delete selected relationship" : "Delete selected step"}
-                disabled={!selectedStep && !selectedEdgeActionAnchor}
-                onPointerDown={handleDeleteGraphObjectPointerDown}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }}
-              >
-                -
-              </button>
-            </div>
-          </div>
-        </div>
-        {graphContextMenu ? (
-          <div
-            key="graph-context-menu"
-            data-graph-menu="true"
-            style={{ ...graphContextMenuStyle, left: graphContextMenu.clientX, top: graphContextMenu.clientY }}
-            onPointerDown={stopGraphControlEvent}
-            onPointerUp={stopGraphControlEvent}
-            onClick={(event) => event.stopPropagation()}
-            onContextMenu={(event) => event.preventDefault()}
-          >
-            {graphContextMenu.kind === "node" && graphContextMenu.stepId ? (
-              <Fragment key="node-menu">
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runNodeContextAction("add-downstream", graphContextMenu.stepId || "")}>Add downstream<span>+</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runNodeContextAction("duplicate", graphContextMenu.stepId || "")}>Duplicate<span>2x</span></button>
-                <button type="button" style={{ ...graphContextMenuButtonStyle, color: "var(--destructive, #ef4444)" }} onClick={() => runNodeContextAction("delete", graphContextMenu.stepId || "")}>Delete<span>Del</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runNodeContextAction("center", graphContextMenu.stepId || "")}>Center<span>C</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runNodeContextAction("select-upstream", graphContextMenu.stepId || "")}>Select upstream<span>U</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runNodeContextAction("select-downstream", graphContextMenu.stepId || "")}>Select downstream<span>D</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runNodeContextAction("select-connected", graphContextMenu.stepId || "")}>Select connected<span>A</span></button>
-              </Fragment>
-            ) : graphContextMenu.kind === "edge" && graphContextMenu.sourceId && graphContextMenu.targetId ? (
-              <Fragment key="edge-menu">
-                <button type="button" style={{ ...graphContextMenuButtonStyle, color: "var(--destructive, #ef4444)" }} onClick={() => runEdgeContextAction("remove-edge", graphContextMenu.sourceId || "", graphContextMenu.targetId || "")}>Remove relationship<span>-</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runEdgeContextAction("select-source", graphContextMenu.sourceId || "", graphContextMenu.targetId || "")}>Select source<span>Src</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runEdgeContextAction("select-target", graphContextMenu.sourceId || "", graphContextMenu.targetId || "")}>Select target<span>Tgt</span></button>
-              </Fragment>
-            ) : (
-              <Fragment key="canvas-menu">
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("agent")}>Add Agent<span>+</span></button>
-                <button
-                  type="button"
-                  style={availableTools.length === 0 ? { ...graphContextMenuButtonStyle, ...buttonDisabledStyle } : graphContextMenuButtonStyle}
-                  disabled={availableTools.length === 0}
-                  onClick={() => runCanvasContextAction("tool")}
-                >Add Tool<span>+</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("branch")}>Add Branch<span>B</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("loop")}>Add Loop<span>L</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("approval")}>Add Approval<span>A</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("fit-canvas")}>Fit canvas<span>F</span></button>
-                <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("actual-size")}>Actual size<span>1</span></button>
-              </Fragment>
-            )}
-          </div>
-        ) : (
-          <Fragment key="graph-context-menu-placeholder" />
-        )}
+        <GraphCanvasEditTools
+          selectedStep={selectedStep}
+          selectedEdgeActionAnchor={selectedEdgeActionAnchor}
+          addAfter={addAfter}
+          handleDeleteGraphObjectPointerDown={handleDeleteGraphObjectPointerDown}
+          stopGraphControlEvent={stopGraphControlEvent}
+        />
+        <GraphCanvasContextMenu
+          graphContextMenu={graphContextMenu}
+          availableTools={availableTools}
+          stopGraphControlEvent={stopGraphControlEvent}
+          runNodeContextAction={runNodeContextAction}
+          runEdgeContextAction={runEdgeContextAction}
+          runCanvasContextAction={runCanvasContextAction}
+        />
         <div
           key="graph-canvas-inner"
           style={{
@@ -632,38 +561,14 @@ export function GraphCanvas({
           </div>
         </div>
         </div>
-        <div key="graph-canvas-view-tools-layer" style={graphCanvasViewToolLayerStyle}>
-          <div key="graph-canvas-view-tools" data-graph-toolbar="true" style={graphCanvasViewToolDockStyle}>
-            <div key="view-tools" aria-label="Canvas view tools" style={graphCanvasToolGroupStyle}>
-              <span style={graphCanvasToolLabelStyle}>View</span>
-              <button type="button" style={graphCanvasToolButtonStyle} title="Zoom out" aria-label="Zoom out" onClick={() => setCanvasScaleFromPoint(canvasScale - 0.1)}>
-                <GraphZoomIcon direction="out" />
-              </button>
-              <button type="button" style={graphCanvasToolButtonStyle} title="Zoom in" aria-label="Zoom in" onClick={() => setCanvasScaleFromPoint(canvasScale + 0.1)}>
-                <GraphZoomIcon direction="in" />
-              </button>
-              <button type="button" style={graphCanvasToolButtonStyle} title="Fit canvas" aria-label="Fit canvas" onClick={() => runWorkbenchAction("fit-canvas")}>
-                F
-              </button>
-              <button type="button" style={graphCanvasToolButtonStyle} title="Center selected" aria-label="Center selected" onClick={() => runWorkbenchAction("center-selected")} disabled={!selectedStep}>
-                C
-              </button>
-            </div>
-          </div>
-        </div>
+        <GraphCanvasViewTools
+          canvasScale={canvasScale}
+          selectedStep={selectedStep}
+          setCanvasScaleFromPoint={setCanvasScaleFromPoint}
+          runWorkbenchAction={runWorkbenchAction}
+        />
       </div>
-        <div key="graph-status-strip" style={graphStatusStripStyle}>
-          <div key="path-summary" style={{ minWidth: 0, display: "flex", alignItems: "center", gap: "7px", color: "var(--muted-foreground, #94a3b8)", fontSize: "12px", overflow: "hidden" }}>
-            <strong style={{ color: "var(--foreground, #f8fafc)", whiteSpace: "nowrap" }}>Selected path</strong>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{workbenchSummary.pathSummary}</span>
-          </div>
-          <div key="status-badges" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "5px", flexWrap: "wrap" }}>
-            {workbenchSummary.statusBadges.map((badge) => (
-              <span key={badge} style={{ ...graphPolicyBadgeStyle, color: badge.includes("error") && !badge.startsWith("0 ") ? "var(--destructive, #ef4444)" : statusStripAccentColor }}>{badge}</span>
-            ))}
-            <span key="canvas-scale" style={{ ...graphPolicyBadgeStyle, color: "#a78bfa" }}>{Math.round(canvasScale * 100)}%</span>
-          </div>
-        </div>
+      <GraphCanvasStatusStrip workbenchSummary={workbenchSummary} canvasScale={canvasScale} />
     </div>
   );
 }
