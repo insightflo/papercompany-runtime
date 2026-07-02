@@ -104,6 +104,28 @@ export function resolveUiRoot(baseDir = path.dirname(fileURLToPath(import.meta.u
   return candidates.find((candidate) => fs.existsSync(path.join(candidate, "index.html"))) ?? candidates[0]!;
 }
 
+export function mountStaticUi(app: express.Express, uiDist: string, indexHtml: string) {
+  app.use("/assets", express.static(path.join(uiDist, "assets"), {
+    immutable: true,
+    maxAge: "1y",
+  }));
+  app.use("/assets", (_req, res) => {
+    res.status(404)
+      .set("Cache-Control", "no-store")
+      .type("text/plain")
+      .send("Asset not found");
+  });
+  app.use(express.static(uiDist, { index: false }));
+  app.get(/.*/, (_req, res) => {
+    res.status(200)
+      .set({
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Content-Type": "text/html; charset=utf-8",
+      })
+      .end(indexHtml);
+  });
+}
+
 function addAliasFields(value: unknown, pairs: Array<[string, string]>): unknown {
   if (Array.isArray(value)) return value.map((entry) => addAliasFields(entry, pairs));
   if (!value || typeof value !== "object") return value;
@@ -544,10 +566,7 @@ export async function createApp(
     const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
     if (uiDist) {
       const indexHtml = applyUiBranding(fs.readFileSync(path.join(uiDist, "index.html"), "utf-8"));
-      app.use(express.static(uiDist));
-      app.get(/.*/, (_req, res) => {
-        res.status(200).set("Content-Type", "text/html").end(indexHtml);
-      });
+      mountStaticUi(app, uiDist, indexHtml);
     } else {
       console.warn("[paperclip] UI dist not found; running in API-only mode");
     }
