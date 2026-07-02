@@ -27,6 +27,10 @@ import {
   resolveCliAuthChallengeSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
+  createPermissionGroupSchema,
+  updatePermissionGroupSchema,
+  updatePermissionGroupMembersSchema,
+  updatePermissionGroupGrantsSchema,
   PERMISSION_KEYS
 } from "@paperclipai/shared";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
@@ -1797,6 +1801,8 @@ export function accessRoutes(
     }
     if (req.actor.type !== "board") throw unauthorized();
     if (isLocalImplicit(req)) return;
+    // Instance admins have full control; bypass the named-permission check without a canUser round-trip.
+    if (req.actor.isInstanceAdmin) return;
     const allowed = await access.canUser(
       companyId,
       req.actor.userId,
@@ -2826,7 +2832,21 @@ export function accessRoutes(
     const companyId = req.params.companyId as string;
     await assertCompanyPermission(req, companyId, "users:manage_permissions");
     const members = await access.listMembers(companyId);
-    res.json(members);
+    const enriched = await Promise.all(
+      members.map(async (member) => ({
+        ...member,
+        grants: await access.listPrincipalGrants(
+          companyId,
+          member.principalType as Parameters<typeof access.listPrincipalGrants>[1],
+          member.principalId,
+        ),
+        groupMemberships:
+          member.principalType === "user"
+            ? await access.listUserGroupMemberships(companyId, member.principalId)
+            : [],
+      })),
+    );
+    res.json(enriched);
   });
 
   router.patch(
@@ -2887,6 +2907,145 @@ export function accessRoutes(
       );
       res.json(memberships);
     }
+  );
+
+  // --- Permission groups (Phase 2). Every route is gated by users:manage_permissions.
+  // Service calls are scoped by companyId, so a cross-company groupId resolves to 404. ---
+
+  router.get("/companies/:companyId/permission-groups", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+    res.json(await access.listGroups(companyId));
+  });
+
+  router.post(
+    "/companies/:companyId/permission-groups",
+    validate(createPermissionGroupSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyPermission(req, companyId, "users:manage_permissions");
+      const created = await access.createGroup(companyId, {
+        name: req.body.name,
+        description: req.body.description,
+        status: req.body.status,
+      });
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "permission_group.created",
+        entityType: "permission_group",
+        entityId: created.id,
+        details: { name: created.name },
+      });
+      res.status(201).json(created);
+    },
+  );
+
+  router.get("/companies/:companyId/permission-groups/:groupId", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const groupId = req.params.groupId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+    const group = await access.getGroup(companyId, groupId);
+    if (!group) throw notFound("Permission group not found");
+    const [members, grants] = await Promise.all([
+      access.listGroupMembers(companyId, groupId),
+      access.listPrincipalGrants(companyId, "group", groupId),
+    ]);
+    res.json({ ...group, members, grants });
+  });
+
+  router.patch(
+    "/companies/:companyId/permission-groups/:groupId",
+    validate(updatePermissionGroupSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const groupId = req.params.groupId as string;
+      await assertCompanyPermission(req, companyId, "users:manage_permissions");
+      const updated = await access.updateGroup(companyId, groupId, {
+        name: req.body.name,
+        description: req.body.description,
+        status: req.body.status,
+      });
+      if (!updated) throw notFound("Permission group not found");
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "permission_group.updated",
+        entityType: "permission_group",
+        entityId: groupId,
+        details: { name: updated.name },
+      });
+      res.json(updated);
+    },
+  );
+
+  router.delete("/companies/:companyId/permission-groups/:groupId", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const groupId = req.params.groupId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+    const removed = await access.deleteGroup(companyId, groupId);
+    if (!removed) throw notFound("Permission group not found");
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "permission_group.deleted",
+      entityType: "permission_group",
+      entityId: groupId,
+    });
+    res.status(204).end();
+  });
+
+  router.put(
+    "/companies/:companyId/permission-groups/:groupId/members",
+    validate(updatePermissionGroupMembersSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const groupId = req.params.groupId as string;
+      await assertCompanyPermission(req, companyId, "users:manage_permissions");
+      if (!(await access.getGroup(companyId, groupId))) throw notFound("Permission group not found");
+      await access.updateGroupMembers(companyId, groupId, {
+        addUserIds: req.body.addUserIds,
+        removeUserIds: req.body.removeUserIds,
+      });
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "permission_group.members_updated",
+        entityType: "permission_group",
+        entityId: groupId,
+        details: {
+          added: (req.body.addUserIds ?? []).length,
+          removed: (req.body.removeUserIds ?? []).length,
+        },
+      });
+      res.json(await access.listGroupMembers(companyId, groupId));
+    },
+  );
+
+  router.patch(
+    "/companies/:companyId/permission-groups/:groupId/permissions",
+    validate(updatePermissionGroupGrantsSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const groupId = req.params.groupId as string;
+      await assertCompanyPermission(req, companyId, "users:manage_permissions");
+      if (!(await access.getGroup(companyId, groupId))) throw notFound("Permission group not found");
+      await access.setPrincipalGrants(companyId, "group", groupId, req.body.grants ?? [], req.actor.userId ?? null);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "permission_group.grants_updated",
+        entityType: "permission_group",
+        entityId: groupId,
+        details: { count: (req.body.grants ?? []).length },
+      });
+      res.json(await access.listPrincipalGrants(companyId, "group", groupId));
+    },
   );
 
   return router;

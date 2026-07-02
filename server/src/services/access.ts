@@ -418,6 +418,145 @@ export function accessService(db: Db) {
     });
   }
 
+  // --- Permission groups (Phase 2). Every query is scoped by companyId so a
+  // cross-company groupId/memberId is treated as not-found rather than leaking. ---
+
+  async function listGroups(companyId: string) {
+    return db
+      .select()
+      .from(permissionGroups)
+      .where(eq(permissionGroups.companyId, companyId))
+      .orderBy(permissionGroups.name);
+  }
+
+  async function getGroup(companyId: string, groupId: string) {
+    return db
+      .select()
+      .from(permissionGroups)
+      .where(and(eq(permissionGroups.id, groupId), eq(permissionGroups.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function createGroup(
+    companyId: string,
+    input: { name: string; description?: string | null; status?: string },
+  ) {
+    const [row] = await db
+      .insert(permissionGroups)
+      .values({
+        companyId,
+        name: input.name,
+        description: input.description ?? null,
+        status: input.status ?? "active",
+      })
+      .returning();
+    return row;
+  }
+
+  async function updateGroup(
+    companyId: string,
+    groupId: string,
+    patch: { name?: string; description?: string | null; status?: string },
+  ) {
+    const changes: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.name !== undefined) changes.name = patch.name;
+    if (patch.description !== undefined) changes.description = patch.description;
+    if (patch.status !== undefined) changes.status = patch.status;
+    const [row] = await db
+      .update(permissionGroups)
+      .set(changes)
+      .where(and(eq(permissionGroups.id, groupId), eq(permissionGroups.companyId, companyId)))
+      .returning();
+    return row ?? null;
+  }
+
+  // Delete order: group grants -> members -> group row. A cross-company groupId is a no-op via scoped WHERE.
+  async function deleteGroup(companyId: string, groupId: string): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      await tx
+        .delete(principalPermissionGrants)
+        .where(
+          and(
+            eq(principalPermissionGrants.companyId, companyId),
+            eq(principalPermissionGrants.principalType, "group"),
+            eq(principalPermissionGrants.principalId, groupId),
+          ),
+        );
+      await tx
+        .delete(permissionGroupMembers)
+        .where(
+          and(
+            eq(permissionGroupMembers.companyId, companyId),
+            eq(permissionGroupMembers.groupId, groupId),
+          ),
+        );
+      const removed = await tx
+        .delete(permissionGroups)
+        .where(
+          and(eq(permissionGroups.id, groupId), eq(permissionGroups.companyId, companyId)),
+        )
+        .returning({ id: permissionGroups.id });
+      return removed.length > 0;
+    });
+  }
+
+  async function listGroupMembers(companyId: string, groupId: string) {
+    return db
+      .select()
+      .from(permissionGroupMembers)
+      .where(
+        and(
+          eq(permissionGroupMembers.companyId, companyId),
+          eq(permissionGroupMembers.groupId, groupId),
+        ),
+      )
+      .orderBy(permissionGroupMembers.createdAt);
+  }
+
+  // addUserIds are inserted active (onConflict do nothing guards the unique index);
+  // removeUserIds are deleted. All scoped by companyId + groupId.
+  async function updateGroupMembers(
+    companyId: string,
+    groupId: string,
+    input: { addUserIds?: string[]; removeUserIds?: string[] },
+  ) {
+    const add = input.addUserIds ?? [];
+    const remove = input.removeUserIds ?? [];
+    await db.transaction(async (tx) => {
+      if (remove.length > 0) {
+        await tx
+          .delete(permissionGroupMembers)
+          .where(
+            and(
+              eq(permissionGroupMembers.companyId, companyId),
+              eq(permissionGroupMembers.groupId, groupId),
+              inArray(permissionGroupMembers.userId, remove),
+            ),
+          );
+      }
+      for (const userId of add) {
+        await tx
+          .insert(permissionGroupMembers)
+          .values({ companyId, groupId, userId, status: "active" })
+          .onConflictDoNothing();
+      }
+    });
+  }
+
+  // Used to enrich GET /members with each user's active group memberships.
+  async function listUserGroupMemberships(companyId: string, userId: string) {
+    return db
+      .select({ groupId: permissionGroupMembers.groupId, status: permissionGroupMembers.status })
+      .from(permissionGroupMembers)
+      .where(
+        and(
+          eq(permissionGroupMembers.companyId, companyId),
+          eq(permissionGroupMembers.userId, userId),
+          eq(permissionGroupMembers.status, "active"),
+        ),
+      );
+  }
+
   return {
     isInstanceAdmin,
     canUser,
@@ -435,5 +574,13 @@ export function accessService(db: Db) {
     setPrincipalGrants,
     listPrincipalGrants,
     setPrincipalPermission,
+    listGroups,
+    getGroup,
+    createGroup,
+    updateGroup,
+    deleteGroup,
+    listGroupMembers,
+    updateGroupMembers,
+    listUserGroupMemberships,
   };
 }
