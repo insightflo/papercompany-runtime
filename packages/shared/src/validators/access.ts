@@ -90,3 +90,38 @@ export const updateUserCompanyAccessSchema = z.object({
 });
 
 export type UpdateUserCompanyAccess = z.infer<typeof updateUserCompanyAccessSchema>;
+
+// --- Permission groups (Phase 1: shared shapes consumed by Phase 2 routes) ---
+
+// Group/member status is intentionally active|suspended (no pending); canUser only honors active.
+const groupStatusEnum = z.enum(["active", "suspended"]);
+
+export const createPermissionGroupSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(2000).optional().nullable(),
+  status: groupStatusEnum.default("active"),
+});
+export type CreatePermissionGroup = z.infer<typeof createPermissionGroupSchema>;
+
+export const updatePermissionGroupSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).optional().nullable(),
+  status: groupStatusEnum.optional(),
+});
+export type UpdatePermissionGroup = z.infer<typeof updatePermissionGroupSchema>;
+
+export const updatePermissionGroupMembersSchema = z.object({
+  addUserIds: z.array(z.string()).default([]),
+  removeUserIds: z.array(z.string()).default([]),
+});
+export type UpdatePermissionGroupMembers = z.infer<typeof updatePermissionGroupMembersSchema>;
+
+export const updatePermissionGroupGrantsSchema = z.object({
+  grants: z.array(
+    z.object({
+      permissionKey: z.enum(PERMISSION_KEYS),
+      scope: z.record(z.string(), z.unknown()).optional().nullable(),
+    }),
+  ),
+});
+export type UpdatePermissionGroupGrants = z.infer<typeof updatePermissionGroupGrantsSchema>;

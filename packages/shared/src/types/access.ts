@@ -33,6 +33,26 @@ export interface PrincipalPermissionGrant {
   updatedAt: Date;
 }
 
+export interface PermissionGroup {
+  id: string;
+  companyId: string;
+  name: string;
+  description: string | null;
+  status: MembershipStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface PermissionGroupMember {
+  id: string;
+  companyId: string;
+  groupId: string;
+  userId: string;
+  status: MembershipStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface Invite {
   id: string;
   companyId: string | null;

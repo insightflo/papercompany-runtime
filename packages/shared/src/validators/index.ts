@@ -331,6 +331,10 @@ export {
   resolveCliAuthChallengeSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
+  createPermissionGroupSchema,
+  updatePermissionGroupSchema,
+  updatePermissionGroupMembersSchema,
+  updatePermissionGroupGrantsSchema,
   type CreateCompanyInvite,
   type CreateOpenClawInvitePrompt,
   type AcceptInvite,
@@ -341,6 +345,10 @@ export {
   type ResolveCliAuthChallenge,
   type UpdateMemberPermissions,
   type UpdateUserCompanyAccess,
+  type CreatePermissionGroup,
+  type UpdatePermissionGroup,
+  type UpdatePermissionGroupMembers,
+  type UpdatePermissionGroupGrants,
 } from "./access.js";
 
 export {

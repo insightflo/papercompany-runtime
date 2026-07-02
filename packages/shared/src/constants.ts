@@ -396,7 +396,7 @@ export const LIVE_EVENT_TYPES = [
 ] as const;
 export type LiveEventType = (typeof LIVE_EVENT_TYPES)[number];
 
-export const PRINCIPAL_TYPES = ["user", "agent"] as const;
+export const PRINCIPAL_TYPES = ["user", "agent", "group"] as const;
 export type PrincipalType = (typeof PRINCIPAL_TYPES)[number];
 
 export const MEMBERSHIP_STATUSES = ["pending", "active", "suspended"] as const;

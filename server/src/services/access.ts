@@ -3,6 +3,8 @@ import type { Db } from "@paperclipai/db";
 import {
   companyMemberships,
   instanceUserRoles,
+  permissionGroupMembers,
+  permissionGroups,
   principalPermissionGrants,
 } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
@@ -42,14 +44,13 @@ export function accessService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function hasPermission(
+  // Checks grant row existence only (no membership check). hasPermission/canUser compose this.
+  async function hasPrincipalGrant(
     companyId: string,
     principalType: PrincipalType,
     principalId: string,
     permissionKey: PermissionKey,
   ): Promise<boolean> {
-    const membership = await getMembership(companyId, principalType, principalId);
-    if (!membership || membership.status !== "active") return false;
     const grant = await db
       .select({ id: principalPermissionGrants.id })
       .from(principalPermissionGrants)
@@ -65,6 +66,57 @@ export function accessService(db: Db) {
     return Boolean(grant);
   }
 
+  async function hasPermission(
+    companyId: string,
+    principalType: PrincipalType,
+    principalId: string,
+    permissionKey: PermissionKey,
+  ): Promise<boolean> {
+    const membership = await getMembership(companyId, principalType, principalId);
+    if (!membership || membership.status !== "active") return false;
+    return hasPrincipalGrant(companyId, principalType, principalId, permissionKey);
+  }
+
+  // Returns true if any active group the user belongs to (same company) holds an active grant.
+  // groupId is uuid while principalId is text, so cast uuid columns to text in the join.
+  // cross-company guard: grant/member/group all share companyId; suspended groups/members excluded.
+  async function hasInheritedGroupGrant(
+    companyId: string,
+    userId: string,
+    permissionKey: PermissionKey,
+  ): Promise<boolean> {
+    const row = await db
+      .select({ id: principalPermissionGrants.id })
+      .from(principalPermissionGrants)
+      .innerJoin(
+        permissionGroupMembers,
+        and(
+          eq(permissionGroupMembers.companyId, principalPermissionGrants.companyId),
+          sql`${permissionGroupMembers.groupId}::text = ${principalPermissionGrants.principalId}`,
+          eq(permissionGroupMembers.userId, userId),
+          eq(permissionGroupMembers.status, "active"),
+        ),
+      )
+      .innerJoin(
+        permissionGroups,
+        and(
+          sql`${permissionGroups.id}::text = ${principalPermissionGrants.principalId}`,
+          eq(permissionGroups.companyId, principalPermissionGrants.companyId),
+          eq(permissionGroups.status, "active"),
+        ),
+      )
+      .where(
+        and(
+          eq(principalPermissionGrants.companyId, companyId),
+          eq(principalPermissionGrants.principalType, "group"),
+          eq(principalPermissionGrants.permissionKey, permissionKey),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return Boolean(row);
+  }
+
   async function canUser(
     companyId: string,
     userId: string | null | undefined,
@@ -72,7 +124,14 @@ export function accessService(db: Db) {
   ): Promise<boolean> {
     if (!userId) return false;
     if (await isInstanceAdmin(userId)) return true;
-    return hasPermission(companyId, "user", userId, permissionKey);
+    // rule 3: user must hold an active company membership; this also gates group inheritance.
+    const membership = await getMembership(companyId, "user", userId);
+    if (!membership || membership.status !== "active") return false;
+    // direct user grant OR inherited active-group grant
+    return (
+      (await hasPrincipalGrant(companyId, "user", userId, permissionKey)) ||
+      hasInheritedGroupGrant(companyId, userId, permissionKey)
+    );
   }
 
   async function listMembers(companyId: string) {
