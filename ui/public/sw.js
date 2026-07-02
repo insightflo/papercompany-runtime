@@ -1,4 +1,14 @@
-const CACHE_NAME = "paperclip-v2";
+const CACHE_NAME = "paperclip-v3";
+
+function isHtmlResponse(response) {
+  return (response.headers.get("content-type") || "").includes("text/html");
+}
+
+function withCacheBypass(url) {
+  const next = new URL(url);
+  next.searchParams.set("__pc_sw_bust", Date.now().toString(36));
+  return next.toString();
+}
 
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -26,7 +36,10 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     fetch(request)
       .then((response) => {
-        if (response.ok && url.origin === self.location.origin) {
+        if (url.origin === self.location.origin && url.pathname.startsWith("/assets/") && isHtmlResponse(response)) {
+          return fetch(withCacheBypass(url), { cache: "reload" });
+        }
+        if (response.ok && url.origin === self.location.origin && !isHtmlResponse(response)) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
         }
