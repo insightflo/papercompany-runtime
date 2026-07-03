@@ -3,7 +3,7 @@
 // [파일 목적] mission owner supervision(감독/회복) 본체. runMainExecutorSupervision(1100+줄) +
 //   runActiveMissionOwnerSupervision. missions.ts 클로저 분해(P3).
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
-import { agentWakeupRequests, heartbeatRuns, issueComments, issues, missionPlanDecisionSubmissions, missions, workflowRuns } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issueComments, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -1649,6 +1649,71 @@ export function createSupervision({ db, deps, ownerActions }: {
           .map((row) => row.missionId)
           .filter((missionId): missionId is string => Boolean(missionId)))
         : new Set<string>();
+      const activePlanArtifactRows = rowMissionIds.length > 0
+        ? await db
+          .select({
+            missionId: missionPlanArtifacts.missionId,
+            revision: missionPlanArtifacts.revision,
+            refs: missionPlanArtifacts.refs,
+          })
+          .from(missionPlanArtifacts)
+          .where(and(
+            eq(missionPlanArtifacts.companyId, companyId),
+            inArray(missionPlanArtifacts.missionId, rowMissionIds),
+            eq(missionPlanArtifacts.status, "active"),
+          ))
+          .orderBy(asc(missionPlanArtifacts.missionId), asc(missionPlanArtifacts.revision))
+        : [];
+      const activePlanByMissionId = new Map<string, typeof activePlanArtifactRows[number]>();
+      for (const planRow of activePlanArtifactRows) {
+        activePlanByMissionId.set(planRow.missionId, planRow);
+      }
+      const planQaIssueDecisionPairs = activePlanArtifactRows
+        .map((planRow) => {
+          const refs = asRecord(planRow.refs);
+          const planQaRef = asRecord(refs.planQa);
+          const issueId = trimmedString(planQaRef.issueId);
+          const decisionHash = trimmedString(planQaRef.decisionHash);
+          return issueId && decisionHash ? { issueId, decisionHash } : null;
+        })
+        .filter((pair): pair is { issueId: string; decisionHash: string } => Boolean(pair));
+      const planQaVerdictKeys = new Set(
+        planQaIssueDecisionPairs.length > 0
+          ? (await db
+            .select({
+              planQaIssueId: missionPlanQaVerdicts.planQaIssueId,
+              decisionHash: missionPlanQaVerdicts.decisionHash,
+            })
+            .from(missionPlanQaVerdicts)
+            .where(and(
+              eq(missionPlanQaVerdicts.companyId, companyId),
+              inArray(missionPlanQaVerdicts.planQaIssueId, planQaIssueDecisionPairs.map((pair) => pair.issueId)),
+            )))
+            .map((row) => `${row.planQaIssueId}:${row.decisionHash}`)
+          : [],
+      );
+      const planMaterializationGapMissionIds = new Set(
+        rows
+          .map((row) => row.id)
+          .filter((missionId) => {
+            if (activeHeartbeatMissionIds.has(missionId)) return false;
+            const planRow = activePlanByMissionId.get(missionId);
+            if (!planRow) return false;
+            const refs = asRecord(planRow.refs);
+            const ownerPlanDecisionRef = asRecord(refs.ownerPlanDecision);
+            const paqoWorkflowRef = asRecord(refs.paqoWorkflow);
+            const planQaRef = asRecord(refs.planQa);
+            const decisionHash = trimmedString(ownerPlanDecisionRef.decisionHash);
+            const planQaIssueId = trimmedString(planQaRef.issueId);
+            const planQaDecisionHash = trimmedString(planQaRef.decisionHash) || decisionHash;
+            const hasPlanQaVerdict = Boolean(planQaIssueId && planQaDecisionHash && planQaVerdictKeys.has(`${planQaIssueId}:${planQaDecisionHash}`));
+            return Boolean(
+              decisionHash
+              && !trimmedString(paqoWorkflowRef.workflowRunId)
+              && (trimmedString(planQaRef.status) !== "pending" || hasPlanQaVerdict),
+            );
+          }),
+      );
       const staleInProgressFailedHeartbeatMissionIds = new Set(
         rowMissionIds.length > 0
           ? (await db
@@ -1685,7 +1750,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       for (const row of rows) {
         const snapshot = snapshots[row.id];
         const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id)) missionIds.push(row.id);
+        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
       }
 
       // [AREA: planning-stall detection] planning 미션 중 PLAN issue done + succeeded heartbeat +

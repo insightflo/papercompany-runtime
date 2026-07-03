@@ -38,6 +38,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
+import { missionService } from "../services/missions.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -3442,6 +3443,103 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(paqoWorkflow?.workflowRunId).toBeTruthy();
     const runsAfter = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
     expect(runsAfter.length).toBeGreaterThan(0);
+  });
+
+  it("structured plan-qa verdict: later PASS comment supersedes prior REQUEST_CHANGES row", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    const pendingPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const pendingPlanQa = (pendingPlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; decisionHash?: string } | undefined;
+    expect(pendingPlanQa?.issueId).toBeTruthy();
+
+    await recordMissionPlanQaVerdict({
+      db,
+      companyId,
+      missionId,
+      planQaIssueId: pendingPlanQa!.issueId!,
+      decisionHash: first.decisionHash ?? pendingPlanQa!.decisionHash ?? "",
+      verdict: "request_changes",
+      diagnostics: [{ code: "missing_detail", message: "needs revision" }],
+      reviewedBy: { actorType: "agent", actorId: qaAgentId },
+    });
+
+    const passCommentCreatedAt = new Date(Date.now() + 1_000);
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: pendingPlanQa!.issueId!,
+      authorAgentId: qaAgentId,
+      body: "Plan is now sound.\nPASS",
+      createdAt: passCommentCreatedAt,
+      updatedAt: passCommentCreatedAt,
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("recorded");
+
+    const verdictRows = await db.select().from(missionPlanQaVerdicts)
+      .where(eq(missionPlanQaVerdicts.planQaIssueId, pendingPlanQa!.issueId!));
+    expect(verdictRows).toHaveLength(1);
+    expect(verdictRows[0]?.verdict).toBe("pass");
+    expect(verdictRows[0]?.sourceCommentId).toBeTruthy();
+
+    const recovered = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const recoveredPlanQa = (recovered?.refs as Record<string, unknown> | undefined)?.planQa as { status?: string; verdict?: string } | undefined;
+    expect(recoveredPlanQa?.status).toBe("pass");
+    expect(recoveredPlanQa?.verdict).toBe("pass");
+    const paqoWorkflow = (recovered?.refs as Record<string, unknown> | undefined)?.paqoWorkflow as { workflowRunId?: string } | undefined;
+    expect(paqoWorkflow?.workflowRunId).toBeTruthy();
+  });
+
+  it("[PLAN-QA materialization gap] active supervision selects a planning mission with PASS verdict but no PAQO workflow", async () => {
+    const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+    await db
+      .update(missions)
+      .set({ status: "planning" })
+      .where(eq(missions.id, missionId));
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+
+    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(first.status).toBe("plan_qa_pending");
+    const pendingPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const pendingPlanQa = (pendingPlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+    expect(pendingPlanQa?.status).toBe("pending");
+    expect(pendingPlanQa?.issueId).toBeTruthy();
+
+    await db.insert(missionPlanQaVerdicts).values({
+      companyId,
+      missionId,
+      planQaIssueId: pendingPlanQa!.issueId!,
+      reviewerAgentId: qaAgentId,
+      reviewerUserId: null,
+      sourceRunId: null,
+      sourceCommentId: null,
+      decisionHash: first.decisionHash ?? "",
+      verdict: "pass",
+      diagnostics: [],
+    });
+
+    const result = await missionService(db).runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 30,
+      applySafeActions: true,
+    });
+
+    expect(result.missionIds).toContain(missionId);
+    const missionResult = result.missions.find((entry) => entry.missionId === missionId);
+    expect(missionResult?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "materialize_plan_decision", resultStatus: "recorded" }),
+    ]));
+
+    const recovered = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    const recoveredPlanQa = (recovered?.refs as Record<string, unknown> | undefined)?.planQa as { status?: string; verdict?: string } | undefined;
+    expect(recoveredPlanQa?.status).toBe("pass");
+    expect(recoveredPlanQa?.verdict).toBe("pass");
+    const paqoWorkflow = (recovered?.refs as Record<string, unknown> | undefined)?.paqoWorkflow as { workflowRunId?: string } | undefined;
+    expect(paqoWorkflow?.workflowRunId).toBeTruthy();
   });
 
   it("[PLAN-QA materialization failure] writes durable diagnostic activity, stays pending, recovers on retry", async () => {

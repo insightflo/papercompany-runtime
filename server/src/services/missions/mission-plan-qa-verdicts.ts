@@ -30,7 +30,8 @@ export async function recordMissionPlanQaVerdict(input: {
   sourceRunId?: string | null;
   sourceCommentId?: string | null;
 }): Promise<{ status: "recorded"; planQaIssueId: string; verdict: ValidationVerdict }> {
-  // structured verdict 저장(unique index 로 같은 hash 재제출 멱등 — onConflictDoNothing).
+  // structured verdict 저장(unique index 로 같은 hash 재제출 멱등, later verdict can supersede earlier one).
+  const now = new Date();
   await input.db
     .insert(missionPlanQaVerdicts)
     .values({
@@ -44,8 +45,24 @@ export async function recordMissionPlanQaVerdict(input: {
       decisionHash: input.decisionHash,
       verdict: input.verdict,
       diagnostics: input.diagnostics ?? [],
+      updatedAt: now,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: [
+        missionPlanQaVerdicts.companyId,
+        missionPlanQaVerdicts.planQaIssueId,
+        missionPlanQaVerdicts.decisionHash,
+      ],
+      set: {
+        reviewerAgentId: input.reviewedBy.actorType === "agent" ? input.reviewedBy.actorId : null,
+        reviewerUserId: input.reviewedBy.actorType === "user" ? input.reviewedBy.actorId : null,
+        sourceRunId: input.sourceRunId ?? null,
+        sourceCommentId: input.sourceCommentId ?? null,
+        verdict: input.verdict,
+        diagnostics: input.diagnostics ?? [],
+        updatedAt: now,
+      },
+    });
 
   // dual-write: 사람이 읽을 수 있는 comment 도 남김(audit/display + legacy parser fallback 호환).
   const body = input.verdict === "pass"

@@ -2318,8 +2318,9 @@ async function readPlanQaVerdict(input: {
   decisionHash?: string | null;
   afterCreatedAt?: Date | null;
 }): Promise<ValidationVerdict | null> {
-  // [AREA: structured events / Task 4] structured-first: mission_plan_qa_verdicts 표에서 최신 verdict 읽기.
-  // 없으면 comment-based fallback(기존 readExplicitValidationVerdict 경로 유지).
+  // [AREA: structured events / Task 4] Prefer the newest authorized verdict signal.
+  // Structured rows are the durable source, but a later authorized PLAN-QA comment must
+  // supersede an older row so unblock/re-review loops cannot strand the plan on stale data.
   const structuredConditions = [
     eq(missionPlanQaVerdicts.companyId, input.companyId),
     eq(missionPlanQaVerdicts.planQaIssueId, input.planQaIssueId),
@@ -2328,14 +2329,16 @@ async function readPlanQaVerdict(input: {
     structuredConditions.push(eq(missionPlanQaVerdicts.decisionHash, input.decisionHash));
   }
   const [structuredVerdict] = await input.db
-    .select({ verdict: missionPlanQaVerdicts.verdict })
+    .select({
+      verdict: missionPlanQaVerdicts.verdict,
+      createdAt: missionPlanQaVerdicts.createdAt,
+      updatedAt: missionPlanQaVerdicts.updatedAt,
+    })
     .from(missionPlanQaVerdicts)
     .where(and(...structuredConditions))
-    .orderBy(desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
+    .orderBy(desc(missionPlanQaVerdicts.updatedAt), desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
     .limit(1);
-  if (structuredVerdict?.verdict === "pass" || structuredVerdict?.verdict === "request_changes") {
-    return structuredVerdict.verdict as ValidationVerdict;
-  }
+  const structuredVerdictValue = normalizePlanQaVerdict(structuredVerdict?.verdict);
 
   // fallback: comment-based read (기존 로직 유지 — legacy parser)
   const [planQaIssue] = await input.db
@@ -2348,7 +2351,7 @@ async function readPlanQaVerdict(input: {
       isNull(issues.hiddenAt),
     ))
     .limit(1);
-  if (!planQaIssue) return null;
+  if (!planQaIssue) return structuredVerdictValue;
 
   const commentConditions = [
     eq(issueComments.companyId, input.companyId),
@@ -2364,6 +2367,7 @@ async function readPlanQaVerdict(input: {
       authorAgentId: issueComments.authorAgentId,
       authorUserId: issueComments.authorUserId,
       body: issueComments.body,
+      createdAt: issueComments.createdAt,
     })
     .from(issueComments)
     .where(and(...commentConditions))
@@ -2382,6 +2386,10 @@ async function readPlanQaVerdict(input: {
   const agentById = new Map(agentRows.map((row) => [row.id, row]));
 
   for (const { row, verdict } of verdictRows) {
+    if (structuredPlanQaVerdictSupersedesComment(row.createdAt, structuredVerdictValue, structuredVerdict?.updatedAt ?? structuredVerdict?.createdAt ?? null)) {
+      return structuredVerdictValue;
+    }
+
     if (typeof row.authorUserId === "string" && row.authorUserId.trim().length > 0) {
       await persistCommentDerivedPlanQaVerdict({
         db: input.db,
@@ -2438,11 +2446,23 @@ async function readPlanQaVerdict(input: {
     }
   }
 
-  return null;
+  return structuredVerdictValue;
 }
 
 function readPlanQaCommentVerdict(body: string): ValidationVerdict | null {
   return readExplicitValidationVerdict(body) ?? readPlanQaScorecardVerdict(body);
+}
+
+function normalizePlanQaVerdict(verdict: unknown): ValidationVerdict | null {
+  return verdict === "pass" || verdict === "request_changes" ? verdict : null;
+}
+
+function structuredPlanQaVerdictSupersedesComment(
+  commentCreatedAt: Date,
+  structuredVerdict: ValidationVerdict | null,
+  structuredObservedAt: Date | null,
+): structuredVerdict is ValidationVerdict {
+  return Boolean(structuredVerdict && structuredObservedAt && structuredObservedAt.getTime() >= commentCreatedAt.getTime());
 }
 
 function readPlanQaScorecardVerdict(body: string): ValidationVerdict | null {
@@ -2482,6 +2502,7 @@ async function persistCommentDerivedPlanQaVerdict(input: {
   verdict: ValidationVerdict;
 }): Promise<void> {
   if (!input.decisionHash) return;
+  const now = new Date();
   await input.db
     .insert(missionPlanQaVerdicts)
     .values({
@@ -2495,8 +2516,24 @@ async function persistCommentDerivedPlanQaVerdict(input: {
       decisionHash: input.decisionHash,
       verdict: input.verdict,
       diagnostics: [],
+      updatedAt: now,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: [
+        missionPlanQaVerdicts.companyId,
+        missionPlanQaVerdicts.planQaIssueId,
+        missionPlanQaVerdicts.decisionHash,
+      ],
+      set: {
+        missionPlanArtifactId: input.missionPlanArtifactId ?? null,
+        reviewerAgentId: input.reviewerAgentId,
+        reviewerUserId: input.reviewerUserId,
+        sourceCommentId: input.sourceCommentId,
+        verdict: input.verdict,
+        diagnostics: [],
+        updatedAt: now,
+      },
+    });
 }
 
 async function updatePlanQaRef(input: {

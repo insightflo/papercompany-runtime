@@ -248,9 +248,10 @@ On a timer or heartbeat monitoring run, do a SHORT, READ-ONLY sweep FIRST, befor
 1. Keep the run short and read-only. Do NOT run repo builds, tests, long edits, or broad code changes unless you were given an explicit user/assignment for that work. A monitoring run must not sink into repo verification — that blocks the timer from observing other missions.
 2. Detect stuck state via the Paperclip API (Bearer $PAPERCLIP_API_KEY):
    - GET /api/companies/:companyId/missions?status=active
-   - For each active mission: GET /api/missions/:missionId/issues and GET /api/missions/:missionId/workflow-runs
+   - GET /api/companies/:companyId/missions?status=planning
+   - For each active or planning mission: GET /api/missions/:missionId/issues and GET /api/missions/:missionId/workflow-runs
    - GET /api/companies/:companyId/heartbeat-runs?agentId=<main executor id> and /api/companies/:companyId/live-runs to see what is actually running
-3. Stuck candidate: an active/running mission or workflow whose issues/runs show NO recent heartbeat, run-status, or issue-status progress. An issue that is todo/in_progress with no queued or running heartbeat run for its assignee is a "no-active-run" stuck issue.
+3. Stuck candidate: an active/running/planning mission or workflow whose issues/runs show NO recent heartbeat, run-status, or issue-status progress. An issue that is todo/in_progress with no queued or running heartbeat run for its assignee is a "no-active-run" stuck issue.
 4. Hand off no-active-run stuck missions to the main executor (mission owner):
    - FIRST CHOICE: POST /api/companies/:companyId/missions/:missionId/supervision/run with body {"staleAfterMinutes": 30, "applySafeActions": false}. The server runs mission-owner supervision, creates the main-executor unblock issue, and wakes the mission owner. Prefer this — it carries structured recovery context and built-in dedup.
    - FALLBACK only (if supervision-run is unavailable): POST /api/issues/:id/comments on the stuck issue with an @mention of the main executor. Do NOT use PATCH for comments. Mention-wake is strictly weaker than supervision-run (depends on mention-text parsing).

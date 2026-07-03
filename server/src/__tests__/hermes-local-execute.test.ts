@@ -18,7 +18,8 @@ describe("Hermes Ops liaison default brief (operational monitoring MVP)", () => 
     expect(brief).toMatch(/Operational Monitoring Protocol/i);
     expect(brief).toMatch(/read-only/i);
     expect(brief).toContain("GET /api/companies/:companyId/missions?status=active");
-    expect(brief).toMatch(/stuck candidate/i);
+    expect(brief).toContain("GET /api/companies/:companyId/missions?status=planning");
+    expect(brief).toMatch(/active\/running\/planning/i);
   });
 
   it("routes no-active-run handoff to the supervision-run endpoint FIRST", () => {
