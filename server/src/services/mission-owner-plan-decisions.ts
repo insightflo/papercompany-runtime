@@ -816,6 +816,7 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionInput = {
   missionId: string;
   requestedBy?: MaterializerActor;
   enqueuePlanQaWakeup?: PlanQaWakeupHandler;
+  enqueuePlanningIssueWakeup?: PlanningIssueWakeupHandler;
   /** Structured decision bypassing comment-parse (structured-events p3). */
   preParsedDecision?: {
     decision: Record<string, unknown>;
@@ -831,6 +832,16 @@ export type PlanQaWakeupHandler = (input: {
   issueStatus: string;
   missionId: string;
   planningIssueId: string | null;
+}) => Promise<unknown> | unknown;
+
+export type PlanningIssueWakeupHandler = (input: {
+  companyId: string;
+  agentId: string;
+  issueId: string;
+  issueStatus: string;
+  missionId: string;
+  planQaIssueId: string | null;
+  decisionHash: string;
 }) => Promise<unknown> | unknown;
 
 export type RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic = {
@@ -888,6 +899,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   missionId,
   requestedBy,
   enqueuePlanQaWakeup,
+  enqueuePlanningIssueWakeup,
   preParsedDecision,
 }: RecordLatestAuthorizedMissionOwnerPlanDecisionInput): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionResult> {
   // [structured-events p3] structured submission 이 있으면 comment-parse 를 건너뛰고
@@ -1140,7 +1152,18 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           return { status: "recorded", missionPlanArtifact: finalPlan, revision: finalPlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
         }
         if (verdict === "request_changes") {
-          await reopenPlanningIssueIfTerminal({ db, planningIssueId: collected.planningIssueId });
+          const planningIssueForRework = await reopenPlanningIssueForPlanChanges({ db, planningIssueId: collected.planningIssueId });
+          if (planningIssueForRework?.assigneeAgentId && enqueuePlanningIssueWakeup) {
+            await enqueuePlanningIssueWakeup({
+              companyId,
+              agentId: planningIssueForRework.assigneeAgentId,
+              issueId: planningIssueForRework.id,
+              issueStatus: planningIssueForRework.status,
+              missionId,
+              planQaIssueId: activePlanQa.issueId,
+              decisionHash,
+            });
+          }
           await closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId });
           await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "request_changes", verdict: "request_changes", reviewedAt: new Date().toISOString() } });
           // Phase 5 (plan 8.1 mission quality contract): Plan-QA request_changes = purpose-fitness
@@ -2568,20 +2591,51 @@ async function closePlanQaIssue(input: { db: Db; planQaIssueId: string }): Promi
     .where(and(eq(issues.id, input.planQaIssueId), eq(issues.originKind, "mission_plan_qa")));
 }
 
-async function reopenPlanningIssueIfTerminal(input: { db: Db; planningIssueId: string | null }): Promise<void> {
-  if (!input.planningIssueId) return;
+type PlanningIssueForRework = {
+  id: string;
+  status: string;
+  assigneeAgentId: string | null;
+};
+
+async function reopenPlanningIssueForPlanChanges(input: { db: Db; planningIssueId: string | null }): Promise<PlanningIssueForRework | null> {
+  if (!input.planningIssueId) return null;
   const [row] = await input.db
-    .select({ id: issues.id, status: issues.status })
+    .select({
+      id: issues.id,
+      status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+      checkoutRunId: issues.checkoutRunId,
+      executionRunId: issues.executionRunId,
+    })
     .from(issues)
     .where(eq(issues.id, input.planningIssueId))
     .limit(1);
-  if (!row) return;
-  if (row.status === "done" || row.status === "cancelled" || row.status === "completed") {
-    await input.db
+  if (!row) return null;
+  if (row.status === "todo") return { id: row.id, status: row.status, assigneeAgentId: row.assigneeAgentId };
+  const isTerminal = row.status === "done" || row.status === "cancelled" || row.status === "completed";
+  const isStatusOnlyInProgress = row.status === "in_progress" && !row.checkoutRunId && !row.executionRunId;
+  if (isTerminal || isStatusOnlyInProgress) {
+    const [updated] = await input.db
       .update(issues)
-      .set({ status: "in_progress", updatedAt: new Date() })
-      .where(eq(issues.id, row.id));
+      .set({
+        status: "todo",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        completedAt: null,
+        cancelledAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(issues.id, row.id))
+      .returning({
+        id: issues.id,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+      });
+    return updated ?? null;
   }
+  return null;
 }
 
 function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decisionHash?: string } | null {

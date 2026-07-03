@@ -28,7 +28,7 @@ import { notFound, badRequest } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
 import { loadMissionRuntimeSnapshot } from "../services/missions/mission-runtime-snapshot.js";
-import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
+import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
 export function missionRoutes(db: Db) {
   const router = Router();
@@ -36,6 +36,10 @@ export function missionRoutes(db: Db) {
   const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
     heartbeat,
     { requestedByActorId: "missions-route-plan-qa", contextSource: "missions_route_plan_qa" },
+  );
+  const enqueuePlanningIssueWakeup = createPlanningIssueWakeupHandler(
+    heartbeat,
+    { requestedByActorId: "missions-route-plan-rework", contextSource: "missions_route_plan_rework" },
   );
   const delegationSvc = missionDelegationService(db);
   const svc = missionService(db, {
@@ -81,6 +85,15 @@ export function missionRoutes(db: Db) {
         },
       });
     },
+    onPlanRevisionRequested: ({ mission, planIssueId, planQaIssueId, targetAgentId, decisionHash }) => enqueuePlanningIssueWakeup({
+      companyId: mission.companyId,
+      agentId: targetAgentId,
+      issueId: planIssueId,
+      issueStatus: "todo",
+      missionId: mission.id,
+      planQaIssueId,
+      decisionHash,
+    }),
     onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
       const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
         companyId: mission.companyId,

@@ -1392,6 +1392,16 @@ export function createSupervision({ db, deps, ownerActions }: {
         missionId: mission.id,
         requestedBy: { actorType: "system", actorId: "mission-owner-supervision" },
         enqueuePlanQaWakeup: deps.onPlanQaIssueCreated,
+        enqueuePlanningIssueWakeup: deps.onPlanRevisionRequested
+          ? (input) => deps.onPlanRevisionRequested?.({
+            mission,
+            planIssueId: input.issueId,
+            planQaIssueId: input.planQaIssueId,
+            targetAgentId: input.agentId,
+            decisionHash: input.decisionHash,
+            idempotencyKey: `mission-owner-plan-rework:${input.issueId}:${input.decisionHash}`,
+          })
+          : undefined,
       });
       const refs = asRecord(result.status === "recorded" ? result.missionPlanArtifact.refs : undefined);
       const paqoWorkflow = asRecord(refs.paqoWorkflow);

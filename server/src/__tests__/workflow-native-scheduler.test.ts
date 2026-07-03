@@ -120,6 +120,40 @@ describe("native workflow scheduler shadow loop", () => {
     }), "Native workflow scheduler active tick");
   });
 
+  it("dispatches queued workflow tool steps during active ticks", async () => {
+    const listCandidates = vi.fn().mockResolvedValue([]);
+    const dispatchQueuedToolSteps = vi.fn().mockResolvedValue({
+      claimedCount: 2,
+      executedCount: 2,
+      failedCount: 0,
+      skippedCount: 0,
+    });
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const now = new Date("2026-06-11T01:05:00.000Z");
+    const scheduler = createNativeWorkflowScheduler({
+      db: {} as never,
+      mode: "active",
+      listCandidates,
+      dispatchQueuedToolSteps,
+      logger,
+    });
+
+    await scheduler.tick(now);
+
+    expect(dispatchQueuedToolSteps).toHaveBeenCalledWith({} as never, { now });
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({
+      mode: "active",
+      candidateCount: 0,
+      toolStepClaimedCount: 2,
+      toolStepExecutedCount: 2,
+      toolStepFailedCount: 0,
+    }), "Native workflow scheduler active tick");
+  });
+
   it("continues active claims after a candidate claim fails", async () => {
     const listCandidates = vi.fn().mockResolvedValue([
       {

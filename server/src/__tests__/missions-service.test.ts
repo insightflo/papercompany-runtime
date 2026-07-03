@@ -36,7 +36,7 @@ import {
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
-import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -3610,6 +3610,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       startedAt: null,
       completedAt: null,
     }));
+    expect(executeToolStep).not.toHaveBeenCalled();
+    const retryDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(retryDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(1);
     expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
       companyId,

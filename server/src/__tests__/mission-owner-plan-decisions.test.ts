@@ -3112,16 +3112,24 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
 
   it("plan-QA gate: REQUEST_CHANGES blocks materialization and reopens the PLAN issue to actionable", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
-    await db.update(issues).set({ status: "done" }).where(eq(issues.id, planningIssueId));
+    const enqueuePlanningIssueWakeup = vi.fn().mockResolvedValue(null);
+    await db.update(issues).set({ status: "done", assigneeAgentId: ownerAgentId }).where(eq(issues.id, planningIssueId));
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
     await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     await postPlanQaVerdict({ companyId, missionId, verdict: "request_changes", authorAgentId: qaAgentId });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId, enqueuePlanningIssueWakeup });
     expect(result.status).toBe("plan_qa_changes_requested");
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
     const [planIssue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, planningIssueId));
-    expect(planIssue.status).toBe("in_progress");
+    expect(planIssue.status).toBe("todo");
+    expect(enqueuePlanningIssueWakeup).toHaveBeenCalledWith(expect.objectContaining({
+      companyId,
+      issueId: planningIssueId,
+      issueStatus: "todo",
+      missionId,
+      decisionHash: expect.any(String),
+    }));
     const [planQaIssue] = await db.select({ status: issues.status }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
     expect(planQaIssue.status).toBe("done");
   });
@@ -3154,7 +3162,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(result.status).toBe("plan_qa_changes_requested");
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
     const [planIssue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, planningIssueId));
-    expect(planIssue.status).toBe("in_progress");
+    expect(planIssue.status).toBe("todo");
   });
 
   it("plan-QA gate: ignores PASS verdicts from non-QA agents", async () => {

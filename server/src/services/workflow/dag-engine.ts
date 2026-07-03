@@ -7,7 +7,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
@@ -161,6 +161,13 @@ export type WorkflowToolStepReadinessChecker = (input: {
   companyId: string;
   toolNames: string[];
 }) => Promise<WorkflowToolStepReadiness>;
+
+export type WorkflowToolStepQueueDispatchResult = {
+  claimedCount: number;
+  executedCount: number;
+  failedCount: number;
+  skippedCount: number;
+};
 
 let workflowToolStepExecutor: WorkflowToolStepExecutor | null = null;
 let workflowToolStepReadinessChecker: WorkflowToolStepReadinessChecker | null = null;
@@ -1608,13 +1615,13 @@ async function loadLatestSucceededHeartbeatAt(db: Db, issueIds: string[]): Promi
   return latest;
 }
 
-async function wakeExistingWorkflowStepIssue(input: {
+export async function wakeExistingWorkflowStepIssue(input: {
   db: Db;
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
   issueId: string;
-}) {
+}): Promise<boolean> {
   const [issue] = await input.db
     .select({
       id: issues.id,
@@ -1625,12 +1632,12 @@ async function wakeExistingWorkflowStepIssue(input: {
     .from(issues)
     .where(eq(issues.id, input.issueId))
     .limit(1);
-  if (!issue || issue.status !== "todo") return;
+  if (!issue || issue.status !== "todo") return false;
 
   let wakeIssue = issue;
   if (!wakeIssue.assigneeAgentId) {
     const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, input.step);
-    if (!assigneeAgentId) return;
+    if (!assigneeAgentId) return false;
 
     const [updatedIssue] = await input.db
       .update(issues)
@@ -1645,7 +1652,7 @@ async function wakeExistingWorkflowStepIssue(input: {
         assigneeAgentId: issues.assigneeAgentId,
         status: issues.status,
       });
-    if (!updatedIssue) return;
+    if (!updatedIssue) return false;
 
     await logActivity(input.db, {
       companyId: updatedIssue.companyId,
@@ -1692,6 +1699,7 @@ async function wakeExistingWorkflowStepIssue(input: {
     requestedByActorType: "system",
     requestedByActorId: `workflow:${input.definition.id}`,
   });
+  return true;
 }
 
 async function resolveWorkflowStepAssigneeAgentId(
@@ -1867,6 +1875,10 @@ function stableJson(value: unknown): string {
 function getMetadataRecord(value: unknown, key: string): Record<string, unknown> {
   const metadata = normalizeRecord(value);
   return normalizeRecord(metadata[key]);
+}
+
+function readMetadataString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function isCacheEnabled(step: WorkflowStep): boolean {
@@ -2116,23 +2128,6 @@ async function startIssueLessToolStepRun(input: {
   const { db, run, definition, step, stepRun, now } = input;
 
   const toolName = getSingleToolStepName(step);
-  if (toolName === "delegate_to_company") {
-    const { startDelegatedWorkflowStep } = await import("../workflow-delegations.js");
-    const delegated = await startDelegatedWorkflowStep({
-      db,
-      run,
-      definition,
-      step,
-      stepRun,
-      args: buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run),
-      now,
-    });
-    if (!delegated) {
-      await failToolStepRun(db, stepRun, now);
-    }
-    return delegated;
-  }
-
   const requestId = `${run.id}:${step.id}:${Date.now()}`;
   const args = buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run);
   const concurrencyKey = step.executionControls?.concurrencyKey;
@@ -2179,7 +2174,7 @@ async function startIssueLessToolStepRun(input: {
     return true;
   }
 
-  if (!workflowToolStepExecutor) {
+  if (toolName !== "delegate_to_company" && !workflowToolStepExecutor) {
     await failToolStepRunWithDispatchError({
       db,
       step,
@@ -2199,7 +2194,11 @@ async function startIssueLessToolStepRun(input: {
       requestId,
       toolName,
       args,
-      dispatchedAt: now.toISOString(),
+      queuedAt: now.toISOString(),
+    },
+    toolQueue: {
+      status: "queued",
+      queuedAt: now.toISOString(),
     },
   };
   delete metadata.concurrencyBlocked;
@@ -2211,46 +2210,209 @@ async function startIssueLessToolStepRun(input: {
       startedAt: stepRun.startedAt ?? now,
       completedAt: null,
       lastDispatchAttemptAt: now,
+      lastDispatchAcceptedAt: null,
+      lastDispatchErrorAt: null,
+      lastDispatchErrorSummary: null,
       lastDispatchRequestId: requestId,
       metadata,
     })
     .where(eq(workflowStepRuns.id, stepRun.id));
 
-  try {
-    const persistedStep = step as PersistedWorkflowStep;
-    const agentName = typeof persistedStep.agentName === "string" ? persistedStep.agentName.trim() : undefined;
-    const dispatchResult = await workflowToolStepExecutor({
-      companyId: run.companyId,
-      workflowRunId: run.id,
-      workflowId: definition.id,
-      stepId: step.id,
-      stepRunId: stepRun.id,
-      toolName,
-      args,
-      requestId,
-      agentId: typeof step.agentId === "string" ? step.agentId.trim() : undefined,
-      agentName,
-    });
-    if (dispatchResult?.accepted !== false) {
-      await db
-        .update(workflowStepRuns)
-        .set({ lastDispatchAcceptedAt: new Date() })
-        .where(eq(workflowStepRuns.id, stepRun.id));
+  return true;
+}
+
+export async function processQueuedWorkflowToolStepRuns(
+  db: Db,
+  options: { limit?: number; now?: Date } = {},
+): Promise<WorkflowToolStepQueueDispatchResult> {
+  const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+  const queuedRows = await db
+    .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+    .where(and(
+      eq(workflowRuns.status, "running"),
+      eq(workflowStepRuns.status, "running"),
+      isNull(workflowStepRuns.issueId),
+      isNull(workflowStepRuns.lastDispatchAcceptedAt),
+      isNull(workflowStepRuns.lastDispatchErrorAt),
+      sql`${workflowStepRuns.lastDispatchRequestId} is not null`,
+    ))
+    .orderBy(asc(workflowStepRuns.startedAt), asc(workflowStepRuns.id))
+    .limit(limit);
+
+  const result: WorkflowToolStepQueueDispatchResult = {
+    claimedCount: 0,
+    executedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+  };
+
+  for (const row of queuedRows) {
+    const now = options.now ?? new Date();
+    const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
+    const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+    if (!step || !isIssueLessToolStep(step)) {
+      result.skippedCount += 1;
+      continue;
     }
-    return true;
-  } catch (error) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
+
+    const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
+    const requestId = readMetadataString(invocation.requestId) ?? readMetadataString(row.stepRun.lastDispatchRequestId);
+    const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
+    const args = Object.prototype.hasOwnProperty.call(invocation, "args")
+      ? invocation.args
+      : buildWorkflowToolStepArgs(step as PersistedWorkflowStep, row.run);
+    if (!requestId) {
+      await failToolStepRunWithDispatchError({
+        db,
+        step,
+        stepRun: row.stepRun,
+        now,
+        requestId: `${row.run.id}:${step.id}:${Date.now()}`,
+        toolName,
+        args,
+        error: "Workflow tool step queue entry is missing a dispatch request id.",
+      });
+      await syncWorkflowRunState(db, row.run.id);
+      result.failedCount += 1;
+      continue;
+    }
+
+    const metadata = normalizeRecord(row.stepRun.metadata);
+    const claimedMetadata: Record<string, unknown> = {
+      ...metadata,
+      toolQueue: {
+        ...getMetadataRecord(metadata, "toolQueue"),
+        status: "claimed",
+        claimedAt: now.toISOString(),
+      },
+      toolInvocation: {
+        ...invocation,
+        requestId,
+        toolName,
+        args,
+        dispatchedAt: now.toISOString(),
+      },
+    };
+
+    const claimedStepRun = await db
+      .update(workflowStepRuns)
+      .set({
+        lastDispatchAcceptedAt: now,
+        metadata: claimedMetadata,
+      })
+      .where(and(
+        eq(workflowStepRuns.id, row.stepRun.id),
+        eq(workflowStepRuns.status, "running"),
+        isNull(workflowStepRuns.lastDispatchAcceptedAt),
+        isNull(workflowStepRuns.lastDispatchErrorAt),
+        eq(workflowStepRuns.lastDispatchRequestId, requestId),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+
+    if (!claimedStepRun) {
+      result.skippedCount += 1;
+      continue;
+    }
+    result.claimedCount += 1;
+
+    try {
+      if (toolName === "delegate_to_company") {
+        const { startDelegatedWorkflowStep } = await import("../workflow-delegations.js");
+        const delegated = await startDelegatedWorkflowStep({
+          db,
+          run: row.run,
+          definition: row.definition,
+          step,
+          stepRun: claimedStepRun,
+          args,
+          now,
+        });
+        if (!delegated) {
+          await failToolStepRunWithDispatchError({
+            db,
+            step,
+            stepRun: claimedStepRun,
+            now,
+            requestId,
+            toolName,
+            args,
+            error: "Workflow delegation tool step could not be started.",
+          });
+          await syncWorkflowRunState(db, row.run.id);
+          result.failedCount += 1;
+        } else {
+          result.executedCount += 1;
+        }
+        continue;
+      }
+
+      if (!workflowToolStepExecutor) {
+        await failToolStepRunWithDispatchError({
+          db,
+          step,
+          stepRun: claimedStepRun,
+          now,
+          requestId,
+          toolName,
+          args,
+          error: "Workflow tool step executor is not configured.",
+        });
+        await syncWorkflowRunState(db, row.run.id);
+        result.failedCount += 1;
+        continue;
+      }
+
+      const persistedStep = step as PersistedWorkflowStep;
+      const agentName = typeof persistedStep.agentName === "string" ? persistedStep.agentName.trim() : undefined;
+      const dispatchResult = await workflowToolStepExecutor({
+        companyId: row.run.companyId,
+        workflowRunId: row.run.id,
+        workflowId: row.definition.id,
+        stepId: step.id,
+        stepRunId: claimedStepRun.id,
+        toolName,
+        args,
+        requestId,
+        agentId: typeof step.agentId === "string" ? step.agentId.trim() : undefined,
+        agentName,
+      });
+      if (dispatchResult?.accepted === false) {
+        await failToolStepRunWithDispatchError({
+          db,
+          step,
+          stepRun: claimedStepRun,
+          now,
+          requestId,
+          toolName,
+          args,
+          error: "Workflow tool step executor rejected the queued request.",
+        });
+        await syncWorkflowRunState(db, row.run.id);
+        result.failedCount += 1;
+        continue;
+      }
+      result.executedCount += 1;
+    } catch (error) {
+      await failToolStepRunWithDispatchError({
+        db,
+        step,
+        stepRun: claimedStepRun,
+        now,
+        requestId,
+        toolName,
+        args,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await syncWorkflowRunState(db, row.run.id);
+      result.failedCount += 1;
+    }
   }
+
+  return result;
 }
 
 function mapWorkflowExecutionResult(

@@ -73,9 +73,9 @@ import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import { missionService } from "./missions.js";
-import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
+import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler, type PlanningIssueWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
-import { createPlanQaWakeupHandler } from "./missions/plan-qa-wakeup.js";
+import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
@@ -2844,6 +2844,7 @@ async function recordMissionOwnerPlanDecisionAfterComment(
   issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">,
   actorAgentId: string | null,
   enqueuePlanQaWakeup?: PlanQaWakeupHandler,
+  enqueuePlanningIssueWakeup?: PlanningIssueWakeupHandler,
 ) {
   if (
     issue.originKind !== "mission_main_executor_plan" &&
@@ -2857,6 +2858,7 @@ async function recordMissionOwnerPlanDecisionAfterComment(
       missionId: issue.missionId,
       requestedBy: actorAgentId ? { actorType: "agent", actorId: actorAgentId } : undefined,
       enqueuePlanQaWakeup,
+      enqueuePlanningIssueWakeup,
     });
   } catch (err) {
     logger.warn(
@@ -2992,6 +2994,10 @@ export function heartbeatService(db: Db) {
   const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
     { wakeup: (agentId, opts) => enqueueWakeup(agentId, opts) },
     { requestedByActorId: "heartbeat-plan-qa", contextSource: "heartbeat_plan_qa" },
+  );
+  const enqueuePlanningIssueWakeup = createPlanningIssueWakeupHandler(
+    { wakeup: (agentId, opts) => enqueueWakeup(agentId, opts) },
+    { requestedByActorId: "heartbeat-plan-rework", contextSource: "heartbeat_plan_rework" },
   );
   const activeRunExecutions = new Set<string>();
   const budgetHooks = {
@@ -7676,6 +7682,7 @@ export function heartbeatService(db: Db) {
         postTransactionMissionOwnerPlanDecision.issue,
         postTransactionMissionOwnerPlanDecision.actorAgentId,
         enqueuePlanQaWakeup,
+        enqueuePlanningIssueWakeup,
       );
     }
 

@@ -5,6 +5,7 @@ import {
   type ScheduledWorkflowCandidate,
 } from "./scheduler-candidates.js";
 import { workflowService } from "./engine.js";
+import { processQueuedWorkflowToolStepRuns, type WorkflowToolStepQueueDispatchResult } from "./dag-engine.js";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000;
@@ -25,6 +26,9 @@ export interface NativeWorkflowSchedulerState {
   lastClaimedCount: number;
   lastSkippedCount: number;
   lastErrorCount: number;
+  lastToolStepClaimedCount: number;
+  lastToolStepExecutedCount: number;
+  lastToolStepFailedCount: number;
 }
 
 export interface NativeWorkflowScheduler {
@@ -53,6 +57,10 @@ export interface CreateNativeWorkflowSchedulerOptions {
       metadata?: Record<string, unknown>;
     },
   ) => Promise<{ claimed: boolean }>;
+  dispatchQueuedToolSteps?: (
+    db: Db,
+    options?: { limit?: number; now?: Date },
+  ) => Promise<WorkflowToolStepQueueDispatchResult>;
   logger?: NativeWorkflowSchedulerLogger;
 }
 
@@ -74,6 +82,7 @@ export function createNativeWorkflowScheduler(
   const tickIntervalMs = options.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
   const listCandidates = options.listCandidates ?? listDueScheduledWorkflowCandidates;
   const claimScheduledRun = options.claimScheduledRun ?? workflowService.claimScheduledRun;
+  const dispatchQueuedToolSteps = options.dispatchQueuedToolSteps ?? processQueuedWorkflowToolStepRuns;
   const log = options.logger ?? defaultLogger;
   let interval: ReturnType<typeof setInterval> | null = null;
   let tickInFlight = false;
@@ -83,6 +92,9 @@ export function createNativeWorkflowScheduler(
   let lastClaimedCount = 0;
   let lastSkippedCount = 0;
   let lastErrorCount = 0;
+  let lastToolStepClaimedCount = 0;
+  let lastToolStepExecutedCount = 0;
+  let lastToolStepFailedCount = 0;
 
   async function tick(now = new Date()): Promise<void> {
     if (tickInFlight) {
@@ -101,6 +113,12 @@ export function createNativeWorkflowScheduler(
         let claimedCount = 0;
         let skippedCount = 0;
         let errorCount = 0;
+        let toolStepQueueResult: WorkflowToolStepQueueDispatchResult = {
+          claimedCount: 0,
+          executedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
 
         for (const candidate of candidates) {
           try {
@@ -132,15 +150,37 @@ export function createNativeWorkflowScheduler(
           }
         }
 
+        try {
+          toolStepQueueResult = await dispatchQueuedToolSteps(options.db, { now });
+        } catch (error) {
+          toolStepQueueResult = {
+            claimedCount: 0,
+            executedCount: 0,
+            failedCount: 1,
+            skippedCount: 0,
+          };
+          log.error({
+            mode: options.mode,
+            err: error instanceof Error ? error.message : String(error),
+          }, "Native workflow scheduler failed to dispatch queued workflow tool steps");
+        }
+
         lastClaimedCount = claimedCount;
         lastSkippedCount = skippedCount;
         lastErrorCount = errorCount;
+        lastToolStepClaimedCount = toolStepQueueResult.claimedCount;
+        lastToolStepExecutedCount = toolStepQueueResult.executedCount;
+        lastToolStepFailedCount = toolStepQueueResult.failedCount;
         log.info({
           mode: options.mode,
           candidateCount: candidates.length,
           claimedCount,
           skippedCount,
           errorCount,
+          toolStepClaimedCount: toolStepQueueResult.claimedCount,
+          toolStepExecutedCount: toolStepQueueResult.executedCount,
+          toolStepFailedCount: toolStepQueueResult.failedCount,
+          toolStepSkippedCount: toolStepQueueResult.skippedCount,
           candidates: candidates.map(serializeCandidate),
         }, "Native workflow scheduler active tick");
         return;
@@ -149,6 +189,9 @@ export function createNativeWorkflowScheduler(
       lastClaimedCount = 0;
       lastSkippedCount = 0;
       lastErrorCount = 0;
+      lastToolStepClaimedCount = 0;
+      lastToolStepExecutedCount = 0;
+      lastToolStepFailedCount = 0;
       log.info({
         mode: options.mode,
         candidateCount: candidates.length,
@@ -193,6 +236,9 @@ export function createNativeWorkflowScheduler(
         lastClaimedCount,
         lastSkippedCount,
         lastErrorCount,
+        lastToolStepClaimedCount,
+        lastToolStepExecutedCount,
+        lastToolStepFailedCount,
       };
     },
   };

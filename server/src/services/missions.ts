@@ -381,6 +381,15 @@ export type MissionPlanSubmissionMissingHandler = (input: {
   wakeCommentId?: string;
 }) => Promise<unknown> | unknown;
 
+export type MissionPlanRevisionRequestedHandler = (input: {
+  mission: MissionRow;
+  planIssueId: string;
+  planQaIssueId: string | null;
+  targetAgentId: string;
+  decisionHash: string;
+  idempotencyKey: string;
+}) => Promise<unknown> | unknown;
+
 export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
@@ -389,6 +398,7 @@ export interface MissionServiceDeps {
   onOwnerPlanningIssueCreated?: MissionOwnerPlanningIssueCreatedHandler;
   onPlanQaIssueCreated?: PlanQaWakeupHandler;
   onPlanSubmissionMissing?: MissionPlanSubmissionMissingHandler;
+  onPlanRevisionRequested?: MissionPlanRevisionRequestedHandler;
   /** Cancel a heartbeat run (kills the process + updates DB + releases issue lock). */
   cancelHeartbeatRun?: (runId: string) => Promise<unknown>;
 }

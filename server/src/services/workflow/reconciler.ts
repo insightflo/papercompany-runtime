@@ -7,7 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, issueComments, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issueComments, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { eq, and, gt, inArray, like, lt, sql } from "drizzle-orm";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 // Reused edge logic: the deadlock gate must answer the SAME reachability question
@@ -19,6 +19,7 @@ import {
   buildWorkflowExecutionSteps,
   getWorkflowLaunchSteps,
   isDynamicOwnerPlanWorkflowDefinition,
+  wakeExistingWorkflowStepIssue,
   type WorkflowStep,
 } from "./dag-engine.js";
 
@@ -242,6 +243,127 @@ function buildPredFactsMap(
     });
   }
   return facts;
+}
+
+export async function reconcileRunnableWorkflowStepWakeups(
+  db: Db,
+  settlingMinutes: number = 5,
+): Promise<ReconciliationResult[]> {
+  const settlingCutoff = new Date(Date.now() - settlingMinutes * 60 * 1000);
+  const candidates = await db
+    .select()
+    .from(workflowRuns)
+    .where(and(eq(workflowRuns.status, "running"), lt(workflowRuns.startedAt, settlingCutoff)));
+
+  const results: ReconciliationResult[] = [];
+
+  for (const run of candidates) {
+    try {
+      const iterating = await db
+        .select({ id: workflowStepRuns.id })
+        .from(workflowStepRuns)
+        .where(and(eq(workflowStepRuns.workflowRunId, run.id), gt(workflowStepRuns.iterationIndex, 0)))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (iterating) continue;
+
+      const runSteps = await db
+        .select()
+        .from(workflowStepRuns)
+        .where(eq(workflowStepRuns.workflowRunId, run.id));
+      const pending = runSteps.filter((step) => step.status === "pending" && step.issueId);
+      if (pending.length === 0) continue;
+
+      const definition = await db
+        .select()
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.workflowId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!definition) continue;
+
+      const steps = buildWorkflowExecutionSteps(definition);
+      const stepById = new Map(steps.map((step) => [step.id, step]));
+      const stepRunMap = buildStepRunMap(runSteps);
+      const predsByStepId = buildPredFactsMap(steps, stepRunMap);
+      const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition({
+        name: definition.name,
+        executionMode: definition.executionMode,
+        dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly,
+        steps,
+      });
+      const launchStepIds = dynamicOwnerPlan
+        ? new Set(getWorkflowLaunchSteps(steps, { dynamicOwnerPlan }).map((step) => step.id))
+        : undefined;
+
+      const linkedIssueIds = pending
+        .map((step) => step.issueId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      const linkedIssueRows = linkedIssueIds.length > 0
+        ? await db
+          .select({ id: issues.id, status: issues.status })
+          .from(issues)
+          .where(inArray(issues.id, linkedIssueIds))
+        : [];
+      const issueStatusById = new Map(linkedIssueRows.map((issue) => [issue.id, issue.status]));
+
+      for (const stepRun of pending) {
+        if (!stepRun.issueId) continue;
+        if (issueStatusById.get(stepRun.issueId) !== "todo") continue;
+        const step = stepById.get(stepRun.stepId);
+        if (!step) continue;
+        if (launchStepIds && !launchStepIds.has(step.id)) continue;
+        if (!classifyStepActivation(step, predsByStepId).runnable) continue;
+
+        const activeHeartbeat = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.issueId, stepRun.issueId),
+            inArray(heartbeatRuns.status, ["queued", "running"]),
+          ))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (activeHeartbeat) continue;
+
+        const activeWakeup = await db
+          .select({ id: agentWakeupRequests.id })
+          .from(agentWakeupRequests)
+          .where(and(
+            eq(agentWakeupRequests.companyId, run.companyId),
+            eq(agentWakeupRequests.issueId, stepRun.issueId),
+            eq(agentWakeupRequests.workflowRunId, run.id),
+            inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+          ))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (activeWakeup) continue;
+
+        const queued = await wakeExistingWorkflowStepIssue({
+          db,
+          run,
+          definition,
+          step,
+          issueId: stepRun.issueId,
+        });
+        if (queued) {
+          results.push({
+            runId: run.id,
+            action: "recovered",
+            reason: `Queued missing workflow_resume wakeup for runnable step ${stepRun.stepId}`,
+          });
+        }
+      }
+    } catch (error) {
+      results.push({
+        runId: run.id,
+        action: "failed",
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -469,17 +591,20 @@ export async function reconcileWorkflow(
   db: Db,
   options: { timeoutMinutes?: number } = {},
 ): Promise<{
+    runnableStepWakeupsQueued: number;
     deadlockedRunsRecovered: number;
     stuckRunsRecovered: number;
     orphanStepsCleaned: number;
   }> {
   const timeoutMinutes = options.timeoutMinutes ?? 60;
 
+  const runnableWakeupResults = await reconcileRunnableWorkflowStepWakeups(db);
   const deadlockedResults = await reconcileDeadlockedWorkflowRuns(db);
   const stuckResults = await reconcileStuckWorkflowRuns(db, timeoutMinutes);
   const orphanStepsCleaned = await reconcileOrphanStepRuns(db);
 
   return {
+    runnableStepWakeupsQueued: runnableWakeupResults.filter((r) => r.action === "recovered").length,
     deadlockedRunsRecovered: deadlockedResults.filter((r) => r.action === "recovered").length,
     stuckRunsRecovered: stuckResults.filter((r) => r.action === "recovered").length,
     orphanStepsCleaned,
@@ -525,6 +650,7 @@ export interface NativeWorkflowReconcilerState {
   running: boolean;
   tickCount: number;
   lastTickAt: string | null;
+  lastRunnableStepWakeupsQueued: number;
   lastDeadlockedRunsRecovered: number;
   lastStuckRunsRecovered: number;
   lastOrphanStepsCleaned: number;
@@ -557,6 +683,7 @@ export function createNativeWorkflowReconciler(
   let tickInFlight = false;
   let tickCount = 0;
   let lastTickAt: string | null = null;
+  let lastRunnableStepWakeupsQueued = 0;
   let lastDeadlockedRunsRecovered = 0;
   let lastStuckRunsRecovered = 0;
   let lastOrphanStepsCleaned = 0;
@@ -575,18 +702,21 @@ export function createNativeWorkflowReconciler(
       const result = await reconcileWorkflow(options.db, { timeoutMinutes });
       tickCount += 1;
       lastTickAt = now.toISOString();
+      lastRunnableStepWakeupsQueued = result.runnableStepWakeupsQueued;
       lastDeadlockedRunsRecovered = result.deadlockedRunsRecovered;
       lastStuckRunsRecovered = result.stuckRunsRecovered;
       lastOrphanStepsCleaned = result.orphanStepsCleaned;
       lastError = null;
       if (
-        result.deadlockedRunsRecovered > 0
+        result.runnableStepWakeupsQueued > 0
+        || result.deadlockedRunsRecovered > 0
         || result.stuckRunsRecovered > 0
         || result.orphanStepsCleaned > 0
       ) {
         log.info(
           {
             timeoutMinutes,
+            runnableStepWakeupsQueued: result.runnableStepWakeupsQueued,
             deadlockedRunsRecovered: result.deadlockedRunsRecovered,
             stuckRunsRecovered: result.stuckRunsRecovered,
             orphanStepsCleaned: result.orphanStepsCleaned,
@@ -624,6 +754,7 @@ export function createNativeWorkflowReconciler(
         running: interval !== null,
         tickCount,
         lastTickAt,
+        lastRunnableStepWakeupsQueued,
         lastDeadlockedRunsRecovered,
         lastStuckRunsRecovered,
         lastOrphanStepsCleaned,

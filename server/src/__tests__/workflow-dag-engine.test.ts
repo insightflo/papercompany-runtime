@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
@@ -44,13 +45,14 @@ import {
   completeWorkflowToolStepFromResult,
   executeWorkflowRun,
   normalizeWorkflowStepsForExecution,
+  processQueuedWorkflowToolStepRuns,
   setWorkflowToolStepReadinessChecker,
   setWorkflowToolStepExecutor,
   syncWorkflowRunForIssue,
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
-import { reconcileDeadlockedWorkflowRuns, reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
+import { reconcileDeadlockedWorkflowRuns, reconcileRunnableWorkflowStepWakeups, reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -181,6 +183,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     setWorkflowToolStepReadinessChecker(null);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(issueWorkProducts);
     await db.delete(workflowDelegations);
     await db.delete(workflowStepRuns);
@@ -475,6 +478,87 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(storedIssue?.status).toBe("todo");
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, branchBIssueId));
     expect(comments).toHaveLength(0);
+  });
+
+  it("reconciler queues a missing workflow_resume wakeup for a runnable todo step", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-workflow-resume" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Runnable Wakeup Company",
+      issuePrefix: `RW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Runnable Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "runnable-wakeup-workflow",
+      stepsJson: [
+        { id: "collect", name: "Collect", type: "agent", agentId, dependencies: [] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date(Date.now() - 6 * 60 * 1000),
+      completedAt: null,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: "RW-1",
+      title: "Collect",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originId: runId,
+      originRunId: runId,
+    });
+    await db.insert(workflowStepRuns).values({
+      workflowRunId: runId,
+      stepId: "collect",
+      status: "pending",
+      issueId,
+    });
+
+    const result = await reconcileRunnableWorkflowStepWakeups(db);
+
+    expect(result).toEqual([expect.objectContaining({
+      runId,
+      action: "recovered",
+      reason: expect.stringContaining("Queued missing workflow_resume wakeup"),
+    })]);
+    expect(heartbeatWakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
+      source: "assignment",
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        workflowDefinitionId: workflowId,
+        stepId: "collect",
+      }),
+    }));
   });
 
   it("deadlock fast-path: does NOT converge an injected delivery verification gate with a reachable todo issue", async () => {
@@ -2261,6 +2345,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const result = await syncWorkflowRunForIssue(db, validatorIssueId);
 
     expect(result?.status).toBe("running");
+    expect(toolExecutor).not.toHaveBeenCalled();
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
       workflowRunId: runId,
       stepId: "send-telegram",
@@ -2387,6 +2474,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const result = await syncWorkflowRunForIssue(db, validatorIssueId);
 
     expect(result?.status).toBe("running");
+    expect(toolExecutor).not.toHaveBeenCalled();
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
       workflowRunId: runId,
       stepId: "send-telegram",
@@ -2772,6 +2862,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const result = await syncWorkflowRunForIssue(db, validatorIssueId);
 
     expect(result?.status).toBe("running");
+    expect(toolExecutor).not.toHaveBeenCalled();
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
       workflowRunId: runId,
       stepId: "send-telegram",
@@ -3982,7 +4075,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
   });
 
-  it("dispatches issue-less tool steps and advances dependent agent steps after tool result", async () => {
+  it("queues issue-less tool steps and advances dependent agent steps after queued tool result", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const workflowId = randomUUID();
@@ -4058,6 +4151,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(toolStep?.completedAt).toBeNull();
     expect(agentStep?.issueId).toBeNull();
     expect(agentStep?.status).toBe("pending");
+    expect(toolStep?.lastDispatchRequestId).toBeTruthy();
+    expect(toolStep?.lastDispatchAcceptedAt).toBeNull();
+    expect(executeToolStep).not.toHaveBeenCalled();
+
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(1);
     expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
       companyId,
@@ -4072,6 +4171,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const afterToolResult = await completeWorkflowToolStepFromResult(db, {
       companyId,
       stepRunId: toolStep!.id,
+      requestId: toolStep!.lastDispatchRequestId!,
       success: true,
     });
     expect(afterToolResult?.status).toBe("running");
@@ -4136,7 +4236,20 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     const result = await executeWorkflowRun(db, runId);
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("running");
+    const queuedBeforeDispatch = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(queuedBeforeDispatch[0]).toMatchObject({
+      stepId: "collect",
+      status: "running",
+      lastDispatchErrorSummary: null,
+    });
+
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 0, failedCount: 1 });
+
     const [stepRun] = await db
       .select()
       .from(workflowStepRuns)
@@ -4210,6 +4323,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const result = await executeWorkflowRun(db, runId);
 
     expect(result.status).toBe("running");
+    expect(executeToolStep).not.toHaveBeenCalled();
+    const queuedResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(queuedResult).toMatchObject({ claimedCount: 3, executedCount: 3, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(3);
     expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
       stepId: "generate-infographic",
@@ -4280,6 +4396,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     const first = await executeWorkflowRun(db, firstRunId);
     expect(first.status).toBe("running");
+    expect(executeToolStep).not.toHaveBeenCalled();
+    const firstDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(firstDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(1);
     const [firstStepRun] = await db
       .select()
@@ -4382,6 +4501,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const result = await executeWorkflowRun(db, runId);
 
     expect(result.status).toBe("running");
+    expect(executeToolStep).not.toHaveBeenCalled();
+    const firstDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(firstDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(1);
     expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
       stepId: "high-priority",
@@ -4425,6 +4547,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       success: true,
     });
 
+    const secondDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(secondDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(2);
     expect(executeToolStep).toHaveBeenLastCalledWith(expect.objectContaining({
       stepId: "low-priority",
@@ -4493,6 +4617,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
 
     await executeWorkflowRun(db, runId);
+    await processQueuedWorkflowToolStepRuns(db);
     const [stepRun] = await db
       .select()
       .from(workflowStepRuns)
@@ -4594,6 +4719,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         expect.objectContaining({ stepId: "extract", issueId: null, status: "pending" }),
       ]),
     );
+    expect(executeToolStep).not.toHaveBeenCalled();
+    const fetchDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(fetchDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(1);
     expect(executeToolStep).toHaveBeenLastCalledWith(expect.objectContaining({
       stepId: "fetch",
@@ -4649,6 +4777,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       success: true,
     });
     expect(afterFetch?.status).toBe("running");
+    const extractDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(extractDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
     expect(executeToolStep).toHaveBeenCalledTimes(2);
     expect(executeToolStep).toHaveBeenLastCalledWith(expect.objectContaining({
       stepId: "extract",
@@ -4752,6 +4882,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
 
     await executeWorkflowRun(db, failedRunId);
+    await processQueuedWorkflowToolStepRuns(db);
     const failedWorkflowInitialSteps = await db
       .select()
       .from(workflowStepRuns)
@@ -4836,6 +4967,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     const initial = await executeWorkflowRun(db, runId);
     expect(initial.status).toBe("running");
+    await processQueuedWorkflowToolStepRuns(db);
     expect(executeToolStep).toHaveBeenCalledTimes(1);
 
     const [stepRun] = await db
@@ -4970,6 +5102,18 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(initial.status).toBe("running");
 
     let stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const queuedDelegateStep = stepRuns.find((stepRun) => stepRun.stepId === "request-research")!;
+    const queuedSynthesizeStep = stepRuns.find((stepRun) => stepRun.stepId === "synthesize")!;
+    expect(queuedDelegateStep).toMatchObject({ status: "running", issueId: null });
+    expect(queuedSynthesizeStep).toMatchObject({ status: "pending", issueId: null });
+
+    const delegateDispatch = await processQueuedWorkflowToolStepRuns(db);
+    expect(delegateDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
+
+    stepRuns = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
