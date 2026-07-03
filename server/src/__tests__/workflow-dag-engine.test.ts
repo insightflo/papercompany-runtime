@@ -50,7 +50,7 @@ import {
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
-import { reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
+import { reconcileDeadlockedWorkflowRuns, reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -318,6 +318,274 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       expect.objectContaining({ stepId: "collect", status: "running" }),
       expect.objectContaining({ stepId: "synthesize", status: "pending", completedAt: null }),
     ]));
+  });
+
+  it("deadlock fast-path: converges a legacy run with a failed predecessor and unreachable pending steps without waiting 60 min", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const linkedIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Deadlock Workflow Company",
+      issuePrefix: `DL${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "deadlock-workflow",
+      stepsJson: [
+        { id: "collect", name: "Collect", type: "agent", agentId: "", dependencies: [] },
+        { id: "synthesize", name: "Synthesize", type: "agent", agentId: "", dependencies: ["collect"] },
+        { id: "report", name: "Report", type: "agent", agentId: "", dependencies: ["synthesize"] },
+      ],
+    });
+    // startedAt is 6 min ago -> past the 5-min deadlock settling gate, but far short
+    // of the 60-min stuck gate. Only the deadlock fast-path can converge it.
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date(Date.now() - 6 * 60 * 1000),
+      completedAt: null,
+    });
+    await db.insert(issues).values({
+      id: linkedIssueId,
+      companyId,
+      identifier: "DL-1",
+      title: "Report",
+      status: "todo",
+      originKind: "workflow_execution",
+      originId: runId,
+    });
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "collect", status: "failed", completedAt: new Date() },
+      { workflowRunId: runId, stepId: "synthesize", status: "pending" },
+      { workflowRunId: runId, stepId: "report", status: "pending", issueId: linkedIssueId },
+    ]);
+
+    const result = await reconcileDeadlockedWorkflowRuns(db);
+
+    expect(result).toEqual([
+      expect.objectContaining({ runId, action: "recovered" }),
+    ]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("failed");
+
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const synthesize = steps.find((step) => step.stepId === "synthesize");
+    expect(synthesize?.status).toBe("skipped");
+    expect((synthesize?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBe(true);
+
+    const report = steps.find((step) => step.stepId === "report");
+    expect(report?.status).toBe("skipped");
+    expect((report?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBe(true);
+
+    // Linked downstream issue is blocked (never failed/done) with one idempotent deadlock comment.
+    const [storedIssue] = await db.select().from(issues).where(eq(issues.id, linkedIssueId));
+    expect(storedIssue?.status).toBe("blocked");
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, linkedIssueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("control-plane-deadlock");
+    expect(comments[0]?.body).toContain("unreachable");
+  });
+
+  it("deadlock fast-path: does NOT converge a PARALLEL dag when an independent branch is still runnable (only the failed branch's downstream is unreachable)", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const branchBIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Parallel DAG Company",
+      issuePrefix: `PD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    // Two independent branches. branchA: a -> a2. branchB: b -> b2.
+    // a2 depends on a (failed) -> unreachable. b is an entry step (runnable);
+    // b2 depends on b (still pending) -> waiting, not unreachable.
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "parallel-dag",
+      stepsJson: [
+        { id: "a", name: "A", type: "agent", agentId: "", dependencies: [] },
+        { id: "a2", name: "A2", type: "agent", agentId: "", dependencies: ["a"] },
+        { id: "b", name: "B", type: "agent", agentId: "", dependencies: [] },
+        { id: "b2", name: "B2", type: "agent", agentId: "", dependencies: ["b"] },
+      ],
+    });
+    // startedAt is 6 min ago -> past the 5-min settling gate. Branch A failed,
+    // branch B has NOT been picked up by the launcher yet (still pending).
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date(Date.now() - 6 * 60 * 1000),
+      completedAt: null,
+    });
+    await db.insert(issues).values({
+      id: branchBIssueId,
+      companyId,
+      identifier: "PD-1",
+      title: "B",
+      status: "todo",
+      originKind: "workflow_execution",
+      originId: runId,
+    });
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "a", status: "failed", completedAt: new Date() },
+      { workflowRunId: runId, stepId: "a2", status: "pending" },
+      { workflowRunId: runId, stepId: "b", status: "pending", issueId: branchBIssueId },
+      { workflowRunId: runId, stepId: "b2", status: "pending" },
+    ]);
+
+    const result = await reconcileDeadlockedWorkflowRuns(db);
+
+    // Not deadlocked: branch B is still runnable. The run must keep going.
+    expect(result).toEqual([]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("running");
+
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const findStep = (stepId: string) => steps.find((step) => step.stepId === stepId);
+
+    // The independent parallel branch is NOT skipped/blocked -- it stays runnable.
+    const branchB = findStep("b");
+    expect(branchB?.status).toBe("pending");
+    expect((branchB?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBeUndefined();
+    const branchB2 = findStep("b2");
+    expect(branchB2?.status).toBe("pending");
+    expect((branchB2?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBeUndefined();
+
+    // The failed branch's downstream is also left untouched this tick (the reconciler
+    // does not partially converge; the launcher/normal skip-pass handles a2). The
+    // invariant under test is only that nothing is wrongly force-skipped/blocked.
+    expect(findStep("a2")?.status).toBe("pending");
+
+    // The linked issue on the runnable branch is NOT blocked.
+    const [storedIssue] = await db.select().from(issues).where(eq(issues.id, branchBIssueId));
+    expect(storedIssue?.status).toBe("todo");
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, branchBIssueId));
+    expect(comments).toHaveLength(0);
+  });
+
+  it("deadlock fast-path: does NOT converge an injected delivery verification gate with a reachable todo issue", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const gateIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Delivery Gate Deadlock Company",
+      issuePrefix: `DG${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "cloudflare-delivery",
+      stepsJson: [
+        { id: "collect", name: "Collect", type: "agent", agentId: "", dependencies: [] },
+        { id: "publish", name: "Publish Cloudflare Pages site", type: "agent", agentId: "", dependencies: [] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date(Date.now() - 6 * 60 * 1000),
+      completedAt: null,
+    });
+    await db.insert(issues).values({
+      id: gateIssueId,
+      companyId,
+      identifier: "DG-1",
+      title: "Verify public delivery",
+      status: "todo",
+      originKind: "workflow_execution",
+      originId: runId,
+    });
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "collect", status: "failed", completedAt: new Date() },
+      { workflowRunId: runId, stepId: "publish", status: "completed", completedAt: new Date() },
+      { workflowRunId: runId, stepId: "delivery-verification-gate", status: "pending", issueId: gateIssueId },
+    ]);
+
+    const result = await reconcileDeadlockedWorkflowRuns(db);
+
+    expect(result).toEqual([]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("running");
+
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const gate = steps.find((step) => step.stepId === "delivery-verification-gate");
+    expect(gate?.status).toBe("pending");
+    expect((gate?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBeUndefined();
+
+    const [storedIssue] = await db.select().from(issues).where(eq(issues.id, gateIssueId));
+    expect(storedIssue?.status).toBe("todo");
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, gateIssueId));
+    expect(comments).toHaveLength(0);
+  });
+
+  it("deadlock fast-path: converges a dynamic owner plan when pending declarations are not launcher-eligible", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Dynamic Owner Deadlock Company",
+      issuePrefix: `DO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "dynamic-owner-plan",
+      executionMode: "dynamic_owner_plan",
+      stepsJson: [
+        { id: "plan", name: "Plan", type: "agent", agentId: "", dependencies: [] },
+        { id: "owner-escalation", name: "Owner escalation", type: "agent", agentId: "", triggerOn: "escalation", dependencies: [] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date(Date.now() - 6 * 60 * 1000),
+      completedAt: null,
+    });
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId: runId, stepId: "plan", status: "failed", completedAt: new Date() },
+      { workflowRunId: runId, stepId: "owner-escalation", status: "pending" },
+    ]);
+
+    const result = await reconcileDeadlockedWorkflowRuns(db);
+
+    expect(result).toEqual([
+      expect.objectContaining({ runId, action: "recovered" }),
+    ]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("failed");
+
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const escalation = steps.find((step) => step.stepId === "owner-escalation");
+    expect(escalation?.status).toBe("skipped");
+    expect((escalation?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBe(true);
   });
 
   it("[P7] does not kill a stuck-looking run when a native control-flow loop is iterating (iteration_index > 0)", async () => {

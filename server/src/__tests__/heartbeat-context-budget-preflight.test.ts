@@ -6929,3 +6929,31 @@ describe("heartbeat context budget preflight", () => {
     expect(invocationContext?.paperclipMissionOwnerTaskContext).toBeUndefined();
   });
 });
+
+describe("classifyHeartbeatRunFailure — guardrail precedence over auth", () => {
+  // Regression: a Step Input Manifest / broad-scan guardrail block must classify as
+  // command (input-contract/command-policy), NOT auth, even when model stdout prose
+  // leaks "Unauthorized"/"forbidden". Evidence weighting: structured error/stderr
+  // outrank stdout prose.
+  it("classifies a Step Input Manifest broad-scan block as command, not auth, when stdout contains auth-like text", () => {
+    const result = classifyHeartbeatRunFailure({
+      status: "failed",
+      errorMessage: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+      stdoutExcerpt: "The API returned Unauthorized (login required). Please re-auth.",
+      errorCode: null,
+    });
+    expect(result.category).toBe("command");
+    expect(result.reasonCode).toBe("STEP_INPUT_MANIFEST_GUARDRAIL");
+  });
+
+  it("still classifies a real auth failure (stderr 401, no guardrail) as auth", () => {
+    const result = classifyHeartbeatRunFailure({
+      status: "failed",
+      errorMessage: "401 Unauthorized: invalid API key",
+      stderrExcerpt: "authentication failed",
+      stdoutExcerpt: null,
+      errorCode: null,
+    });
+    expect(result.category).toBe("auth");
+  });
+});

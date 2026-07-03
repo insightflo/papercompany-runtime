@@ -2711,6 +2711,27 @@ export function classifyHeartbeatRunFailure(input: {
       fallbackCandidates,
     };
   }
+  // Strong-evidence guardrail check BEFORE auth. A Step Input Manifest / runtime
+  // broad-scan guardrail block is a command-policy/input-contract failure, not auth —
+  // even when model stdout prose leaks "unauthorized"/"forbidden". Evidence weighting:
+  // structured errorCode/errorMessage/stderr outrank stdout prose.
+  const strongEvidenceText = [input.errorCode, input.errorMessage, input.stderrExcerpt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n")
+    .toLowerCase();
+  if (
+    /step input manifest|runtime broad scan|broad scan (command|instruction)|rg without path|\bfind \.|git ls-files|\bls -r|\btree\b|\bgrep -r/.test(
+      strongEvidenceText,
+    )
+  ) {
+    return {
+      category: "command",
+      reasonCode: "STEP_INPUT_MANIFEST_GUARDRAIL",
+      summary:
+        "Run blocked by a Step Input Manifest / runtime broad-scan guardrail (command-policy/input-contract). Not a provider auth failure; replan the command or adjust the manifest.",
+      fallbackCandidates,
+    };
+  }
   if (/\b401\b|unauthorized|invalid api key|invalid token|authentication failed|reauth|required|login required|forbidden/.test(normalized)) {
     return {
       category: "auth",
