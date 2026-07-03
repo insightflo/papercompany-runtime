@@ -1,0 +1,118 @@
+name: Deploy A1 Papercompany
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-a1-papercompany
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Run tests
+        run: pnpm test:run
+
+      - name: Build
+        run: pnpm build
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      A1_SSH_HOST: ${{ secrets.A1_SSH_HOST }}
+      A1_SSH_USER: ${{ secrets.A1_SSH_USER }}
+      A1_SSH_PRIVATE_KEY: ${{ secrets.A1_SSH_PRIVATE_KEY }}
+      A1_SSH_PORT: ${{ vars.A1_SSH_PORT || '22' }}
+      A1_DEPLOY_PATH: ${{ vars.A1_DEPLOY_PATH || '/srv/papercompany/papercompany-runtime' }}
+      A1_SERVICE_NAME: ${{ vars.A1_SERVICE_NAME || 'papercompany-runtime.service' }}
+      A1_INTERNAL_HEALTH_URL: ${{ vars.A1_INTERNAL_HEALTH_URL || 'http://127.0.0.1:3100/api/health' }}
+      A1_PUBLIC_HEALTH_URL: ${{ vars.A1_PUBLIC_HEALTH_URL || 'https://papercompany.showk.ing/api/health' }}
+      A1_HEALTH_TIMEOUT_SECONDS: ${{ vars.A1_HEALTH_TIMEOUT_SECONDS || '120' }}
+      A1_HEALTH_INTERVAL_SECONDS: ${{ vars.A1_HEALTH_INTERVAL_SECONDS || '3' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check deployment secrets
+        run: |
+          missing=0
+          for name in A1_SSH_HOST A1_SSH_USER A1_SSH_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Prepare SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$A1_SSH_PRIVATE_KEY" > ~/.ssh/a1_deploy_key
+          chmod 600 ~/.ssh/a1_deploy_key
+          ssh-keyscan -p "$A1_SSH_PORT" -H "$A1_SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Copy deploy script to A1
+        run: |
+          scp -P "$A1_SSH_PORT" \
+            -i ~/.ssh/a1_deploy_key \
+            scripts/deploy-a1.sh \
+            "$A1_SSH_USER@$A1_SSH_HOST:/tmp/papercompany-deploy-a1.sh"
+
+      - name: Deploy on A1
+        env:
+          A1_DEPLOY_EXPECTED_SHA: ${{ github.sha }}
+          A1_DEPLOY_REF: ${{ github.sha }}
+        run: |
+          remote_env=(
+            "A1_DEPLOY_PATH=$A1_DEPLOY_PATH"
+            "A1_DEPLOY_BRANCH=main"
+            "A1_DEPLOY_REF=$A1_DEPLOY_REF"
+            "A1_DEPLOY_EXPECTED_SHA=$A1_DEPLOY_EXPECTED_SHA"
+            "A1_SERVICE_NAME=$A1_SERVICE_NAME"
+            "A1_INTERNAL_HEALTH_URL=$A1_INTERNAL_HEALTH_URL"
+            "A1_PUBLIC_HEALTH_URL=$A1_PUBLIC_HEALTH_URL"
+            "A1_HEALTH_TIMEOUT_SECONDS=$A1_HEALTH_TIMEOUT_SECONDS"
+            "A1_HEALTH_INTERVAL_SECONDS=$A1_HEALTH_INTERVAL_SECONDS"
+          )
+
+          printf -v remote_command '%q ' env "${remote_env[@]}" bash /tmp/papercompany-deploy-a1.sh
+          ssh -p "$A1_SSH_PORT" \
+            -i ~/.ssh/a1_deploy_key \
+            "$A1_SSH_USER@$A1_SSH_HOST" \
+            "$remote_command"

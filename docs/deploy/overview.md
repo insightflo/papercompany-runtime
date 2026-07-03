@@ -53,3 +53,5 @@ Or update it later:
 ```sh
 pnpm paperclipai configure --section server
 ```
+
+For the A1 Papercompany GitHub Actions deployment flow, see [A1 GitHub Actions Deployment](./a1-github-actions.md).
