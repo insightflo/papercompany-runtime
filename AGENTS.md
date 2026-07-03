@@ -81,6 +81,12 @@ Prefer additive updates. Keep `doc/SPEC.md` and `doc/SPEC-implementation.md` ali
 5. Keep plan docs dated and centralized.
 New plan documents belong in `doc/plans/` and should use `YYYY-MM-DD-slug.md` filenames.
 
+6. Keep branch/worktree ownership explicit.
+Before making code changes, inspect the current branch, `git status --short`, and existing worktrees. Do not start unrelated work in a dirty checkout. If existing changes are not part of the requested task, preserve them with a named stash or move the new task to a clean branch/worktree. One task purpose gets one branch/worktree; do not mix workflow, heartbeat, UI, docs, and cleanup changes in a leftover branch.
+
+7. Do not modify execution-control code without impact proof.
+For workflow, heartbeat, queue, issue status, mission planning, and PLAN-QA paths, identify the execution source of truth before editing. Queue/run semantics must be preserved: status fields are display/result state, not proof that execution was requested or performed. Check callers, tests, and a live or DB-facing proof surface before claiming the change is safe.
+
 ## 6. Database Change Workflow
 
 When changing data model:
