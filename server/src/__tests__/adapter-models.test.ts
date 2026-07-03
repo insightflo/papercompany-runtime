@@ -238,4 +238,24 @@ describe("adapter model listing", () => {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("returns Hermes openai-codex fallback models when provider cache is missing", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-hermes-models-missing-"));
+    process.env.HERMES_HOME = home;
+
+    try {
+      const models = await listAdapterModels("hermes_local");
+
+      expect(models).toContainEqual({
+        id: "openai-codex/gpt-5.5",
+        label: "gpt-5.5",
+      });
+      expect(models).toContainEqual({
+        id: "openai-codex/gpt-5.4-mini",
+        label: "gpt-5.4-mini",
+      });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

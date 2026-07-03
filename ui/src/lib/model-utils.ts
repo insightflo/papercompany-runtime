@@ -1,16 +1,19 @@
-export function extractProviderId(modelId: string): string | null {
-  const trimmed = modelId.trim();
+export function extractProviderId(modelId: string | null | undefined): string | null {
+  const trimmed = modelId?.trim() ?? "";
   if (!trimmed.includes("/")) return null;
   const provider = trimmed.slice(0, trimmed.indexOf("/")).trim();
   return provider || null;
 }
 
-export function extractProviderIdWithFallback(modelId: string, fallback = "other"): string {
+export function extractProviderIdWithFallback(
+  modelId: string | null | undefined,
+  fallback = "other",
+): string {
   return extractProviderId(modelId) ?? fallback;
 }
 
-export function extractModelName(modelId: string): string {
-  const trimmed = modelId.trim();
+export function extractModelName(modelId: string | null | undefined): string {
+  const trimmed = modelId?.trim() ?? "";
   if (!trimmed.includes("/")) return trimmed;
   return trimmed.slice(trimmed.indexOf("/") + 1).trim();
 }
@@ -56,7 +59,7 @@ export function filterModelsByProvider(
 export function resolveProviderModelSelection(
   models: readonly ModelEntryLike[],
   provider: string,
-  currentModelId: string,
+  currentModelId: string | null | undefined,
 ): string {
   const providerModels = filterModelsByProvider(models, provider);
   if (providerModels.length === 0) return "";

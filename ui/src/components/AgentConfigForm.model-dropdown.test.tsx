@@ -76,4 +76,14 @@ describe("Hermes provider model helpers", () => {
       "anthropic/claude-sonnet-4-6",
     );
   });
+
+  it("falls back to the first provider model when the current model is missing at runtime", () => {
+    const selected = Reflect.apply(resolveProviderModelSelection, undefined, [
+      models,
+      "openai-codex",
+      undefined,
+    ]);
+
+    expect(selected).toBe("openai-codex/gpt-5.4-mini");
+  });
 });
