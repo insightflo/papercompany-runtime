@@ -1,10 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { models as codexFallbackModels } from "@paperclipai/adapter-codex-local";
 import type { AdapterModel } from "./types.js";
 import { dedupeAdapterModels } from "./local-cli-models.js";
 
 const HERMES_MODELS_CACHE_TTL_MS = 60_000;
+const HERMES_OPENAI_CODEX_PROVIDER = "openai-codex";
+const hermesFallbackModels = codexFallbackModels.map((model) => ({
+  id: `${HERMES_OPENAI_CODEX_PROVIDER}/${model.id}`,
+  label: model.label,
+}));
 
 let cached: { cachePath: string; mtimeMs: number; expiresAt: number; models: AdapterModel[] } | null = null;
 
@@ -41,6 +47,12 @@ export function parseHermesProviderModelsCache(value: unknown): AdapterModel[] {
   );
 }
 
+function mergeHermesFallbackModels(models: AdapterModel[]): AdapterModel[] {
+  return dedupeAdapterModels([...models, ...hermesFallbackModels]).sort((a, b) =>
+    a.id.localeCompare(b.id, "en", { numeric: true, sensitivity: "base" }),
+  );
+}
+
 export async function listHermesModels(): Promise<AdapterModel[]> {
   const cachePath = providerModelsCachePath();
   try {
@@ -50,11 +62,11 @@ export async function listHermesModels(): Promise<AdapterModel[]> {
       return cached.models;
     }
     const payload = JSON.parse(await fs.promises.readFile(cachePath, "utf8")) as unknown;
-    const models = parseHermesProviderModelsCache(payload);
+    const models = mergeHermesFallbackModels(parseHermesProviderModelsCache(payload));
     cached = { cachePath, mtimeMs: stat.mtimeMs, expiresAt: now + HERMES_MODELS_CACHE_TTL_MS, models };
     return models;
   } catch {
-    return [];
+    return mergeHermesFallbackModels([]);
   }
 }
 
