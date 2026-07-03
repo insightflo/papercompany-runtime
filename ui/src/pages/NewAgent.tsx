@@ -35,6 +35,7 @@ const SUPPORTED_ADVANCED_ADAPTER_TYPES = new Set<CreateConfigValues["adapterType
   "antigravity_local",
   "gemini_local",
   "opencode_local",
+  "hermes_local",
   "cursor",
   "openclaw_gateway",
 ]);

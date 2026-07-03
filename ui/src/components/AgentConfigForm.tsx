@@ -25,7 +25,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { FolderOpen, Heart, ChevronDown, X } from "lucide-react";
 import { cn } from "../lib/utils";
-import { extractModelName, extractProviderId } from "../lib/model-utils";
+import {
+  extractModelName,
+  extractProviderId,
+  filterModelsByProvider,
+  listModelProviders,
+  resolveProviderModelSelection,
+} from "../lib/model-utils";
 import { queryKeys } from "../lib/queryKeys";
 import { useCompany } from "../context/CompanyContext";
 import {
@@ -356,6 +362,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const [runPolicyAdvancedOpen, setRunPolicyAdvancedOpen] = useState(false);
   // Popover states
   const [modelOpen, setModelOpen] = useState(false);
+  const [providerOpen, setProviderOpen] = useState(false);
   const [fallbackModelOpen, setFallbackModelOpen] = useState(false);
   const [thinkingEffortOpen, setThinkingEffortOpen] = useState(false);
 
@@ -383,6 +390,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       });
     },
   });
+  const showInlineHermesConnectionTest =
+    showAdapterTestEnvironmentButton && adapterType === "hermes_local";
+  const showHeaderAdapterTestEnvironmentButton =
+    showAdapterTestEnvironmentButton && !showInlineHermesConnectionTest;
 
   // Current model for display
   const currentModelId = isCreate
@@ -394,6 +405,77 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           return provider && model ? `${provider}/${model}` : model;
         })()
       : eff("adapterConfig", "model", String(config.model ?? ""));
+  const currentHermesProvider =
+    adapterType === "hermes_local"
+      ? isCreate
+        ? extractProviderId(currentModelId) ?? ""
+        : String(eff("adapterConfig", "provider", String(config.provider ?? "")) ?? "") ||
+          extractProviderId(currentModelId) ||
+          ""
+      : "";
+  const currentHermesModelName =
+    adapterType === "hermes_local" ? extractModelName(currentModelId) : "";
+  const hermesProviderOptions = useMemo(() => {
+    if (adapterType !== "hermes_local") return [];
+    const options = listModelProviders(models);
+    if (!currentHermesProvider || options.some((option) => option.id === currentHermesProvider)) {
+      return options;
+    }
+    return [
+      ...options,
+      {
+        id: currentHermesProvider,
+        label: currentHermesProvider,
+        modelCount: 0,
+      },
+    ].sort((left, right) => left.id.localeCompare(right.id));
+  }, [adapterType, currentHermesProvider, models]);
+  const hermesModelOptions = useMemo<AdapterModel[]>(() => {
+    if (adapterType !== "hermes_local") return models;
+    if (!currentHermesProvider) return [];
+    return filterModelsByProvider(models, currentHermesProvider).map((model) => ({
+      ...model,
+      label: extractModelName(model.id) || model.label,
+    }));
+  }, [adapterType, currentHermesProvider, models]);
+  const currentModelOptions =
+    adapterType === "hermes_local" ? hermesModelOptions : models;
+
+  function handleHermesProviderChange(provider: string) {
+    const nextModelId = provider
+      ? resolveProviderModelSelection(models, provider, currentModelId)
+      : "";
+    if (isCreate) {
+      set!({ model: nextModelId });
+      return;
+    }
+    mark("adapterConfig", "provider", provider || undefined);
+    mark(
+      "adapterConfig",
+      "model",
+      nextModelId ? extractModelName(nextModelId) : undefined,
+    );
+  }
+
+  function handleModelChange(modelId: string) {
+    if (adapterType !== "hermes_local") {
+      isCreate ? set!({ model: modelId }) : mark("adapterConfig", "model", modelId || undefined);
+      return;
+    }
+    if (!modelId) {
+      isCreate ? set!({ model: "" }) : mark("adapterConfig", "model", undefined);
+      return;
+    }
+    const embeddedProvider = extractProviderId(modelId);
+    const provider = embeddedProvider ?? currentHermesProvider;
+    const storedModelId = embeddedProvider || !provider ? modelId : `${provider}/${modelId}`;
+    if (isCreate) {
+      set!({ model: storedModelId });
+      return;
+    }
+    mark("adapterConfig", "provider", provider || undefined);
+    mark("adapterConfig", "model", extractModelName(storedModelId) || undefined);
+  }
   const currentFallbackConfig = isCreate
     ? {}
     : asRecord(eff("adapterConfig", "fallback", asRecord(config.fallback)));
@@ -579,7 +661,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             ? <h3 className="text-sm font-medium">Adapter</h3>
             : <span className="text-xs font-medium text-muted-foreground">Adapter</span>
           }
-          {showAdapterTestEnvironmentButton && (
+          {showHeaderAdapterTestEnvironmentButton && (
             <Button
               type="button"
               variant="outline"
@@ -652,7 +734,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             </Field>
           )}
 
-          {testEnvironment.error && (
+          {!showInlineHermesConnectionTest && testEnvironment.error && (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {testEnvironment.error instanceof Error
                 ? testEnvironment.error.message
@@ -660,7 +742,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             </div>
           )}
 
-          {testEnvironment.data && (
+          {!showInlineHermesConnectionTest && testEnvironment.data && (
             <AdapterEnvironmentResult result={testEnvironment.data} />
           )}
 
@@ -804,25 +886,25 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 />
               )}
 
+              {adapterType === "hermes_local" && (
+                <ProviderDropdown
+                  providers={hermesProviderOptions}
+                  value={currentHermesProvider}
+                  onChange={handleHermesProviderChange}
+                  open={providerOpen}
+                  onOpenChange={setProviderOpen}
+                />
+              )}
+
               <ModelDropdown
-                models={models}
+                models={currentModelOptions}
                 value={currentModelId}
-                onChange={(v) =>
-                  isCreate
-                    ? set!({ model: v })
-                    : adapterType === "hermes_local"
-                      ? (() => {
-                          const provider = extractProviderId(v);
-                          mark("adapterConfig", "provider", provider || undefined);
-                          mark("adapterConfig", "model", provider ? extractModelName(v) : v || undefined);
-                        })()
-                      : mark("adapterConfig", "model", v || undefined)
-                }
+                onChange={handleModelChange}
                 open={modelOpen}
                 onOpenChange={setModelOpen}
-                allowDefault={adapterType !== "opencode_local"}
-                required={adapterType === "opencode_local"}
-                groupByProvider={adapterType === "opencode_local" || adapterType === "hermes_local"}
+                allowDefault={adapterType !== "opencode_local" && adapterType !== "hermes_local"}
+                required={adapterType === "opencode_local" || adapterType === "hermes_local"}
+                groupByProvider={adapterType === "opencode_local"}
               />
               {fetchedModelsError && (
                 <p className="text-xs text-destructive">
@@ -830,6 +912,38 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     ? fetchedModelsError.message
                     : "Failed to load adapter models."}
                 </p>
+              )}
+
+              {showInlineHermesConnectionTest && (
+                <div className="space-y-2">
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2.5 text-xs"
+                      onClick={() => testEnvironment.mutate()}
+                      disabled={
+                        testEnvironment.isPending ||
+                        !selectedCompanyId ||
+                        !currentHermesProvider ||
+                        !currentHermesModelName
+                      }
+                    >
+                      {testEnvironment.isPending ? "Testing..." : "Test connection"}
+                    </Button>
+                  </div>
+                  {testEnvironment.error && (
+                    <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {testEnvironment.error instanceof Error
+                        ? testEnvironment.error.message
+                        : "Connection test failed"}
+                    </div>
+                  )}
+                  {testEnvironment.data && (
+                    <AdapterEnvironmentResult result={testEnvironment.data} />
+                  )}
+                </div>
               )}
 
               {showThinkingEffort && (
@@ -1393,6 +1507,75 @@ function EnvVarEditor({
         PAPERCLIP_* variables are injected automatically at runtime.
       </p>
     </div>
+  );
+}
+
+function ProviderDropdown({
+  providers,
+  value,
+  onChange,
+  open,
+  onOpenChange,
+}: {
+  providers: ReadonlyArray<{ id: string; label: string; modelCount: number }>;
+  value: string;
+  onChange: (id: string) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const selected = providers.find((provider) => provider.id === value);
+  const disabled = providers.length === 0;
+
+  return (
+    <Field label="Provider" hint="Provider passed to Hermes for this model run.">
+      <Popover open={open} onOpenChange={onOpenChange}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            disabled={disabled}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between",
+              disabled && "cursor-not-allowed opacity-60 hover:bg-transparent",
+            )}
+          >
+            <span className={cn(!selected && "text-muted-foreground")}>
+              {selected ? selected.label : disabled ? "No providers found" : "Select provider"}
+            </span>
+            <span className="flex items-center gap-2 text-muted-foreground">
+              {selected && (
+                <span className="text-[10px] uppercase tracking-wide">
+                  {selected.modelCount} models
+                </span>
+              )}
+              <ChevronDown className="h-3 w-3" />
+            </span>
+          </button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-1" align="start">
+          {providers.map((provider) => (
+            <button
+              key={provider.id}
+              type="button"
+              className={cn(
+                "flex items-center justify-between gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                provider.id === value && "bg-accent",
+              )}
+              onClick={() => {
+                onChange(provider.id);
+                onOpenChange(false);
+              }}
+            >
+              <span className="min-w-0 truncate text-left" title={provider.id}>
+                {provider.label}
+              </span>
+              <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                {provider.modelCount}
+              </span>
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
+    </Field>
   );
 }
 
