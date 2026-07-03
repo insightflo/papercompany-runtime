@@ -388,6 +388,76 @@ describe("heartbeat orphaned process recovery", () => {
     expect(issue?.checkoutRunId).toBeNull();
     expect(issue?.executionRunId).toBeNull();
   });
+  it("terminalizes an active linked run immediately when an issue is marked done", async () => {
+    const { companyId, runId, wakeupRequestId, issueId } = await seedRunFixture();
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.finalizeLinkedRunsForIssueStatus({
+      issueId,
+      companyId,
+      status: "done",
+      linkedRunIds: [runId],
+    });
+
+    expect(result).toEqual({ finalized: 1, runIds: [runId] });
+
+    const run = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run).toEqual(expect.objectContaining({
+      status: "succeeded",
+      errorCode: null,
+      error: null,
+      finishedAt: expect.any(Date),
+    }));
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup).toEqual(expect.objectContaining({
+      status: "completed",
+      finishedAt: expect.any(Date),
+    }));
+  });
+
+  it("terminalizes an active linked run as failed when an issue is marked blocked", async () => {
+    const { companyId, runId, wakeupRequestId, issueId } = await seedRunFixture();
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.finalizeLinkedRunsForIssueStatus({
+      issueId,
+      companyId,
+      status: "blocked",
+      linkedRunIds: [runId],
+    });
+
+    expect(result).toEqual({ finalized: 1, runIds: [runId] });
+
+    const run = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run).toEqual(expect.objectContaining({
+      status: "failed",
+      errorCode: "issue_status_blocked",
+      finishedAt: expect.any(Date),
+    }));
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup).toEqual(expect.objectContaining({
+      status: "failed",
+      finishedAt: expect.any(Date),
+    }));
+  });
 
   it("queues exactly one retry when the recorded local pid is dead", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({

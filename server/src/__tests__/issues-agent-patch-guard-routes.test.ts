@@ -20,6 +20,7 @@ const mockAccessService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
+  finalizeLinkedRunsForIssueStatus: vi.fn(async () => ({ finalized: 0, runIds: [] })),
 }));
 
 const mockAgentService = vi.hoisted(() => ({
@@ -129,6 +130,12 @@ describe("issue routes agent patch guard", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).toHaveBeenCalledWith({
+      issueId: issue.id,
+      companyId: issue.companyId,
+      status: "done",
+      linkedRunIds: [undefined, undefined, "run-1"],
+    });
     expect(mockLogMaintenanceDecisionActionMismatch).toHaveBeenCalledWith(
       expect.objectContaining({
         companyId: "company-1",

@@ -5,6 +5,7 @@ import {
   hasSatisfiedWorkProductRegistration,
   isActionableClaimedArtifactPath,
   resolveStepRunRequiresWorkProduct,
+  isSucceededHeartbeatRunStatus,
   workProductReferencesClaimedArtifact,
 } from "../services/heartbeat.ts";
 
@@ -36,6 +37,15 @@ describe("extractExplicitArtifactPaths (backslash + dedup)", () => {
   });
 });
 
+describe("isSucceededHeartbeatRunStatus", () => {
+  it("allows output/workProduct contract gates only after a succeeded run", () => {
+    expect(isSucceededHeartbeatRunStatus("succeeded")).toBe(true);
+    expect(isSucceededHeartbeatRunStatus("timed_out")).toBe(false);
+    expect(isSucceededHeartbeatRunStatus("failed")).toBe(false);
+    expect(isSucceededHeartbeatRunStatus("cancelled")).toBe(false);
+    expect(isSucceededHeartbeatRunStatus(null)).toBe(false);
+  });
+});
 describe("heartbeat missing workProduct artifact gate", () => {
   it("ignores agent instruction files when extracting claimed artifact paths", () => {
     const instructionPath = "/Users/kwak/.paperclip-worktrees/instances/papercompany-runtime/companies/e7e3e98c-e720-4ddb-8f8b-36dd75805cc3/agents/9d56d53b-7a3a-4046-ba0d-08d18083a0cc/instructions/AGENTS.md";

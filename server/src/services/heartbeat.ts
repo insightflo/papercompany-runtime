@@ -2409,6 +2409,9 @@ function resolveNextSessionState(input: {
   };
 }
 
+export function isSucceededHeartbeatRunStatus(status: string | null | undefined): status is "succeeded" {
+  return status === "succeeded";
+}
 function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelect) {
   const text = [run.stdoutExcerpt, run.stderrExcerpt, run.error].filter(Boolean).join("\n");
   return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
@@ -4890,6 +4893,118 @@ export function heartbeatService(db: Db) {
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  async function finalizeLinkedRunsForIssueStatus(input: {
+    issueId: string;
+    companyId: string;
+    status: string;
+    linkedRunIds?: Array<string | null | undefined>;
+  }) {
+    const issueTerminalStatus = input.status === "done"
+      ? "succeeded"
+      : input.status === "cancelled"
+        ? "cancelled"
+        : input.status === "blocked"
+          ? "failed"
+          : null;
+    if (!issueTerminalStatus) {
+      return { finalized: 0, runIds: [] as string[] };
+    }
+
+    const explicitRunIds = [
+      ...(input.linkedRunIds ?? []),
+    ].filter((runId): runId is string => typeof runId === "string" && runId.length > 0);
+    const linkedRunCondition = explicitRunIds.length > 0
+      ? or(eq(heartbeatRuns.issueId, input.issueId), inArray(heartbeatRuns.id, [...new Set(explicitRunIds)]))
+      : eq(heartbeatRuns.issueId, input.issueId);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, input.companyId),
+        inArray(heartbeatRuns.status, ["queued", "running"]),
+        linkedRunCondition,
+      ));
+
+    const finalizedRunIds: string[] = [];
+    const now = new Date();
+    for (const run of runs) {
+      const trackedProcess = runningProcesses.get(run.id) ?? null;
+      if (trackedProcess) {
+        trackedProcess.child.kill("SIGTERM");
+        setTimeout(() => {
+          if (!trackedProcess.child.killed) {
+            trackedProcess.child.kill("SIGKILL");
+          }
+        }, Math.max(1, trackedProcess.graceSec) * 1000);
+        runningProcesses.delete(run.id);
+      } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
+        setTimeout(() => {
+          terminateRecordedProcess(run.processPid, "SIGKILL");
+        }, 5_000);
+      }
+
+      const errorCode = input.status === "done"
+        ? null
+        : input.status === "cancelled"
+          ? "cancelled"
+          : "issue_status_blocked";
+      const error = input.status === "done"
+        ? null
+        : input.status === "cancelled"
+          ? "Issue cancelled while linked run was active; terminalized by control plane"
+          : "Issue blocked while linked run was active; terminalized by control plane";
+
+      const updated = await db
+        .update(heartbeatRuns)
+        .set({
+          status: issueTerminalStatus,
+          error,
+          errorCode,
+          finishedAt: now,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(heartbeatRuns.id, run.id), inArray(heartbeatRuns.status, ["queued", "running"])))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!updated) continue;
+
+      publishLiveEvent({
+        companyId: updated.companyId,
+        type: "heartbeat.run.status",
+        payload: {
+          runId: updated.id,
+          agentId: updated.agentId,
+          status: updated.status,
+          invocationSource: updated.invocationSource,
+          triggerDetail: updated.triggerDetail,
+          error: updated.error ?? null,
+          errorCode: updated.errorCode ?? null,
+          startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
+          finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+        },
+      });
+      await recordHeartbeatRunTerminalTransitionEvent(db, updated);
+      await setWakeupStatus(updated.wakeupRequestId, issueTerminalStatus === "succeeded" ? "completed" : issueTerminalStatus, {
+        finishedAt: now,
+        error,
+      });
+      await releaseRuntimeServicesForRun(updated.id).catch(() => undefined);
+      activeRunExecutions.delete(updated.id);
+      await finalizeAgentStatus(updated.agentId, issueTerminalStatus);
+      await startNextQueuedRunForAgent(updated.agentId);
+      finalizedRunIds.push(updated.id);
+    }
+
+    if (finalizedRunIds.length > 0) {
+      logger.info(
+        { issueId: input.issueId, status: input.status, runIds: finalizedRunIds },
+        "terminalized active heartbeat runs after issue status transition",
+      );
+    }
+
+    return { finalized: finalizedRunIds.length, runIds: finalizedRunIds };
+  }
   async function resumeQueuedRuns() {
     const queuedRuns = await db
       .select({ agentId: heartbeatRuns.agentId })
@@ -6928,7 +7043,7 @@ export function heartbeatService(db: Db) {
         isLinkedToRun &&
         successfulRunCanFinalizeIssue &&
         issue.assigneeAgentId === run.agentId;
-      const requestChangesVerdict = run.status === "succeeded" ? extractRequestChangesVerdict(run) : null;
+      const requestChangesVerdict = isSucceededHeartbeatRunStatus(run.status) ? extractRequestChangesVerdict(run) : null;
       const shouldBlockRequestChangesVerdict =
         !!requestChangesVerdict &&
         isLinkedToRun &&
@@ -6937,7 +7052,7 @@ export function heartbeatService(db: Db) {
         successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId;
       const claimedArtifactPaths =
-        run.status === "succeeded" && isLinkedToRun && !!issue.missionId
+        isSucceededHeartbeatRunStatus(run.status) && isLinkedToRun && !!issue.missionId
           ? extractClaimedArtifactPaths(run)
           : [];
       const missionWorkProductPaths = issue.missionId
@@ -6960,6 +7075,7 @@ export function heartbeatService(db: Db) {
         : null;
       const stepRunRequiresWorkProduct = resolveStepRunRequiresWorkProduct(stepRunMetadata);
       const shouldCheckMissingWorkProductRegistration =
+        isSucceededHeartbeatRunStatus(run.status) &&
         // produced-nothing guard: producer-type issue 가 succeeded run 후 workProduct 가 하나도 없으면
         // claimed paths 유무와 무관하게 gate 발화(자동 done 차단). workProduct 가 있으면 통과.
         isLinkedToRun &&
@@ -8752,6 +8868,7 @@ export function heartbeatService(db: Db) {
     },
 
     cancelRun: (runId: string) => cancelRunInternal(runId),
+    finalizeLinkedRunsForIssueStatus,
 
     cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
 

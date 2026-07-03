@@ -1234,6 +1234,18 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    if (
+      typeof updateFields.status === "string" &&
+      updateFields.status !== existing.status &&
+      (updateFields.status === "done" || updateFields.status === "blocked" || updateFields.status === "cancelled")
+    ) {
+      await heartbeat.finalizeLinkedRunsForIssueStatus({
+        issueId: issue.id,
+        companyId: issue.companyId,
+        status: updateFields.status,
+        linkedRunIds: [existing.checkoutRunId, existing.executionRunId, actor.runId],
+      });
+    }
     await routinesSvc.syncRunStatusForIssue(issue.id);
     await workflowsSvc.syncRunStatusForIssue(db, issue.id);
 
