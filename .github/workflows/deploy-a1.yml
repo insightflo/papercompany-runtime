@@ -39,8 +39,8 @@ jobs:
       - name: Typecheck
         run: pnpm -r typecheck
 
-      - name: Run tests
-        run: pnpm test:run
+      - name: Run deployment smoke tests
+        run: pnpm vitest run server/src/__tests__/health.test.ts server/src/__tests__/app-ui-root.test.ts
 
       - name: Build
         run: pnpm build

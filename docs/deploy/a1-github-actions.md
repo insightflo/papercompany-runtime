@@ -5,7 +5,7 @@ A1 host and running the same deploy script that can be run manually on the host.
 
 The deployment is intentionally server-side:
 
-1. GitHub Actions verifies the commit with typecheck, tests, and build.
+1. GitHub Actions verifies the commit with typecheck, deployment smoke tests, and build.
 2. GitHub Actions copies `scripts/deploy-a1.sh` to A1.
 3. A1 fast-forwards `/srv/papercompany/papercompany-runtime` to the verified commit.
 4. A1 runs `pnpm install --frozen-lockfile` and `pnpm build`.
