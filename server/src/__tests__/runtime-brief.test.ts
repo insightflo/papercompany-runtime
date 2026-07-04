@@ -392,7 +392,7 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Paperclip child issues are the delegation mechanism for mission work");
     expect(brief).toContain("Report slice completion separately from end-to-end completion.");
     expect(brief).toContain('"missionInvariant": []');
-    expect(brief).toContain('"selfImprovementCandidates": []');
+    expect(brief).not.toContain('"selfImprovementCandidates": []');
     expect(brief).toContain('"scopeHypothesis": "..."');
     expect(brief).toContain('"evidenceRequired": []');
     expect(brief).toContain('"approvalGates": []');

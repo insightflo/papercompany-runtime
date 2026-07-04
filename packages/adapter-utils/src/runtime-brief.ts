@@ -301,6 +301,7 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     "2. `blocked`: name the missing input, authority, runtime path, or escalation path.",
     "3. `ready_to_plan`: emit the structured JSON block below.",
     "Do not mark the planning issue done until a structured plan decision has been posted and materialized as mission-level sibling issues, or the mission is explicitly completed with evidence and a final completion comment.",
+    "Do not include `selfImprovementCandidates` unless every entry follows the full self-improvement candidate object contract.",
     "Accepted marker and JSON block:",
     "### Mission owner plan decision",
     "```json",
@@ -327,7 +328,6 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
           promote: [],
           doNotPromote: [],
         },
-        selfImprovementCandidates: [],
         assessment: {
           objectiveRestatement: "...",
           availableAssetsReviewed: [],

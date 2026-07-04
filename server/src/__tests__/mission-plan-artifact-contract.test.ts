@@ -61,6 +61,61 @@ describe("mission plan artifact workProduct contract", () => {
     expect(diagnostics.filter((diagnostic) => diagnostic.severity === "invalid")).toEqual([]);
   });
 
+  it("does not treat ACTION source or research units as artifact QA because of evidence wording", () => {
+    const diagnostics = reviewPlanAgainstIntent({
+      intent: extractMissionIntent("Manual onboarding concepts", "Research Papercompany concepts and publish them to the site"),
+      selectedExecutionUnits: [
+        unit({
+          id: "source-comments",
+          title: "[ACTION] Collect source comments and references",
+          reason: "Build the source evidence packet and capture quality caveats for downstream synthesis.",
+          graphWorkProductRequired: true,
+          sourceRef: { type: "mission_plan_unit", id: "source-comments" },
+        }),
+        unit({
+          id: "workflow-comparison",
+          title: "[ACTION] Compare findings against workflow governance and artifact registration rules",
+          reason: "Check source coverage and workProduct registration requirements before writing.",
+          graphWorkProductRequired: true,
+          dependsOn: ["source-comments"],
+          sourceRef: { type: "mission_plan_unit", id: "workflow-comparison" },
+        }),
+        unit({
+          id: "concept-html",
+          title: "[ACTION] Produce Korean concepts HTML artifact",
+          graphWorkProductRequired: true,
+          dependsOn: ["workflow-comparison"],
+          sourceRef: { type: "mission_plan_unit", id: "concept-html" },
+        }),
+        unit({
+          id: "artifact-qa",
+          title: "[QA] Validate produced HTML artifact before publication",
+          graphWorkProductRequired: false,
+          dependsOn: ["concept-html"],
+          sourceRef: { type: "mission_plan_unit", id: "artifact-qa" },
+        }),
+        unit({
+          id: "publish",
+          title: "[ACTION] Publish approved HTML concept page",
+          graphWorkProductRequired: true,
+          toolNames: ["manual-onboarding-publish"],
+          dependsOn: ["artifact-qa"],
+          sourceRef: { type: "mission_plan_unit", id: "publish" },
+        }),
+        unit({
+          id: "readback",
+          title: "[QA] Readback published page",
+          graphWorkProductRequired: false,
+          dependsOn: ["publish"],
+          sourceRef: { type: "mission_plan_unit", id: "readback" },
+        }),
+      ],
+    });
+
+    expect(diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("invalid_artifact_qa_delivery_order");
+    expect(diagnostics.filter((diagnostic) => diagnostic.severity === "invalid")).toEqual([]);
+  });
+
   it("requires a delivery tool instead of publish wording alone", () => {
     const diagnostics = reviewPlanAgainstIntent({
       intent: extractMissionIntent("Beginner guide", "Research the topic and publish the guide to the site"),

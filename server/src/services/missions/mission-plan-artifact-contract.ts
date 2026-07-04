@@ -32,6 +32,10 @@ const ARTIFACT_PRODUCTION_VERB_RE =
   /\bwrite\b|\bbuild\b|\bcreate\b|\bgenerate\b|\brender\b|\bcompile\b|\bpackage\b|\bdraft\b|\bproduce\b|\bcollect\b|\bcurate\b|작성|생성|제작|빌드|렌더|초안|만들|꾸리|수집|정리/iu;
 const QA_UNIT_RE =
   /^\s*\[qa\]/iu;
+const ACTION_UNIT_RE =
+  /^\s*\[action\]/iu;
+const OVERSIGHT_UNIT_RE =
+  /^\s*\[oversight\]/iu;
 const QA_TEXT_RE =
   /\bqa\b|\bverif(?:y|ied|ication)\b|\bvalid(?:ate|ated|ation)\b|\breview\b|검증|리뷰|확인/u;
 const ARTIFACT_QA_TEXT_RE =
@@ -50,6 +54,19 @@ function readUnitToolNames(unit: Record<string, unknown>): string[] {
     ...readStringArray(unit.tools),
     typeof unit.toolName === "string" && unit.toolName.trim().length > 0 ? unit.toolName.trim() : null,
   ].filter((toolName): toolName is string => Boolean(toolName))));
+}
+
+function readUnitLabel(unit: Record<string, unknown>): string {
+  for (const key of ["title", "name"]) {
+    const value = unit[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return "";
+}
+
+function hasExplicitNonQaPrefix(unit: Record<string, unknown>): boolean {
+  const label = readUnitLabel(unit);
+  return ACTION_UNIT_RE.test(label) || OVERSIGHT_UNIT_RE.test(label);
 }
 
 function toolNameTokens(toolName: string): string[] {
@@ -79,8 +96,10 @@ export function hasArtifactProducerRole(unit: Record<string, unknown>): boolean 
 }
 
 export function hasArtifactQaRole(unit: Record<string, unknown>): boolean {
+  if (hasExplicitNonQaPrefix(unit)) return false;
+  const label = readUnitLabel(unit);
   const text = missionPlanUnitText(unit);
-  return (QA_UNIT_RE.test(text) || ARTIFACT_QA_TEXT_RE.test(text)) && ARTIFACT_QA_RE.test(text);
+  return (QA_UNIT_RE.test(label) || ARTIFACT_QA_TEXT_RE.test(text)) && ARTIFACT_QA_RE.test(text);
 }
 
 function isNonProducingGateOrQaRole(unit: Record<string, unknown>): boolean {
