@@ -112,10 +112,12 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
         permissions: {},
       })),
     );
+    const ownerAgent = opts.agents[0];
+    if (!ownerAgent) throw new Error("executeRun requires at least one agent");
     await db.insert(missions).values({
       id: opts.missionId,
       companyId: opts.companyId,
-      ownerAgentId: opts.agents[0]!.id,
+      ownerAgentId: ownerAgent.id,
       title: opts.companyName,
       status: "planning",
     });
@@ -171,6 +173,14 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
       .then((rows) => rows[0] ?? null);
   }
 
+  async function getStepRun(runId: string, stepId: string) {
+    return db
+      .select()
+      .from(workflowStepRuns)
+      .where(and(eq(workflowStepRuns.workflowRunId, runId), eq(workflowStepRuns.stepId, stepId)))
+      .then((rows) => rows[0] ?? null);
+  }
+
   it("does not hard-stop direct dependencies explicitly marked as not requiring workProducts", async () => {
     const companyId = randomUUID();
     const runId = randomUUID();
@@ -211,7 +221,7 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
     expect(description).not.toContain("has no registered dependency workProduct.");
   });
 
-  it("hard-stops a direct dependency explicitly marked as requiring a workProduct", async () => {
+  it("does not unlock downstream when a required producer is done without a registered workProduct", async () => {
     const companyId = randomUUID();
     const runId = randomUUID();
     const producerAgentId = randomUUID();
@@ -236,10 +246,34 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
     if (!evidenceIssue) throw new Error("produce-evidence issue was not created");
     await completeIssue(evidenceIssue.id);
 
+    expect(await getStepIssue(runId, "synthesize")).toBeNull();
+    expect((await getStepRun(runId, "produce-evidence"))?.status).toBe("running");
+    const runAfterMissingWorkProduct = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(runAfterMissingWorkProduct?.status).toBe("running");
+
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: evidenceIssue.id,
+      type: "file",
+      provider: "local",
+      title: "evidence-packet.md",
+      url: "/tmp/evidence-packet.md",
+      status: "active",
+      isPrimary: true,
+    });
+    await syncWorkflowRunForIssue(db, evidenceIssue.id);
+
+    expect((await getStepRun(runId, "produce-evidence"))?.status).toBe("completed");
     const synthIssue = await getStepIssue(runId, "synthesize");
     if (!synthIssue) throw new Error("synthesize issue was not created");
     const description = synthIssue.description ?? "";
-    expect(description).toContain("Dependency workProduct hard-stop:");
-    expect(description).toContain(`- produce-evidence: ${evidenceIssue.identifier ?? evidenceIssue.id} has no registered dependency workProduct.`);
+    expect(description).toContain("produce-evidence:");
+    expect(description).toContain("workProducts:");
+    expect(description).not.toContain("Dependency workProduct hard-stop:");
+    expect(description).not.toContain("has no registered dependency workProduct.");
   });
 });

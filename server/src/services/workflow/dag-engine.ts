@@ -47,6 +47,7 @@ import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { readRawWorkProductRequirementMarkers } from "./workflow-step-workproduct-markers.js";
+import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 
 /**
  * Workflow step definition.
@@ -630,10 +631,7 @@ async function syncStepRunExecutionControlMetadata(
   }
 
   if (!changed) return stepRuns;
-  return db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
+  return reloadWorkflowStepRunsForSameRun(db, stepRuns);
 }
 
 function desiredStepRunStatusFromIssueStatus(issueStatus: string): "pending" | "running" | "completed" | "failed" {
@@ -1008,8 +1006,8 @@ async function syncStepRunsFromIssueState(
     .where(inArray(issues.id, issueIds));
   const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
   const stepById = new Map(steps.map((step) => [step.id, step]));
-  const validationCandidateIssueIds = stepRuns
-    .filter((stepRun) => {
+  const workProductDependencyGate = await loadWorkProductDependencyGate(db, stepRuns, steps);
+  const validationCandidateIssueIds = collectUniqueStepRunIssueIds(stepRuns.filter((stepRun) => {
       if (!stepRun.issueId) return false;
       const issue = issueById.get(stepRun.issueId);
       if (!issue || (issue.status !== "done" && issue.status !== "blocked")) return false;
@@ -1018,9 +1016,7 @@ async function syncStepRunsFromIssueState(
         issueOriginKind: issue.originKind,
         step: stepById.get(stepRun.stepId) ?? null,
       });
-    })
-    .map((stepRun) => stepRun.issueId!)
-    .filter((issueId, index, all) => all.indexOf(issueId) === index);
+    }));
   const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationCandidateIssueIds);
   // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
   const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
@@ -1117,9 +1113,11 @@ async function syncStepRunsFromIssueState(
     const validationVerdict = issue.status === "done"
       ? latestValidationVerdictByIssueId.get(issue.id)?.verdict ?? null
       : null;
-    const desiredStatus = validationVerdict === "request_changes"
-      ? "failed"
-      : desiredStepRunStatusFromIssueStatus(issue.status);
+    const desiredStatus = applyWorkProductDependencyGate({
+      issueId: issue.id,
+      status: validationVerdict === "request_changes" ? "failed" : desiredStepRunStatusFromIssueStatus(issue.status),
+      gate: workProductDependencyGate,
+    });
     const patch: Partial<typeof workflowStepRuns.$inferInsert> = {};
     const now = new Date();
 
@@ -1148,10 +1146,7 @@ async function syncStepRunsFromIssueState(
       .where(eq(workflowStepRuns.id, stepRun.id));
   }
 
-  return db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
+  return reloadWorkflowStepRunsForSameRun(db, stepRuns);
 }
 
 async function resetUnlaunchedTerminalStepRuns(
@@ -1179,10 +1174,7 @@ async function resetUnlaunchedTerminalStepRuns(
     })
     .where(inArray(workflowStepRuns.id, unlaunchedTerminal.map((stepRun) => stepRun.id)));
 
-  return db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, stepRuns[0]!.workflowRunId));
+  return reloadWorkflowStepRunsForSameRun(db, stepRuns);
 }
 
 function uniqueIssueRowsByIssueId<T extends { issueId: string }>(rows: T[]): T[] {
@@ -1563,7 +1555,8 @@ async function createWorkflowStepIssue(input: {
     .orderBy(asc(issues.createdAt))
     .limit(1);
   if (reusable.length > 0) {
-    return reusable[0]!.id;
+    const reusableIssue = reusable[0];
+    if (reusableIssue) return reusableIssue.id;
   }
 
   const createdIssue = await issueSvc.create(input.run.companyId, {
@@ -1849,7 +1842,11 @@ function getSingleToolStepName(step: WorkflowStep): string {
   if (toolNames.length !== 1) {
     throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received ${toolNames.length}.`);
   }
-  return toolNames[0]!;
+  const toolName = toolNames[0];
+  if (!toolName) {
+    throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received 0.`);
+  }
+  return toolName;
 }
 
 function buildWorkflowToolStepArgs(
