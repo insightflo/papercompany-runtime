@@ -100,7 +100,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     const issueId = randomUUID();
     const workProductRoot = `/tmp/paperclip-artifact-comment-gate/${companyId}/produced_work`;
     const missionOutputRoot = `${workProductRoot}/missions/${missionId}`;
-    const artifactPath = `${missionOutputRoot}/runs/run-1/steps/draft/report.md`;
+    const artifactPath = `${missionOutputRoot}/runs/run-1/steps/draft/evidence.json`;
 
     await db.insert(companies).values({
       id: companyId,
@@ -201,7 +201,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
 
   it("blocks when same-run comments expose multiple explicit artifact candidates", async () => {
     const fixture = await seedProducerIssue();
-    const secondPath = fixture.artifactPath.replace("report.md", "appendix.md");
+    const secondPath = fixture.artifactPath.replace("evidence.json", "appendix.json");
     executeSpy.mockImplementation(async () => {
       await db.insert(issueComments).values({
         companyId: fixture.companyId,

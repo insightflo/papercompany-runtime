@@ -1235,7 +1235,15 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   const explicitEligiblePaths = extractExplicitArtifactPaths(explicitRunText)
     .filter((p) => isActionableClaimedArtifactPath(p))
     .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
-  const declaredArtifactPath = input.preferClaimedArtifactPath && explicitEligiblePaths.length >= 1
+  const commentRegistrationSource = input.registrationSource?.type === "issue_comment_artifact_marker"
+    ? input.registrationSource
+    : null;
+  const explicitCommentEligiblePaths = commentRegistrationSource?.commentClaimedArtifactPaths
+    .filter((p) => isActionableClaimedArtifactPath(p))
+    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot)) ?? [];
+  const declaredArtifactPath = explicitCommentEligiblePaths.length === 1
+    ? explicitCommentEligiblePaths[0]
+    : input.preferClaimedArtifactPath && explicitEligiblePaths.length >= 1
     ? explicitEligiblePaths[0]
     : null;
   const scored = eligibleClaimedArtifactPaths
@@ -1250,9 +1258,6 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
   const resolvedArtifactPath = declaredArtifactPath ?? (scored.length > 0 && scored[0].score > 0 ? scored[0].p : null);
   if (!resolvedArtifactPath) return null;
-  const commentRegistrationSource = input.registrationSource?.type === "issue_comment_artifact_marker"
-    ? input.registrationSource
-    : null;
 
   const isPrimary = !(await input.tx
     .select({ id: issueWorkProducts.id })
