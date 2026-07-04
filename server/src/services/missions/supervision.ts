@@ -28,6 +28,7 @@ import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue } from "./mission-supervision-context.js";
+import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
 import { qualityService } from "../quality.js";
 
 export function createSupervision({ db, deps, ownerActions }: {
@@ -800,6 +801,28 @@ export function createSupervision({ db, deps, ownerActions }: {
                 );
                 if (sourcePlanGateReason) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: sourcePlanGateReason }));
+                  break;
+                }
+                const staleValidationGateRetry = await requeueStaleValidationGateBeforeOwnerRetry({
+                  db,
+                  mission,
+                  ownerActionIssue: issue,
+                  ownerActionLabel: label,
+                  sourceIssue: sourceCandidate,
+                  sourceLabel: sourceCandidateLabel,
+                  sourceStepRows: stepRowsByIssueId.get(sourceCandidate.id) ?? [],
+                  stepRows,
+                  missionIssues,
+                  now,
+                  dispatchWakeup: Boolean(input.dispatchOwnerDecisionWakeups),
+                  onWakeup: deps.onOwnerDecisionRetrySourceIssueApplied,
+                });
+                if (staleValidationGateRetry) {
+                  findings.push(...staleValidationGateRetry.findings);
+                  const appliedAction = staleValidationGateRetry.appliedAction;
+                  if (appliedAction) {
+                    appliedActions.push(appliedAction);
+                  }
                   break;
                 }
                 const sourceRuns = heartbeatRunsByIssueId.get(sourceCandidate.id) ?? [];
