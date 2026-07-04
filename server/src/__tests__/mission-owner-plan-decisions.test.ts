@@ -2380,6 +2380,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("invalid");
+    if (result.status !== "invalid") return;
     expect(result.reason).toBe("invalid_selected_execution_unit_source_ref");
     expect(result.diagnostics).toEqual([
       expect.objectContaining({
@@ -2624,6 +2625,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result2.status).toBe("noop");
     expect(result2.decisionHash).toBe(result1.status === "recorded" ? result1.decisionHash : undefined);
+    const submissionRows = await db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissionRows).toEqual([expect.objectContaining({ decisionHash: result2.decisionHash, status: "recorded" })]);
 
     // Verify only one revision was created (plus initial = 2 total plans)
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
@@ -2717,6 +2720,11 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const active = plans.find((p) => p.status === "active");
     expect(active!.revision).toBe(3);
     expect(active!.missionGoal).toBe("V2 updated plan");
+    const refs = active!.refs as Record<string, unknown>;
+    expect(refs.selectedExecutionUnits).toEqual([
+      expect.objectContaining({ id: `wf:${wfV2Id}:step:run` }),
+    ]);
+    expect(JSON.stringify(refs.selectedExecutionUnits)).not.toContain(wfV1Id);
 
     // Verify 2 activity log entries
     const activities = await db
@@ -2779,6 +2787,52 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(activityLog)
       .where(eq(activityLog.action, "mission.owner_plan.recorded"));
     expect(activities).toHaveLength(0);
+  });
+
+  it("stores an invalid comment-derived owner plan decision in the submission ledger", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        selectedExecutionUnits: [{
+          id: "missing-workflow-step",
+          kind: "workflow_definition_step",
+          selectionState: "selected",
+          reason: "References a workflow that is not company-scoped",
+          sourceRef: { type: "workflow_definition_step", id: randomUUID(), stepId: "run" },
+        }],
+      }),
+      createdAt: new Date("2026-01-04T00:00:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("invalid");
+    if (result.status !== "invalid") return;
+    expect(result.reason).toBe("invalid_selected_execution_unit_source_ref");
+
+    const submissions = await db
+      .select()
+      .from(missionPlanDecisionSubmissions)
+      .where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions).toEqual([
+      expect.objectContaining({
+        companyId,
+        missionId,
+        planningIssueId,
+        authorAgentId: ownerAgentId,
+        decisionHash: result.decisionHash,
+        status: "rejected",
+        rejectionReason: "invalid_selected_execution_unit_source_ref",
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: "workflow_definition_not_found" }),
+        ]),
+      }),
+    ]);
   });
 
   it("treats Markdown-only planning comments as noop unless a structured JSON decision block exists", async () => {
@@ -3006,6 +3060,48 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     // no issue comment was posted (structured path, not comment-parse)
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, planningIssueId));
     expect(comments).toHaveLength(0);
+  });
+
+  it("stores a rejected structured owner plan decision with ledger diagnostics", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedQaFixture();
+    const result = await recordMissionOwnerPlanDecisionSubmission({
+      db,
+      companyId,
+      missionId,
+      planningIssueId,
+      decision: {
+        ...validDecision,
+        missionId,
+        selectedExecutionUnits: [{
+          id: "structured-missing-workflow",
+          kind: "workflow_definition_step",
+          title: "Run missing workflow",
+          reason: "source evidence",
+          selectionState: "selected",
+          sourceRef: { type: "workflow_definition_step", id: randomUUID(), stepId: "scout" },
+        }],
+      },
+      requestedBy: { actorType: "agent", actorId: ownerAgentId },
+      sourceRunId: randomUUID(),
+    });
+
+    expect(result.status).toBe("invalid");
+    if (result.status !== "invalid") return;
+
+    const submissions = await db
+      .select()
+      .from(missionPlanDecisionSubmissions)
+      .where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions).toEqual([
+      expect.objectContaining({
+        decisionHash: result.decisionHash,
+        status: "rejected",
+        rejectionReason: "invalid_selected_execution_unit_source_ref",
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: "workflow_definition_not_found" }),
+        ]),
+      }),
+    ]);
   });
 
   it("comment hook stores PLAN and scorecard-only PLAN-QA results as structured rows before workflow materialization", async () => {

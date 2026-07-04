@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
@@ -22,6 +22,7 @@ import { buildDeliveryVerificationCriteria } from "./workflow/delivery-verificat
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
+import { upsertMissionPlanDecisionSubmission } from "./missions/mission-plan-decision-ledger.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -939,8 +940,26 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     commentId: collected.commentId,
   });
   const decisionHash = hashOwnerPlanDecision(collected.decision);
+  const ledgerSubmission = {
+    db,
+    companyId,
+    missionId,
+    planningIssueId: collected.planningIssueId,
+    authorAgentId: collected.author.kind === "agent" ? collected.author.id : null,
+    authorUserId: collected.author.kind === "user" ? collected.author.id : null,
+    sourceCommentId: preParsedDecision ? null : collected.commentId,
+    decisionHash,
+    decision: collected.decision,
+  };
+  await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "submitted" });
 
   if (!draftResult.ok) {
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "invalid_decision_shape",
+      diagnostics: draftResult.diagnostics,
+    });
     return {
       status: "invalid",
       reason: "invalid_decision_shape",
@@ -957,6 +976,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
   });
   if (sourceValidationDiagnostics.length > 0) {
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "invalid_selected_execution_unit_source_ref",
+      diagnostics: sourceValidationDiagnostics,
+    });
     return {
       status: "invalid",
       reason: "invalid_selected_execution_unit_source_ref",
@@ -998,6 +1023,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       entityType: "mission",
       entityId: missionId,
       details: { planningIssueId: collected.planningIssueId, reason: "ownership_drift", diagnostics },
+    });
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "ownership_drift",
+      diagnostics,
     });
     return {
       status: "invalid",
@@ -1057,6 +1088,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       entityId: missionId,
       details: { planningIssueId: collected.planningIssueId, reason: "plan_intent_coverage_failed", diagnostics: blockingDiagnostics },
     });
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "plan_intent_coverage_failed",
+      diagnostics: blockingDiagnostics,
+    });
     return {
       status: "invalid",
       reason: "plan_intent_coverage_failed",
@@ -1081,19 +1118,6 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     });
   }
 
-  if (!preParsedDecision) {
-    await persistCommentDerivedOwnerPlanDecisionSubmission({
-      db,
-      companyId,
-      missionId,
-      planningIssueId: collected.planningIssueId,
-      author: collected.author,
-      sourceCommentId: collected.commentId,
-      decisionHash,
-      decision: collected.decision,
-    });
-  }
-
   const service = missionPlanArtifactService(db);
   const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
   const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
@@ -1113,6 +1137,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         || Boolean(paqoWorkflowRef && typeof paqoWorkflowRef.workflowRunId === "string" && paqoWorkflowRef.workflowRunId.length > 0);
       // (a) 이미 materialize → 게이트 통과 이력, 사이드이펙트 없이 noop
       if (alreadyMaterialized) {
+        await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "recorded" });
         return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
       }
       // (b) 같은 decisionHash 의 PLAN-QA 게이트 진행중 → verdict 로 분기
@@ -1149,6 +1174,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, revision: activePlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}`, planQaIssueId: activePlanQa.issueId } });
           const refreshedPlan = await service.getActiveMissionPlan({ companyId, missionId });
           const finalPlan = refreshedPlan ?? activePlan;
+          await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "recorded" });
           return { status: "recorded", missionPlanArtifact: finalPlan, revision: finalPlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
         }
         if (verdict === "request_changes") {
@@ -1180,6 +1206,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           } catch {
             // swallowed: plan QA must not depend on the quality board.
           }
+          await upsertMissionPlanDecisionSubmission({
+            ...ledgerSubmission,
+            status: "rejected",
+            rejectionReason: "plan_qa_changes_requested",
+            diagnostics: [],
+          });
           return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
         }
         // pending / verdict 없음 → 대기 (어떤 경로에서도 materialize 금지)
@@ -1191,11 +1223,13 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           missionId,
           planningIssueId: collected.planningIssueId,
         });
+        await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "plan_qa_pending" });
         return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
       }
       // (c) 같은 hash 인데 PLAN-QA 게이트 미생성(레거시 plan 진입) → 게이트 생성 후 대기
       const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
       await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { issueId: legacyPlanQaIssue.id, status: "pending", decisionHash } });
+      await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "plan_qa_pending" });
       return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: legacyPlanQaIssue.id, diagnostics: [] };
     }
     return { status: "noop", reason: "already_recorded", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
@@ -1205,11 +1239,15 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const planQaIssue = collected.decisionIssueOriginKind === "mission_plan_qa"
     ? { id: collected.decisionIssueId }
     : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
-  const refs = mergeMissionPlanRefs(activePlan?.refs, {
-    ...draftResult.draft.refs,
-    ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
-    planQa: { issueId: planQaIssue.id, status: "pending", decisionHash },
-  });
+  const refs = mergeMissionPlanRefs(
+    activePlan?.refs,
+    {
+      ...draftResult.draft.refs,
+      ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
+      planQa: { issueId: planQaIssue.id, status: "pending", decisionHash },
+    },
+    { selectedExecutionUnits: "replace" },
+  );
   // 새 decision 는 이전 decision 의 materialization 결과(paqoWorkflow/crossCompanyDelegations)를 계승하지 않는다.
   // PASS 시 idempotent branch 에서 새 decision 기준으로 materialize 한다.
   delete (refs as Record<string, unknown>).paqoWorkflow;
@@ -1245,33 +1283,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     },
   });
 
+  await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "plan_qa_pending" });
   return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: planQaIssue.id, diagnostics: [] };
-}
-
-async function persistCommentDerivedOwnerPlanDecisionSubmission(input: {
-  db: Db;
-  companyId: string;
-  missionId: string;
-  planningIssueId: string;
-  author: MissionOwnerPlanDecisionAuthor;
-  sourceCommentId: string;
-  decisionHash: string;
-  decision: Record<string, unknown>;
-}): Promise<void> {
-  await input.db
-    .insert(missionPlanDecisionSubmissions)
-    .values({
-      companyId: input.companyId,
-      missionId: input.missionId,
-      planningIssueId: input.planningIssueId,
-      authorAgentId: input.author.kind === "agent" ? input.author.id : null,
-      authorUserId: input.author.kind === "user" ? input.author.id : null,
-      sourceCommentId: input.sourceCommentId,
-      decisionHash: input.decisionHash,
-      decision: input.decision,
-      status: "accepted",
-    })
-    .onConflictDoNothing();
 }
 
 async function validateSelectedExecutionUnitSourceRefs({

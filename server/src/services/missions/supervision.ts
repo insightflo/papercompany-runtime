@@ -5,7 +5,7 @@
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
 import { agentWakeupRequests, heartbeatRuns, issueComments, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -30,6 +30,7 @@ import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue } from "./mission-supervision-context.js";
 import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
 import { qualityService } from "../quality.js";
+import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDecisionSubmissionStatus } from "./mission-plan-decision-ledger.js";
 
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
@@ -126,12 +127,67 @@ export function createSupervision({ db, deps, ownerActions }: {
     }
 
     const findPlanSubmissionMissingCandidate = async (): Promise<{
+      kind: "missing";
       planIssue: MissionSupervisionIssue;
       succeededRun: MissionSupervisionHeartbeatRun;
       markerText: string;
       idempotencyKey: string;
+    } | {
+      kind: "rejected";
+      planIssue: MissionSupervisionIssue;
+      succeededRun: MissionSupervisionHeartbeatRun;
+      decisionHash: string;
+      rejectionReason: string | null;
+      diagnostics: unknown;
+      markerText: string;
+      idempotencyKey: string;
     } | null> => {
       if (mission.status !== "planning") return null;
+
+      const planIssue = missionIssues.find((issue) => (
+        issue.originKind === "mission_main_executor_plan" &&
+        !issue.hiddenAt &&
+        isTerminalIssueStatus(issue.status)
+      ));
+      if (!planIssue) return null;
+
+      const succeededRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
+        .filter((run) => run.status === "succeeded")
+        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+      if (!succeededRun) return null;
+
+      const [existingSubmission] = await db
+        .select({
+          id: missionPlanDecisionSubmissions.id,
+          status: missionPlanDecisionSubmissions.status,
+          decisionHash: missionPlanDecisionSubmissions.decisionHash,
+          rejectionReason: missionPlanDecisionSubmissions.rejectionReason,
+          diagnostics: missionPlanDecisionSubmissions.diagnostics,
+        })
+        .from(missionPlanDecisionSubmissions)
+        .where(and(
+          eq(missionPlanDecisionSubmissions.companyId, mission.companyId),
+          eq(missionPlanDecisionSubmissions.missionId, mission.id),
+        ))
+        .orderBy(desc(missionPlanDecisionSubmissions.createdAt))
+        .limit(1);
+      if (existingSubmission) {
+        if (!isRejectedMissionPlanDecisionSubmissionStatus(existingSubmission.status)) return null;
+        const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}`;
+        const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
+        if (planIssueComments.some((comment) => comment.includes(markerText))) return null;
+        return {
+          kind: "rejected",
+          planIssue,
+          succeededRun,
+          decisionHash: existingSubmission.decisionHash,
+          rejectionReason: existingSubmission.rejectionReason,
+          diagnostics: existingSubmission.diagnostics,
+          markerText,
+          idempotencyKey: `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}`,
+        };
+      }
+
       if (missionHasActiveHeartbeat) return null;
 
       const missionIssueIds = missionIssues.map((issue) => issue.id);
@@ -156,28 +212,6 @@ export function createSupervision({ db, deps, ownerActions }: {
         .limit(1);
       if (existingWorkflowRun) return null;
 
-      const planIssue = missionIssues.find((issue) => (
-        issue.originKind === "mission_main_executor_plan" &&
-        !issue.hiddenAt &&
-        isTerminalIssueStatus(issue.status)
-      ));
-      if (!planIssue) return null;
-
-      const succeededRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
-        .filter((run) => run.status === "succeeded")
-        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
-      if (!succeededRun) return null;
-
-      const [existingSubmission] = await db
-        .select({ id: missionPlanDecisionSubmissions.id })
-        .from(missionPlanDecisionSubmissions)
-        .where(and(
-          eq(missionPlanDecisionSubmissions.companyId, mission.companyId),
-          eq(missionPlanDecisionSubmissions.missionId, mission.id),
-        ))
-        .limit(1);
-      if (existingSubmission) return null;
-
       const hasPlanQaIssue = missionIssues.some((issue) => (
         issue.originKind === "mission_plan_qa" && !issue.hiddenAt
       ));
@@ -188,6 +222,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       if (planIssueComments.some((comment) => comment.includes(markerText))) return null;
 
       return {
+        kind: "missing",
         planIssue,
         succeededRun,
         markerText,
@@ -197,23 +232,32 @@ export function createSupervision({ db, deps, ownerActions }: {
 
     const planSubmissionMissingCandidate = await findPlanSubmissionMissingCandidate();
     if (planSubmissionMissingCandidate) {
-      findings.push(`plan_submission_missing: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} succeeded_run=${planSubmissionMissingCandidate.succeededRun.id}`);
-      // Phase 5 (plan 8.1 oversight stall): auto-create a company-scoped quality review item.
-      // Awaited + try/catch so the quality board is observable/testable but never blocks supervision on its own failure.
-      try {
-        await qSvc.createOversightStallReviewItem({
-          companyId: mission.companyId,
-          missionId: mission.id,
-          missionTitle: mission.title,
-        });
-      } catch {
-        // swallowed intentionally: supervision must not depend on the quality board.
+      const diagnosticsSummary = planSubmissionMissingCandidate.kind === "rejected"
+        ? formatMissionPlanDecisionSubmissionDiagnostics(planSubmissionMissingCandidate.diagnostics)
+        : "";
+      findings.push(planSubmissionMissingCandidate.kind === "rejected"
+        ? `plan_submission_rejected: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} decision_hash=${planSubmissionMissingCandidate.decisionHash} reason=${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}${diagnosticsSummary ? ` diagnostics=${diagnosticsSummary}` : ""}`
+        : `plan_submission_missing: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} succeeded_run=${planSubmissionMissingCandidate.succeededRun.id}`);
+      if (planSubmissionMissingCandidate.kind === "missing") {
+        // Phase 5 (plan 8.1 oversight stall): auto-create a company-scoped quality review item.
+        // Awaited + try/catch so the quality board is observable/testable but never blocks supervision on its own failure.
+        try {
+          await qSvc.createOversightStallReviewItem({
+            companyId: mission.companyId,
+            missionId: mission.id,
+            missionTitle: mission.title,
+          });
+        } catch {
+          // swallowed intentionally: supervision must not depend on the quality board.
+        }
       }
       addRecommendation({
-        type: "plan_submission_missing",
+        type: planSubmissionMissingCandidate.kind === "rejected" ? "plan_submission_rejected" : "plan_submission_missing",
         missionId: mission.id,
         issueId: planSubmissionMissingCandidate.planIssue.id,
-        reason: "Planning run succeeded, but no structured Mission owner plan decision submission was recorded; the mission owner must submit the decision block before Plan QA or workflow materialization can start",
+        reason: planSubmissionMissingCandidate.kind === "rejected"
+          ? `Latest Mission owner plan decision submission was rejected (${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}); the mission owner must revise the decision before Plan QA or workflow materialization can continue${diagnosticsSummary ? `; diagnostics: ${diagnosticsSummary}` : ""}`
+          : "Planning run succeeded, but no structured Mission owner plan decision submission was recorded; the mission owner must submit the decision block before Plan QA or workflow materialization can start",
         safeToAutoApply: true,
       });
     }
@@ -1439,6 +1483,9 @@ export function createSupervision({ db, deps, ownerActions }: {
 
     if (input.applySafeActions && planSubmissionMissingCandidate) {
       const { planIssue, succeededRun, markerText, idempotencyKey } = planSubmissionMissingCandidate;
+      const diagnosticsSummary = planSubmissionMissingCandidate.kind === "rejected"
+        ? formatMissionPlanDecisionSubmissionDiagnostics(planSubmissionMissingCandidate.diagnostics)
+        : "";
       await db
         .update(issues)
         .set({
@@ -1455,19 +1502,34 @@ export function createSupervision({ db, deps, ownerActions }: {
 
       const wakeComment = await issueService(db).addComment(
         planIssue.id,
-        [
-          "### Mission owner plan submission required",
-          `<!-- ${markerText} -->`,
-          `- Mission: ${mission.title}`,
-          `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
-          `- Observed run: ${succeededRun.id} finished with status succeeded.`,
-          "- Current blocker: no structured `### Mission owner plan decision` submission is recorded, so Plan QA and workflow materialization cannot start.",
-          "",
-          "Required next action:",
-          "- Reopen this PLAN work and post exactly one structured `### Mission owner plan decision` JSON block on this issue.",
-          "- Do not perform ACTION or QA work from this PLAN issue; only submit the executable plan decision.",
-          "- After the structured decision is posted, the normal Plan QA gate will continue the mission.",
-        ].join("\n"),
+        planSubmissionMissingCandidate.kind === "rejected"
+          ? [
+            "### Mission owner plan submission rejected",
+            `<!-- ${markerText} -->`,
+            `- Mission: ${mission.title}`,
+            `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
+            `- Decision hash: ${planSubmissionMissingCandidate.decisionHash}`,
+            `- Rejection reason: ${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}`,
+            ...(diagnosticsSummary ? [`- Diagnostics: ${diagnosticsSummary}`] : []),
+            "",
+            "Required next action:",
+            "- Reopen this PLAN work and post a revised structured `### Mission owner plan decision` JSON block on this issue.",
+            "- Do not perform ACTION or QA work from this PLAN issue; only submit the corrected executable plan decision.",
+            "- After the revised decision is posted, the normal Plan QA gate will continue the mission.",
+          ].join("\n")
+          : [
+            "### Mission owner plan submission required",
+            `<!-- ${markerText} -->`,
+            `- Mission: ${mission.title}`,
+            `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
+            `- Observed run: ${succeededRun.id} finished with status succeeded.`,
+            "- Current blocker: no structured `### Mission owner plan decision` submission is recorded, so Plan QA and workflow materialization cannot start.",
+            "",
+            "Required next action:",
+            "- Reopen this PLAN work and post exactly one structured `### Mission owner plan decision` JSON block on this issue.",
+            "- Do not perform ACTION or QA work from this PLAN issue; only submit the executable plan decision.",
+            "- After the structured decision is posted, the normal Plan QA gate will continue the mission.",
+          ].join("\n"),
         { agentId: mission.ownerAgentId },
       );
 
@@ -1483,19 +1545,30 @@ export function createSupervision({ db, deps, ownerActions }: {
           });
           resultStatus = "wakeup_requested";
         } catch (err) {
-          logger.warn({ err, missionId: mission.id, planIssueId: planIssue.id }, "failed to wake mission owner for missing plan submission");
+          logger.warn({ err, missionId: mission.id, planIssueId: planIssue.id }, "failed to wake mission owner for plan submission recovery");
           resultStatus = "wakeup_failed";
         }
       }
 
-      appliedActions.push({
-        type: "plan_submission_missing",
-        missionId: mission.id,
-        planIssueId: planIssue.id,
-        succeededRunId: succeededRun.id,
-        resultStatus,
-        idempotencyKey,
-      });
+      if (planSubmissionMissingCandidate.kind === "rejected") {
+        appliedActions.push({
+          type: "plan_submission_rejected",
+          missionId: mission.id,
+          planIssueId: planIssue.id,
+          decisionHash: planSubmissionMissingCandidate.decisionHash,
+          resultStatus,
+          idempotencyKey,
+        });
+      } else {
+        appliedActions.push({
+          type: "plan_submission_missing",
+          missionId: mission.id,
+          planIssueId: planIssue.id,
+          succeededRunId: succeededRun.id,
+          resultStatus,
+          idempotencyKey,
+        });
+      }
     }
 
     const safeDispatchRecommendations = recommendations.filter((recommendation) => recommendation.type === "dispatch_missing_step" && recommendation.safeToAutoApply && recommendation.workflowRunId);
@@ -1569,6 +1642,8 @@ export function createSupervision({ db, deps, ownerActions }: {
                     ? `- ${action.type}: source=${action.sourceIssueId} artifact=${action.artifactPath} stalled_run=${action.stalledRunId} result=${action.resultStatus}`
                     : action.type === "plan_submission_missing"
                       ? `- ${action.type}: planning_issue=${action.planIssueId} succeeded_run=${action.succeededRunId} result=${action.resultStatus}`
+                      : action.type === "plan_submission_rejected"
+                        ? `- ${action.type}: planning_issue=${action.planIssueId} decision_hash=${action.decisionHash} result=${action.resultStatus}`
                       : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
           : ["- None"]),
         "",
@@ -1813,32 +1888,38 @@ export function createSupervision({ db, deps, ownerActions }: {
           if (succeededRuns.length === 0) continue;
           const missionId = planIssue.missionId;
           if (!missionId) continue;
-          const existingSubmission = await db
-            .select({ id: missionPlanDecisionSubmissions.id })
+          const [existingSubmission] = await db
+            .select({ id: missionPlanDecisionSubmissions.id, status: missionPlanDecisionSubmissions.status })
             .from(missionPlanDecisionSubmissions)
             .where(and(
               eq(missionPlanDecisionSubmissions.companyId, companyId),
               eq(missionPlanDecisionSubmissions.missionId, missionId),
             ))
+            .orderBy(desc(missionPlanDecisionSubmissions.createdAt))
             .limit(1);
-          if (existingSubmission.length > 0) continue;
-          const existingPlanQa = await db
-            .select({ id: issues.id })
-            .from(issues)
-            .where(and(
-              eq(issues.companyId, companyId),
-              eq(issues.missionId, missionId),
-              eq(issues.originKind, "mission_plan_qa"),
-              isNull(issues.hiddenAt),
-            ))
-            .limit(1);
-          if (existingPlanQa.length > 0) continue;
-          const existingWorkflowRuns = await db
-            .select({ id: workflowRuns.id })
-            .from(workflowRuns)
-            .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId)))
-            .limit(1);
-          if (existingWorkflowRuns.length > 0) continue;
+          const hasRejectedSubmission = existingSubmission
+            ? isRejectedMissionPlanDecisionSubmissionStatus(existingSubmission.status)
+            : false;
+          if (existingSubmission && !hasRejectedSubmission) continue;
+          if (!hasRejectedSubmission) {
+            const existingPlanQa = await db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(and(
+                eq(issues.companyId, companyId),
+                eq(issues.missionId, missionId),
+                eq(issues.originKind, "mission_plan_qa"),
+                isNull(issues.hiddenAt),
+              ))
+              .limit(1);
+            if (existingPlanQa.length > 0) continue;
+            const existingWorkflowRuns = await db
+              .select({ id: workflowRuns.id })
+              .from(workflowRuns)
+              .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId)))
+              .limit(1);
+            if (existingWorkflowRuns.length > 0) continue;
+          }
           if (activeHeartbeatMissionIds.has(missionId)) continue;
           if (!missionIds.includes(missionId)) missionIds.push(missionId);
         }

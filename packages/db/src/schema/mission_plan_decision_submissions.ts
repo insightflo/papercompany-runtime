@@ -20,6 +20,8 @@ export const missionPlanDecisionSubmissions = pgTable(
     decisionHash: text("decision_hash").notNull(),
     decision: jsonb("decision").$type<Record<string, unknown>>().notNull(),
     status: text("status").notNull().default("accepted"),
+    rejectionReason: text("rejection_reason"),
+    diagnostics: jsonb("diagnostics").$type<Array<Record<string, unknown>>>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

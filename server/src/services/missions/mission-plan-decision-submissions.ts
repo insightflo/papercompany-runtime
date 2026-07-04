@@ -5,9 +5,9 @@
 // [주요 흐름] recordMissionOwnerPlanDecisionSubmission → record(preParsed) → store submission.
 // [외부 연결] mission-owner-plan-decisions.ts recordLatestAuthorizedMissionOwnerPlanDecision.
 // [수정시 주의] hashOwnerPlanDecision 은 record 내부에서 계산 → 결과 decisionHash 로 submission 저장.
-import { and, eq } from "drizzle-orm";
-import { missionPlanDecisionSubmissions, type Db } from "@paperclipai/db";
+import type { Db } from "@paperclipai/db";
 import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "../mission-owner-plan-decisions.js";
+import { upsertMissionPlanDecisionSubmission } from "./mission-plan-decision-ledger.js";
 
 // [목적] structured owner plan decision 제출 → 표 저장 + materialization.
 // [입력] db/companyId/missionId/planningIssueId/decision(객체)/requestedBy/sourceRunId?/enqueuePlanQaWakeup?
@@ -43,28 +43,29 @@ export async function recordMissionOwnerPlanDecisionSubmission(input: {
   //   record 결과에서 decisionHash 추출(recorded/pending/changes_requested/invalid 모두 포함).
   const decisionHash = "decisionHash" in result ? result.decisionHash : undefined;
   if (decisionHash) {
-    const existing = await input.db
-      .select({ id: missionPlanDecisionSubmissions.id })
-      .from(missionPlanDecisionSubmissions)
-      .where(and(
-        eq(missionPlanDecisionSubmissions.companyId, input.companyId),
-        eq(missionPlanDecisionSubmissions.missionId, input.missionId),
-        eq(missionPlanDecisionSubmissions.decisionHash, decisionHash),
-      ))
-      .limit(1);
-    if (existing.length === 0) {
-      await input.db.insert(missionPlanDecisionSubmissions).values({
-        companyId: input.companyId,
-        missionId: input.missionId,
-        planningIssueId: input.planningIssueId,
-        authorAgentId: input.requestedBy.actorType === "agent" ? input.requestedBy.actorId : null,
-        authorUserId: null,
-        sourceRunId: input.sourceRunId ?? null,
-        decisionHash,
-        decision: input.decision,
-        status: "accepted",
-      });
-    }
+    await upsertMissionPlanDecisionSubmission({
+      db: input.db,
+      companyId: input.companyId,
+      missionId: input.missionId,
+      planningIssueId: input.planningIssueId,
+      authorAgentId: input.requestedBy.actorType === "agent" ? input.requestedBy.actorId : null,
+      authorUserId: null,
+      sourceRunId: input.sourceRunId ?? null,
+      sourceCommentId: null,
+      decisionHash,
+      decision: input.decision,
+      status: result.status === "recorded"
+        ? "recorded"
+        : result.status === "noop" && "reason" in result && result.reason === "already_recorded"
+          ? "recorded"
+        : result.status === "plan_qa_pending"
+          ? "plan_qa_pending"
+          : result.status === "plan_qa_changes_requested" || result.status === "invalid"
+            ? "rejected"
+            : "submitted",
+      rejectionReason: "reason" in result ? result.reason : result.status === "plan_qa_changes_requested" ? "plan_qa_changes_requested" : null,
+      diagnostics: "diagnostics" in result ? result.diagnostics : [],
+    });
   }
 
   return result;

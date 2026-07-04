@@ -211,7 +211,11 @@ function asExecutionUnits(value: unknown): MissionPlanExecutionUnitRef[] {
   return asRecordArray(value).filter((unit): unit is MissionPlanExecutionUnitRef => refsExecutionUnitKey(unit as MissionPlanExecutionUnitRef) !== null);
 }
 
-export function mergeMissionPlanRefs(existing: unknown, incoming: unknown): MissionPlanRefs {
+export function mergeMissionPlanRefs(
+  existing: unknown,
+  incoming: unknown,
+  options: { selectedExecutionUnits?: "merge" | "replace" } = {},
+): MissionPlanRefs {
   const existingRefs = asRecord(existing);
   const incomingRefs = asRecord(incoming);
   const merged: MissionPlanRefs = { ...existingRefs, ...incomingRefs } as MissionPlanRefs;
@@ -242,10 +246,13 @@ export function mergeMissionPlanRefs(existing: unknown, incoming: unknown): Miss
   }
 
   const selectedUnitsByKey = new Map<string, MissionPlanExecutionUnitSelection>();
-  for (const unit of [
-    ...asSelectedExecutionUnits(existingRefs.selectedExecutionUnits),
-    ...asSelectedExecutionUnits(incomingRefs.selectedExecutionUnits),
-  ]) {
+  const selectedUnitSource = options.selectedExecutionUnits === "replace"
+    ? asSelectedExecutionUnits(incomingRefs.selectedExecutionUnits)
+    : [
+      ...asSelectedExecutionUnits(existingRefs.selectedExecutionUnits),
+      ...asSelectedExecutionUnits(incomingRefs.selectedExecutionUnits),
+    ];
+  for (const unit of selectedUnitSource) {
     const key = selectedExecutionUnitKey(unit);
     if (!key) continue;
     selectedUnitsByKey.set(key, unit);
