@@ -41,6 +41,7 @@ import {
 import { resetStepRunForRework } from "./step-reset.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
+import { buildQaReworkArtifactInstructionLine } from "../../work-products/artifact-registration-instructions.js";
 import type { StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -231,9 +232,7 @@ function buildProducerReworkComment(input: {
     `Producer step \`${input.producerStepId}\` was reset for rework because the following QA validator(s) requested changes.`,
     qaList,
     `- Rework iteration: ${input.currentIteration + 1}/${input.maxIterations}`,
-    multi
-      ? "- Required: update the deliverable to address ALL listed QA feedback above, save it in the assigned output directory, and finish with the required `[ARTIFACT]: <absolute path>` line."
-      : "- Required: update the deliverable to address the QA feedback, save it in the assigned output directory, and finish with the required `[ARTIFACT]: <absolute path>` line.",
+    buildQaReworkArtifactInstructionLine({ feedbackScope: multi ? "ALL listed QA feedback above" : "the QA feedback" }),
     "- Do not close this issue as already complete unless the requested changes are actually reflected in the deliverable.",
     input.dependencyArtifacts ?? null,
     "",

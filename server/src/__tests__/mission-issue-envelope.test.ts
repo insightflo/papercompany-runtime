@@ -15,6 +15,7 @@ describe("mission issue envelope", () => {
     expect(prompt).toContain("Title: Collect sources");
     expect(prompt).toContain("Post a source-backed comment.");
     expect(prompt).toContain("Use Paperclip API env vars for lifecycle updates or evidence/blocker comments when needed.");
+    expect(prompt).toContain("creating the file and registering the workProduct are separate");
     expect(prompt).not.toContain("## Mission Child Issue Contract");
   });
 

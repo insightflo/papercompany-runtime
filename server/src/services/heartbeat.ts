@@ -78,6 +78,7 @@ import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-plann
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
+import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import {
   extractMissionOwnerDecisionFromText,
@@ -2589,29 +2590,6 @@ export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$infe
     if (value && isActionableClaimedArtifactPath(value)) paths.add(value);
   }
   return [...paths].slice(0, 10);
-}
-
-function buildMissingWorkProductRegistrationGateComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  claimedArtifactPaths: string[];
-  allowedArtifactRoot?: string | null;
-}) {
-  const paths = input.claimedArtifactPaths.length > 0
-    ? input.claimedArtifactPaths.map((artifactPath) => `- ${artifactPath}`).join("\n")
-    : "- (artifact path not captured)";
-  return [
-    "## Mission artifact gate: workProduct registration missing",
-    `- 실행 runId: \`${input.run.id}\``,
-    "- 감지: run은 succeeded로 종료됐고 산출물 파일 경로를 보고했지만, issue에 공식 `workProduct`가 등록되어 있지 않습니다.",
-    "- 조치: downstream workflow가 비공식 comment 경로만 보고 진행하지 않도록 source issue를 `blocked`로 전이합니다.",
-    "- 복구: 아래 파일을 이 issue의 `workProduct`로 등록한 뒤 workflow를 resume하세요.",
-    input.allowedArtifactRoot
-      ? `- 허용 경로: 이 mission의 local workProduct는 \`${input.allowedArtifactRoot}\` 아래에 있어야 합니다.`
-      : null,
-    "",
-    "### Claimed artifact paths",
-    paths,
-  ].filter((line) => line !== null).join("\n");
 }
 
 export type HeartbeatFailureClassification = {
@@ -7237,7 +7215,7 @@ export function heartbeatService(db: Db) {
             companyId: issue.companyId,
             issueId: issue.id,
             authorAgentId: run.agentId,
-            body: buildMissingWorkProductRegistrationGateComment({ run, claimedArtifactPaths, allowedArtifactRoot }),
+            body: buildMissingWorkProductRegistrationGateComment({ runId: run.id, claimedArtifactPaths, allowedArtifactRoot }),
           });
           await tx.insert(activityLog).values({
             companyId: issue.companyId,

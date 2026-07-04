@@ -9,6 +9,7 @@ import {
   extractMissionOwnerDecisionFromText,
   type ExtractedMissionOwnerDecision,
 } from "./mission-owner-recovery-events.js";
+import { buildExistingArtifactRegistrationActionLines } from "../work-products/artifact-registration-instructions.js";
 
 type MissionOwnerDescriptionMission = {
   id: string;
@@ -158,10 +159,7 @@ export function buildWorkProductReuseWakeDispatchedComment(input: {
     `Deliverable file already written: ${input.artifactPath}`,
     `Target agent: ${input.targetAgentId}`,
     `Idempotency key: ${input.idempotencyKey}`,
-    "Required action:",
-    `- Reuse the existing deliverable file at \`${input.artifactPath}\` (do not regenerate it).`,
-    `- Finish your run output with exactly one standalone final line \`[ARTIFACT]: ${input.artifactPath}\` so the system registers the workProduct automatically.`,
-    "- Do not POST or curl a workProduct registration. The [ARTIFACT] line is the only registration method.",
+    ...buildExistingArtifactRegistrationActionLines({ artifactPath: input.artifactPath }),
   ].join("\n");
 }
 

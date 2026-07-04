@@ -15,6 +15,7 @@ import { issueService } from "./issues.js";
 import { heartbeatService } from "./heartbeat.js";
 import type { WorkflowStep } from "./workflow/dag-engine.js";
 import { completeWorkflowToolStepFromResult } from "./workflow/dag-engine.js";
+import { buildDelegatedWorkProductContractLines } from "./work-products/artifact-registration-instructions.js";
 
 export const WORKFLOW_DELEGATION_TOOL_NAME = "delegate_to_company";
 
@@ -90,9 +91,7 @@ function buildTargetDescription(input: {
     `- sourceTrackerIssueId: ${input.sourceIssueId}`,
     `- sourceTrackerIssueIdentifier: ${input.sourceIssueIdentifier ?? "none"}`,
     "",
-    "Official workProduct contract:",
-    "- If this delegated issue specifies an output directory or `[ARTIFACT]:` contract, write the deliverable there and finish with the required `[ARTIFACT]: <absolute path>` line. Do not POST/curl workProduct registration.",
-    "- The source workflow will copy those registered workProducts back to the source tracker issue when this issue is done.",
+    ...buildDelegatedWorkProductContractLines(),
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
