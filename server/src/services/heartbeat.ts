@@ -69,6 +69,15 @@ import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./sess
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
+import {
+  collectRecentIssueCommentArtifactPathCandidates,
+  extractClaimedArtifactPathsFromText,
+  extractExplicitArtifactPaths,
+  extractExplicitArtifactUrls,
+  isActionableClaimedArtifactPath,
+  resolveCommentArtifactPathCandidates,
+  stripArtifactTokenPunctuation,
+} from "./work-products/artifact-claim-paths.js";
 import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.js";
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
@@ -111,6 +120,13 @@ import {
   resolveSessionCompactionPolicy,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
+
+export {
+  extractClaimedArtifactPathsFromText,
+  extractExplicitArtifactPaths,
+  isActionableClaimedArtifactPath,
+  resolveCommentArtifactPathCandidates,
+};
 
 type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
@@ -962,68 +978,12 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function stripArtifactTokenPunctuation(value: string) {
-  return value
-    .trim()
-    .replace(/^[`'"]+/u, "")
-    .replace(/[`'",;.)\\\]]+$/u, "");
-}
-
 function extractIssueDeclaredArtifactTokens(text: string | null | undefined) {
   if (!text?.trim()) return [];
   const matches = text.match(
     /(?:~?\/|\.{1,2}\/|[A-Za-z0-9_{}.-]+[\\/])?[A-Za-z0-9_{}./\\@()-]+\.(?:md|markdown|html?|json|csv|pdf|txt|xlsx?|docx?|png|jpe?g|webp|ya?ml)\b/giu,
   ) ?? [];
   return Array.from(new Set(matches.map(stripArtifactTokenPunctuation).filter(Boolean)));
-}
-
-/**
- * [목적] producer 가 run output / issue description / comment 에 명시적으로 남긴
- * `ARTIFACT: <absolute path>` / `[ARTIFACT]: <absolute path>` 선언만 추출한다.
- * [입력] 가변 인자로 텍스트 소스(run stdout/resultJson 직렬화, issue description, comment body 등).
- * [출력] dedup 된 절대경로(leading `/`) 배열. 절대경로만 허용 → 상대경로 FS scan 차단.
- * [왜 다른 extractor 와 분리되는가] extractIssueDeclaredArtifactTokens / extractClaimedArtifactPaths
- *   는 deliverable 확장자를 가진 "아무 경로"나 매칭하지만, 본 함수는 리터럴 artifact 접두사를
- *   요구한다. downstream step 이 본의 아니게 언급된 경로를 upstream 산출물로 착각 섭취하지 않도록.
- * [수정시 영향] dag-engine createWorkflowStepIssue 의 dependency 보조 evidence 주입 경로와
- *   producer 자동 등록의 claimed artifact 추출 경로에서 호출한다.
- */
-const EXPLICIT_ARTIFACT_DECLARATION_RE = /`?\[?ARTIFACT\]?`?\s*:\s*[`'"]?(\/[^\s`'")\]\n]+)/giu;
-const EXPLICIT_ARTIFACT_URL_DECLARATION_RE = /`?\[?ARTIFACT\]?`?\s*:\s*[`'"]?(https?:\/\/[^\s`'")\]\n]+)/giu;
-
-export function extractExplicitArtifactPaths(...sources: Array<string | null | undefined>): string[] {
-  const paths = new Set<string>();
-  for (const source of sources) {
-    if (!source) continue;
-    for (const match of source.matchAll(EXPLICIT_ARTIFACT_DECLARATION_RE)) {
-      const candidate = stripArtifactTokenPunctuation(match[1]!);
-      if (candidate.startsWith("/")) paths.add(candidate);
-    }
-  }
-  return Array.from(paths);
-}
-
-function normalizeExplicitArtifactUrl(value: string): string | null {
-  const candidate = stripArtifactTokenPunctuation(value);
-  try {
-    const url = new URL(candidate);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function extractExplicitArtifactUrls(...sources: Array<string | null | undefined>): string[] {
-  const urls = new Set<string>();
-  for (const source of sources) {
-    if (!source) continue;
-    for (const match of source.matchAll(EXPLICIT_ARTIFACT_URL_DECLARATION_RE)) {
-      const url = normalizeExplicitArtifactUrl(match[1]!);
-      if (url) urls.add(url);
-    }
-  }
-  return Array.from(urls);
 }
 
 function artifactTokenRegexSource(token: string) {
@@ -1235,6 +1195,11 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   claimedArtifactPaths: string[];
   allowedArtifactRoot?: string | null;
   preferClaimedArtifactPath?: boolean;
+  registrationSource?: {
+    type: "issue_comment_artifact_marker";
+    commentClaimedArtifactPaths: string[];
+    sourceCommentIds: string[];
+  };
 }) {
   // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
   //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
@@ -1285,6 +1250,9 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
   const resolvedArtifactPath = declaredArtifactPath ?? (scored.length > 0 && scored[0].score > 0 ? scored[0].p : null);
   if (!resolvedArtifactPath) return null;
+  const commentRegistrationSource = input.registrationSource?.type === "issue_comment_artifact_marker"
+    ? input.registrationSource
+    : null;
 
   const isPrimary = !(await input.tx
     .select({ id: issueWorkProducts.id })
@@ -1307,12 +1275,21 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
       reviewState: "none",
       isPrimary,
       healthStatus: "unknown",
-      summary: "Auto-registered from a claimed artifact path that resolves to a real file (producer reported the path but did not register a workProduct).",
-      metadata: {
-        path: resolvedArtifactPath,
-        autoRegisteredFrom: "claimed_artifact_file",
-        claimedArtifactPaths: input.claimedArtifactPaths,
-      },
+      summary: commentRegistrationSource
+        ? "Auto-registered from one explicit artifact marker in a same-run issue comment."
+        : "Auto-registered from a claimed artifact path that resolves to a real file (producer reported the path but did not register a workProduct).",
+      metadata: commentRegistrationSource
+        ? {
+            path: resolvedArtifactPath,
+            autoRegisteredFrom: "issue_comment_artifact_marker",
+            commentClaimedArtifactPaths: commentRegistrationSource.commentClaimedArtifactPaths,
+            sourceCommentIds: commentRegistrationSource.sourceCommentIds,
+          }
+        : {
+            path: resolvedArtifactPath,
+            autoRegisteredFrom: "claimed_artifact_file",
+            claimedArtifactPaths: input.claimedArtifactPaths,
+          },
       createdByRunId: input.run.id,
     })
     .returning({ id: issueWorkProducts.id });
@@ -1321,15 +1298,27 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
     companyId: input.issue.companyId,
     actorType: "system",
     actorId: "heartbeat",
-    action: "issue.work_product_auto_registered_from_file",
+    action: commentRegistrationSource
+      ? "issue.work_product_auto_registered_from_comment"
+      : "issue.work_product_auto_registered_from_file",
     entityType: "issue",
     entityId: input.issue.id,
     agentId: input.run.agentId,
     runId: input.run.id,
-    details: {
-      workProductId: created?.id ?? null,
-      path: resolvedArtifactPath,
-    },
+    details: commentRegistrationSource
+      ? {
+          workProductId: created?.id ?? null,
+          path: resolvedArtifactPath,
+          autoRegisteredFrom: "issue_comment_artifact_marker",
+          commentClaimedArtifactPaths: commentRegistrationSource.commentClaimedArtifactPaths,
+          sourceCommentIds: commentRegistrationSource.sourceCommentIds,
+        }
+      : {
+          workProductId: created?.id ?? null,
+          path: resolvedArtifactPath,
+          autoRegisteredFrom: "claimed_artifact_file",
+          claimedArtifactPaths: input.claimedArtifactPaths,
+        },
   });
 
   return created ?? null;
@@ -2528,68 +2517,11 @@ function buildRequestChangesOwnerActionDescription(input: {
   ].join("\n");
 }
 
-const CLAIMED_ARTIFACT_EXTENSION_PATTERN = "md|markdown|json|html|htm|pdf|png|jpg|jpeg|webp|svg|csv|txt|docx|pptx|xlsx";
-const CLAIMED_ARTIFACT_JSON_PATH_RE = new RegExp(
-  `"(?:outputPath|artifactPath|documentPath|filePath|path|url)"\\s*:\\s*"([^"]+\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))"`,
-  "giu",
-);
-const CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE = new RegExp(
-  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"\\\\,}\\]])`,
-  "giu",
-);
-
-function normalizeClaimedArtifactPath(value: string): string {
-  return value
-    .trim()
-    .replace(/^[-*•]\s*/, "")
-    .replace(/^`+|`+$/g, "")
-    .replace(/[),.;:]+$/g, "")
-    .trim();
-}
-
-export function isActionableClaimedArtifactPath(value: string): boolean {
-  if (!value.startsWith("/")) return false;
-  if (value.includes("\\n") || value.includes("\\r") || /[\r\n]/u.test(value)) return false;
-  if (/[<>]/u.test(value)) return false;
-  if (/\{\$date\}|YYYY(?:MM|-MM-DD)?|MMDD/u.test(value)) return false;
-
-  const nonDeliverablePathMarkers = [
-    "/papercompany-runtime/skills/",
-    "/papercompany-operations/scripts/paperclip-addon/agents/",
-    "/instructions/",
-    "/node_modules/",
-    "/.git/",
-    "/data/",
-    "/input/",
-    "/source/",
-    "/sources/",
-  ];
-  if (nonDeliverablePathMarkers.some((marker) => value.includes(marker))) return false;
-  if (/(?:^|\/)(?:AGENTS|CLAUDE|SKILL)\.md$/u.test(value)) return false;
-  if (/(?:^|\/)\.cursorrules$/u.test(value)) return false;
-
-  return true;
-}
-
 export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
   const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
-  if (!text.trim()) return [];
-
-  const paths = new Set<string>();
-  for (const artifactPath of extractExplicitArtifactPaths(text)) {
-    if (isActionableClaimedArtifactPath(artifactPath)) paths.add(artifactPath);
-  }
-  for (const match of text.matchAll(CLAIMED_ARTIFACT_JSON_PATH_RE)) {
-    const value = normalizeClaimedArtifactPath(match[1] ?? "");
-    if (value && isActionableClaimedArtifactPath(value)) paths.add(value);
-  }
-  for (const match of text.matchAll(CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE)) {
-    const value = normalizeClaimedArtifactPath(match[1] ?? "");
-    if (value && isActionableClaimedArtifactPath(value)) paths.add(value);
-  }
-  return [...paths].slice(0, 10);
+  return extractClaimedArtifactPathsFromText(text);
 }
 
 export type HeartbeatFailureClassification = {
@@ -7173,24 +7105,61 @@ export function heartbeatService(db: Db) {
           issue,
           allowedArtifactRoot,
         });
-        const autoRegisteredWorkProduct = hasSatisfiedExistingWorkProductRegistration
-          ? null
-          : existingWorkProducts.length > 0
-            ? null
-            : (await autoRegisterWorkProductFromIssueDocument({
-                tx,
-                issue,
-                run,
-                claimedArtifactPaths,
-                allowedArtifactRoot,
-              }) ?? await autoRegisterWorkProductFromClaimedFile({
-                tx,
-                issue,
-                run,
-                claimedArtifactPaths,
-                allowedArtifactRoot,
-                preferClaimedArtifactPath: stepRunRequiresWorkProduct === true || hasDeliverableOutputContract(issue.description),
-              }));
+        let commentArtifactPathCandidates: Awaited<ReturnType<typeof collectRecentIssueCommentArtifactPathCandidates>> = {
+          paths: [],
+          sourceCommentIds: [],
+          safeForAutoRegistration: false,
+        };
+        let autoRegisteredWorkProduct: Awaited<ReturnType<typeof autoRegisterWorkProductFromClaimedFile>> = null;
+        if (!hasSatisfiedExistingWorkProductRegistration && existingWorkProducts.length === 0) {
+          autoRegisteredWorkProduct = await autoRegisterWorkProductFromIssueDocument({
+            tx,
+            issue,
+            run,
+            claimedArtifactPaths,
+            allowedArtifactRoot,
+          }) ?? await autoRegisterWorkProductFromClaimedFile({
+            tx,
+            issue,
+            run,
+            claimedArtifactPaths,
+            allowedArtifactRoot,
+            preferClaimedArtifactPath: stepRunRequiresWorkProduct === true || hasDeliverableOutputContract(issue.description),
+          });
+        }
+        if (
+          !autoRegisteredWorkProduct &&
+          !hasSatisfiedExistingWorkProductRegistration &&
+          existingWorkProducts.length === 0 &&
+          claimedArtifactPaths.length === 0
+        ) {
+          commentArtifactPathCandidates = await collectRecentIssueCommentArtifactPathCandidates({
+            tx,
+            issueId: issue.id,
+            companyId: issue.companyId,
+            agentId: run.agentId,
+            runStartedAt: run.startedAt instanceof Date ? run.startedAt : null,
+            runCreatedAt: run.createdAt instanceof Date ? run.createdAt : null,
+            runFinishedAt: run.finishedAt instanceof Date ? run.finishedAt : null,
+            runUpdatedAt: run.updatedAt instanceof Date ? run.updatedAt : null,
+            allowedArtifactRoot,
+          });
+          if (commentArtifactPathCandidates.safeForAutoRegistration) {
+            autoRegisteredWorkProduct = await autoRegisterWorkProductFromClaimedFile({
+              tx,
+              issue,
+              run,
+              claimedArtifactPaths: commentArtifactPathCandidates.paths,
+              allowedArtifactRoot,
+              preferClaimedArtifactPath: true,
+              registrationSource: {
+                type: "issue_comment_artifact_marker",
+                commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
+                sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
+              },
+            });
+          }
+        }
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
           claimedArtifactPaths,
@@ -7215,7 +7184,13 @@ export function heartbeatService(db: Db) {
             companyId: issue.companyId,
             issueId: issue.id,
             authorAgentId: run.agentId,
-            body: buildMissingWorkProductRegistrationGateComment({ runId: run.id, claimedArtifactPaths, allowedArtifactRoot }),
+            body: buildMissingWorkProductRegistrationGateComment({
+              runId: run.id,
+              claimedArtifactPaths,
+              commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
+              sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
+              allowedArtifactRoot,
+            }),
           });
           await tx.insert(activityLog).values({
             companyId: issue.companyId,
@@ -7230,7 +7205,10 @@ export function heartbeatService(db: Db) {
               previousStatus: issue.status,
               nextStatus: "blocked",
               reason: "missing_work_product_registration",
-              claimedArtifactPaths,
+              runClaimedArtifactPaths: claimedArtifactPaths,
+              commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
+              sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
+              commentArtifactPathsSafeForAutoRegistration: commentArtifactPathCandidates.safeForAutoRegistration,
             },
           });
           // Agent self-learning wiki (Phase 1): workProduct 미등록 패턴 기록 (non-blocking).

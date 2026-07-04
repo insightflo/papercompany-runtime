@@ -64,11 +64,19 @@ export function buildAssignedIssueArtifactWorkflowLine(): string {
 export function buildMissingWorkProductRegistrationGateComment(input: {
   runId: string;
   claimedArtifactPaths: readonly string[];
+  commentClaimedArtifactPaths?: readonly string[];
+  sourceCommentIds?: readonly string[];
   allowedArtifactRoot?: string | null;
 }): string {
-  const paths = input.claimedArtifactPaths.length > 0
+  const runPaths = input.claimedArtifactPaths.length > 0
     ? input.claimedArtifactPaths.map((artifactPath) => `- ${artifactPath}`).join("\n")
     : "- (artifact path not captured)";
+  const commentPaths = input.commentClaimedArtifactPaths && input.commentClaimedArtifactPaths.length > 0
+    ? input.commentClaimedArtifactPaths.map((artifactPath) => `- ${artifactPath}`).join("\n")
+    : null;
+  const sourceCommentIds = input.sourceCommentIds && input.sourceCommentIds.length > 0
+    ? input.sourceCommentIds.map((commentId) => `- ${commentId}`).join("\n")
+    : null;
   return [
     "## Mission artifact gate: workProduct registration missing",
     `- 실행 runId: \`${input.runId}\``,
@@ -82,7 +90,13 @@ export function buildMissingWorkProductRegistrationGateComment(input: {
     "### Registration procedure",
     ...buildWorkProductRegistrationContractLines(),
     "",
-    "### Claimed artifact paths",
-    paths,
+    "### Run output artifact paths",
+    runPaths,
+    commentPaths ? "" : null,
+    commentPaths ? "### Comment artifact paths" : null,
+    commentPaths,
+    sourceCommentIds ? "" : null,
+    sourceCommentIds ? "### Source comment ids" : null,
+    sourceCommentIds,
   ].filter((line): line is string => line !== null).join("\n");
 }

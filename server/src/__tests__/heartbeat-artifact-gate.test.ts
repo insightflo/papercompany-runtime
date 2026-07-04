@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractClaimedArtifactPathsFromText,
   extractClaimedArtifactPaths,
   extractExplicitArtifactPaths,
   hasSatisfiedWorkProductRegistration,
   isActionableClaimedArtifactPath,
+  resolveCommentArtifactPathCandidates,
   resolveStepRunRequiresWorkProduct,
   isSucceededHeartbeatRunStatus,
   workProductReferencesClaimedArtifact,
@@ -47,6 +49,89 @@ describe("isSucceededHeartbeatRunStatus", () => {
   });
 });
 describe("heartbeat missing workProduct artifact gate", () => {
+  it("extracts artifact file paths from run output text", () => {
+    const artifactPath = "/srv/papercompany/projects/research-company/produced_work/missions/mission-1/runs/run-1/steps/draft/report.md";
+
+    expect(extractClaimedArtifactPathsFromText(`Artifact: ${artifactPath}`)).toEqual([artifactPath]);
+  });
+
+  it("allows auto-registration from a single same-run comment artifact path under the mission output root", () => {
+    const root = "/srv/papercompany/projects/research-company/produced_work/missions/mission-1";
+    const artifactPath = `${root}/runs/run-1/steps/draft/report.md`;
+
+    expect(resolveCommentArtifactPathCandidates({
+      allowedArtifactRoot: root,
+      runStartedAt: new Date("2026-07-04T00:00:00.000Z"),
+      runFinishedAt: new Date("2026-07-04T00:01:00.000Z"),
+      comments: [
+        {
+          id: "comment-1",
+          body: `[ARTIFACT]: ${artifactPath}`,
+          createdAt: new Date("2026-07-04T00:00:10.000Z"),
+        },
+        {
+          id: "comment-2",
+          body: `Older artifact: ${root}/runs/old/steps/draft/report.md`,
+          createdAt: new Date("2026-07-03T23:59:50.000Z"),
+        },
+        {
+          id: "comment-3",
+          body: "Outside artifact: [ARTIFACT]: /tmp/report.md",
+          createdAt: new Date("2026-07-04T00:00:11.000Z"),
+        },
+      ],
+    })).toEqual({
+      paths: [artifactPath],
+      sourceCommentIds: ["comment-1"],
+      safeForAutoRegistration: true,
+    });
+  });
+
+  it("keeps comment-derived registration blocked when the comment has multiple artifact candidates", () => {
+    const root = "/srv/papercompany/projects/research-company/produced_work/missions/mission-1";
+    const reportPath = `${root}/runs/run-1/steps/draft/report.md`;
+    const sourcePath = `${root}/runs/run-1/steps/draft/source-summary.md`;
+
+    expect(resolveCommentArtifactPathCandidates({
+      allowedArtifactRoot: root,
+      runStartedAt: new Date("2026-07-04T00:00:00.000Z"),
+      runFinishedAt: new Date("2026-07-04T00:01:00.000Z"),
+      comments: [
+        {
+          id: "comment-1",
+          body: [`Artifact: ${reportPath}`, `Artifact: ${sourcePath}`].join("\n"),
+          createdAt: new Date("2026-07-04T00:00:10.000Z"),
+        },
+      ],
+    })).toEqual({
+      paths: [reportPath, sourcePath],
+      sourceCommentIds: ["comment-1"],
+      safeForAutoRegistration: false,
+    });
+  });
+
+  it("ignores generic absolute paths in comments without an artifact marker", () => {
+    const root = "/srv/papercompany/projects/research-company/produced_work/missions/mission-1";
+    const artifactPath = `${root}/runs/run-1/steps/draft/report.md`;
+
+    expect(resolveCommentArtifactPathCandidates({
+      allowedArtifactRoot: root,
+      runStartedAt: new Date("2026-07-04T00:00:00.000Z"),
+      runFinishedAt: new Date("2026-07-04T00:01:00.000Z"),
+      comments: [
+        {
+          id: "comment-1",
+          body: `I wrote ${artifactPath}`,
+          createdAt: new Date("2026-07-04T00:00:10.000Z"),
+        },
+      ],
+    })).toEqual({
+      paths: [],
+      sourceCommentIds: [],
+      safeForAutoRegistration: false,
+    });
+  });
+
   it("ignores agent instruction files when extracting claimed artifact paths", () => {
     const instructionPath = "/Users/kwak/.paperclip-worktrees/instances/papercompany-runtime/companies/e7e3e98c-e720-4ddb-8f8b-36dd75805cc3/agents/9d56d53b-7a3a-4046-ba0d-08d18083a0cc/instructions/AGENTS.md";
     const commonInstructionPath = "/Users/kwak/.paperclip-worktrees/instances/papercompany-runtime/companies/e7e3e98c-e720-4ddb-8f8b-36dd75805cc3/instructions/research-company-common.md";
