@@ -425,7 +425,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         "- Add `toolNames` only when a workflow tool is available and directly needed for that unit; do not invent tool names.",
         "- Add `knowledgeBaseIds` only when a listed KB ref is relevant and accessible to the assigned agent.",
         "- Use agent/company skills to choose the best assignee and explain the fit in `reason` or `skillRefs`; skills are not standalone workflow tools.",
-        "- Set `graphWorkProductRequired: true` on ACTION units that must create official deliverables; QA units should normally set `graphWorkProductRequired: false` and validate dependency workProducts.",
+        "- Set `graphWorkProductRequired: true` on ACTION units that must create official deliverables; use `graphWorkProductRequired: false` only for pure condition/input-check/QA units with no official deliverable, and keep the upstream producer unit true when a downstream unit validates, synthesizes, publishes, or approves that deliverable.",
         "- Express execution order with `dependsOn` arrays on each non-root `selectedExecutionUnits` entry; root units must use `dependsOn: []`.",
         "- Use `dependsOn` values that exactly match upstream selected unit `id` or `sourceRef.id` values. The `steps` array is only human-readable phase notes and must not be the only place dependencies appear.",
         "- Do not rely on loose issue creation order, phase text, or assignee wakeups for ordering.",

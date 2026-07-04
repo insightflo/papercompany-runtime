@@ -46,6 +46,7 @@ import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
+import { readRawWorkProductRequirementMarkers } from "./workflow-step-workproduct-markers.js";
 
 /**
  * Workflow step definition.
@@ -318,7 +319,6 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       ...(executionControls ? { executionControls } : {}),
       // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
       conditionalDependencies,
-      // 산출물 생산 step 여부를 항상 strict boolean으로 강제(legacy "true" string도 흡수).
       graphWorkProductRequired: isTruthyBooleanMarker(step.graphWorkProductRequired),
     };
   });
@@ -1243,6 +1243,7 @@ async function createWorkflowStepIssue(input: {
   const workflowStepsById = new Map(
     normalizeWorkflowStepsForExecution(input.definition.stepsJson).map((step) => [step.id, step]),
   );
+  const rawWorkProductRequirementMarkers = readRawWorkProductRequirementMarkers(input.definition.stepsJson);
   const gateProducerStepIdsByGateStepId = collectGateValidatedProducerStepIds(
     input.step.dependencies,
     workflowStepsById,
@@ -1419,10 +1420,9 @@ async function createWorkflowStepIssue(input: {
       gateStepIds.length > 0 ? `  checkedByGates: ${gateStepIds.join(", ")}` : null,
     ].filter((line) => line !== null);
   });
-  // hard-stop 은 workProduct 도, 명시적 ARTIFACT 도 없는 dependency 에만 남긴다.
-  // (메시지 텍스트는 기존 테스트 기대치와 동일하게 유지 — 필터 조건만 완화.)
   const gateStepIds = new Set(gateProducerStepIdsByGateStepId.keys());
   const missingDirectDependencyWorkProductLines = dependencyIssueRows
+    .filter((row) => rawWorkProductRequirementMarkers.get(row.stepId) !== false)
     .filter((row) => !dependencyHasWorkProductOrArtifact(row))
     .filter((row) => !gateStepIds.has(row.stepId))
     .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);

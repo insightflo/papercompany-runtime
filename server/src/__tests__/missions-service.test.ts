@@ -417,7 +417,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]));
     expect(planningIssues).toHaveLength(2);
     const planningIssue = planningIssues.find((issue) => issue.originKind === "mission_main_executor_plan");
-    expect(planningIssue?.description).toContain("Post exactly one structured `### Mission owner plan decision` JSON comment");
+    for (const expected of ["Post exactly one structured `### Mission owner plan decision` JSON comment", "use `graphWorkProductRequired: false` only for pure condition/input-check/QA units", "keep the upstream producer unit true when a downstream unit validates"]) expect(planningIssue?.description).toContain(expected);
     expect(planningIssue?.description).toContain("\"assigneeAgentId\": \"agent-id-from-roster\"");
     expect(planningIssue?.description).toContain(`Main Executor (operator, active) id=${ownerAgentId} [mission owner]`);
     expect(planningIssue?.description).not.toContain(errorAgentId);

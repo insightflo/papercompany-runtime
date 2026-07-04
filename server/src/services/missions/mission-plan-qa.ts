@@ -16,12 +16,20 @@
  *   - critiqueHook 은 async outsider — 순수 함수가 아닌 주입점. 기본 undefined(no-op).
  */
 import { intentSignalsByCategory, type MissionIntent } from "./mission-intent.js";
+import {
+  hasArtifactProducerRole,
+  hasArtifactQaRole,
+  hasStrictPublishRole,
+  reviewArtifactWorkProductMarkers,
+} from "./mission-plan-artifact-contract.js";
+import { missionPlanUnitText as unitText } from "./mission-plan-unit-text.js";
 
 export type PlanQaDiagnosticCode =
   | "missing_publish_unit"
   | "missing_publish_readback_qa"
   | "missing_artifact_qa_before_delivery"
   | "invalid_artifact_qa_delivery_order"
+  | "invalid_artifact_workproduct_marker"
   | "missing_audience_split"
   | "missing_scenario_taxonomy";
 
@@ -46,28 +54,6 @@ export interface PlanQaUnitRole {
  * selectedExecutionUnits entry 는 Record<string, unknown> 자유형이므로, 스키마 변형에 robust 하게
  * 등장하는 모든 문자열을 모아 검사한다.
  */
-function unitText(unit: Record<string, unknown>): string {
-  const parts: string[] = [];
-  const pushIfString = (value: unknown): void => {
-    if (typeof value === "string" && value.length > 0) parts.push(value);
-  };
-  pushIfString(unit.title);
-  pushIfString(unit.name);
-  pushIfString(unit.kind);
-  pushIfString(unit.reason);
-  pushIfString(unit.description);
-  if (unit.sourceRef && typeof unit.sourceRef === "object") {
-    const sourceRef = unit.sourceRef as Record<string, unknown>;
-    pushIfString(sourceRef.type);
-    pushIfString(sourceRef.kind);
-  }
-  pushIfString(unit.toolName);
-  if (Array.isArray(unit.toolNames)) {
-    for (const toolName of unit.toolNames) pushIfString(toolName);
-  }
-  return parts.join("\n");
-}
-
 /** unit 역할 판정용 신호. [정규식, 역할 키]. mission-intent 의 publish/scenario 토큰과 의미 정렬. */
 const UNIT_ROLE_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, role: keyof PlanQaUnitRole]> = [
   // publish/stage/deploy 계열 unit
@@ -158,40 +144,6 @@ function unitDependsOn(dependencyIndex: number[][], fromIndex: number, targetInd
   return false;
 }
 
-const STRICT_PUBLISH_UNIT_RE =
-  /\bmanual[-_\s]?onboarding\b|\bpublisher\b|\bcloudflare\b|\bpages\b|\bR2\b|\bpublish(?:ed|ing)?\b|\bdeploy(?:ed|ing|ment)?\b|\bupload(?:ed|ing)?\b|\bhost(?:ed|ing)?\b|게시|배포|업로드|출간|출판|올리(?!픽)|사이트\s*(?:게시|배포|업로드)|웹사이트\s*(?:게시|배포|업로드)/iu;
-const ARTIFACT_PRODUCER_DIRECT_RE =
-  /\breport[-_\s]?for[-_\s]?beginners\b|\bhtml[-_\s]?for[-_\s]?beginners\b|\bsynth(?:esis|esize)?\b|합성|종합/iu;
-const ARTIFACT_NOUN_RE =
-  /\bwork[-_\s]?product\b|\bartifact\b|\bdeliverable\b|\boutput\b|\basset\b|\btemplate\b|\breport\b|\bhtml\b|\bpdf\b|\bdeck\b|\bpptx\b|\bmarkdown\b|\bjson\b|\bcsv\b|\bdashboard\b|\bpage\b|\bfile\b|\bdocument\b|산출물|결과물|템플릿|자료|초안|원고|보고서|리포트|문서|페이지|대시보드|이미지|파일/iu;
-const ARTIFACT_PRODUCTION_VERB_RE =
-  /\bwrite\b|\bbuild\b|\bcreate\b|\bgenerate\b|\brender\b|\bcompile\b|\bpackage\b|\bdraft\b|\bproduce\b|작성|생성|제작|빌드|렌더|초안|만들|꾸리/iu;
-const QA_UNIT_RE =
-  /^\s*\[qa\]/iu;
-const QA_TEXT_RE =
-  /\bqa\b|\bverif(?:y|ied|ication)\b|\bvalid(?:ate|ated|ation)\b|\breview\b|검증|리뷰|확인/u;
-const ARTIFACT_QA_TEXT_RE =
-  /\bqa\b|\bverif(?:y|ied|ication)\b|\bvalid(?:ate|ated|ation)\b|\breview\b|\baudit\b|\bquality\b|검증|리뷰|검수|품질/u;
-const ARTIFACT_QA_RE =
-  /\bwork[-_\s]?product\b|\bartifact\b|\bdeliverable\b|\boutput\b|\basset\b|\btemplate\b|\bclaim\b|\bevidence\b|\bsource\b|\bcitation\b|\brubric\b|\bsuccess\s*criteria\b|\bacceptance\b|\bquality\b|\bcoverage\b|\bcontent\b|\bformat\b|\bfile\b|\bpreview\b|\brender\b|산출물|결과물|템플릿|자료|본문|내용|주장|근거|출처|품질|성공기준|수용기준|커버리지|형식|파일|미리보기|렌더|동작|검수/iu;
-
-function hasStrictPublishRole(unit: Record<string, unknown>): boolean {
-  return STRICT_PUBLISH_UNIT_RE.test(unitText(unit));
-}
-
-function hasArtifactProducerRole(unit: Record<string, unknown>): boolean {
-  const text = unitText(unit);
-  const producesArtifact =
-    ARTIFACT_PRODUCER_DIRECT_RE.test(text) ||
-    (ARTIFACT_NOUN_RE.test(text) && ARTIFACT_PRODUCTION_VERB_RE.test(text));
-  return producesArtifact && !QA_UNIT_RE.test(text) && !QA_TEXT_RE.test(text) && !hasStrictPublishRole(unit);
-}
-
-function hasArtifactQaRole(unit: Record<string, unknown>): boolean {
-  const text = unitText(unit);
-  return (QA_UNIT_RE.test(text) || ARTIFACT_QA_TEXT_RE.test(text)) && ARTIFACT_QA_RE.test(text);
-}
-
 function reviewArtifactQaDeliveryOrder(input: {
   intent: MissionIntent;
   selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>;
@@ -261,11 +213,13 @@ export function reviewPlanAgainstIntent(input: {
   successCriteria?: unknown[];
 }): PlanQaDiagnostic[] {
   const { intent, selectedExecutionUnits, successCriteria } = input;
+  const diagnostics: PlanQaDiagnostic[] = [
+    ...reviewArtifactWorkProductMarkers(selectedExecutionUnits),
+  ];
   if (!intent.publish && !intent.audienceSplit && !intent.scenario) {
-    return []; // intent 없는 legacy/순수 research mission → 회귀 없이 pass
+    return diagnostics;
   }
 
-  const diagnostics: PlanQaDiagnostic[] = [];
   const roles = selectedExecutionUnits.map(extractUnitRoles);
   const hasRole = (key: keyof PlanQaUnitRole): boolean => roles.some((role) => role[key]);
   const scText = successCriteriaText(successCriteria);
