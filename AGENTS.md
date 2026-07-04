@@ -87,6 +87,9 @@ Before making code changes, inspect the current branch, `git status --short`, an
 7. Do not modify execution-control code without impact proof.
 For workflow, heartbeat, queue, issue status, mission planning, and PLAN-QA paths, identify the execution source of truth before editing. Queue/run semantics must be preserved: status fields are display/result state, not proof that execution was requested or performed. Check callers, tests, and a live or DB-facing proof surface before claiming the change is safe.
 
+8. Keep implementation files under 300 lines.
+During development, do not let a single source, test, or support file grow past 300 lines. Split cohesive helpers, components, fixtures, or focused tests into separate files before crossing the limit. If a legacy file already exceeds 300 lines, do not make it larger unless the change is a targeted reduction or an explicitly approved exception.
+
 ## 6. Database Change Workflow
 
 When changing data model:
