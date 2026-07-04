@@ -12,7 +12,6 @@ import { eq } from "drizzle-orm";
 import { channelConfigs, heartbeatRuns } from "@paperclipai/db";
 import { getChannelRegistry } from "../index.js";
 import { logger } from "../../middleware/logger.js";
-import { formatSuccess } from "./formatter.js";
 import { summarizeHeartbeatRunResultJson } from "../../services/heartbeat-run-summary.js";
 
 /**
@@ -135,19 +134,18 @@ async function formatTelegramConversationReply(
  * Format a live event as a human-readable Telegram notification.
  * Returns null if the event type should not be notified.
  */
-function formatEventNotification(event: { type: string; payload?: Record<string, unknown> }): string | null {
+export function formatEventNotification(event: { type: string; payload?: Record<string, unknown> }): string | null {
   const { type, payload } = event;
 
   switch (type) {
     case "heartbeat.run.status": {
-      const status = payload?.status as string | undefined;
-      const runId = payload?.runId as string | undefined;
+      const status = readString(payload?.status);
+      const runId = readString(payload?.runId);
       if (!status || !runId) return null;
-      // Only notify on terminal states — skip intermediate noise (queued/running)
-      if (!["succeeded", "failed", "timed_out", "cancelled"].includes(status)) return null;
+      if (!["failed", "timed_out", "cancelled"].includes(status)) return null;
       const emoji = getRunStatusEmoji(status);
       const runLabel = runId.slice(0, 8);
-      return formatSuccess(`${emoji} Run *${runLabel}* — ${formatStatus(status)}`);
+      return formatError(`${emoji} Run *${runLabel}* — ${formatStatus(status)}`);
     }
 
     // heartbeat.run.queued — suppressed: intermediate noise
@@ -156,25 +154,18 @@ function formatEventNotification(event: { type: string; payload?: Record<string,
     // activity.logged — suppressed: intermediate noise
 
     case "plugin.ui.updated": {
-      const action = payload?.action as string | undefined;
-      const pluginId = payload?.pluginId as string | undefined;
-      if (!action) return null;
-      const pluginLabel = pluginId?.slice(0, 8) ?? "plugin";
-      return `Plugin *${pluginLabel}*: ${action}`;
+      return null;
     }
 
     case "plugin.worker.crashed": {
-      const pluginKey = payload?.pluginKey as string | undefined;
-      const workerId = payload?.workerId as string | undefined;
+      const pluginKey = readString(payload?.pluginKey);
+      const workerId = readString(payload?.workerId);
       const msg = `Plugin worker crashed${pluginKey ? `: ${pluginKey}` : ""}${workerId ? ` (${workerId.slice(0, 8)})` : ""}`;
       return formatError(msg);
     }
 
     case "plugin.worker.restarted": {
-      const pluginKey = payload?.pluginKey as string | undefined;
-      const workerId = payload?.workerId as string | undefined;
-      const msg = `Plugin worker restarted${pluginKey ? `: ${pluginKey}` : ""}${workerId ? ` (${workerId.slice(0, 8)})` : ""}`;
-      return formatSuccess(msg);
+      return null;
     }
 
     default:
