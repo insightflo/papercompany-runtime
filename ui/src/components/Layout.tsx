@@ -12,6 +12,7 @@ import { ToastViewport } from "./ToastViewport";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
 import { DevRestartBanner } from "./DevRestartBanner";
+import { AppVersionBadge } from "./AppVersionBadge";
 import { useDialog } from "../context/DialogContext";
 import { usePanel } from "../context/PanelContext";
 import { useCompany } from "../context/CompanyContext";
@@ -30,7 +31,6 @@ import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { NotFoundPage } from "../pages/NotFound";
 import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 const INSTANCE_SETTINGS_MEMORY_KEY = "paperclip.lastInstanceSettingsPath";
 const HERMES_PANEL_MEMORY_KEY = "paperclip.hermesPanelOpen";
@@ -361,14 +361,7 @@ export function Layout() {
                   <BookOpen className="h-4 w-4 shrink-0" />
                   <span className="truncate">Documentation</span>
                 </a>
-                {health?.version && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="px-2 text-xs text-muted-foreground shrink-0 cursor-default">v</span>
-                    </TooltipTrigger>
-                    <TooltipContent>v{health.version}</TooltipContent>
-                  </Tooltip>
-                )}
+                <AppVersionBadge version={health?.version} />
                 <Button variant="ghost" size="icon-sm" className="text-muted-foreground shrink-0" asChild>
                   <Link
                     to={instanceSettingsTarget}
@@ -422,14 +415,7 @@ export function Layout() {
                     <BookOpen className="h-4 w-4 shrink-0" />
                     <span className="truncate">Documentation</span>
                   </a>
-                  {health?.version && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="px-2 text-xs text-muted-foreground shrink-0 cursor-default">v</span>
-                      </TooltipTrigger>
-                      <TooltipContent>v{health.version}</TooltipContent>
-                    </Tooltip>
-                  )}
+                  <AppVersionBadge version={health?.version} />
                   <Button variant="ghost" size="icon-sm" className="text-muted-foreground shrink-0" asChild>
                     <Link
                       to={instanceSettingsTarget}
