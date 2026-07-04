@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractMissionIntent } from "../services/missions/mission-intent.js";
+import { hasDeliveryActionRole } from "../services/missions/mission-plan-artifact-contract.js";
 import { reviewPlanAgainstIntent } from "../services/missions/mission-plan-qa.js";
 
 function unit(overrides: Record<string, unknown>): Record<string, unknown> {
@@ -37,11 +38,43 @@ describe("mission plan artifact workProduct contract", () => {
         unit({ id: "check", title: "Confirm input scope and blocker policy", graphWorkProductRequired: false, sourceRef: { type: "mission_plan_unit", id: "check" } }),
         unit({ id: "draft", title: "Write guide artifact", graphWorkProductRequired: true, dependsOn: ["check"], sourceRef: { type: "mission_plan_unit", id: "draft" } }),
         unit({ id: "qa", title: "[QA] Validate artifact content", graphWorkProductRequired: false, dependsOn: ["draft"], sourceRef: { type: "mission_plan_unit", id: "qa" } }),
-        unit({ id: "publish", title: "Publish guide to site", graphWorkProductRequired: true, dependsOn: ["qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
+        unit({ id: "publish", title: "Publish guide to site", graphWorkProductRequired: true, toolNames: ["manual-onboarding-publish"], dependsOn: ["qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
         unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
       ],
     });
     expect(diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("invalid_artifact_workproduct_marker");
     expect(diagnostics.filter((diagnostic) => diagnostic.severity === "invalid")).toEqual([]);
+  });
+
+  it("does not treat destination contract checks as delivery actions", () => {
+    const diagnostics = reviewPlanAgainstIntent({
+      intent: extractMissionIntent("Beginner guide", "Research the topic and publish the guide to the site"),
+      selectedExecutionUnits: [
+        unit({ id: "check", title: "Confirm manual-onboarding publish contract", graphWorkProductRequired: true, sourceRef: { type: "mission_plan_unit", id: "check" } }),
+        unit({ id: "draft", title: "Write guide artifact", graphWorkProductRequired: true, dependsOn: ["check"], sourceRef: { type: "mission_plan_unit", id: "draft" } }),
+        unit({ id: "qa", title: "[QA] Validate artifact content", graphWorkProductRequired: false, dependsOn: ["draft"], sourceRef: { type: "mission_plan_unit", id: "qa" } }),
+        unit({ id: "publish", title: "Publish guide to site", graphWorkProductRequired: true, toolNames: ["manual-onboarding-publish"], dependsOn: ["qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
+        unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
+      ],
+    });
+    expect(diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("invalid_artifact_qa_delivery_order");
+    expect(diagnostics.filter((diagnostic) => diagnostic.severity === "invalid")).toEqual([]);
+  });
+
+  it("requires a delivery tool instead of publish wording alone", () => {
+    const diagnostics = reviewPlanAgainstIntent({
+      intent: extractMissionIntent("Beginner guide", "Research the topic and publish the guide to the site"),
+      selectedExecutionUnits: [
+        unit({ id: "draft", title: "Write guide artifact", graphWorkProductRequired: true, sourceRef: { type: "mission_plan_unit", id: "draft" } }),
+        unit({ id: "qa", title: "[QA] Validate artifact content", graphWorkProductRequired: false, dependsOn: ["draft"], sourceRef: { type: "mission_plan_unit", id: "qa" } }),
+        unit({ id: "publish", title: "Publish guide to site", graphWorkProductRequired: true, dependsOn: ["qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
+        unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
+      ],
+    });
+    expect(diagnostics.map((diagnostic) => diagnostic.code)).toContain("missing_publish_unit");
+  });
+
+  it("recognizes publisher tool names as delivery actions", () => {
+    expect(hasDeliveryActionRole(unit({ toolNames: ["manual-onboarding-publisher"] }))).toBe(true);
   });
 });

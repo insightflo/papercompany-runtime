@@ -5,23 +5,24 @@
  * [설계 원칙]
  *   - enforcement 는 이 module, discovery 는 mission-owner-planning-context, runtime recovery 는 supervision.
  *     artifact QA 를 supervision 에 넣지 않는다(reactive가 되므로).
- *   - publish 계열 위반은 severity:"invalid"(materialization 차단). audience/scenario 위반은
+ *   - delivery 계열 위반은 severity:"invalid"(materialization 차단). audience/scenario 위반은
  *     "needs_clarification"(MVP에선 log/attach, full 에서 Hermes Ops 가 사용자 질문으로 전환).
  *   - diagnostic 는 operator 가 이해 가능하게: code + "어떤 user intent 가 어떤 unit 을 필요로 하는지" message.
  * [외부 연결] consumer: mission-owner-plan-decisions(recordLatestAuthorizedMissionOwnerPlanDecision).
  *   입력: mission-intent(extractMissionIntent) + draft.refs.selectedExecutionUnits + successCriteria.
  * [수정시 주의]
- *   - extractUnitRoles 의 키워드 테이블(UNIT_ROLE_SIGNALS) 과 mission-intent 의 SIGNALS 를 함께 유지.
+ *   - delivery 여부는 tool/action 이름으로만 판정한다. 제목/설명 텍스트는 readback/audience/scenario 보조 신호다.
  *   - 새 checklist 규칙 추가 시 reviewPlanAgainstIntent 에 추가하고 PlanQaDiagnosticCode/테스트 확장.
  *   - critiqueHook 은 async outsider — 순수 함수가 아닌 주입점. 기본 undefined(no-op).
  */
 import { intentSignalsByCategory, type MissionIntent } from "./mission-intent.js";
 import {
+  hasDeliveryActionRole,
   hasArtifactProducerRole,
   hasArtifactQaRole,
-  hasStrictPublishRole,
   reviewArtifactWorkProductMarkers,
 } from "./mission-plan-artifact-contract.js";
+import { buildDependencyIndex, unitDependsOn } from "./mission-plan-unit-dependencies.js";
 import { missionPlanUnitText as unitText } from "./mission-plan-unit-text.js";
 
 export type PlanQaDiagnosticCode =
@@ -41,7 +42,6 @@ export interface PlanQaDiagnostic {
   message: string;
 }
 
-/** 단일 실행 unit 이 어떤 역할(발행/검증/대상분기/시나리오)을 담당하는지 판정 결과. */
 export interface PlanQaUnitRole {
   publish: boolean;
   readbackQa: boolean;
@@ -54,11 +54,7 @@ export interface PlanQaUnitRole {
  * selectedExecutionUnits entry 는 Record<string, unknown> 자유형이므로, 스키마 변형에 robust 하게
  * 등장하는 모든 문자열을 모아 검사한다.
  */
-/** unit 역할 판정용 신호. [정규식, 역할 키]. mission-intent 의 publish/scenario 토큰과 의미 정렬. */
 const UNIT_ROLE_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, role: keyof PlanQaUnitRole]> = [
-  // publish/stage/deploy 계열 unit
-  [/\bpublish(?:ed|ing)?\b|\bdeploy(?:ed|ing|ment)?\b|\bstage(?:d|ing)?\b|\bupload(?:ed|ing)?\b|\bship(?:ped|ping)?\b|\brelease(?:d)?\b|\bhost(?:ed|ing)?\b/iu, "publish"],
-  [/\bhtml\b|\blanding\b|\bwebpage?\b|\bwebsite\b|cloudflare|publisher|배포|게시|업로드|출간|올리|사이트|웹사이트|호스팅/u, "publish"],
   // readback / QA 검증 unit. [QA] title prefix 도 포함.
   [/^\s*\[qa\]/iu, "readbackQa"],
   [/\bread[-\s]?back\b|\bverif(y|ied|ication)\b|\bvalid(?:ation|ate|ated)?\b|\bqa\b|\bcheck(?:ed|ing)?\b|검증|리뷰|확인\s*리포트|회독/u, "readbackQa"],
@@ -72,7 +68,7 @@ const UNIT_ROLE_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, role: keyof Pla
 /** [목적] 단일 unit 의 역할 판정. [출력] 4 역할 불리언. */
 export function extractUnitRoles(unit: Record<string, unknown>): PlanQaUnitRole {
   const text = unitText(unit);
-  const role: PlanQaUnitRole = { publish: false, readbackQa: false, audienceSplit: false, scenario: false };
+  const role: PlanQaUnitRole = { publish: hasDeliveryActionRole(unit), readbackQa: false, audienceSplit: false, scenario: false };
   for (const [regexp, key] of UNIT_ROLE_SIGNALS) {
     if (regexp.test(text)) role[key] = true;
   }
@@ -86,75 +82,17 @@ function successCriteriaText(successCriteria: unknown[] | undefined): string {
     .join("\n");
 }
 
-function readStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-}
-
-function readUnitIdRefs(unit: Record<string, unknown>): string[] {
-  const ids: string[] = [];
-  for (const key of ["id", "unitId", "executionUnitId", "selectedExecutionUnitId"]) {
-    const value = unit[key];
-    if (typeof value === "string" && value.trim().length > 0) ids.push(value.trim());
-  }
-  if (unit.sourceRef && typeof unit.sourceRef === "object" && !Array.isArray(unit.sourceRef)) {
-    const sourceRef = unit.sourceRef as Record<string, unknown>;
-    for (const key of ["id", "issueId", "stepId", "unitId"]) {
-      const value = sourceRef[key];
-      if (typeof value === "string" && value.trim().length > 0) ids.push(value.trim());
-    }
-  }
-  return Array.from(new Set(ids));
-}
-
-function readUnitDependencyRefs(unit: Record<string, unknown>): string[] {
-  return Array.from(new Set([
-    ...readStringArray(unit.dependsOn),
-    ...readStringArray(unit.dependencies),
-    ...readStringArray(unit.after),
-  ]));
-}
-
-function buildDependencyIndex(selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>): number[][] {
-  const idToIndex = new Map<string, number>();
-  selectedExecutionUnits.forEach((unit, index) => {
-    for (const id of readUnitIdRefs(unit)) {
-      idToIndex.set(id, index);
-    }
-  });
-
-  return selectedExecutionUnits.map((unit, index) => {
-    const dependencyIndexes = readUnitDependencyRefs(unit)
-      .map((ref) => idToIndex.get(ref))
-      .filter((target): target is number => target !== undefined && target !== index);
-    return Array.from(new Set(dependencyIndexes));
-  });
-}
-
-function unitDependsOn(dependencyIndex: number[][], fromIndex: number, targetIndex: number): boolean {
-  const visited = new Set<number>();
-  const stack = [...(dependencyIndex[fromIndex] ?? [])];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    if (current === targetIndex) return true;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    stack.push(...(dependencyIndex[current] ?? []));
-  }
-  return false;
-}
-
 function reviewArtifactQaDeliveryOrder(input: {
   intent: MissionIntent;
   selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>;
 }): PlanQaDiagnostic[] {
   if (!input.intent.publish) return [];
 
-  const publishIndexes = input.selectedExecutionUnits
+  const deliveryIndexes = input.selectedExecutionUnits
     .map((unit, index) => ({ unit, index }))
-    .filter(({ unit }) => hasStrictPublishRole(unit))
+    .filter(({ unit }) => hasDeliveryActionRole(unit))
     .map(({ index }) => index);
-  if (publishIndexes.length === 0) return [];
+  if (deliveryIndexes.length === 0) return [];
 
   const artifactProducerIndexes = input.selectedExecutionUnits
     .map((unit, index) => ({ unit, index }))
@@ -176,14 +114,14 @@ function reviewArtifactQaDeliveryOrder(input: {
   }
 
   const dependencyIndex = buildDependencyIndex(input.selectedExecutionUnits);
-  const ordered = publishIndexes.every((publishIndex) =>
+  const ordered = deliveryIndexes.every((deliveryIndex) =>
     artifactQaIndexes.some((qaIndex) =>
-      unitDependsOn(dependencyIndex, publishIndex, qaIndex) &&
+      unitDependsOn(dependencyIndex, deliveryIndex, qaIndex) &&
       artifactProducerIndexes.some((producerIndex) => unitDependsOn(dependencyIndex, qaIndex, producerIndex)),
     ),
   );
   const reversed = artifactQaIndexes.some((qaIndex) =>
-    publishIndexes.some((publishIndex) => unitDependsOn(dependencyIndex, qaIndex, publishIndex))) ||
+    deliveryIndexes.some((deliveryIndex) => unitDependsOn(dependencyIndex, qaIndex, deliveryIndex))) ||
     artifactProducerIndexes.some((producerIndex) =>
       artifactQaIndexes.some((qaIndex) => unitDependsOn(dependencyIndex, producerIndex, qaIndex)));
 

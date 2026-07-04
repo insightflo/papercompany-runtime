@@ -1,7 +1,29 @@
 import { missionPlanUnitText } from "./mission-plan-unit-text.js";
 
-const STRICT_PUBLISH_UNIT_RE =
-  /\bmanual[-_\s]?onboarding\b|\bpublisher\b|\bcloudflare\b|\bpages\b|\bR2\b|\bpublish(?:ed|ing)?\b|\bdeploy(?:ed|ing|ment)?\b|\bupload(?:ed|ing)?\b|\bhost(?:ed|ing)?\b|게시|배포|업로드|출간|출판|올리(?!픽)|사이트\s*(?:게시|배포|업로드)|웹사이트\s*(?:게시|배포|업로드)/iu;
+const DELIVERY_TOOL_ACTION_TOKENS = new Set([
+  "deliver",
+  "delivery",
+  "deploy",
+  "post",
+  "publish",
+  "publisher",
+  "register",
+  "release",
+  "send",
+  "submit",
+  "upload",
+]);
+const DELIVERY_TOOL_TARGET_TOKENS = new Set([
+  "github",
+  "gitlab",
+  "linear",
+  "notion",
+  "jira",
+  "cms",
+  "crm",
+  "catalog",
+]);
+const DELIVERY_TOOL_TARGET_ACTION_TOKENS = new Set(["comment", "issue", "pr", "pullrequest", "record", "entry"]);
 const ARTIFACT_PRODUCER_DIRECT_RE =
   /\breport[-_\s]?for[-_\s]?beginners\b|\bhtml[-_\s]?for[-_\s]?beginners\b|\bsynth(?:esis|esize)?\b|합성|종합/iu;
 const ARTIFACT_NOUN_RE =
@@ -17,8 +39,35 @@ const ARTIFACT_QA_TEXT_RE =
 const ARTIFACT_QA_RE =
   /\bwork[-_\s]?product\b|\bartifact\b|\bdeliverable\b|\boutput\b|\basset\b|\btemplate\b|\bclaim\b|\bevidence\b|\bsource\b|\bcitation\b|\brubric\b|\bsuccess\s*criteria\b|\bacceptance\b|\bquality\b|\bcoverage\b|\bcontent\b|\bformat\b|\bfile\b|\bpreview\b|\brender\b|산출물|결과물|템플릿|자료|본문|내용|주장|근거|출처|품질|성공기준|수용기준|커버리지|형식|파일|미리보기|렌더|동작|검수/iu;
 
-export function hasStrictPublishRole(unit: Record<string, unknown>): boolean {
-  return STRICT_PUBLISH_UNIT_RE.test(missionPlanUnitText(unit));
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
+
+function readUnitToolNames(unit: Record<string, unknown>): string[] {
+  return Array.from(new Set([
+    ...readStringArray(unit.toolNames),
+    ...readStringArray(unit.tools),
+    typeof unit.toolName === "string" && unit.toolName.trim().length > 0 ? unit.toolName.trim() : null,
+  ].filter((toolName): toolName is string => Boolean(toolName))));
+}
+
+function toolNameTokens(toolName: string): string[] {
+  return toolName
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((token) => token.length > 0);
+}
+
+function isDeliveryToolName(toolName: string): boolean {
+  const tokens = toolNameTokens(toolName);
+  if (tokens.some((token) => DELIVERY_TOOL_ACTION_TOKENS.has(token))) return true;
+  const hasTarget = tokens.some((token) => DELIVERY_TOOL_TARGET_TOKENS.has(token));
+  return hasTarget && tokens.some((token) => DELIVERY_TOOL_TARGET_ACTION_TOKENS.has(token));
+}
+
+export function hasDeliveryActionRole(unit: Record<string, unknown>): boolean {
+  return readUnitToolNames(unit).some(isDeliveryToolName);
 }
 
 export function hasArtifactProducerRole(unit: Record<string, unknown>): boolean {
@@ -26,7 +75,7 @@ export function hasArtifactProducerRole(unit: Record<string, unknown>): boolean 
   const producesArtifact =
     ARTIFACT_PRODUCER_DIRECT_RE.test(text) ||
     (ARTIFACT_NOUN_RE.test(text) && ARTIFACT_PRODUCTION_VERB_RE.test(text));
-  return producesArtifact && !QA_UNIT_RE.test(text) && !QA_TEXT_RE.test(text) && !hasStrictPublishRole(unit);
+  return producesArtifact && !QA_UNIT_RE.test(text) && !QA_TEXT_RE.test(text) && !hasDeliveryActionRole(unit);
 }
 
 export function hasArtifactQaRole(unit: Record<string, unknown>): boolean {
@@ -68,11 +117,11 @@ export function reviewArtifactWorkProductMarkers(
   selectedExecutionUnits.forEach((unit, index) => {
     if (readUnitWorkProductRequired(unit) !== false) return;
     if (isNonProducingGateOrQaRole(unit)) return;
-    if (!hasStrictPublishRole(unit) && !hasArtifactProducerRole(unit)) return;
+    if (!hasDeliveryActionRole(unit) && !hasArtifactProducerRole(unit)) return;
     diagnostics.push({
       code: "invalid_artifact_workproduct_marker",
       severity: "invalid",
-      message: `산출물 작성/게시 unit "${unitDiagnosticLabel(unit, index)}" 이 graphWorkProductRequired:false 로 표시되어 있습니다. 공식 산출물을 만드는 ACTION 은 graphWorkProductRequired:true 로 두고, 순수 조건 확인/QA unit 만 false 로 두세요.`,
+      message: `산출물 작성/delivery unit "${unitDiagnosticLabel(unit, index)}" 이 graphWorkProductRequired:false 로 표시되어 있습니다. 공식 산출물을 만들거나 전달하는 ACTION 은 graphWorkProductRequired:true 로 두고, 순수 조건 확인/QA unit 만 false 로 두세요.`,
     });
   });
   return diagnostics;

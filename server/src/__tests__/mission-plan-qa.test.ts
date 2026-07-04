@@ -70,7 +70,6 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
   const intent = extractMissionIntent(REAL_BRIEF_TITLE, REAL_BRIEF_DESC);
 
   it("실제 brief: research→synthesis→QA 만 있고 publish/readback unit 이 없으면 missing_publish_unit(invalid) reject", () => {
-    // 사용자가 보고한 버그 케이스: publish intent 인데 publish unit 이 빠진 plan.
     const diag = reviewPlanAgainstIntent({
       intent,
       selectedExecutionUnits: [
@@ -84,14 +83,14 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
     expect(diag.find((d) => d.code === "missing_publish_unit")?.severity).toBe("invalid");
   });
 
-  it("publish unit + QA/readback unit 이 있으면 invalid 없이 통과(needs_clarification 만 허용)", () => {
+  it("delivery tool unit + QA/readback unit 이 있으면 invalid 없이 통과(needs_clarification 만 허용)", () => {
     const diag = reviewPlanAgainstIntent({
       intent,
       selectedExecutionUnits: [
         unit({ id: "u-research", title: "전달법 리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
         unit({ id: "u-synth", title: "산출물 초안 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
         unit({ id: "u-artifact-qa", title: "[QA] 산출물 내용/출처/형식 검증", dependsOn: ["u-synth"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
-        unit({ id: "u-publish", title: "site에 산출물 게시/배포", dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-publish", title: "site에 산출물 게시/배포", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
         unit({ id: "u-qa", title: "[QA] 게시물 readback 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
       ],
     });
@@ -104,7 +103,7 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
       intent,
       selectedExecutionUnits: [
         unit({ id: "u-research", title: "리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-publish", title: "사이트에 게시", sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-publish", title: "사이트에 게시", toolNames: ["manual-onboarding-publish"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
       ],
     });
     const codes = diag.map((d) => d.code);
@@ -118,7 +117,7 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
       selectedExecutionUnits: [
         unit({ id: "u-research", title: "필요 조건 확인 및 템플릿 조사", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
         unit({ id: "u-build", title: "템플릿 기반 대시보드 파일 생성", dependsOn: ["u-research"], sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
-        unit({ id: "u-publish", title: "Cloudflare Pages에 산출물 업로드", dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-publish", title: "Cloudflare Pages에 산출물 업로드", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
         unit({ id: "u-readback", title: "[QA] 게시물 readback 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-readback" } }),
       ],
     });
@@ -132,7 +131,7 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
       selectedExecutionUnits: [
         unit({ id: "u-research", title: "필요 조건 확인 및 자료 조사", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
         unit({ id: "u-build", title: "PPTX 덱 파일 제작", dependsOn: ["u-research"], sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
-        unit({ id: "u-publish", title: "site에 PPTX 업로드/게시", dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        unit({ id: "u-publish", title: "site에 PPTX 업로드/게시", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
         unit({ id: "u-artifact-qa", title: "[QA] 산출물 파일 품질 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
       ],
     });
@@ -198,11 +197,12 @@ describe("reviewPlanAgainstIntent — legacy 보존", () => {
 });
 
 describe("extractUnitRoles", () => {
-  it("[QA] prefix / readback / publish 키워드를 역할로 잡는다", () => {
+  it("[QA] prefix / readback / delivery tool 을 역할로 잡는다", () => {
     expect(extractUnitRoles(unit({ title: "[QA] 게시물 검증" })).readbackQa).toBe(true);
     expect(extractUnitRoles(unit({ title: "게시물 readback 확인" })).readbackQa).toBe(true);
-    expect(extractUnitRoles(unit({ title: "site에 HTML 게시" })).publish).toBe(true);
-    expect(extractUnitRoles(unit({ title: "배포 파이프라인 실행" })).publish).toBe(true);
+    expect(extractUnitRoles(unit({ title: "site에 HTML 게시" })).publish).toBe(false);
+    expect(extractUnitRoles(unit({ title: "site에 HTML 게시", toolNames: ["manual-onboarding-publish"] })).publish).toBe(true);
+    expect(extractUnitRoles(unit({ title: "배포 파이프라인 실행", toolNames: ["deploy-a1"] })).publish).toBe(true);
   });
 });
 
