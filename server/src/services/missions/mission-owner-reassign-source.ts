@@ -22,7 +22,11 @@ import {
   type MissionOwnerSupervisionAppliedAction,
 } from "./supervision-types.js";
 
-const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/iu;
+const UUID_SOURCE = String.raw`[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`;
+const UUID_PATTERN = new RegExp(String.raw`\b${UUID_SOURCE}\b`, "giu");
+const TARGET_AGENT_PATTERN = new RegExp(String.raw`(?:^|\n)\s*(?:target\s+agent|target\s+assignee|assignee\s+agent|new\s+assignee)\s*:\s*[^\n]*?\b(${UUID_SOURCE})\b`, "iu");
+const TO_AGENT_PATTERN = new RegExp(String.raw`\bto\s+[^\n]*?\bagent\b[^\n]*?\b(${UUID_SOURCE})\b`, "iu");
+const AGENT_LABEL_PATTERN = new RegExp(String.raw`\bagent\b[^\n]*?\b(${UUID_SOURCE})\b`, "iu");
 
 export type ReassignSourceIssueDecisionText = {
   readonly nextAction?: string;
@@ -40,10 +44,17 @@ type ReassignSourceIssueResult = {
 };
 
 export function extractReassignTargetAgentId(input: ReassignSourceIssueDecisionText): string | null {
-  const fields = [input.nextAction, input.reason, input.evidence];
+  const fields = [input.nextAction, input.reason, input.evidence].filter((field): field is string => Boolean(field));
+  const targetPatterns = [TARGET_AGENT_PATTERN, TO_AGENT_PATTERN, AGENT_LABEL_PATTERN];
   for (const field of fields) {
-    const targetAgentId = field?.match(UUID_PATTERN)?.[0] ?? null;
-    if (targetAgentId) return targetAgentId;
+    for (const pattern of targetPatterns) {
+      const targetAgentId = field.match(pattern)?.[1] ?? null;
+      if (targetAgentId) return targetAgentId;
+    }
+  }
+  for (const field of fields) {
+    const matches = Array.from(field.matchAll(UUID_PATTERN), (match) => match[0]);
+    if (matches.length === 1) return matches[0] ?? null;
   }
   return null;
 }
@@ -139,7 +150,7 @@ export async function applyReassignSourceIssueDecision(input: {
 
   const targetAgentId = extractReassignTargetAgentId(input.ownerDecision);
   if (!targetAgentId) {
-    return fail("reassign_source_issue did not include a target agent UUID in Next action, Reason, or Evidence");
+    return fail("reassign_source_issue did not include an unambiguous target agent UUID; use a Target agent line when multiple UUIDs are present");
   }
 
   const targetAgent = await input.db
@@ -184,7 +195,18 @@ export async function applyReassignSourceIssueDecision(input: {
   if (!hasMissionOwnerDecisionAppliedMarker([...input.sourceComments], markerInput)) {
     const updated = await input.db
       .update(issues)
-      .set({ assigneeAgentId: targetAgentId, status: "todo", updatedAt: input.now })
+      .set({
+        assigneeAgentId: targetAgentId,
+        assigneeUserId: null,
+        status: "todo",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        completedAt: null,
+        cancelledAt: null,
+        updatedAt: input.now,
+      })
       .where(and(
         eq(issues.id, input.sourceIssue.id),
         eq(issues.companyId, input.mission.companyId),

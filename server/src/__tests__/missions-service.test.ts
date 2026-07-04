@@ -35,6 +35,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
+import { extractReassignTargetAgentId } from "../services/missions/mission-owner-reassign-source.js";
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { completeWorkflowToolStepFromResult, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
@@ -85,6 +86,19 @@ describe("mission owner decision parser", () => {
       nextAction: undefined,
       evidence: undefined,
     });
+  });
+
+  it("extracts reassign target agents without mistaking source UUIDs for targets", () => {
+    const sourceIssueId = randomUUID();
+    const targetAgentId = randomUUID();
+    const unrelatedId = randomUUID();
+
+    expect(extractReassignTargetAgentId({
+      nextAction: `Reassign source issue ${sourceIssueId} to agent ${targetAgentId}.`,
+    })).toBe(targetAgentId);
+    expect(extractReassignTargetAgentId({
+      nextAction: `Reassign source issue ${sourceIssueId}; evidence run ${unrelatedId}.`,
+    })).toBeNull();
   });
 });
 
@@ -1349,6 +1363,27 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Wake reassign mission", status: "active" });
     const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: operationsAgentId, missionId, originKind: "workflow_execution", status: "todo", title: "Publish approved manual" });
+    const staleRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: staleRunId,
+      companyId,
+      agentId: operationsAgentId,
+      issueId: sourceIssue.id,
+      invocationSource: "assignment",
+      status: "failed",
+      startedAt: new Date("2026-06-28T03:06:44.526Z"),
+      finishedAt: new Date("2026-06-28T03:07:44.526Z"),
+      createdAt: new Date("2026-06-28T03:06:44.502Z"),
+    });
+    await db.update(issues).set({
+      assigneeUserId: randomUUID(),
+      checkoutRunId: staleRunId,
+      executionRunId: staleRunId,
+      executionAgentNameKey: "hermes-operations-manager",
+      executionLockedAt: new Date("2026-06-28T03:06:44.526Z"),
+      completedAt: new Date("2026-06-28T03:07:44.526Z"),
+      cancelledAt: new Date("2026-06-28T03:08:44.526Z"),
+    }).where(eq(issues.id, sourceIssue.id));
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title: "Reassign publish source" });
     await db.insert(issueComments).values({
       companyId,
@@ -1370,7 +1405,15 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
       mission: expect.objectContaining({ id: missionId, ownerAgentId }),
       ownerActionIssue: expect.objectContaining({ id: ownerAction.id, assigneeAgentId: ownerAgentId }),
-      sourceIssue: expect.objectContaining({ id: sourceIssue.id, assigneeAgentId: synthesisAgentId }),
+      sourceIssue: expect.objectContaining({
+        id: sourceIssue.id,
+        assigneeAgentId: synthesisAgentId,
+        assigneeUserId: null,
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+      }),
       targetAgentId: synthesisAgentId,
       idempotencyKey,
     }));
@@ -1384,7 +1427,17 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         idempotencyKey,
       }),
     ]));
-    await expect(db.select().from(issues).where(eq(issues.id, sourceIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: synthesisAgentId }));
+    await expect(db.select().from(issues).where(eq(issues.id, sourceIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({
+      status: "todo",
+      assigneeAgentId: synthesisAgentId,
+      assigneeUserId: null,
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+      completedAt: null,
+      cancelledAt: null,
+    }));
     const sourceBody = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id)).then((rows) => rows.map((comment) => comment.body).join("\n"));
     expect(sourceBody).toContain("mission-owner-decision-applied");
     expect(sourceBody).toContain("reassign_source_issue");
