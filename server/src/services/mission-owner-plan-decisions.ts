@@ -23,6 +23,11 @@ import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import { upsertMissionPlanDecisionSubmission } from "./missions/mission-plan-decision-ledger.js";
+import {
+  RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES,
+  describeMissionExecutionLiaisonBoundary,
+  isMissionExecutionLiaisonAgent,
+} from "./missions/agent-role-boundaries.js";
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -800,7 +805,7 @@ const CROSS_COMPANY_MISSION_SOURCE_TYPES = new Set([
   "company_mission",
   "external_company_mission",
 ]);
-const RUNNABLE_PLAN_ASSIGNEE_STATUSES = new Set(["active", "idle", "running"]);
+const RUNNABLE_PLAN_ASSIGNEE_STATUSES = RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES;
 const PLAN_QA_VERDICT_AGENT_ROLES = new Set(["qa", "reviewer", "validator"]);
 const PLUGIN_WORKFLOW_ENTITY_SOURCE_TYPES = new Map<string, string[]>([
   ["plugin_workflow_definition", ["workflow-definition"]],
@@ -1434,7 +1439,14 @@ async function validateSelectedExecutionUnitSourceRefs({
   if (assigneeAgentIds.size > 0) {
     const ids = Array.from(assigneeAgentIds);
     const rows = await db
-      .select({ id: agents.id, status: agents.status })
+      .select({
+        id: agents.id,
+        name: agents.name,
+        status: agents.status,
+        adapterType: agents.adapterType,
+        runtimeConfig: agents.runtimeConfig,
+        metadata: agents.metadata,
+      })
       .from(agents)
       .where(and(eq(agents.companyId, companyId), inArray(agents.id, ids)));
     const found = new Set(rows.map((row) => row.id));
@@ -1452,6 +1464,14 @@ async function validateSelectedExecutionUnitSourceRefs({
         diagnostics.push({
           code: "assignee_agent_not_runnable",
           message: `selectedExecutionUnits assigneeAgentId ${id} is not runnable (status=${status || "unknown"}); choose an active or idle company agent`,
+        });
+        continue;
+      }
+      const agent = rowById.get(id);
+      if (agent && isMissionExecutionLiaisonAgent(agent)) {
+        diagnostics.push({
+          code: "assignee_agent_role_boundary",
+          message: `selectedExecutionUnits assigneeAgentId ${id} cannot directly execute mission work: ${describeMissionExecutionLiaisonBoundary(agent)} Choose a non-liaison execution assignee with the required tool/skill grant.`,
         });
       }
     }

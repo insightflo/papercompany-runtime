@@ -1322,6 +1322,76 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceBody).toContain(idempotencyKey);
   });
 
+  it("applies reassign_source_issue to the source issue and wakes the new assignee", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const operationsAgentId = randomUUID();
+    const synthesisAgentId = randomUUID();
+    const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-reassign", runId: "run-reassign" });
+
+    await db.insert(companies).values({ id: companyId, name: "Wake Reassign Company", issuePrefix: `WA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      {
+        id: operationsAgentId,
+        companyId,
+        name: "Hermes Operations Manager",
+        role: "pm",
+        status: "active",
+        adapterType: "hermes_local",
+        adapterConfig: {},
+        runtimeConfig: { domain: "operations", operatingMode: "chief_of_staff_liaison" },
+        permissions: {},
+      },
+      { id: synthesisAgentId, companyId, name: "Synthesis Editor", role: "pm", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { domain: "synthesis" }, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Wake reassign mission", status: "active" });
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
+    const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: operationsAgentId, missionId, originKind: "workflow_execution", status: "todo", title: "Publish approved manual" });
+    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title: "Reassign publish source" });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: ownerAction.id,
+      authorAgentId: ownerAgentId,
+      body: [
+        "### Mission owner decision",
+        "Decision: reassign_source_issue",
+        `Source issue: ${sourceIssue.identifier}`,
+        "Reason: Hermes is a liaison and must not directly execute the publish issue.",
+        `Next action: Reassign ${sourceIssue.identifier} to Synthesis Editor ${synthesisAgentId} and wake it.`,
+      ].join("\n"),
+    });
+
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:reassign_source_issue`;
+
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ id: missionId, ownerAgentId }),
+      ownerActionIssue: expect.objectContaining({ id: ownerAction.id, assigneeAgentId: ownerAgentId }),
+      sourceIssue: expect.objectContaining({ id: sourceIssue.id, assigneeAgentId: synthesisAgentId }),
+      targetAgentId: synthesisAgentId,
+      idempotencyKey,
+    }));
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "owner_decision_reassign_source_issue",
+        sourceIssueId: sourceIssue.id,
+        previousAgentId: operationsAgentId,
+        targetAgentId: synthesisAgentId,
+        wakeupDispatchStatus: "dispatched",
+        idempotencyKey,
+      }),
+    ]));
+    await expect(db.select().from(issues).where(eq(issues.id, sourceIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: synthesisAgentId }));
+    const sourceBody = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id)).then((rows) => rows.map((comment) => comment.body).join("\n"));
+    expect(sourceBody).toContain("mission-owner-decision-applied");
+    expect(sourceBody).toContain("reassign_source_issue");
+    expect(sourceBody).toContain("mission-owner-decision-wakeup-dispatched");
+    expect(sourceBody).toContain(idempotencyKey);
+  });
+
   it("carries the latest REQUEST_CHANGES summary into retry_source_issue comments and wake context", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

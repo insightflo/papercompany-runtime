@@ -92,6 +92,8 @@ export type ExtractedMissionOwnerDecision = {
   evidence?: string;
 };
 
+export type AppliedMissionOwnerDecisionOption = "retry_source_issue" | "reassign_source_issue";
+
 const MISSION_OWNER_DECISION_BLOCK_HEADING = "### Mission owner decision";
 
 function firstNonEmptyLine(value: string | undefined): string | undefined {
@@ -133,7 +135,7 @@ export function extractMissionOwnerDecisionFromText(text: string): ExtractedMiss
 export function buildMissionOwnerDecisionAppliedMarker(input: {
   ownerActionIssueId: string;
   sourceIssueId: string;
-  decision: "retry_source_issue";
+  decision: AppliedMissionOwnerDecisionOption;
 }): string {
   return `<!-- mission-owner-decision-applied:${JSON.stringify(input)} -->`;
 }
@@ -141,7 +143,7 @@ export function buildMissionOwnerDecisionAppliedMarker(input: {
 export function hasMissionOwnerDecisionAppliedMarker(comments: string[], input: {
   ownerActionIssueId: string;
   sourceIssueId: string;
-  decision: "retry_source_issue";
+  decision: AppliedMissionOwnerDecisionOption;
 }): boolean {
   const marker = buildMissionOwnerDecisionAppliedMarker(input);
   return comments.some((comment) => comment.includes(marker));
@@ -151,15 +153,16 @@ export function buildMissionOwnerDecisionWakeupIdempotencyKey(input: {
   missionId: string;
   ownerActionIssueId: string;
   sourceIssueId: string;
+  decision?: AppliedMissionOwnerDecisionOption;
 }): string {
-  return `mission-owner-decision-wakeup:${input.missionId}:${input.ownerActionIssueId}:${input.sourceIssueId}:retry_source_issue`;
+  return `mission-owner-decision-wakeup:${input.missionId}:${input.ownerActionIssueId}:${input.sourceIssueId}:${input.decision ?? "retry_source_issue"}`;
 }
 
 export function buildMissionOwnerDecisionWakeupDispatchedMarker(input: {
   missionId: string;
   ownerActionIssueId: string;
   sourceIssueId: string;
-  decision: "retry_source_issue";
+  decision: AppliedMissionOwnerDecisionOption;
   idempotencyKey: string;
 }): string {
   return `<!-- mission-owner-decision-wakeup-dispatched:${JSON.stringify(input)} -->`;
@@ -169,7 +172,7 @@ export function hasMissionOwnerDecisionWakeupDispatchedMarker(comments: string[]
   missionId: string;
   ownerActionIssueId: string;
   sourceIssueId: string;
-  decision: "retry_source_issue";
+  decision: AppliedMissionOwnerDecisionOption;
   idempotencyKey: string;
 }): boolean {
   const marker = buildMissionOwnerDecisionWakeupDispatchedMarker(input);

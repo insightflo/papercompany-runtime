@@ -84,6 +84,7 @@ import {
   MISSION_OWNER_DECISION_OPTIONS,
   parseMissionOwnerActionMarker,
 } from "./missions/mission-owner-recovery-events.js";
+import { isMissionExecutionLiaisonAgent } from "./missions/agent-role-boundaries.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
 import {
   assertMissionRuntimeAcceptsWork,
@@ -815,21 +816,7 @@ function applyPaperclipApiContext(context: Record<string, unknown>): void {
 }
 
 function isHermesOperationsLiaisonAgent(agent: Pick<typeof agents.$inferSelect, "name" | "adapterType" | "runtimeConfig" | "metadata">) {
-  if (agent.adapterType !== "hermes_local") return false;
-  const runtimeConfig = parseObject(agent.runtimeConfig);
-  const metadata = parseObject(agent.metadata);
-  const domain = readNonEmptyString(runtimeConfig.domain);
-  const operatingMode = readNonEmptyString(runtimeConfig.operatingMode);
-  const purpose = readNonEmptyString(metadata.purpose);
-  return (
-    agent.name === "Hermes Operations Manager" ||
-    agent.name === "Hermes Ops Manager" ||
-    domain === "operations" ||
-    purpose === "research-company-hermes-management" ||
-    purpose === "gazua-hermes-management" ||
-    operatingMode === "chief_of_staff_liaison" ||
-    operatingMode === "independent_management_operator"
-  );
+  return isMissionExecutionLiaisonAgent(agent);
 }
 
 function isMissionOwnerControlIssue(issue: Pick<typeof issues.$inferSelect, "originKind" | "description">) {

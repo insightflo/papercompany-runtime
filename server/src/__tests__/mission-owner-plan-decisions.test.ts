@@ -2398,6 +2398,62 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(paqoDefinitions).toHaveLength(0);
   });
 
+  it("rejects PLAN mission units assigned to Hermes liaison agents", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
+    const hermesAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: hermesAgentId,
+      companyId,
+      name: "Hermes Operations Manager",
+      role: "pm",
+      status: "active",
+      adapterType: "hermes_local",
+      adapterConfig: {},
+      runtimeConfig: {
+        domain: "operations",
+        operatingMode: "chief_of_staff_liaison",
+        authorityBoundary: { missionActionRoute: "signal_main_executor" },
+      },
+      permissions: {},
+    });
+    await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      body: decisionComment({
+        missionId,
+        missionGoal: "Publish a manual without dispatching liaison agents directly",
+        selectedExecutionUnits: [
+          {
+            id: "unit-publish-manual",
+            kind: "mission_plan_unit",
+            title: "[ACTION] Publish approved manual",
+            assigneeAgentId: hermesAgentId,
+            sourceRef: { type: "mission_plan_unit", id: "unit-publish-manual" },
+            toolNames: ["manual-onboarding-publish"],
+          },
+        ],
+        requiredInputs: [],
+        successCriteria: [],
+        steps: [],
+      }),
+      createdAt: new Date("2026-01-01T00:05:00.000Z"),
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("invalid");
+    if (result.status !== "invalid") return;
+    expect(result.reason).toBe("invalid_selected_execution_unit_source_ref");
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "assignee_agent_role_boundary",
+        message: expect.stringContaining("Hermes Operations Manager"),
+      }),
+    ]);
+  });
+
   it("materializes PLAN mission units assigned to currently running agents", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     const runningAgentId = randomUUID();

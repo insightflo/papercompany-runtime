@@ -31,6 +31,7 @@ import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, ty
 import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
 import { qualityService } from "../quality.js";
 import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDecisionSubmissionStatus } from "./mission-plan-decision-ledger.js";
+import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
 
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
@@ -739,7 +740,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           }
         }
         if (ownerDecision) {
-          const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
+          const sourceIssue = issue.originId ? (missionIssueById.get(issue.originId) ?? null) : null;
           const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (ownerDecision.sourceIssueRef ?? issue.originId ?? "unknown-source");
           findings.push(`owner_action_decision_recorded: ${label} decision=${ownerDecision.decision} source=${sourceLabel} — ${issue.title}`);
           const baseReason = ownerDecision.reason ? `Owner decision ${ownerDecision.decision} for ${sourceLabel}: ${ownerDecision.reason}` : `Owner decision ${ownerDecision.decision} recorded for ${sourceLabel}`;
@@ -1051,9 +1052,37 @@ export function createSupervision({ db, deps, ownerActions }: {
                 type: "request_approval",
                 missionId: mission.id,
                 issueId: sourceIssue?.id ?? issue.originId ?? issue.id,
-                reason: `${baseReason}; source issue reassignment requires explicit approved handling in a later execution slice`,
-                safeToAutoApply: false,
+                reason: `${baseReason}; source issue reassignment can be applied when a target assignee is explicit and runnable`,
+                safeToAutoApply: true,
               });
+              if (input.applyOwnerDecisionActions) {
+                const sourceRuns = sourceIssue ? (heartbeatRunsByIssueId.get(sourceIssue.id) ?? []) : [];
+                const sourcePlanGateReason = sourceIssue
+                  ? activePlanRecoveryGateReason(activePlan, sourceIssue, stepRowsByIssueId.get(sourceIssue.id) ?? [])
+                  : null;
+                const result = await applyReassignSourceIssueDecision({
+                  db,
+                  mission,
+                  ownerActionIssue: issue,
+                  ownerActionLabel: label,
+                  ownerDecision: {
+                    decision: "reassign_source_issue",
+                    reason: ownerDecision.reason,
+                    nextAction: ownerDecision.nextAction,
+                    evidence: ownerDecision.evidence,
+                  },
+                  sourceIssue,
+                  sourceLabel,
+                  sourceComments: sourceIssue ? (commentsByIssueId.get(sourceIssue.id) ?? []) : [],
+                  sourceHasActiveHeartbeat: sourceRuns.some((run) => run.status === "queued" || run.status === "running"),
+                  sourcePlanGateReason,
+                  now,
+                  dispatchWakeup: Boolean(input.dispatchOwnerDecisionWakeups),
+                  onWakeup: deps.onOwnerDecisionRetrySourceIssueApplied,
+                });
+                findings.push(...result.findings);
+                if (result.appliedAction) appliedActions.push(result.appliedAction);
+              }
               break;
             case "replan_mission":
               addRecommendation({
@@ -1634,6 +1663,8 @@ export function createSupervision({ db, deps, ownerActions }: {
             ? `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`
             : action.type === "owner_decision_retry_source_issue"
               ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`
+              : action.type === "owner_decision_reassign_source_issue"
+                ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} previous=${action.previousAgentId ?? "unassigned"} target=${action.targetAgentId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`
               : action.type === "native_tool_step_retry"
                 ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
                 : action.type === "materialize_plan_decision"

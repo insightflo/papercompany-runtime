@@ -196,8 +196,9 @@ export function summarizeOwnerDecisionNotApplied(input: {
   ownerActionLabel: string;
   sourceLabel: string;
   reason: string;
+  decision?: string;
 }) {
-  return `owner_action_decision_not_applied: ${input.ownerActionLabel} retry_source_issue source=${input.sourceLabel} — ${input.reason}`;
+  return `owner_action_decision_not_applied: ${input.ownerActionLabel} ${input.decision ?? "retry_source_issue"} source=${input.sourceLabel} — ${input.reason}`;
 }
 
 export function buildRetrySourceIssueComment(input: {
