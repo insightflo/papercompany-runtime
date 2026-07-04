@@ -18,7 +18,7 @@ const HERMES_OPS_RUNTIME_CONFIG = {
   operatingMode: "chief_of_staff_liaison",
   heartbeat: {
     enabled: true,
-    intervalSec: 300,
+    intervalSec: 1800,
     maxConcurrentRuns: 2,
   },
   monitoring: {

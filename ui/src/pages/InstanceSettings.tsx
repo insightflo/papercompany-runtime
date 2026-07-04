@@ -10,8 +10,14 @@ import { EmptyState } from "../components/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDateTime, relativeTime } from "../lib/utils";
+
+type HeartbeatPatch = {
+  readonly enabled?: boolean;
+  readonly intervalSec?: number;
+};
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -26,10 +32,27 @@ function buildAgentHref(agent: InstanceSchedulerHeartbeatAgent) {
   return `/${agent.companyIssuePrefix}/agents/${encodeURIComponent(agent.agentUrlKey)}`;
 }
 
+export function intervalMinutesValue(intervalSec: number): string {
+  const minutes = Math.max(0, intervalSec) / 60;
+  return Number.isInteger(minutes) ? String(minutes) : minutes.toFixed(1);
+}
+
+export function parseIntervalMinutesToSec(value: string): number | null {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes < 1) return null;
+  return Math.round(minutes * 60);
+}
+
+export function formatHeartbeatInterval(intervalSec: number): string {
+  if (intervalSec < 60) return `${intervalSec}s`;
+  return `${intervalMinutesValue(intervalSec)} min`;
+}
+
 export function InstanceSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [intervalDrafts, setIntervalDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setBreadcrumbs([
@@ -44,8 +67,12 @@ export function InstanceSettings() {
     refetchInterval: 15_000,
   });
 
-  const toggleMutation = useMutation({
-    mutationFn: async (agentRow: InstanceSchedulerHeartbeatAgent) => {
+  const heartbeatMutation = useMutation({
+    mutationFn: async (input: {
+      readonly agentRow: InstanceSchedulerHeartbeatAgent;
+      readonly patch: HeartbeatPatch;
+    }) => {
+      const { agentRow, patch } = input;
       const agent = await agentsApi.get(agentRow.id, agentRow.companyId);
       const runtimeConfig = asRecord(agent.runtimeConfig) ?? {};
       const heartbeat = asRecord(runtimeConfig.heartbeat) ?? {};
@@ -57,19 +84,26 @@ export function InstanceSettings() {
             ...runtimeConfig,
             heartbeat: {
               ...heartbeat,
-              enabled: !agentRow.heartbeatEnabled,
+              ...patch,
             },
           },
         },
         agentRow.companyId,
       );
     },
-    onSuccess: async (_, agentRow) => {
+    onSuccess: async (_, input) => {
       setActionError(null);
+      if (typeof input.patch.intervalSec === "number") {
+        const intervalSec = input.patch.intervalSec;
+        setIntervalDrafts((current) => ({
+          ...current,
+          [input.agentRow.id]: intervalMinutesValue(intervalSec),
+        }));
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.instance.schedulerHeartbeats }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(agentRow.companyId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentRow.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(input.agentRow.companyId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(input.agentRow.id) }),
       ]);
     },
     onError: (error) => {
@@ -147,39 +181,80 @@ export function InstanceSettings() {
                 </div>
                 <div className="divide-y">
                   {group.agents.map((agent) => {
-                    const saving = toggleMutation.isPending && toggleMutation.variables?.id === agent.id;
+                    const draftValue = intervalDrafts[agent.id] ?? intervalMinutesValue(agent.intervalSec);
+                    const parsedIntervalSec = parseIntervalMinutesToSec(draftValue);
+                    const intervalInvalid = parsedIntervalSec === null;
+                    const intervalDirty = parsedIntervalSec !== null && parsedIntervalSec !== agent.intervalSec;
+                    const saving = heartbeatMutation.isPending && heartbeatMutation.variables?.agentRow.id === agent.id;
                     return (
                       <div
                         key={agent.id}
-                        className="flex items-center gap-3 px-3 py-2 text-sm"
+                        className="flex flex-col gap-2 px-3 py-2 text-sm md:flex-row md:items-center"
                       >
-                        <Badge
-                          variant={agent.schedulerActive ? "default" : "outline"}
-                          className="shrink-0 text-[10px] px-1.5 py-0"
-                        >
-                          {agent.schedulerActive ? "On" : "Off"}
-                        </Badge>
-                        <Link
-                          to={buildAgentHref(agent)}
-                          className="font-medium truncate hover:underline"
-                        >
-                          {agent.agentName}
-                        </Link>
-                        <span className="hidden sm:inline text-muted-foreground truncate">
-                          {humanize(agent.title ?? agent.role)}
-                        </span>
-                        <span className="text-muted-foreground tabular-nums shrink-0">
-                          {agent.intervalSec}s
-                        </span>
-                        <span
-                          className="hidden md:inline text-muted-foreground truncate"
-                          title={agent.lastHeartbeatAt ? formatDateTime(agent.lastHeartbeatAt) : undefined}
-                        >
-                          {agent.lastHeartbeatAt
-                            ? relativeTime(agent.lastHeartbeatAt)
-                            : "never"}
-                        </span>
-                        <span className="ml-auto flex items-center gap-1.5 shrink-0">
+                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                          <Badge
+                            variant={agent.schedulerActive ? "default" : "outline"}
+                            className="shrink-0 text-[10px] px-1.5 py-0"
+                          >
+                            {agent.schedulerActive ? "On" : "Off"}
+                          </Badge>
+                          <Link
+                            to={buildAgentHref(agent)}
+                            className="font-medium truncate hover:underline"
+                          >
+                            {agent.agentName}
+                          </Link>
+                          <span className="hidden sm:inline text-muted-foreground truncate">
+                            {humanize(agent.title ?? agent.role)}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 md:ml-auto md:shrink-0">
+                          <span className="text-muted-foreground tabular-nums shrink-0">
+                            {formatHeartbeatInterval(agent.intervalSec)}
+                          </span>
+                          <span
+                            className="hidden lg:inline text-muted-foreground truncate"
+                            title={agent.lastHeartbeatAt ? formatDateTime(agent.lastHeartbeatAt) : undefined}
+                          >
+                            {agent.lastHeartbeatAt
+                              ? relativeTime(agent.lastHeartbeatAt)
+                              : "never"}
+                          </span>
+                          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                            <span className="hidden lg:inline">Interval</span>
+                            <Input
+                              aria-label={`${agent.agentName} heartbeat interval minutes`}
+                              aria-invalid={intervalInvalid}
+                              className="h-7 w-20 px-2 text-right text-xs"
+                              min={1}
+                              step={1}
+                              type="number"
+                              value={draftValue}
+                              onChange={(event) =>
+                                setIntervalDrafts((current) => ({
+                                  ...current,
+                                  [agent.id]: event.currentTarget.value,
+                                }))}
+                            />
+                            <span>min</span>
+                          </label>
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            disabled={saving || intervalInvalid || !intervalDirty}
+                            onClick={() => {
+                              if (parsedIntervalSec === null) {
+                                setActionError("Heartbeat interval must be at least 1 minute.");
+                                return;
+                              }
+                              heartbeatMutation.mutate({
+                                agentRow: agent,
+                                patch: { intervalSec: parsedIntervalSec },
+                              });
+                            }}
+                          >
+                            Save
+                          </Button>
                           <Link
                             to={buildAgentHref(agent)}
                             className="text-muted-foreground hover:text-foreground"
@@ -192,11 +267,15 @@ export function InstanceSettings() {
                             size="sm"
                             className="h-6 px-2 text-xs"
                             disabled={saving}
-                            onClick={() => toggleMutation.mutate(agent)}
+                            onClick={() =>
+                              heartbeatMutation.mutate({
+                                agentRow: agent,
+                                patch: { enabled: !agent.heartbeatEnabled },
+                              })}
                           >
                             {saving ? "..." : agent.heartbeatEnabled ? "Disable Timer Heartbeat" : "Enable Timer Heartbeat"}
                           </Button>
-                        </span>
+                        </div>
                       </div>
                     );
                   })}

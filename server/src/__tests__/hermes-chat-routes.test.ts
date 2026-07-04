@@ -144,4 +144,29 @@ describeEmbeddedPostgres("Hermes chat routes", () => {
     const rows = await db.select().from(agents);
     expect(rows).toHaveLength(0);
   });
+
+  it("creates a Hermes Ops agent with a 30 minute scheduler heartbeat", async () => {
+    mockHermesEnvironmentTest.mockResolvedValue({
+      adapterType: "hermes_local",
+      status: "pass",
+      checks: [],
+      testedAt: "2026-06-26T00:00:00.000Z",
+    });
+    const companyId = await insertCompany();
+
+    const res = await request(createApp(db))
+      .post(`/api/companies/${companyId}/hermes-chat/operations-agent`)
+      .send({});
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const rows = await db.select().from(agents);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.runtimeConfig).toMatchObject({
+      heartbeat: {
+        enabled: true,
+        intervalSec: 1800,
+        maxConcurrentRuns: 2,
+      },
+    });
+  });
 });
