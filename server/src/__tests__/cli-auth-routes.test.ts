@@ -41,6 +41,7 @@ function createApp(actor: any) {
     (req as typeof req & { actor: unknown }).actor = actor;
     next();
   });
+  vi.resetModules();
   return import("../routes/access.js").then(({ accessRoutes }) =>
     import("../middleware/index.js").then(({ errorHandler }) => {
       app.use(

@@ -1,8 +1,6 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { accessRoutes } from "../routes/access.js";
-import { errorHandler } from "../middleware/index.js";
 
 const mockAccessService = vi.hoisted(() => ({
   canUser: vi.fn(),
@@ -34,13 +32,18 @@ vi.mock("../services/index.js", () => ({
   notifyHireApproved: vi.fn(),
 }));
 
-function createApp(actor: Record<string, unknown> = localImplicitActor()) {
+async function createApp(actor: Record<string, unknown> = localImplicitActor()) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as unknown as { actor: unknown }).actor = actor;
     next();
   });
+  vi.resetModules();
+  const [{ accessRoutes }, { errorHandler }] = await Promise.all([
+    import("../routes/access.js"),
+    import("../middleware/index.js"),
+  ]);
   app.use(
     "/api",
     accessRoutes({} as never, {
@@ -84,7 +87,7 @@ beforeEach(() => {
 describe("permission-groups routes", () => {
   it("rejects group creation without users:manage_permissions (403)", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
-    const res = await request(createApp(boardActorWithPermission()))
+    const res = await request(await createApp(boardActorWithPermission()))
       .post(`/api/companies/${COMPANY}/permission-groups`)
       .send({ name: "editors" });
     expect(res.status).toBe(403);
@@ -94,7 +97,7 @@ describe("permission-groups routes", () => {
 
   it("creates a group and logs activity when local_implicit bypasses", async () => {
     mockAccessService.createGroup.mockResolvedValue({ id: GROUP, name: "editors", companyId: COMPANY });
-    const res = await request(createApp(localImplicitActor()))
+    const res = await request(await createApp(localImplicitActor()))
       .post(`/api/companies/${COMPANY}/permission-groups`)
       .send({ name: "editors" });
     expect(res.status).toBe(201);
@@ -112,7 +115,7 @@ describe("permission-groups routes", () => {
 
   it("returns 404 for a cross-company group on PATCH (scoped update yields null)", async () => {
     mockAccessService.updateGroup.mockResolvedValue(null);
-    const res = await request(createApp(localImplicitActor()))
+    const res = await request(await createApp(localImplicitActor()))
       .patch(`/api/companies/${COMPANY}/permission-groups/${GROUP}`)
       .send({ name: "renamed" });
     expect(res.status).toBe(404);
@@ -121,14 +124,14 @@ describe("permission-groups routes", () => {
 
   it("returns 404 for a cross-company group on DELETE (scoped delete yields false)", async () => {
     mockAccessService.deleteGroup.mockResolvedValue(false);
-    const res = await request(createApp(localImplicitActor()))
+    const res = await request(await createApp(localImplicitActor()))
       .delete(`/api/companies/${COMPANY}/permission-groups/${GROUP}`);
     expect(res.status).toBe(404);
   });
 
   it("returns 404 when adding members to a group not in this company", async () => {
     mockAccessService.getGroup.mockResolvedValue(null);
-    const res = await request(createApp(localImplicitActor()))
+    const res = await request(await createApp(localImplicitActor()))
       .put(`/api/companies/${COMPANY}/permission-groups/${GROUP}/members`)
       .send({ addUserIds: ["user-2"] });
     expect(res.status).toBe(404);
@@ -140,7 +143,7 @@ describe("permission-groups routes", () => {
     mockAccessService.listPrincipalGrants.mockResolvedValue([
       { permissionKey: "agents:create", principalType: "group", principalId: GROUP },
     ]);
-    const res = await request(createApp(localImplicitActor()))
+    const res = await request(await createApp(localImplicitActor()))
       .patch(`/api/companies/${COMPANY}/permission-groups/${GROUP}/permissions`)
       .send({ grants: [{ permissionKey: "agents:create" }] });
     expect(res.status).toBe(200);
@@ -163,7 +166,7 @@ describe("permission-groups routes", () => {
     ]);
     mockAccessService.listPrincipalGrants.mockResolvedValue([{ permissionKey: "agents:create" }]);
     mockAccessService.listUserGroupMemberships.mockResolvedValue([{ groupId: GROUP, status: "active" }]);
-    const res = await request(createApp(localImplicitActor())).get(`/api/companies/${COMPANY}/members`);
+    const res = await request(await createApp(localImplicitActor())).get(`/api/companies/${COMPANY}/members`);
     expect(res.status).toBe(200);
     expect(res.body[0]).toEqual(
       expect.objectContaining({
@@ -185,7 +188,7 @@ describe("permission-groups routes", () => {
       source: "session",
       isInstanceAdmin: true,
     };
-    const res = await request(createApp(actor))
+    const res = await request(await createApp(actor))
       .post(`/api/companies/${COMPANY}/permission-groups`)
       .send({ name: "editors" });
     expect(res.status).toBe(201);
@@ -197,7 +200,7 @@ describe("permission-groups routes", () => {
     mockAccessService.listGroups.mockResolvedValue([
       { id: GROUP, companyId: COMPANY, name: "editors", status: "active" },
     ]);
-    const res = await request(createApp(localImplicitActor())).get(
+    const res = await request(await createApp(localImplicitActor())).get(
       `/api/companies/${COMPANY}/permission-groups`,
     );
     expect(res.status).toBe(200);
@@ -212,7 +215,7 @@ describe("permission-groups routes", () => {
     mockAccessService.listPrincipalGrants.mockResolvedValue([
       { permissionKey: "agents:create", principalType: "group", principalId: GROUP },
     ]);
-    const res = await request(createApp(localImplicitActor())).get(
+    const res = await request(await createApp(localImplicitActor())).get(
       `/api/companies/${COMPANY}/permission-groups/${GROUP}`,
     );
     expect(res.status).toBe(200);

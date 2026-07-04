@@ -11,6 +11,7 @@ import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js"
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
+import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-execution-placement.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
@@ -105,7 +106,6 @@ export type FindLatestAuthorizedMissionOwnerPlanDecisionInput = {
   maxDiagnostics?: number;
 };
 
-const DECISION_HEADING = "### Mission owner plan decision";
 const DECISION_HEADING_PATTERN = /^### Mission owner plan decision(?:\s+\([^)\n]+\))?\s*$/gm;
 const DEFAULT_MAX_COLLECTOR_DIAGNOSTICS = 20;
 
@@ -980,20 +980,33 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     companyId,
     selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
   });
-  if (sourceValidationDiagnostics.length > 0) {
+  const placementDiagnostics = sourceValidationDiagnostics.length > 0
+    ? []
+    : await reviewMissionPlanExecutionPlacement({
+      db,
+      companyId,
+      selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
+    });
+  const executionValidationDiagnostics = sourceValidationDiagnostics.length > 0
+    ? sourceValidationDiagnostics
+    : placementDiagnostics;
+  if (executionValidationDiagnostics.length > 0) {
+    const rejectionReason = sourceValidationDiagnostics.length > 0
+      ? "invalid_selected_execution_unit_source_ref"
+      : "invalid_execution_placement";
     await upsertMissionPlanDecisionSubmission({
       ...ledgerSubmission,
       status: "rejected",
-      rejectionReason: "invalid_selected_execution_unit_source_ref",
-      diagnostics: sourceValidationDiagnostics,
+      rejectionReason,
+      diagnostics: executionValidationDiagnostics,
     });
     return {
       status: "invalid",
-      reason: "invalid_selected_execution_unit_source_ref",
+      reason: rejectionReason,
       planningIssueId: collected.planningIssueId,
       commentId: collected.commentId,
       decisionHash,
-      diagnostics: sourceValidationDiagnostics,
+      diagnostics: executionValidationDiagnostics,
     };
   }
 

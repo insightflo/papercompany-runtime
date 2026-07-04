@@ -20,6 +20,7 @@ import {
   hasDeliveryActionRole,
   hasArtifactProducerRole,
   hasArtifactQaRole,
+  reviewDeliveryToolPreflightMarkers,
   reviewArtifactWorkProductMarkers,
 } from "./mission-plan-artifact-contract.js";
 import { buildDependencyIndex, unitDependsOn } from "./mission-plan-unit-dependencies.js";
@@ -31,6 +32,7 @@ export type PlanQaDiagnosticCode =
   | "missing_artifact_qa_before_delivery"
   | "invalid_artifact_qa_delivery_order"
   | "invalid_artifact_workproduct_marker"
+  | "invalid_delivery_tool_preflight_unit"
   | "missing_audience_split"
   | "missing_scenario_taxonomy";
 
@@ -153,6 +155,7 @@ export function reviewPlanAgainstIntent(input: {
   const { intent, selectedExecutionUnits, successCriteria } = input;
   const diagnostics: PlanQaDiagnostic[] = [
     ...reviewArtifactWorkProductMarkers(selectedExecutionUnits),
+    ...reviewDeliveryToolPreflightMarkers(selectedExecutionUnits),
   ];
   if (!intent.publish && !intent.audienceSplit && !intent.scenario) {
     return diagnostics;

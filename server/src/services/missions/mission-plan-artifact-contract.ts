@@ -145,3 +145,24 @@ export function reviewArtifactWorkProductMarkers(
   });
   return diagnostics;
 }
+
+function mentionsToolGrantPreflight(unit: Record<string, unknown>): boolean {
+  const text = missionPlanUnitText(unit);
+  return /\bworkflow\s*tools?\b|\btool\s*(?:access|availability|grant|permission|contract)s?\b|도구\s*(?:접근|권한|가용|계약)/iu.test(text)
+    && /\bpre[-_\s]?flight\b|\bprerequisite\b|\bcondition\b|\binput[-_\s]?check\b|\bdelivery\b|\bdownstream\b|사전|조건|필수|하위|후속/iu.test(text);
+}
+
+export function reviewDeliveryToolPreflightMarkers(
+  selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>,
+): Array<{ code: "invalid_delivery_tool_preflight_unit"; severity: "invalid"; message: string }> {
+  const diagnostics: Array<{ code: "invalid_delivery_tool_preflight_unit"; severity: "invalid"; message: string }> = [];
+  selectedExecutionUnits.forEach((unit, index) => {
+    if (readUnitToolNames(unit).length > 0 || !mentionsToolGrantPreflight(unit)) return;
+    diagnostics.push({
+      code: "invalid_delivery_tool_preflight_unit",
+      severity: "invalid",
+      message: `조건 확인 unit "${unitDiagnosticLabel(unit, index)}" 이 downstream workflow tool 권한/가용성을 실행 중 확인하도록 되어 있습니다. 도구 배치는 PLAN/PLAN-QA에서 실제 tool unit assignee 기준으로 검증하고, ACTION preflight 는 URL/입력 접근 같은 자기 step의 실제 조건만 확인하게 수정하세요.`,
+    });
+  });
+  return diagnostics;
+}

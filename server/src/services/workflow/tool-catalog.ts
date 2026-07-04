@@ -21,6 +21,7 @@ export type WorkflowToolCatalogTool = {
 };
 
 export type WorkflowToolCatalogGrant = {
+  agentId?: string;
   agentName: string;
   toolName: string;
   source?: "core" | "tool-registry" | "plugin";
@@ -63,6 +64,7 @@ export type WorkflowToolGrantMutationInput = {
 
 type WorkflowStepWithToolSelection = WorkflowStep & {
   type?: unknown;
+  agentId?: unknown;
   agentName?: unknown;
 };
 
@@ -83,10 +85,20 @@ function sortTools(tools: WorkflowToolCatalogTool[]): WorkflowToolCatalogTool[] 
 function sortAndDedupeGrants(grants: WorkflowToolCatalogGrant[]): WorkflowToolCatalogGrant[] {
   const byAgentAndTool = new Map<string, WorkflowToolCatalogGrant>();
   for (const grant of grants) {
-    byAgentAndTool.set(`${grant.agentName}:${grant.toolName}`, grant);
+    byAgentAndTool.set(`${grant.agentId ?? grant.agentName}:${grant.toolName}`, grant);
   }
   return Array.from(byAgentAndTool.values())
-    .sort((a, b) => `${a.agentName}:${a.toolName}`.localeCompare(`${b.agentName}:${b.toolName}`));
+    .sort((a, b) => `${a.agentId ?? a.agentName}:${a.toolName}`.localeCompare(`${b.agentId ?? b.agentName}:${b.toolName}`));
+}
+
+function uniqueAgentIdByName(rows: ReadonlyArray<{ id: string; name: string }>): Map<string, string | null> {
+  const agentIdsByName = new Map<string, string | null>();
+  for (const row of rows) {
+    const name = row.name.trim();
+    if (!name) continue;
+    agentIdsByName.set(name, agentIdsByName.has(name) ? null : row.id);
+  }
+  return agentIdsByName;
 }
 
 function booleanValue(value: unknown): boolean {
@@ -285,7 +297,7 @@ export async function syncToolRegistryToolsToCore(
     }
   }
 
-  const agentIdByName = new Map(agentRows.map((agent) => [agent.name.trim(), agent.id]));
+  const agentIdByName = uniqueAgentIdByName(agentRows);
   for (const row of grantRows) {
     if (row.status === "deleted") continue;
     const data = recordValue(row.data);
@@ -345,7 +357,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
     toolService.listDefinitions(db, { companyId }),
     listDefaultWorkflowPluginAgentTools(db),
     db
-      .select({ name: agents.name })
+      .select({ id: agents.id, name: agents.name })
       .from(agents)
       .where(eq(agents.companyId, companyId)),
   ]);
@@ -360,6 +372,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
     .filter((tool) => tool.name.trim().length > 0);
   const coreGrants = await db
     .select({
+      agentId: agents.id,
       agentName: agents.name,
       toolName: toolDefinitions.name,
     })
@@ -375,6 +388,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
     .where(eq(agentToolGrants.companyId, companyId));
   const coreGrantItems: WorkflowToolCatalogGrant[] = coreGrants
     .map((grant) => ({
+      agentId: grant.agentId,
       agentName: grant.agentName.trim(),
       toolName: grant.toolName.trim(),
       source: "core" as const,
@@ -391,6 +405,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
   const pluginGrantItems: WorkflowToolCatalogGrant[] = pluginAgentTools.flatMap((tool) =>
     companyAgents
       .map((agent) => ({
+        agentId: agent.id,
         agentName: agent.name.trim(),
         toolName: tool.name,
         source: "plugin" as const,
@@ -400,6 +415,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
 
   const registryTools: WorkflowToolCatalogTool[] = [];
   let registryGrants: WorkflowToolCatalogGrant[] = [];
+  const agentIdsByName = uniqueAgentIdByName(companyAgents);
 
   if (toolRegistryPlugin) {
     const [toolRows, grantRows] = await Promise.all([
@@ -452,6 +468,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       .map((row) => {
         const data = recordValue(row.data);
         return {
+          ...(agentIdsByName.get(stringValue(data.agentName)) ? { agentId: agentIdsByName.get(stringValue(data.agentName))! } : {}),
           agentName: stringValue(data.agentName),
           toolName: stringValue(data.toolName),
           source: "tool-registry" as const,
@@ -521,16 +538,29 @@ export async function assertWorkflowToolReferencesSelectable(
     throw new Error(`Workflow tool "${firstUnavailable.toolName}" is unavailable.`);
   }
 
-  const grants = new Set(catalog.grants.map((grant) => `${grant.agentName}:${grant.toolName}`));
+  const agentRows = await db
+    .select({ id: agents.id, name: agents.name })
+    .from(agents)
+    .where(eq(agents.companyId, input.companyId));
+  const uniqueAgentIdsByName = uniqueAgentIdByName(agentRows);
+  const grantsByAgentId = new Set(
+    catalog.grants
+      .filter((grant) => typeof grant.agentId === "string" && grant.agentId.trim().length > 0)
+      .map((grant) => `${grant.agentId!.trim()}:${grant.toolName.trim()}`),
+  );
   const missingAgentGrant = references.find((reference) => {
     const stepType = typeof reference.step.type === "string" ? reference.step.type.trim().toLowerCase() : "";
+    const agentId = typeof reference.step.agentId === "string" ? reference.step.agentId.trim() : "";
     const agentName = typeof reference.step.agentName === "string" ? reference.step.agentName.trim() : "";
-    if (stepType !== "agent" && !agentName) return false;
-    if (!agentName) return false;
-    return !grants.has(`${agentName}:${reference.toolName}`);
+    if (stepType !== "agent" && !agentId && !agentName) return false;
+    const resolvedAgentId = agentId || (agentName ? uniqueAgentIdsByName.get(agentName) : undefined);
+    if (!resolvedAgentId) return true;
+    return !grantsByAgentId.has(`${resolvedAgentId}:${reference.toolName}`);
   });
   if (missingAgentGrant) {
+    const agentId = typeof missingAgentGrant.step.agentId === "string" ? missingAgentGrant.step.agentId.trim() : "";
     const agentName = typeof missingAgentGrant.step.agentName === "string" ? missingAgentGrant.step.agentName.trim() : "";
-    throw new Error(`Workflow tool "${missingAgentGrant.toolName}" is not granted to agent "${agentName}".`);
+    const agentLabel = agentName || agentId || "unknown";
+    throw new Error(`Workflow tool "${missingAgentGrant.toolName}" is not granted to agent "${agentLabel}".`);
   }
 }

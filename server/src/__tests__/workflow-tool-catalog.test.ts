@@ -52,7 +52,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
     await tempDb?.cleanup();
   });
 
-  it("returns core agent tool grants by agent name and tool name", async () => {
+  it("returns core agent tool grants by agent id, agent name, and tool name", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const toolId = randomUUID();
@@ -99,7 +99,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
       }),
     ]);
     expect(catalog.grants).toEqual([
-      { agentName: "Doraemon", toolName: "collect-evening", source: "core" },
+      { agentId, agentName: "Doraemon", toolName: "collect-evening", source: "core" },
     ]);
     expect(catalog.sources.core).toEqual({
       available: true,
@@ -240,7 +240,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
     expect(granted).toEqual({ agentName: "Tool Operator", toolName: "core-report", source: "core" });
     expect(grantedAgain).toEqual(granted);
     expect((await listWorkflowToolCatalog(db, companyId)).grants).toEqual([
-      { agentName: "Tool Operator", toolName: "core-report", source: "core" },
+      { agentId, agentName: "Tool Operator", toolName: "core-report", source: "core" },
     ]);
 
     const revoked = await revokeWorkflowToolFromAgent(db, {
@@ -347,7 +347,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
       enabled: true,
     }));
     expect(catalog.grants).toEqual([
-      { agentName: "Doraemon", toolName: "collect-evening", source: "core" },
+      { agentId, agentName: "Doraemon", toolName: "collect-evening", source: "core" },
     ]);
   });
 
@@ -415,6 +415,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
       pluginId: researchPluginId,
     }));
     expect(catalog.grants).toContainEqual({
+      agentId,
       agentName: "Research Agent",
       toolName: "insightflo.research-workbench:research-search",
       source: "plugin",
