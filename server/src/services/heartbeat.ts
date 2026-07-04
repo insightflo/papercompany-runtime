@@ -83,6 +83,7 @@ import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import { missionService } from "./missions.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler, type PlanningIssueWakeupHandler } from "./mission-owner-plan-decisions.js";
+import { blockMissionPlanQaCompletionWithoutLedger, hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
@@ -7310,6 +7311,23 @@ export function heartbeatService(db: Db) {
             now: new Date(),
           });
           queuePostTransactionWorkflowIssueSync(applied?.sourceIssueId);
+        }
+      }
+
+      if (
+        shouldAutoCompleteSuccessfulIssue &&
+        issue.originKind === "mission_plan_qa"
+      ) {
+        const ledger = await hasMissionPlanQaCompletionLedger({
+          db: tx,
+          companyId: issue.companyId,
+          missionId: issue.missionId,
+          planQaIssueId: issue.id,
+        });
+        if (!ledger.satisfied) {
+          await blockMissionPlanQaCompletionWithoutLedger({ db: tx, issue, run, ledger });
+          queuePostTransactionWorkflowIssueSync(issue.id);
+          return null;
         }
       }
 

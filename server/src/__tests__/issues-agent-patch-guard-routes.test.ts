@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
+import { HttpError } from "../errors.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -159,5 +160,71 @@ describe("issue routes agent patch guard", () => {
         }),
       }),
     );
+  });
+
+  it("returns the service-level mission_plan_qa ledger rejection for direct agent PATCH done", async () => {
+    const issue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      missionId: "mission-1",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      assigneeUserId: null,
+      createdByUserId: null,
+      identifier: "PAP-PLANQA",
+      title: "[PLAN-QA] Review active plan",
+      originKind: "mission_plan_qa",
+      metadata: {},
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockRejectedValue(new HttpError(
+      422,
+      "Cannot complete mission_plan_qa issue without an official mission_plan_qa_verdicts row for the active plan decision hash.",
+    ));
+
+    const res = await request(createApp())
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done", comment: "PASS" });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("mission_plan_qa");
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).not.toHaveBeenCalled();
+  });
+
+  it("allows direct agent PATCH done to complete when the service-level mission_plan_qa ledger guard passes", async () => {
+    const issue = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      missionId: "mission-1",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      assigneeUserId: null,
+      createdByUserId: null,
+      identifier: "PAP-PLANQA",
+      title: "[PLAN-QA] Review active plan",
+      originKind: "mission_plan_qa",
+      metadata: {},
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({ ...issue, status: "done" });
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1", body: "PASS" });
+
+    const res = await request(createApp())
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done", comment: "PASS" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockIssueService.addComment).toHaveBeenCalled();
+    expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).toHaveBeenCalledWith({
+      issueId: issue.id,
+      companyId: issue.companyId,
+      status: "done",
+      linkedRunIds: [undefined, undefined, "run-1"],
+    });
   });
 });

@@ -38,6 +38,7 @@ import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallbac
 import { getDefaultCompanyGoal } from "./goals.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
+import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import {
   extractExpectedContentMarker,
   isManualOnboardingHubShell,
@@ -156,6 +157,20 @@ async function assertCanCompleteMissionOversightIssue(db: Db, issue: typeof issu
       `Cannot complete mission oversight while workflow step ${activeWorkflowStep.stepId} is ${activeWorkflowStep.status}.`,
     );
   }
+}
+
+async function assertCanCompleteMissionPlanQaIssue(db: Db, issue: typeof issues.$inferSelect) {
+  if (issue.originKind !== "mission_plan_qa") return;
+  const ledger = await hasMissionPlanQaCompletionLedger({
+    db,
+    companyId: issue.companyId,
+    missionId: issue.missionId,
+    planQaIssueId: issue.id,
+  });
+  if (ledger.satisfied) return;
+  throw unprocessable(
+    `Cannot complete mission_plan_qa issue without an official mission_plan_qa_verdicts row for ${ledger.decisionHash ? "the active plan decision hash" : "that plan QA issue"}.`,
+  );
 }
 
 function parseHttpUrl(value: string | null) {
@@ -1618,6 +1633,7 @@ export function issueService(db: Db) {
       }
       if (issueData.status === "done" && existing.status !== "done") {
         await assertCanCompleteMissionOversightIssue(db, existing);
+        await assertCanCompleteMissionPlanQaIssue(db, existing);
         await assertDeliveryReadbackBeforeDone(db, existing);
       }
 
