@@ -3384,6 +3384,39 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
+  type IssueScopedRawSessionResumeDecision =
+    | { readonly rotate: false }
+    | {
+        readonly rotate: true;
+        readonly previousSessionId: string;
+        readonly reason: string;
+      };
+
+  async function evaluateIssueScopedRawSessionResume(input: {
+    readonly agentId: string;
+    readonly currentIssueId: string | null;
+    readonly currentRunId: string;
+    readonly sessionId: string | null;
+  }): Promise<IssueScopedRawSessionResumeDecision> {
+    const currentIssueId = readNonEmptyString(input.currentIssueId);
+    const sessionId = readNonEmptyString(input.sessionId);
+    if (!currentIssueId || !sessionId) return { rotate: false };
+
+    const previousRun = await getLatestRunForSession(input.agentId, sessionId, {
+      excludeRunId: input.currentRunId,
+    });
+    const previousContext = parseObject(previousRun?.contextSnapshot);
+    const previousIssueId =
+      readNonEmptyString(previousRun?.issueId) ?? readNonEmptyString(previousContext.issueId);
+    if (!previousIssueId || previousIssueId === currentIssueId) return { rotate: false };
+
+    return {
+      rotate: true,
+      previousSessionId: sessionId,
+      reason: `workflow step issue changed from ${previousIssueId} to ${currentIssueId}`,
+    };
+  }
+
   async function getOldestRunForSession(agentId: string, sessionId: string) {
     return db
       .select({
@@ -5953,12 +5986,29 @@ export function heartbeatService(db: Db) {
       readNonEmptyString(runtimeSessionParams?.sessionId) ?? runtimeSessionFallback;
     let runtimeSessionParamsForAdapter = runtimeSessionParams;
 
-    const sessionCompaction = await evaluateSessionCompaction({
-      agent,
-      sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
-      issueId,
+    const issueScopedRawSessionResume = await evaluateIssueScopedRawSessionResume({
+      agentId: agent.id,
+      currentIssueId: issueId,
+      currentRunId: run.id,
+      sessionId: runtimeSessionIdForAdapter,
     });
-    if (sessionCompaction.rotate) {
+    const sessionCompaction = issueScopedRawSessionResume.rotate
+      ? null
+      : await evaluateSessionCompaction({
+          agent,
+          sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
+          issueId,
+        });
+    if (issueScopedRawSessionResume.rotate) {
+      context.paperclipSessionRotationReason = issueScopedRawSessionResume.reason;
+      context.paperclipPreviousSessionId = previousSessionDisplayId ?? issueScopedRawSessionResume.previousSessionId;
+      runtimeSessionIdForAdapter = null;
+      runtimeSessionParamsForAdapter = null;
+      previousSessionDisplayId = null;
+      runtimeWorkspaceWarnings.push(
+        `Starting a fresh session because ${issueScopedRawSessionResume.reason}.`,
+      );
+    } else if (sessionCompaction?.rotate) {
       context.paperclipSessionHandoffMarkdown = sessionCompaction.handoffMarkdown;
       context.paperclipSessionHandoff = sessionCompaction.handoffArtifact;
       context.paperclipSessionRotationReason = sessionCompaction.reason;
@@ -6509,8 +6559,10 @@ export function heartbeatService(db: Db) {
               sessionReused: runtimeForAdapter.sessionId != null || runtimeForAdapter.sessionDisplayId != null,
               taskSessionReused: taskSessionForRun != null,
               freshSession: runtimeForAdapter.sessionId == null && runtimeForAdapter.sessionDisplayId == null,
-              sessionRotated: sessionCompaction.rotate,
-              sessionRotationReason: sessionCompaction.reason,
+              sessionRotated: issueScopedRawSessionResume.rotate || sessionCompaction?.rotate === true,
+              sessionRotationReason: issueScopedRawSessionResume.rotate
+                ? issueScopedRawSessionResume.reason
+                : sessionCompaction?.reason ?? null,
               provider: readNonEmptyString(adapterResult.provider) ?? "unknown",
               biller: resolveLedgerBiller(adapterResult),
               model: readNonEmptyString(adapterResult.model) ?? "unknown",

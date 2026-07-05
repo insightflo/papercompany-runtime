@@ -280,6 +280,68 @@ function successfulAdapterResult() {
   };
 }
 
+async function seedMissionSessionRotationFixture(db: ReturnType<typeof createDb>) {
+  const companyId = randomUUID();
+  const agentId = randomUUID();
+  const missionId = randomUUID();
+  const firstIssueId = randomUUID();
+  const secondIssueId = randomUUID();
+  const issuePrefix = `MSR${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`;
+
+  await db.insert(companies).values({
+    id: companyId,
+    name: "Mission Session Rotation",
+    issuePrefix,
+    requireBoardApprovalForNewAgents: false,
+  });
+  await db.insert(agents).values({
+    id: agentId,
+    companyId,
+    name: "Mission Session Rotation Agent",
+    role: "engineer",
+    status: "active",
+    adapterType: "codex_local",
+    adapterConfig: {},
+    runtimeConfig: {},
+    permissions: {},
+  });
+  await db.insert(missions).values({
+    id: missionId,
+    companyId,
+    ownerAgentId: agentId,
+    title: "Rotate raw provider sessions by workflow step issue",
+    status: "active",
+  });
+  await db.insert(issues).values([
+    {
+      id: firstIssueId,
+      companyId,
+      missionId,
+      title: "Workflow step A",
+      description: "stepId: step-a",
+      status: "todo",
+      assigneeAgentId: agentId,
+      identifier: `${issuePrefix}-1`,
+      originKind: "workflow_step",
+      originId: "step-a",
+    },
+    {
+      id: secondIssueId,
+      companyId,
+      missionId,
+      title: "Workflow step B",
+      description: "stepId: step-b",
+      status: "todo",
+      assigneeAgentId: agentId,
+      identifier: `${issuePrefix}-2`,
+      originKind: "workflow_step",
+      originId: "step-b",
+    },
+  ]);
+
+  return { companyId, agentId, missionId, firstIssueId, secondIssueId };
+}
+
 function failedAdapterResult(overrides: Partial<ReturnType<typeof successfulAdapterResult> & { errorCode: string }> = {}) {
   return {
     ...successfulAdapterResult(),
@@ -4883,6 +4945,146 @@ describe("heartbeat context budget preflight", () => {
 
     const secretValue = await secretService(db).resolveSecretValue(companyId, rows[0]!.sessionSecretId, "latest");
     expect(secretValue).toBe("mission-token-1");
+  });
+
+  it("starts a fresh raw provider session when a mission resumes on a different workflow step issue", async () => {
+    const { companyId, agentId, missionId, firstIssueId, secondIssueId } = await seedMissionSessionRotationFixture(db);
+    const adapterCalls: Array<{
+      readonly runId: string;
+      readonly sessionId: string | null;
+      readonly sessionDisplayId: string | null;
+      readonly context: Record<string, unknown>;
+    }> = [];
+
+    executeSpy.mockImplementation(async (input: {
+      runId: string;
+      runtime: { sessionId: string | null; sessionDisplayId: string | null };
+      context: Record<string, unknown>;
+    }) => {
+      adapterCalls.push({
+        runId: input.runId,
+        sessionId: input.runtime.sessionId,
+        sessionDisplayId: input.runtime.sessionDisplayId,
+        context: input.context,
+      });
+      return {
+        ...successfulAdapterResult(),
+        sessionId: adapterCalls.length === 1 ? "provider-step-a" : "provider-step-b",
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const firstRun = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { missionId, issueId: firstIssueId, taskId: firstIssueId, workflowStepId: "step-a", stepId: "step-a" },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    expect(firstRun).not.toBeNull();
+    const firstFinalized = await waitForRunTerminal(heartbeat, firstRun!.id);
+    expect(firstFinalized.status).toBe("succeeded");
+
+    const secondRun = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { missionId, issueId: secondIssueId, taskId: secondIssueId, workflowStepId: "step-b", stepId: "step-b" },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    expect(secondRun).not.toBeNull();
+    const secondFinalized = await waitForRunTerminal(heartbeat, secondRun!.id);
+    expect(secondFinalized.status).toBe("succeeded");
+
+    const ownCalls = adapterCalls.filter((call) => call.runId === firstRun!.id || call.runId === secondRun!.id);
+    expect(ownCalls).toHaveLength(2);
+    expect(ownCalls[0]?.sessionId).toBeNull();
+    expect(ownCalls[1]?.sessionId).toBeNull();
+    expect(ownCalls[1]?.sessionDisplayId).toBeNull();
+    expect(ownCalls[1]?.context.paperclipSessionRotationReason).toContain(firstIssueId);
+    expect(ownCalls[1]?.context.paperclipSessionRotationReason).toContain(secondIssueId);
+    expect(ownCalls[1]?.context.paperclipPreviousSessionId).toBe("provider-step-a");
+    expect(secondFinalized.sessionIdBefore).toBeNull();
+    expect(secondFinalized.contextSnapshot?.paperclipPreviousSessionId).toBe("provider-step-a");
+
+    const [session] = await db.select().from(missionSessions).where(eq(missionSessions.missionId, missionId)).limit(1);
+    expect(session).toEqual(expect.objectContaining({ companyId, agentId, missionId }));
+    const secretValue = await secretService(db).resolveSecretValue(companyId, session!.sessionSecretId, "latest");
+    expect(secretValue).toBe("provider-step-b");
+  });
+
+  it("preserves raw provider session resume for a retry of the same workflow step issue", async () => {
+    const { agentId, missionId, firstIssueId } = await seedMissionSessionRotationFixture(db);
+    const sessionIdsSeen: Array<string | null> = [];
+
+    executeSpy.mockImplementation(async (input: { runtime: { sessionId: string | null } }) => {
+      sessionIdsSeen.push(input.runtime.sessionId);
+      return {
+        ...successfulAdapterResult(),
+        sessionId: input.runtime.sessionId ?? "provider-step-a",
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    for (let i = 0; i < 2; i += 1) {
+      const run = await heartbeat.invoke(
+        agentId,
+        "on_demand",
+        { missionId, issueId: firstIssueId, taskId: firstIssueId, workflowStepId: "step-a", stepId: "step-a" },
+        "manual",
+        { actorType: "system", actorId: "test-suite" },
+      );
+      expect(run).not.toBeNull();
+      const finalized = await waitForRunTerminal(heartbeat, run!.id);
+      expect(finalized.status).toBe("succeeded");
+      expect(finalized.contextSnapshot?.paperclipSessionRotationReason).toBeUndefined();
+    }
+
+    expect(sessionIdsSeen).toEqual([null, "provider-step-a"]);
+  });
+
+  it("keeps resetTaskSession behavior fresh even when a mission session exists for the same issue", async () => {
+    const { agentId, missionId, firstIssueId } = await seedMissionSessionRotationFixture(db);
+    const sessionIdsSeen: Array<string | null> = [];
+
+    executeSpy.mockImplementation(async (input: { runtime: { sessionId: string | null } }) => {
+      sessionIdsSeen.push(input.runtime.sessionId);
+      return {
+        ...successfulAdapterResult(),
+        sessionId: input.runtime.sessionId ?? `provider-session-${sessionIdsSeen.length}`,
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const firstRun = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { missionId, issueId: firstIssueId, taskId: firstIssueId, workflowStepId: "step-a", stepId: "step-a" },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    expect(firstRun).not.toBeNull();
+    expect((await waitForRunTerminal(heartbeat, firstRun!.id)).status).toBe("succeeded");
+
+    const resetRun = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      {
+        missionId,
+        issueId: firstIssueId,
+        taskId: firstIssueId,
+        workflowStepId: "step-a",
+        stepId: "step-a",
+        forceFreshSession: true,
+      },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    expect(resetRun).not.toBeNull();
+    const resetFinalized = await waitForRunTerminal(heartbeat, resetRun!.id);
+    expect(resetFinalized.status).toBe("succeeded");
+    expect(resetFinalized.contextSnapshot?.paperclipSessionRotationReason).toBeUndefined();
+    expect(sessionIdsSeen).toEqual([null, null]);
   });
 
   it("counts agent and run placeholders before adapter execution", async () => {
