@@ -30,6 +30,7 @@ const mockAgentService = vi.hoisted(() => ({
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockLogMaintenanceDecisionActionMismatch = vi.hoisted(() => vi.fn(async () => null));
+const mockRecordWorkflowValidationVerdictFromText = vi.hoisted(() => vi.fn(async () => null));
 
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
@@ -55,6 +56,10 @@ vi.mock("../services/srb/source-status-sync.js", () => ({
 
 vi.mock("../services/maintenance/decision-audit.js", () => ({
   logMaintenanceDecisionActionMismatch: mockLogMaintenanceDecisionActionMismatch,
+}));
+
+vi.mock("../services/workflow/validation-verdict-ledger.js", () => ({
+  recordWorkflowValidationVerdictFromText: mockRecordWorkflowValidationVerdictFromText,
 }));
 
 function createApp() {
@@ -189,6 +194,12 @@ describe("issue routes agent patch guard", () => {
 
     expect(res.status).toBe(422);
     expect(res.body.error).toContain("mission_plan_qa");
+    expect(mockRecordWorkflowValidationVerdictFromText).toHaveBeenCalledWith(expect.objectContaining({
+      issue,
+      text: "PASS",
+      actorAgentId: "22222222-2222-4222-8222-222222222222",
+      heartbeatRunId: "run-1",
+    }));
     expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).not.toHaveBeenCalled();

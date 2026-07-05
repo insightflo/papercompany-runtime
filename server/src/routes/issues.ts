@@ -49,6 +49,7 @@ import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/de
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
 import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
+import { recordWorkflowValidationVerdictFromText } from "../services/workflow/validation-verdict-ledger.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -1202,6 +1203,15 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       updateFields.status = "todo";
+    }
+    if (updateFields.status === "done" && typeof commentBody === "string") {
+      await recordWorkflowValidationVerdictFromText({
+        db,
+        issue: existing,
+        text: commentBody,
+        actorAgentId: actor.agentId,
+        heartbeatRunId: actor.runId,
+      });
     }
     let issue: Awaited<ReturnType<typeof svc.update>>;
     try {

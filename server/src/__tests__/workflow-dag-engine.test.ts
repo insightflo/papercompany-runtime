@@ -20,6 +20,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -181,6 +182,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     heartbeatWakeup.mockReset();
     setWorkflowToolStepExecutor(null);
     setWorkflowToolStepReadinessChecker(null);
+    await db.delete(workflowTransitionEvents);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
@@ -1862,6 +1864,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const missionId = randomUUID();
     const collectIssueId = randomUUID();
     const validatorIssueId = randomUUID();
+    const validatorStepRunId = randomUUID();
     const toolExecutor = vi.fn().mockResolvedValue({ accepted: true });
     setWorkflowToolStepExecutor(toolExecutor);
 
@@ -1968,19 +1971,6 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         completedAt: new Date("2026-06-14T06:10:00.000Z"),
       },
     ]);
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: validatorIssueId,
-      authorAgentId: validatorAgentId,
-      body: [
-        "REQUEST_CHANGES — Artifact Validation Result",
-        "",
-        "- Hallucinated label remains in the PNG.",
-        "- Coverage is incomplete; do not deliver to Telegram.",
-        "",
-        "REQUEST_CHANGES: Hallucinated label and incomplete coverage remain.",
-      ].join("\n"),
-    });
     await db.insert(workflowStepRuns).values([
       {
         workflowRunId: runId,
@@ -1991,6 +1981,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         completedAt: new Date("2026-06-14T06:05:00.000Z"),
       },
       {
+        id: validatorStepRunId,
         workflowRunId: runId,
         stepId: "validate-ai-news-artifact",
         issueId: validatorIssueId,
@@ -2004,6 +1995,26 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         status: "pending",
       },
     ]);
+    await db.insert(workflowTransitionEvents).values({
+      companyId,
+      missionId,
+      workflowRunId: runId,
+      workflowStepRunId: validatorStepRunId,
+      issueId: validatorIssueId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict: "request_changes",
+      decision: "request_changes",
+      reason: "test",
+      reasonCode: "test",
+      payload: {
+        kind: "workflow_validation_verdict",
+        workflowRunId: runId,
+        stepRunId: validatorStepRunId,
+        issueId: validatorIssueId,
+        verdict: "request_changes",
+      },
+    });
 
     const result = await syncWorkflowRunForIssue(db, validatorIssueId);
 

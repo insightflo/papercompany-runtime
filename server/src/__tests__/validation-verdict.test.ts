@@ -29,6 +29,21 @@ describe("readExplicitValidationVerdict", () => {
     ].join("\n"))).toBeNull();
   });
 
+  it("reads a QA verdict section when evidence details follow the verdict line", () => {
+    expect(readExplicitValidationVerdict([
+      "## QA verdict",
+      "",
+      "REQUEST_CHANGES for [RES-980](/RES/issues/RES-980) HTML artifact before publication.",
+      "",
+      "- Verified file exists at the declared dependency workProduct path.",
+      "- Not verified for publication-quality HTML: parser error remains.",
+      "",
+      "Required fixes:",
+      "- Escape the Google Fonts query separator.",
+      "- Replace local-only evidence paths in the user-facing page.",
+    ].join("\n"))).toBe("request_changes");
+  });
+
   it("keeps heartbeat result compatibility for leading verdict plus detail lines", () => {
     expect(readExplicitValidationVerdict("REQUEST_CHANGES\n- fix hallucinated label", { allowLeadingVerdict: true })).toBe("request_changes");
     expect(readExplicitValidationVerdict("PASS\n- all checks complete", { allowLeadingVerdict: true })).toBe("pass");

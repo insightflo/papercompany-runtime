@@ -9,7 +9,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService, extractExplicitArtifactPaths } from "../heartbeat.js";
@@ -936,6 +936,25 @@ async function loadLatestValidationVerdicts(
     const minObservedAt = minObservedAtByIssueId.get(issueId);
     return !minObservedAt || observedAt.getTime() >= minObservedAt.getTime();
   };
+
+  const eventRows = await db
+    .select({
+      issueId: workflowTransitionEvents.issueId,
+      verdict: workflowTransitionEvents.verdict,
+      createdAt: workflowTransitionEvents.createdAt,
+    })
+    .from(workflowTransitionEvents)
+    .where(and(
+      inArray(workflowTransitionEvents.issueId, issueIds),
+      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+    ))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id));
+  for (const event of eventRows) {
+    const observedAt = event.createdAt ?? null;
+    if (!isWithinCurrentExecutionWindow(event.issueId, observedAt)) continue;
+    if (event.verdict !== "pass" && event.verdict !== "request_changes") continue;
+    setLatestValidationVerdict(verdicts, event.issueId, event.verdict, observedAt);
+  }
 
   const runRows = await db
     .select({

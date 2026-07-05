@@ -23,6 +23,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -2216,5 +2217,158 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
       .where(eq(issues.id, planningIssueId))
       .then((rows) => rows[0]!.updatedAt);
     expect(after.getTime()).toBeGreaterThan(before.getTime());
+  });
+});
+
+describeEmbeddedPostgres("issueService workflow validation verdict ledger gate", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workflow-validation-ledger-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 60_000);
+
+  afterEach(async () => {
+    await db.delete(workflowTransitionEvents);
+    await db.delete(workflowStepRuns);
+    await db.delete(workflowRuns);
+    await db.delete(workflowDefinitions);
+    await db.delete(issueComments);
+    await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(issueWorkProducts);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedWorkflowValidationIssue(overrides: {
+    readonly issueTitle?: string;
+    readonly stepId?: string;
+    readonly stepName?: string;
+  } = {}) {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const issueId = randomUUID();
+    const stepRunId = randomUUID();
+    const startedAt = new Date("2026-07-05T03:38:00.000Z");
+    const stepId = overrides.stepId ?? "qa-review";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip QA Ledger",
+      issuePrefix: `QL${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Report Validator",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "qa-ledger-workflow",
+      stepsJson: [{
+        id: stepId,
+        name: overrides.stepName ?? "Validate delivery artifact",
+        agentId,
+        dependencies: [],
+      }],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      status: "running",
+      startedAt,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: overrides.issueTitle ?? "[QA] Validate delivery artifact",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      originKind: "workflow_execution",
+      originId: workflowRunId,
+      originRunId: workflowRunId,
+      startedAt,
+    });
+    await db.insert(workflowStepRuns).values({
+      id: stepRunId,
+      workflowRunId,
+      stepId,
+      issueId,
+      status: "running",
+      startedAt,
+    });
+
+    return { companyId, workflowRunId, issueId, stepRunId };
+  }
+
+  it("rejects done for workflow QA issues without a verdict ledger row", async () => {
+    const seeded = await seedWorkflowValidationIssue();
+
+    await expect(svc.update(seeded.issueId, { status: "done" })).rejects.toThrow(
+      "workflow_validation_verdict",
+    );
+  });
+
+  it("allows done for workflow QA issues after a verdict ledger row exists", async () => {
+    const seeded = await seedWorkflowValidationIssue();
+
+    await db.insert(workflowTransitionEvents).values({
+      companyId: seeded.companyId,
+      workflowRunId: seeded.workflowRunId,
+      workflowStepRunId: seeded.stepRunId,
+      issueId: seeded.issueId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict: "pass",
+      decision: "pass",
+      reason: "test",
+      reasonCode: "test",
+      payload: {
+        kind: "workflow_validation_verdict",
+        workflowRunId: seeded.workflowRunId,
+        stepRunId: seeded.stepRunId,
+        issueId: seeded.issueId,
+        verdict: "pass",
+      },
+      createdAt: new Date("2026-07-05T03:39:00.000Z"),
+    });
+
+    const updated = await svc.update(seeded.issueId, { status: "done" });
+
+    expect(updated.status).toBe("done");
+  });
+
+  it("does not require a verdict ledger for ordinary validate workflow steps", async () => {
+    const seeded = await seedWorkflowValidationIssue({
+      issueTitle: "Validate API response shape",
+      stepId: "validate-api-response",
+      stepName: "Validate API response shape",
+    });
+
+    const updated = await svc.update(seeded.issueId, { status: "done" });
+
+    expect(updated.status).toBe("done");
   });
 });

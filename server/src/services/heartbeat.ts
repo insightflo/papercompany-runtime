@@ -36,6 +36,10 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { readExplicitValidationVerdict } from "./validation-verdict.js";
+import {
+  hasWorkflowValidationCompletionLedger,
+  recordWorkflowValidationVerdictFromRun,
+} from "./workflow/validation-verdict-ledger.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
@@ -2494,6 +2498,17 @@ function buildRequestChangesValidationGateComment(input: {
     "```text",
     input.verdict.excerpt || "REQUEST_CHANGES",
     "```",
+  ].join("\n");
+}
+
+function buildMissingWorkflowValidationVerdictGateComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+}) {
+  return [
+    "## Completion blocked: workflow_validation_verdict_missing",
+    `- 실행 runId: \`${input.run.id}\``,
+    "- Reason: this workflow QA/validator issue cannot be marked done until the official workflow_validation_verdict ledger contains PASS or REQUEST_CHANGES.",
+    "- Required evidence: a workflow_transition_events row with eventType=workflow_validation_verdict for this issue.",
   ].join("\n");
 }
 
@@ -6874,6 +6889,7 @@ export function heartbeatService(db: Db) {
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
           executionRunId: issues.executionRunId,
+          startedAt: issues.startedAt,
         })
         .from(issues)
         .where(
@@ -6985,6 +7001,21 @@ export function heartbeatService(db: Db) {
         successfulRunCanFinalizeIssue &&
         issue.assigneeAgentId === run.agentId;
       const requestChangesVerdict = isSucceededHeartbeatRunStatus(run.status) ? extractRequestChangesVerdict(run) : null;
+      if (
+        isSucceededHeartbeatRunStatus(run.status) &&
+        isLinkedToRun &&
+        successfulRunCanApplyCompletionGates &&
+        issue.assigneeAgentId === run.agentId
+      ) {
+        await recordWorkflowValidationVerdictFromRun({ db: tx, issue, run });
+      }
+      const workflowValidationCompletionLedger =
+        isSucceededHeartbeatRunStatus(run.status) &&
+        isLinkedToRun &&
+        successfulRunCanApplyCompletionGates &&
+        issue.assigneeAgentId === run.agentId
+          ? await hasWorkflowValidationCompletionLedger({ db: tx, issue })
+          : null;
       const shouldBlockRequestChangesVerdict =
         !!requestChangesVerdict &&
         isLinkedToRun &&
@@ -6992,6 +7023,9 @@ export function heartbeatService(db: Db) {
         canApplyRequestChangesValidationGate(issue) &&
         successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId;
+      const shouldBlockMissingWorkflowValidationVerdict =
+        workflowValidationCompletionLedger?.isCandidate === true &&
+        workflowValidationCompletionLedger.satisfied === false;
       const claimedArtifactPaths =
         isSucceededHeartbeatRunStatus(run.status) && isLinkedToRun && !!issue.missionId
           ? extractClaimedArtifactPaths(run)
@@ -7101,6 +7135,48 @@ export function heartbeatService(db: Db) {
           promotedRun: null,
           postTransactionRequestChangesOwnerAction: { sourceIssue: issue, run, verdict: requestChangesVerdict },
         };
+      }
+
+      if (shouldBlockMissingWorkflowValidationVerdict) {
+        const now = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "blocked",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            completedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: buildMissingWorkflowValidationVerdictGateComment({ run }),
+        });
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.workflow_validation_verdict_missing_auto_blocked",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: issue.status,
+            nextStatus: "blocked",
+            reason: "workflow_validation_verdict_missing",
+            workflowRunId: workflowValidationCompletionLedger.workflowRunId,
+            workflowStepRunId: workflowValidationCompletionLedger.workflowStepRunId,
+            stepId: workflowValidationCompletionLedger.stepId,
+          },
+        });
+        queuePostTransactionWorkflowIssueSync(issue.id);
+        return { promotedRun: null };
       }
 
       if (shouldCheckMissingWorkProductRegistration) {
@@ -7668,19 +7744,27 @@ export function heartbeatService(db: Db) {
 
     const transactionObject =
       !!transactionResult && typeof transactionResult === "object" ? transactionResult : null;
+    const transactionRecord = transactionObject as Record<string, unknown> | null;
+    type PostTransactionMissionOwnerPlanDecision = {
+      issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">;
+      actorAgentId: string | null;
+    };
+    type PostTransactionRequestChangesOwnerAction =
+      Parameters<typeof ensureMissionOwnerActionForRequestChanges>[0];
     const hasPostTransactionMissionOwnerPlanDecision =
       !!transactionObject && "postTransactionMissionOwnerPlanDecision" in transactionObject;
     const postTransactionMissionOwnerPlanDecision = hasPostTransactionMissionOwnerPlanDecision
-      ? transactionObject.postTransactionMissionOwnerPlanDecision
+      ? transactionRecord?.postTransactionMissionOwnerPlanDecision as PostTransactionMissionOwnerPlanDecision
       : null;
     const hasPostTransactionRequestChangesOwnerAction =
       !!transactionObject && "postTransactionRequestChangesOwnerAction" in transactionObject;
     const postTransactionRequestChangesOwnerAction = hasPostTransactionRequestChangesOwnerAction
-      ? transactionObject.postTransactionRequestChangesOwnerAction
+      ? transactionRecord?.postTransactionRequestChangesOwnerAction as PostTransactionRequestChangesOwnerAction
       : null;
+    const hasPromotedRunField = !!transactionObject && "promotedRun" in transactionObject;
     const promotedRun = (
-      hasPostTransactionMissionOwnerPlanDecision || hasPostTransactionRequestChangesOwnerAction
-        ? transactionObject?.promotedRun
+      hasPromotedRunField || hasPostTransactionMissionOwnerPlanDecision || hasPostTransactionRequestChangesOwnerAction
+        ? transactionRecord?.promotedRun
         : transactionResult
     ) as typeof heartbeatRuns.$inferSelect | null | undefined;
 

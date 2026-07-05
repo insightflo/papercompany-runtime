@@ -6,6 +6,7 @@ export interface ReadExplicitValidationVerdictOptions {
 
 const VERDICT_LABEL = String.raw`REQUEST[_\s-]?CHANGES|PASS`;
 const MARKDOWN_RULE_RE = /^[-*_]{3,}$/u;
+const VERDICT_HEADING_RE = /^(?:QA\s+)?(?:verdict|decision|outcome|status|판정|결론)$/iu;
 
 function normalizeVerdictLabel(label: string): ValidationVerdict {
   return /^PASS$/iu.test(label.trim()) ? "pass" : "request_changes";
@@ -39,6 +40,18 @@ function readVerdictFromLine(line: string): ValidationVerdict | null {
   return null;
 }
 
+function readVerdictAfterExplicitHeading(lines: readonly string[]): ValidationVerdict | null {
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    if (!VERDICT_HEADING_RE.test(normalizeVerdictLine(lines[index]!))) continue;
+    for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+      const candidate = lines[nextIndex]!;
+      if (!candidate.trim() || MARKDOWN_RULE_RE.test(candidate.trim())) continue;
+      return readVerdictFromLine(candidate);
+    }
+  }
+  return null;
+}
+
 export function readExplicitValidationVerdict(
   value: string | null | undefined,
   options: ReadExplicitValidationVerdictOptions = {},
@@ -52,6 +65,9 @@ export function readExplicitValidationVerdict(
 
   const terminalVerdict = readVerdictFromLine(lines[lines.length - 1]!);
   if (terminalVerdict) return terminalVerdict;
+
+  const sectionVerdict = readVerdictAfterExplicitHeading(lines);
+  if (sectionVerdict) return sectionVerdict;
 
   if (options.allowLeadingVerdict) {
     return readVerdictFromLine(lines[0]!);

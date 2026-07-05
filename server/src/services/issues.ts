@@ -39,6 +39,7 @@ import { getDefaultCompanyGoal } from "./goals.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
 import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
+import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import {
   extractExpectedContentMarker,
   isManualOnboardingHubShell,
@@ -170,6 +171,15 @@ async function assertCanCompleteMissionPlanQaIssue(db: Db, issue: typeof issues.
   if (ledger.satisfied) return;
   throw unprocessable(
     `Cannot complete mission_plan_qa issue without an official mission_plan_qa_verdicts row for ${ledger.decisionHash ? "the active plan decision hash" : "that plan QA issue"}.`,
+  );
+}
+
+async function assertCanCompleteWorkflowValidationIssue(db: Db, issue: typeof issues.$inferSelect) {
+  if (issue.originKind !== "workflow_execution") return;
+  const ledger = await hasWorkflowValidationCompletionLedger({ db, issue });
+  if (!ledger.isCandidate || ledger.satisfied) return;
+  throw unprocessable(
+    "Cannot complete workflow validation issue without an official workflow_validation_verdict ledger event for that workflow QA issue.",
   );
 }
 
@@ -1634,6 +1644,7 @@ export function issueService(db: Db) {
       if (issueData.status === "done" && existing.status !== "done") {
         await assertCanCompleteMissionOversightIssue(db, existing);
         await assertCanCompleteMissionPlanQaIssue(db, existing);
+        await assertCanCompleteWorkflowValidationIssue(db, existing);
         await assertDeliveryReadbackBeforeDone(db, existing);
       }
 
