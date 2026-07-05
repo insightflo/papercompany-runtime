@@ -50,6 +50,7 @@ import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js"
 import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
 import { recordWorkflowValidationVerdictFromText } from "../services/workflow/validation-verdict-ledger.js";
+import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -789,6 +790,17 @@ export function issueRoutes(db: Db, storage: StorageService) {
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    const actor = getActorInfo(req);
+    const workProductRouteGuard = await resolveAgentWorkProductRouteGuard({
+      db,
+      companyId: issue.companyId,
+      issueId: issue.id,
+      actorType: actor.actorType,
+    });
+    if (workProductRouteGuard.block) {
+      res.status(422).json({ error: workProductRouteGuard.message ?? "blocked" });
+      return;
+    }
     const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, {
       ...req.body,
       projectId: req.body.projectId ?? issue.projectId ?? null,
@@ -797,7 +809,6 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(422).json({ error: "Invalid work product payload" });
       return;
     }
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: issue.companyId,
       actorType: actor.actorType,

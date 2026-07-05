@@ -254,6 +254,18 @@ export async function stopMissionRuntimesForMission(db: Db, input: {
   return stopped.length;
 }
 
+export function capHandoffJsonText(json: MissionIssueHandoffJson | undefined): MissionIssueHandoffJson {
+  if (!json) return {};
+  const capped: MissionIssueHandoffJson = { ...json };
+  if (typeof capped.issueGoal === "string") {
+    capped.issueGoal = truncateHandoffText(capped.issueGoal);
+  }
+  if (Array.isArray(capped.actionsTaken)) {
+    capped.actionsTaken = capped.actionsTaken.map((item) => truncateHandoffText(String(item)));
+  }
+  return capped;
+}
+
 export function buildMissionIssueHandoffMarkdown(input: {
   missionId: string;
   issueId: string | null;
@@ -323,6 +335,7 @@ export async function persistMissionIssueHandoff(db: Db, input: {
 }) {
   const now = new Date();
   const contentHash = sha256Text(input.handoffMarkdown);
+  const cappedHandoffJson = capHandoffJsonText(input.handoffJson);
   const [handoff] = await db
     .insert(missionIssueHandoffs)
     .values({
@@ -335,7 +348,7 @@ export async function persistMissionIssueHandoff(db: Db, input: {
       status: input.status,
       contentHash,
       handoffMarkdown: input.handoffMarkdown,
-      handoffJson: input.handoffJson ?? {},
+      handoffJson: cappedHandoffJson,
       evidenceRefsJson: input.evidenceRefsJson ?? [],
       updatedAt: now,
     })
@@ -345,7 +358,7 @@ export async function persistMissionIssueHandoff(db: Db, input: {
         status: input.status,
         contentHash,
         handoffMarkdown: input.handoffMarkdown,
-        handoffJson: input.handoffJson ?? {},
+        handoffJson: cappedHandoffJson,
         evidenceRefsJson: input.evidenceRefsJson ?? [],
         updatedAt: now,
       },

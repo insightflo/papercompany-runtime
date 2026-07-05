@@ -117,7 +117,7 @@ export async function assertWorkflowIssueWorkProductReadyForDone(input: {
     descriptionDrift,
   });
   throw unprocessable(
-    `Cannot complete workflow execution issue ${issueLabel(input.issue)} while step ${decision.stepId ?? "unknown"} requires a registered workProduct. Register the artifact in issue_work_products before marking the issue done; transcript claims or [ARTIFACT] comments alone are not sufficient.${decision.cardHash ? ` issueExecutionCardHash=${decision.cardHash}` : ""}`,
+    `Cannot complete workflow execution issue ${issueLabel(input.issue)} while step ${decision.stepId ?? "unknown"} requires a registered workProduct. Emit a standalone final line \`[ARTIFACT]: <absolute path>\` so the runtime registers the artifact automatically; do not POST /api/issues/:id/work-products manually or rely on transcript claims.${decision.cardHash ? ` issueExecutionCardHash=${decision.cardHash}` : ""}`,
   );
 }
 
