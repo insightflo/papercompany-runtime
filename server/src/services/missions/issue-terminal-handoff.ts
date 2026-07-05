@@ -7,6 +7,7 @@ import {
   type issues,
 } from "@paperclipai/db";
 import { sha256Text } from "../issue-execution-cards/hash.js";
+import { truncateHandoffText } from "./handoff-text-cap.js";
 
 type TerminalIssueRow = Pick<
   typeof issues.$inferSelect,
@@ -29,7 +30,7 @@ function renderTerminalIssueHandoff(input: {
     `Run ID: ${input.runId ?? "none"}`,
     "",
     "## Issue Goal",
-    input.issue.description ?? input.issue.title,
+    truncateHandoffText(input.issue.description ?? input.issue.title),
     "",
     "## What This Proves",
     "- The issue entered a terminal status in the official issues table.",
@@ -78,7 +79,7 @@ export async function persistTerminalIssueHandoff(input: {
       contentHash,
       handoffMarkdown,
       handoffJson: {
-        issueGoal: input.issue.description ?? input.issue.title,
+        issueGoal: truncateHandoffText(input.issue.description ?? input.issue.title),
         actionsTaken: [`Issue status changed from ${input.previousIssue.status} to ${input.issue.status}.`],
         evidence: evidenceRefsJson,
         importantCaveats: ["This closeout is generated from issue status state; verify comments, ledgers, and workProducts separately."],
