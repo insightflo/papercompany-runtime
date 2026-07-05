@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import {
   asString,
   asNumber,
@@ -425,7 +425,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let instructionsChars = 0;
   if (resolvedInstructionsFilePath) {
     try {
-      const loadedInstructions = await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath);
+      const loadedInstructions = applyInstructionInjectionPolicy(
+        await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath),
+        context,
+      );
       const instructionsContents = loadedInstructions.content;
       instructionsPrefix =
         `${instructionsContents}\n\n` +

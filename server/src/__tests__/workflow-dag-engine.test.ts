@@ -1064,10 +1064,20 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       source: "assignment",
       triggerDetail: "system",
       reason: "issue_assigned",
-      payload: { issueId: createdIssue!.id, mutation: "create" },
+      payload: expect.objectContaining({
+        issueId: createdIssue!.id,
+        mutation: "create",
+        issueExecutionCardId: expect.any(String),
+        issueExecutionCardHash: expect.any(String),
+      }),
       requestedByActorType: "system",
       requestedByActorId: `workflow:${workflowId}`,
-      contextSnapshot: { issueId: createdIssue!.id, source: "workflow.dispatch" },
+      contextSnapshot: expect.objectContaining({
+        issueId: createdIssue!.id,
+        source: "workflow.dispatch",
+        paperclipIssueExecutionCardId: expect.any(String),
+        paperclipIssueExecutionCardHash: expect.any(String),
+      }),
     }));
 
     const workflowRun = await db

@@ -9,6 +9,7 @@ import {
   type MissionIssueHandoffJson,
   type MissionRollingStateJson,
 } from "@paperclipai/db";
+import { sha256Text } from "../issue-execution-cards/hash.js";
 
 export const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const MISSION_RUNTIME_WORK_BLOCKING_STATUSES = new Set(["completed", "cancelled", "paused"]);
@@ -320,6 +321,7 @@ export async function persistMissionIssueHandoff(db: Db, input: {
   evidenceRefsJson?: MissionIssueHandoffEvidenceRef[];
 }) {
   const now = new Date();
+  const contentHash = sha256Text(input.handoffMarkdown);
   const [handoff] = await db
     .insert(missionIssueHandoffs)
     .values({
@@ -330,6 +332,7 @@ export async function persistMissionIssueHandoff(db: Db, input: {
       runId: input.runId,
       missionSessionId: input.missionSessionId ?? null,
       status: input.status,
+      contentHash,
       handoffMarkdown: input.handoffMarkdown,
       handoffJson: input.handoffJson ?? {},
       evidenceRefsJson: input.evidenceRefsJson ?? [],
@@ -339,6 +342,7 @@ export async function persistMissionIssueHandoff(db: Db, input: {
       target: missionIssueHandoffs.runId,
       set: {
         status: input.status,
+        contentHash,
         handoffMarkdown: input.handoffMarkdown,
         handoffJson: input.handoffJson ?? {},
         evidenceRefsJson: input.evidenceRefsJson ?? [],

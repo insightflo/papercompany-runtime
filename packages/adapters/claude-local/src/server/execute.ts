@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
   asString,
@@ -511,7 +511,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let effectiveInstructionsFilePath: string | undefined = resolvedInstructionsFilePath || undefined;
   if (resolvedInstructionsFilePath) {
     try {
-      const loadedInstructions = await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath);
+      const loadedInstructions = applyInstructionInjectionPolicy(
+        await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath),
+        context,
+      );
       const instructionsContent = loadedInstructions.content;
       const pathDirective = `\nThe above agent instructions were loaded from ${resolvedInstructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}.`;
       const combinedPath = path.join(skillsDir, "agent-instructions.md");

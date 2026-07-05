@@ -48,6 +48,7 @@ export const missionIssueHandoffs = pgTable(
     runId: uuid("run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
     missionSessionId: uuid("mission_session_id").references(() => missionSessions.id, { onDelete: "set null" }),
     status: text("status").notNull(),
+    contentHash: text("content_hash"),
     handoffVersion: integer("handoff_version").notNull().default(1),
     handoffMarkdown: text("handoff_markdown").notNull(),
     handoffJson: jsonb("handoff_json").$type<MissionIssueHandoffJson>().notNull().default({}),
@@ -59,6 +60,13 @@ export const missionIssueHandoffs = pgTable(
     missionCreatedIdx: index("idx_mission_issue_handoffs_mission_created").on(table.companyId, table.missionId, table.createdAt),
     issueCreatedIdx: index("idx_mission_issue_handoffs_issue_created").on(table.issueId, table.createdAt),
     agentMissionIdx: index("idx_mission_issue_handoffs_agent_mission").on(table.companyId, table.agentId, table.missionId),
+    contentHashIdx: index("idx_mission_issue_handoffs_content_hash").on(table.contentHash),
+    issueStatusHashUniqueIdx: uniqueIndex("mission_issue_handoffs_issue_status_hash_uq").on(
+      table.companyId,
+      table.issueId,
+      table.status,
+      table.contentHash,
+    ),
     runUniqueIdx: uniqueIndex("mission_issue_handoffs_run_id_key").on(table.runId),
   }),
 );

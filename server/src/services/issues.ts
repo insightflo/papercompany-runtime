@@ -41,6 +41,8 @@ import { logger } from "../middleware/logger.js";
 import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { recordHumanOperatorRequestEvent } from "./missions/human-operator-alert-events.js";
+import { resyncIssueExecutionCardAfterIssueUpdate } from "./issue-execution-cards/resync.js";
+import { persistTerminalIssueHandoff } from "./missions/issue-terminal-handoff.js";
 import {
   extractExpectedContentMarker,
   isManualOnboardingHubShell,
@@ -1780,12 +1782,39 @@ export function issueService(db: Db) {
         return enriched;
       });
 
+      const executionCardInputChanged = (
+        (issueData.title !== undefined && issueData.title !== existing.title) ||
+        (issueData.description !== undefined && issueData.description !== existing.description) ||
+        (issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== existing.assigneeAgentId) ||
+        (issueData.projectId !== undefined && issueData.projectId !== existing.projectId) ||
+        (issueData.missionId !== undefined && issueData.missionId !== existing.missionId)
+      );
+      if (updatedIssue && executionCardInputChanged) {
+        try {
+          await resyncIssueExecutionCardAfterIssueUpdate({ db, issue: updatedIssue });
+        } catch (err) {
+          logger.warn({ err, issueId: updatedIssue.id }, "failed to resync issue execution card after issue update");
+        }
+      }
+
       if (
         updatedIssue &&
         issueData.status &&
         issueData.status !== existing.status &&
         (issueData.status === "done" || issueData.status === "blocked" || issueData.status === "cancelled")
       ) {
+        try {
+          await persistTerminalIssueHandoff({
+            db,
+            issue: updatedIssue,
+            previousIssue: existing,
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId: updatedIssue.id, status: issueData.status },
+            "failed to persist terminal issue handoff",
+          );
+        }
         try {
           const { finalizeDelegatedWorkflowTargetIssue } = await import("./workflow-delegations.js");
           await finalizeDelegatedWorkflowTargetIssue(db, {

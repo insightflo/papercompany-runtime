@@ -100,6 +100,7 @@ export async function evaluateContextBudgetPreflight(input: {
       : "";
   const instructions = await readInstructionsPayload({
     adapterType: input.adapterType,
+    context: input.context,
     instructionsFilePath:
       typeof input.adapterConfig.instructionsFilePath === "string"
         ? input.adapterConfig.instructionsFilePath
@@ -178,6 +179,7 @@ export async function evaluateContextBudgetPreflight(input: {
 
 async function readInstructionsPayload(input: {
   adapterType: string;
+  context: Record<string, unknown>;
   instructionsFilePath: string | null;
   cwd: string;
   piSystemPromptChars: number;
@@ -185,6 +187,22 @@ async function readInstructionsPayload(input: {
   const trimmed = input.instructionsFilePath?.trim() ?? "";
   if (!trimmed) return { estimatedChars: 0, systemPromptChars: 0 };
   const resolvedPath = path.isAbsolute(trimmed) ? trimmed : path.resolve(input.cwd, trimmed);
+  const injection = parseObject(input.context.paperclipInstructionInjection);
+  if (injection.mode === "compact") {
+    const contentHash = typeof injection.contentHash === "string" ? injection.contentHash : "unknown";
+    const compactChars = [
+      "Agent Instructions Reference",
+      resolvedPath,
+      contentHash,
+      "Read referenced instructions on demand when needed.",
+    ].join("\n").length;
+    return {
+      estimatedChars: compactChars,
+      systemPromptChars: input.adapterType === "claude_local" || input.adapterType === "pi_local"
+        ? compactChars + (input.adapterType === "pi_local" ? input.piSystemPromptChars : 0)
+        : 0,
+    };
+  }
   try {
     const content = await fs.readFile(resolvedPath, "utf8");
     const dir = `${path.dirname(resolvedPath)}/`;

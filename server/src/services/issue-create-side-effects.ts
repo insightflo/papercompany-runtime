@@ -27,6 +27,8 @@ export async function applyIssueCreatedSideEffects(input: {
   contextSource: string;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
+  payload?: Record<string, unknown>;
+  contextSnapshot?: Record<string, unknown>;
   waitForWakeCompletion?: boolean;
   rethrowOnWakeError?: boolean;
 }) {
@@ -36,6 +38,8 @@ export async function applyIssueCreatedSideEffects(input: {
     reason: "issue_assigned",
     mutation: "create",
     contextSource: input.contextSource,
+    payload: input.payload,
+    contextSnapshot: input.contextSnapshot,
     requestedByActorType: input.requestedByActorType ?? input.actor.actorType,
     requestedByActorId: input.requestedByActorId ?? input.actor.actorId,
     rethrowOnError: input.rethrowOnWakeError,

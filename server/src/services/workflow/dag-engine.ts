@@ -49,6 +49,7 @@ import {
   buildArtifactOutputDirectoryLines,
   buildWorkProductRegistrationContractLines,
 } from "../work-products/artifact-registration-instructions.js";
+import { upsertWorkflowIssueExecutionCard } from "../issue-execution-cards/workflow-upsert.js";
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { readRawWorkProductRequirementMarkers } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
@@ -1562,7 +1563,14 @@ async function createWorkflowStepIssue(input: {
   // CMPA-5415→5419→5424→5427→5430 반복) 을 막는다. done/blocked issue 도 재사용 — 이후
   // dispatch 의 wake/skip 이 상태를 판단한다(이미 done 이면 재실행 안 함).
   const reusable = await input.db
-    .select({ id: issues.id, status: issues.status })
+    .select({
+      id: issues.id,
+      status: issues.status,
+      description: issues.description,
+      assigneeAgentId: issues.assigneeAgentId,
+      projectId: issues.projectId,
+      missionId: issues.missionId,
+    })
     .from(issues)
     .where(and(
       eq(issues.originRunId, input.run.id),
@@ -1574,7 +1582,24 @@ async function createWorkflowStepIssue(input: {
     .limit(1);
   if (reusable.length > 0) {
     const reusableIssue = reusable[0];
-    if (reusableIssue) return reusableIssue.id;
+    if (reusableIssue) {
+      await upsertWorkflowIssueExecutionCard({
+        db: input.db,
+        companyId: input.run.companyId,
+        issueId: reusableIssue.id,
+        title,
+        description: reusableIssue.description ?? description,
+        assigneeAgentId: reusableIssue.assigneeAgentId,
+        projectId: reusableIssue.projectId,
+        missionId: reusableIssue.missionId,
+        workflowDefinitionId: input.definition.id,
+        workflowRunId: input.run.id,
+        step: input.step,
+        stepOutputDir: workProductPaths?.stepOutputDir ?? null,
+        qaRubricPath,
+      });
+      return reusableIssue.id;
+    }
   }
 
   const createdIssue = await issueSvc.create(input.run.companyId, {
@@ -1589,6 +1614,22 @@ async function createWorkflowStepIssue(input: {
     originRunId: input.run.id,
   });
 
+  const executionCardRow = await upsertWorkflowIssueExecutionCard({
+    db: input.db,
+    companyId: input.run.companyId,
+    issueId: createdIssue.id,
+    title,
+    description,
+    assigneeAgentId,
+    projectId,
+    missionId: input.run.missionId ?? null,
+    workflowDefinitionId: input.definition.id,
+    workflowRunId: input.run.id,
+    step: input.step,
+    stepOutputDir: workProductPaths?.stepOutputDir ?? null,
+    qaRubricPath,
+  });
+
   await applyIssueCreatedSideEffects({
     db: input.db,
     heartbeat,
@@ -1598,6 +1639,25 @@ async function createWorkflowStepIssue(input: {
       actorId: `workflow:${input.definition.id}`,
     },
     contextSource: "workflow.dispatch",
+    payload: {
+      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
+      workflowRunId: input.run.id,
+      workflowDefinitionId: input.definition.id,
+      workflowStepId: input.step.id,
+      issueExecutionCardId: executionCardRow.id,
+      issueExecutionCardHash: executionCardRow.contentHash,
+    },
+    contextSnapshot: {
+      taskId: createdIssue.id,
+      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
+      workflowRunId: input.run.id,
+      workflowDefinitionId: input.definition.id,
+      workflowStepId: input.step.id,
+      stepId: input.step.id,
+      paperclipIssueExecutionCard: executionCardRow.cardJson,
+      paperclipIssueExecutionCardId: executionCardRow.id,
+      paperclipIssueExecutionCardHash: executionCardRow.contentHash,
+    },
     waitForWakeCompletion: true,
   });
 

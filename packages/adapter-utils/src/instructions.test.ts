@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadInstructionsWithInlinedReferences } from "./instructions.js";
+import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "./instructions.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(path.join(tmpdir(), "papercompany-instructions-"));
@@ -104,6 +104,26 @@ describe("loadInstructionsWithInlinedReferences", () => {
       expect(loaded.deferredPaths).toEqual([refPath]);
       expect(loaded.content).not.toContain("UNIQUE_BODY_MARKER_42");
       expect(loaded.content).toContain("tiny.md");
+    });
+  });
+
+  it("compacts repeated same-issue instructions when the server policy says compact", async () => {
+    await withTempDir(async (dir) => {
+      const entryPath = path.join(dir, "AGENTS.md");
+      await writeFile(entryPath, "FULL UNIQUE INSTRUCTIONS BODY", "utf8");
+
+      const loaded = await loadInstructionsWithInlinedReferences(entryPath);
+      const compacted = applyInstructionInjectionPolicy(loaded, {
+        paperclipInstructionInjection: {
+          mode: "compact",
+          contentHash: "abc123",
+        },
+      });
+
+      expect(compacted.content).toContain("Agent Instructions Reference");
+      expect(compacted.content).toContain(entryPath);
+      expect(compacted.content).toContain("abc123");
+      expect(compacted.content).not.toContain("FULL UNIQUE INSTRUCTIONS BODY");
     });
   });
 });

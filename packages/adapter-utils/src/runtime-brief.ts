@@ -353,6 +353,12 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
 export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const manifest = asRecord(context.paperclipStepInputManifest);
   const handoff = asRecord(context.paperclipSessionHandoff);
+  const issueExecutionCard = asRecord(context.paperclipIssueExecutionCard);
+  const issueExecutionRequiredOutputs = asRecord(issueExecutionCard?.requiredOutputs);
+  const issueExecutionWorkProduct = asRecord(issueExecutionRequiredOutputs?.workProduct);
+  const issueExecutionVerdict = asRecord(issueExecutionRequiredOutputs?.verdict);
+  const issueExecutionDelivery = asRecord(issueExecutionRequiredOutputs?.deliveryReadback);
+  const instructionInjection = asRecord(context.paperclipInstructionInjection);
   const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
   const recentIssueCommentsLine = buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
   const hermesChatLine = buildHermesChatBrief(context.paperclipHermesChat);
@@ -533,6 +539,12 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       : guardrails?.broadScanAllowed === true
         ? "- Broad scans: allowed by server policy."
         : null;
+  const issueExecutionCardLine = issueExecutionCard
+    ? `- Issue execution card: hash ${asString(context.paperclipIssueExecutionCardHash) ?? "unknown"}; workProduct required=${issueExecutionWorkProduct?.required === true}; verdict required=${issueExecutionVerdict?.required === true}; delivery readback required=${issueExecutionDelivery?.required === true}.`
+    : null;
+  const instructionInjectionLine = asString(instructionInjection?.mode)
+    ? `- Agent instructions injection: ${asString(instructionInjection?.mode)}${asString(instructionInjection?.contentHash) ? ` (${asString(instructionInjection?.contentHash)})` : ""}.`
+    : null;
 
   const handoffSummary = handoff
     ? joinPromptSections([
@@ -580,6 +592,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     hermesChatLine,
     fileViewsLine,
     guardrailLine,
+    issueExecutionCardLine,
+    instructionInjectionLine,
     handoffSummary,
   ], "\n");
 

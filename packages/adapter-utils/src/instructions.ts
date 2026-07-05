@@ -10,6 +10,11 @@ export type LoadedInstructionsWithReferences = {
   warnings: string[];
 };
 
+type InstructionInjectionPolicy = {
+  mode?: "full" | "compact";
+  contentHash?: string;
+};
+
 type LoadOptions = {
   maxDepth?: number;
   maxFiles?: number;
@@ -22,6 +27,54 @@ const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_FILES = 20;
 const DEFAULT_MAX_BYTES_PER_FILE = 512 * 1024;
 const DEFAULT_INLINE_MAX_BYTES = 10 * 1024;
+
+function asPolicy(value: unknown): InstructionInjectionPolicy | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const mode = record.mode === "compact" || record.mode === "full" ? record.mode : undefined;
+  const contentHash = typeof record.contentHash === "string" ? record.contentHash.trim() : undefined;
+  return mode ? { mode, contentHash } : null;
+}
+
+function compactInstructionsContent(
+  loaded: LoadedInstructionsWithReferences,
+  policy: InstructionInjectionPolicy,
+): string {
+  return [
+    "# Agent Instructions Reference",
+    "",
+    "Full agent instructions for this same issue were already injected in an earlier run.",
+    `Entry path: ${loaded.entryPath}`,
+    `Content hash: ${policy.contentHash ?? "unknown"}`,
+    "",
+    "Use the active session plus the Paperclip issue execution card, handoff, and ledgers as the primary context.",
+    "If a rule is needed again, read the entry path or referenced paths directly instead of restating the whole manual.",
+    "",
+    loaded.includedPaths.length > 0 ? "Referenced instruction paths:" : null,
+    ...loaded.includedPaths.map((includedPath) => `- ${includedPath}`),
+    loaded.deferredPaths.length > 0 ? "Deferred instruction paths:" : null,
+    ...loaded.deferredPaths.map((deferredPath) => `- ${deferredPath}`),
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+export function applyInstructionInjectionPolicy(
+  loaded: LoadedInstructionsWithReferences,
+  context: unknown,
+): LoadedInstructionsWithReferences {
+  const record = typeof context === "object" && context !== null && !Array.isArray(context)
+    ? context as Record<string, unknown>
+    : {};
+  const policy = asPolicy(record.paperclipInstructionInjection);
+  if (policy?.mode !== "compact") return loaded;
+  return {
+    ...loaded,
+    content: compactInstructionsContent(loaded, policy),
+    warnings: [
+      ...loaded.warnings,
+      `Compacted repeated instructions for same issue; content hash ${policy.contentHash ?? "unknown"}.`,
+    ],
+  };
+}
 
 /**
  * [목적] resolveInlineMaxBytes — inline 임계 결정. 명시 opt > env(PAPERCLIP_INSTRUCTIONS_INLINE_MAX_BYTES) > 기본 10KB.

@@ -8,7 +8,7 @@ import {
   type AdapterExecutionContext,
   type AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
-import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import {
   asBoolean,
   asNumber,
@@ -178,7 +178,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let instructionsPrefix = "";
   if (resolvedInstructionsFilePath) {
     try {
-      const loadedInstructions = await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath);
+      const loadedInstructions = applyInstructionInjectionPolicy(
+        await loadInstructionsWithInlinedReferences(resolvedInstructionsFilePath),
+        ctx.context,
+      );
       instructionsPrefix = `${loadedInstructions.content}\n\n`;
       await onLog("stderr", `[paperclip] Loaded agent instructions file: ${resolvedInstructionsFilePath}\n`);
       for (const includedPath of loadedInstructions.includedPaths) {

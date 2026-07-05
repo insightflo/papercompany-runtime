@@ -5,9 +5,12 @@ import {
   agents,
   companies,
   createDb,
+  issues,
+  missionIssueHandoffs,
   missionAgentRuntimes,
   missions,
 } from "@paperclipai/db";
+import { issueService } from "../services/issues.js";
 import {
   assertMissionRuntimeAcceptsWork,
   buildIssueEnvelopePolicy,
@@ -114,6 +117,8 @@ describeEmbeddedPostgres("mission runtime manager db guards", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(missionIssueHandoffs);
+    await db.delete(issues);
     await db.delete(missionAgentRuntimes);
     await db.delete(missions);
     await db.delete(agents);
@@ -185,5 +190,32 @@ describeEmbeddedPostgres("mission runtime manager db guards", () => {
       .from(missionAgentRuntimes)
       .where(eq(missionAgentRuntimes.missionId, missionId));
     expect(rows).toHaveLength(0);
+  });
+
+  it("writes a terminal issue handoff when a mission issue is blocked", async () => {
+    const { companyId, ownerAgentId, missionId } = await seedMission("active");
+    const issue = await issueService(db).create(companyId, {
+      title: "Needs operator input",
+      description: "Collect missing source access.",
+      missionId,
+      assigneeAgentId: ownerAgentId,
+      status: "todo",
+    });
+
+    await issueService(db).update(issue.id, { status: "blocked" });
+
+    const [handoff] = await db
+      .select()
+      .from(missionIssueHandoffs)
+      .where(eq(missionIssueHandoffs.issueId, issue.id));
+    expect(handoff).toMatchObject({
+      companyId,
+      missionId,
+      issueId: issue.id,
+      agentId: ownerAgentId,
+      status: "blocked",
+    });
+    expect(handoff?.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(handoff?.handoffMarkdown).toContain("Issue Terminal Handoff");
   });
 });

@@ -67,6 +67,7 @@ import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
+import { applyInstructionInjectionLedger } from "./instruction-injection-ledger.js";
 import { buildStepInputManifest } from "./step-input-manifest.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
@@ -5976,6 +5977,19 @@ export function heartbeatService(db: Db) {
       delete context.paperclipSessionRotationReason;
       delete context.paperclipPreviousSessionId;
     }
+    try {
+      await applyInstructionInjectionLedger({
+        db,
+        context,
+        agent,
+        issueId,
+        adapterConfig: runtimeConfig,
+        cwd: executionWorkspace.cwd,
+      });
+    } catch (err) {
+      delete context.paperclipInstructionInjection;
+      logger.warn({ err, agentId: agent.id, issueId }, "failed to apply instruction injection ledger");
+    }
 
     const runtimeForAdapter = {
       sessionId: runtimeSessionIdForAdapter,
@@ -6255,8 +6269,8 @@ export function heartbeatService(db: Db) {
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
       }
-      const hasResumableSession = hasResumableSessionForRun(runtimeForAdapter, executionWorkspace.cwd);
-      const contextBudgetPreflight = await evaluateContextBudgetPreflight({
+      let hasResumableSession = hasResumableSessionForRun(runtimeForAdapter, executionWorkspace.cwd);
+      let contextBudgetPreflight = await evaluateContextBudgetPreflight({
         runtimeConfig: agent.runtimeConfig,
         adapterType: agent.adapterType,
         adapterConfig: runtimeConfig,
@@ -6268,6 +6282,44 @@ export function heartbeatService(db: Db) {
         authTokenPresent:
           typeof parseObject(resolvedConfig.env).PAPERCLIP_API_KEY === "string" || Boolean(authToken),
       });
+      if (contextBudgetPreflight.blocked && hasResumableSession) {
+        const previousSessionId = runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null;
+        runtimeForAdapter.sessionId = null;
+        runtimeForAdapter.sessionParams = null;
+        runtimeForAdapter.sessionDisplayId = null;
+        hasResumableSession = false;
+        context.paperclipSessionRotationReason = "context_budget_preflight";
+        context.paperclipPreviousSessionId = previousSessionId;
+        context.paperclipSessionHandoffMarkdown = [
+          "# Session Handoff",
+          "",
+          `Previous session: ${previousSessionId ?? "unknown"}`,
+          "Rotation reason: context_budget_preflight",
+          `Issue ID: ${issueId ?? "none"}`,
+          "",
+          contextBudgetPreflight.reason ?? "Context budget preflight blocked resumed session.",
+        ].join("\n");
+        context.paperclipSessionHandoff = {
+          version: 1,
+          previousSessionId,
+          issueId,
+          rotationReason: "context_budget_preflight",
+          lastRunSummaryText: contextBudgetPreflight.reason,
+        };
+        refreshStepInputManifest(context, taskKey);
+        contextBudgetPreflight = await evaluateContextBudgetPreflight({
+          runtimeConfig: agent.runtimeConfig,
+          adapterType: agent.adapterType,
+          adapterConfig: runtimeConfig,
+          agent,
+          runId: run.id,
+          context,
+          hasResumableSession,
+          cwd: executionWorkspace.cwd,
+          authTokenPresent:
+            typeof parseObject(resolvedConfig.env).PAPERCLIP_API_KEY === "string" || Boolean(authToken),
+        });
+      }
       if (contextBudgetPreflight.blocked) {
         throw Object.assign(
           new Error(

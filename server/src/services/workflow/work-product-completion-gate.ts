@@ -1,20 +1,16 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueWorkProducts, issues, workflowStepRuns } from "@paperclipai/db";
+import { activityLog, issueWorkProducts, issues, workflowStepRuns } from "@paperclipai/db";
 import { unprocessable } from "../../errors.js";
+import { resolveWorkProductRequirement } from "../issue-execution-cards/gate-contract.js";
+import { cardDescriptionDrift, getIssueExecutionCard } from "../issue-execution-cards/store.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./issue-step-closeout.js";
 
-type WorkflowIssueWorkProductDb = Pick<Db, "select" | "update">;
+type WorkflowIssueWorkProductDb = Pick<Db, "select" | "update" | "insert">;
 type IssueRow = typeof issues.$inferSelect;
 type StepRunRow = Pick<typeof workflowStepRuns.$inferSelect, "id" | "stepId" | "metadata">;
 
 const ACTIVE_STEP_STATUS_CONDITION = sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`;
-
-function stepRunRequiresWorkProduct(stepRun: StepRunRow): boolean {
-  return stepRun.metadata.graphWorkProductRequired === true ||
-    stepRun.metadata.workProductRequired === true ||
-    stepRun.metadata.requiresWorkProduct === true;
-}
 
 async function getActiveLinkedStepRuns(
   db: WorkflowIssueWorkProductDb,
@@ -52,6 +48,32 @@ function issueLabel(issue: Pick<IssueRow, "id" | "identifier">): string {
   return issue.identifier ?? issue.id;
 }
 
+async function recordWorkProductGateDecision(input: {
+  db: WorkflowIssueWorkProductDb;
+  issue: IssueRow;
+  outcome: "passed" | "blocked";
+  source: string;
+  stepId: string | null;
+  cardHash: string | null;
+  descriptionDrift: boolean;
+}) {
+  if (!input.cardHash) return;
+  await input.db.insert(activityLog).values({
+    companyId: input.issue.companyId,
+    actorType: "system",
+    actorId: "workflow-work-product-completion-gate",
+    action: `issue_execution_card.work_product_gate_${input.outcome}`,
+    entityType: "issue",
+    entityId: input.issue.id,
+    details: {
+      source: input.source,
+      stepId: input.stepId,
+      cardHash: input.cardHash,
+      descriptionDrift: input.descriptionDrift,
+    },
+  });
+}
+
 export async function assertWorkflowIssueWorkProductReadyForDone(input: {
   readonly db: WorkflowIssueWorkProductDb;
   readonly issue: IssueRow;
@@ -59,12 +81,43 @@ export async function assertWorkflowIssueWorkProductReadyForDone(input: {
   if (input.issue.originKind !== "workflow_execution") return;
 
   const linkedStepRuns = await getActiveLinkedStepRuns(input.db, input.issue.id);
-  const requiredStepRun = linkedStepRuns.find(stepRunRequiresWorkProduct);
-  if (!requiredStepRun) return;
-  if (await hasRegisteredWorkProduct(input.db, input.issue)) return;
+  const card = await getIssueExecutionCard({
+    db: input.db,
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+  });
+  const decision = resolveWorkProductRequirement({
+    card,
+    linkedStepRuns,
+    issueDescription: input.issue.description,
+  });
+  if (!decision.required) return;
 
+  const descriptionDrift = cardDescriptionDrift({ issue: input.issue, card });
+  if (await hasRegisteredWorkProduct(input.db, input.issue)) {
+    await recordWorkProductGateDecision({
+      db: input.db,
+      issue: input.issue,
+      outcome: "passed",
+      source: decision.source,
+      stepId: decision.stepId,
+      cardHash: decision.cardHash,
+      descriptionDrift,
+    });
+    return;
+  }
+
+  await recordWorkProductGateDecision({
+    db: input.db,
+    issue: input.issue,
+    outcome: "blocked",
+    source: decision.source,
+    stepId: decision.stepId,
+    cardHash: decision.cardHash,
+    descriptionDrift,
+  });
   throw unprocessable(
-    `Cannot complete workflow execution issue ${issueLabel(input.issue)} while step ${requiredStepRun.stepId} requires a registered workProduct. Register the artifact in issue_work_products before marking the issue done; transcript claims or [ARTIFACT] comments alone are not sufficient.`,
+    `Cannot complete workflow execution issue ${issueLabel(input.issue)} while step ${decision.stepId ?? "unknown"} requires a registered workProduct. Register the artifact in issue_work_products before marking the issue done; transcript claims or [ARTIFACT] comments alone are not sufficient.${decision.cardHash ? ` issueExecutionCardHash=${decision.cardHash}` : ""}`,
   );
 }
 
