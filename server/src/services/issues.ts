@@ -47,6 +47,10 @@ import {
   readbackBodyContainsMarker,
   readbackPublicUrl,
 } from "./public-url-readback.js";
+import {
+  assertWorkflowIssueWorkProductReadyForDone,
+  completeWorkflowIssueStepRunsAfterDone,
+} from "./workflow/work-product-completion-gate.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -1646,6 +1650,7 @@ export function issueService(db: Db) {
         await assertCanCompleteMissionOversightIssue(db, existing);
         await assertCanCompleteMissionPlanQaIssue(db, existing);
         await assertCanCompleteWorkflowValidationIssue(db, existing);
+        await assertWorkflowIssueWorkProductReadyForDone({ db, issue: existing });
         await assertDeliveryReadbackBeforeDone(db, existing);
       }
 
@@ -1761,6 +1766,13 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         if (!updated) return null;
+        if (issueData.status === "done" && existing.status !== "done") {
+          await completeWorkflowIssueStepRunsAfterDone({
+            db: tx,
+            issue: updated,
+            completedAt: updated.completedAt ?? new Date(),
+          });
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }

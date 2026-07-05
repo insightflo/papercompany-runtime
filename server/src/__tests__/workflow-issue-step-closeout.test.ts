@@ -5,6 +5,7 @@ import {
   companies,
   createDb,
   agents,
+  issueWorkProducts,
   issues,
   missions,
   workflowDefinitions,
@@ -16,6 +17,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "../services/workflow/issue-step-closeout.js";
+import { issueService } from "../services/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -36,6 +38,7 @@ describeEmbeddedPostgres("workflow issue step closeout", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(issueWorkProducts);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
@@ -49,7 +52,10 @@ describeEmbeddedPostgres("workflow issue step closeout", () => {
     await tempDb?.cleanup();
   });
 
-  it("completes active workflow step runs when their issue is closed externally", async () => {
+  async function seedLinkedWorkflowIssue(input?: {
+    issueStatus?: string;
+    stepMetadata?: Record<string, unknown>;
+  }) {
     const companyId = randomUUID();
     const missionId = randomUUID();
     const workflowId = randomUUID();
@@ -90,10 +96,10 @@ describeEmbeddedPostgres("workflow issue step closeout", () => {
       missionId,
       identifier: "GAZ-155",
       title: "Sector rotation",
-      status: "done",
+      status: input?.issueStatus ?? "done",
       originKind: "workflow_execution",
       originRunId: workflowRunId,
-      completedAt,
+      completedAt: input?.issueStatus === "done" || input?.issueStatus == null ? completedAt : null,
     });
     await db.insert(workflowDefinitions).values({
       id: workflowId,
@@ -116,7 +122,14 @@ describeEmbeddedPostgres("workflow issue step closeout", () => {
       issueId,
       status: "running",
       startedAt,
+      metadata: input?.stepMetadata ?? {},
     });
+
+    return { companyId, issueId, stepRunId, startedAt, completedAt };
+  }
+
+  it("completes active workflow step runs when their issue is closed externally", async () => {
+    const { issueId, stepRunId, startedAt, completedAt } = await seedLinkedWorkflowIssue();
 
     const completedIds = await completeLinkedWorkflowStepRunsForIssue({ db, issueId, completedAt });
 
@@ -127,5 +140,44 @@ describeEmbeddedPostgres("workflow issue step closeout", () => {
       startedAt,
       completedAt,
     }));
+  });
+
+  it("blocks direct issue completion when a linked required workProduct is missing", async () => {
+    const { issueId, stepRunId } = await seedLinkedWorkflowIssue({
+      issueStatus: "todo",
+      stepMetadata: { graphWorkProductRequired: true },
+    });
+
+    await expect(issueService(db).update(issueId, { status: "done" })).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("requires a registered workProduct"),
+    });
+
+    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
+    expect(stepRun?.status).toBe("running");
+  });
+
+  it("completes the linked workflow step when direct issue completion has a workProduct", async () => {
+    const { companyId, issueId, stepRunId } = await seedLinkedWorkflowIssue({
+      issueStatus: "todo",
+      stepMetadata: { graphWorkProductRequired: true },
+    });
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId,
+      type: "artifact",
+      provider: "local",
+      title: "Sector_Rotation_Analysis_2026-07-05.md",
+      url: "/srv/papercompany/projects/gazua-addon/produced_work/sector.md",
+      status: "active",
+      isPrimary: true,
+    });
+
+    const updated = await issueService(db).update(issueId, { status: "done" });
+
+    expect(updated?.status).toBe("done");
+    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
+    expect(stepRun?.status).toBe("completed");
+    expect(stepRun?.completedAt).toBeInstanceOf(Date);
   });
 });
