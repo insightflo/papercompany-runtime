@@ -10,6 +10,7 @@ import {
   type MissionRollingStateJson,
 } from "@paperclipai/db";
 import { sha256Text } from "../issue-execution-cards/hash.js";
+import { truncateHandoffText } from "./handoff-text-cap.js";
 
 export const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const MISSION_RUNTIME_WORK_BLOCKING_STATUSES = new Set(["completed", "cancelled", "paused"]);
@@ -281,10 +282,10 @@ export function buildMissionIssueHandoffMarkdown(input: {
     `- Timestamp: ${new Date().toISOString()}`,
     "",
     "## Issue Goal",
-    input.issueGoal?.trim() || "No issue goal captured.",
+    truncateHandoffText(input.issueGoal) || "No issue goal captured.",
     "",
     "## Actions Taken",
-    input.summaryText?.trim() || "See heartbeat run result/log excerpts.",
+    truncateHandoffText(input.summaryText) || "See heartbeat run result/log excerpts.",
     "",
     "## Decisions Made",
     ...(input.decisions?.length ? input.decisions.map((item) => `- ${item}`) : ["- No explicit decisions captured."]),

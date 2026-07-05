@@ -1,4 +1,5 @@
 import { joinPromptSections } from "./prompt-utils.js";
+import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -354,10 +355,6 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const manifest = asRecord(context.paperclipStepInputManifest);
   const handoff = asRecord(context.paperclipSessionHandoff);
   const issueExecutionCard = asRecord(context.paperclipIssueExecutionCard);
-  const issueExecutionRequiredOutputs = asRecord(issueExecutionCard?.requiredOutputs);
-  const issueExecutionWorkProduct = asRecord(issueExecutionRequiredOutputs?.workProduct);
-  const issueExecutionVerdict = asRecord(issueExecutionRequiredOutputs?.verdict);
-  const issueExecutionDelivery = asRecord(issueExecutionRequiredOutputs?.deliveryReadback);
   const instructionInjection = asRecord(context.paperclipInstructionInjection);
   const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
   const recentIssueCommentsLine = buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
@@ -539,9 +536,12 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       : guardrails?.broadScanAllowed === true
         ? "- Broad scans: allowed by server policy."
         : null;
-  const issueExecutionCardLine = issueExecutionCard
-    ? `- Issue execution card: hash ${asString(context.paperclipIssueExecutionCardHash) ?? "unknown"}; workProduct required=${issueExecutionWorkProduct?.required === true}; verdict required=${issueExecutionVerdict?.required === true}; delivery readback required=${issueExecutionDelivery?.required === true}.`
-    : null;
+  const issueExecutionCardLines = issueExecutionCard
+    ? buildIssueExecutionCardBriefLines({
+      card: context.paperclipIssueExecutionCard,
+      cardHash: asString(context.paperclipIssueExecutionCardHash),
+    })
+    : [];
   const instructionInjectionLine = asString(instructionInjection?.mode)
     ? `- Agent instructions injection: ${asString(instructionInjection?.mode)}${asString(instructionInjection?.contentHash) ? ` (${asString(instructionInjection?.contentHash)})` : ""}.`
     : null;
@@ -592,7 +592,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     hermesChatLine,
     fileViewsLine,
     guardrailLine,
-    issueExecutionCardLine,
+    ...issueExecutionCardLines,
     instructionInjectionLine,
     handoffSummary,
   ], "\n");
