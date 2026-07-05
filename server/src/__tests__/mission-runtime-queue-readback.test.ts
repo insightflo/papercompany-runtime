@@ -19,6 +19,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
+  heartbeatService,
   recordHeartbeatQueueTransitionEvent,
   recordHeartbeatRunTerminalTransitionEvent,
 } from "../services/heartbeat.js";
@@ -195,6 +196,71 @@ describeEmbeddedPostgres("mission runtime queue readback (Task 6C/6D)", () => {
     expect(accepted.length).toBeGreaterThan(0);
     expect(accepted[0]?.decision).toBe("accepted");
     expect(accepted[0]?.heartbeatRunId).toBeTruthy();
+  });
+
+  it("keeps assignment wakeups queued when the assigned agent is paused", async () => {
+    const { companyId, agentId, missionId, issueId } = await seedMinimalFixture(db);
+    await db
+      .update(agents)
+      .set({
+        status: "paused",
+        pauseReason: "reauth_required",
+        pausedAt: new Date("2026-07-05T00:00:00.000Z"),
+      })
+      .where(eq(agents.id, agentId));
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.wakeup(agentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "workflow_step_runnable",
+      payload: { issueId, mutation: "workflow_resume", missionId },
+      contextSnapshot: {
+        issueId,
+        missionId,
+        workflowRunId: randomUUID(),
+        stepId: "paused-agent-step",
+        source: "workflow.resume",
+      },
+      requestedByActorType: "system",
+      requestedByActorId: "workflow:test",
+    });
+
+    expect(run).toBeNull();
+
+    const wakeups = await db
+      .select({
+        status: agentWakeupRequests.status,
+        runId: agentWakeupRequests.runId,
+        missionId: agentWakeupRequests.missionId,
+        reason: agentWakeupRequests.reason,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.issueId, issueId));
+    expect(wakeups).toEqual([{
+      status: "queued",
+      runId: null,
+      missionId,
+      reason: "workflow_step_runnable",
+    }]);
+    expect(await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.issueId, issueId))).toEqual([]);
+
+    const [waiting] = await db
+      .select({
+        eventType: workflowTransitionEvents.eventType,
+        decision: workflowTransitionEvents.decision,
+        reasonCode: workflowTransitionEvents.reasonCode,
+      })
+      .from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.issueId, issueId));
+    expect(waiting).toMatchObject({
+      eventType: "queue_waiting",
+      decision: "waiting",
+      reasonCode: "agent.paused",
+    });
   });
 
   it("records queue_run_completed when a heartbeat run succeeds", async () => {

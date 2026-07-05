@@ -1822,6 +1822,8 @@ export function agentRoutes(db: Db) {
       entityId: agent.id,
     });
 
+    await heartbeat.resumeQueuedRuns(agent.id);
+
     res.json(agent);
   });
 

@@ -4961,7 +4961,11 @@ export function heartbeatService(db: Db) {
 
     return { finalized: finalizedRunIds.length, runIds: finalizedRunIds };
   }
-  async function resumeQueuedRuns() {
+  async function resumeQueuedRuns(agentId?: string) {
+    if (agentId) {
+      await startNextQueuedRunForAgent(agentId);
+      return;
+    }
     const queuedRuns = await db
       .select({ agentId: heartbeatRuns.agentId })
       .from(heartbeatRuns)
@@ -7913,6 +7917,71 @@ export function heartbeatService(db: Db) {
       workflowStepRunId: (readNonEmptyString(enrichedContextSnapshot.workflowStepRunId)
         ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowStepRunId"] as string)) ?? null,
     };
+    const queuePausedAgentWakeup = async () => {
+      let wakeupRequestId: string | null = null;
+      if (issueId) {
+        const existingQueuedWake = await db
+          .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount })
+          .from(agentWakeupRequests)
+          .where(and(
+            eq(agentWakeupRequests.companyId, agent.companyId),
+            eq(agentWakeupRequests.agentId, agentId),
+            eq(agentWakeupRequests.status, "queued"),
+            eq(agentWakeupRequests.issueId, issueId),
+            sql`${agentWakeupRequests.runId} is null`,
+          ))
+          .orderBy(asc(agentWakeupRequests.requestedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (existingQueuedWake) {
+          await db
+            .update(agentWakeupRequests)
+            .set({
+              payload,
+              coalescedCount: (existingQueuedWake.coalescedCount ?? 0) + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, existingQueuedWake.id));
+          wakeupRequestId = existingQueuedWake.id;
+        }
+      }
+
+      if (!wakeupRequestId) {
+        const inserted = await db
+          .insert(agentWakeupRequests)
+          .values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason,
+            payload,
+            ...typedQueueColumns,
+            status: "queued",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+          })
+          .returning({ id: agentWakeupRequests.id })
+          .then((rows) => rows[0] ?? null);
+        wakeupRequestId = inserted?.id ?? null;
+      }
+
+      await recordQueueTransitionEvent({
+        companyId: agent.companyId,
+        missionId: missionIdForWake,
+        issueId: issueId ?? null,
+        wakeupRequestId,
+        workflowRunId: typedQueueColumns.workflowRunId,
+        workflowStepRunId: typedQueueColumns.workflowStepRunId,
+        eventType: "queue_waiting",
+        layer: "queue",
+        decision: "waiting",
+        reason: "agent.paused",
+        reasonCode: "agent.paused",
+        idempotencyKey: `queue-waiting:${agent.companyId}:${agentId}:agent.paused:${issueId ?? wakeupRequestId ?? "no-issue"}`,
+      });
+    };
     if (missionIdForWake) {
       try {
         await assertMissionRuntimeAcceptsWork(db, {
@@ -7978,7 +8047,12 @@ export function heartbeatService(db: Db) {
       agent.status === "terminated" ||
       agent.status === "pending_approval"
     ) {
-      throw conflict("Agent is not invokable in its current state", { status: agent.status });
+      if (agent.status === "paused") {
+        await queuePausedAgentWakeup();
+        return null;
+      }
+      await writeSkippedRequest(`agent.${agent.status}`);
+      return null;
     }
 
     const policy = parseHeartbeatPolicy(agent);
