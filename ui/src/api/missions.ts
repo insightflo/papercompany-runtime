@@ -150,6 +150,14 @@ export interface MissionGovernanceThreadEvidenceRef {
   label?: string;
 }
 
+export interface MissionGovernanceThreadSuggestedResumeTarget {
+  action: "wake_agent" | "resume_workflow" | "request_human_input" | "owner_review" | "manual_retry" | "none";
+  agentId?: string;
+  issueId?: string;
+  workflowRunId?: string;
+  workflowStepRunId?: string;
+}
+
 export interface MissionGovernanceThreadEvent {
   id: string;
   companyId: string;
@@ -170,6 +178,7 @@ export interface MissionGovernanceThreadEvent {
   severity?: MissionGovernanceThreadSeverity;
   actor?: MissionGovernanceThreadActor;
   evidenceRefs?: MissionGovernanceThreadEvidenceRef[];
+  suggestedResumeTarget?: MissionGovernanceThreadSuggestedResumeTarget;
   rawAvailable?: boolean;
 }
 
@@ -177,6 +186,7 @@ export interface MissionGovernanceThreadSummary {
   totalEventCount: number;
   latestEvents: MissionGovernanceThreadEvent[];
   openDecisions: MissionGovernanceThreadEvent[];
+  suggestedResumeTarget?: MissionGovernanceThreadSuggestedResumeTarget;
 }
 
 export interface MissionGovernanceThreadResponse {
@@ -201,6 +211,20 @@ export interface MissionListItem {
   completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface MissionHumanOperatorRequest {
+  id: string;
+  companyId: string;
+  missionId: string;
+  missionTitle: string;
+  missionStatus: MissionStatus;
+  issueId?: string;
+  title: string;
+  summary: string;
+  timestamp: string;
+  severity?: MissionGovernanceThreadSeverity;
+  event: MissionGovernanceThreadEvent;
 }
 
 export interface MissionListFilters {
@@ -368,6 +392,8 @@ export const missionsApi = {
   listIssues: (id: string) => api.get<Issue[]>(`/missions/${id}/issues`),
   listWorkflowRuns: (id: string) => api.get<MissionWorkflowRun[]>(`/missions/${id}/workflow-runs`),
   getGovernanceThread: (id: string) => api.get<MissionGovernanceThreadResponse>(`/missions/${id}/governance-thread`),
+  listHumanOperatorRequests: (companyId: string) =>
+    api.get<MissionHumanOperatorRequest[]>(`/companies/${companyId}/missions/human-operator-requests`),
   create: (companyId: string, data: CreateMissionInput) =>
     api.post<MissionListItem>(`/companies/${companyId}/missions`, data),
   update: (id: string, data: UpdateMissionInput) =>

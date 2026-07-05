@@ -1,0 +1,102 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildHumanOperatorRequestPayload,
+  HUMAN_OPERATOR_REQUEST_ACTION,
+  recordHumanOperatorRequestEvent,
+} from "../services/missions/human-operator-alert-events.js";
+
+vi.mock("../services/live-events.js", () => ({
+  publishLiveEvent: vi.fn((event) => event),
+}));
+
+const ownerIssue = {
+  id: "owner-issue-1",
+  companyId: "company-1",
+  missionId: "mission-1",
+  originKind: "mission_main_executor_unblock",
+  originId: "source-issue-1",
+  title: "Recover blocked source",
+  identifier: "RES-100",
+};
+
+const requestInputComment = {
+  id: "comment-1",
+  authorAgentId: "owner-agent-1",
+  authorUserId: null,
+  body: [
+    "### Mission owner decision",
+    "Decision: request_input",
+    "Reason: Browser auth is required.",
+    "Next Action: Human operator should reauthorize the session.",
+    "Evidence: redirect to login page",
+  ].join("\n"),
+};
+
+describe("human operator alert events", () => {
+  it("builds a human request payload from owner unblock request_input comments", () => {
+    const payload = buildHumanOperatorRequestPayload({
+      issue: ownerIssue,
+      comment: requestInputComment,
+    });
+
+    expect(payload).toMatchObject({
+      missionId: "mission-1",
+      issueId: "owner-issue-1",
+      sourceIssueId: "source-issue-1",
+      commentId: "comment-1",
+      decision: "request_input",
+      issueIdentifier: "RES-100",
+      actorType: "agent",
+      actorId: "owner-agent-1",
+    });
+    expect(payload?.reason).toContain("Browser auth");
+    expect(payload?.nextAction).toContain("reauthorize");
+  });
+
+  it("ignores non-owner-unblock issues", () => {
+    const payload = buildHumanOperatorRequestPayload({
+      issue: { ...ownerIssue, originKind: "mission_plan_qa" },
+      comment: requestInputComment,
+    });
+
+    expect(payload).toBeNull();
+  });
+
+  it("records and publishes the dedicated live event once per comment", async () => {
+    const liveEvents = await import("../services/live-events.js");
+    const rows: Array<{ id: string; details: Record<string, unknown> }> = [];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => Promise.resolve(rows),
+        }),
+      }),
+      insert: () => ({
+        values: (value: { action: string; details: Record<string, unknown> }) => {
+          rows.push({ id: `activity-${rows.length + 1}`, details: value.details });
+          expect(value.action).toBe(HUMAN_OPERATOR_REQUEST_ACTION);
+          return Promise.resolve();
+        },
+      }),
+    };
+
+    const payload = await recordHumanOperatorRequestEvent(db as never, {
+      issue: ownerIssue,
+      comment: requestInputComment,
+    });
+    const duplicate = await recordHumanOperatorRequestEvent(db as never, {
+      issue: ownerIssue,
+      comment: requestInputComment,
+    });
+
+    expect(payload?.decision).toBe("request_input");
+    expect(duplicate?.decision).toBe("request_input");
+    expect(rows).toHaveLength(1);
+    expect(liveEvents.publishLiveEvent).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      type: "mission.human_input_requested",
+      payload: expect.objectContaining({ issueId: "owner-issue-1" }),
+    }));
+    expect(liveEvents.publishLiveEvent).toHaveBeenCalledTimes(1);
+  });
+});

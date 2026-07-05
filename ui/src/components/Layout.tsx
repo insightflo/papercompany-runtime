@@ -72,7 +72,8 @@ function readRememberedHermesPanelOpen(): boolean {
   if (typeof window === "undefined") return true;
   try {
     const raw = window.localStorage.getItem(HERMES_PANEL_MEMORY_KEY);
-    return raw === null ? true : raw === "true";
+    if (raw !== null) return raw === "true";
+    return !window.matchMedia("(max-width: 767px)").matches;
   } catch {
     return true;
   }

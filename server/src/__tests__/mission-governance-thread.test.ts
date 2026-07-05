@@ -248,6 +248,20 @@ describe("governance-thread helpers", () => {
     ]);
   });
 
+  it("keeps human input requests in open decisions", () => {
+    const event = makeEvent({
+      eventType: "owner_diagnosis",
+      title: "Human/operator input requested",
+      sourceRef: makeSourceRef({ type: "issue_comment", id: "comment-1" }),
+      suggestedResumeTarget: { action: "request_human_input", issueId: "issue-1" },
+    });
+
+    const summary = summarizeGovernanceThread([event]);
+
+    expect(summary.openDecisions).toHaveLength(1);
+    expect(summary.openDecisions[0].suggestedResumeTarget?.action).toBe("request_human_input");
+  });
+
   it("uses event suggestedResumeTarget as plain data and does not expose side-effect functions", () => {
     const event = makeEvent({
       eventType: "workflow_step_failed",

@@ -53,4 +53,24 @@ describe("Telegram outbound notifications", () => {
     expect(message).toContain("Plugin worker crashed");
     expect(message).toContain("insightflo.research-workbench");
   });
+
+  it("reports mission human input requests without enabling success noise", () => {
+    const message = formatEventNotification({
+      type: "mission.human_input_requested",
+      payload: {
+        missionId: "934e9993-7175-4956-8c93-4fa8150fdc41",
+        issueId: "6b540c35-3067-4e12-864a-79a3b08a0a76",
+        issueIdentifier: "RES-935",
+        issueTitle: "Resolve blocked source",
+        decision: "request_input",
+        reason: "Browser auth is required.",
+        nextAction: "Human operator should reauthorize the session.",
+      },
+    });
+
+    expect(message).toContain("*Human input required*");
+    expect(message).toContain("RES-935");
+    expect(message).toContain("Browser auth is required.");
+    expect(message).not.toContain("*Success*");
+  });
 });

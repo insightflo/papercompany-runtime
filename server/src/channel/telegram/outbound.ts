@@ -157,6 +157,26 @@ export function formatEventNotification(event: { type: string; payload?: Record<
       return null;
     }
 
+    case "mission.human_input_requested": {
+      const missionId = readString(payload?.missionId);
+      const issueId = readString(payload?.issueId);
+      const issueTitle = readString(payload?.issueTitle);
+      const issueIdentifier = readString(payload?.issueIdentifier);
+      const decision = readString(payload?.decision);
+      const reason = readString(payload?.reason);
+      const nextAction = readString(payload?.nextAction);
+      const issueLabel = issueIdentifier ?? (issueId ? issueId.slice(0, 8) : null);
+      const lines = [
+        "*Human input required*",
+        issueTitle && issueLabel ? `${issueLabel} — ${issueTitle}` : issueTitle ?? (issueLabel ? `Issue ${issueLabel}` : null),
+        missionId ? `Mission: ${missionId.slice(0, 8)}` : null,
+        decision ? `Decision: ${decision}` : null,
+        reason ? `Reason: ${reason}` : null,
+        nextAction ? `Next: ${nextAction}` : null,
+      ].filter((line): line is string => Boolean(line));
+      return lines.length > 1 ? lines.join("\n").slice(0, 3500) : null;
+    }
+
     case "plugin.worker.crashed": {
       const pluginKey = readString(payload?.pluginKey);
       const workerId = readString(payload?.workerId);

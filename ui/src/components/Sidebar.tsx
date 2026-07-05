@@ -19,6 +19,7 @@ import {
   GitPullRequest,
   Workflow,
   ListChecks,
+  UserRoundCheck,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
@@ -28,6 +29,7 @@ import { SidebarAgents } from "./SidebarAgents";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { heartbeatsApi } from "../api/heartbeats";
+import { missionsApi } from "../api/missions";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { useInboxBadge } from "../hooks/useInboxBadge";
@@ -54,6 +56,15 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
     refetchInterval: 10_000,
   });
   const liveRunCount = liveRuns?.length ?? 0;
+  const { data: humanOperatorRequests } = useQuery({
+    queryKey: deferredCompanyId
+      ? queryKeys.missions.humanOperatorRequests(deferredCompanyId)
+      : ["missions", "human-operator-requests"],
+    queryFn: () => missionsApi.listHumanOperatorRequests(deferredCompanyId!),
+    enabled: !!deferredCompanyId,
+    refetchInterval: 30_000,
+  });
+  const humanOperatorRequestCount = humanOperatorRequests?.length ?? 0;
 
   function openSearch() {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
@@ -107,6 +118,14 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
             <span className="truncate">New Mission</span>
           </button>
           <SidebarNavItem to="/missions" label="Missions" icon={Rocket} />
+          <SidebarNavItem
+            to="/human-operator"
+            label="Human Operator"
+            icon={UserRoundCheck}
+            badge={humanOperatorRequestCount}
+            badgeTone="danger"
+            alert={humanOperatorRequestCount > 0}
+          />
           <SidebarNavItem
             to="/inbox"
             label="Inbox"

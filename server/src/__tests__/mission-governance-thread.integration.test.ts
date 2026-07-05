@@ -27,6 +27,8 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
+import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
+import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -180,10 +182,46 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: ownerAgentId, issueId, status: "failed", errorCode: "adapter_failed", wakeupRequestId: wakeupId, startedAt: new Date("2026-05-20T00:04:00Z"), finishedAt: new Date("2026-05-20T00:05:00Z"), logRef: "log://run" });
     await db.insert(activityLog).values([
       { id: randomUUID(), companyId, actorType: "system", actorId: "system", action: "custom.unknown", entityType: "issue", entityId: issueId, runId, details: {} },
+      {
+        id: randomUUID(),
+        companyId,
+        actorType: "agent",
+        actorId: ownerAgentId,
+        action: HUMAN_OPERATOR_REQUEST_ACTION,
+        entityType: "issue",
+        entityId: issueId,
+        agentId: ownerAgentId,
+        details: {
+          missionId,
+          issueId,
+          commentId: "owner-decision-comment",
+          decision: "request_input",
+          reason: "Browser auth is required.",
+          nextAction: "Human operator should reauthorize the session.",
+          actorType: "agent",
+          actorId: ownerAgentId,
+        },
+      },
       { id: randomUUID(), companyId, actorType: "system", actorId: "system", action: "heartbeat.invoked", entityType: "issue", entityId: issueId, runId, details: {} },
       { id: randomUUID(), companyId: other.companyId, actorType: "system", actorId: "system", action: "custom.other", entityType: "issue", entityId: issueId, details: {} },
     ]);
-    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId, authorUserId: "operator", body: "Plain comment" });
+    const ownerDecisionCommentId = randomUUID();
+    await db.insert(issueComments).values([
+      { id: randomUUID(), companyId, issueId, authorUserId: "operator", body: "Plain comment" },
+      {
+        id: ownerDecisionCommentId,
+        companyId,
+        issueId,
+        authorAgentId: ownerAgentId,
+        body: [
+          "### Mission owner decision",
+          "Decision: request_input",
+          "Reason: Browser auth is required.",
+          "Next Action: Human operator should reauthorize the session.",
+          "Evidence: redirect to login page",
+        ].join("\n"),
+      },
+    ]);
 
     const pendingApprovalId = randomUUID();
     const revisionApprovalId = randomUUID();
@@ -231,6 +269,7 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
     expect(events.some((event) => event.sourceRef.type === "activity_log" && event.eventType === "activity_observed" && event.summary === "custom.unknown")).toBe(true);
     expect(events.some((event) => event.sourceRef.type === "activity_log" && event.summary === "heartbeat.invoked")).toBe(false);
     expect(events.some((event) => event.sourceRef.type === "issue_comment" && event.eventType === "activity_observed")).toBe(true);
+    expect(events.some((event) => event.sourceRef.type === "issue_comment" && event.sourceRef.id === ownerDecisionCommentId && event.title === "Human/operator input requested")).toBe(true);
     expect(events.some((event) => event.sourceRef.type === "tool_audit_log" && event.eventType === "tool_result")).toBe(true);
     expect(events.some((event) => event.sourceRef.type === "tool_audit_log" && event.sourceRef.id === crossToolAuditId)).toBe(false);
     expect(events.some((event) => event.companyId === other.companyId)).toBe(false);
@@ -238,10 +277,20 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
     const openApprovalIds = thread!.summary.openDecisions.map((event) => event.scope.approvalId);
     expect(openApprovalIds).toEqual(expect.arrayContaining([pendingApprovalId, revisionApprovalId]));
     expect(openApprovalIds).not.toEqual(expect.arrayContaining([approvedApprovalId, rejectedApprovalId, unknownApprovalId]));
+    expect(thread!.summary.openDecisions.some((event) => event.suggestedResumeTarget?.action === "request_human_input" && event.scope.issueId === issueId)).toBe(true);
     expect(events.some((event) => event.sourceRef.type === "approval" && event.sourceRef.id === unknownApprovalId && event.eventType === "activity_observed")).toBe(true);
     expect(events.filter((event) => event.sourceRef.type === "approval_comment")).toHaveLength(1);
     expect(events.some((event) => event.eventType === "evidence_missing")).toBe(true);
     expect(new Set(events.map((event) => event.id)).size).toBe(events.length);
+
+    const operatorRequests = await listCompanyHumanOperatorRequests(db, { companyId });
+    expect(operatorRequests).toHaveLength(1);
+    expect(operatorRequests[0]).toMatchObject({
+      missionId,
+      issueId,
+      title: "Human/operator input requested",
+      severity: "attention",
+    });
   });
 
   it("projects native-only workflow runs and direct steps when plugin rows are absent", async () => {

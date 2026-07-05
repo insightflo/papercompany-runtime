@@ -40,6 +40,7 @@ import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandle
 import { logger } from "../middleware/logger.js";
 import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
+import { recordHumanOperatorRequestEvent } from "./missions/human-operator-alert-events.js";
 import {
   extractExpectedContentMarker,
   isManualOnboardingHubShell,
@@ -2276,6 +2277,9 @@ export function issueService(db: Db) {
           companyId: issues.companyId,
           missionId: issues.missionId,
           originKind: issues.originKind,
+          originId: issues.originId,
+          title: issues.title,
+          identifier: issues.identifier,
         })
         .from(issues)
         .where(eq(issues.id, issueId))
@@ -2303,6 +2307,20 @@ export function issueService(db: Db) {
         .update(issues)
         .set({ updatedAt: new Date() })
         .where(eq(issues.id, issueId));
+
+      try {
+        await recordHumanOperatorRequestEvent(db, {
+          issue,
+          comment: {
+            id: comment.id,
+            authorAgentId: comment.authorAgentId,
+            authorUserId: comment.authorUserId,
+            body: comment.body,
+          },
+        });
+      } catch (err) {
+        logger.warn({ err, issueId: issue.id, companyId: issue.companyId }, "failed to record human operator request");
+      }
 
       if (
         (issue.originKind === "mission_main_executor_plan" || issue.originKind === "mission_plan_qa") &&

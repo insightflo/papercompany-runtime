@@ -18,6 +18,7 @@ import {
 import { and, eq, inArray, or } from "drizzle-orm";
 import type { MissionExecutionUnit, MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listMissionExecutionSourceSnapshots, normalizeMissionExecutionStatus } from "./mission-execution-sources.js";
+import { missionOwnerHumanReportEvents } from "./mission-owner-human-report-events.js";
 
 export type GovernanceThreadEventType =
   | "status_changed"
@@ -202,7 +203,10 @@ export function summarizeGovernanceThread(
   const limit = options.latestEventsLimit ?? options.maxLatestEvents ?? DEFAULT_LATEST_EVENTS_LIMIT;
   const sortedEvents = sortGovernanceEvents(events);
   const latestEvents = sortedEvents.slice(Math.max(0, sortedEvents.length - limit));
-  const openDecisions = sortedEvents.filter((event) => event.eventType === "approval_requested");
+  const openDecisions = sortedEvents.filter((event) => (
+    event.eventType === "approval_requested"
+    || event.suggestedResumeTarget?.action === "request_human_input"
+  ));
   const suggestedResumeTarget = [...sortedEvents]
     .reverse()
     .find((event) => event.suggestedResumeTarget)?.suggestedResumeTarget;
@@ -662,6 +666,11 @@ export async function listMissionGovernanceThread(
 
   if (issueIdList.length > 0) {
     const scopedIssueComments = await db.select().from(issueComments).where(and(eq(issueComments.companyId, input.companyId), inArray(issueComments.issueId, issueIdList)));
+    events.push(...missionOwnerHumanReportEvents({
+      missionId: input.missionId,
+      issueIds,
+      comments: scopedIssueComments,
+    }));
     for (const comment of scopedIssueComments) {
       events.push({
         id: `activity_observed:issue_comment:${comment.id}`,

@@ -3,6 +3,7 @@
  *
  * Endpoints:
  * - GET    /companies/:companyId/missions            — List missions
+ * - GET    /companies/:companyId/missions/human-operator-requests — List open human operator requests
  * - POST   /companies/:companyId/missions            — Create mission
  * - GET    /missions/:id                             — Get mission detail
  * - PATCH  /missions/:id                             — Update mission
@@ -27,6 +28,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
+import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
 import { loadMissionRuntimeSnapshot } from "../services/missions/mission-runtime-snapshot.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
@@ -191,6 +193,24 @@ export function missionRoutes(db: Db) {
   // ---------------------------------------------------------------------------
   // Mission CRUD
   // ---------------------------------------------------------------------------
+
+  /**
+   * GET /companies/:companyId/missions/human-operator-requests
+   *
+   * List open mission governance decisions that need human/operator input.
+   */
+  router.get("/companies/:companyId/missions/human-operator-requests", async (req, res) => {
+    const { companyId } = req.params;
+    assertCompanyAccess(req, companyId);
+
+    const limit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
+    const requests = await listCompanyHumanOperatorRequests(db, {
+      companyId,
+      ...(Number.isFinite(limit) && limit && limit > 0 ? { limit: Math.min(limit, 100) } : {}),
+    });
+
+    res.json(requests);
+  });
 
   /**
    * GET /companies/:companyId/missions

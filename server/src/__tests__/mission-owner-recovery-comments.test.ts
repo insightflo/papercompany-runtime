@@ -103,6 +103,10 @@ describe("mission owner recovery comments", () => {
     expect(description).toContain("Current situation: Source issue SRC-1");
     expect(description).toContain("Mission execution loop:");
     expect(description).toContain("- Choose and perform the action that best advances the mission: instruct or wake agents, request fixes, retry/resume bounded work, request/re-run tool steps, revalidate outputs, replan, escalate, or report impossible completion with evidence.");
+    expect(description).toContain("Escalation/reporting line:");
+    expect(description).toContain("Use the existing mission-owner decision path");
+    expect(description).toContain("name the next assignee/owner `reportsTo` target");
+    expect(description).toContain("The human operator is the final receiver for unresolved mission blockers.");
     expect(description).toContain("Oversight signal boundary:");
     expect(description).toContain("Oversight is not the recovery decision-maker.");
     expect(description).toContain("Do not depend on normalized decision labels as the primary control path");
