@@ -69,6 +69,7 @@ import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
 import { buildStepInputManifest } from "./step-input-manifest.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
+import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
@@ -1379,6 +1380,7 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
       status: issues.status,
       assigneeAgentId: issues.assigneeAgentId,
       hiddenAt: issues.hiddenAt,
+      completedAt: issues.completedAt,
     })
     .from(issues)
     .where(and(eq(issues.id, ownerActionIssue.originId), eq(issues.companyId, ownerActionIssue.companyId)))
@@ -1469,6 +1471,11 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
       })
       .where(and(eq(issues.id, sourceIssue.id), eq(issues.companyId, sourceIssue.companyId)));
   }
+  const completedStepRunIds = await completeLinkedWorkflowStepRunsForIssue({
+    db: input.tx,
+    issueId: sourceIssue.id,
+    completedAt: sourceIssue.completedAt ?? input.now,
+  });
 
   await input.tx.insert(issueComments).values({
     companyId: sourceIssue.companyId,
@@ -1497,6 +1504,7 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
       previousStatus: sourceIssue.status,
       nextStatus: "done",
       ownerActionIssueId: ownerActionIssue.id,
+      workflowStepRunIds: completedStepRunIds,
       artifactUrl: input.artifactUrl,
       workProductId,
     },
