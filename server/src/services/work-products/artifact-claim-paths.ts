@@ -120,6 +120,7 @@ export function resolveCommentArtifactPathCandidates(input: {
   runFinishedAt?: Date | null;
   allowedArtifactRoot: string | null;
   includeClaimedPaths?: boolean;
+  includePriorComments?: boolean;
   clockSkewMs?: number;
 }): CommentArtifactPathCandidates {
   if (!input.allowedArtifactRoot || !(input.runStartedAt instanceof Date)) {
@@ -134,7 +135,7 @@ export function resolveCommentArtifactPathCandidates(input: {
   for (const comment of input.comments) {
     if (!(comment.createdAt instanceof Date)) continue;
     const createdAtMs = comment.createdAt.getTime();
-    if (createdAtMs < runStartedAtMs - clockSkewMs) continue;
+    if (!input.includePriorComments && createdAtMs < runStartedAtMs - clockSkewMs) continue;
     if (runFinishedAtMs !== null && createdAtMs > runFinishedAtMs + clockSkewMs) continue;
 
     let addedFromComment = false;
@@ -172,6 +173,7 @@ export async function collectRecentIssueCommentArtifactPathCandidates(input: {
   runUpdatedAt: Date | null;
   allowedArtifactRoot: string | null;
   includeClaimedPaths?: boolean;
+  includePriorComments?: boolean;
   now?: Date;
 }): Promise<CommentArtifactPathCandidates> {
   const runStartedAt = input.runStartedAt ?? input.runCreatedAt;
@@ -201,5 +203,6 @@ export async function collectRecentIssueCommentArtifactPathCandidates(input: {
     runFinishedAt: input.runFinishedAt ?? input.runUpdatedAt ?? input.now ?? new Date(),
     allowedArtifactRoot: input.allowedArtifactRoot,
     includeClaimedPaths: input.includeClaimedPaths,
+    includePriorComments: input.includePriorComments,
   });
 }

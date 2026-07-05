@@ -7188,6 +7188,7 @@ export function heartbeatService(db: Db) {
               runUpdatedAt: run.updatedAt instanceof Date ? run.updatedAt : null,
               allowedArtifactRoot,
               includeClaimedPaths: true,
+              includePriorComments: true,
             });
             if (commentArtifactPathCandidates.safeForAutoRegistration) {
               autoRegisteredWorkProduct = await autoRegisterWorkProductFromClaimedFile({

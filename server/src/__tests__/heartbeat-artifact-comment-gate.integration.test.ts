@@ -78,6 +78,15 @@ function successfulAdapterResult() {
   };
 }
 
+async function invokeAndWaitForRun(heartbeat: ReturnType<typeof heartbeatService>, agentId: string, issueId: string) {
+  const run = await heartbeat.invoke(agentId, "on_demand", { issueId }, "manual", {
+    actorType: "system",
+    actorId: "test-suite",
+  });
+  expect(run).not.toBeNull();
+  await waitForRunTerminal(heartbeat, run!.id);
+}
+
 describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -176,12 +185,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     });
 
     const heartbeat = heartbeatService(db);
-    const run = await heartbeat.invoke(fixture.agentId, "on_demand", { issueId: fixture.issueId }, "manual", {
-      actorType: "system",
-      actorId: "test-suite",
-    });
-    expect(run).not.toBeNull();
-    await waitForRunTerminal(heartbeat, run!.id);
+    await invokeAndWaitForRun(heartbeat, fixture.agentId, fixture.issueId);
 
     const issue = await waitForIssueStatus(db, fixture.issueId, "done");
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
@@ -205,29 +209,25 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     }));
   });
 
-  it("auto-registers one same-run claimed comment artifact only when the local file exists", async () => {
+  it("auto-registers one prior claimed comment artifact only when the local file exists", async () => {
     const fixture = await seedProducerIssue();
     const sourceCommentId = randomUUID();
+    await db.insert(issueComments).values({
+      id: sourceCommentId,
+      companyId: fixture.companyId,
+      issueId: fixture.issueId,
+      authorAgentId: fixture.agentId,
+      body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
+      createdAt: new Date(Date.now() - 60_000),
+    });
     executeSpy.mockImplementation(async () => {
       await fs.mkdir(path.dirname(fixture.artifactPath), { recursive: true });
       await fs.writeFile(fixture.artifactPath, "{\"ok\":true}\n", "utf8");
-      await db.insert(issueComments).values({
-        id: sourceCommentId,
-        companyId: fixture.companyId,
-        issueId: fixture.issueId,
-        authorAgentId: fixture.agentId,
-        body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
-      });
       return successfulAdapterResult();
     });
 
     const heartbeat = heartbeatService(db);
-    const run = await heartbeat.invoke(fixture.agentId, "on_demand", { issueId: fixture.issueId }, "manual", {
-      actorType: "system",
-      actorId: "test-suite",
-    });
-    expect(run).not.toBeNull();
-    await waitForRunTerminal(heartbeat, run!.id);
+    await invokeAndWaitForRun(heartbeat, fixture.agentId, fixture.issueId);
 
     const issue = await waitForIssueStatus(db, fixture.issueId, "done");
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
@@ -251,25 +251,19 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     }));
   });
 
-  it("blocks one same-run claimed comment artifact when the local file is missing", async () => {
+  it("blocks one prior claimed comment artifact when the local file is missing", async () => {
     const fixture = await seedProducerIssue();
-    executeSpy.mockImplementation(async () => {
-      await db.insert(issueComments).values({
-        companyId: fixture.companyId,
-        issueId: fixture.issueId,
-        authorAgentId: fixture.agentId,
-        body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
-      });
-      return successfulAdapterResult();
+    await db.insert(issueComments).values({
+      companyId: fixture.companyId,
+      issueId: fixture.issueId,
+      authorAgentId: fixture.agentId,
+      body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
+      createdAt: new Date(Date.now() - 60_000),
     });
+    executeSpy.mockImplementation(async () => successfulAdapterResult());
 
     const heartbeat = heartbeatService(db);
-    const run = await heartbeat.invoke(fixture.agentId, "on_demand", { issueId: fixture.issueId }, "manual", {
-      actorType: "system",
-      actorId: "test-suite",
-    });
-    expect(run).not.toBeNull();
-    await waitForRunTerminal(heartbeat, run!.id);
+    await invokeAndWaitForRun(heartbeat, fixture.agentId, fixture.issueId);
 
     const issue = await waitForIssueStatus(db, fixture.issueId, "blocked");
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
@@ -294,12 +288,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     });
 
     const heartbeat = heartbeatService(db);
-    const run = await heartbeat.invoke(fixture.agentId, "on_demand", { issueId: fixture.issueId }, "manual", {
-      actorType: "system",
-      actorId: "test-suite",
-    });
-    expect(run).not.toBeNull();
-    await waitForRunTerminal(heartbeat, run!.id);
+    await invokeAndWaitForRun(heartbeat, fixture.agentId, fixture.issueId);
 
     const issue = await waitForIssueStatus(db, fixture.issueId, "blocked");
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));

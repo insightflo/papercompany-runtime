@@ -182,19 +182,7 @@ describe("heartbeat missing workProduct artifact gate", () => {
 
   it("keeps explicit [ARTIFACT] paths ahead of noisy path-like output", () => {
     const artifactPath = "/srv/papercompany/projects/research-company/produced_work/missions/mission-1/runs/run-1/steps/collect-tech-scout-evidence/evidence.json";
-    const noisyPaths = [
-      "/tool-index.md",
-      "/tool-index.json",
-      "/README-kali.md",
-      "/platforms/macos.md",
-      "/platforms/linux.md",
-      "/README_en.md",
-      "/README_ja.md",
-      "/docs/install.md",
-      "/docs/usage.md",
-      "/examples/basic.json",
-      "/examples/advanced.json",
-    ].join("\n");
+    const noisyPaths = ["/tool-index.md", "/tool-index.json", "/README-kali.md", "/platforms/macos.md", "/platforms/linux.md", "/README_en.md", "/README_ja.md", "/docs/install.md", "/docs/usage.md", "/examples/basic.json", "/examples/advanced.json"].join("\n");
 
     const paths = extractClaimedArtifactPaths({
       resultJson: {
