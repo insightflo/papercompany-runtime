@@ -9,7 +9,7 @@ const CLAIMED_ARTIFACT_JSON_PATH_RE = new RegExp(
   "giu",
 );
 const CLAIMED_ARTIFACT_ABSOLUTE_PATH_RE = new RegExp(
-  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"\\\\,}\\]])`,
+  `(/[^\\r\\n\`'"]+?\\.(?:${CLAIMED_ARTIFACT_EXTENSION_PATTERN}))(?=$|[\\s\`'"\\\\,}\\]).;:])`,
   "giu",
 );
 const EXPLICIT_ARTIFACT_DECLARATION_RE = /`?\[?ARTIFACT\]?`?\s*:\s*[`'"]?(\/[^\s`'")\]\n]+)/giu;
@@ -119,6 +119,7 @@ export function resolveCommentArtifactPathCandidates(input: {
   runStartedAt: Date | null;
   runFinishedAt?: Date | null;
   allowedArtifactRoot: string | null;
+  includeClaimedPaths?: boolean;
   clockSkewMs?: number;
 }): CommentArtifactPathCandidates {
   if (!input.allowedArtifactRoot || !(input.runStartedAt instanceof Date)) {
@@ -137,7 +138,11 @@ export function resolveCommentArtifactPathCandidates(input: {
     if (runFinishedAtMs !== null && createdAtMs > runFinishedAtMs + clockSkewMs) continue;
 
     let addedFromComment = false;
-    for (const artifactPath of extractExplicitArtifactPaths(comment.body ?? "")) {
+    const commentBody = comment.body ?? "";
+    const artifactPaths = input.includeClaimedPaths
+      ? extractClaimedArtifactPathsFromText(commentBody)
+      : extractExplicitArtifactPaths(commentBody);
+    for (const artifactPath of artifactPaths) {
       if (!isActionableClaimedArtifactPath(artifactPath)) continue;
       if (!isPathInsideOrEqual(artifactPath, input.allowedArtifactRoot)) continue;
       paths.add(artifactPath);
@@ -166,6 +171,7 @@ export async function collectRecentIssueCommentArtifactPathCandidates(input: {
   runFinishedAt: Date | null;
   runUpdatedAt: Date | null;
   allowedArtifactRoot: string | null;
+  includeClaimedPaths?: boolean;
   now?: Date;
 }): Promise<CommentArtifactPathCandidates> {
   const runStartedAt = input.runStartedAt ?? input.runCreatedAt;
@@ -194,5 +200,6 @@ export async function collectRecentIssueCommentArtifactPathCandidates(input: {
     runStartedAt,
     runFinishedAt: input.runFinishedAt ?? input.runUpdatedAt ?? input.now ?? new Date(),
     allowedArtifactRoot: input.allowedArtifactRoot,
+    includeClaimedPaths: input.includeClaimedPaths,
   });
 }

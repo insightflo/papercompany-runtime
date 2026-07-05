@@ -1197,10 +1197,11 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   allowedArtifactRoot?: string | null;
   preferClaimedArtifactPath?: boolean;
   registrationSource?: {
-    type: "issue_comment_artifact_marker";
+    type: "issue_comment_artifact_marker" | "issue_comment_claimed_file";
     commentClaimedArtifactPaths: string[];
     sourceCommentIds: string[];
   };
+  requireExistingLocalFile?: boolean;
 }) {
   // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
   //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
@@ -1236,9 +1237,8 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   const explicitEligiblePaths = extractExplicitArtifactPaths(explicitRunText)
     .filter((p) => isActionableClaimedArtifactPath(p))
     .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
-  const commentRegistrationSource = input.registrationSource?.type === "issue_comment_artifact_marker"
-    ? input.registrationSource
-    : null;
+  const commentRegistrationSource = input.registrationSource ?? null;
+  const commentRegistrationSourceKind = commentRegistrationSource?.type ?? null;
   const explicitCommentEligiblePaths = commentRegistrationSource?.commentClaimedArtifactPaths
     .filter((p) => isActionableClaimedArtifactPath(p))
     .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot)) ?? [];
@@ -1259,6 +1259,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
   const resolvedArtifactPath = declaredArtifactPath ?? (scored.length > 0 && scored[0].score > 0 ? scored[0].p : null);
   if (!resolvedArtifactPath) return null;
+  if (input.requireExistingLocalFile === true && !(await isExistingLocalFile(resolvedArtifactPath))) return null;
 
   const isPrimary = !(await input.tx
     .select({ id: issueWorkProducts.id })
@@ -1282,12 +1283,12 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
       isPrimary,
       healthStatus: "unknown",
       summary: commentRegistrationSource
-        ? "Auto-registered from one explicit artifact marker in a same-run issue comment."
+        ? "Auto-registered from one same-run issue comment artifact path."
         : "Auto-registered from a claimed artifact path that resolves to a real file (producer reported the path but did not register a workProduct).",
       metadata: commentRegistrationSource
         ? {
             path: resolvedArtifactPath,
-            autoRegisteredFrom: "issue_comment_artifact_marker",
+            autoRegisteredFrom: commentRegistrationSourceKind,
             commentClaimedArtifactPaths: commentRegistrationSource.commentClaimedArtifactPaths,
             sourceCommentIds: commentRegistrationSource.sourceCommentIds,
           }
@@ -1315,7 +1316,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
       ? {
           workProductId: created?.id ?? null,
           path: resolvedArtifactPath,
-          autoRegisteredFrom: "issue_comment_artifact_marker",
+          autoRegisteredFrom: commentRegistrationSourceKind,
           commentClaimedArtifactPaths: commentRegistrationSource.commentClaimedArtifactPaths,
           sourceCommentIds: commentRegistrationSource.sourceCommentIds,
         }
@@ -1328,6 +1329,16 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   });
 
   return created ?? null;
+}
+
+async function isExistingLocalFile(artifactPath: string): Promise<boolean> {
+  try {
+    const stats = await fs.stat(artifactPath);
+    return stats.isFile();
+  } catch (error) {
+    if (error instanceof Error) return false;
+    throw error;
+  }
 }
 
 function extractMissionOwnerUnblockArtifactUrl(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string | null {
@@ -7164,6 +7175,36 @@ export function heartbeatService(db: Db) {
                 sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
               },
             });
+          }
+          if (!autoRegisteredWorkProduct) {
+            commentArtifactPathCandidates = await collectRecentIssueCommentArtifactPathCandidates({
+              tx,
+              issueId: issue.id,
+              companyId: issue.companyId,
+              agentId: run.agentId,
+              runStartedAt: run.startedAt instanceof Date ? run.startedAt : null,
+              runCreatedAt: run.createdAt instanceof Date ? run.createdAt : null,
+              runFinishedAt: run.finishedAt instanceof Date ? run.finishedAt : null,
+              runUpdatedAt: run.updatedAt instanceof Date ? run.updatedAt : null,
+              allowedArtifactRoot,
+              includeClaimedPaths: true,
+            });
+            if (commentArtifactPathCandidates.safeForAutoRegistration) {
+              autoRegisteredWorkProduct = await autoRegisterWorkProductFromClaimedFile({
+                tx,
+                issue,
+                run,
+                claimedArtifactPaths: commentArtifactPathCandidates.paths,
+                allowedArtifactRoot,
+                preferClaimedArtifactPath: true,
+                requireExistingLocalFile: true,
+                registrationSource: {
+                  type: "issue_comment_claimed_file",
+                  commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
+                  sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
+                },
+              });
+            }
           }
         }
         if (!hasSatisfiedWorkProductRegistration({

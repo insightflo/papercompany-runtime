@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -60,6 +62,20 @@ async function waitForIssueStatus(db: ReturnType<typeof createDb>, issueId: stri
     `Timed out waiting for issue ${issueId}; latest=${issue?.status ?? "missing"}`,
     comments.map((comment) => comment.body).join("\n---\n"),
   ].join("\n"));
+}
+
+function successfulAdapterResult() {
+  return {
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    errorMessage: null,
+    usage: null,
+    provider: "test",
+    model: "test-model",
+    resultJson: null,
+    runtimeServices: [],
+  };
 }
 
 describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
@@ -156,17 +172,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
         authorAgentId: fixture.agentId,
         body: `[ARTIFACT]: ${fixture.artifactPath}`,
       });
-      return {
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        errorMessage: null,
-        usage: null,
-        provider: "test",
-        model: "test-model",
-        resultJson: null,
-        runtimeServices: [],
-      };
+      return successfulAdapterResult();
     });
 
     const heartbeat = heartbeatService(db);
@@ -199,6 +205,81 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     }));
   });
 
+  it("auto-registers one same-run claimed comment artifact only when the local file exists", async () => {
+    const fixture = await seedProducerIssue();
+    const sourceCommentId = randomUUID();
+    executeSpy.mockImplementation(async () => {
+      await fs.mkdir(path.dirname(fixture.artifactPath), { recursive: true });
+      await fs.writeFile(fixture.artifactPath, "{\"ok\":true}\n", "utf8");
+      await db.insert(issueComments).values({
+        id: sourceCommentId,
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        authorAgentId: fixture.agentId,
+        body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
+      });
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(fixture.agentId, "on_demand", { issueId: fixture.issueId }, "manual", {
+      actorType: "system",
+      actorId: "test-suite",
+    });
+    expect(run).not.toBeNull();
+    await waitForRunTerminal(heartbeat, run!.id);
+
+    const issue = await waitForIssueStatus(db, fixture.issueId, "done");
+    const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
+    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, fixture.issueId));
+    expect(issue?.status).toBe("done");
+    expect(workProducts).toHaveLength(1);
+    expect(workProducts[0]?.externalId).toBe(fixture.artifactPath);
+    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
+      autoRegisteredFrom: "issue_comment_claimed_file",
+      path: fixture.artifactPath,
+      commentClaimedArtifactPaths: [fixture.artifactPath],
+      sourceCommentIds: [sourceCommentId],
+    }));
+    expect(activities).toContainEqual(expect.objectContaining({
+      action: "issue.work_product_auto_registered_from_comment",
+      details: expect.objectContaining({
+        autoRegisteredFrom: "issue_comment_claimed_file",
+        commentClaimedArtifactPaths: [fixture.artifactPath],
+        sourceCommentIds: [sourceCommentId],
+      }),
+    }));
+  });
+
+  it("blocks one same-run claimed comment artifact when the local file is missing", async () => {
+    const fixture = await seedProducerIssue();
+    executeSpy.mockImplementation(async () => {
+      await db.insert(issueComments).values({
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        authorAgentId: fixture.agentId,
+        body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
+      });
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(fixture.agentId, "on_demand", { issueId: fixture.issueId }, "manual", {
+      actorType: "system",
+      actorId: "test-suite",
+    });
+    expect(run).not.toBeNull();
+    await waitForRunTerminal(heartbeat, run!.id);
+
+    const issue = await waitForIssueStatus(db, fixture.issueId, "blocked");
+    const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, fixture.issueId));
+    expect(issue?.status).toBe("blocked");
+    expect(workProducts).toHaveLength(0);
+    expect(comments.map((comment) => comment.body).join("\n")).toContain("workProduct registration missing");
+    expect(comments.map((comment) => comment.body).join("\n")).toContain(fixture.artifactPath);
+  });
+
   it("blocks when same-run comments expose multiple explicit artifact candidates", async () => {
     const fixture = await seedProducerIssue();
     const secondPath = fixture.artifactPath.replace("evidence.json", "appendix.json");
@@ -209,17 +290,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
         authorAgentId: fixture.agentId,
         body: [`[ARTIFACT]: ${fixture.artifactPath}`, `[ARTIFACT]: ${secondPath}`].join("\n"),
       });
-      return {
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        errorMessage: null,
-        usage: null,
-        provider: "test",
-        model: "test-model",
-        resultJson: null,
-        runtimeServices: [],
-      };
+      return successfulAdapterResult();
     });
 
     const heartbeat = heartbeatService(db);
