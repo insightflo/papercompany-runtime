@@ -244,10 +244,13 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
 
     const evidenceIssue = upstream["produce-evidence"];
     if (!evidenceIssue) throw new Error("produce-evidence issue was not created");
-    await completeIssue(evidenceIssue.id);
+    await expect(completeIssue(evidenceIssue.id)).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("requires a registered workProduct"),
+    });
 
     expect(await getStepIssue(runId, "synthesize")).toBeNull();
-    expect((await getStepRun(runId, "produce-evidence"))?.status).toBe("running");
+    expect((await getStepRun(runId, "produce-evidence"))?.status).not.toBe("completed");
     const runAfterMissingWorkProduct = await db
       .select()
       .from(workflowRuns)
@@ -265,7 +268,7 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
       status: "active",
       isPrimary: true,
     });
-    await syncWorkflowRunForIssue(db, evidenceIssue.id);
+    await completeIssue(evidenceIssue.id);
 
     expect((await getStepRun(runId, "produce-evidence"))?.status).toBe("completed");
     const synthIssue = await getStepIssue(runId, "synthesize");
