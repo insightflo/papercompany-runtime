@@ -264,8 +264,8 @@ export function buildPaperclipEnv(
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
   const apiUrl =
     normalizePaperclipApiUrl(options.apiUrl ?? "") ??
-    readContextPaperclipApiUrl(options.context) ??
     normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL ?? "") ??
+    readContextPaperclipApiUrl(options.context) ??
     `http://${runtimeHost}:${runtimePort}`;
   vars.PAPERCLIP_API_URL = apiUrl;
   vars.PAPERCLIP_API_BASE_URL = apiBaseUrl(apiUrl);

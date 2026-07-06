@@ -64,6 +64,20 @@ describe("buildPaperclipEnv", () => {
     expect(env.PAPERCLIP_API_BASE_URL).toBe("http://127.0.0.1:3100/api");
   });
 
+  it("prefers the current runtime API URL over stale adapter context", () => {
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3100";
+    process.env.PAPERCLIP_LISTEN_HOST = "127.0.0.1";
+    process.env.PAPERCLIP_LISTEN_PORT = "3100";
+
+    const env = buildPaperclipEnv(
+      { id: "agent-1", companyId: "company-1" },
+      { context: { paperclipApiUrl: "http://localhost:3200" } },
+    );
+
+    expect(env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:3100");
+    expect(env.PAPERCLIP_API_BASE_URL).toBe("http://127.0.0.1:3100/api");
+  });
+
   it("formats IPv6 hosts safely in fallback URL generation", () => {
     delete process.env.PAPERCLIP_API_URL;
     process.env.PAPERCLIP_LISTEN_HOST = "::1";
