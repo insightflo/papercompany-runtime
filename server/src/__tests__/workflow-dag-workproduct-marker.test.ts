@@ -221,6 +221,39 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
     expect(description).not.toContain("has no registered dependency workProduct.");
   });
 
+  it("does not hard-stop direct dependencies with no workProduct marker after normalized default false", async () => {
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const analystAgentId = randomUUID();
+    const editorAgentId = randomUUID();
+    const upstream = await executeRun({
+      companyId,
+      companyName: "Comment Dependency",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [
+        { id: analystAgentId, name: "Signal Analyst", role: "analyst" },
+        { id: editorAgentId, name: "Synthesis Editor", role: "editor" },
+      ],
+      steps: [
+        { id: "signal-analysis", name: "Post signal analysis", agentId: analystAgentId, dependencies: [] },
+        { id: "market-analysis", name: "Synthesize market report", agentId: editorAgentId, dependencies: ["signal-analysis"], graphWorkProductRequired: true },
+      ],
+    });
+
+    const signalIssue = upstream["signal-analysis"];
+    if (!signalIssue) throw new Error("signal-analysis issue was not created");
+    await completeIssue(signalIssue.id);
+
+    const marketIssue = await getStepIssue(runId, "market-analysis");
+    if (!marketIssue) throw new Error("market-analysis issue was not created");
+    const description = marketIssue.description ?? "";
+    expect(description).toContain("signal-analysis:");
+    expect(description).toContain("workProducts: none registered");
+    expect(description).not.toContain("Dependency workProduct hard-stop:");
+  });
+
   it("does not unlock downstream when a required producer is done without a registered workProduct", async () => {
     const companyId = randomUUID();
     const runId = randomUUID();

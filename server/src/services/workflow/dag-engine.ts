@@ -51,7 +51,7 @@ import {
 } from "../work-products/artifact-registration-instructions.js";
 import { upsertWorkflowIssueExecutionCard } from "../issue-execution-cards/workflow-upsert.js";
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
-import { readRawWorkProductRequirementMarkers } from "./workflow-step-workproduct-markers.js";
+import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 
 /**
@@ -99,7 +99,7 @@ export interface WorkflowStep {
   conditionalDependencies?: ConditionalEdge[];
   /**
    * 이 step이 파일 산출물을 생산하는지(compile-time 계약).
-   * normalizeWorkflowStepsForExecution 이 isTruthyBooleanMarker 로 항상 boolean으로 강제한다.
+   * normalizeWorkflowStepsForExecution 이 명시 true/alias true만 true로 정규화한다.
    * true면 createWorkflowStepIssue 가 출력 디렉토리 + [ARTIFACT]: 등록 contract를 주입하고,
    * heartbeat missing-workProduct gate가 적용된다.
    */
@@ -133,6 +133,8 @@ type PersistedWorkflowStep = WorkflowStep & {
   graphCacheTtlSeconds?: unknown;
   graphDeleteAfterUse?: unknown;
   graphWorkProductRequired?: unknown;
+  workProductRequired?: unknown;
+  requiresWorkProduct?: unknown;
 };
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
@@ -325,7 +327,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       ...(executionControls ? { executionControls } : {}),
       // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
       conditionalDependencies,
-      graphWorkProductRequired: isTruthyBooleanMarker(step.graphWorkProductRequired),
+      graphWorkProductRequired: readWorkProductRequirementMarker(step) === true,
     };
   });
 }
@@ -1306,7 +1308,6 @@ async function createWorkflowStepIssue(input: {
   const workflowStepsById = new Map(
     normalizeWorkflowStepsForExecution(input.definition.stepsJson).map((step) => [step.id, step]),
   );
-  const rawWorkProductRequirementMarkers = readRawWorkProductRequirementMarkers(input.definition.stepsJson);
   const gateProducerStepIdsByGateStepId = collectGateValidatedProducerStepIds(
     input.step.dependencies,
     workflowStepsById,
@@ -1485,7 +1486,7 @@ async function createWorkflowStepIssue(input: {
   });
   const gateStepIds = new Set(gateProducerStepIdsByGateStepId.keys());
   const missingDirectDependencyWorkProductLines = dependencyIssueRows
-    .filter((row) => rawWorkProductRequirementMarkers.get(row.stepId) !== false)
+    .filter((row) => workflowStepsById.get(row.stepId)?.graphWorkProductRequired === true)
     .filter((row) => !dependencyHasWorkProductOrArtifact(row))
     .filter((row) => !gateStepIds.has(row.stepId))
     .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);

@@ -103,13 +103,19 @@ describe("normalizeWorkflowStepsForExecution", () => {
     const normalized = normalizeWorkflowStepsForExecution([
       { id: "producer", graphWorkProductRequired: true },
       { id: "producer-legacy-string", graphWorkProductRequired: "true" },
+      { id: "producer-legacy-alias", workProductRequired: true },
+      { id: "producer-requires-alias", requiresWorkProduct: "1" },
       { id: "validator", graphWorkProductRequired: false },
+      { id: "legacy-false-alias", workProductRequired: false },
       { id: "unset" },
       { id: "garbage-string", graphWorkProductRequired: "false" },
     ]);
     expect(normalized.map((s) => s.graphWorkProductRequired)).toEqual([
       true,
       true,
+      true,
+      true,
+      false,
       false,
       false,
       false,
@@ -3366,9 +3372,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(issues)
       .where(eq(issues.id, progressedBuild!.issueId!))
       .then((rows) => rows[0] ?? null);
-    expect(buildIssue?.description).toContain("Dependency workProduct hard-stop:");
-    expect(buildIssue?.description).toContain(`- plan: ${planIssue?.identifier ?? planIssue!.id} has no registered dependency workProduct.`);
-    expect(buildIssue?.description).toContain("Do not infer dependency deliverables from guessed filesystem paths");
+    expect(buildIssue?.description).not.toContain("Dependency workProduct hard-stop:");
+    expect(buildIssue?.description).toContain(`- plan: ${planIssue?.identifier ?? planIssue!.id} (done)`);
+    expect(buildIssue?.description).toContain("workProducts: none registered");
 
     await issueSvc.update(progressedBuild!.issueId!, { status: "done" });
     const afterBuild = await syncWorkflowRunForIssue(db, progressedBuild!.issueId!);
@@ -3624,42 +3630,52 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(0);
   });
 
-  it("Plan B: hard-stops only the dependency missing both workProduct and ARTIFACT, while injecting paths for the one that declared ARTIFACT", async () => {
+  it("Plan B: keeps downstream pending when a required dependency is done without workProduct or ARTIFACT", async () => {
     const companyId = randomUUID();
     const agentAId = randomUUID();
     const agentBId = randomUUID();
     const agentCId = randomUUID();
     const runId = randomUUID();
+    const workflowId = randomUUID();
+    const steps: PlanBStepDef[] = [
+      { id: "a1", name: "Collect A1", agentId: agentAId, dependencies: [], description: "Collect A1" },
+      { id: "a2", name: "Collect A2", agentId: agentBId, dependencies: [], description: "Collect A2" },
+      { id: "b", name: "Synthesize", agentId: agentCId, dependencies: ["a1", "a2"], description: "Synthesize A1+A2" },
+    ];
     const upstream = await executeDependencyWorkflow({
       companyId,
       companyName: "PlanB Partial Artifact",
       missionId: randomUUID(),
-      workflowId: randomUUID(),
+      workflowId,
       runId,
       agents: [
         { id: agentAId, name: "Collector A1", role: "engineer" },
         { id: agentBId, name: "Collector A2", role: "engineer" },
         { id: agentCId, name: "Synthesizer", role: "pm" },
       ],
-      steps: [
-        { id: "a1", name: "Collect A1", agentId: agentAId, dependencies: [], description: "Collect A1" },
-        { id: "a2", name: "Collect A2", agentId: agentBId, dependencies: [], description: "Collect A2" },
-        { id: "b", name: "Synthesize", agentId: agentCId, dependencies: ["a1", "a2"], description: "Synthesize A1+A2" },
-      ],
+      steps,
     });
     const a1Path = "/srv/papercompany/produced_work/a1/evidence_a1.json";
     // a1 은 ARTIFACT 선언, a2 는 workProduct 도 ARTIFACT 도 없음.
+    await completeStepIssue(upstream.a2!.id);
+    await db
+      .update(workflowDefinitions)
+      .set({ stepsJson: steps.map((step) => step.id === "a2" ? { ...step, graphWorkProductRequired: true } : step) })
+      .where(eq(workflowDefinitions.id, workflowId));
     await seedArtifactRun({ companyId, agentId: agentAId, issueId: upstream.a1!.id, artifactPath: a1Path });
     await completeStepIssue(upstream.a1!.id);
-    await completeStepIssue(upstream.a2!.id);
 
     const synthIssue = await getStepIssue(runId, "b");
-    expect(synthIssue).toBeTruthy();
-    const desc = synthIssue!.description ?? "";
-    expect(desc).toContain(a1Path);
-    expect(desc).toContain("Dependency workProduct hard-stop:");
-    expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(1);
-    expect(desc).toContain(`- a2: ${upstream.a2!.identifier ?? upstream.a2!.id} has no registered dependency workProduct.`);
+    expect(synthIssue).toBeNull();
+    const stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const a2StepRun = stepRuns.find((stepRun) => stepRun.stepId === "a2");
+    const synthStepRun = stepRuns.find((stepRun) => stepRun.stepId === "b");
+    expect(a2StepRun?.status).toBe("running");
+    expect(synthStepRun?.status).toBe("pending");
+    expect(synthStepRun?.issueId).toBeNull();
   });
 
   it("Plan B: treats QA gate dependencies as pass gates and forwards the checked producer workProduct to downstream producer steps", async () => {
