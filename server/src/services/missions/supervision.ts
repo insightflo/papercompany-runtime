@@ -34,6 +34,31 @@ import { qualityService } from "../quality.js";
 import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDecisionSubmissionStatus } from "./mission-plan-decision-ledger.js";
 import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
 
+type ToolStepFailureEvidenceRow = {
+  readonly startedAt: Date | null;
+  readonly lastDispatchAttemptAt: Date | null;
+  readonly lastDispatchAcceptedAt: Date | null;
+  readonly lastDispatchErrorAt: Date | null;
+  readonly lastDispatchRequestId: string | null;
+  readonly metadata: unknown;
+};
+
+function hasToolStepFailureExecutionEvidence(stepRun: ToolStepFailureEvidenceRow): boolean {
+  if (
+    stepRun.startedAt
+    || stepRun.lastDispatchAttemptAt
+    || stepRun.lastDispatchAcceptedAt
+    || stepRun.lastDispatchErrorAt
+    || trimmedString(stepRun.lastDispatchRequestId)
+  ) {
+    return true;
+  }
+  const metadata = asRecord(stepRun.metadata);
+  return Object.keys(asRecord(metadata.toolInvocation)).length > 0
+    || Object.keys(asRecord(metadata.toolResult)).length > 0
+    || Object.keys(asRecord(metadata.retentionDeleted)).length > 0;
+}
+
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
   deps: MissionServiceDeps;
@@ -1299,6 +1324,10 @@ export function createSupervision({ db, deps, ownerActions }: {
       const workflowSteps = (row.definition.stepsJson as WorkflowStep[] | null) ?? [];
       const workflowStep = workflowSteps.find((step) => step.id === row.stepRun.stepId) ?? null;
       if (isIssueLessToolWorkflowStep(workflowStep, row.stepRun.issueId)) {
+        if (!hasToolStepFailureExecutionEvidence(row.stepRun)) {
+          findings.push(`tool_step_failure_unlaunched_skipped: run=${row.run.id} step=${row.stepRun.stepId} has failed status without dispatch evidence`);
+          continue;
+        }
         const workflowName = row.definition.name || row.run.workflowId;
         const recovery = await ownerActions.ensureToolStepFailureRecoveryIssue({
           mission,

@@ -241,6 +241,77 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(stored?.completedAt).toBeInstanceOf(Date);
   });
 
+  it("does not mark unlaunched downstream tool steps as failed when a stuck run is terminalized", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Stuck Tool Cascade Company",
+      issuePrefix: `ST${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "stuck-tool-cascade",
+      stepsJson: [
+        { id: "inspection", name: "Inspection", type: "agent", agentId: "", dependencies: [] },
+        {
+          id: "sync-dashboard",
+          name: "Sync dashboard",
+          type: "tool",
+          toolNames: ["gazua.oracle-data-sync"],
+          dependencies: ["inspection"],
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      status: "running",
+      triggeredBy: "schedule",
+      startedAt: new Date("2020-01-01T00:00:00.000Z"),
+      completedAt: null,
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "inspection",
+        status: "failed",
+        completedAt: new Date("2020-01-01T01:00:00.000Z"),
+      },
+      {
+        workflowRunId: runId,
+        stepId: "sync-dashboard",
+        status: "pending",
+        metadata: { graphWorkProductRequired: false },
+      },
+    ]);
+
+    const result = await reconcileStuckWorkflowRuns(db, 60);
+
+    expect(result).toEqual([
+      expect.objectContaining({ runId, action: "recovered" }),
+    ]);
+    const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    expect(storedRun?.status).toBe("failed");
+    const storedSteps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    expect(storedSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "inspection", status: "failed" }),
+      expect.objectContaining({
+        stepId: "sync-dashboard",
+        status: "skipped",
+        startedAt: null,
+        lastDispatchAttemptAt: null,
+        lastDispatchRequestId: null,
+        metadata: expect.objectContaining({ failureCascadeSkipped: true }),
+      }),
+    ]));
+  });
+
   it("does not fail pending downstream steps while a linked workflow issue is still active", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();

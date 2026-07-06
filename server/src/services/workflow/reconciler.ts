@@ -132,11 +132,21 @@ export async function reconcileStuckWorkflowRuns(
         );
 
       if (pendingSteps.length > 0) {
-        // Mark pending steps as failed
+        const now = new Date();
         for (const step of pendingSteps) {
+          const metadata = step.metadata && typeof step.metadata === "object" && !Array.isArray(step.metadata)
+            ? step.metadata
+            : {};
           await db
             .update(workflowStepRuns)
-            .set({ status: "failed", completedAt: new Date() })
+            .set({
+              status: "skipped",
+              completedAt: now,
+              metadata: {
+                ...metadata,
+                failureCascadeSkipped: true,
+              },
+            })
             .where(eq(workflowStepRuns.id, step.id));
         }
       }
