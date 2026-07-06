@@ -141,7 +141,7 @@ export async function recordWorkflowValidationVerdict(input: {
   readonly db: WorkflowValidationDb;
   readonly issue: WorkflowValidationIssue;
   readonly verdict: ValidationVerdict;
-  readonly source: "issue_patch_comment" | "heartbeat_result";
+  readonly source: "issue_patch_comment" | "heartbeat_result" | "workflow_api";
   readonly actorAgentId?: string | null;
   readonly heartbeatRunId?: string | null;
   readonly sourceText?: string | null;

@@ -304,6 +304,15 @@ export {
 } from "./workflow.js";
 
 export {
+  workflowArtifactRegisterSchema,
+  workflowVerdictSubmitSchema,
+  workflowIssueCompleteSchema,
+  type WorkflowArtifactRegister,
+  type WorkflowVerdictSubmit,
+  type WorkflowIssueComplete,
+} from "./workflow-agent-api.js";
+
+export {
   createCostEventSchema,
   updateBudgetSchema,
   type CreateCostEvent,
