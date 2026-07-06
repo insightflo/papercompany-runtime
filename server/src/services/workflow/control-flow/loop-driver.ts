@@ -39,6 +39,7 @@ import {
   type PredFacts,
 } from "./edge-condition.js";
 import { resetStepRunForRework } from "./step-reset.js";
+import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildQaReworkArtifactInstructionLine } from "../../work-products/artifact-registration-instructions.js";
@@ -68,6 +69,13 @@ export interface ApplyBackEdgeReworkInput {
    * 까지 loop 를 발화시킬 수 있다.
    */
   predsByStepId: Map<string, PredFacts>;
+  /**
+   * QA issueId → 최신 verdict 관측 시각. stale verdict 재소비 차단(RES-995)에 사용:
+   * producer 가 rework 후 completed 된 시점보다 **이전**에 관측된 verdict 는 그 producer generation
+   * 에 대한 판정이 아니므로 rework cap 소모에 쓰지 않는다. producer 완료 후 새 QA run 이 observedAt >=
+   * producerCompletedAt 인 verdict 를 낼 때만 rework 를 일으킨다.
+   */
+  validationVerdictsByIssueId?: ReadonlyMap<string, { observedAt: Date | null } | undefined>;
 }
 
 export interface ApplyBackEdgeReworkResult {
@@ -285,8 +293,19 @@ export async function applyBackEdgeReworkPass(
     // barrier: sibling QA 중 pending/running(또는 아직 stepRun 자체가 없는) 이 있으면 이번 sync 에는
     //   리셋하지 않고 다음 tick 에 재평가. conservative — 모든 relevant QA 가 끝난 뒤에만 rework.
     if (!siblingQas.every((q) => q.terminal)) continue;
-    const rejectedQas = siblingQas.filter((q) => q.rejected);
-    if (rejectedQas.length === 0) continue; // 전원 pass(또는 반려 아님) → rework 없이 forward
+    const rejectedQasRaw = siblingQas.filter((q) => q.rejected);
+    if (rejectedQasRaw.length === 0) continue; // 전원 pass(또는 반려 아님) → rework 없이 forward
+
+    // RES-995: drop QA verdicts observed before this producer iteration completed —
+    // they belong to a previous generation and must not consume the rework cap again.
+    // Verdict timing is conservative (unknown => not stale) to preserve prior behavior.
+    const producerCompletedAt = stepRun.completedAt ?? null;
+    const rejectedQas = filterFreshRejectedQas(
+      rejectedQasRaw,
+      producerCompletedAt,
+      input.validationVerdictsByIssueId,
+    );
+    if (rejectedQas.length === 0) continue; // all stale -> wait for a fresh QA verdict, no rework
 
     // producer-level cap: iterationIndex 는 producer stepRun 에서 모든 back-edge 가 공유하므로,
     //   cap 도 QA edge 단위가 아닌 producer 단위로 판정한다(여러 edge 의 max 이상치 사용).

@@ -6754,6 +6754,35 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(producerComments.map((comment) => comment.body).join("\n")).not.toContain("Workflow QA rework request");
   });
 
+  it("[P4 control-flow loop] ignores a stale QA verdict observed before the current producer iteration completion (RES-995)", async () => {
+    // RES-995: producer 가 이미 1회 rework(iteration 1) 후 completed(07:20). 이전 generation QA
+    // verdict(07:10)는 stale → 두 번째 rework cap 소모 없이 iteration 2 로 증가하지 않는다.
+    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2, initialProducerIteration: 1 });
+    await db.update(workflowStepRuns)
+      .set({ status: "completed", completedAt: new Date("2026-06-18T07:20:00.000Z") })
+      .where(and(eq(workflowStepRuns.workflowRunId, runId), eq(workflowStepRuns.stepId, "produce")));
+    await db.update(issues)
+      .set({ status: "done", completedAt: new Date("2026-06-18T07:20:00.000Z") })
+      .where(eq(issues.id, producerIssueId));
+    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-res995-stale" });
+    heartbeatWakeup.mockClear();
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+    const produce = rows.find((row) => row.stepId === "produce")!;
+    // stale verdict(observedAt 07:10 < producerCompletedAt 07:20) → cap 미소모, iteration 2 미증가.
+    expect(produce.iterationIndex).toBe(1);
+    expect(produce.status).toBe("completed");
+    const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
+    expect(producerComments.map((comment) => comment.body).join("\n")).not.toContain("Workflow QA rework request");
+    // QA 재큐 전제(기존 syncStepRunsFromIssueState 담당): stale verdict 발견 시 blocked QA issue 가
+    //   todo 로 돌아가 새 QA run 이 최신 producer generation 산출물을 다시 판정하게 된다.
+    const [qaIssueRow] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
+    expect(qaIssueRow.status).toBe("todo");
+  });
+
   it("[P4 control-flow loop] carries QA heartbeat feedback into the producer rework issue before QA comment commit", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-feedback" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });

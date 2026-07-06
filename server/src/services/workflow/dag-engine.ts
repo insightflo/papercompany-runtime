@@ -2982,6 +2982,7 @@ export async function syncWorkflowRunState(
       steps: context.steps,
       stepRuns,
       predsByStepId: reworkPredsByStepId,
+      validationVerdictsByIssueId,
     });
     stepRuns = reworkResult.stepRuns;
   }
