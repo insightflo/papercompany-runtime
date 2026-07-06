@@ -13,12 +13,13 @@ import { issueService } from "../issues.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService } from "../mission-plan-artifacts.js";
 import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
-import { buildMainExecutorBrief, buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
+import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
 import { pruneStaleWorkflowExecutionUnits, type PluginWorkflowRunData, type PluginWorkflowStepRunData } from "./plugin-workflow.js";
 import { classifyToolStepFailure, getWorkflowStepToolNames, type ToolStepFailureClassification } from "./tool-step-failure.js";
+import { buildToolStepRecoveryDescription } from "./tool-step-recovery-description.js";
 import { asTrimmedString } from "./utils.js";
 import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
@@ -661,38 +662,19 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     }
 
     const displayStepName = input.step?.name?.trim() || input.stepRun.stepId;
-    const toolNamesLabel = toolNames.length > 0 ? toolNames.join(", ") : "(not recorded)";
     const recoveryParentId = input.oversightIssue.parentId ? undefined : input.oversightIssue.id;
     const recoveryIssue = await createMissionOwnerActionIssue(input.mission.companyId, {
       assigneeAgentId: input.mission.ownerAgentId,
-      description: [
-        `<!-- ${marker} -->`,
-        "Mission-owner signal. A tool workflow step failed without a linked execution issue. Automation has not selected a recovery action.",
-        "",
-        `Mission: ${input.mission.title}`,
-        `Workflow: ${input.workflowName}`,
-        `Workflow run: ${input.run.id}`,
-        `Step: ${input.stepRun.stepId} (${displayStepName})`,
-        `Tool names: ${toolNamesLabel}`,
-        `Local signal hint: ${classification.className}`,
-        `Local retry hint: ${classification.retryPolicy}`,
-        `Hint rationale: ${classification.rationale}`,
-        "",
-        "Raw evidence:",
-        ...(classification.evidence.length > 0 ? classification.evidence.map((line) => `- ${line}`) : ["- No runtime stderr/stdout/error evidence was captured on the workflow step run."]),
-        "",
-        buildMainExecutorBrief({
-          missionGoal: input.mission.title,
-          currentSituation: `Workflow ${input.workflowName} run ${input.run.id} has failed tool step ${input.stepRun.stepId}; no linked execution issue owns the failure.`,
-        }),
-        "",
-        "Manual recovery result contract:",
-        "- If you manually rerun or repair this issue-less tool step and it succeeds, leave a final recovery evidence comment before closing this issue.",
-        "- Include `### Native tool step recovery result`, `Status: success`, and one standalone `[ARTIFACT]: <absolute path>` line for the generated/reused handoff file.",
-        "- Do not rely on ordinary issue completion alone; the workflow engine will use that recovery evidence to mark the tool step completed.",
-        "",
-        "No recovery action has been selected by automation.",
-      ].join("\n"),
+      description: buildToolStepRecoveryDescription({
+        marker,
+        missionTitle: input.mission.title,
+        workflowName: input.workflowName,
+        workflowRunId: input.run.id,
+        stepId: input.stepRun.stepId,
+        displayStepName,
+        toolNames,
+        classification,
+      }),
       missionId: input.mission.id,
       originKind: "mission_main_executor_unblock",
       originId: input.oversightIssue.id,

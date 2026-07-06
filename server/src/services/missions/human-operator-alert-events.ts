@@ -38,6 +38,45 @@ export type HumanOperatorRequestPayload = {
   actorId?: string;
 };
 
+type HumanOperatorDecisionSignal = {
+  decision: "request_input" | "escalate";
+  reason?: string;
+  nextAction?: string;
+  evidence?: string;
+};
+
+function firstLineAfterLabel(text: string, label: string): string | undefined {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\n)\\s*${escapedLabel}\\s*[:：]\\s*([^\\n]+)`, "i").exec(text);
+  return match?.[1]?.trim();
+}
+
+function extractFallbackHumanOperatorSignal(text: string): HumanOperatorDecisionSignal | null {
+  const normalized = text.toLowerCase();
+  const mentionsHumanOperator = /\bhuman[-/\s]?operator\b/.test(normalized) ||
+    /\bhuman\/operator\b/.test(normalized);
+  if (!mentionsHumanOperator) return null;
+
+  const negatesHandoff = /\b(no|not|without)\s+(human[-/\s]?operator|human\/operator|operator input)\b/.test(normalized) ||
+    /human[-/\s]?operator\s+(input\s+)?(is\s+)?not\s+(needed|required)/.test(normalized) ||
+    /필요\s*없/.test(text);
+  if (negatesHandoff) return null;
+
+  const hasHandoffSignal = /\breportsto\b/.test(normalized) ||
+    /\b(request|requires?|needed|input|handoff|authority|receiver|escalat(?:e|ed|ion))\b/.test(normalized) ||
+    /운영자|상위\s*오너|결정해야|필요|권한/.test(text);
+  if (!hasHandoffSignal) return null;
+
+  const nextAction = firstLineAfterLabel(text, "Next action") ?? firstLineAfterLabel(text, "다음 조치");
+  const evidence = firstLineAfterLabel(text, "Evidence") ?? firstLineAfterLabel(text, "누락 증거");
+  return {
+    decision: normalized.includes("escalate") ? "escalate" : "request_input",
+    reason: "Owner action comment names human operator as the handoff target.",
+    ...(nextAction ? { nextAction } : {}),
+    ...(evidence ? { evidence } : {}),
+  };
+}
+
 export function buildHumanOperatorRequestPayload(input: {
   issue: OwnerDecisionIssue;
   comment: OwnerDecisionComment;
@@ -46,7 +85,18 @@ export function buildHumanOperatorRequestPayload(input: {
   if (input.issue.originKind !== "mission_main_executor_unblock") return null;
 
   const decision = extractMissionOwnerDecisionFromText(input.comment.body);
-  if (decision?.decision !== "request_input" && decision?.decision !== "escalate") return null;
+  const decisionSignal: HumanOperatorDecisionSignal | null =
+    decision?.decision === "request_input" || decision?.decision === "escalate"
+      ? {
+          decision: decision.decision,
+          ...(decision.reason ? { reason: decision.reason } : {}),
+          ...(decision.nextAction ? { nextAction: decision.nextAction } : {}),
+          ...(decision.evidence ? { evidence: decision.evidence } : {}),
+        }
+      : decision === null
+        ? extractFallbackHumanOperatorSignal(input.comment.body)
+        : null;
+  if (!decisionSignal) return null;
 
   const actorType = input.comment.authorAgentId ? "agent" : input.comment.authorUserId ? "user" : "system";
   const actorId = input.comment.authorAgentId ?? input.comment.authorUserId ?? undefined;
@@ -56,12 +106,12 @@ export function buildHumanOperatorRequestPayload(input: {
     issueId: input.issue.id,
     ...(input.issue.originId ? { sourceIssueId: input.issue.originId } : {}),
     commentId: input.comment.id,
-    decision: decision.decision,
+    decision: decisionSignal.decision,
     ...(input.issue.title ? { issueTitle: input.issue.title } : {}),
     ...(input.issue.identifier ? { issueIdentifier: input.issue.identifier } : {}),
-    ...(decision.reason ? { reason: decision.reason } : {}),
-    ...(decision.nextAction ? { nextAction: decision.nextAction } : {}),
-    ...(decision.evidence ? { evidence: decision.evidence } : {}),
+    ...(decisionSignal.reason ? { reason: decisionSignal.reason } : {}),
+    ...(decisionSignal.nextAction ? { nextAction: decisionSignal.nextAction } : {}),
+    ...(decisionSignal.evidence ? { evidence: decisionSignal.evidence } : {}),
     actorType,
     ...(actorId ? { actorId } : {}),
   };
