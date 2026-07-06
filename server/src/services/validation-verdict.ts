@@ -28,6 +28,7 @@ function readVerdictFromLine(line: string): ValidationVerdict | null {
 
   const patterns = [
     new RegExp(String.raw`^(${VERDICT_LABEL})(?:\b|[\s:：—–-])`, "iu"),
+    new RegExp(String.raw`^(?:[a-z][\w\s-]*\s+)?(?:verdict|decision|outcome|status)\s*[:：=-]\s*(${VERDICT_LABEL})\b`, "iu"),
     new RegExp(String.raw`^(?:verdict|decision|outcome|status|QA\s+verdict|판정|결론)\s*[:：=-]\s*(${VERDICT_LABEL})\b`, "iu"),
     new RegExp(String.raw`^validation\s+complete\s*[:：=-]\s*(${VERDICT_LABEL})\b`, "iu"),
     new RegExp(String.raw`^mission\s+validation\s+gate\s*[:：=-]\s*(REQUEST[_\s-]?CHANGES)\b`, "iu"),

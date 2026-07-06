@@ -1472,6 +1472,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(deliveryRubric).toContain("final consumer path");
     expect(deliveryRubric).toContain("HTTP 200");
 
+    await addQaVerdictComment(deliveryRun.issueId!, companyId, publisherAgentId, "PASS", "2026-06-28T00:40:00.000Z");
     await issueService(db).update(deliveryRun.issueId!, { status: "done" });
     await syncWorkflowRunForIssue(db, deliveryRun.issueId!);
     const [completedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
@@ -2388,13 +2389,14 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   });
 
-  it("ignores REQUEST_CHANGES comments from before the current validator execution window", async () => {
+  it("ignores REQUEST_CHANGES comments from before the current validator execution window when a current PASS exists", async () => {
     const companyId = randomUUID();
     const validatorAgentId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
     const missionId = randomUUID();
     const validatorIssueId = randomUUID();
+    const passRunId = randomUUID();
     const toolExecutor = vi.fn().mockResolvedValue({ accepted: true });
     setWorkflowToolStepExecutor(toolExecutor);
 
@@ -2473,6 +2475,21 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       authorAgentId: validatorAgentId,
       createdAt: new Date("2026-06-14T06:09:00.000Z"),
       body: "## Mission validation gate: REQUEST_CHANGES\n- Earlier execution failed before requeue.",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: passRunId,
+      companyId,
+      agentId: validatorAgentId,
+      issueId: validatorIssueId,
+      status: "succeeded",
+      invocationSource: "automation",
+      resultJson: {
+        result: "## Report Validator Verdict: **PASS**\n\nThe current execution passes validation.",
+      },
+      startedAt: new Date("2026-06-14T06:11:00.000Z"),
+      finishedAt: new Date("2026-06-14T06:12:00.000Z"),
+      createdAt: new Date("2026-06-14T06:11:00.000Z"),
+      updatedAt: new Date("2026-06-14T06:12:00.000Z"),
     });
     await db.insert(workflowStepRuns).values([
       {

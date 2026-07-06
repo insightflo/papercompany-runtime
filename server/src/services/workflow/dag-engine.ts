@@ -659,10 +659,9 @@ function isValidationGateCandidate(input: {
     return false;
   }
 
-  if (input.step && isQaLikeStep(input.step)) return true;
+  if (/^\s*\[QA\]/iu.test(input.issueTitle ?? "")) return true;
 
-  const text = [
-    input.issueTitle,
+  const stepText = [
     input.step?.id,
     input.step?.name,
     input.step?.title,
@@ -670,12 +669,15 @@ function isValidationGateCandidate(input: {
   ]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
+  const text = stepText || input.issueTitle || "";
 
-  return (
-    /^\s*\[QA\]/iu.test(text) ||
-    /\b(QA|audit|auditor|validator|validation|validate|verify|review|check)\b/iu.test(text) ||
-    text.includes("검증")
-  );
+  const validationText = /\b(QA|audit\w*|validator|validation|validat\w*|verif\w*|review\w*)\b/iu.test(text)
+    || text.includes("검증");
+  if (validationText) return true;
+
+  if (!input.step && /\bcheck\b/iu.test(text)) return true;
+
+  return false;
 }
 
 async function writeQaRubricMarkdown(input: {
@@ -868,6 +870,18 @@ interface ValidationVerdictObservation {
   observedAt: Date | null;
 }
 
+function desiredValidationCheckStepStatus(input: {
+  issueStatus: string;
+  latestVerdict: ValidationVerdictObservation | undefined;
+}): "pending" | "running" | "completed" | "failed" {
+  if (input.issueStatus !== "done") {
+    return desiredStepRunStatusFromIssueStatus(input.issueStatus);
+  }
+  if (input.latestVerdict?.verdict === "pass") return "completed";
+  if (input.latestVerdict?.verdict === "request_changes") return "failed";
+  return "running";
+}
+
 function isNewerValidationVerdict(
   next: ValidationVerdictObservation,
   current: ValidationVerdictObservation | undefined,
@@ -1041,6 +1055,7 @@ async function syncStepRunsFromIssueState(
         step: stepById.get(stepRun.stepId) ?? null,
       });
     }));
+  const validationCandidateIssueIdSet = new Set(validationCandidateIssueIds);
   const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationCandidateIssueIds);
   // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
   const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
@@ -1049,7 +1064,7 @@ async function syncStepRunsFromIssueState(
   for (const stepRun of stepRuns) {
     if (!stepRun.issueId) continue;
     const issue = issueById.get(stepRun.issueId);
-    if (!issue || issue.status !== "blocked") continue;
+    if (!issue || (issue.status !== "blocked" && issue.status !== "done")) continue;
     const step = stepById.get(stepRun.stepId);
     if (!step || step.dependencies.length === 0) continue;
     if (!isValidationGateCandidate({ issueTitle: issue.title, issueOriginKind: issue.originKind, step })) continue;
@@ -1091,7 +1106,7 @@ async function syncStepRunsFromIssueState(
         executionLockedAt: null,
         updatedAt: now,
       })
-      .where(and(eq(issues.id, issue.id), eq(issues.status, "blocked")))
+      .where(and(eq(issues.id, issue.id), inArray(issues.status, ["blocked", "done"])))
       .returning({
         id: issues.id,
         companyId: issues.companyId,
@@ -1134,12 +1149,14 @@ async function syncStepRunsFromIssueState(
     const issue = issueById.get(stepRun.issueId);
     if (!issue) continue;
 
-    const validationVerdict = issue.status === "done"
-      ? latestValidationVerdictByIssueId.get(issue.id)?.verdict ?? null
-      : null;
+    const isValidationCheck = validationCandidateIssueIdSet.has(issue.id);
+    const latestValidationVerdict = latestValidationVerdictByIssueId.get(issue.id);
+    const ungatedStatus = isValidationCheck
+      ? desiredValidationCheckStepStatus({ issueStatus: issue.status, latestVerdict: latestValidationVerdict })
+      : desiredStepRunStatusFromIssueStatus(issue.status);
     const desiredStatus = applyWorkProductDependencyGate({
       issueId: issue.id,
-      status: validationVerdict === "request_changes" ? "failed" : desiredStepRunStatusFromIssueStatus(issue.status),
+      status: ungatedStatus,
       gate: workProductDependencyGate,
     });
     const patch: Partial<typeof workflowStepRuns.$inferInsert> = {};

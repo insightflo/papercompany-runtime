@@ -49,6 +49,13 @@ describe("readExplicitValidationVerdict", () => {
     expect(readExplicitValidationVerdict("PASS\n- all checks complete", { allowLeadingVerdict: true })).toBe("pass");
   });
 
+  it("reads a labeled validator verdict from heartbeat result text", () => {
+    expect(readExplicitValidationVerdict(
+      "## Report Validator Verdict: **PASS**\n\nBoth requested fixes are verified.",
+      { allowLeadingVerdict: true },
+    )).toBe("pass");
+  });
+
   it("ignores a leading markdown rule before a leading verdict", () => {
     expect(readExplicitValidationVerdict([
       "---",
