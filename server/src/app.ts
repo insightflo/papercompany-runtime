@@ -22,6 +22,7 @@ import { routineRoutes } from "./routes/routines.js";
 import { schedulerRoutes } from "./routes/scheduler.js";
 import { worktreeRoutes } from "./routes/worktree.js";
 import { missionRoutes } from "./routes/missions.js";
+import { workflowAgentApiRoutes } from "./routes/workflow-agent-api.js";
 import { workflowRoutes } from "./routes/workflows.js";
 import { srbWebhookRoutes } from "./routes/srb-webhook.js";
 import { requireMaintenanceCompany } from "./middleware/company-kind-gate.js";
@@ -357,6 +358,7 @@ export async function createApp(
   api.use(routineRoutes(db));
   api.use(schedulerRoutes(db));
   api.use(missionRoutes(db));
+  api.use(workflowAgentApiRoutes(db));
   api.use(workflowRoutes(db));
   api.use(srbWebhookRoutes(db));
   api.use(executionWorkspaceRoutes(db));

@@ -68,12 +68,31 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 **Step 7 — Do the work.** Use your tools and capabilities.
 
-**Step 8 — Update status and communicate.** Always include the run ID header. Do not invent completion routes: use `PATCH /api/issues/{issueId}` for `done`/`blocked` updates, and use `POST /api/issues/{issueId}/release` only when returning work to `todo`.
+**Step 8 — Update status and communicate.** Always include the run ID header. For workflow execution issues, prefer the structured Workflow API below before generic issue updates. Use `PATCH /api/issues/{issueId}` for normal non-workflow `done`/`blocked` updates, and use `POST /api/issues/{issueId}/release` only when returning work to `todo`.
+
+Workflow API closeout:
+
+- When your work creates a file artifact, register it with `POST /api/issues/{issueId}/workflow/artifacts` and an existing absolute local `path`. Do this after creating the file and before completing the issue.
+- When your assignment is QA or validation, submit the official verdict with `POST /api/issues/{issueId}/workflow/verdict`. Valid verdicts: `pass`, `request_changes`.
+- Complete workflow execution issues with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.
+- Fallback only when the Workflow API is unavailable: leave a standalone final line `[ARTIFACT]: <absolute path>` for artifact recovery, then use the normal issue update route. Do not rely on transcript claims alone.
 If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
 
 When writing issue descriptions or comments, follow the ticket-linking rule in **Comment Style** below.
 
 ```json
+POST /api/issues/{issueId}/workflow/artifacts
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{ "path": "/absolute/path/to/report.md", "title": "report.md", "type": "document" }
+
+POST /api/issues/{issueId}/workflow/verdict
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{ "verdict": "pass", "reason": "Required checks passed." }
+
+POST /api/issues/{issueId}/workflow/complete
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{ "comment": "Completed via Workflow API; artifact/verdict records are registered." }
+
 PATCH /api/issues/{issueId}
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "status": "done", "comment": "What was done and why." }

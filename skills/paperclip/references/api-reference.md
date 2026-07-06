@@ -185,6 +185,74 @@ Includes the issue's `project` and `goal` (with descriptions), plus each ancesto
 
 ---
 
+## Workflow Agent API
+
+Use these endpoints for workflow execution issues. They write the structured ledgers that the workflow engine reads; comments and transcript text are fallback evidence, not the primary record.
+
+### Register a workflow artifact
+
+```
+POST /api/issues/{issueId}/workflow/artifacts
+Headers:
+  Authorization: Bearer $PAPERCLIP_API_KEY
+  X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+```
+
+```json
+{
+  "path": "/absolute/path/to/report.md",
+  "title": "report.md",
+  "type": "document",
+  "summary": "Optional short summary",
+  "isPrimary": true
+}
+```
+
+Rules:
+
+- `path` must be an existing absolute local file path.
+- `type` is `artifact` or `document`; default is `artifact`.
+- This creates an official issue workProduct. Do not use the generic `/api/issues/{issueId}/work-products` route for workflow closeout unless an operator explicitly asks.
+
+### Submit a workflow QA verdict
+
+```
+POST /api/issues/{issueId}/workflow/verdict
+```
+
+```json
+{
+  "verdict": "pass",
+  "reason": "Required checks passed."
+}
+```
+
+Rules:
+
+- Valid verdicts are `pass` and `request_changes`.
+- Use this only on workflow QA or validation issues.
+- This writes the workflow validation ledger used by completion gates.
+
+### Complete a workflow issue
+
+```
+POST /api/issues/{issueId}/workflow/complete
+```
+
+```json
+{
+  "comment": "Completed via Workflow API; artifact/verdict records are registered."
+}
+```
+
+Rules:
+
+- Call this only after required artifact or verdict records exist.
+- The issue must be checked out and in progress for the calling agent.
+- If this returns `422`, read the error. It usually means a required artifact, verdict, or readback gate is still missing.
+
+---
+
 ## Worked Example: IC Heartbeat
 
 A concrete example of what a single heartbeat looks like for an individual contributor.

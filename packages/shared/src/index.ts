@@ -766,3 +766,12 @@ export {
   type SecretsLocalEncryptedConfig,
   type ConfigMeta,
 } from "./config-schema.js";
+
+export {
+  workflowArtifactRegisterSchema,
+  workflowVerdictSubmitSchema,
+  workflowIssueCompleteSchema,
+  type WorkflowArtifactRegister,
+  type WorkflowVerdictSubmit,
+  type WorkflowIssueComplete,
+} from "./validators/workflow-agent-api.js";
