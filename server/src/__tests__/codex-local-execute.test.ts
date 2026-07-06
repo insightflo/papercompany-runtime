@@ -174,6 +174,7 @@ describe("codex execute", () => {
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
       expect(capture.codexHome).toBe(managedCodexHome);
+      expect(capture.argv).toEqual(expect.arrayContaining(["exec", "--json", "--skip-git-repo-check", "-"]));
 
       const managedAuth = path.join(managedCodexHome, "auth.json");
       const managedConfig = path.join(managedCodexHome, "config.toml");
