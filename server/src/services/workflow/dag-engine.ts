@@ -971,6 +971,7 @@ async function loadLatestValidationVerdicts(
     return !minObservedAt || observedAt.getTime() >= minObservedAt.getTime();
   };
 
+  const structuredVerdictIssueIds = new Set<string>();
   const eventRows = await db
     .select({
       issueId: workflowTransitionEvents.issueId,
@@ -987,6 +988,7 @@ async function loadLatestValidationVerdicts(
     const observedAt = event.createdAt ?? null;
     if (!isWithinCurrentExecutionWindow(event.issueId, observedAt)) continue;
     if (event.verdict !== "pass" && event.verdict !== "request_changes") continue;
+    if (event.issueId) structuredVerdictIssueIds.add(event.issueId);
     setLatestValidationVerdict(verdicts, event.issueId, event.verdict, observedAt);
   }
 
@@ -1006,10 +1008,14 @@ async function loadLatestValidationVerdicts(
   for (const run of runRows) {
     const observedAt = run.finishedAt ?? run.createdAt ?? null;
     if (!isWithinCurrentExecutionWindow(run.issueId, observedAt)) continue;
+    const heartbeatVerdict = readValidationVerdictFromHeartbeatResult(run.resultJson);
+    if (heartbeatVerdict === null && run.issueId && structuredVerdictIssueIds.has(run.issueId)) {
+      continue;
+    }
     setLatestValidationVerdict(
       verdicts,
       run.issueId,
-      readValidationVerdictFromHeartbeatResult(run.resultJson),
+      heartbeatVerdict,
       observedAt,
     );
   }
@@ -1042,6 +1048,7 @@ async function syncStepRunsFromIssueState(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
   steps: WorkflowStep[] = [],
+  context?: WorkflowExecutionContext,
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
   const issueIds = stepRuns
     .map((stepRun) => stepRun.issueId)
@@ -1103,30 +1110,28 @@ async function syncStepRunsFromIssueState(
     if (dependencyCompletedTimes.length === 0) continue;
     if (Math.max(...dependencyCompletedTimes) <= latestVerdict.observedAt.getTime()) continue;
     // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
-    //   재큐하지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가 한 번이라도
-    //   있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate re-queue
-    //   를 끊는다(A1 RES-424: 재실행 run 은 succeeded 였으나 PASS verdict 가 없어 구 REQUEST_CHANGES 로 재큐 반복).
-    //   이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재큐가 다시 허용된다.
+    //   중복 실행 요청을 만들지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가
+    //   한 번이라도 있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate
+    //   request 를 끊는다. 이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재요청이 허용된다.
     const dependencyMaxCompletedAt = Math.max(...dependencyCompletedTimes);
     const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
     if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
 
-    const now = new Date();
+    if (!context) continue;
+    const queued = await wakeExistingWorkflowStepIssue({
+      db,
+      run: context.run,
+      definition: context.definition,
+      step,
+      stepRunId: stepRun.id,
+      issueId: issue.id,
+      allowCompletedIssue: true,
+      allowBlockedIssue: true,
+    });
+    if (!queued) continue;
+
     const [updatedIssue] = await db
-      .update(issues)
-      .set({
-        status: "todo",
-        startedAt: null,
-        completedAt: null,
-        cancelledAt: null,
-        checkoutRunId: null,
-        executionRunId: null,
-        executionAgentNameKey: null,
-        executionLockedAt: null,
-        updatedAt: now,
-      })
-      .where(and(eq(issues.id, issue.id), inArray(issues.status, ["blocked", "done"])))
-      .returning({
+      .select({
         id: issues.id,
         companyId: issues.companyId,
         status: issues.status,
@@ -1135,26 +1140,28 @@ async function syncStepRunsFromIssueState(
         cancelledAt: issues.cancelledAt,
         title: issues.title,
         originKind: issues.originKind,
-      });
-    if (!updatedIssue) continue;
-
-    issueById.set(updatedIssue.id, updatedIssue);
+      })
+      .from(issues)
+      .where(eq(issues.id, issue.id))
+      .limit(1);
+    if (updatedIssue) issueById.set(updatedIssue.id, updatedIssue);
     await commentOnValidationRecheckQueued({
       db,
-      companyId: updatedIssue.companyId,
-      issueId: updatedIssue.id,
+      companyId: issue.companyId,
+      issueId: issue.id,
       workflowRunId: stepRun.workflowRunId,
       step,
     });
     await logActivity(db, {
-      companyId: updatedIssue.companyId,
+      companyId: issue.companyId,
       actorType: "system",
       actorId: "workflow:validation-recheck",
       action: "workflow.validation_recheck_queued",
       entityType: "issue",
-      entityId: updatedIssue.id,
+      entityId: issue.id,
       details: {
         workflowRunId: stepRun.workflowRunId,
+        workflowStepRunId: stepRun.id,
         stepId: step.id,
         dependencyStepIds: step.dependencies,
         reason: "dependency_completed_after_request_changes",
@@ -1704,10 +1711,10 @@ async function createWorkflowStepIssue(input: {
 }
 
 // [Patch 3 recheck idempotency] validation issue 별 latest succeeded heartbeat finishedAt.
-//   syncStepRunsFromIssueState 가 같은 producer generation 에 대해 중복 re-queue 하지 않도록 한다:
-//   "이미 recheck heartbeat 가 producer 최종 완료 이후에 성공했다면 재큐 금지" 판정 재료.
+//   syncStepRunsFromIssueState 가 같은 producer generation 에 대해 중복 실행 요청을 만들지 않도록 한다:
+//   "이미 recheck heartbeat 가 producer 최종 완료 이후에 성공했다면 재요청 금지" 판정 재료.
 //   A1 RES-424 사례: 재실행 run 은 succeeded 였으나 explicit PASS verdict 가 없어 latestValidationVerdict
-//   가 구 REQUEST_CHANGES 에 머물 → 이후 sync 마다 QA 가 todo 로 재큐되던 stale duplicate.
+//   가 구 REQUEST_CHANGES 에 머물 → 이후 sync 마다 QA 실행 요청이 반복되던 stale duplicate.
 async function loadLatestSucceededHeartbeatAt(db: Db, issueIds: string[]): Promise<Map<string, Date>> {
   const latest = new Map<string, Date>();
   if (issueIds.length === 0) return latest;
@@ -1730,7 +1737,10 @@ export async function wakeExistingWorkflowStepIssue(input: {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
+  stepRunId?: string;
   issueId: string;
+  allowCompletedIssue?: boolean;
+  allowBlockedIssue?: boolean;
 }): Promise<boolean> {
   const [issue] = await input.db
     .select({
@@ -1742,7 +1752,12 @@ export async function wakeExistingWorkflowStepIssue(input: {
     .from(issues)
     .where(eq(issues.id, input.issueId))
     .limit(1);
-  if (!issue || issue.status !== "todo") return false;
+  if (!issue) return false;
+  const isRunnableIssue =
+    issue.status === "todo" ||
+    (input.allowCompletedIssue === true && issue.status === "done") ||
+    (input.allowBlockedIssue === true && issue.status === "blocked");
+  if (!isRunnableIssue) return false;
 
   let wakeIssue = issue;
   if (!wakeIssue.assigneeAgentId) {
@@ -1794,6 +1809,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       workflowRunId: input.run.id,
       workflowDefinitionId: input.definition.id,
       stepId: input.step.id,
+      ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
     },
     contextSnapshot: {
       issueId: issue.id,
@@ -1801,6 +1817,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
       workflowRunId: input.run.id,
       workflowDefinitionId: input.definition.id,
+      ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
       workflowStepId: input.step.id,
       stepId: input.step.id,
       source: "workflow.resume",
@@ -2912,7 +2929,7 @@ export async function syncWorkflowRunState(
 ): Promise<WorkflowExecutionResult> {
   const context = await loadWorkflowExecutionContext(db, runId);
   let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
-  stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps);
+  stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
 
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
   if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {

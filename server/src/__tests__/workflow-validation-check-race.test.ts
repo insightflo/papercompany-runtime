@@ -230,9 +230,25 @@ describeEmbeddedPostgres("workflow validation check race", () => {
     }).where(eq(issues.id, producerIssueId));
     await syncWorkflowRunForIssue(db, producerIssueId);
     const [auditIssueAfterProducerRework] = await db.select().from(issues).where(eq(issues.id, auditIssueId));
-    expect(auditIssueAfterProducerRework.status).toBe("todo");
+    expect(auditIssueAfterProducerRework.status).toBe("done");
+    expect(heartbeatWakeup).toHaveBeenCalledWith(auditAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: auditIssueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        stepId: "audit-source-coverage",
+        workflowStepRunId: expect.any(String),
+      }),
+      contextSnapshot: expect.objectContaining({
+        issueId: auditIssueId,
+        workflowRunId: runId,
+        workflowStepId: "audit-source-coverage",
+        workflowStepRunId: expect.any(String),
+      }),
+    }));
     rows = await stepRuns(runId);
-    expect(rows.find((row) => row.stepId === "audit-source-coverage")?.status).toBe("pending");
+    expect(rows.find((row) => row.stepId === "audit-source-coverage")?.status).toBe("failed");
     expect(rows.find((row) => row.stepId === "draft-beginner-report-outline")).toMatchObject({ status: "pending", issueId: null });
 
     heartbeatWakeup.mockClear();

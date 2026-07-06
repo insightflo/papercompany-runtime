@@ -334,6 +334,34 @@ function resolveHeartbeatFailureCode(error: unknown, fallback: string) {
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
 
+function isWorkflowStepResumeWake(input: {
+  requestKind?: unknown;
+  reason?: unknown;
+  payload?: unknown;
+  contextSnapshot?: unknown;
+}) {
+  const payload = parseObject(input.payload);
+  const contextSnapshot = parseObject(input.contextSnapshot);
+  const kind = typeof input.requestKind === "string" ? input.requestKind : "";
+  const mutation = typeof payload.mutation === "string" ? payload.mutation : "";
+  const reason = typeof input.reason === "string" ? input.reason : "";
+  const workflowRunId = typeof contextSnapshot.workflowRunId === "string"
+    ? contextSnapshot.workflowRunId
+    : typeof payload.workflowRunId === "string"
+      ? payload.workflowRunId
+      : "";
+  const workflowStepRunId = typeof contextSnapshot.workflowStepRunId === "string"
+    ? contextSnapshot.workflowStepRunId
+    : typeof payload.workflowStepRunId === "string"
+      ? payload.workflowStepRunId
+      : "";
+  return (
+    (kind === "workflow_resume" || mutation === "workflow_resume" || reason === "workflow_step_runnable") &&
+    workflowRunId.length > 0 &&
+    workflowStepRunId.length > 0
+  );
+}
+
 function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
 }
@@ -5213,6 +5241,12 @@ export function heartbeatService(db: Db) {
         triggerDetail: promotedTriggerDetail,
         payload: promotedPayload,
       });
+      const isWorkflowStepResume = isWorkflowStepResumeWake({
+        requestKind: request.requestKind,
+        reason: request.reason,
+        payload: promotedPayload,
+        contextSnapshot: promotedContextSnapshot,
+      });
       const promotedIssueId = readNonEmptyString(promotedContextSnapshot.issueId) ?? issueIdFromPayload;
 
       const promotedIssue = promotedIssueId
@@ -5243,7 +5277,11 @@ export function heartbeatService(db: Db) {
       }
 
       // [거절] issue 가 이미 terminal 이면 재실행 무의미 → request terminal-fail.
-      if (promotedIssue && PROMOTED_REJECT_ISSUE_STATUSES.has(promotedIssue.status)) {
+      if (
+        promotedIssue &&
+        PROMOTED_REJECT_ISSUE_STATUSES.has(promotedIssue.status) &&
+        !(isWorkflowStepResume && promotedIssue.status === "done")
+      ) {
         await tx
           .update(agentWakeupRequests)
           .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`, updatedAt: new Date() })
@@ -5336,6 +5374,9 @@ export function heartbeatService(db: Db) {
         .where(eq(agentWakeupRequests.id, request.id));
 
       if (promotedIssue) {
+        const issueStartStatuses = isWorkflowStepResume
+          ? [...ISSUE_RUN_START_STATUSES, "done"]
+          : ISSUE_RUN_START_STATUSES;
         const startedIssue = await tx
           .update(issues)
           .set({
@@ -5347,7 +5388,7 @@ export function heartbeatService(db: Db) {
             executionLockedAt: now,
             updatedAt: now,
           })
-          .where(and(eq(issues.id, promotedIssue.id), inArray(issues.status, ISSUE_RUN_START_STATUSES)))
+          .where(and(eq(issues.id, promotedIssue.id), inArray(issues.status, issueStartStatuses)))
           .returning({ id: issues.id })
           .then((rows) => rows[0] ?? null);
 
@@ -8187,6 +8228,12 @@ export function heartbeatService(db: Db) {
       const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey, {
         missionId: readNonEmptyString(enrichedContextSnapshot.missionId),
       });
+      const isWorkflowStepResume = isWorkflowStepResumeWake({
+        requestKind: typedQueueColumns.requestKind,
+        reason,
+        payload,
+        contextSnapshot: enrichedContextSnapshot,
+      });
 
       const outcome = await db.transaction(async (tx) => {
         await tx.execute(
@@ -8533,6 +8580,9 @@ export function heartbeatService(db: Db) {
           .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
         const issueRunStartedAt = new Date();
+        const issueStartStatuses = isWorkflowStepResume
+          ? [...ISSUE_RUN_START_STATUSES, "done"]
+          : ISSUE_RUN_START_STATUSES;
         const startedIssue = await tx
           .update(issues)
           .set({
@@ -8544,7 +8594,7 @@ export function heartbeatService(db: Db) {
             executionLockedAt: issueRunStartedAt,
             updatedAt: issueRunStartedAt,
           })
-          .where(and(eq(issues.id, issue.id), inArray(issues.status, ISSUE_RUN_START_STATUSES)))
+          .where(and(eq(issues.id, issue.id), inArray(issues.status, issueStartStatuses)))
           .returning({ id: issues.id })
           .then((rows) => rows[0] ?? null);
 

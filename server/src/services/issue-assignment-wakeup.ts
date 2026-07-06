@@ -30,11 +30,19 @@ export function queueIssueAssignmentWakeup(input: {
   requestedByActorId?: string | null;
   rethrowOnError?: boolean;
 }) {
+  const workflowResumeContext = {
+    ...(input.payload ?? {}),
+    ...(input.contextSnapshot ?? {}),
+  };
+  const isWorkflowResume =
+    input.mutation === "workflow_resume" &&
+    typeof workflowResumeContext.workflowRunId === "string" &&
+    typeof workflowResumeContext.workflowStepRunId === "string";
   if (
     !input.issue.assigneeAgentId ||
     input.issue.status === "backlog" ||
-    input.issue.status === "blocked" ||
-    input.issue.status === "done" ||
+    (input.issue.status === "blocked" && !isWorkflowResume) ||
+    (input.issue.status === "done" && !isWorkflowResume) ||
     input.issue.status === "cancelled"
   ) {
     return;

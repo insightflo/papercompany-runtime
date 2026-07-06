@@ -2055,7 +2055,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   });
 
-  it("requeues a blocked validator issue when an upstream dependency completes after REQUEST_CHANGES", async () => {
+  it("queues a blocked validator issue when an upstream dependency completes after REQUEST_CHANGES", async () => {
     const companyId = randomUUID();
     const synthAgentId = randomUUID();
     const validatorAgentId = randomUUID();
@@ -2220,20 +2220,16 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(result?.status).toBe("running");
     const [validatorIssue] = await db.select().from(issues).where(eq(issues.id, validatorIssueId));
     expect(validatorIssue).toMatchObject({
-      status: "todo",
+      status: "blocked",
       assigneeAgentId: validatorAgentId,
-      startedAt: null,
-      completedAt: null,
     });
     const stepRows = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
     expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")).toMatchObject({
-      status: "pending",
+      status: "failed",
       issueId: validatorIssueId,
-      startedAt: null,
-      completedAt: null,
     });
     expect(stepRows.find((stepRun) => stepRun.stepId === "lead-ai-news-approval")).toMatchObject({
       status: "pending",
@@ -2250,6 +2246,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         workflowRunId: runId,
         workflowDefinitionId: workflowId,
         stepId: "validate-ai-news-note",
+        workflowStepRunId: expect.any(String),
       }),
     }));
   });
@@ -6684,10 +6681,6 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     ]));
   });
 
-  // ===== P4 control-flow: bounded back-edge loop (QA 반려 → producer rework → 재QA) =====
-  // produce[root] → qa-validate(forward). produce 가 qa-validate 로 back-edge(when:qa_request_changes,
-  //   isBackEdge, maxIterations). QA 반려 시 loop-driver 가 produce 를 리셋(rework). QA 재실행은 기존
-  //   validation-recheck(producer 재완료 후 qa issue → todo) 가 담당. maxIterations cap 이 가즈아 무한 loop 방지.
   async function seedBackEdgeLoopRun(opts: { maxIterations: number; initialProducerIteration?: number }) {
     const companyId = randomUUID();
     const producerAgentId = randomUUID();
@@ -6841,10 +6834,18 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(produce.status).toBe("completed");
     const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
     expect(producerComments.map((comment) => comment.body).join("\n")).not.toContain("Workflow QA rework request");
-    // QA 재큐 전제(기존 syncStepRunsFromIssueState 담당): stale verdict 발견 시 blocked QA issue 가
-    //   todo 로 돌아가 새 QA run 이 최신 producer generation 산출물을 다시 판정하게 된다.
     const [qaIssueRow] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
-    expect(qaIssueRow.status).toBe("todo");
+    expect(qaIssueRow.status).toBe("blocked");
+    expect(heartbeatWakeup).toHaveBeenCalledWith(qaAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: qaIssueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        stepId: "qa-validate",
+        workflowStepRunId: expect.any(String),
+      }),
+    }));
   });
 
   it("[P4 control-flow loop] carries QA heartbeat feedback into the producer rework issue before QA comment commit", async () => {
@@ -6961,11 +6962,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(body).toContain("Fix the readability gaps");
   });
 
-  it("[Patch 3 recheck idempotency] QA already re-checked (succeeded heartbeat >= producer completion) is NOT re-queued to todo on later sync", async () => {
-    // A1 RES-424 회귀: producer rework 가 REQUEST_CHANGES verdict 이후에 완료되면 recheck 가 QA 를
-    //   todo 로 requeue 한다. QA 가 재실행(succeeded heartbeat) 됐으나 explicit PASS verdict 가 없으면
-    //   latestValidationVerdict 가 구 REQUEST_CHANGES 에 머물러 이후 sync 마다 다시 requeue 되었다.
-    //   기대: producer 완료 이후 succeeded heartbeat 가 한 번이라도 있으면 같은 generation 에선 재큐 금지.
+  it("[Patch 3 recheck idempotency] QA already re-checked (succeeded heartbeat >= producer completion) is NOT enqueued again on later sync", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-patch3-idempotency" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
     // T1=07:10 REQUEST_CHANGES verdict (구 verdict).
@@ -6987,14 +6984,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     // 늦은 owner/comment 등으로 sync 가 다시 돌았다고 가정.
     await syncWorkflowRunForIssue(db, producerIssueId);
 
-    // QA 는 todo 로 재큐되지 않는다(idempotency). recheck comment 미추가 + wakeup 미발생.
     const qaIssueAfter = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, qaIssueId)).then((rows) => rows[0]!);
     expect(qaIssueAfter.status).not.toBe("todo");
     const recheckComments = await db.select().from(issueComments).where(eq(issueComments.issueId, qaIssueId));
     expect(recheckComments.filter((comment) => comment.body.includes("Workflow validation recheck")).length).toBe(0);
-    // recheck 가 QA 를 재큐하지 않았음의 직접 증거: recheck comment 0건(위) + issue 가 todo 로 바뀌지 않음(아래).
-    // (heartbeatWakeup 전역 카운트는 producer rework wake 등 다른 경로와 섞이므로 단언에서 제외.)
-    // producer 는 건드리지 않는다.
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
     const producerAfter = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, producerIssueId)).then((rows) => rows[0]!);
     expect(producerAfter.status).toBe("done");
   });
@@ -7028,13 +7022,28 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     let rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     expect(rows.find((row) => row.stepId === "produce")!.iterationIndex).toBe(1);
 
-    // producer rework 완료 시뮬레이션(QA verdict 07:10 보다 나중에 완료 → validation-recheck 가 QA 재큐).
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:30:00.000Z"), cancelledAt: null, startedAt: new Date("2026-06-18T07:11:00.000Z") }).where(eq(issues.id, producerIssueId));
 
-    // Sync 2: validation-recheck 가 QA issue 를 "todo" 로 재큐(producer 07:30 > verdict 07:10) → QA 재실행.
+    heartbeatWakeup.mockClear();
     await syncWorkflowRunForIssue(db, producerIssueId);
     const [qaIssueAfterRework] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
-    expect(qaIssueAfterRework.status).toBe("todo");
+    expect(qaIssueAfterRework.status).toBe("blocked");
+    expect(heartbeatWakeup).toHaveBeenCalledWith(qaAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: qaIssueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        stepId: "qa-validate",
+        workflowStepRunId: expect.any(String),
+      }),
+      contextSnapshot: expect.objectContaining({
+        issueId: qaIssueId,
+        workflowRunId: runId,
+        workflowStepId: "qa-validate",
+        workflowStepRunId: expect.any(String),
+      }),
+    }));
 
     // QA 재리뷰 PASS 시뮬레이션(producer 07:30 이후). QA issue done.
     await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T07:40:00.000Z");
@@ -7096,7 +7105,17 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await syncWorkflowRunForIssue(db, producerIssueId);
 
     const [qaIssueAfterRequeue] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
-    expect(qaIssueAfterRequeue.status).toBe("todo");
+    expect(qaIssueAfterRequeue.status).toBe("blocked");
+    expect(heartbeatWakeup).toHaveBeenCalledWith(qaAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: qaIssueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        stepId: "qa-validate",
+        workflowStepRunId: expect.any(String),
+      }),
+    }));
     expect(qaIssueAfterRequeue.description).toContain("workProducts: none registered");
     expect(qaIssueAfterRequeue.description).toContain("Dependency workProduct hard-stop:");
     const qaComments = await db.select().from(issueComments).where(eq(issueComments.issueId, qaIssueId));
@@ -7367,10 +7386,20 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     // producer rework 완료 시뮬레이션(verdict 07:10 이후).
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:30:00.000Z"), cancelledAt: null, startedAt: new Date("2026-06-18T07:11:00.000Z") }).where(eq(issues.id, producerIssueId));
 
-    // Sync 2: validation-recheck 가 QA 재큐(QA 재리뷰).
+    heartbeatWakeup.mockClear();
     await syncWorkflowRunForIssue(db, producerIssueId);
     const [qaIssueAfterRework] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
-    expect(qaIssueAfterRework.status).toBe("todo");
+    expect(qaIssueAfterRework.status).toBe("blocked");
+    expect(heartbeatWakeup).toHaveBeenCalledWith(qaAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: qaIssueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        stepId: "qa-validate",
+        workflowStepRunId: expect.any(String),
+      }),
+    }));
 
     // QA 가 다시 반려(producer 07:30 이후). 이번엔 cap 초과라 producer 가 더 rework 못 한다.
     await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:40:00.000Z");
