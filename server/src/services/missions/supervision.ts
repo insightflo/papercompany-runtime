@@ -59,6 +59,33 @@ function hasToolStepFailureExecutionEvidence(stepRun: ToolStepFailureEvidenceRow
     || Object.keys(asRecord(metadata.retentionDeleted)).length > 0;
 }
 
+function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): string {
+  switch (action.type) {
+    case "dispatch_missing_step":
+      return `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`;
+    case "owner_decision_retry_source_issue":
+      return `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
+    case "owner_decision_retry_unresolved":
+      return `- ${action.type}: owner_action=${action.ownerActionIssueId} retry_target=${action.sourceIssueId} blocked=${action.blockedIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
+    case "owner_decision_reassign_source_issue":
+      return `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} previous=${action.previousAgentId ?? "unassigned"} target=${action.targetAgentId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
+    case "native_tool_step_retry":
+      return `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`;
+    case "native_tool_step_recovery_result":
+      return `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} artifact=${action.artifactPath} result=${action.resultStatus}`;
+    case "materialize_plan_decision":
+      return `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}`;
+    case "workproduct_reuse_wakeup":
+      return `- ${action.type}: source=${action.sourceIssueId} artifact=${action.artifactPath} stalled_run=${action.stalledRunId} result=${action.resultStatus}`;
+    case "plan_submission_missing":
+      return `- ${action.type}: planning_issue=${action.planIssueId} succeeded_run=${action.succeededRunId} result=${action.resultStatus}`;
+    case "plan_submission_rejected":
+      return `- ${action.type}: planning_issue=${action.planIssueId} decision_hash=${action.decisionHash} result=${action.resultStatus}`;
+    case "stale_source_issue_wakeup":
+      return `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`;
+  }
+}
+
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
   deps: MissionServiceDeps;
@@ -985,6 +1012,84 @@ export function createSupervision({ db, deps, ownerActions }: {
                   idempotencyKey,
                 };
                 if (hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput)) {
+                  const blockedOriginIssue = issue.originId && issue.originId !== sourceCandidate.id
+                    ? missionIssueById.get(issue.originId) ?? null
+                    : null;
+                  const retryUnresolvedMarker = blockedOriginIssue
+                    ? `mission-owner-retry-unresolved:${mission.id}:${issue.id}:${sourceCandidate.id}:${blockedOriginIssue.id}`
+                    : null;
+                  const retryResolvedNothing = isProducerRework
+                    && blockedOriginIssue?.status === "blocked"
+                    && isTerminalIssueStatus(sourceCandidate.status)
+                    && !missionHasActiveHeartbeat;
+                  if (retryResolvedNothing && blockedOriginIssue && retryUnresolvedMarker) {
+                    const [pendingWakeup] = await db
+                      .select({ id: agentWakeupRequests.id })
+                      .from(agentWakeupRequests)
+                      .where(and(
+                        eq(agentWakeupRequests.companyId, mission.companyId),
+                        inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+                        or(
+                          eq(agentWakeupRequests.missionId, mission.id),
+                          eq(agentWakeupRequests.issueId, issue.id),
+                          eq(agentWakeupRequests.issueId, sourceCandidate.id),
+                          eq(agentWakeupRequests.issueId, blockedOriginIssue.id),
+                        ),
+                      ))
+                      .limit(1);
+                    if (pendingWakeup) {
+                      findings.push(`owner_action_retry_unresolved_waiting: ${label} retry_source_issue source=${sourceCandidateLabel} already applied; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked but wakeup=${pendingWakeup.id} is still queued/claimed`);
+                      break;
+                    }
+                    if (comments.some((comment) => comment.includes(retryUnresolvedMarker))) {
+                      findings.push(`owner_action_retry_unresolved_already_escalated: ${label} retry_source_issue source=${sourceCandidateLabel} terminal=${sourceCandidate.status}; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked`);
+                      break;
+                    }
+                    addRecommendation({
+                      type: "request_replan",
+                      missionId: mission.id,
+                      issueId: blockedOriginIssue.id,
+                      reason: `Retry target ${sourceCandidateLabel} reached terminal status=${sourceCandidate.status}, but blocked issue ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} is still blocked; owner must choose a new recovery path instead of repeating the same retry`,
+                      safeToAutoApply: false,
+                    });
+                    addRecommendation({
+                      type: "escalate_blocked",
+                      missionId: mission.id,
+                      issueId: issue.id,
+                      reason: `Owner action ${label} already applied retry_source_issue and it did not unblock ${blockedOriginIssue.identifier ?? blockedOriginIssue.id}`,
+                      safeToAutoApply: false,
+                    });
+                    let ownerWakeupStatus: MissionOwnerDecisionWakeupDispatchStatus = "not_requested";
+                    try {
+                      ownerWakeupStatus = await ownerActions.reopenUnresolvedRetryOwnerAction({
+                        mission,
+                        ownerActionIssue: issue,
+                        retryTargetIssue: sourceCandidate,
+                        retryTargetLabel: sourceCandidateLabel,
+                        blockedIssue: blockedOriginIssue,
+                        marker: retryUnresolvedMarker,
+                        dispatchWakeup: Boolean(input.dispatchOwnerDecisionWakeups),
+                      });
+                      if (ownerWakeupStatus === "failed") {
+                        findings.push(`owner_action_retry_unresolved_wakeup_skipped: ${label} no owner action wakeup callback configured`);
+                      }
+                    } catch (err) {
+                      const message = err instanceof Error ? err.message : String(err);
+                      findings.push(`owner_action_retry_unresolved_wakeup_failed: ${label} owner wakeup callback failed — ${message}`);
+                      ownerWakeupStatus = "failed";
+                    }
+                    findings.push(`owner_action_retry_unresolved_escalated: ${label} retry_source_issue source=${sourceCandidateLabel} terminal=${sourceCandidate.status}; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked; owner action reopened`);
+                    appliedActions.push({
+                      type: "owner_decision_retry_unresolved",
+                      missionId: mission.id,
+                      ownerActionIssueId: issue.id,
+                      sourceIssueId: sourceCandidate.id,
+                      blockedIssueId: blockedOriginIssue.id,
+                      resultStatus: "todo",
+                      wakeupDispatchStatus: ownerWakeupStatus,
+                    });
+                    break;
+                  }
                   if (input.dispatchOwnerDecisionWakeups && !hasMissionOwnerDecisionWakeupDispatchedMarker(sourceComments, wakeupMarkerInput)) {
                     let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = "skipped_no_assignee";
                     if (!sourceCandidate.assigneeAgentId) {
@@ -1737,25 +1842,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           : []),
         "Applied safe actions:",
         ...(appliedActions.length > 0
-          ? appliedActions.map((action) => action.type === "dispatch_missing_step"
-            ? `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`
-            : action.type === "owner_decision_retry_source_issue"
-              ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`
-              : action.type === "owner_decision_reassign_source_issue"
-                ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} previous=${action.previousAgentId ?? "unassigned"} target=${action.targetAgentId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`
-              : action.type === "native_tool_step_retry"
-                ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
-                : action.type === "native_tool_step_recovery_result"
-                  ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} artifact=${action.artifactPath} result=${action.resultStatus}`
-                : action.type === "materialize_plan_decision"
-                  ? `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}`
-                  : action.type === "workproduct_reuse_wakeup"
-                    ? `- ${action.type}: source=${action.sourceIssueId} artifact=${action.artifactPath} stalled_run=${action.stalledRunId} result=${action.resultStatus}`
-                    : action.type === "plan_submission_missing"
-                      ? `- ${action.type}: planning_issue=${action.planIssueId} succeeded_run=${action.succeededRunId} result=${action.resultStatus}`
-                      : action.type === "plan_submission_rejected"
-                        ? `- ${action.type}: planning_issue=${action.planIssueId} decision_hash=${action.decisionHash} result=${action.resultStatus}`
-                      : `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`)
+          ? appliedActions.map(formatAppliedAction)
           : ["- None"]),
         "",
         "Main executor action:",

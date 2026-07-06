@@ -2612,6 +2612,107 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(wakeupMarkers).toHaveLength(1);
   });
 
+  it("reopens owner action when an already-applied producer retry leaves the gate blocked", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const producerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const onOwnerActionCreated = vi.fn();
+
+    await db.insert(companies).values({ id: companyId, name: "Retry Unresolved Company", issuePrefix: `RU${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: producerAgentId, companyId, name: "Producer Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: qaAgentId, companyId, name: "QA Agent", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Retry unresolved mission", status: "active" });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "retry-unresolved-loop",
+      stepsJson: [
+        { id: "produce", name: "Produce signal analysis", agentId: producerAgentId, dependencies: [] },
+        { id: "qa", name: "Inspect signal analysis", agentId: qaAgentId, dependencies: ["produce"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({ id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system", status: "running" });
+
+    const producerIssue = await issueService(db).create(companyId, { assigneeAgentId: producerAgentId, missionId, originKind: "workflow_execution", originId: workflowRunId, originRunId: workflowRunId, status: "done", title: "Produce signal analysis" });
+    const qaIssue = await issueService(db).create(companyId, { assigneeAgentId: qaAgentId, missionId, originKind: "workflow_execution", originId: workflowRunId, originRunId: workflowRunId, status: "blocked", title: "Inspect signal analysis" });
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId, stepId: "produce", issueId: producerIssue.id, status: "completed", completedAt: new Date("2026-07-06T07:34:00.000Z") },
+      { workflowRunId, stepId: "qa", issueId: qaIssue.id, status: "failed", completedAt: new Date("2026-07-06T07:35:00.000Z") },
+    ]);
+    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: qaIssue.id, status: "done", title: "Retry missing signal analysis" });
+    await db.update(issues).set({ completedAt: new Date("2026-07-06T07:36:00.000Z") }).where(eq(issues.id, ownerAction.id));
+    await db.insert(issueComments).values([
+      {
+        companyId,
+        issueId: ownerAction.id,
+        authorAgentId: ownerAgentId,
+        body: [
+          "### Mission owner decision",
+          "Decision: retry_source_issue",
+          `Source issue: ${qaIssue.identifier}`,
+          `Rework target: ${producerIssue.identifier}`,
+          "Reason: producer must provide signal-analysis evidence before QA can complete.",
+        ].join("\n"),
+      },
+      {
+        companyId,
+        issueId: producerIssue.id,
+        authorAgentId: ownerAgentId,
+        body: [
+          "### Mission owner retry applied",
+          `<!-- mission-owner-decision-applied:${JSON.stringify({ ownerActionIssueId: ownerAction.id, sourceIssueId: producerIssue.id, decision: "retry_source_issue" })} -->`,
+          "Action: retry_source_issue already reopened this producer once.",
+        ].join("\n"),
+      },
+    ]);
+
+    const svc = missionService(db, { onOwnerActionCreated });
+    const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-07-06T08:00:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+
+    expect(result.findings.join("\n")).toContain("owner_action_retry_unresolved_escalated");
+    expect(result.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "request_replan", issueId: qaIssue.id, safeToAutoApply: false }),
+      expect.objectContaining({ type: "escalate_blocked", issueId: ownerAction.id, safeToAutoApply: false }),
+    ]));
+    expect(result.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "owner_decision_retry_unresolved",
+        ownerActionIssueId: ownerAction.id,
+        sourceIssueId: producerIssue.id,
+        blockedIssueId: qaIssue.id,
+        resultStatus: "todo",
+        wakeupDispatchStatus: "dispatched",
+      }),
+    ]));
+    expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
+    expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
+      issue: expect.objectContaining({ id: ownerAction.id }),
+      sourceIssue: expect.objectContaining({ id: qaIssue.id }),
+      reason: "mission_unblock_action_stalled",
+    }));
+    await expect(db.select().from(issues).where(eq(issues.id, ownerAction.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
+    await expect(db.select().from(issues).where(eq(issues.id, producerIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "done" }));
+    await expect(db.select().from(issues).where(eq(issues.id, qaIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked" }));
+    const ownerActionBody = await db.select().from(issueComments).where(eq(issueComments.issueId, ownerAction.id)).then((rows) => rows.map((row) => row.body).join("\n"));
+    expect(ownerActionBody).toContain("mission-owner-retry-unresolved");
+    expect(ownerActionBody).toContain("Required next decision");
+
+    onOwnerActionCreated.mockClear();
+    const second = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-07-06T08:01:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    expect(second.findings.join("\n")).toContain("owner_action_retry_unresolved_already_escalated");
+    expect(second.appliedActions).toEqual([]);
+    expect(onOwnerActionCreated).not.toHaveBeenCalled();
+    const ownerActionBodies = await db.select().from(issueComments).where(eq(issueComments.issueId, ownerAction.id));
+    expect(ownerActionBodies.filter((row) => row.body.includes("mission-owner-retry-unresolved"))).toHaveLength(1);
+  });
+
   it("applies retry_source_issue with no source assignee but skips explicit wakeup dispatch", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

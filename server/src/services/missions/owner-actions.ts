@@ -24,6 +24,7 @@ import { asTrimmedString } from "./utils.js";
 import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import type { MissionServiceDeps } from "../missions.js";
+import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
 
 export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceDeps }) {
 
@@ -865,6 +866,42 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     return true;
   }
 
+  async function reopenUnresolvedRetryOwnerAction(input: {
+    mission: MissionRow;
+    ownerActionIssue: IssueRow;
+    retryTargetIssue: IssueRow;
+    retryTargetLabel: string;
+    blockedIssue: IssueRow;
+    marker: string;
+    dispatchWakeup: boolean;
+  }): Promise<MissionOwnerDecisionWakeupDispatchStatus> {
+    if (input.ownerActionIssue.status !== "todo") {
+      await issueService(db).update(input.ownerActionIssue.id, { status: "todo" });
+    }
+    await issueService(db).addComment(
+      input.ownerActionIssue.id,
+      [
+        "### Mission owner retry unresolved",
+        `<!-- ${input.marker} -->`,
+        "Previous decision: retry_source_issue",
+        `Retry target: ${input.retryTargetLabel}`,
+        `Blocked issue: ${input.blockedIssue.identifier ?? input.blockedIssue.id}`,
+        `Result: retry target is ${input.retryTargetIssue.status}, but the blocked issue is still blocked.`,
+        "Required next decision: choose replan_mission, request_input, escalate, report_impossible, or provide a different retry target with new evidence. Do not repeat the same retry without new evidence.",
+      ].join("\n"),
+      { agentId: input.mission.ownerAgentId },
+    );
+    if (!input.dispatchWakeup) return "not_requested";
+    if (!deps.onOwnerActionCreated) return "failed";
+    await deps.onOwnerActionCreated({
+      mission: input.mission,
+      issue: input.ownerActionIssue,
+      sourceIssue: input.blockedIssue,
+      reason: "mission_unblock_action_stalled",
+    });
+    return "dispatched";
+  }
+
   async function closeDuplicateToolStepRecoveryIssue(input: {
     issue: IssueRow;
     mission: MissionRow;
@@ -992,6 +1029,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     collectIssueIdsWithAncestors,
     findMainExecutorIssue,
     reopenAppliedToolStepRecoveryIfRetryFailed,
+    reopenUnresolvedRetryOwnerAction,
     closeDuplicateToolStepRecoveryIssue,
     listRecurringArtifactMissingIssueRefs,
     buildCorrectedArtifactValidatorRetryEvidence,
