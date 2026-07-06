@@ -759,6 +759,25 @@ async function writeQaRubricMarkdown(input: {
   await writeFile(input.filePath, body, "utf8");
 }
 
+function buildWorkflowApiCloseoutLines(input: {
+  requiresWorkProduct: boolean;
+  requiresVerdict: boolean;
+}): string[] {
+  const lines = [
+    "Workflow API closeout:",
+    "- Use the installed `paperclip` skill for request examples and Paperclip API environment variables.",
+  ];
+  if (input.requiresWorkProduct) {
+    lines.push("- If this step creates or reuses a file artifact, register it with `POST /api/issues/{issueId}/workflow/artifacts` before completion.");
+  }
+  if (input.requiresVerdict) {
+    lines.push("- Submit the official `PASS` or `REQUEST_CHANGES` verdict with `POST /api/issues/{issueId}/workflow/verdict` before completion.");
+  }
+  lines.push("- Complete this workflow issue with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.");
+  lines.push("- Use normal issue status/comment updates only if the Workflow API is unavailable or the issue is blocked.");
+  return lines;
+}
+
 async function commentOnValidationRecheckQueued(input: {
   db: Db;
   companyId: string;
@@ -1489,7 +1508,8 @@ async function createWorkflowStepIssue(input: {
   const renderedStepDescription = input.step.description?.trim()
     ? renderWorkflowRunTextTemplate(input.step.description.trim(), input.run)
     : null;
-  const qaRubricPath = !requiresWorkProduct && isQaLikeStep(input.step) && workProductPaths?.stepOutputDir
+  const requiresVerdict = !requiresWorkProduct && isQaLikeStep(input.step);
+  const qaRubricPath = requiresVerdict && workProductPaths?.stepOutputDir
     ? path.join(workProductPaths.stepOutputDir, "qa-rubric.md")
     : null;
   if (qaRubricPath) {
@@ -1569,6 +1589,8 @@ async function createWorkflowStepIssue(input: {
       ? "- If this step needs that dependency deliverable for validation, synthesis, build, publish, or approval, stop and leave a blocker/REQUEST_CHANGES naming the missing dependency workProduct instead of producing a guessed result."
       : null,
     "- Treat issue ids from other missions or workflow runs as out of scope, even when their titles are similar.",
+    "",
+    ...buildWorkflowApiCloseoutLines({ requiresWorkProduct, requiresVerdict }),
     "",
     ...(requiresWorkProduct ? buildWorkProductRegistrationContractLines() : []),
     !requiresWorkProduct ? "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable." : null,

@@ -1166,6 +1166,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     // graphWorkProductRequired=true → dag-engine injects the full contract.
     expect(createdIssue?.description).toContain("Deliverable output (use exactly this directory):");
     expect(createdIssue?.description).toContain(workProductRoot);
+    expect(createdIssue?.description).toContain("Workflow API closeout:");
+    expect(createdIssue?.description).toContain("/workflow/artifacts");
+    expect(createdIssue?.description).toContain("/workflow/complete");
     expect(createdIssue?.description).toContain("WorkProduct registration contract:");
     expect(createdIssue?.description).toContain("[ARTIFACT]:");
     // AREA-3: the QA/validator guidance line is gated on !graphWorkProductRequired,
@@ -1299,14 +1302,18 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(issues)
       .where(eq(issues.id, qaStepRun.issueId!));
 
-    expect(qaIssue.description).toContain("QA grading rubric:");
-    expect(qaIssue.description).toContain("qa-rubric.md");
-    expect(qaIssue.description).not.toContain("Check Top25 rank coverage");
-    expect(qaIssue.description).not.toContain("collection timestamp, fallback notes");
-    expect(qaIssue.description).not.toContain("Deliverable output (use exactly this directory):");
-    expect(qaIssue.description).not.toContain("[ARTIFACT]:");
+    const qaDescription = qaIssue.description ?? "";
+    expect(qaDescription).toContain("QA grading rubric:");
+    expect(qaDescription).toContain("qa-rubric.md");
+    expect(qaDescription).toContain("Workflow API closeout:");
+    expect(qaDescription).toContain("/workflow/verdict");
+    expect(qaDescription).toContain("/workflow/complete");
+    expect(qaDescription).not.toContain("Check Top25 rank coverage");
+    expect(qaDescription).not.toContain("collection timestamp, fallback notes");
+    expect(qaDescription).not.toContain("Deliverable output (use exactly this directory):");
+    expect(qaDescription).not.toContain("[ARTIFACT]:");
 
-    const rubricPath = qaIssue.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
+    const rubricPath = qaDescription.match(/- (\/.*qa-rubric\.md)/)?.[1];
     expect(rubricPath).toBeTruthy();
     expect(fs.existsSync(rubricPath!)).toBe(true);
     const rubric = fs.readFileSync(rubricPath!, "utf8");
@@ -1462,8 +1469,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(runBeforeDeliveryQa?.status).toBe("running");
 
     const [deliveryIssue] = await db.select().from(issues).where(eq(issues.id, deliveryRun.issueId!));
-    expect(deliveryIssue?.description).toContain("QA grading rubric:");
-    const rubricPath = deliveryIssue?.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
+    const deliveryDescription = deliveryIssue?.description ?? "";
+    expect(deliveryDescription).toContain("QA grading rubric:");
+    const rubricPath = deliveryDescription.match(/- (\/.*qa-rubric\.md)/)?.[1];
     expect(rubricPath).toBeTruthy();
     const deliveryRubric = fs.readFileSync(rubricPath!, "utf8");
     expect(deliveryRubric).toContain("Verification Before Completion");
@@ -1473,6 +1481,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(deliveryRubric).toContain("HTTP 200");
 
     await addQaVerdictComment(deliveryRun.issueId!, companyId, publisherAgentId, "PASS", "2026-06-28T00:40:00.000Z");
+    await recordWorkflowVerdictForIssue(deliveryRun.issueId!, "pass", "2026-06-28T00:40:00.000Z");
     await issueService(db).update(deliveryRun.issueId!, { status: "done" });
     await syncWorkflowRunForIssue(db, deliveryRun.issueId!);
     const [completedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
@@ -1575,7 +1584,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(smokeQaRun.issueId).toEqual(expect.any(String));
 
     const [smokeQaIssue] = await db.select().from(issues).where(eq(issues.id, smokeQaRun.issueId!));
-    const rubricPath = smokeQaIssue?.description.match(/- (\/.*qa-rubric\.md)/)?.[1];
+    const smokeQaDescription = smokeQaIssue?.description ?? "";
+    const rubricPath = smokeQaDescription.match(/- (\/.*qa-rubric\.md)/)?.[1];
     expect(rubricPath).toBeTruthy();
     const rubric = fs.readFileSync(rubricPath!, "utf8");
     expect(rubric).toContain("Confirm the published item is visible.");
@@ -3391,6 +3401,42 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await syncWorkflowRunForIssue(db, issueId);
   }
 
+  async function recordWorkflowVerdictForIssue(issueId: string, verdict: "pass" | "request_changes", at: string) {
+    const [row] = await db
+      .select({
+        companyId: issues.companyId,
+        missionId: issues.missionId,
+        workflowRunId: workflowStepRuns.workflowRunId,
+        workflowStepRunId: workflowStepRuns.id,
+      })
+      .from(workflowStepRuns)
+      .innerJoin(issues, eq(issues.id, workflowStepRuns.issueId))
+      .where(eq(workflowStepRuns.issueId, issueId))
+      .limit(1);
+    expect(row).toBeTruthy();
+    await db.insert(workflowTransitionEvents).values({
+      companyId: row!.companyId,
+      missionId: row!.missionId,
+      workflowRunId: row!.workflowRunId,
+      workflowStepRunId: row!.workflowStepRunId,
+      issueId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict,
+      decision: verdict,
+      reason: "test",
+      reasonCode: "test",
+      payload: {
+        kind: "workflow_validation_verdict",
+        workflowRunId: row!.workflowRunId,
+        stepRunId: row!.workflowStepRunId,
+        issueId,
+        verdict,
+      },
+      createdAt: new Date(at),
+    });
+  }
+
   async function getStepIssue(runId: string, stepId: string) {
     const stepRun = await db
       .select()
@@ -3616,6 +3662,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       body: "Coverage checked.\nPASS",
       createdAt: new Date("2026-06-24T06:06:00.000Z"),
     });
+    await recordWorkflowVerdictForIssue(auditIssue!.id, "pass", "2026-06-24T06:06:00.000Z");
     await completeStepIssue(auditIssue!.id);
 
     const outlineIssue = await getStepIssue(runId, "outline");

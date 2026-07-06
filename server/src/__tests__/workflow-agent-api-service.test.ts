@@ -209,6 +209,34 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     });
   });
 
+  it("records workflow verdicts without requiring a QA step type", async () => {
+    const issue = await seedWorkflowIssue({
+      stepId: "audit-source-coverage",
+      title: "Audit source coverage and confidence",
+    });
+
+    const result = await submitWorkflowVerdict({
+      db,
+      issue,
+      actor,
+      data: { verdict: "pass", reason: "Source coverage is sufficient" },
+    });
+
+    expect(result).toMatchObject({
+      isCandidate: true,
+      satisfied: true,
+      verdict: "pass",
+      stepId: "audit-source-coverage",
+    });
+    const events = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.issueId, issue.id));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: "workflow_validation_verdict",
+      reason: "workflow_api",
+      verdict: "pass",
+    });
+  });
+
   it("registers artifacts as official issue workProducts", async () => {
     const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
     const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-artifact-"));

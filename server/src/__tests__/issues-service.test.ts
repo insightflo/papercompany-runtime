@@ -12,6 +12,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueExecutionCards,
   issueInboxArchives,
   issueReadStates,
   issueWorkProducts,
@@ -2233,6 +2234,7 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
 
   afterEach(async () => {
     await db.delete(workflowTransitionEvents);
+    await db.delete(issueExecutionCards);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
@@ -2253,6 +2255,7 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
     readonly issueTitle?: string;
     readonly stepId?: string;
     readonly stepName?: string;
+    readonly cardVerdictRequired?: boolean;
   } = {}) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -2319,12 +2322,72 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
       status: "running",
       startedAt,
     });
+    if (typeof overrides.cardVerdictRequired === "boolean") {
+      await db.insert(issueExecutionCards).values({
+        companyId,
+        issueId,
+        workflowRunId,
+        workflowStepRunId: stepRunId,
+        cardVersion: 1,
+        contentHash: "test-card-verdict-required",
+        cardJson: {
+          version: 1,
+          issue: {
+            id: issueId,
+            title: overrides.issueTitle ?? "[QA] Validate delivery artifact",
+            assigneeAgentId: agentId,
+            originKind: "workflow_execution",
+          },
+          workflow: {
+            definitionId: workflowId,
+            runId: workflowRunId,
+            stepRunId,
+            stepId,
+            dependencyStepIds: [],
+          },
+          requiredOutputs: {
+            workProduct: {
+              required: false,
+              artifactMarker: "[ARTIFACT]: <absolute path>",
+            },
+            verdict: {
+              required: overrides.cardVerdictRequired,
+              ledger: overrides.cardVerdictRequired ? "workflow_validation_verdict" : null,
+              allowed: overrides.cardVerdictRequired ? ["PASS", "REQUEST_CHANGES"] as const : [],
+            },
+            deliveryReadback: {
+              required: false,
+              marker: null,
+            },
+          },
+          evidenceRefs: [],
+          preservedProseMarkers: [],
+          source: {
+            descriptionHash: "test",
+            generatedBy: "test",
+          },
+        },
+      });
+    }
 
     return { companyId, workflowRunId, issueId, stepRunId };
   }
 
   it("rejects done for workflow QA issues without a verdict ledger row", async () => {
     const seeded = await seedWorkflowValidationIssue();
+
+    await expect(svc.update(seeded.issueId, { status: "done" })).rejects.toThrow(
+      "workflow_validation_verdict",
+    );
+  });
+
+  it("rejects done when the execution card requires a verdict without QA naming", async () => {
+    const seeded = await seedWorkflowValidationIssue({
+      issueTitle: "Audit source coverage and confidence",
+      stepId: "audit-source-coverage",
+      stepName: "Audit source coverage and confidence",
+      cardVerdictRequired: true,
+    });
 
     await expect(svc.update(seeded.issueId, { status: "done" })).rejects.toThrow(
       "workflow_validation_verdict",
@@ -2357,7 +2420,7 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
 
     const updated = await svc.update(seeded.issueId, { status: "done" });
 
-    expect(updated.status).toBe("done");
+    expect(updated?.status).toBe("done");
   });
 
   it("does not require a verdict ledger for ordinary validate workflow steps", async () => {
@@ -2369,6 +2432,6 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
 
     const updated = await svc.update(seeded.issueId, { status: "done" });
 
-    expect(updated.status).toBe("done");
+    expect(updated?.status).toBe("done");
   });
 });

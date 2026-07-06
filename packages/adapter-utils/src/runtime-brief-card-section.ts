@@ -82,6 +82,15 @@ export function buildIssueExecutionCardBriefLines(input: {
     );
   }
 
+  const closeoutParts = [
+    workProduct?.required === true ? "register artifacts with /workflow/artifacts" : null,
+    verdict?.required === true ? "submit verdict with /workflow/verdict" : null,
+    "complete with /workflow/complete",
+  ].filter((part): part is string => part !== null);
+  if (workflow && closeoutParts.length > 0) {
+    lines.push(`- Workflow API closeout: ${joinList(closeoutParts)}; use the paperclip skill for request examples.`);
+  }
+
   const stepId = asString(workflow?.stepId);
   const runId = asString(workflow?.runId);
   const deps = asStringArray(workflow?.dependencyStepIds, ARRAY_CAP);

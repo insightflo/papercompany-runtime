@@ -127,7 +127,7 @@ export async function submitWorkflowVerdict(input: {
     sourceText: input.data.reason ?? input.data.verdict,
   });
   if (!result.isCandidate) {
-    throw unprocessable("Workflow verdict API can only be used on workflow QA or validation issues");
+    throw unprocessable("Workflow verdict API can only be used on workflow execution issues linked to a workflow step run");
   }
   if (!result.satisfied) {
     throw unprocessable("Workflow verdict ledger was not recorded");

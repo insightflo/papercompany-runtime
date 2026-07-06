@@ -17,7 +17,9 @@ describe("artifact registration instructions", () => {
     expect(lines.join("\n")).toContain("[ARTIFACT]: <absolute path>");
     expect(lines.join("\n")).toContain("If the deliverable file does not exist yet, create it");
     expect(lines.join("\n")).toContain("If it already exists, do not regenerate it");
-    expect(lines.join("\n")).toContain("Do not POST, curl, or invent workProduct fields");
+    expect(lines.join("\n")).toContain("Prefer the Workflow API");
+    expect(lines.join("\n")).toContain("/workflow/artifacts");
+    expect(lines.join("\n")).toContain("Do not use the generic workProduct route");
   });
 
   it("points recovery runs at the existing file instead of regeneration", () => {
@@ -60,6 +62,6 @@ describe("artifact registration instructions", () => {
     expect(text).toContain("creating the file and registering the workProduct are separate");
     expect(text).toContain("If the file is missing, create it");
     expect(text).toContain("if it already exists, reuse it");
-    expect(text).toContain("Do not POST/curl registration");
+    expect(text).toContain("Register with the Workflow API first");
   });
 });

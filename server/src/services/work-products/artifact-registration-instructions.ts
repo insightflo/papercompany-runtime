@@ -19,12 +19,13 @@ export function buildWorkProductRegistrationContractLines(input: {
   return [
     "WorkProduct registration contract:",
     "- Creating the deliverable file and registering the workProduct are separate steps. A file that only exists on disk or in a comment is not registered.",
-    `- Registration happens only when your run output includes one standalone final line exactly \`${marker}\`. The system reads that line and registers the workProduct automatically.`,
+    "- Prefer the Workflow API: register the deliverable with `POST /api/issues/{issueId}/workflow/artifacts` after creating or reusing the file and before completing the issue.",
+    `- Fallback only if the Workflow API is unavailable: include one standalone final line exactly \`${marker}\`. The system reads that line and registers the workProduct automatically.`,
     input.artifactPath
-      ? `- The deliverable file already exists at \`${input.artifactPath}\`; do not regenerate it. Reuse that file and emit the exact marker above.`
-      : "- If the deliverable file does not exist yet, create it in the assigned output directory, then emit the artifact marker. If it already exists, do not regenerate it; emit the marker for the existing file.",
-    "- Do not POST, curl, or invent workProduct fields such as type/provider/title/metadata. The artifact marker is the only registration method.",
-    `- FINAL LINE RULE: your last assistant message MUST end with exactly one standalone line \`${marker}\`. Nothing may follow that line: no closing prose, no summary, and no meta text like 'ARTIFACT line ready'.`,
+      ? `- The deliverable file already exists at \`${input.artifactPath}\`; do not regenerate it. Reuse that file and register that exact path.`
+      : "- If the deliverable file does not exist yet, create it in the assigned output directory. If it already exists, do not regenerate it; register the existing file.",
+    "- Do not use the generic workProduct route or invent workProduct fields such as provider/title/metadata. Use the Workflow API first, or the artifact marker fallback above.",
+    `- FALLBACK FINAL LINE RULE: when using the fallback marker, your last assistant message MUST end with exactly one standalone line \`${marker}\`. Nothing may follow that line: no closing prose, no summary, and no meta text like 'ARTIFACT line ready'.`,
   ];
 }
 
@@ -47,14 +48,14 @@ export function buildDelegatedWorkProductContractLines(): string[] {
   return [
     "Official workProduct contract:",
     "- Creating the deliverable file and registering the workProduct are separate steps. A file that only exists on disk or in a comment is not registered.",
-    `- If this delegated issue specifies an output directory or artifact contract, create the deliverable there when missing. If it already exists, reuse it and finish with the required \`${ARTIFACT_MARKER_PLACEHOLDER}\` line.`,
-    "- Do not POST or curl workProduct registration. The artifact marker is the only registration method.",
+    `- If this delegated issue specifies an output directory or artifact contract, create the deliverable there when missing. If it already exists, reuse it and register it with the Workflow API or finish with the fallback \`${ARTIFACT_MARKER_PLACEHOLDER}\` line.`,
+    "- Do not use the generic workProduct route. Use the Workflow API first; use the artifact marker only as fallback when the Workflow API is unavailable.",
     "- The source workflow will copy those registered workProducts back to the source tracker issue when this issue is done.",
   ];
 }
 
 export function buildAssignedIssueArtifactWorkflowText(): string {
-  return "If the issue specifies a deliverable output directory or artifact contract, remember that creating the file and registering the workProduct are separate. If the file is missing, create it and finish with `[ARTIFACT]: <absolute path>`; if it already exists, reuse it and emit that marker. Do not POST/curl registration.";
+  return "If the issue specifies a deliverable output directory or artifact contract, remember that creating the file and registering the workProduct are separate. If the file is missing, create it; if it already exists, reuse it. Register with the Workflow API first, or emit `[ARTIFACT]: <absolute path>` only as fallback when the Workflow API is unavailable.";
 }
 
 export function buildAssignedIssueArtifactWorkflowLine(): string {

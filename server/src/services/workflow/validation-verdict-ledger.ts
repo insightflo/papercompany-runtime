@@ -3,6 +3,7 @@ import { and, desc, eq, gte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   heartbeatRuns,
+  issueExecutionCards,
   issues,
   workflowDefinitions,
   workflowRuns,
@@ -42,6 +43,8 @@ type WorkflowValidationContext = {
   readonly stepId: string | null;
 };
 
+type ResolveWorkflowValidationContextMode = "completion" | "record";
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -54,7 +57,7 @@ function readSteps(value: unknown): StepLike[] {
   return Array.isArray(value) ? value.filter((step): step is StepLike => Boolean(step) && typeof step === "object") : [];
 }
 
-function isWorkflowValidationStep(issue: WorkflowValidationIssue, step: StepLike | null): boolean {
+function isLegacyWorkflowValidationStep(issue: WorkflowValidationIssue, step: StepLike | null): boolean {
   if (issue.originKind !== "workflow_execution") return false;
   const title = trimmedString(issue.title) ?? "";
   const stepId = trimmedString(step?.id) ?? "";
@@ -62,6 +65,31 @@ function isWorkflowValidationStep(issue: WorkflowValidationIssue, step: StepLike
   return /^\s*\[QA\]/iu.test(title) ||
     /^qa[-_]/iu.test(stepId) ||
     ["qa", "validation", "validator"].includes(stepType);
+}
+
+function cardRequiresWorkflowValidationVerdict(value: unknown): boolean | null {
+  const card = asRecord(value);
+  if (Object.keys(card).length === 0) return null;
+  const requiredOutputs = asRecord(card.requiredOutputs);
+  const verdict = asRecord(requiredOutputs.verdict);
+  return typeof verdict.required === "boolean" ? verdict.required : null;
+}
+
+async function readWorkflowValidationCompletionRequirement(
+  db: WorkflowValidationDb,
+  issue: WorkflowValidationIssue,
+): Promise<boolean | null> {
+  const row = await db
+    .select({ cardJson: issueExecutionCards.cardJson })
+    .from(issueExecutionCards)
+    .where(and(
+      eq(issueExecutionCards.companyId, issue.companyId),
+      eq(issueExecutionCards.issueId, issue.id),
+    ))
+    .orderBy(desc(issueExecutionCards.updatedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return row ? cardRequiresWorkflowValidationVerdict(row.cardJson) : null;
 }
 
 function hashText(value: string): string {
@@ -97,6 +125,7 @@ export function readWorkflowValidationVerdictFromRunResult(resultJson: unknown):
 export async function resolveWorkflowValidationContext(
   db: WorkflowValidationDb,
   issue: WorkflowValidationIssue,
+  options: { readonly mode?: ResolveWorkflowValidationContextMode } = {},
 ): Promise<WorkflowValidationContext> {
   const stepRun = await db
     .select({
@@ -128,9 +157,17 @@ export async function resolveWorkflowValidationContext(
     : null;
   const step = readSteps(definition?.stepsJson).find((candidate) => trimmedString(candidate.id) === stepRun?.stepId) ?? null;
   const hasStepRunContext = Boolean(stepRun?.workflowRunId && stepRun.id);
+  const mode = options.mode ?? "completion";
+  const recordableWorkflowStep = issue.originKind === "workflow_execution" && hasStepRunContext;
+  const cardRequirement = mode === "completion" && recordableWorkflowStep
+    ? await readWorkflowValidationCompletionRequirement(db, issue)
+    : null;
+  const completionRequired = mode === "record"
+    ? recordableWorkflowStep
+    : recordableWorkflowStep && (cardRequirement ?? isLegacyWorkflowValidationStep(issue, step));
 
   return {
-    isCandidate: hasStepRunContext && isWorkflowValidationStep(issue, step),
+    isCandidate: completionRequired,
     workflowRunId: stepRun?.workflowRunId ?? null,
     workflowStepRunId: stepRun?.id ?? null,
     stepId: stepRun?.stepId ?? null,
@@ -146,7 +183,7 @@ export async function recordWorkflowValidationVerdict(input: {
   readonly heartbeatRunId?: string | null;
   readonly sourceText?: string | null;
 }): Promise<WorkflowValidationLedgerResult> {
-  const context = await resolveWorkflowValidationContext(input.db, input.issue);
+  const context = await resolveWorkflowValidationContext(input.db, input.issue, { mode: "record" });
   if (!context.isCandidate || !context.workflowRunId || !context.workflowStepRunId) {
     return { ...context, satisfied: false, verdict: null };
   }
