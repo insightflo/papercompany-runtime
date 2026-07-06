@@ -43,6 +43,7 @@ import {
 } from "./control-flow/edge-condition.js";
 import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
+import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import {
@@ -1130,6 +1131,7 @@ async function syncStepRunsFromIssueState(
       definition: context.definition,
       step,
       stepRunId: stepRun.id,
+      stepRunMetadata: stepRun.metadata,
       issueId: issue.id,
       allowCompletedIssue: true,
       allowBlockedIssue: true,
@@ -1743,6 +1745,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
   stepRunId?: string;
+  stepRunMetadata?: unknown;
   issueId: string;
   allowCompletedIssue?: boolean;
   allowBlockedIssue?: boolean;
@@ -1803,6 +1806,12 @@ export async function wakeExistingWorkflowStepIssue(input: {
     wakeIssue = updatedIssue;
   }
 
+  const stepRunMetadata = normalizeRecord(input.stepRunMetadata);
+  const reworkContract = readWorkflowReworkContract(stepRunMetadata.workflowReworkContract);
+  const reworkContext = reworkContract
+    ? { paperclipWorkflowReworkContract: reworkContract }
+    : {};
+
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
     issue: wakeIssue,
@@ -1815,6 +1824,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       workflowDefinitionId: input.definition.id,
       stepId: input.step.id,
       ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
+      ...reworkContext,
     },
     contextSnapshot: {
       issueId: issue.id,
@@ -1827,6 +1837,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       stepId: input.step.id,
       source: "workflow.resume",
       wakeReason: "workflow_step_runnable",
+      ...reworkContext,
     },
     requestedByActorType: "system",
     requestedByActorId: `workflow:${input.definition.id}`,
@@ -3100,6 +3111,7 @@ export async function syncWorkflowRunState(
             definition: context.definition,
             step,
             stepRunId: stepRun.id,
+            stepRunMetadata: stepRun.metadata,
             issueId: stepRun.issueId,
             allowCompletedIssue: resumeExistingIssue,
             allowBlockedIssue: resumeExistingIssue,

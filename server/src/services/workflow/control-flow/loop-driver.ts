@@ -42,7 +42,7 @@ import { resetStepRunForRework } from "./step-reset.js";
 import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
-import { buildQaReworkArtifactInstructionLine } from "../../work-products/artifact-registration-instructions.js";
+import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rework-contract.js";
 import type { StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -212,44 +212,6 @@ async function loadProducerDependencyArtifacts(input: {
   return any ? lines.join("\n") : null;
 }
 
-function buildProducerReworkComment(input: {
-  producerStepId: string;
-  qaFeedbacks: Array<{ qaStepId: string; qaIssueId: string | null; feedback: string | null }>;
-  currentIteration: number;
-  maxIterations: number;
-  dependencyArtifacts?: string | null;
-}): string {
-  // [QA loop hardening] 한 producer 에 여러 QA validator 가 동시 반려할 수 있다. 각 QA 의 feedback 을
-  //   별도 섹션으로 합쳐 하나의 rework comment 로 생산자에게 전달 → producer 가 QA verdict 단위가 아닌
-  //   한 번의 rework 사이클로 모든 반려를 처리하게 한다.
-  const qaList = input.qaFeedbacks
-    .map((q) => `- QA step \`${q.qaStepId}\` (issue ${q.qaIssueId ?? "unknown"}) requested changes`)
-    .join("\n");
-  const multi = input.qaFeedbacks.length > 1;
-  const feedbackSections = input.qaFeedbacks
-    .map((q, index) => {
-      const sectionHeader = multi ? `\n#### QA feedback ${index + 1}: \`${q.qaStepId}\`` : "";
-      const body = q.feedback
-        ?? "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.";
-      return `${sectionHeader}${sectionHeader ? "\n" : ""}${body}`;
-    })
-    .join("\n");
-  return [
-    "## Workflow QA rework request",
-    "",
-    `Producer step \`${input.producerStepId}\` was reset for rework because the following QA validator(s) requested changes.`,
-    qaList,
-    `- Rework iteration: ${input.currentIteration + 1}/${input.maxIterations}`,
-    buildQaReworkArtifactInstructionLine({ feedbackScope: multi ? "ALL listed QA feedback above" : "the QA feedback" }),
-    "- Do not close this issue as already complete unless the requested changes are actually reflected in the deliverable.",
-    input.dependencyArtifacts ?? null,
-    "",
-    feedbackSections,
-  ]
-    .filter((line) => line !== null)
-    .join("\n");
-}
-
 /**
  * [목적] back-edge(QA 반려) 로 발화해야 하는 terminal step 들을 cap 내에서 리셋(rework).
  * [입력] ApplyBackEdgeReworkInput. [출력] { stepRuns(리셋 반영), reworkedCount }.
@@ -332,12 +294,20 @@ export async function applyBackEdgeReworkPass(
         feedback: await loadQaReworkFeedback({ db, qaIssueId: q.qaRun?.issueId ?? null }),
       });
     }
+    const reworkContract = buildWorkflowReworkContract({
+      producerStepId: step.id,
+      qaFeedbacks,
+      currentIteration,
+      maxIterations,
+      dependencyArtifacts,
+    });
 
     await resetStepRunForRework({
       db,
       stepRun,
       companyId: run.companyId,
       attempt,
+      reworkContract,
       reason: `qa_request_changes(merged back-edge ${step.id}←[${rejectedQas.map((q) => q.edge.stepId).join(",")}], iteration ${currentIteration}/${maxIterations})`,
     });
     // Phase 5 (plan 8.1 delivery verification): 각 반려 QA 마다 best-effort company-scoped quality
@@ -379,13 +349,7 @@ export async function applyBackEdgeReworkPass(
       await db.insert(issueComments).values({
         companyId: run.companyId,
         issueId: stepRun.issueId,
-        body: buildProducerReworkComment({
-          producerStepId: step.id,
-          qaFeedbacks,
-          currentIteration,
-          maxIterations,
-          dependencyArtifacts,
-        }),
+        body: renderWorkflowReworkComment(reworkContract),
       });
     }
     reworkedCount += 1;

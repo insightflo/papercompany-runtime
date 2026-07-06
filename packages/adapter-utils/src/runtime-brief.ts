@@ -1,5 +1,6 @@
 import { joinPromptSections } from "./prompt-utils.js";
 import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
+import { buildWorkflowReworkContractBriefLines } from "./runtime-brief-rework-section.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -356,6 +357,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const handoff = asRecord(context.paperclipSessionHandoff);
   const issueExecutionCard = asRecord(context.paperclipIssueExecutionCard);
   const instructionInjection = asRecord(context.paperclipInstructionInjection);
+  const workflowReworkContractLines = buildWorkflowReworkContractBriefLines(context.paperclipWorkflowReworkContract);
   const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
   const recentIssueCommentsLine = buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
   const hermesChatLine = buildHermesChatBrief(context.paperclipHermesChat);
@@ -587,6 +589,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanRulesLine,
     missionWorkingNoteLine,
     missionOwnerPlanningContextLine,
+    ...workflowReworkContractLines,
     workflowToolContractLine,
     recentIssueCommentsLine,
     hermesChatLine,

@@ -43,6 +43,7 @@ export interface ResetStepRunForReworkInput {
   increment?: number;
   /** activity log details.reason 용 human-readable 사유. */
   reason?: string;
+  reworkContract?: Record<string, unknown>;
 }
 
 export interface ResetStepRunForReworkResult {
@@ -68,6 +69,9 @@ export async function resetStepRunForRework(
   let metadata = normalizeRecord(stepRun.metadata);
   if (attempt) {
     metadata = appendAttempt(metadata, attempt);
+  }
+  if (input.reworkContract) {
+    metadata.workflowReworkContract = input.reworkContract;
   }
   // P2 이월: skip sentinel 제거 — back-edge 로 회복되는 step 이 flap 없이 재실행되게.
   delete metadata.controlFlowSkipped;
