@@ -15,6 +15,12 @@ import {
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { issueService } from "./issues.js";
+import { applyIssueCreatedSideEffects } from "./issue-create-side-effects.js";
+import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
+import {
+  resolveQualityVerdictRouting,
+  type QualityVerdictRouting,
+} from "./quality-verdict-routing.js";
 
 const EVIDENCE_ISSUE_ORIGIN = "quality_evidence_request";
 const CORRECTION_ISSUE_ORIGIN = "quality_correction_request";
@@ -42,6 +48,29 @@ const REQUIRED_EVIDENCE_SURFACES = [
 
 type TransactionDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type QualityWriteDb = Db | TransactionDb;
+type QualityFollowUpIssueForSideEffects = {
+  id: string;
+  companyId: string;
+  title: string;
+  identifier: string | null;
+  assigneeAgentId: string | null;
+  status: string;
+};
+type QualityFollowUpSideEffect = {
+  issue: QualityFollowUpIssueForSideEffects;
+  contextSource: string;
+};
+
+function toFollowUpIssueForSideEffects(issue: QualityFollowUpIssueForSideEffects): QualityFollowUpIssueForSideEffects {
+  return {
+    id: issue.id,
+    companyId: issue.companyId,
+    title: issue.title,
+    identifier: issue.identifier,
+    assigneeAgentId: issue.assigneeAgentId,
+    status: issue.status,
+  };
+}
 
 // [목적] partial unique index(0070) 동시 삽입 race 감지. Postgres unique_violation = 23505.
 export function isUniqueViolation(err: unknown): boolean {
@@ -455,9 +484,10 @@ export interface RecordEvidenceInput {
   blocking?: boolean;
 }
 
-export function qualityService(db: Db) {
+export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}) {
   // Use the issue service so identifiers, issue numbers, and activity side effects stay consistent.
   const issueSvc = issueService(db);
+  const heartbeat = deps.heartbeat ?? { wakeup: async () => null };
 
   async function loadReviewItem(reviewItemId: string): Promise<QualityReviewItemRow> {
     const [item] = await db
@@ -567,10 +597,10 @@ export function qualityService(db: Db) {
     item: QualityReviewItemRow,
     surfaces: string[],
     reason: string | null,
-  ) {
+  ): Promise<QualityFollowUpSideEffect> {
     const title = `Quality evidence required: ${item.title || item.targetType}`;
     const followUpMissionId = await resolveFollowUpMissionId(tx, item);
-    await issueSvc.createFromSrb(tx, item.companyId, {
+    const issue = await issueSvc.createFromSrb(tx, item.companyId, {
       missionId: followUpMissionId,
       title,
       description: buildEvidenceIssueDescription(item, { reason, requiredEvidenceSurfaces: surfaces }, followUpMissionId),
@@ -602,6 +632,10 @@ export function qualityService(db: Db) {
         await tx.insert(qualityEvidenceRefs).values(toInsert);
       }
     }
+    return {
+      issue: toFollowUpIssueForSideEffects(issue),
+      contextSource: "quality.evidence_request",
+    };
   }
 
   // [목적] fail/request_changes 공용: correction issue 생성(producer/owner 가 수정하도록).
@@ -610,10 +644,10 @@ export function qualityService(db: Db) {
     item: QualityReviewItemRow,
     verdict: string,
     input: { reason?: string | null; failureType?: string | null },
-  ) {
+  ): Promise<QualityFollowUpSideEffect> {
     const title = `Quality correction required: ${item.title || item.targetType}`;
     const followUpMissionId = await resolveFollowUpMissionId(tx, item);
-    await issueSvc.createFromSrb(tx, item.companyId, {
+    const issue = await issueSvc.createFromSrb(tx, item.companyId, {
       missionId: followUpMissionId,
       title,
       description: buildCorrectionIssueDescription(item, { verdict, ...input }, followUpMissionId),
@@ -621,6 +655,10 @@ export function qualityService(db: Db) {
       originKind: CORRECTION_ISSUE_ORIGIN,
       originId: item.id,
     });
+    return {
+      issue: toFollowUpIssueForSideEffects(issue),
+      contextSource: "quality.correction_request",
+    };
   }
 
   // [목적] promote-anchor 호출 시 evaluator candidate version + queued replay run + improvement issue 생성.
@@ -690,9 +728,15 @@ export function qualityService(db: Db) {
   }> {
     const item = await loadReviewItem(input.reviewItemId);
     const nextStatus = resolveVerdictStatus(input.verdict);
-    const surfaces = (input.requiredEvidenceSurfaces ?? []).map((s) => s.trim()).filter(Boolean);
+    const routing = resolveQualityVerdictRouting({
+      verdict: input.verdict,
+      reason: input.reason,
+      failureType: input.failureType ?? item.failureType ?? null,
+      requiredEvidenceSurfaces: input.requiredEvidenceSurfaces,
+    });
 
-    return db.transaction(async (tx) => {
+    const followUpSideEffects: QualityFollowUpSideEffect[] = [];
+    const result = await db.transaction(async (tx) => {
       const verdict = await insertVerdictReturning(tx, {
         companyId: item.companyId,
         reviewItemId: item.id,
@@ -711,13 +755,8 @@ export function qualityService(db: Db) {
         .where(eq(qualityReviewItems.id, item.id))
         .returning();
 
-      // Verdict routing (plan 8.2): needs_evidence -> evidence collection;
-      // fail/request_changes -> correction issue. pass/dismissed just close.
-      if (input.verdict === "needs_evidence") {
-        await openEvidenceCollection(tx, item, surfaces, input.reason ?? null);
-      } else if (input.verdict === "fail" || input.verdict === "request_changes") {
-        await openCorrectionFlow(tx, item, input.verdict, input);
-      }
+      const followUp = await applyQualityVerdictRouting(tx, item, routing);
+      if (followUp) followUpSideEffects.push(followUp);
 
       const refs = await tx
         .select()
@@ -744,6 +783,42 @@ export function qualityService(db: Db) {
 
       return { verdict, reviewItem };
     });
+    await applyQualityFollowUpIssueSideEffects(followUpSideEffects);
+    return result;
+  }
+
+  async function applyQualityVerdictRouting(
+    tx: TransactionDb,
+    item: QualityReviewItemRow,
+    routing: QualityVerdictRouting,
+  ): Promise<QualityFollowUpSideEffect | null> {
+    if (routing.kind === "evidence") {
+      return openEvidenceCollection(tx, item, routing.requiredEvidenceSurfaces, routing.reason);
+    }
+    if (routing.kind === "correction") {
+      return openCorrectionFlow(tx, item, routing.verdict, {
+        reason: routing.reason,
+        failureType: routing.failureType,
+      });
+    }
+    return null;
+  }
+
+  async function applyQualityFollowUpIssueSideEffects(followUps: QualityFollowUpSideEffect[]) {
+    for (const followUp of followUps) {
+      await applyIssueCreatedSideEffects({
+        db,
+        heartbeat,
+        issue: followUp.issue,
+        actor: {
+          actorType: "system",
+          actorId: "quality:verdict-routing",
+        },
+        contextSource: followUp.contextSource,
+        requestedByActorType: "system",
+        requestedByActorId: "quality:verdict-routing",
+      });
+    }
   }
 
   // [목적] human 판정 → anchor case 승격 + evaluator candidate version/replay/improvement job 까지 한 트랜잭션.

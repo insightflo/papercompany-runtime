@@ -4,6 +4,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -63,6 +64,7 @@ describeEmbeddedPostgres("quality routes", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(qualityDailyReports);
     await db.delete(evaluatorCandidateRuns);
     await db.delete(evaluatorVersions);
@@ -226,6 +228,12 @@ describeEmbeddedPostgres("quality routes", () => {
       status: "todo",
       originKind: "quality_evidence_request",
       originId: reviewItemId,
+    });
+    const [createdLog] = await db.select().from(activityLog).where(eq(activityLog.entityId, followUp.id));
+    expect(createdLog).toMatchObject({
+      companyId,
+      action: "issue.created",
+      actorId: "quality:verdict-routing",
     });
   });
 
@@ -398,6 +406,12 @@ describeEmbeddedPostgres("quality routes", () => {
     expect(correction).toMatchObject({ companyId, status: "todo", originId: reviewItemId });
     expect(correction?.description).toContain("Reason:");
     expect(correction?.description).toContain("Core concept missing.");
+    const [createdLog] = await db.select().from(activityLog).where(eq(activityLog.entityId, correction!.id));
+    expect(createdLog).toMatchObject({
+      companyId,
+      action: "issue.created",
+      actorId: "quality:verdict-routing",
+    });
     const verdict = (await db.select().from(missionQualityVerdicts)).find((v) => v.reviewItemId === reviewItemId);
     expect(verdict?.reason).toBe("Core concept missing.");
   });

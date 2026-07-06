@@ -943,6 +943,10 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
   return null;
 }
 
+function stepRunNeedsWorkflowResume(stepRun: typeof workflowStepRuns.$inferSelect): boolean {
+  return stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0;
+}
+
 /**
  * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes|null) 를 heartbeat(성공) + comment
  *   에서 추출해 issueId→observation 맵으로 반환. P4 추출(DRY): syncStepRunsFromIssueState 와
@@ -3081,12 +3085,16 @@ export async function syncWorkflowRunState(
         }
 
         if (stepRun.issueId) {
+          const resumeExistingIssue = stepRunNeedsWorkflowResume(stepRun);
           await wakeExistingWorkflowStepIssue({
             db,
             run: context.run,
             definition: context.definition,
             step,
+            stepRunId: stepRun.id,
             issueId: stepRun.issueId,
+            allowCompletedIssue: resumeExistingIssue,
+            allowBlockedIssue: resumeExistingIssue,
           });
           continue;
         }

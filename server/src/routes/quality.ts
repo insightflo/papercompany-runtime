@@ -2,6 +2,7 @@ import { Router } from "express";
 import { type Db } from "@paperclipai/db";
 import { QUALITY_VERDICTS } from "@paperclipai/shared";
 import { qualityService } from "../services/quality.js";
+import { heartbeatService } from "../services/heartbeat.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { badRequest, notFound } from "../errors.js";
 
@@ -21,7 +22,7 @@ function normalizeSurfaces(raw: unknown): string[] {
 
 export function qualityRoutes(db: Db) {
   const router = Router();
-  const svc = qualityService(db);
+  const svc = qualityService(db, { heartbeat: heartbeatService(db) });
 
   // GET review items + evidence refs for one company.
   router.get("/companies/:companyId/quality/review-items", (req, res, next) => {

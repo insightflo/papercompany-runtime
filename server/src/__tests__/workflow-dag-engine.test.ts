@@ -6752,7 +6752,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
   it("[P4 control-flow loop] QA request_changes fires the back-edge: producer is reset (rework), iteration_index++ and attempt archived", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-fire" });
-    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
+    const { companyId, producerAgentId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
     // QA 가 produce 완료(07:05) 후 반려(07:10).
     await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
@@ -6770,17 +6770,24 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const attempts = (produce.metadata as Record<string, unknown> | null)?.controlFlowAttempts as Array<Record<string, unknown>> | undefined;
     expect(attempts).toHaveLength(1);
     expect(attempts![0]).toMatchObject({ iteration: 0, verdict: "request_changes" });
-    // producer issue 도 "todo" 로 돌아야 step 이 pending 으로 재유도된다.
     const [producerIssue] = await db.select().from(issues).where(eq(issues.id, producerIssueId));
-    expect(producerIssue.status).toBe("todo");
-    expect(producerIssue.completedAt).toBeNull();
+    expect(producerIssue.status).toBe("done");
+    expect(producerIssue.completedAt).toBeTruthy();
     const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
     const producerCommentBody = producerComments.map((comment) => comment.body).join("\n");
     expect(producerCommentBody).toContain("Workflow QA rework request");
     expect(producerCommentBody).toContain("qa-validate");
     expect(producerCommentBody).toContain("Decision: REQUEST_CHANGES");
-    // producer 가 재실행(wake) 됐다.
-    expect(heartbeatWakeup).toHaveBeenCalled();
+    expect(heartbeatWakeup).toHaveBeenCalledWith(producerAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        issueId: producerIssueId,
+        mutation: "workflow_resume",
+        workflowRunId: runId,
+        stepId: "produce",
+        workflowStepRunId: expect.any(String),
+      }),
+    }));
     // QA 는 이 sync 에서 리셋하지 않는다(producer 가 아직 재완료 전이라 validation-recheck 도 미발화).
     expect(qa.status).toBe("failed");
     expect(qa.iterationIndex).toBe(0);
