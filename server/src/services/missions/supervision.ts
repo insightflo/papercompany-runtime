@@ -13,7 +13,7 @@ import { logger } from "../../middleware/logger.js";
 import { issueService } from "../issues.js";
 import { workProductService } from "../work-products.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
-import { retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "../workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "../workflow/dag-engine.js";
 import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "../mission-owner-plan-decisions.js";
 import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
@@ -26,6 +26,7 @@ import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type Miss
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
+import { buildNativeToolStepRecoveryResultAppliedMarker, hasNativeToolStepRecoveryResultAppliedMarker, resolveNativeToolStepRecoveryResult } from "./tool-step-recovery-result.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue } from "./mission-supervision-context.js";
 import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
@@ -662,6 +663,54 @@ export function createSupervision({ db, deps, ownerActions }: {
           const currentToolStepRow = stepRows.find((row) =>
             row.run.id === toolRecovery.runId && row.stepRun.stepId === toolRecovery.stepId
           );
+          if (hasNativeToolStepRecoveryResultAppliedMarker(comments, markerInput)) {
+            findings.push(`tool_step_recovery_result_already_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+          } else {
+            const recoveryResult = resolveNativeToolStepRecoveryResult({ comments });
+            if (recoveryResult && currentToolStepRow?.stepRun.status === "failed") {
+              const result = await completeWorkflowToolStepFromResult(db, {
+                companyId: mission.companyId,
+                stepRunId: currentToolStepRow.stepRun.id,
+                workflowRunId: toolRecovery.runId,
+                stepId: toolRecovery.stepId,
+                success: true,
+                stdout: `Mission owner recovery artifact: ${recoveryResult.artifactPath}`,
+                exitCode: 0,
+                allowTerminalRecovery: true,
+              });
+              if (result) {
+                findings.push(`tool_step_recovery_result_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} artifact=${recoveryResult.artifactPath} result=${result.status}`);
+                await issueService(db).addComment(
+                  issue.id,
+                  [
+                    "### Native tool step recovery result applied",
+                    buildNativeToolStepRecoveryResultAppliedMarker(markerInput),
+                    `Workflow run: ${toolRecovery.runId}`,
+                    `Step: ${toolRecovery.stepId}`,
+                    `Step run: ${currentToolStepRow.stepRun.id}`,
+                    `Artifact: ${recoveryResult.artifactPath}`,
+                    `Result status: ${result.status}`,
+                  ].join("\n"),
+                  { agentId: mission.ownerAgentId },
+                );
+                appliedActions.push({
+                  type: "native_tool_step_recovery_result",
+                  missionId: mission.id,
+                  ownerActionIssueId: issue.id,
+                  workflowRunId: toolRecovery.runId,
+                  stepId: toolRecovery.stepId,
+                  stepRunId: currentToolStepRow.stepRun.id,
+                  artifactPath: recoveryResult.artifactPath,
+                  resultStatus: result.status,
+                });
+                continue;
+              }
+              findings.push(`tool_step_recovery_result_complete_not_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+            } else if (recoveryResult && currentToolStepRow) {
+              findings.push(`tool_step_recovery_result_not_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} current_status=${currentToolStepRow.stepRun.status}`);
+              continue;
+            }
+          }
           if (hasNativeToolStepRetryAppliedMarker(comments, markerInput)) {
             if (currentToolStepRow?.stepRun.status === "failed") {
               const reopened = await ownerActions.reopenAppliedToolStepRecoveryIfRetryFailed({
@@ -1667,6 +1716,8 @@ export function createSupervision({ db, deps, ownerActions }: {
                 ? `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} previous=${action.previousAgentId ?? "unassigned"} target=${action.targetAgentId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`
               : action.type === "native_tool_step_retry"
                 ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`
+                : action.type === "native_tool_step_recovery_result"
+                  ? `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} artifact=${action.artifactPath} result=${action.resultStatus}`
                 : action.type === "materialize_plan_decision"
                   ? `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}`
                   : action.type === "workproduct_reuse_wakeup"

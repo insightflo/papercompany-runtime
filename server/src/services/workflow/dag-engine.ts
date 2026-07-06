@@ -2607,6 +2607,7 @@ export async function completeWorkflowToolStepFromResult(
     stderr?: string;
     exitCode?: number | null;
     error?: string;
+    allowTerminalRecovery?: boolean;
   },
 ): Promise<WorkflowExecutionResult | null> {
   const row = await db
@@ -2625,7 +2626,10 @@ export async function completeWorkflowToolStepFromResult(
     return null;
   }
 
-  if (WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status)) {
+  const canRecoverTerminalFailure = input.allowTerminalRecovery === true
+    && input.success
+    && row.stepRun.status === "failed";
+  if (WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status) && !canRecoverTerminalFailure) {
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
   }
 
@@ -2637,7 +2641,7 @@ export async function completeWorkflowToolStepFromResult(
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
     || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
-  const toolResult = {
+  const baseToolResult = {
     requestId: input.requestId ?? row.stepRun.lastDispatchRequestId ?? null,
     toolName: input.toolName ?? null,
     success: input.success,
@@ -2647,6 +2651,9 @@ export async function completeWorkflowToolStepFromResult(
     error: input.error ?? null,
     completedAt: now.toISOString(),
   };
+  const toolResult = input.allowTerminalRecovery === true
+    ? { ...baseToolResult, recoveredBy: "owner-action" }
+    : baseToolResult;
   const resultMetadata: Record<string, unknown> = deleteAfterUse
     ? {
       ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
@@ -2673,8 +2680,8 @@ export async function completeWorkflowToolStepFromResult(
       status: input.success ? "completed" : "failed",
       startedAt: row.stepRun.startedAt ?? now,
       completedAt: now,
-      lastDispatchErrorAt: input.success ? row.stepRun.lastDispatchErrorAt : now,
-      lastDispatchErrorSummary: input.success ? row.stepRun.lastDispatchErrorSummary : input.error ?? input.stderr ?? null,
+      lastDispatchErrorAt: input.success ? null : now,
+      lastDispatchErrorSummary: input.success ? null : input.error ?? input.stderr ?? null,
       metadata: resultMetadata,
     })
     .where(eq(workflowStepRuns.id, row.stepRun.id));

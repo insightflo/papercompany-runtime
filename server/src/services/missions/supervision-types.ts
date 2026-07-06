@@ -80,6 +80,15 @@ export type MissionOwnerSupervisionAppliedAction = {
   stepRunId: string;
   resultStatus: string;
 } | {
+  type: "native_tool_step_recovery_result";
+  missionId: string;
+  ownerActionIssueId: string;
+  workflowRunId: string;
+  stepId: string;
+  stepRunId: string;
+  artifactPath: string;
+  resultStatus: string;
+} | {
   type: "stale_source_issue_wakeup";
   missionId: string;
   sourceIssueId: string;
