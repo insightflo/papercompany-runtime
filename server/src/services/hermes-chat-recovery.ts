@@ -12,10 +12,12 @@
 //   - recovery 질문이 아니거나 missionId를 못 찾으면 null → chat은 정상 진행(advice 없이).
 import type { Db } from "@paperclipai/db";
 import { getMissionRecoveryAdvice, type MissionRecoveryAdvice } from "./missions/mission-recovery-advice.js";
+import { logger } from "../middleware/logger.js";
 
 // 한국어/영문 recovery 질문 표현. 과 매칭보다 누락이 나으므로 넓게.
 const RECOVERY_QUESTION_PATTERNS: RegExp[] = [
-  /왜\s*멈[춤푸]/i,
+  // [주의] "왜 멈췄어" / "왜 멈춘" / "왜 멈픈" 모두 잡도록 멈 다음 한글 음절 전체 허용.
+  /왜\s*멈[가-힣]/i,
   /깨우려면|깨워\s*줘|깨워라|재개\s*시켜|다시\s*시작\s*시켜|다시\s*돌려/i,
   /막혔|막힘|막힌\s*사유|blocked\s*reason|stuck/i,
   /unblock|언블럭|차단\s*해제/i,
@@ -99,8 +101,12 @@ export async function resolveRecoveryAdviceForChat(
       missionId,
       issueId,
     });
-  } catch {
-    // [주의] advice 실패가 chat을 막으면 안 됨. null로 정상 진행.
+  } catch (err) {
+    // [주의] advice 실패가 chat을 막으면 안 됨(fail-open). 단, 운영 추적을 위해 companyId/missionId/err를 warn로 남긴다.
+    logger.warn(
+      { err, companyId: input.companyId, missionId },
+      "hermes-chat recovery advice failed; continuing chat without structured advice",
+    );
     return null;
   }
 }
