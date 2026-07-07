@@ -145,9 +145,13 @@ export function resolveMissionRecoveryAdvice(input: {
     list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
 
-  // QA 신호: 각 이슈 댓글에서 최신 REQUEST_CHANGES 요약 추출(재사용). 가장 최근 것 선택.
+  // QA 신호: QA-role 이슈(originKind=mission_plan_qa) 댓글에서만 최신 REQUEST_CHANGES 요약 추출(재사용).
+  //   [peer review fix] producer/oversight/unblock 댓글에 REQUEST_CHANGES가 포함돼도 QA 판정으로
+  //   오판하지 않도록 QA-role 게이트로 제한. workflow-step QA(originKind=workflow_execution)는
+  //   originKind만으로 producer와 구분이 안 되어 이 게이트에서 제외 → supervision_run으로 위임.
   let qaSignal: QaSignal | null = null;
   for (const issue of input.issues) {
+    if (classifyRecoveryRole(issue.originKind) !== "qa") continue;
     const list = commentsByIssue.get(issue.id) ?? [];
     const summary = extractLatestRequestChangesSummary(list.map((c) => c.body));
     if (!summary) continue;

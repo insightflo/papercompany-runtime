@@ -34,7 +34,8 @@ function makeQa(overrides: Partial<IssueForAdvice> = {}): IssueForAdvice {
     identifier: "RES-1077",
     title: "Audit source coverage and confidence",
     status: "done",
-    originKind: "workflow_execution",
+    // plan-level QA originKind. QA signal 스캔은 이 originKind의 이슈로 제한된다.
+    originKind: "mission_plan_qa",
     originId: "p-1076",
     assigneeAgentId: "agent-qa",
     updatedAt: T1,
@@ -153,5 +154,45 @@ describe("resolveMissionRecoveryAdvice", () => {
     expect(advice.decision).toBe("human_operator");
     expect(advice.targetIssue).toBeNull();
     expect(advice.missingEvidence.length).toBeGreaterThan(0);
+  });
+
+  // [peer review fix — 회귀 가드] producer/oversight/unblock 댓글에 REQUEST_CHANGES가 있어도
+  //   QA signal로 오판하면 안 된다. QA-role 이슈(mission_plan_qa)에서만 판정.
+  it("REQUEST_CHANGES on a non-QA (producer) issue is ignored — never fabricates producer_rework", () => {
+    const producerComment: CommentForAdvice = {
+      id: "c-prod",
+      issueId: "p-1076",
+      body: "REQUEST_CHANGES: 이 producer 댓글의 문자열은 QA verdict로 취급되면 안 됩니다.",
+      createdAt: T1,
+    };
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [makeProducer({ status: "in_progress", originId: null }), makeOversight()],
+      comments: [producerComment],
+      runs: [],
+    });
+
+    expect(advice.decision).not.toBe("producer_rework");
+    // producer 가 in_progress 인데 활성 런이 없으므로 supervision_run으로 fall-through.
+    expect(advice.decision).toBe("supervision_run");
+  });
+
+  it("REQUEST_CHANGES on an oversight/unblock issue is ignored too", () => {
+    const oversightComment: CommentForAdvice = {
+      id: "c-oversight",
+      issueId: "o-1075",
+      body: "REQUEST_CHANGES: oversight 메모 — QA verdict 아님.",
+      createdAt: T1,
+    };
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [makeProducer({ status: "done" }), makeOversight({ status: "todo" })],
+      comments: [oversightComment],
+      runs: [],
+    });
+
+    expect(advice.decision).not.toBe("producer_rework");
+    // oversight 가 todo(활성)인데 활성 런 없음 → supervision_run.
+    expect(advice.decision).toBe("supervision_run");
   });
 });
