@@ -205,32 +205,49 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-// [P4] Hermes run kind를 explicit 데이터 필드로 산출(text parse 금지).
-//   paperclipHermesChat가 있으면 chat(source로 채널 구분), 없으면 timer/heartbeat monitor run.
-export function deriveHermesRunKind(paperclipHermesChat: unknown): "chat-sidebar" | "chat-telegram" | "monitor" {
-  const chat = asRecord(paperclipHermesChat);
-  if (!chat) return "monitor";
-  const source = typeof chat.source === "string" ? chat.source : null;
-  return source === "telegram" ? "chat-telegram" : "chat-sidebar";
+// [P4] Hermes Ops run kind. chat는 paperclipHermesChat 있을 때, monitor는 liaison run일 때만.
+export type HermesRunKind = "chat-sidebar" | "chat-telegram" | "monitor";
+
+// [P4] run-kind는 Hermes Ops 범위에서만 산출(text parse 금지).
+//   - paperclipHermesChat 있으면 chat(source로 채널 구분)
+//   - chat 없고 operations liaison run이면 monitor(timer/heartbeat sweep)
+//   - 일반 hermes_local executor run(비-liaison + chat 없음)이면 null -> resultJson에 hermesRunKind 안 씀.
+//     (UI가 비-Ops run을 "Hermes Ops - Monitor"로 오표시하는 scope bug 방지)
+export function deriveHermesRunKind(input: {
+  paperclipHermesChat: unknown;
+  isOperationsLiaison: boolean;
+}): HermesRunKind | null {
+  const chat = asRecord(input.paperclipHermesChat);
+  if (chat) {
+    const source = typeof chat.source === "string" ? chat.source : null;
+    return source === "telegram" ? "chat-telegram" : "chat-sidebar";
+  }
+  return input.isOperationsLiaison ? "monitor" : null;
 }
 
 // [P4] resultJson 산출을 pure helper로 분리(단위 테스트 가능).
-//   [주의] recoveryAdvice는 nested key ONLY — top-level decision 절대 금지(verdict reader 충돌, P2 invariant).
+//   [주의] recoveryAdvice는 nested key ONLY -- top-level decision 절대 금지(verdict reader 충돌, P2 invariant).
+//   hermesRunKind는 deriveHermesRunKind가 null을 반환하면 아예 key로 쓰지 않는다(비-Ops run 오염 방지).
 export function buildHermesResultJson(input: {
   result: string;
   sessionId: string | null;
   usage: unknown;
   costUsd: number | null;
   paperclipHermesChat: unknown;
+  isOperationsLiaison: boolean;
 }): Record<string, unknown> {
   const chat = asRecord(input.paperclipHermesChat);
   const recoveryAdvice = chat?.recoveryAdvice;
+  const hermesRunKind = deriveHermesRunKind({
+    paperclipHermesChat: input.paperclipHermesChat,
+    isOperationsLiaison: input.isOperationsLiaison,
+  });
   return {
     result: input.result,
     session_id: input.sessionId,
     usage: input.usage,
     cost_usd: input.costUsd,
-    hermesRunKind: deriveHermesRunKind(input.paperclipHermesChat),
+    ...(hermesRunKind ? { hermesRunKind } : {}),
     ...(recoveryAdvice ? { recoveryAdvice } : {}),
   };
 }
@@ -670,6 +687,7 @@ export async function executeHermesLocal(
     usage: parsed.usage || null,
     costUsd: parsed.costUsd ?? null,
     paperclipHermesChat: ctx.context?.paperclipHermesChat,
+    isOperationsLiaison: isHermesOperationsLiaisonAgent(ctx),
   });
   if (result.idleTimedOut)
     executionResult.errorMessage = `No process output for ${idleTimeoutSec}s`;

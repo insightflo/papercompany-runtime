@@ -22,19 +22,20 @@ describe("HermesOpsRunSummary", () => {
         }}
       />,
     );
-    expect(html).toContain("Chat · sidebar");
+    expect(html).toContain("Chat - sidebar");
     expect(html).toContain("왜 멈췄어?");
     expect(html).toContain("최종 답변 내용");
     // advice 없으면 Target 라벨 미출력.
     expect(html).not.toContain("Target");
-    // [peer check] logRef 없으면 raw-transcript 힌트 미출력.
-    expect(html).not.toContain("raw transcript");
+    // [peer check] id/logRef 없으면 raw-log 링크 미출력.
+    expect(html).not.toContain("raw log");
   });
 
-  it("renders compact nested recovery advice and the raw-transcript hint", () => {
+  it("renders compact nested recovery advice and the raw-log link", () => {
     const html = renderToStaticMarkup(
       <HermesOpsRunSummary
         run={{
+          id: "run-1",
           resultJson: {
             hermesRunKind: "chat-telegram",
             result: "최종 답변",
@@ -56,13 +57,15 @@ describe("HermesOpsRunSummary", () => {
         }}
       />,
     );
-    expect(html).toContain("Chat · Telegram");
+    expect(html).toContain("Chat - Telegram");
     expect(html).toContain("decision=producer_rework");
     expect(html).toContain("RES-1076");
     expect(html).toContain("missing Cloudflare source");
     expect(html).toContain("재작업 요청입니다.");
     expect(html).toContain("QA PASS 금지");
-    expect(html).toContain("raw transcript");
+    // [peer check] id + logRef 있으면 raw-log 링크(href 포함) 노출.
+    expect(html).toContain("raw log");
+    expect(html).toContain("/api/heartbeat-runs/run-1/log?offset=0&amp;limitBytes=256000");
   });
 
   it("labels monitor runs distinctly", () => {

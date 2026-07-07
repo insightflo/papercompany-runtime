@@ -9,6 +9,7 @@
 import { cn } from "../lib/utils";
 
 type HermesRun = {
+  id?: string;
   resultJson?: unknown;
   contextSnapshot?: unknown;
   logRef?: string | null;
@@ -25,8 +26,8 @@ function asString(value: unknown): string | null {
 }
 
 const KIND_LABEL: Record<string, string> = {
-  "chat-sidebar": "Chat · sidebar",
-  "chat-telegram": "Chat · Telegram",
+  "chat-sidebar": "Chat - sidebar",
+  "chat-telegram": "Chat - Telegram",
   monitor: "Monitor sweep",
 };
 
@@ -73,7 +74,7 @@ export function HermesOpsRunSummary({ run }: { run: HermesRun }) {
               KIND_TONE[kind] ?? "bg-muted text-muted-foreground border-border",
             )}
           >
-            Hermes Ops · {KIND_LABEL[kind] ?? kind}
+            Hermes Ops - {KIND_LABEL[kind] ?? kind}
           </span>
           {decision && (
             <span className="text-[11px] font-mono text-muted-foreground">
@@ -81,8 +82,15 @@ export function HermesOpsRunSummary({ run }: { run: HermesRun }) {
             </span>
           )}
         </div>
-        {run.logRef ? (
-          <span className="text-[11px] text-muted-foreground">raw transcript ↓</span>
+        {run.id && run.logRef ? (
+          <a
+            href={`/api/heartbeat-runs/${run.id}/log?offset=0&limitBytes=256000`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[11px] text-sky-600 hover:underline dark:text-sky-400"
+          >
+            raw log
+          </a>
         ) : null}
       </div>
 
@@ -145,7 +153,7 @@ export function HermesOpsRunSummary({ run }: { run: HermesRun }) {
       {answer && (
         <div className="text-xs">
           <span className="text-muted-foreground">A </span>
-          <span className="text-foreground">{answer.length > 280 ? `${answer.slice(0, 280)}…` : answer}</span>
+          <span className="text-foreground">{answer.length > 280 ? `${answer.slice(0, 280)}...` : answer}</span>
         </div>
       )}
     </div>

@@ -261,13 +261,16 @@ describe("hermes local execution config", () => {
 });
 
 describe("hermes run-kind + resultJson recovery advice (P4)", () => {
-  it("deriveHermesRunKind: chat-sidebar / chat-telegram / monitor", () => {
-    expect(deriveHermesRunKind({ source: "paperclip_ui" })).toBe("chat-sidebar");
-    expect(deriveHermesRunKind({ source: "telegram" })).toBe("chat-telegram");
-    expect(deriveHermesRunKind(null)).toBe("monitor");
-    expect(deriveHermesRunKind(undefined)).toBe("monitor");
-    // chat context without source → sidebar default
-    expect(deriveHermesRunKind({})).toBe("chat-sidebar");
+  it("deriveHermesRunKind: chat from paperclipHermesChat, monitor only for liaison, null otherwise", () => {
+    expect(deriveHermesRunKind({ paperclipHermesChat: { source: "paperclip_ui" }, isOperationsLiaison: false })).toBe("chat-sidebar");
+    expect(deriveHermesRunKind({ paperclipHermesChat: { source: "telegram" }, isOperationsLiaison: false })).toBe("chat-telegram");
+    // chat context without source -> sidebar default
+    expect(deriveHermesRunKind({ paperclipHermesChat: {}, isOperationsLiaison: false })).toBe("chat-sidebar");
+    // no chat + liaison -> monitor
+    expect(deriveHermesRunKind({ paperclipHermesChat: null, isOperationsLiaison: true })).toBe("monitor");
+    expect(deriveHermesRunKind({ paperclipHermesChat: undefined, isOperationsLiaison: true })).toBe("monitor");
+    // [scope bug fix] no chat + non-liaison -> null (general hermes_local executor run is not Hermes Ops)
+    expect(deriveHermesRunKind({ paperclipHermesChat: null, isOperationsLiaison: false })).toBeNull();
   });
 
   it("buildHermesResultJson: writes hermesRunKind + base fields, omits recoveryAdvice when absent", () => {
@@ -277,12 +280,13 @@ describe("hermes run-kind + resultJson recovery advice (P4)", () => {
       usage: { input: 10 },
       costUsd: 0.01,
       paperclipHermesChat: { source: "telegram" },
+      isOperationsLiaison: false,
     });
     expect(json.hermesRunKind).toBe("chat-telegram");
     expect(json.result).toBe("answer");
     expect(json.session_id).toBe("sess-1");
     expect(json.cost_usd).toBe(0.01);
-    // [주의] advice 없으면 key 자체가 없어야(tailored resultJson).
+    // [주의] advice 없으면 key 자체가 없어야.
     expect(json.recoveryAdvice).toBeUndefined();
   });
 
@@ -305,22 +309,38 @@ describe("hermes run-kind + resultJson recovery advice (P4)", () => {
       usage: null,
       costUsd: null,
       paperclipHermesChat: { source: "paperclip_ui", recoveryAdvice: advice },
+      isOperationsLiaison: false,
     });
-    // [P4 invariant — verdict reader 충돌 방지] nested ONLY, top-level decision 금지.
+    // [P4 invariant -- verdict reader 충돌 방지] nested ONLY, top-level decision 금지.
     expect(json.recoveryAdvice).toEqual(advice);
     expect(json).not.toHaveProperty("decision");
     expect(json.hermesRunKind).toBe("chat-sidebar");
   });
 
-  it("buildHermesResultJson: monitor run (no paperclipHermesChat)", () => {
+  it("buildHermesResultJson: monitor run for liaison (no paperclipHermesChat)", () => {
     const json = buildHermesResultJson({
       result: "monitor sweep",
       sessionId: null,
       usage: null,
       costUsd: null,
       paperclipHermesChat: null,
+      isOperationsLiaison: true,
     });
     expect(json.hermesRunKind).toBe("monitor");
     expect(json.recoveryAdvice).toBeUndefined();
+  });
+
+  it("buildHermesResultJson: non-liaison hermes_local run without chat omits hermesRunKind entirely", () => {
+    const json = buildHermesResultJson({
+      result: "executor work",
+      sessionId: null,
+      usage: null,
+      costUsd: null,
+      paperclipHermesChat: null,
+      isOperationsLiaison: false,
+    });
+    // [scope bug fix] general hermes_local executor run은 Hermes Ops가 아니므로 kind를 쓰지 않는다.
+    expect(json).not.toHaveProperty("hermesRunKind");
+    expect(json.result).toBe("executor work");
   });
 });
