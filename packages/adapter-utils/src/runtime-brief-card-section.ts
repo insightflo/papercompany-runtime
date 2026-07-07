@@ -84,6 +84,7 @@ export function buildIssueExecutionCardBriefLines(input: {
 
   const closeoutParts = [
     workProduct?.required === true ? "register artifacts with /workflow/artifacts" : null,
+    delivery?.required === true ? "register public URLs with /workflow/artifacts type=preview_url" : null,
     verdict?.required === true ? "submit verdict with /workflow/verdict" : null,
     "complete with /workflow/complete",
   ].filter((part): part is string => part !== null);

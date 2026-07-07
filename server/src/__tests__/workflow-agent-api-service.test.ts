@@ -264,6 +264,52 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     expect(rows[0]?.metadata).toMatchObject({ path: artifactPath, registeredVia: "workflow_api" });
   });
 
+  it("registers public preview URLs as official issue workProducts", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "publish-entry", title: "[ACTION] Publish entry" });
+    const publicUrl = "https://manual-onboarding.pages.dev/onboarding/concepts/260707-llm-document-search/index.html";
+
+    const product = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: {
+        type: "preview_url",
+        url: publicUrl,
+        title: "260707-llm-document-search",
+        contentMarker: "260707-llm-document-search",
+        isPrimary: true,
+      },
+    });
+    const duplicate = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: {
+        type: "preview_url",
+        url: publicUrl,
+        title: "260707-llm-document-search",
+        contentMarker: "260707-llm-document-search",
+        isPrimary: true,
+      },
+    });
+
+    expect(product).toMatchObject({
+      provider: "manual_onboarding",
+      title: "260707-llm-document-search",
+      type: "preview_url",
+      url: publicUrl,
+      isPrimary: true,
+    });
+    expect(duplicate.id).toBe(product.id);
+    const rows = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issue.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.metadata).toMatchObject({
+      registeredVia: "workflow_api",
+      contentMarker: "260707-llm-document-search",
+      deliveryReadback: { required: true, source: "workflow_preview_url" },
+    });
+  });
+
   it("rejects artifact paths outside the mission workProduct directory", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-root-"));
     const outside = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-outside-"));
@@ -305,5 +351,37 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       title: "route-report.md",
       createdByRunId: runId,
     });
+  });
+
+  it("routes agent preview URL registration through the workflow API", async () => {
+    const { issue, agentId, runId } = await seedAssignedWorkflowIssue();
+    const publicUrl = "https://manual-onboarding.pages.dev/onboarding/concepts/260707-llm-document-search/index.html";
+
+    const response = await request(createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: issue.companyId,
+      agentId,
+      runId,
+    }))
+      .post(`/api/issues/${issue.id}/workflow/artifacts`)
+      .send({
+        type: "preview_url",
+        url: publicUrl,
+        title: "260707-llm-document-search",
+        contentMarker: "260707-llm-document-search",
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(response.body).toMatchObject({
+      issueId: issue.id,
+      provider: "manual_onboarding",
+      title: "260707-llm-document-search",
+      type: "preview_url",
+      url: publicUrl,
+      createdByRunId: runId,
+    });
+    const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, issue.id));
+    expect(rows.at(-1)?.details).toMatchObject({ type: "preview_url", url: publicUrl });
   });
 });

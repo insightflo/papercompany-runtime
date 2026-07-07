@@ -28,8 +28,65 @@ export type WorkflowApiActor = {
   readonly runId: string | null;
 };
 
-function artifactTitle(input: WorkflowArtifactRegister): string {
+type WorkflowPreviewUrlRegister = {
+  readonly type: "preview_url";
+  readonly url: string;
+  readonly title?: string;
+  readonly externalId?: string;
+  readonly expectedTitle?: string;
+  readonly contentMarker?: string;
+  readonly marker?: string;
+  readonly topic?: string;
+  readonly summary?: string | null;
+  readonly isPrimary: boolean;
+};
+
+type WorkflowLocalArtifactRegister = {
+  readonly path: string;
+  readonly title?: string;
+  readonly type: "artifact" | "document";
+  readonly summary?: string | null;
+  readonly isPrimary: boolean;
+};
+
+function isPreviewUrlRegister(data: WorkflowArtifactRegister): data is WorkflowPreviewUrlRegister {
+  return data.type === "preview_url";
+}
+
+function isLocalArtifactRegister(data: WorkflowArtifactRegister): data is WorkflowLocalArtifactRegister {
+  return "path" in data;
+}
+
+function artifactTitle(input: WorkflowLocalArtifactRegister): string {
   return input.title?.trim() || path.basename(input.path.trim()) || "Workflow artifact";
+}
+
+function parsePreviewUrl(value: string) {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw unprocessable("Workflow preview_url must use an HTTP(S) URL");
+  }
+  return url;
+}
+
+function previewUrlProvider(url: URL) {
+  return url.hostname === "manual-onboarding.pages.dev" ? "manual_onboarding" : "public_url";
+}
+
+function previewUrlTitle(input: WorkflowPreviewUrlRegister, url: URL) {
+  return input.title?.trim() || path.basename(url.pathname) || url.hostname;
+}
+
+function previewUrlMetadata(input: WorkflowPreviewUrlRegister, runId: string | null) {
+  return {
+    registeredVia: "workflow_api",
+    registeredByRunId: runId,
+    deliveryReadback: { required: true, source: "workflow_preview_url" },
+    ...(input.expectedTitle ? { expectedTitle: input.expectedTitle } : {}),
+    ...(input.contentMarker ? { contentMarker: input.contentMarker } : {}),
+    ...(input.marker ? { marker: input.marker } : {}),
+    ...(input.topic ? { topic: input.topic } : {}),
+  };
 }
 
 async function findExistingWorkflowArtifact(input: {
@@ -45,6 +102,26 @@ async function findExistingWorkflowArtifact(input: {
       eq(issueWorkProducts.issueId, input.issue.id),
       eq(issueWorkProducts.provider, "local_file"),
       eq(issueWorkProducts.externalId, input.artifactPath),
+      ne(issueWorkProducts.status, "archived"),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return row ? toIssueWorkProduct(row) : null;
+}
+
+async function findExistingWorkflowPreviewUrl(input: {
+  readonly db: Db;
+  readonly issue: WorkflowApiIssue;
+  readonly url: string;
+}) {
+  const row = await input.db
+    .select()
+    .from(issueWorkProducts)
+    .where(and(
+      eq(issueWorkProducts.companyId, input.issue.companyId),
+      eq(issueWorkProducts.issueId, input.issue.id),
+      eq(issueWorkProducts.type, "preview_url"),
+      eq(issueWorkProducts.url, input.url),
       ne(issueWorkProducts.status, "archived"),
     ))
     .limit(1)
@@ -74,6 +151,39 @@ export async function registerWorkflowArtifact(input: {
   readonly actor: WorkflowApiActor;
   readonly data: WorkflowArtifactRegister;
 }) {
+  if (isPreviewUrlRegister(input.data)) {
+    const url = parsePreviewUrl(input.data.url);
+    const existing = await findExistingWorkflowPreviewUrl({ db: input.db, issue: input.issue, url: url.toString() });
+    if (existing) return existing;
+
+    const product = await workProductService(input.db).createForIssue(input.issue.id, input.issue.companyId, {
+      projectId: input.issue.projectId ?? null,
+      executionWorkspaceId: null,
+      runtimeServiceId: null,
+      type: "preview_url",
+      provider: previewUrlProvider(url),
+      externalId: input.data.externalId ?? url.toString(),
+      title: previewUrlTitle(input.data, url),
+      url: url.toString(),
+      status: "active",
+      reviewState: "none",
+      isPrimary: input.data.isPrimary,
+      healthStatus: "unknown",
+      summary: input.data.summary ?? null,
+      metadata: previewUrlMetadata(input.data, input.actor.runId),
+      createdByRunId: input.actor.runId,
+    });
+    if (!product) {
+      throw unprocessable("Workflow preview_url workProduct could not be registered");
+    }
+    await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+    return product;
+  }
+
+  if (!isLocalArtifactRegister(input.data)) {
+    throw unprocessable("Workflow artifact registration requires a path or preview_url");
+  }
+
   const artifactPath = input.data.path.trim();
   if (!path.isAbsolute(artifactPath)) {
     throw unprocessable("Workflow artifact path must be an absolute local path");

@@ -772,6 +772,7 @@ function buildWorkflowApiCloseoutLines(input: {
   ];
   if (input.requiresWorkProduct) {
     lines.push("- If this step creates or reuses a file artifact, register it with `POST /api/issues/{issueId}/workflow/artifacts` before completion.");
+    lines.push("- If this step publishes a public URL, register it with `POST /api/issues/{issueId}/workflow/artifacts` using `type: \"preview_url\"` and `url` before completion.");
   }
   if (input.requiresVerdict) {
     lines.push("- Submit the official `PASS` or `REQUEST_CHANGES` verdict with `POST /api/issues/{issueId}/workflow/verdict` before completion.");

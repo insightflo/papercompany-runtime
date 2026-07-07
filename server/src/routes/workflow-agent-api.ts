@@ -65,7 +65,13 @@ export function workflowAgentApiRoutes(db: Db) {
       action: "issue.workflow_artifact_registered",
       entityType: "issue",
       entityId: issue.id,
-      details: { identifier: issue.identifier, workProductId: product.id, type: product.type, path: data.path },
+      details: {
+        identifier: issue.identifier,
+        workProductId: product.id,
+        type: product.type,
+        ...(product.url ? { url: product.url } : {}),
+        ...(product.metadata?.path ? { path: product.metadata.path } : {}),
+      },
     });
     res.status(201).json(product);
   });
