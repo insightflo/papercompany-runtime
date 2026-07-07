@@ -136,6 +136,15 @@ describe("resolveMissionRecoveryAdvice", () => {
     expect(advice.operatorComment).toContain("RES-1076");
     // doNot에 denylist 안내가 있어야(brief·guard operational 일치).
     expect(advice.doNot.some((d) => d.includes("hermes_ops_mutation_forbidden"))).toBe(true);
+    expect(advice.executionInstruction).toContain("reopen:true");
+    expect(advice.executionInstruction).toContain("plain comment");
+    expect(advice.executionInstruction).toContain("agent_wakeup_requests");
+    expect(advice.successEvidence).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("issue_reopened_via_comment"),
+        expect.stringContaining("heartbeat"),
+      ]),
+    );
   });
 
   it("producer active workProduct changed AFTER QA request → qa_recheck targeting the QA issue", () => {
@@ -152,6 +161,8 @@ describe("resolveMissionRecoveryAdvice", () => {
     expect(advice.targetAction).toBe("qa_recheck");
     expect(advice.operatorComment).toContain("QA 재검");
     expect(advice.evidence.some((entry) => entry.kind === "work_product")).toBe(true);
+    expect(advice.executionInstruction).toContain("reopen:true");
+    expect(advice.executionInstruction).toContain("RES-1077");
   });
 
   it("producer updatedAt drift alone does not imply rework after QA", () => {

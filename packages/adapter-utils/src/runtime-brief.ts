@@ -202,6 +202,7 @@ function buildRecoveryAdviceLines(value: unknown): string[] | null {
   const targetAction = asString(advice.targetAction);
   const leafCause = asString(advice.leafCause);
   const operatorComment = asString(advice.operatorComment);
+  const executionInstruction = asString(advice.executionInstruction);
   const evidence = Array.isArray(advice.evidence)
     ? advice.evidence.filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null)
     : [];
@@ -210,6 +211,9 @@ function buildRecoveryAdviceLines(value: unknown): string[] | null {
     : [];
   const missingEvidence = Array.isArray(advice.missingEvidence)
     ? advice.missingEvidence.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
+    : [];
+  const successEvidence = Array.isArray(advice.successEvidence)
+    ? advice.successEvidence.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
     : [];
   const targetIdentifier = asString(target?.identifier) ?? asString(target?.id);
   const targetRole = asString(target?.role);
@@ -231,9 +235,14 @@ function buildRecoveryAdviceLines(value: unknown): string[] | null {
     ...missingEvidence.slice(0, 5).map((m) => `- ${truncateBriefLine(m, 300)}`),
     operatorComment ? "Operator comment (paste-ready Korean):" : null,
     operatorComment ? truncateBriefLine(operatorComment, 1200) : null,
+    executionInstruction ? "Execution instruction:" : null,
+    executionInstruction ? truncateBriefLine(executionInstruction, 1200) : null,
+    successEvidence.length > 0 ? "Success evidence to verify after acting:" : null,
+    ...successEvidence.slice(0, 5).map((m) => `- ${truncateBriefLine(m, 300)}`),
     "Answer rules for recovery questions:",
-    "- Include: target issue, action, reason (leaf cause), key evidence, the paste-ready operator comment, and the do-not list.",
+    "- Include: target issue, action, reason (leaf cause), key evidence, the paste-ready operator comment, execution instruction, success evidence, and the do-not list.",
     "- If decision is supervision_run, say to run mission-owner supervision next. If human_operator, say manual judgment is required.",
+    "- If the operator asks you to execute/wake/rework, follow Execution instruction and then verify Success evidence. A plain comment on a done issue is not a wake.",
   ].filter((line): line is string => line !== null);
   return lines.length > 1 ? lines : null;
 }

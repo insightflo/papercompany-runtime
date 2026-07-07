@@ -239,4 +239,41 @@ describe("issue comment reopen routes", () => {
       }),
     );
   });
+
+  it("reopens closed issues via the comment route and wakes the assignee", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("done"),
+      ...patch,
+    }));
+
+    const res = await request(createApp())
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "please rework", reopen: true });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", {
+      status: "todo",
+    });
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalled());
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_reopened_via_comment",
+        payload: expect.objectContaining({
+          issueId: "11111111-1111-4111-8111-111111111111",
+          commentId: "comment-1",
+          reopenedFrom: "done",
+          mutation: "comment",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: "11111111-1111-4111-8111-111111111111",
+          wakeCommentId: "comment-1",
+          source: "issue.comment.reopen",
+          wakeReason: "issue_reopened_via_comment",
+          reopenedFrom: "done",
+        }),
+      }),
+    );
+  });
 });

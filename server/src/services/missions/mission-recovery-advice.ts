@@ -66,6 +66,8 @@ export interface MissionRecoveryAdvice {
   leafCause: string;
   evidence: RecoveryEvidence[];
   operatorComment: string | null;
+  executionInstruction?: string | null;
+  successEvidence?: string[];
   doNot: string[];
   missingEvidence: string[];
 }
@@ -156,6 +158,48 @@ function findLatestRequestChangesSignal(list: CommentForAdvice[]): { summary: st
     if (summary) return { summary, requestAt: comment.createdAt };
   }
   return null;
+}
+
+function issueLabel(issue: IssueForAdvice): string {
+  return issue.identifier ?? issue.id;
+}
+
+function buildIssueActivationInstruction(input: {
+  issue: IssueForAdvice;
+  actionLabel: string;
+}): string {
+  const targetLabel = issueLabel(input.issue);
+  const assigneeLabel = input.issue.assigneeAgentId ?? "unassigned";
+  if (input.issue.status === "done") {
+    return [
+      `Target issue ${targetLabel} is done. A plain comment on a done issue is not execution and will not wake the assignee.`,
+      `To actually execute ${input.actionLabel}, call POST /api/issues/${input.issue.id}/comments with the operator comment as body and reopen:true.`,
+      `After acting, verify a new issue comment, agent_wakeup_requests reason=issue_reopened_via_comment, and a queued/running heartbeat run for assignee ${assigneeLabel}.`,
+    ].join(" ");
+  }
+  if (input.issue.status === "cancelled") {
+    return `Target issue ${targetLabel} is cancelled. Do not try to reopen it; escalate to human_operator with the QA verdict and target issue evidence.`;
+  }
+  return [
+    `Target issue ${targetLabel} is ${input.issue.status}. To request ${input.actionLabel}, call POST /api/issues/${input.issue.id}/comments with the operator comment as body.`,
+    `After acting, verify a new issue comment, agent_wakeup_requests reason=issue_commented or a queued/running heartbeat run for assignee ${assigneeLabel}.`,
+  ].join(" ");
+}
+
+function buildIssueActivationSuccessEvidence(issue: IssueForAdvice): string[] {
+  const targetLabel = issueLabel(issue);
+  const assigneeLabel = issue.assigneeAgentId ?? "unassigned";
+  if (issue.status === "done") {
+    return [
+      `new issue comment on ${targetLabel} created by this turn`,
+      `agent_wakeup_requests row for ${assigneeLabel} with reason=issue_reopened_via_comment`,
+      `new queued/running/completed heartbeat run for ${assigneeLabel} tied to ${targetLabel}`,
+    ];
+  }
+  return [
+    `new issue comment on ${targetLabel} created by this turn`,
+    `agent_wakeup_requests row for ${assigneeLabel} with reason=issue_commented or a new heartbeat run tied to ${targetLabel}`,
+  ];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -343,6 +387,11 @@ export function resolveMissionRecoveryAdvice(input: {
         leafCause: `producer(${producer.identifier ?? producer.id})가 QA REQUEST_CHANGES 이후 workProduct를 수정했습니다. QA 재검이 필요합니다.`,
         evidence,
         operatorComment: buildQaRecheckComment({ qa: qaSignal.issue, producer }),
+        executionInstruction: buildIssueActivationInstruction({
+          issue: qaSignal.issue,
+          actionLabel: "QA recheck",
+        }),
+        successEvidence: buildIssueActivationSuccessEvidence(qaSignal.issue),
         doNot: baseDoNot,
         missingEvidence,
       };
@@ -363,6 +412,11 @@ export function resolveMissionRecoveryAdvice(input: {
       leafCause: qaSignal.summary,
       evidence,
       operatorComment: buildProducerReworkComment({ producer, qa: qaSignal.issue, leafCause: qaSignal.summary }),
+      executionInstruction: buildIssueActivationInstruction({
+        issue: producer,
+        actionLabel: "producer rework",
+      }),
+      successEvidence: buildIssueActivationSuccessEvidence(producer),
       doNot: baseDoNot,
       missingEvidence,
     };

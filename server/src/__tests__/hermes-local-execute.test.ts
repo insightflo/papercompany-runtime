@@ -60,6 +60,9 @@ describe("Hermes Ops liaison default brief (operational monitoring MVP)", () => 
     expect(brief).toMatch(/new durable Paperclip record/);
     expect(brief).toMatch(/A Hermes chat wakeup\/run proves only that Hermes answered/);
     expect(brief).toMatch(/workflow step status and validation verdict\/request_changes are state authority/);
+    expect(brief).toMatch(/plain issue comment on a done issue is not execution/);
+    expect(brief).toMatch(/reopen:true/);
+    expect(brief).toMatch(/agent_wakeup_requests/);
   });
 });
 

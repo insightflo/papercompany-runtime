@@ -448,6 +448,11 @@ describe("buildPaperclipRuntimeBrief", () => {
             { kind: "comment", label: "QA REQUEST_CHANGES on RES-1077", value: "missing Cloudflare source" },
           ],
           operatorComment: "재작업 요청입니다.\nRES-1076의 산출물을 다시 고쳐주세요.",
+          executionInstruction: "RES-1076 is done. To actually execute this rework, post the operator comment with reopen:true; a plain comment will not wake the assignee.",
+          successEvidence: [
+            "new issue comment on RES-1076",
+            "agent_wakeup_requests reason=issue_reopened_via_comment",
+          ],
           doNot: ["QA 이슈를 억지로 PASS 처리하지 마세요."],
           missingEvidence: [],
         },
@@ -460,6 +465,10 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("RES-1076");
     expect(brief).toContain("QA REQUEST_CHANGES: missing Cloudflare source.");
     expect(brief).toContain("재작업 요청입니다.");
+    expect(brief).toContain("Execution instruction:");
+    expect(brief).toContain("reopen:true");
+    expect(brief).toContain("Success evidence to verify after acting:");
+    expect(brief).toContain("issue_reopened_via_comment");
     expect(brief).toContain("Do NOT:");
     expect(brief).toContain("Answer rules for recovery questions");
     // [주의] full facts JSON은 advice가 있을 때 생략(peer P2 acceptance: 최소 컨텍스트).
