@@ -55,6 +55,12 @@ describe("Hermes Ops liaison default brief (operational monitoring MVP)", () => 
     expect(brief).toMatch(/hermes_ops_mutation_forbidden/);
     expect(brief).toMatch(/HTTP 403/);
   });
+
+  it("requires durable target-state evidence before claiming an action succeeded", () => {
+    expect(brief).toMatch(/new durable Paperclip record/);
+    expect(brief).toMatch(/A Hermes chat wakeup\/run proves only that Hermes answered/);
+    expect(brief).toMatch(/workflow step status and validation verdict\/request_changes are state authority/);
+  });
 });
 
 describe("hermes local execution config", () => {

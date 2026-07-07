@@ -4,6 +4,7 @@ import {
   resolveMissionRecoveryAdvice,
   type CommentForAdvice,
   type IssueForAdvice,
+  type WorkflowStepForAdvice,
 } from "../services/missions/mission-recovery-advice.js";
 
 // [목적] resolveMissionRecoveryAdvice(pure)가 RES-1076/1077/1075 형태 케이스에서
@@ -67,6 +68,29 @@ function requestChangesComment(overrides: Partial<CommentForAdvice> = {}): Comme
   };
 }
 
+function workflowStepsForAuditLoop(): WorkflowStepForAdvice[] {
+  return [
+    {
+      workflowRunId: "run-1",
+      stepId: "collect-ai-news-evidence",
+      issueId: "p-1076",
+      status: "completed",
+      dependencies: [],
+      conditionalDependencies: [
+        { stepId: "audit-source-coverage", when: "qa_request_changes", isBackEdge: true },
+      ],
+    },
+    {
+      workflowRunId: "run-1",
+      stepId: "audit-source-coverage",
+      issueId: "q-1077",
+      status: "failed",
+      dependencies: ["collect-ai-news-evidence"],
+      conditionalDependencies: [],
+    },
+  ];
+}
+
 describe("classifyRecoveryRole", () => {
   it("maps originKind to producer/qa/oversight/planning", () => {
     expect(classifyRecoveryRole("mission_plan_qa")).toBe("qa");
@@ -114,6 +138,50 @@ describe("resolveMissionRecoveryAdvice", () => {
     expect(advice.targetIssue?.id).toBe("q-1077");
     expect(advice.targetAction).toBe("qa_recheck");
     expect(advice.operatorComment).toContain("QA 재검");
+  });
+
+  it("workflow QA REQUEST_CHANGES resolves producer through qa_request_changes back-edge", () => {
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [
+        makeProducer({ originId: "run-1" }),
+        makeQa({ originKind: "workflow_execution", originId: "run-1" }),
+        makeOversight(),
+      ],
+      comments: [
+        requestChangesComment({
+          body: "Completed QA recheck. Verdict: request_changes. Remaining issue: two late-2026-07-06 AI-category sources are missing or need cutoff rationale.",
+        }),
+      ],
+      runs: [],
+      workflowSteps: workflowStepsForAuditLoop(),
+    });
+
+    expect(advice.decision).toBe("producer_rework");
+    expect(advice.targetIssue?.identifier).toBe("RES-1076");
+    expect(advice.targetAction).toBe("rework");
+    expect(advice.leafCause).toContain("late-2026-07-06");
+    expect(advice.evidence.some((entry) => entry.kind === "workflow_step" && entry.label.includes("audit-source-coverage"))).toBe(true);
+    expect(advice.operatorComment).toContain("RES-1076");
+    expect(advice.operatorComment).toContain("RES-1077");
+  });
+
+  it("workflow producer REQUEST_CHANGES text is not treated as QA without a matching back-edge", () => {
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [makeProducer({ status: "done", originId: "run-1" }), makeQa({ originKind: "workflow_execution", originId: "run-1" }), makeOversight({ status: "done" })],
+      comments: [
+        requestChangesComment({
+          issueId: "p-1076",
+          body: "REQUEST_CHANGES: producer note mentioning the word must not become a QA verdict.",
+        }),
+      ],
+      runs: [],
+      workflowSteps: workflowStepsForAuditLoop(),
+    });
+
+    expect(advice.decision).not.toBe("producer_rework");
+    expect(advice.decision).toBe("human_operator");
   });
 
   it("QA originId that resolves to no known issue → supervision_run with missingEvidence (no fabricated producer)", () => {

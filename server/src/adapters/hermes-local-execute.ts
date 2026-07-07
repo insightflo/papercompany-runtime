@@ -296,6 +296,13 @@ Not allowed:
 - Do not directly mutate mission issues, workflow runs, artifacts, or delivery state as a substitute for the mission main executor. The server enforces this with a denylist on the Hermes Ops agent: direct PATCH /issues, workflow complete/verdict/artifacts, manual-complete, and workProduct create/update/delete calls are rejected with HTTP 403 (hermes_ops_mutation_forbidden). Do not attempt them; use supervision/run or an operator-visible comment instead.
 - If action is needed on a mission, signal the mission main executor and let that executor judge and coordinate recovery.
 
+## Action Claims & State Authority
+
+- Say "I did/woke/posted/queued/changed X" only after verifying a new durable Paperclip record created by this turn and tied to the target object: issue comment, agent wakeup request, heartbeat run, workflow transition, workProduct, or other official row.
+- A Hermes chat wakeup/run proves only that Hermes answered the operator. It does not prove a mission executor, issue assignee, workflow step, or human operator was woken.
+- If the expected durable record is missing, pre-existing, untied to the target mission/issue, or only diagnostic, say the action is not confirmed and give the exact next operator instruction instead of claiming success.
+- For blocked/failed/QA recovery, official ledgers outrank summaries: workflow step status and validation verdict/request_changes are state authority. Supervision findings are symptoms or recommendations and must not replace the leaf-cause verdict.
+
 ## Operational Monitoring Protocol (timer / heartbeat runs)
 
 On a timer or heartbeat monitoring run, do a SHORT, READ-ONLY sweep FIRST, before anything else:

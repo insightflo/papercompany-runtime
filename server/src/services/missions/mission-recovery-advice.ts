@@ -8,15 +8,14 @@
 // [외부 연결]
 //   - extractLatestRequestChangesSummary(mission-owner-recovery-comments.ts)를 재사용해 REQUEST_CHANGES
 //     leaf cause를 추출. 동일 신호의 다른 consumer이므로 classifier drift가 아님.
-//   - producer 링크는 QA 이슈의 originId(issues.origin_id, supervision.ts:891 도 동일 신호 사용)로 정규 해석.
-//   - 복잡 케이스(native loop back-edge, owner 결정 매핑 등)는 decision=supervision_run으로 위임 —
-//     deep producer-resolution은 createSupervision에만 존재하므로 duplicate하지 않고 넘긴다.
+//   - plan QA producer 링크는 QA 이슈의 originId(issues.origin_id)로 해석한다.
+//   - workflow QA producer 링크는 workflow graph의 qa_request_changes back-edge로 해석한다.
 // [수정시 주의]
-//   - producer 판정 로직을 새로 짜지 말 것. 감당 가능 케이스는 originId direct lookup, 그 이상은 위임.
+//   - producer 판정은 "공식 계획/실행표 장부"에서만 읽는다. 텍스트 제목 예외를 늘리지 말 것.
 //   - operatorComment는 한국어 paste-ready. plan 회수 시 템플릿만 교체.
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, heartbeatRuns } from "@paperclipai/db";
+import { issueComments, issues, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { extractLatestRequestChangesSummary } from "./mission-owner-recovery-comments.js";
 
 export type RecoveryDecision =
@@ -39,7 +38,7 @@ export type RecoveryAction =
 export type RecoveryIssueRole = "producer" | "qa" | "oversight" | "planning" | "unknown";
 
 export interface RecoveryEvidence {
-  kind: "issue" | "comment" | "heartbeat_run" | "wakeup";
+  kind: "issue" | "comment" | "heartbeat_run" | "wakeup" | "workflow_step";
   label: string;
   value: string;
 }
@@ -91,6 +90,21 @@ export interface RunForAdvice {
   status: string;
 }
 
+export interface WorkflowConditionalDependencyForAdvice {
+  stepId: string;
+  when: string | null;
+  isBackEdge: boolean | null;
+}
+
+export interface WorkflowStepForAdvice {
+  workflowRunId: string;
+  stepId: string;
+  issueId: string | null;
+  status: string;
+  dependencies: string[];
+  conditionalDependencies: WorkflowConditionalDependencyForAdvice[];
+}
+
 export function classifyRecoveryRole(originKind: string): RecoveryIssueRole {
   switch (originKind) {
     case "mission_plan_qa":
@@ -116,6 +130,33 @@ interface QaSignal {
   issue: IssueForAdvice;
   summary: string;
   requestAt: Date;
+  producerIssueId: string | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : [];
+}
+
+function normalizeConditionalDependencies(value: unknown): WorkflowConditionalDependencyForAdvice[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const record = asRecord(entry);
+    const stepId = asString(record?.stepId);
+    if (!stepId) return [];
+    return [{
+      stepId,
+      when: asString(record?.when),
+      isBackEdge: typeof record?.isBackEdge === "boolean" ? record.isBackEdge : null,
+    }];
+  });
 }
 
 /**
@@ -129,6 +170,7 @@ export function resolveMissionRecoveryAdvice(input: {
   issues: IssueForAdvice[];
   comments: CommentForAdvice[];
   runs: RunForAdvice[];
+  workflowSteps?: WorkflowStepForAdvice[];
   selectedIssueId?: string | null;
 }): MissionRecoveryAdvice {
   const evidence: RecoveryEvidence[] = [];
@@ -144,20 +186,69 @@ export function resolveMissionRecoveryAdvice(input: {
   for (const list of commentsByIssue.values()) {
     list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
+  const workflowSteps = input.workflowSteps ?? [];
 
-  // QA 신호: QA-role 이슈(originKind=mission_plan_qa) 댓글에서만 최신 REQUEST_CHANGES 요약 추출(재사용).
-  //   [peer review fix] producer/oversight/unblock 댓글에 REQUEST_CHANGES가 포함돼도 QA 판정으로
-  //   오판하지 않도록 QA-role 게이트로 제한. workflow-step QA(originKind=workflow_execution)는
-  //   originKind만으로 producer와 구분이 안 되어 이 게이트에서 제외 → supervision_run으로 위임.
+  const workflowProducerForQa = (issueId: string) => {
+    const qaSteps = workflowSteps.filter((step) => step.issueId === issueId);
+    for (const qaStep of qaSteps) {
+      const producerIssueIds = new Set<string>();
+      for (const candidate of workflowSteps) {
+        if (candidate.workflowRunId !== qaStep.workflowRunId || !candidate.issueId) continue;
+        if (
+          candidate.conditionalDependencies.some(
+            (edge) => edge.stepId === qaStep.stepId && edge.when === "qa_request_changes",
+          )
+        ) {
+          producerIssueIds.add(candidate.issueId);
+        }
+      }
+      if (producerIssueIds.size === 1) {
+        const [producerIssueId] = [...producerIssueIds];
+        return {
+          producerIssueId,
+          qaStep,
+          reason: `workflow QA step ${qaStep.stepId} resolves to producer through a qa_request_changes back-edge`,
+          ambiguous: false,
+        };
+      }
+      if (producerIssueIds.size > 1) {
+        return {
+          producerIssueId: null,
+          qaStep,
+          reason: `workflow QA step ${qaStep.stepId} has multiple qa_request_changes producer targets`,
+          ambiguous: true,
+        };
+      }
+    }
+    return null;
+  };
+
   let qaSignal: QaSignal | null = null;
   for (const issue of input.issues) {
-    if (classifyRecoveryRole(issue.originKind) !== "qa") continue;
     const list = commentsByIssue.get(issue.id) ?? [];
     const summary = extractLatestRequestChangesSummary(list.map((c) => c.body));
     if (!summary) continue;
+    const role = classifyRecoveryRole(issue.originKind);
+    const workflowProducer = role === "qa" ? null : workflowProducerForQa(issue.id);
+    if (role !== "qa" && !workflowProducer?.producerIssueId) {
+      if (workflowProducer?.ambiguous) missingEvidence.push(workflowProducer.reason);
+      continue;
+    }
     const requestAt = list.length > 0 ? list[list.length - 1].createdAt : issue.updatedAt;
     if (!qaSignal || requestAt > qaSignal.requestAt) {
-      qaSignal = { issue, summary, requestAt };
+      qaSignal = {
+        issue,
+        summary,
+        requestAt,
+        producerIssueId: role === "qa" ? issue.originId : workflowProducer?.producerIssueId ?? null,
+      };
+      if (workflowProducer?.qaStep) {
+        evidence.push({
+          kind: "workflow_step",
+          label: `workflow QA step ${workflowProducer.qaStep.stepId}`,
+          value: `status=${workflowProducer.qaStep.status}; producer resolved by qa_request_changes back-edge`,
+        });
+      }
     }
   }
 
@@ -170,7 +261,7 @@ export function resolveMissionRecoveryAdvice(input: {
       label: `QA REQUEST_CHANGES on ${qaSignal.issue.identifier ?? qaSignal.issue.id}`,
       value: qaSignal.summary,
     });
-    const producerId = qaSignal.issue.originId;
+    const producerId = qaSignal.producerIssueId;
     const producer = producerId ? (issueById.get(producerId) ?? null) : null;
     if (!producer) {
       missingEvidence.push(
@@ -184,7 +275,7 @@ export function resolveMissionRecoveryAdvice(input: {
           id: qaSignal.issue.id,
           identifier: qaSignal.issue.identifier,
           title: qaSignal.issue.title,
-          role: classifyRecoveryRole(qaSignal.issue.originKind),
+          role: "qa",
           assigneeAgentId: qaSignal.issue.assigneeAgentId,
         },
         targetAction: "supervision_run",
@@ -321,6 +412,27 @@ function buildQaRecheckComment(input: { qa: IssueForAdvice; producer: IssueForAd
   ].join("\n");
 }
 
+function normalizeWorkflowDefinitionSteps(value: unknown) {
+  const steps = Array.isArray(value) ? value : [];
+  const normalized = new Map<string, {
+    dependencies: string[];
+    conditionalDependencies: WorkflowConditionalDependencyForAdvice[];
+  }>();
+  for (const entry of steps) {
+    const step = asRecord(entry);
+    const id = asString(step?.id);
+    if (!id) continue;
+    const dependencies = asStringArray(step?.dependencies).length > 0
+      ? asStringArray(step?.dependencies)
+      : asStringArray(step?.dependsOn);
+    normalized.set(id, {
+      dependencies,
+      conditionalDependencies: normalizeConditionalDependencies(step?.conditionalDependencies),
+    });
+  }
+  return normalized;
+}
+
 // ---------------------------------------------------------------------------
 // DB loader — pure 함수에 데이터를 공급.
 // ---------------------------------------------------------------------------
@@ -352,6 +464,35 @@ export async function getMissionRecoveryAdvice(
       .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.issueId, issueIds)))
     : [];
 
+  const workflowRows = await db
+    .select({
+      workflowRunId: workflowRuns.id,
+      stepRun: workflowStepRuns,
+      stepsJson: workflowDefinitions.stepsJson,
+    })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+    .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId)));
+
+  const definitionStepsByRunId = new Map<string, ReturnType<typeof normalizeWorkflowDefinitionSteps>>();
+  const workflowSteps = workflowRows.map((row): WorkflowStepForAdvice => {
+    let definitionSteps = definitionStepsByRunId.get(row.workflowRunId);
+    if (!definitionSteps) {
+      definitionSteps = normalizeWorkflowDefinitionSteps(row.stepsJson);
+      definitionStepsByRunId.set(row.workflowRunId, definitionSteps);
+    }
+    const definitionStep = definitionSteps.get(row.stepRun.stepId);
+    return {
+      workflowRunId: row.workflowRunId,
+      stepId: row.stepRun.stepId,
+      issueId: row.stepRun.issueId,
+      status: row.stepRun.status,
+      dependencies: definitionStep?.dependencies ?? [],
+      conditionalDependencies: definitionStep?.conditionalDependencies ?? [],
+    };
+  });
+
   const toIssue = (r: typeof issueRows[number]): IssueForAdvice => ({
     id: r.id,
     identifier: r.identifier,
@@ -373,6 +514,7 @@ export async function getMissionRecoveryAdvice(
       createdAt: r.createdAt,
     })),
     runs: runRows.map((r) => ({ id: r.id, issueId: r.issueId, status: r.status })),
+    workflowSteps,
     selectedIssueId: input.issueId ?? null,
   });
 }
