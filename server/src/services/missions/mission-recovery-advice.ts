@@ -15,7 +15,15 @@
 //   - operatorComment는 한국어 paste-ready. plan 회수 시 템플릿만 교체.
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import {
+  issueComments,
+  issues,
+  heartbeatRuns,
+  issueWorkProducts,
+  workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
+} from "@paperclipai/db";
 import { extractLatestRequestChangesSummary } from "./mission-owner-recovery-comments.js";
 
 export type RecoveryDecision =
@@ -38,7 +46,7 @@ export type RecoveryAction =
 export type RecoveryIssueRole = "producer" | "qa" | "oversight" | "planning" | "unknown";
 
 export interface RecoveryEvidence {
-  kind: "issue" | "comment" | "heartbeat_run" | "wakeup" | "workflow_step";
+  kind: "issue" | "comment" | "heartbeat_run" | "wakeup" | "workflow_step" | "work_product";
   label: string;
   value: string;
 }
@@ -90,6 +98,15 @@ export interface RunForAdvice {
   status: string;
 }
 
+export interface WorkProductForAdvice {
+  id: string;
+  issueId: string;
+  title: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface WorkflowConditionalDependencyForAdvice {
   stepId: string;
   when: string | null;
@@ -133,6 +150,14 @@ interface QaSignal {
   producerIssueId: string | null;
 }
 
+function findLatestRequestChangesSignal(list: CommentForAdvice[]): { summary: string; requestAt: Date } | null {
+  for (const comment of list.slice().reverse()) {
+    const summary = extractLatestRequestChangesSummary([comment.body]);
+    if (summary) return { summary, requestAt: comment.createdAt };
+  }
+  return null;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -170,6 +195,7 @@ export function resolveMissionRecoveryAdvice(input: {
   issues: IssueForAdvice[];
   comments: CommentForAdvice[];
   runs: RunForAdvice[];
+  workProducts?: WorkProductForAdvice[];
   workflowSteps?: WorkflowStepForAdvice[];
   selectedIssueId?: string | null;
 }): MissionRecoveryAdvice {
@@ -187,6 +213,7 @@ export function resolveMissionRecoveryAdvice(input: {
     list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
   const workflowSteps = input.workflowSteps ?? [];
+  const workProducts = input.workProducts ?? [];
 
   const workflowProducerForQa = (issueId: string) => {
     const qaSteps = workflowSteps.filter((step) => step.issueId === issueId);
@@ -226,15 +253,15 @@ export function resolveMissionRecoveryAdvice(input: {
   let qaSignal: QaSignal | null = null;
   for (const issue of input.issues) {
     const list = commentsByIssue.get(issue.id) ?? [];
-    const summary = extractLatestRequestChangesSummary(list.map((c) => c.body));
-    if (!summary) continue;
+    const requestChanges = findLatestRequestChangesSignal(list);
+    if (!requestChanges) continue;
     const role = classifyRecoveryRole(issue.originKind);
     const workflowProducer = role === "qa" ? null : workflowProducerForQa(issue.id);
     if (role !== "qa" && !workflowProducer?.producerIssueId) {
       if (workflowProducer?.ambiguous) missingEvidence.push(workflowProducer.reason);
       continue;
     }
-    const requestAt = list.length > 0 ? list[list.length - 1].createdAt : issue.updatedAt;
+    const { summary, requestAt } = requestChanges;
     if (!qaSignal || requestAt > qaSignal.requestAt) {
       qaSignal = {
         issue,
@@ -291,9 +318,16 @@ export function resolveMissionRecoveryAdvice(input: {
       label: `producer ${producer.identifier ?? producer.id} (status=${producer.status})`,
       value: producer.title,
     });
-    // producer가 QA 요청 이후에 갱신됐고 아직 QA가 재검 안 한 경우 → QA 재검 요청.
-    const producerReworkedAfterQa = producer.updatedAt.getTime() > qaSignal.requestAt.getTime();
-    if (producerReworkedAfterQa) {
+    const producerWorkProducts = workProducts.filter((wp) => wp.issueId === producer.id && wp.status === "active");
+    const producerReworkWorkProduct = producerWorkProducts.find(
+      (wp) => Math.max(wp.createdAt.getTime(), wp.updatedAt.getTime()) > qaSignal.requestAt.getTime(),
+    );
+    if (producerReworkWorkProduct) {
+      evidence.push({
+        kind: "work_product",
+        label: `producer workProduct ${producerReworkWorkProduct.title}`,
+        value: `status=${producerReworkWorkProduct.status}; updatedAt=${producerReworkWorkProduct.updatedAt.toISOString()}`,
+      });
       return {
         missionId: input.missionId,
         selectedIssueId: input.selectedIssueId ?? null,
@@ -306,7 +340,7 @@ export function resolveMissionRecoveryAdvice(input: {
           assigneeAgentId: qaSignal.issue.assigneeAgentId,
         },
         targetAction: "qa_recheck",
-        leafCause: `producer(${producer.identifier ?? producer.id})가 QA REQUEST_CHANGES 이후 산출물을 수정했습니다. QA 재검이 필요합니다.`,
+        leafCause: `producer(${producer.identifier ?? producer.id})가 QA REQUEST_CHANGES 이후 workProduct를 수정했습니다. QA 재검이 필요합니다.`,
         evidence,
         operatorComment: buildQaRecheckComment({ qa: qaSignal.issue, producer }),
         doNot: baseDoNot,
@@ -464,6 +498,13 @@ export async function getMissionRecoveryAdvice(
       .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.issueId, issueIds)))
     : [];
 
+  const workProductRows = issueIds.length > 0
+    ? await db
+      .select()
+      .from(issueWorkProducts)
+      .where(and(eq(issueWorkProducts.companyId, companyId), inArray(issueWorkProducts.issueId, issueIds)))
+    : [];
+
   const workflowRows = await db
     .select({
       workflowRunId: workflowRuns.id,
@@ -514,6 +555,14 @@ export async function getMissionRecoveryAdvice(
       createdAt: r.createdAt,
     })),
     runs: runRows.map((r) => ({ id: r.id, issueId: r.issueId, status: r.status })),
+    workProducts: workProductRows.map((r) => ({
+      id: r.id,
+      issueId: r.issueId,
+      title: r.title,
+      status: r.status,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    })),
     workflowSteps,
     selectedIssueId: input.issueId ?? null,
   });

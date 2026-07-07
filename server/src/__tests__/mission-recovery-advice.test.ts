@@ -4,6 +4,7 @@ import {
   resolveMissionRecoveryAdvice,
   type CommentForAdvice,
   type IssueForAdvice,
+  type WorkProductForAdvice,
   type WorkflowStepForAdvice,
 } from "../services/missions/mission-recovery-advice.js";
 
@@ -68,6 +69,18 @@ function requestChangesComment(overrides: Partial<CommentForAdvice> = {}): Comme
   };
 }
 
+function makeWorkProduct(overrides: Partial<WorkProductForAdvice> = {}): WorkProductForAdvice {
+  return {
+    id: "wp-1",
+    issueId: "p-1076",
+    title: "evidence.json",
+    status: "active",
+    createdAt: T0,
+    updatedAt: T0,
+    ...overrides,
+  };
+}
+
 function workflowStepsForAuditLoop(): WorkflowStepForAdvice[] {
   return [
     {
@@ -125,19 +138,48 @@ describe("resolveMissionRecoveryAdvice", () => {
     expect(advice.doNot.some((d) => d.includes("hermes_ops_mutation_forbidden"))).toBe(true);
   });
 
-  it("producer reworked AFTER QA request → qa_recheck targeting the QA issue", () => {
-    // producer updatedAt T2 > QA 요청 T1 → producer가 이미 손댐 → QA 재검.
+  it("producer active workProduct changed AFTER QA request → qa_recheck targeting the QA issue", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
       issues: [makeProducer({ updatedAt: T2 }), makeQa(), makeOversight()],
       comments: [requestChangesComment()],
       runs: [],
+      workProducts: [makeWorkProduct({ updatedAt: T2 })],
     });
 
     expect(advice.decision).toBe("qa_recheck");
     expect(advice.targetIssue?.id).toBe("q-1077");
     expect(advice.targetAction).toBe("qa_recheck");
     expect(advice.operatorComment).toContain("QA 재검");
+    expect(advice.evidence.some((entry) => entry.kind === "work_product")).toBe(true);
+  });
+
+  it("producer updatedAt drift alone does not imply rework after QA", () => {
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [makeProducer({ updatedAt: T2 }), makeQa(), makeOversight()],
+      comments: [requestChangesComment()],
+      runs: [],
+      workProducts: [makeWorkProduct({ updatedAt: T0 })],
+    });
+
+    expect(advice.decision).toBe("producer_rework");
+    expect(advice.targetIssue?.id).toBe("p-1076");
+  });
+
+  it("uses the actual REQUEST_CHANGES comment timestamp when newer non-verdict comments exist", () => {
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [makeProducer(), makeQa(), makeOversight()],
+      comments: [
+        requestChangesComment({ createdAt: T1 }),
+        requestChangesComment({ id: "c-later-note", body: "Later non-verdict operational note.", createdAt: T2 }),
+      ],
+      runs: [],
+      workProducts: [makeWorkProduct({ updatedAt: new Date("2026-07-07T01:30:00Z") })],
+    });
+
+    expect(advice.decision).toBe("qa_recheck");
   });
 
   it("workflow QA REQUEST_CHANGES resolves producer through qa_request_changes back-edge", () => {
