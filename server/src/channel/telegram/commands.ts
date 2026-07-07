@@ -24,6 +24,7 @@ import { issueService } from "../../services/issues.js";
 import { approvalService } from "../../services/approvals.js";
 import { heartbeatService } from "../../services/heartbeat.js";
 import { hermesChatService } from "../../services/hermes-chat.js";
+import { resolveRecoveryAdviceForChat } from "../../services/hermes-chat-recovery.js";
 
 /**
  * System actor ID used when Telegram acts on behalf of the system
@@ -180,6 +181,12 @@ async function cmdHermesConversation(
   });
   const assistantMessage = await chatService.addAssistantPlaceholder(companyId, session.id, agent.id);
   const recentMessages = await chatService.recentConversation(companyId, session.id, 14);
+  // [P2] recovery 질문(메시지 텍스트 기반)이면 처방 계산해 context에 부착(fail-open).
+  const recoveryAdvice = await resolveRecoveryAdviceForChat(db, {
+    companyId,
+    currentPage: null,
+    messageText: text,
+  });
 
   const run = await heartbeatService(db).wakeup(agent.id, {
     source: "on_demand",
@@ -212,6 +219,8 @@ async function cmdHermesConversation(
         recentMessages,
         currentPage: null,
         attachments: [],
+        // [P2] nested key ONLY — top-level decision 금지(verdict reader 충돌).
+        recoveryAdvice,
         source: "telegram",
         telegramChatId: chatId,
         telegramMessageId: message.message_id,

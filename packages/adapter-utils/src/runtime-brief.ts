@@ -189,6 +189,55 @@ function buildCurrentPageIssueEvidence(currentPage: Record<string, unknown> | nu
   ];
 }
 
+// [P2] recovery advice(structured MissionRecoveryAdvice)를 compact prompt 섹션으로 직렬화.
+//   server의 MissionRecoveryAdvice 타입을 import 할 수 없으니(의존성 방향) 구조적으로 안전 읽기.
+//   advice가 있으면 caller가 facts JSON을 생략한다(결정에 불필요한 중복 컨텍스트 감소).
+function buildRecoveryAdviceLines(value: unknown): string[] | null {
+  const advice = asRecord(value);
+  if (!advice) return null;
+  const decision = asString(advice.decision);
+  if (!decision) return null;
+
+  const target = asRecord(advice.targetIssue);
+  const targetAction = asString(advice.targetAction);
+  const leafCause = asString(advice.leafCause);
+  const operatorComment = asString(advice.operatorComment);
+  const evidence = Array.isArray(advice.evidence)
+    ? advice.evidence.filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null)
+    : [];
+  const doNot = Array.isArray(advice.doNot)
+    ? advice.doNot.filter((d): d is string => typeof d === "string" && d.trim().length > 0)
+    : [];
+  const missingEvidence = Array.isArray(advice.missingEvidence)
+    ? advice.missingEvidence.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
+    : [];
+  const targetIdentifier = asString(target?.identifier) ?? asString(target?.id);
+  const targetRole = asString(target?.role);
+  const targetTitle = asString(target?.title);
+
+  const lines = [
+    "Recovery advice (structured — prefer this for recovery/QA/blocked/stuck questions):",
+    `- Decision: ${decision}`,
+    targetIdentifier
+      ? `- Target: ${targetIdentifier}${targetRole ? ` (${targetRole})` : ""}${targetTitle ? ` — ${truncateBriefLine(targetTitle, 160)}` : ""}`
+      : null,
+    targetAction ? `- Action: ${targetAction}` : null,
+    leafCause ? `- Leaf cause: ${truncateBriefLine(leafCause, 800)}` : null,
+    evidence.length > 0 ? "Evidence:" : null,
+    ...evidence.slice(0, 5).map((e) => `- ${asString(e.label) ?? "evidence"}: ${truncateBriefLine(asString(e.value) ?? "", 300)}`),
+    doNot.length > 0 ? "Do NOT:" : null,
+    ...doNot.slice(0, 6).map((d) => `- ${truncateBriefLine(d, 300)}`),
+    missingEvidence.length > 0 ? "Missing evidence (state to operator plainly — do not hide):" : null,
+    ...missingEvidence.slice(0, 5).map((m) => `- ${truncateBriefLine(m, 300)}`),
+    operatorComment ? "Operator comment (paste-ready Korean):" : null,
+    operatorComment ? truncateBriefLine(operatorComment, 1200) : null,
+    "Answer rules for recovery questions:",
+    "- Include: target issue, action, reason (leaf cause), key evidence, the paste-ready operator comment, and the do-not list.",
+    "- If decision is supervision_run, say to run mission-owner supervision next. If human_operator, say manual judgment is required.",
+  ].filter((line): line is string => line !== null);
+  return lines.length > 1 ? lines : null;
+}
+
 function buildHermesChatBrief(value: unknown) {
   const chat = asRecord(value);
   if (!chat) return null;
@@ -215,8 +264,12 @@ function buildHermesChatBrief(value: unknown) {
     if (!body) return null;
     return `- ${role}: ${truncateBriefLine(body, 420)}`;
   }).filter((line): line is string => line !== null);
+  const recoveryAdviceLines = buildRecoveryAdviceLines(chat.recoveryAdvice);
+  const hasStructuredAdvice = recoveryAdviceLines !== null;
   const currentPageFacts = asRecord(currentPage?.facts);
-  const currentPageFactsLine = currentPageFacts && Object.keys(currentPageFacts).length > 0
+  // [P2] structured recovery advice가 있으면 full facts JSON을 생략한다 — advice가 결정적 evidence를
+  //   compact하게 제공하므로 중복 대형 컨텍스트가 prompt를 잡아먹지 않는다(peer P2 acceptance).
+  const currentPageFactsLine = !hasStructuredAdvice && currentPageFacts && Object.keys(currentPageFacts).length > 0
     ? truncateBriefLine(JSON.stringify(currentPageFacts), 4_000)
     : null;
   const currentPageIssueEvidenceLines = buildCurrentPageIssueEvidence(currentPage);
@@ -238,6 +291,7 @@ function buildHermesChatBrief(value: unknown) {
     sessionTitle ? `- Title: ${sessionTitle}` : null,
     instructions.length > 0 ? "Instructions:" : null,
     ...instructions.slice(0, 10).map((instruction) => `- ${instruction}`),
+    ...(recoveryAdviceLines ?? []),
     ...currentPageIssueEvidenceLines,
     currentPage ? "Current Paperclip page:" : null,
     asString(currentPage?.kind) ? `- Kind: ${asString(currentPage?.kind)}` : null,

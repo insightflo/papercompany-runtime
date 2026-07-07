@@ -6,6 +6,7 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { logActivity, secretService } from "../services/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { hermesChatService } from "../services/hermes-chat.js";
+import { resolveRecoveryAdviceForChat } from "../services/hermes-chat-recovery.js";
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -267,6 +268,12 @@ export function hermesChatRoutes(db: Db) {
     const recentMessages = await service.recentConversation(companyId, sessionId, 14);
     const actor = getActorInfo(req);
     const currentPage = sanitizePageContext(req.body?.pageContext);
+    // [P2] recovery 질문이면 구조화 처방을 계산해 context에 부착(fail-open). adapter가 compact하게 소비.
+    const recoveryAdvice = await resolveRecoveryAdviceForChat(db, {
+      companyId,
+      currentPage,
+      messageText: body,
+    });
 
     const run = await heartbeat.wakeup(agent.id, {
       source: "on_demand",
@@ -292,6 +299,8 @@ export function hermesChatRoutes(db: Db) {
           recentMessages,
           currentPage,
           attachments,
+          // [P2] nested key ONLY — top-level decision 필드 금지(verdict reader 충돌, peer 제약).
+          recoveryAdvice,
           source: "paperclip_ui",
           instructions: [
             "Default to a concise operations answer for the sidebar: 3-6 short bullets or 1-2 short paragraphs, usually under 1200 Korean characters.",

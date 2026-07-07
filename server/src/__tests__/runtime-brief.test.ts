@@ -415,4 +415,55 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Last run summary: Last run summarized the issue state");
     expect(brief).not.toContain("# old markdown fallback");
   });
+
+  // [P2.2] recovery advice가 있으면 compact advice 섹션을 주입하고 full facts JSON을 생략한다.
+  //   non-recovery chat은 기존 동작 유지(위 테스트들이 facts 라인 검증).
+  it("injects compact recovery advice and omits the facts JSON when advice is present", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      taskKey: "hermes-chat:session-2",
+      paperclipHermesChat: {
+        sessionId: "session-2",
+        currentMessage: "왜 멈췄어? 깨우려면 뭐라고 해?",
+        currentPage: {
+          kind: "mission",
+          path: "/RES/missions/mission-1",
+          title: "TechCrunch AI evidence mission",
+          facts: { missionId: "mission-1", heavyBlob: "x".repeat(2000) },
+          loadedAt: "2026-06-09T00:00:00.000Z",
+        },
+        recoveryAdvice: {
+          missionId: "mission-1",
+          selectedIssueId: null,
+          decision: "producer_rework",
+          targetIssue: {
+            id: "p-1076",
+            identifier: "RES-1076",
+            title: "Collect bounded TechCrunch AI evidence",
+            role: "producer",
+            assigneeAgentId: "agent-producer",
+          },
+          targetAction: "rework",
+          leafCause: "QA REQUEST_CHANGES: missing Cloudflare source.",
+          evidence: [
+            { kind: "comment", label: "QA REQUEST_CHANGES on RES-1077", value: "missing Cloudflare source" },
+          ],
+          operatorComment: "재작업 요청입니다.\nRES-1076의 산출물을 다시 고쳐주세요.",
+          doNot: ["QA 이슈를 억지로 PASS 처리하지 마세요."],
+          missingEvidence: [],
+        },
+      },
+    });
+
+    // [주의] compact advice 섹션이 prompt에 들어가야 한다.
+    expect(brief).toContain("Recovery advice (structured");
+    expect(brief).toContain("- Decision: producer_rework");
+    expect(brief).toContain("RES-1076");
+    expect(brief).toContain("QA REQUEST_CHANGES: missing Cloudflare source.");
+    expect(brief).toContain("재작업 요청입니다.");
+    expect(brief).toContain("Do NOT:");
+    expect(brief).toContain("Answer rules for recovery questions");
+    // [주의] full facts JSON은 advice가 있을 때 생략(peer P2 acceptance: 최소 컨텍스트).
+    expect(brief).not.toContain('"missionId":"mission-1"');
+    expect(brief).not.toContain("heavyBlob");
+  });
 });
