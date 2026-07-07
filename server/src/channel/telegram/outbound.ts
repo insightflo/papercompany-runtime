@@ -13,6 +13,7 @@ import { channelConfigs, heartbeatRuns } from "@paperclipai/db";
 import { getChannelRegistry } from "../index.js";
 import { logger } from "../../middleware/logger.js";
 import { summarizeHeartbeatRunResultJson } from "../../services/heartbeat-run-summary.js";
+import { applyRunHonestyCaveat } from "../../services/hermes-chat.js";
 
 /**
  * Map of companyId → chatId for users who have messaged the bot.
@@ -101,10 +102,14 @@ async function formatTelegramConversationReply(
   const [run] = await db
     .select({
       id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
       contextSnapshot: heartbeatRuns.contextSnapshot,
       resultJson: heartbeatRuns.resultJson,
       error: heartbeatRuns.error,
       status: heartbeatRuns.status,
+      startedAt: heartbeatRuns.startedAt,
+      createdAt: heartbeatRuns.createdAt,
     })
     .from(heartbeatRuns)
     .where(eq(heartbeatRuns.id, runId))
@@ -124,9 +129,12 @@ async function formatTelegramConversationReply(
     readString(run.error) ??
     `Run ${run.status}.`;
   const prefix = run.status === "succeeded" ? "Hermes Operations Manager" : `Hermes Operations Manager (${run.status})`;
+  // [P5] honesty guard — telegram 답변 경로도 finalizeRunResponse와 동일하게 durable proof 대조.
+  //   claimed action인데 이 run의 wakeup/comment proof가 0이면 caveat 부착(거짓 "깨웠다" 방지).
+  const body = await applyRunHonestyCaveat(db, run, resultText);
   return {
     chatId,
-    message: `${prefix}\n${resultText.slice(0, 3500)}`,
+    message: `${prefix}\n${body.slice(0, 3500)}`,
   };
 }
 

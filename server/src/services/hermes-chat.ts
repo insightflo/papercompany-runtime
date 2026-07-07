@@ -170,7 +170,7 @@ export function applyHonestyCaveat(input: { body: string; claimedAction: boolean
 //   [주의] Hermes 자기 chat wakeup은 target(missionId/issueId/workflowRunId)이 없고 runId도 null
 //   (run을 spawn하는 쪽이므로) → eq(runId, run.id) + target-set 필터로 자동 제외 → mission executor
 //   wakeup과 혼동되지 않는다(peer가 요구한 구분). 댓글은 run FK가 없어 authorAgentId+창 휴리스틱.
-async function applyRunHonestyCaveat(
+export async function applyRunHonestyCaveat(
   db: Db,
   run: { id: string; companyId: string; agentId: string; startedAt: Date | null; createdAt: Date },
   body: string,
