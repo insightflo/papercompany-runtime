@@ -208,10 +208,24 @@ Headers:
 }
 ```
 
+For a published public URL:
+
+```json
+{
+  "type": "preview_url",
+  "url": "https://example.com/final/index.html",
+  "title": "Public detail page",
+  "marker": "expected-content-marker",
+  "summary": "Optional short summary",
+  "isPrimary": true
+}
+```
+
 Rules:
 
 - `path` must be an existing absolute local file path.
 - `type` is `artifact` or `document`; default is `artifact`.
+- For public delivery URLs, use `type: "preview_url"` and an HTTP(S) `url`; include a stable `marker`, `contentMarker`, `expectedTitle`, or `topic` when the completion gate must read back page content.
 - This creates an official issue workProduct. Do not use the generic `/api/issues/{issueId}/work-products` route for workflow closeout unless an operator explicitly asks.
 
 ### Submit a workflow QA verdict

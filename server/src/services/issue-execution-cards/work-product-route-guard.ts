@@ -36,7 +36,8 @@ export async function resolveAgentWorkProductRouteGuard(input: {
 
   const outputDir = card.cardJson?.requiredOutputs?.workProduct?.outputDir ?? null;
   const lines = [
-    "This workflow execution issue requires the artifact to be registered automatically by emitting a standalone final line `[ARTIFACT]: <absolute path>`; the runtime registers it in issue_work_products.",
+    "This workflow execution issue requires an official workProduct. Use POST /api/issues/:id/workflow/artifacts first: send an existing absolute local path for file artifacts, or type=preview_url plus an HTTP(S) url for public delivery URLs.",
+    "Fallback for local file artifacts only: emit a standalone final line `[ARTIFACT]: <absolute path>` so the runtime can recover registration.",
     "Do not POST /api/issues/:id/work-products manually for this issue, and do not rely on transcript claims.",
   ];
   if (typeof outputDir === "string" && outputDir.length > 0) {

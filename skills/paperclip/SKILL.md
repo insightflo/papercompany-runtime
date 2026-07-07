@@ -73,6 +73,7 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 Workflow API closeout:
 
 - When your work creates a file artifact, register it with `POST /api/issues/{issueId}/workflow/artifacts` and an existing absolute local `path`. Do this after creating the file and before completing the issue.
+- When your workflow step publishes or verifies a public delivery URL, register that URL with `POST /api/issues/{issueId}/workflow/artifacts` using `type: "preview_url"` and `url`. Do this before completing the issue so delivery gates can read the official workProduct.
 - When your assignment is QA or validation, submit the official verdict with `POST /api/issues/{issueId}/workflow/verdict`. Valid verdicts: `pass`, `request_changes`.
 - Complete workflow execution issues with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.
 - Fallback only when the Workflow API is unavailable: leave a standalone final line `[ARTIFACT]: <absolute path>` for artifact recovery, then use the normal issue update route. Do not rely on transcript claims alone.
@@ -84,6 +85,10 @@ When writing issue descriptions or comments, follow the ticket-linking rule in *
 POST /api/issues/{issueId}/workflow/artifacts
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "path": "/absolute/path/to/report.md", "title": "report.md", "type": "document" }
+
+POST /api/issues/{issueId}/workflow/artifacts
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{ "type": "preview_url", "url": "https://example.com/final/index.html", "title": "Public detail page", "marker": "expected-content-marker" }
 
 POST /api/issues/{issueId}/workflow/verdict
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID

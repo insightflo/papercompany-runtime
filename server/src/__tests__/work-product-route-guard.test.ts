@@ -42,6 +42,7 @@ describe("resolveAgentWorkProductRouteGuard", () => {
     expect(decision.block).toBe(true);
     expect(decision.reason).toBe("workflow_card_requires_artifact_marker");
     expect(decision.issueExecutionCardHash).toBe("cardhash-9");
+    expect(decision.message).toContain("type=preview_url");
     expect(decision.message).toContain("[ARTIFACT]: <absolute path>");
     expect(decision.message).toContain("Do not POST /api/issues/:id/work-products");
     expect(decision.message).toContain("issueExecutionCardHash=cardhash-9");
