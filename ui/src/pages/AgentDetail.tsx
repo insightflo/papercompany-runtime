@@ -23,6 +23,7 @@ import { useDialog } from "../context/DialogContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { AgentConfigForm } from "../components/AgentConfigForm";
+import { HermesOpsRunSummary } from "../components/HermesOpsRunSummary";
 import { PageTabBar } from "../components/PageTabBar";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
 import { MarkdownEditor } from "../components/MarkdownEditor";
@@ -3692,6 +3693,8 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           )}
         </div>
       )}
+
+      <HermesOpsRunSummary run={run} />
 
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground">
