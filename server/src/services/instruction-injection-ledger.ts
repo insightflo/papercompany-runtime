@@ -39,6 +39,10 @@ export async function applyInstructionInjectionLedger(input: {
   adapterConfig: Record<string, unknown>;
   cwd: string;
 }) {
+  // [주의 — P0c] issueId가 null인 run(sidebar/Telegram 자유대화, timer)은 이 벡터(AGENTS.md
+  //   reference 파일, issue+execution-card 스코프)를 받지 않는다. Hermes Ops liaison의 필수
+  //   safety/monitoring 규칙은 vector-1(HERMES_OPERATIONS_LIAISON_BRIEF, -q prompt로 무조건 전달)
+  //   에 있어야 이 경로에서도 도달한다. reference 파일은 보조 자료만 담을 것.
   if (!input.issueId) {
     delete input.context.paperclipInstructionInjection;
     return null;

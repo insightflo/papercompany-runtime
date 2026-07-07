@@ -45,6 +45,14 @@ describe("Hermes Ops liaison default brief (operational monitoring MVP)", () => 
     expect(brief).toMatch(/heartbeat\.mission_run_active/);
     expect(brief).toMatch(/Report-only/);
   });
+
+  // [주의 — P0b/P0c] brief와 서버 denylist(hermes-ops-mutation-guard)의 operational 일치를 lock.
+  //   liaison 에이전트는 issueId 무관하게 이 brief를 받으므로(-q prompt), brief가 mutation 금지를
+  //   안내하면 Hermes가 불필요한 403 시도를 줄인다. 이 매핑이 깨지면 guard는 있지만 Hermes가 모름.
+  it("documents the server-side denylist so liaison runs do not attempt blocked mutations", () => {
+    expect(brief).toMatch(/hermes_ops_mutation_forbidden/);
+    expect(brief).toMatch(/HTTP 403/);
+  });
 });
 
 describe("hermes local execution config", () => {

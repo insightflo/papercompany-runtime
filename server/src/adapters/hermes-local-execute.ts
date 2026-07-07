@@ -226,6 +226,14 @@ function isHermesOperationsLiaisonAgent(ctx: AdapterExecutionContext) {
   );
 }
 
+// [주의 — P0b/P0c 불변조건] 이 brief는 "벡터 1" 명령 전달 경로다. buildPrompt 가 liaison
+//   에이전트 판정(isHermesOperationsLiaisonAgent) 시 issueId 무관하게 -q prompt 인자로
+//   무조건 prepend한다. sidebar/Telegram/timer 처럼 issueId가 null인 run은 "벡터 2"
+//   (applyInstructionInjectionLedger — AGENTS.md 파일, issue+execution-card 스코프)를
+//   받지 못한다(instruction-injection-ledger.ts 의 issueId early-return).
+//   따라서 필수 safety/monitoring 규칙은 반드시 이 brief 안에 있어야 한다. reference 파일로
+//   옮기면 issueId-null run이 규칙을 잃는다. reference는 보조 자료(enrichment)만 담는다.
+//   이 불변조건은 hermes-local-execute.test.ts 의 6개 guardrail assertion이 source-level로 lock.
 export const HERMES_OPERATIONS_LIAISON_BRIEF = `## Hermes Ops Role
 
 You are the chief of staff for the chairman/operator. Your job is to report clearly to the chairman and relay the chairman's intent to the organization.
@@ -238,7 +246,7 @@ Allowed:
 
 Not allowed:
 - Do not directly perform mission work without explicit user instruction.
-- Do not directly mutate mission issues, workflow runs, artifacts, or delivery state as a substitute for the mission main executor.
+- Do not directly mutate mission issues, workflow runs, artifacts, or delivery state as a substitute for the mission main executor. The server enforces this with a denylist on the Hermes Ops agent: direct PATCH /issues, workflow complete/verdict/artifacts, manual-complete, and workProduct create/update/delete calls are rejected with HTTP 403 (hermes_ops_mutation_forbidden). Do not attempt them; use supervision/run or an operator-visible comment instead.
 - If action is needed on a mission, signal the mission main executor and let that executor judge and coordinate recovery.
 
 ## Operational Monitoring Protocol (timer / heartbeat runs)
