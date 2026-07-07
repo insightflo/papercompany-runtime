@@ -30,6 +30,7 @@ import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
 import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
 import { loadMissionRuntimeSnapshot } from "../services/missions/mission-runtime-snapshot.js";
+import { getMissionRecoveryAdvice } from "../services/missions/mission-recovery-advice.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
 export function missionRoutes(db: Db) {
@@ -627,6 +628,27 @@ export function missionRoutes(db: Db) {
       companyId: mission.companyId,
       snapshot,
     });
+  });
+
+  /**
+   * GET /companies/:companyId/missions/:missionId/recovery-advice
+   *
+   * Read-only structured recovery diagnosis for operators/Hermes: who to wake,
+   * what action, leaf cause, and paste-ready comment. Reuses supervision's
+   * REQUEST_CHANGES signals (no parallel classifier). Complex native-loop/owner
+   * cases delegate to decision=supervision_run.
+   */
+  router.get("/companies/:companyId/missions/:missionId/recovery-advice", async (req, res) => {
+    const { companyId, missionId } = req.params;
+    const mission = await svc.getById(missionId);
+    if (mission.companyId !== companyId) {
+      throw notFound("Mission not found");
+    }
+    assertCompanyAccess(req, companyId);
+
+    const issueId = typeof req.query.issueId === "string" ? req.query.issueId : null;
+    const advice = await getMissionRecoveryAdvice(db, { companyId, missionId, issueId });
+    res.json(advice);
   });
 
   /**
