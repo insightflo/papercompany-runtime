@@ -4,7 +4,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentApiKeys, agents, companyMemberships, instanceUserRoles } from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
-import { isMissionExecutionLiaisonAgent } from "../services/missions/agent-role-boundaries.js";
+import { resolveHermesOpsLiaisonIdentity } from "../services/missions/agent-role-boundaries.js";
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
@@ -139,8 +139,8 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         keyId: undefined,
         runId: runIdHeader || claims.run_id || undefined,
         source: "agent_jwt",
-        // [연결] hermes-ops-mutation-guard가 읽음. agentRecord는 authn에서 이미 fetch했으므로 추가 비용 없음.
-        isHermesOpsLiaison: isMissionExecutionLiaisonAgent(agentRecord),
+        // [P3] liaison identity(mode 포함)를 authn에서 한 번에 산출. hermes-ops-mutation-guard가 읽음.
+        ...resolveHermesOpsLiaisonIdentity(agentRecord),
       };
       next();
       return;
@@ -169,7 +169,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       keyId: key.id,
       runId: runIdHeader || undefined,
       source: "agent_key",
-      isHermesOpsLiaison: isMissionExecutionLiaisonAgent(agentRecord),
+      ...resolveHermesOpsLiaisonIdentity(agentRecord),
     };
 
     next();
