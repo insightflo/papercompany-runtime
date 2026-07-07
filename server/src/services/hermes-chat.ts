@@ -165,11 +165,13 @@ export function applyHonestyCaveat(input: { body: string; claimedAction: boolean
   return `${input.body}${caveat}`;
 }
 
-// [P5] 이 run이 만든 durable side-effect(mission/issue/workflow executor wakeup + 댓글) 개수를 세서
-//   claim이 있는데 proof 0면 caveat 부착.
-//   [주의] Hermes 자기 chat wakeup은 target(missionId/issueId/workflowRunId)이 없고 runId도 null
-//   (run을 spawn하는 쪽이므로) → eq(runId, run.id) + target-set 필터로 자동 제외 → mission executor
-//   wakeup과 혼동되지 않는다(peer가 요구한 구분). 댓글은 run FK가 없어 authorAgentId+창 휴리스틱.
+// [P5] 이 run이 만든 durable side-effect 개수를 세서 claim이 있는데 proof 0면 caveat 부착.
+//   proof는 모두 exact run attribution(runId FK):
+//   - wakeup: agent_wakeup_requests.runId = run.id + mission/issue/workflow target.
+//     Hermes 자기 chat wakeup은 target이 없고 runId도 null(run을 spawn하는 쪽)이라 자동 제외 →
+//     mission executor wakeup과 혼동되지 않는다(peer가 요구한 구분).
+//   - comment/supervision: activity_log.runId = run.id + action IN (issue.comment_added, mission.supervision.run).
+//     (이전 issue_comments authorAgentId+창 휴리스틱은 같은 agent의 다른-run 댓글이 false-positive proof가 되어 제거.)
 export async function applyRunHonestyCaveat(
   db: Db,
   run: { id: string },
