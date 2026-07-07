@@ -21,6 +21,7 @@ import {
 } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
 import { validate } from "../middleware/validate.js";
+import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
 import {
   accessService,
   agentService,
@@ -782,7 +783,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.json({ ok: true });
   });
 
-  router.post("/issues/:id/work-products", validate(createIssueWorkProductSchema), async (req, res) => {
+  router.post("/issues/:id/work-products", hermesOpsMutationGuard("issue.work-products.create"), validate(createIssueWorkProductSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -823,7 +824,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.status(201).json(product);
   });
 
-  router.patch("/work-products/:id", validate(updateIssueWorkProductSchema), async (req, res) => {
+  router.patch("/work-products/:id", hermesOpsMutationGuard("issue.work-products.update"), validate(updateIssueWorkProductSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await workProductsSvc.getById(id);
     if (!existing) {
@@ -914,7 +915,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     stream.pipe(res);
   });
 
-  router.delete("/work-products/:id", async (req, res) => {
+  router.delete("/work-products/:id", hermesOpsMutationGuard("issue.work-products.delete"), async (req, res) => {
     const id = req.params.id as string;
     const existing = await workProductsSvc.getById(id);
     if (!existing) {
@@ -1163,7 +1164,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.status(201).json(issue);
   });
 
-  router.patch("/issues/:id", validate(updateIssueSchema), async (req, res) => {
+  router.patch("/issues/:id", hermesOpsMutationGuard("issue.status.patch"), validate(updateIssueSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {

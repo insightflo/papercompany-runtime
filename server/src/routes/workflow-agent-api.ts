@@ -9,6 +9,7 @@ import {
   type WorkflowVerdictSubmit,
 } from "@paperclipai/shared/validators/workflow-agent-api";
 import { validate } from "../middleware/validate.js";
+import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -51,7 +52,7 @@ async function authorizeWorkflowApi(req: Request, db: Db, issue: Awaited<ReturnT
 export function workflowAgentApiRoutes(db: Db) {
   const router = Router();
 
-  router.post("/issues/:id/workflow/artifacts", validate(workflowArtifactRegisterSchema), async (req, res) => {
+  router.post("/issues/:id/workflow/artifacts", hermesOpsMutationGuard("workflow.artifacts.register"), validate(workflowArtifactRegisterSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
     const actor = await authorizeWorkflowApi(req, db, issue);
     const data: WorkflowArtifactRegister = req.body;
@@ -76,7 +77,7 @@ export function workflowAgentApiRoutes(db: Db) {
     res.status(201).json(product);
   });
 
-  router.post("/issues/:id/workflow/verdict", validate(workflowVerdictSubmitSchema), async (req, res) => {
+  router.post("/issues/:id/workflow/verdict", hermesOpsMutationGuard("workflow.verdict.submit"), validate(workflowVerdictSubmitSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
     const actor = await authorizeWorkflowApi(req, db, issue);
     const data: WorkflowVerdictSubmit = req.body;
@@ -101,7 +102,7 @@ export function workflowAgentApiRoutes(db: Db) {
     res.json(verdict);
   });
 
-  router.post("/issues/:id/workflow/complete", validate(workflowIssueCompleteSchema), async (req, res) => {
+  router.post("/issues/:id/workflow/complete", hermesOpsMutationGuard("workflow.complete"), validate(workflowIssueCompleteSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
     const actor = await authorizeWorkflowApi(req, db, issue);
     const data: WorkflowIssueComplete = req.body;

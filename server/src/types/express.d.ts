@@ -13,6 +13,8 @@ declare global {
         keyId?: string;
         runId?: string;
         source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "none";
+        // authn 시 agentRecord 기반으로 한 번만 계산. hermes-ops-mutation-guard가 읽음.
+        isHermesOpsLiaison?: boolean;
       };
     }
   }

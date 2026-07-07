@@ -12,6 +12,7 @@ import {
   workflowToolGrantSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
+import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
 import { workProductService } from "../services/work-products.js";
@@ -582,7 +583,7 @@ export function workflowRoutes(db: Db) {
     res.json({ id: runId, runId, status: cancelled ? "cancelled" : run.status, cancelled });
   });
 
-  router.post("/issues/:issueId/workflow/manual-complete", validate(manualCompleteWorkflowIssueSchema), async (req, res) => {
+  router.post("/issues/:issueId/workflow/manual-complete", hermesOpsMutationGuard("workflow.manual-complete"), validate(manualCompleteWorkflowIssueSchema), async (req, res) => {
     const issueId = req.params.issueId as string;
     const svc = issueService(db);
     const existing = await svc.getById(issueId);
