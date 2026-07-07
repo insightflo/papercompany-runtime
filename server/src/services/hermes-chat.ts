@@ -1,5 +1,5 @@
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, agents, heartbeatRuns, hermesChatMessages, hermesChatSessions, issueComments } from "@paperclipai/db";
+import { activityLog, agentWakeupRequests, agents, heartbeatRuns, hermesChatMessages, hermesChatSessions } from "@paperclipai/db";
 import type {
   HermesChatMessage,
   HermesChatMessageStatus,
@@ -7,7 +7,7 @@ import type {
   HermesChatSessionDetail,
   HermesChatSessionStatus,
 } from "@paperclipai/shared";
-import { and, count, desc, eq, gte, isNotNull, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { agentService } from "./agents.js";
 
 const MAX_CHAT_RESPONSE_CHARS = 100_000;
@@ -172,12 +172,14 @@ export function applyHonestyCaveat(input: { body: string; claimedAction: boolean
 //   wakeup과 혼동되지 않는다(peer가 요구한 구분). 댓글은 run FK가 없어 authorAgentId+창 휴리스틱.
 export async function applyRunHonestyCaveat(
   db: Db,
-  run: { id: string; companyId: string; agentId: string; startedAt: Date | null; createdAt: Date },
+  run: { id: string },
   body: string,
 ): Promise<string> {
   const claimed = detectClaimedAction(body);
   if (!claimed) return body;
 
+  // proof 1: 이 run이 dispatch한 mission/issue/workflow executor wakeup.
+  //   Hermes 자기 chat wakeup은 target(missionId/issueId/workflowRunId)이 없고 runId도 null이라 자동 제외.
   const [wakeupRow] = await db
     .select({ n: count() })
     .from(agentWakeupRequests)
@@ -192,19 +194,21 @@ export async function applyRunHonestyCaveat(
       ),
     );
 
-  const since = run.startedAt ?? run.createdAt;
-  const [commentRow] = await db
+  // proof 2: 이 run이 만든 durable action을 activity_log.runId FK로 exact 증명.
+  //   [peer review fix] 이전 issue_comments(authorAgentId+창) 휴리스틱은 같은 agent의 다른-run 댓글이
+  //   false-positive proof가 되어 caveat를 잘못 빼는 hole이었음 → activity_log exact proof로 교체.
+  //   action: issue.comment_added(댓글 relay), mission.supervision.run(supervision 호출).
+  const [activityRow] = await db
     .select({ n: count() })
-    .from(issueComments)
+    .from(activityLog)
     .where(
       and(
-        eq(issueComments.companyId, run.companyId),
-        eq(issueComments.authorAgentId, run.agentId),
-        gte(issueComments.createdAt, since),
+        eq(activityLog.runId, run.id),
+        inArray(activityLog.action, ["issue.comment_added", "mission.supervision.run"]),
       ),
     );
 
-  const proofCount = Number(wakeupRow?.n ?? 0) + Number(commentRow?.n ?? 0);
+  const proofCount = Number(wakeupRow?.n ?? 0) + Number(activityRow?.n ?? 0);
   return applyHonestyCaveat({ body, claimedAction: claimed, proofCount });
 }
 
