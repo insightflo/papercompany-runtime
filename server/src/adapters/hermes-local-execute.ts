@@ -205,6 +205,36 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+// [P4] Hermes run kind를 explicit 데이터 필드로 산출(text parse 금지).
+//   paperclipHermesChat가 있으면 chat(source로 채널 구분), 없으면 timer/heartbeat monitor run.
+export function deriveHermesRunKind(paperclipHermesChat: unknown): "chat-sidebar" | "chat-telegram" | "monitor" {
+  const chat = asRecord(paperclipHermesChat);
+  if (!chat) return "monitor";
+  const source = typeof chat.source === "string" ? chat.source : null;
+  return source === "telegram" ? "chat-telegram" : "chat-sidebar";
+}
+
+// [P4] resultJson 산출을 pure helper로 분리(단위 테스트 가능).
+//   [주의] recoveryAdvice는 nested key ONLY — top-level decision 절대 금지(verdict reader 충돌, P2 invariant).
+export function buildHermesResultJson(input: {
+  result: string;
+  sessionId: string | null;
+  usage: unknown;
+  costUsd: number | null;
+  paperclipHermesChat: unknown;
+}): Record<string, unknown> {
+  const chat = asRecord(input.paperclipHermesChat);
+  const recoveryAdvice = chat?.recoveryAdvice;
+  return {
+    result: input.result,
+    session_id: input.sessionId,
+    usage: input.usage,
+    cost_usd: input.costUsd,
+    hermesRunKind: deriveHermesRunKind(input.paperclipHermesChat),
+    ...(recoveryAdvice ? { recoveryAdvice } : {}),
+  };
+}
+
 function isHermesOperationsLiaisonAgent(ctx: AdapterExecutionContext) {
   const agent = ctx.agent as AdapterExecutionContext["agent"] & {
     runtimeConfig?: unknown;
@@ -634,12 +664,13 @@ export async function executeHermesLocal(
     provider: provider || null,
     model,
   };
-  executionResult.resultJson = {
+  executionResult.resultJson = buildHermesResultJson({
     result: parsed.response || "",
-    session_id: parsed.sessionId || null,
+    sessionId: parsed.sessionId || null,
     usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
-  };
+    costUsd: parsed.costUsd ?? null,
+    paperclipHermesChat: ctx.context?.paperclipHermesChat,
+  });
   if (result.idleTimedOut)
     executionResult.errorMessage = `No process output for ${idleTimeoutSec}s`;
   const hasSuccessfulAnswer = result.exitCode === 0 && !result.timedOut && Boolean(parsed.response?.trim());

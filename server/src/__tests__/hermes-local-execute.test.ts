@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildHermesChatArgs,
+  buildHermesResultJson,
+  deriveHermesRunKind,
   formatHermesTimeoutLabel,
   HERMES_OPERATIONS_LIAISON_BRIEF,
   parseHermesOutput,
@@ -255,5 +257,70 @@ describe("hermes local execution config", () => {
     expect(parsed.response).toContain("tech-ai-news (7 steps → 5 steps):");
     expect(parsed.response).not.toContain("Good. The grep exit code");
     expect(parsed.sessionId).toBe("20260619_080911_55a9e8");
+  });
+});
+
+describe("hermes run-kind + resultJson recovery advice (P4)", () => {
+  it("deriveHermesRunKind: chat-sidebar / chat-telegram / monitor", () => {
+    expect(deriveHermesRunKind({ source: "paperclip_ui" })).toBe("chat-sidebar");
+    expect(deriveHermesRunKind({ source: "telegram" })).toBe("chat-telegram");
+    expect(deriveHermesRunKind(null)).toBe("monitor");
+    expect(deriveHermesRunKind(undefined)).toBe("monitor");
+    // chat context without source → sidebar default
+    expect(deriveHermesRunKind({})).toBe("chat-sidebar");
+  });
+
+  it("buildHermesResultJson: writes hermesRunKind + base fields, omits recoveryAdvice when absent", () => {
+    const json = buildHermesResultJson({
+      result: "answer",
+      sessionId: "sess-1",
+      usage: { input: 10 },
+      costUsd: 0.01,
+      paperclipHermesChat: { source: "telegram" },
+    });
+    expect(json.hermesRunKind).toBe("chat-telegram");
+    expect(json.result).toBe("answer");
+    expect(json.session_id).toBe("sess-1");
+    expect(json.cost_usd).toBe(0.01);
+    // [주의] advice 없으면 key 자체가 없어야(tailored resultJson).
+    expect(json.recoveryAdvice).toBeUndefined();
+  });
+
+  it("buildHermesResultJson: nests recoveryAdvice and NEVER adds top-level decision", () => {
+    const advice = {
+      missionId: "m1",
+      selectedIssueId: null,
+      decision: "producer_rework",
+      targetIssue: { id: "p1", identifier: "RES-1076", title: "x", role: "producer", assigneeAgentId: null },
+      targetAction: "rework",
+      leafCause: "missing source",
+      evidence: [],
+      operatorComment: "재작성 요청",
+      doNot: [],
+      missingEvidence: [],
+    };
+    const json = buildHermesResultJson({
+      result: "answer",
+      sessionId: null,
+      usage: null,
+      costUsd: null,
+      paperclipHermesChat: { source: "paperclip_ui", recoveryAdvice: advice },
+    });
+    // [P4 invariant — verdict reader 충돌 방지] nested ONLY, top-level decision 금지.
+    expect(json.recoveryAdvice).toEqual(advice);
+    expect(json).not.toHaveProperty("decision");
+    expect(json.hermesRunKind).toBe("chat-sidebar");
+  });
+
+  it("buildHermesResultJson: monitor run (no paperclipHermesChat)", () => {
+    const json = buildHermesResultJson({
+      result: "monitor sweep",
+      sessionId: null,
+      usage: null,
+      costUsd: null,
+      paperclipHermesChat: null,
+    });
+    expect(json.hermesRunKind).toBe("monitor");
+    expect(json.recoveryAdvice).toBeUndefined();
   });
 });
