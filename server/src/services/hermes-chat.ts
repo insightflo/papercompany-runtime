@@ -1,5 +1,5 @@
 import type { Db } from "@paperclipai/db";
-import { agents, heartbeatRuns, hermesChatMessages, hermesChatSessions } from "@paperclipai/db";
+import { agentWakeupRequests, agents, heartbeatRuns, hermesChatMessages, hermesChatSessions, issueComments } from "@paperclipai/db";
 import type {
   HermesChatMessage,
   HermesChatMessageStatus,
@@ -7,7 +7,7 @@ import type {
   HermesChatSessionDetail,
   HermesChatSessionStatus,
 } from "@paperclipai/shared";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, isNotNull, or, sql } from "drizzle-orm";
 import { agentService } from "./agents.js";
 
 const MAX_CHAT_RESPONSE_CHARS = 100_000;
@@ -141,6 +141,71 @@ export function responseTextFromRun(row: Pick<typeof heartbeatRuns.$inferSelect,
   return row.status === "succeeded"
     ? "Hermes run completed, but it did not return a text response."
     : `Hermes run ${row.status}.`;
+}
+
+// [P5 honesty guard] 응답이 durable side-effect(wakeup/comment/supervision)를 "했다/깨웠다/남겼다"고
+//   주장하는지 휴리스틱 검출. prompt-only가 아니라 서버 사이드 사후 검증의 입력으로 쓴다.
+//   거짓 "깨웠습니다" 재발 방지(peer 라이브 사례: claimed action + durable row 0).
+const ACTION_CLAIM_PATTERNS: RegExp[] = [
+  /깨웠|깨워\s*드렸|깨워\s*놓|깨워\s*달|재개\s*시켰|재실행\s*시켰|다시\s*(돌렸|실행\s*시켰)/,
+  /댓글\s*(을\s*)?남겼|남겨\s*뒀|요청\s*(을\s*)?(보냈|전송)|알림\s*(을\s*)?보냈|조치\s*(를\s*)?했|처리\s*했|완료\s*했/,
+  /woken|woke\s+(it|them|the|up)|sent\s+(a\s+)?(comment|wakeup|notification|request)|posted\s+(a\s+)?(comment|message)|dispatched\s+(a\s+)?(wakeup|run)|left\s+a\s+(comment|message)|notified\s+(the\s+)?(operator|owner|executor|agent)/i,
+];
+export function detectClaimedAction(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return ACTION_CLAIM_PATTERNS.some((re) => re.test(text));
+}
+
+// [P5 honesty guard] claim이 있는데 proof가 0이면 caveat 부착. 순수 함수(단위 테스트용).
+//   proofCount는 이 run이 만든 durable row 개수(wakeup + comment; 호출측에서 산출).
+export function applyHonestyCaveat(input: { body: string; claimedAction: boolean; proofCount: number }): string {
+  if (!input.claimedAction || input.proofCount > 0) return input.body;
+  const caveat =
+    "\n\n---\n[서버 검증] 위 '했다/깨웠다/남겼다' 조치가 이번 run의 durable 기록(mission/issue/workflow wakeup 또는 댓글)으로 확인되지 않았습니다. 진단·지시만 수행된 것으로 보세요. 실제 실행 여부는 해당 issue/mission의 activity나 wakeup ledger에서 직접 확인하세요.";
+  return `${input.body}${caveat}`;
+}
+
+// [P5] 이 run이 만든 durable side-effect(mission/issue/workflow executor wakeup + 댓글) 개수를 세서
+//   claim이 있는데 proof 0면 caveat 부착.
+//   [주의] Hermes 자기 chat wakeup은 target(missionId/issueId/workflowRunId)이 없고 runId도 null
+//   (run을 spawn하는 쪽이므로) → eq(runId, run.id) + target-set 필터로 자동 제외 → mission executor
+//   wakeup과 혼동되지 않는다(peer가 요구한 구분). 댓글은 run FK가 없어 authorAgentId+창 휴리스틱.
+async function applyRunHonestyCaveat(
+  db: Db,
+  run: { id: string; companyId: string; agentId: string; startedAt: Date | null; createdAt: Date },
+  body: string,
+): Promise<string> {
+  const claimed = detectClaimedAction(body);
+  if (!claimed) return body;
+
+  const [wakeupRow] = await db
+    .select({ n: count() })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.runId, run.id),
+        or(
+          isNotNull(agentWakeupRequests.missionId),
+          isNotNull(agentWakeupRequests.issueId),
+          isNotNull(agentWakeupRequests.workflowRunId),
+        ),
+      ),
+    );
+
+  const since = run.startedAt ?? run.createdAt;
+  const [commentRow] = await db
+    .select({ n: count() })
+    .from(issueComments)
+    .where(
+      and(
+        eq(issueComments.companyId, run.companyId),
+        eq(issueComments.authorAgentId, run.agentId),
+        gte(issueComments.createdAt, since),
+      ),
+    );
+
+  const proofCount = Number(wakeupRow?.n ?? 0) + Number(commentRow?.n ?? 0);
+  return applyHonestyCaveat({ body, claimedAction: claimed, proofCount });
 }
 
 export function hermesChatService(db: Db) {
@@ -445,10 +510,13 @@ export function hermesChatService(db: Db) {
       .select({
         id: heartbeatRuns.id,
         companyId: heartbeatRuns.companyId,
+        agentId: heartbeatRuns.agentId,
         status: heartbeatRuns.status,
         resultJson: heartbeatRuns.resultJson,
         error: heartbeatRuns.error,
         contextSnapshot: heartbeatRuns.contextSnapshot,
+        startedAt: heartbeatRuns.startedAt,
+        createdAt: heartbeatRuns.createdAt,
       })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
@@ -464,10 +532,13 @@ export function hermesChatService(db: Db) {
     if (!assistantMessageId) return null;
 
     const terminalStatus = run.status as HermesChatMessageStatus;
+    const baseBody = responseTextFromRun(run);
+    // [P5] honesty guard — claimed action을 이 run의 durable proof(wakeup/comment)와 대조. 증명 없으면 caveat.
+    const body = await applyRunHonestyCaveat(db, run, baseBody);
     return markAssistantMessage(assistantMessageId, {
       runId,
       status: terminalStatus,
-      body: responseTextFromRun(run),
+      body,
     });
   }
 
