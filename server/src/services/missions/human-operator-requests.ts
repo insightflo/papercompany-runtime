@@ -5,6 +5,7 @@ import type { GovernanceThreadEvent } from "./governance-thread.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION, type HumanOperatorRequestPayload } from "./human-operator-alert-events.js";
 
 const DEFAULT_REQUEST_LIMIT = 50;
+const MAX_CANDIDATE_REQUESTS = 250;
 const OPEN_MISSION_STATUSES = ["planning", "active", "paused"] as const;
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
 
@@ -40,6 +41,40 @@ function compactSummary(payload: HumanOperatorRequestPayload): string {
   ].filter((value): value is string => Boolean(value?.trim())).join(": ").slice(0, 280);
 }
 
+function isOpenIssueStatus(status: string): boolean {
+  return (OPEN_ISSUE_STATUSES as readonly string[]).includes(status);
+}
+
+type HumanOperatorActivityRow = {
+  activityId: string;
+  activityDetails: unknown;
+  activityCreatedAt: Date;
+  issueId: string;
+  issueTitle: string;
+  issueStatus: string;
+  missionId: string;
+  missionTitle: string;
+  missionStatus: string;
+};
+
+async function loadSourceIssueRows(
+  db: Db,
+  companyId: string,
+  sourceIssueIds: readonly string[],
+): Promise<Map<string, { id: string; title: string; status: string; missionId: string | null }>> {
+  if (sourceIssueIds.length === 0) return new Map();
+  const rows = await db
+    .select({
+      id: issues.id,
+      title: issues.title,
+      status: issues.status,
+      missionId: issues.missionId,
+    })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, [...sourceIssueIds])));
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
 export async function listCompanyHumanOperatorRequests(
   db: Db,
   input: {
@@ -48,7 +83,8 @@ export async function listCompanyHumanOperatorRequests(
   },
 ): Promise<HumanOperatorRequest[]> {
   const requestLimit = input.limit ?? DEFAULT_REQUEST_LIMIT;
-  const rows = await db
+  const candidateLimit = Math.min(requestLimit * 5, MAX_CANDIDATE_REQUESTS);
+  const rows: HumanOperatorActivityRow[] = await db
     .select({
       activityId: activityLog.id,
       activityDetails: activityLog.details,
@@ -68,21 +104,39 @@ export async function listCompanyHumanOperatorRequests(
       eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION),
       eq(activityLog.entityType, "issue"),
       inArray(missions.status, [...OPEN_MISSION_STATUSES]),
-      inArray(issues.status, [...OPEN_ISSUE_STATUSES]),
     ))
     .orderBy(desc(activityLog.createdAt))
-    .limit(requestLimit);
+    .limit(candidateLimit);
+
+  const parsed = rows
+    .map((row) => ({ row, payload: asPayload(row.activityDetails) }))
+    .filter((entry): entry is { row: HumanOperatorActivityRow; payload: HumanOperatorRequestPayload } =>
+      Boolean(entry.payload),
+    );
+
+  const sourceIssueIds = Array.from(new Set(
+    parsed.map((entry) => entry.payload.sourceIssueId ?? "").filter((value) => value.length > 0),
+  ));
+  const sourceIssuesById = await loadSourceIssueRows(db, input.companyId, sourceIssueIds);
 
   const requests: HumanOperatorRequest[] = [];
-  for (const row of rows) {
-    const payload = asPayload(row.activityDetails);
-    if (!payload) continue;
+  for (const { row, payload } of parsed) {
+    const ownerOpen = isOpenIssueStatus(row.issueStatus);
+    const sourceRow = payload.sourceIssueId ? sourceIssuesById.get(payload.sourceIssueId) ?? null : null;
+    const sourceOpen = Boolean(
+      sourceRow
+        && sourceRow.missionId === row.missionId
+        && isOpenIssueStatus(sourceRow.status),
+    );
+    if (!ownerOpen && !sourceOpen) continue;
+
+    const targetIssueId = sourceOpen && sourceRow ? sourceRow.id : row.issueId;
     const title = payload.decision === "request_input" ? "Human/operator input requested" : "Mission blocker escalated";
     const timestamp = row.activityCreatedAt.toISOString();
     const event: GovernanceThreadEvent = {
       id: `owner_diagnosis:activity_log:${row.activityId}`,
       companyId: input.companyId,
-      scope: { missionId: row.missionId, issueId: row.issueId },
+      scope: { missionId: row.missionId, issueId: targetIssueId },
       sourceRef: { type: "activity_log", id: row.activityId, table: "activity_log" },
       eventType: "owner_diagnosis",
       title,
@@ -91,7 +145,7 @@ export async function listCompanyHumanOperatorRequests(
       severity: payload.decision === "escalate" ? "blocked" : "attention",
       actor: { type: payload.actorType, ...(payload.actorId ? { id: payload.actorId } : {}) },
       evidenceRefs: [{ type: "comment", ref: payload.commentId, label: "mission owner decision" }],
-      suggestedResumeTarget: { action: "request_human_input", issueId: row.issueId },
+      suggestedResumeTarget: { action: "request_human_input", issueId: targetIssueId },
       rawAvailable: true,
     };
     requests.push({
@@ -100,13 +154,14 @@ export async function listCompanyHumanOperatorRequests(
       missionId: row.missionId,
       missionTitle: row.missionTitle,
       missionStatus: row.missionStatus,
-      issueId: row.issueId,
+      issueId: targetIssueId,
       title,
       summary: event.summary,
       timestamp,
       severity: event.severity,
       event,
     });
+    if (requests.length >= requestLimit) break;
   }
 
   return requests;
