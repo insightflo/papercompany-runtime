@@ -155,6 +155,16 @@ describe("shouldResetTaskSessionForWake", () => {
     ).toBe(true);
   });
 
+  it("resets session context on workflow QA rework runs", () => {
+    expect(
+      shouldResetTaskSessionForWake({
+        paperclipWorkflowReworkContract: {
+          kind: "workflow_qa_rework",
+        },
+      }),
+    ).toBe(true);
+  });
+
   it("does not reset session context on mention wake comment", () => {
     expect(
       shouldResetTaskSessionForWake({
