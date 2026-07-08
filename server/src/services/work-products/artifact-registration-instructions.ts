@@ -1,3 +1,5 @@
+import { renderEvidenceExplanationWritingLines } from "../missions/mission-quality-contract.js";
+
 const ARTIFACT_MARKER_PLACEHOLDER = "[ARTIFACT]: <absolute path>";
 
 export function buildArtifactOutputDirectoryLines(input: {
@@ -7,6 +9,8 @@ export function buildArtifactOutputDirectoryLines(input: {
     "Deliverable output (use exactly this directory):",
     `- ${input.outputDir}`,
     "- Write or reuse deliverable file(s) only in that directory. Do not look under other produced_work paths, run dates, or sibling mission folders.",
+    "",
+    ...renderEvidenceExplanationWritingLines(),
   ];
 }
 

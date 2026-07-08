@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildVerificationBeforeCompletionCriteria,
   extractMissionQualityContract,
+  renderEvidenceExplanationQaLines,
+  renderEvidenceExplanationWritingLines,
   renderMissionQualityContractSection,
 } from "../services/missions/mission-quality-contract.js";
 
@@ -58,6 +60,23 @@ describe("mission-quality-contract", () => {
     expect(lines.join("\n")).toContain("purposeFitness");
   });
 
+  it("renders producer writing guidance for explaining evidence instead of pointing at source containers", () => {
+    const lines = renderEvidenceExplanationWritingLines().join("\n");
+    expect(lines).toContain("Evidence explanation quality");
+    expect(lines).toContain("observed facts");
+    expect(lines).toContain("reasoning");
+    expect(lines).toContain("source ledger");
+    expect(lines).toContain("evidence.json");
+  });
+
+  it("renders QA rejection criteria for source-pointer prose", () => {
+    const lines = renderEvidenceExplanationQaLines().join("\n");
+    expect(lines).toContain("Evidence explanation quality");
+    expect(lines).toContain("REQUEST_CHANGES");
+    expect(lines).toContain("only points to source containers");
+    expect(lines).toContain("observed facts");
+  });
+
   it("renders verification-before-completion criteria as a claim/evidence gate", () => {
     const criteria = buildVerificationBeforeCompletionCriteria();
     expect(criteria).toContain("Verification Before Completion");
@@ -66,5 +85,6 @@ describe("mission-quality-contract", () => {
     expect(criteria).toContain("Do not infer a provider");
     expect(criteria).toContain("notVerified");
     expect(criteria).toContain("finalVerdict");
+    expect(criteria).toContain("Evidence explanation quality");
   });
 });

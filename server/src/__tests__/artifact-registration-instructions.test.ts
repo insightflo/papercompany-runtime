@@ -36,12 +36,15 @@ describe("artifact registration instructions", () => {
   it("pins producer output to the assigned directory", () => {
     const outputDir = "/srv/papercompany/projects/research-company/produced_work/missions/m1/runs/r1/steps/s1";
     const lines = buildArtifactOutputDirectoryLines({ outputDir });
+    const text = lines.join("\n");
 
-    expect(lines).toEqual([
+    expect(lines.slice(0, 3)).toEqual([
       "Deliverable output (use exactly this directory):",
       `- ${outputDir}`,
       "- Write or reuse deliverable file(s) only in that directory. Do not look under other produced_work paths, run dates, or sibling mission folders.",
     ]);
+    expect(text).toContain("Evidence explanation quality");
+    expect(text).toContain("observed facts");
   });
 
   it("includes the shared contract in missing-registration gate comments", () => {

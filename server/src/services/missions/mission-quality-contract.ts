@@ -138,6 +138,32 @@ export function renderMissionQualityScoringLines(): string[] {
   ];
 }
 
+export const EVIDENCE_EXPLANATION_QUALITY_MARKER = "## Evidence explanation quality";
+
+export function renderEvidenceExplanationWritingLines(): string[] {
+  return [
+    EVIDENCE_EXPLANATION_QUALITY_MARKER,
+    "",
+    "Use source material as explained evidence, not as a pointer to a source container.",
+    "- For each important conclusion in a narrative/report/manual/analysis artifact, write the observed facts from the source, the reasoning that connects those facts, and the resulting conclusion.",
+    "- Do not use internal artifact names as user-facing evidence, such as `source ledger`, `comparison artifact`, `evidence.json`, `upstream workProduct`, or `the dependency says`. Those names may appear in source lists only after the evidence has been explained in the body.",
+    "- If the evidence is weak, indirect, or only partially relevant, state that limitation instead of strengthening the conclusion.",
+    "",
+  ];
+}
+
+export function renderEvidenceExplanationQaLines(): string[] {
+  return [
+    EVIDENCE_EXPLANATION_QUALITY_MARKER,
+    "",
+    "For narrative/report/manual/analysis artifacts, do not PASS when the artifact only points to source containers instead of explaining the evidence.",
+    "- Check that each important conclusion explains the observed facts from the source and the reasoning that connects those facts to the conclusion.",
+    "- REQUEST_CHANGES when user-facing prose says only that a `source ledger`, `comparison artifact`, `evidence.json`, dependency workProduct, or named source says the conclusion without explaining the underlying observed facts.",
+    "- Internal source names are acceptable in an appendix or source list only after the body explains the evidence itself.",
+    "",
+  ];
+}
+
 export const VERIFICATION_BEFORE_COMPLETION_MARKER = "## Verification Before Completion";
 
 export function renderVerificationBeforeCompletionGateLines(): string[] {
@@ -153,6 +179,7 @@ export function renderVerificationBeforeCompletionGateLines(): string[] {
     "- If the proof surface is missing or ambiguous, REQUEST_CHANGES and state which claim cannot be verified. Do not infer a provider or substitute a nearby surface.",
     "- PASS only when every required claim has fresh supporting evidence. Otherwise REQUEST_CHANGES with the exact missing or failed claim.",
     "",
+    ...renderEvidenceExplanationQaLines(),
     "Verdict evidence shape:",
     "- verified: concrete claims with evidence and source/probe used.",
     "- notVerified: required claims that failed, were stale, or had only adjacent evidence.",

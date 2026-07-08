@@ -1513,7 +1513,14 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.name, "PAQO WBS: Validate PAQO workflow pivot"));
     expect(paqoDefinitions).toHaveLength(1);
-    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[]; agentId: string; graphWorkProductRequired?: boolean }>;
+    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{
+      id: string;
+      name: string;
+      dependencies: string[];
+      agentId: string;
+      description?: string;
+      graphWorkProductRequired?: boolean;
+    }>;
     expect(paqoSteps.map((step) => step.name)).toEqual([
       "[ACTION] Research current workflow surfaces",
       "[QA] Verify mission result",
@@ -1564,6 +1571,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(actionIssue?.description).toContain("Deliverable output (use exactly this directory):");
     expect(actionIssue?.description).toContain("WorkProduct registration contract:");
     expect(actionIssue?.description).toContain("[ARTIFACT]: <absolute path>");
+    expect(actionIssue?.description).toContain("Evidence explanation quality");
+    expect(actionIssue?.description).toContain("observed facts");
+    expect(paqoSteps[1]!.description).toContain("Evidence explanation quality");
+    expect(paqoSteps[1]!.description).toContain("REQUEST_CHANGES");
 
     const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     expect(activePlan?.refs).toMatchObject({
