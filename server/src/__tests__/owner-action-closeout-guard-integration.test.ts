@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import express from "express";
+import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agentWakeupRequests, companies, createDb, issueComments, issues } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
@@ -10,6 +12,8 @@ import {
 import { issueService } from "../services/issues.js";
 import { hermesChatService } from "../services/hermes-chat.js";
 import { completeUnblockActionWithSourceHandback } from "../services/missions/owner-action-completion.js";
+import { issueRoutes } from "../routes/issues.js";
+import { errorHandler } from "../middleware/index.js";
 
 // [목적] mission_main_executor_unblock done closeout guard가 GAZ-315 silent success를 막는지 검증.
 //   source(originId)가 blocked이고 wakeup도 없으면 done 거부; source 회복 또는 wakeup dispatch 시 허용.
@@ -136,5 +140,52 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
       .from(issueComments)
       .where(eq(issueComments.issueId, unblock.id));
     expect(comments.some((c) => c.body?.includes("handback") && c.body?.includes(result.wakeupRequestId!.slice(0, 8)))).toBe(true);
+  });
+
+  // [Phase 2 route] POST /issues/:id/owner-action/complete-with-handback
+  function buildApp() {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", userId: "test-board", isInstanceAdmin: true, source: "local_implicit" };
+      next();
+    });
+    app.use("/api", issueRoutes(db, {} as never));
+    app.use(errorHandler);
+    return app;
+  }
+
+  it("route happy path: creates source wakeup, completes, returns response fields", async () => {
+    const [source] = await db
+      .insert(issues)
+      .values({ companyId, title: "source for route", status: "blocked", originKind: "workflow_execution", assigneeAgentId: agentId })
+      .returning({ id: issues.id });
+    const [unblock] = await db
+      .insert(issues)
+      .values({ companyId, title: "unblock for route", status: "todo", originKind: "mission_main_executor_unblock", originId: source.id })
+      .returning({ id: issues.id });
+
+    const app = buildApp();
+    const res = await request(app).post(`/api/issues/${unblock.id}/owner-action/complete-with-handback`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("done");
+    expect(res.body.sourceIssueId).toBe(source.id);
+    expect(res.body.wakeupRequestId).toBeTruthy();
+
+    // [peer assert] DB wakeup row targets source.
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, res.body.wakeupRequestId)).limit(1);
+    expect(wake?.issueId).toBe(source.id);
+  });
+
+  it("route rejects non-owner-action issue with 422", async () => {
+    const [leaf] = await db
+      .insert(issues)
+      .values({ companyId, title: "manual leaf for route", status: "todo", originKind: "manual" })
+      .returning({ id: issues.id });
+
+    const app = buildApp();
+    const res = await request(app).post(`/api/issues/${leaf.id}/owner-action/complete-with-handback`);
+    expect(res.status).toBe(422);
   });
 });

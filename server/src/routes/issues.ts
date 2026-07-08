@@ -53,6 +53,7 @@ import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } 
 import { recordWorkflowValidationVerdictFromText } from "../services/workflow/validation-verdict-ledger.js";
 import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
 import { handleDelegatedArtifactHandback } from "../services/delegated-artifact-handback.js";
+import { completeUnblockActionWithSourceHandback } from "../services/missions/owner-action-completion.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -2075,6 +2076,57 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
 
     res.json({ ok: true });
+  });
+
+  /**
+   * POST /issues/:id/owner-action/complete-with-handback
+   *
+   * Owner-action(mission_main_executor_unblock) 이슈를 source wakeup queue materialization과 함께 완료.
+   * 일반 PATCH done 대신 이 route를 사용하면 source(originId) 향 wakeup이 생성되고 guard가 통과된다.
+   */
+  router.post("/issues/:id/owner-action/complete-with-handback", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (issue.originKind !== "mission_main_executor_unblock") {
+      res.status(422).json({ error: "This route is only for mission_main_executor_unblock issues" });
+      return;
+    }
+
+    const result = await completeUnblockActionWithSourceHandback(db, {
+      unblockIssueId: id,
+      companyId: issue.companyId,
+      actor: { agentId: req.actor.agentId ?? null, userId: req.actor.userId ?? null },
+    });
+
+    const updated = await svc.getById(id);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.owner_action_completed_with_handback",
+      entityType: "issue",
+      entityId: id,
+      details: {
+        sourceIssueId: issue.originId,
+        wakeupRequestId: result.wakeupRequestId,
+        identifier: issue.identifier,
+      },
+    });
+
+    res.json({
+      ownerActionIssueId: id,
+      status: updated?.status ?? null,
+      sourceIssueId: issue.originId,
+      wakeupRequestId: result.wakeupRequestId,
+    });
   });
 
   return router;
