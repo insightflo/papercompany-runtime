@@ -10,6 +10,7 @@ import {
   activityLog,
   agents,
   heartbeatRuns,
+  issueComments,
   companies,
   createDb,
   issueWorkProducts,
@@ -69,6 +70,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     await db.delete(activityLog);
     await db.delete(workflowTransitionEvents);
     await db.delete(issueWorkProducts);
+    await db.delete(issueComments);
     await db.delete(heartbeatRuns);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
@@ -180,6 +182,40 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     await db.update(issues).set({ assigneeAgentId: agentId, checkoutRunId: runId }).where(eq(issues.id, issue.id));
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));
     return { issue: updatedIssue, agentId, runId };
+  }
+
+  async function seedMissionOwnerUnblockIssue(sourceIssue: typeof issues.$inferSelect) {
+    if (!sourceIssue.missionId) throw new Error("source issue must belong to a mission");
+    const [mission] = await db.select().from(missions).where(eq(missions.id, sourceIssue.missionId));
+    const ownerAgentId = mission?.ownerAgentId;
+    if (!ownerAgentId) throw new Error("mission owner agent is required");
+    const ownerActionId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(issues).values({
+      id: ownerActionId,
+      companyId: sourceIssue.companyId,
+      missionId: sourceIssue.missionId,
+      title: `[Unblock] ${sourceIssue.identifier}: ${sourceIssue.title}`,
+      status: "in_progress",
+      originKind: "mission_main_executor_unblock",
+      originId: sourceIssue.id,
+      assigneeAgentId: ownerAgentId,
+      startedAt: new Date("2026-07-06T00:00:03.000Z"),
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: sourceIssue.companyId,
+      agentId: ownerAgentId,
+      issueId: ownerActionId,
+      status: "running",
+      startedAt: new Date("2026-07-06T00:00:04.000Z"),
+    });
+    await db
+      .update(issues)
+      .set({ checkoutRunId: runId, executionRunId: runId })
+      .where(eq(issues.id, ownerActionId));
+    const [ownerAction] = await db.select().from(issues).where(eq(issues.id, ownerActionId));
+    return { ownerAction, ownerAgentId, runId };
   }
 
   const actor: WorkflowApiActor = {
@@ -382,6 +418,102 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       createdByRunId: runId,
     });
     const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, issue.id));
-    expect(rows.at(-1)?.details).toMatchObject({ type: "preview_url", url: publicUrl });
+    expect(rows[rows.length - 1]?.details).toMatchObject({ type: "preview_url", url: publicUrl });
+  });
+
+  it("allows a checked-out mission owner unblock run to register recovered source artifacts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-source-root-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-recovered-"));
+    tempDirs.add(root);
+    tempDirs.add(outside);
+    const sourceIssue = await seedWorkflowIssue({
+      stepId: "materialize-html-report",
+      title: "Materialize dashboard HTML",
+      workProductRoot: root,
+    });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssue.id));
+    const artifactPath = path.join(outside, "KR_Market_Report_2026-07-08.html");
+    await writeFile(artifactPath, "<html><title>KR Market Report</title></html>\n", "utf8");
+    const { ownerAction, ownerAgentId, runId } = await seedMissionOwnerUnblockIssue(sourceIssue);
+
+    const response = await request(createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: sourceIssue.companyId,
+      agentId: ownerAgentId,
+      runId,
+    }))
+      .post(`/api/issues/${sourceIssue.id}/workflow/artifacts`)
+      .send({ path: artifactPath, title: "KR_Market_Report_2026-07-08.html", type: "document" });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(response.body).toMatchObject({
+      issueId: sourceIssue.id,
+      provider: "local_file",
+      title: "KR_Market_Report_2026-07-08.html",
+      createdByRunId: runId,
+      metadata: {
+        path: artifactPath,
+        delegatedWorkflowApi: "mission_owner_unblock_source",
+        delegatedFromIssueId: ownerAction.id,
+      },
+    });
+  });
+
+  it("allows a checked-out mission owner unblock run to complete the source workflow issue", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-complete-root-"));
+    tempDirs.add(root);
+    const sourceIssue = await seedWorkflowIssue({
+      stepId: "materialize-html-report",
+      title: "Materialize dashboard HTML",
+      workProductRoot: root,
+    });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssue.id));
+    const { ownerAgentId, runId } = await seedMissionOwnerUnblockIssue(sourceIssue);
+
+    const response = await request(createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: sourceIssue.companyId,
+      agentId: ownerAgentId,
+      runId,
+    }))
+      .post(`/api/issues/${sourceIssue.id}/workflow/complete`)
+      .send({ comment: "Recovered dashboard files and propagated completion from mission-owner unblock." });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const [updatedSourceIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+    expect(updatedSourceIssue).toMatchObject({ id: sourceIssue.id, status: "done" });
+    const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.issueId, sourceIssue.id));
+    expect(step?.status).toBe("completed");
+    const [ownerRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(ownerRun?.status).toBe("running");
+  });
+
+  it("does not allow mission owner unblock delegation to submit workflow verdicts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-verdict-root-"));
+    tempDirs.add(root);
+    const sourceIssue = await seedWorkflowIssue({
+      stepId: "qa-dashboard-html",
+      stepType: "qa",
+      title: "QA dashboard HTML",
+      workProductRoot: root,
+    });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssue.id));
+    const { ownerAgentId, runId } = await seedMissionOwnerUnblockIssue(sourceIssue);
+
+    const response = await request(createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: sourceIssue.companyId,
+      agentId: ownerAgentId,
+      runId,
+    }))
+      .post(`/api/issues/${sourceIssue.id}/workflow/verdict`)
+      .send({ verdict: "pass", reason: "Owner action cannot cast the QA verdict." });
+
+    expect(response.status).toBe(409);
+    const events = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.issueId, sourceIssue.id));
+    expect(events).toHaveLength(0);
   });
 });

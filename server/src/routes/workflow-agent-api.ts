@@ -1,5 +1,7 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
+import { heartbeatRuns, issues } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import {
   workflowArtifactRegisterSchema,
   workflowIssueCompleteSchema,
@@ -20,6 +22,8 @@ import {
   completeWorkflowIssue,
   registerWorkflowArtifact,
   submitWorkflowVerdict,
+  type WorkflowApiActor,
+  type WorkflowApiDelegation,
 } from "../services/workflow/agent-api.js";
 
 function routeParam(value: string | string[] | undefined, name: string): string {
@@ -33,20 +37,78 @@ async function loadIssue(db: Db, issueId: string) {
   return issue;
 }
 
-async function authorizeWorkflowApi(req: Request, db: Db, issue: Awaited<ReturnType<typeof loadIssue>>) {
+async function resolveMissionOwnerUnblockDelegation(input: {
+  readonly db: Db;
+  readonly targetIssue: Awaited<ReturnType<typeof loadIssue>>;
+  readonly actor: WorkflowApiActor;
+}): Promise<WorkflowApiDelegation | null> {
+  if (!input.actor.agentId || !input.actor.runId || !input.targetIssue.missionId) return null;
+  const run = await input.db
+    .select({
+      issueId: heartbeatRuns.issueId,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+    })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, input.actor.runId))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (
+    !run?.issueId ||
+    run.companyId !== input.targetIssue.companyId ||
+    run.agentId !== input.actor.agentId
+  ) {
+    return null;
+  }
+
+  const ownerAction = await input.db
+    .select({
+      id: issues.id,
+      identifier: issues.identifier,
+    })
+    .from(issues)
+    .where(and(
+      eq(issues.id, run.issueId),
+      eq(issues.companyId, input.targetIssue.companyId),
+      eq(issues.missionId, input.targetIssue.missionId),
+      eq(issues.originKind, "mission_main_executor_unblock"),
+      eq(issues.originId, input.targetIssue.id),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!ownerAction) return null;
+
+  await issueService(input.db).assertCheckoutOwner(ownerAction.id, input.actor.agentId, input.actor.runId);
+  return {
+    kind: "mission_owner_unblock_source",
+    issueId: ownerAction.id,
+    identifier: ownerAction.identifier,
+  };
+}
+
+async function authorizeWorkflowApi(
+  req: Request,
+  db: Db,
+  issue: Awaited<ReturnType<typeof loadIssue>>,
+  options?: { readonly allowMissionOwnerUnblockDelegation?: boolean },
+) {
   assertCompanyAccess(req, issue.companyId);
   if (issue.originKind !== "workflow_execution") {
     throw conflict("Workflow API can only be used for workflow execution issues");
   }
   const actor = getActorInfo(req);
-  if (req.actor.type !== "agent") return actor;
+  if (req.actor.type !== "agent") return { actor, delegation: null };
   if (!actor.agentId) throw forbidden("Agent authentication required");
   if (!actor.runId) throw unauthorized("Agent run id required");
-  if (issue.status !== "in_progress" || issue.assigneeAgentId !== actor.agentId) {
-    throw conflict("Workflow API requires a checked-out in_progress issue assigned to this agent");
+  if (issue.status === "in_progress" && issue.assigneeAgentId === actor.agentId) {
+    await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
+    return { actor, delegation: null };
   }
-  await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
-  return actor;
+  if (options?.allowMissionOwnerUnblockDelegation) {
+    const delegation = await resolveMissionOwnerUnblockDelegation({ db, targetIssue: issue, actor });
+    if (delegation) return { actor, delegation };
+  }
+  throw conflict("Workflow API requires either the checked-out workflow issue run or a checked-out mission-owner unblock issue whose originId is this workflow issue");
 }
 
 export function workflowAgentApiRoutes(db: Db) {
@@ -54,9 +116,9 @@ export function workflowAgentApiRoutes(db: Db) {
 
   router.post("/issues/:id/workflow/artifacts", hermesOpsMutationGuard("workflow.artifacts.register"), validate(workflowArtifactRegisterSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
-    const actor = await authorizeWorkflowApi(req, db, issue);
+    const { actor, delegation } = await authorizeWorkflowApi(req, db, issue, { allowMissionOwnerUnblockDelegation: true });
     const data: WorkflowArtifactRegister = req.body;
-    const product = await registerWorkflowArtifact({ db, issue, actor, data });
+    const product = await registerWorkflowArtifact({ db, issue, actor, data, delegation });
     await logActivity(db, {
       companyId: issue.companyId,
       actorType: actor.actorType,
@@ -79,7 +141,7 @@ export function workflowAgentApiRoutes(db: Db) {
 
   router.post("/issues/:id/workflow/verdict", hermesOpsMutationGuard("workflow.verdict.submit"), validate(workflowVerdictSubmitSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
-    const actor = await authorizeWorkflowApi(req, db, issue);
+    const { actor } = await authorizeWorkflowApi(req, db, issue);
     const data: WorkflowVerdictSubmit = req.body;
     const verdict = await submitWorkflowVerdict({ db, issue, actor, data });
     await logActivity(db, {
@@ -104,14 +166,14 @@ export function workflowAgentApiRoutes(db: Db) {
 
   router.post("/issues/:id/workflow/complete", hermesOpsMutationGuard("workflow.complete"), validate(workflowIssueCompleteSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
-    const actor = await authorizeWorkflowApi(req, db, issue);
+    const { actor, delegation } = await authorizeWorkflowApi(req, db, issue, { allowMissionOwnerUnblockDelegation: true });
     const data: WorkflowIssueComplete = req.body;
     const updated = await completeWorkflowIssue({ db, issue, actor, data });
     await heartbeatService(db).finalizeLinkedRunsForIssueStatus({
       issueId: updated.id,
       companyId: updated.companyId,
       status: "done",
-      linkedRunIds: [issue.checkoutRunId, issue.executionRunId, actor.runId],
+      linkedRunIds: delegation ? [issue.checkoutRunId, issue.executionRunId] : [issue.checkoutRunId, issue.executionRunId, actor.runId],
     });
     if (actor.runId) {
       await heartbeatService(db).reportRunActivity(actor.runId)

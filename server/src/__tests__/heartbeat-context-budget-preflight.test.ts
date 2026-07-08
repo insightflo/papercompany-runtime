@@ -7072,6 +7072,17 @@ describe("classifyHeartbeatRunFailure — guardrail precedence over auth", () =>
     expect(result.reasonCode).toBe("STEP_INPUT_MANIFEST_GUARDRAIL");
   });
 
+  it("classifies a Step Input Manifest broad-scan block as command, not quota, when stdout contains quota-like text", () => {
+    const result = classifyHeartbeatRunFailure({
+      status: "failed",
+      errorMessage: 'Step Input Manifest blocked runtime broad scan command: "find ."',
+      stdoutExcerpt: "Provider quota or rate-limit failure detected from run output. HTTP 429 capacity exceeded.",
+      errorCode: null,
+    });
+    expect(result.category).toBe("command");
+    expect(result.reasonCode).toBe("STEP_INPUT_MANIFEST_GUARDRAIL");
+  });
+
   it("still classifies a real auth failure (stderr 401, no guardrail) as auth", () => {
     const result = classifyHeartbeatRunFailure({
       status: "failed",

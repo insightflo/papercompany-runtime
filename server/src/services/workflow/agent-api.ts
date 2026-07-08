@@ -28,6 +28,12 @@ export type WorkflowApiActor = {
   readonly runId: string | null;
 };
 
+export type WorkflowApiDelegation = {
+  readonly kind: "mission_owner_unblock_source";
+  readonly issueId: string;
+  readonly identifier: string | null;
+};
+
 type WorkflowPreviewUrlRegister = {
   readonly type: "preview_url";
   readonly url: string;
@@ -77,10 +83,20 @@ function previewUrlTitle(input: WorkflowPreviewUrlRegister, url: URL) {
   return input.title?.trim() || path.basename(url.pathname) || url.hostname;
 }
 
-function previewUrlMetadata(input: WorkflowPreviewUrlRegister, runId: string | null) {
+function delegationMetadata(delegation: WorkflowApiDelegation | null | undefined) {
+  if (!delegation) return {};
+  return {
+    delegatedWorkflowApi: delegation.kind,
+    delegatedFromIssueId: delegation.issueId,
+    delegatedFromIssueIdentifier: delegation.identifier,
+  };
+}
+
+function previewUrlMetadata(input: WorkflowPreviewUrlRegister, runId: string | null, delegation?: WorkflowApiDelegation | null) {
   return {
     registeredVia: "workflow_api",
     registeredByRunId: runId,
+    ...delegationMetadata(delegation),
     deliveryReadback: { required: true, source: "workflow_preview_url" },
     ...(input.expectedTitle ? { expectedTitle: input.expectedTitle } : {}),
     ...(input.contentMarker ? { contentMarker: input.contentMarker } : {}),
@@ -133,7 +149,9 @@ async function assertWorkflowArtifactPath(input: {
   readonly db: Db;
   readonly issue: WorkflowApiIssue;
   readonly artifactPath: string;
+  readonly delegation?: WorkflowApiDelegation | null;
 }) {
+  if (input.delegation?.kind === "mission_owner_unblock_source") return;
   const paths = await resolveMissionWorkProductPaths(input.db, {
     companyId: input.issue.companyId,
     projectId: input.issue.projectId,
@@ -150,6 +168,7 @@ export async function registerWorkflowArtifact(input: {
   readonly issue: WorkflowApiIssue;
   readonly actor: WorkflowApiActor;
   readonly data: WorkflowArtifactRegister;
+  readonly delegation?: WorkflowApiDelegation | null;
 }) {
   if (isPreviewUrlRegister(input.data)) {
     const url = parsePreviewUrl(input.data.url);
@@ -170,7 +189,7 @@ export async function registerWorkflowArtifact(input: {
       isPrimary: input.data.isPrimary,
       healthStatus: "unknown",
       summary: input.data.summary ?? null,
-      metadata: previewUrlMetadata(input.data, input.actor.runId),
+      metadata: previewUrlMetadata(input.data, input.actor.runId, input.delegation),
       createdByRunId: input.actor.runId,
     });
     if (!product) {
@@ -188,7 +207,7 @@ export async function registerWorkflowArtifact(input: {
   if (!path.isAbsolute(artifactPath)) {
     throw unprocessable("Workflow artifact path must be an absolute local path");
   }
-  await assertWorkflowArtifactPath({ db: input.db, issue: input.issue, artifactPath });
+  await assertWorkflowArtifactPath({ db: input.db, issue: input.issue, artifactPath, delegation: input.delegation });
 
   const existing = await findExistingWorkflowArtifact({ db: input.db, issue: input.issue, artifactPath });
   if (existing) return existing;
@@ -211,6 +230,7 @@ export async function registerWorkflowArtifact(input: {
       path: artifactPath,
       registeredVia: "workflow_api",
       registeredByRunId: input.actor.runId,
+      ...delegationMetadata(input.delegation),
     },
     createdByRunId: input.actor.runId,
   });

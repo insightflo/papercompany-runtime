@@ -2671,26 +2671,6 @@ export function classifyHeartbeatRunFailure(input: {
       fallbackCandidates,
     };
   }
-  if (/\b(403|429)\b/.test(normalized) && /quota|rate.?limit|rate limit|insufficient|billing|capacity|exceeded/.test(normalized)) {
-    return {
-      category: "quota",
-      reasonCode: /\b403\b/.test(normalized) ? "PROVIDER_QUOTA_OR_AUTH_403" : "PROVIDER_QUOTA_OR_RATE_LIMIT",
-      summary: "Provider quota/rate-limit/auth-capacity failure detected from run output.",
-      fallbackCandidates,
-    };
-  }
-  if (/quota|insufficient_quota|rate.?limit|rate limit|billing hard limit|credits? exhausted|capacity exceeded/.test(normalized)) {
-    return {
-      category: "quota",
-      reasonCode: "PROVIDER_QUOTA_OR_RATE_LIMIT",
-      summary: "Provider quota or rate-limit failure detected from run output.",
-      fallbackCandidates,
-    };
-  }
-  // Strong-evidence guardrail check BEFORE auth. A Step Input Manifest / runtime
-  // broad-scan guardrail block is a command-policy/input-contract failure, not auth —
-  // even when model stdout prose leaks "unauthorized"/"forbidden". Evidence weighting:
-  // structured errorCode/errorMessage/stderr outrank stdout prose.
   const strongEvidenceText = [input.errorCode, input.errorMessage, input.stderrExcerpt]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n")
@@ -2704,7 +2684,23 @@ export function classifyHeartbeatRunFailure(input: {
       category: "command",
       reasonCode: "STEP_INPUT_MANIFEST_GUARDRAIL",
       summary:
-        "Run blocked by a Step Input Manifest / runtime broad-scan guardrail (command-policy/input-contract). Not a provider auth failure; replan the command or adjust the manifest.",
+        "Run blocked by a Step Input Manifest / runtime broad-scan guardrail (command-policy/input-contract). Not a provider quota/auth failure; replan the command or adjust the manifest.",
+      fallbackCandidates,
+    };
+  }
+  if (/\b(403|429)\b/.test(normalized) && /quota|rate.?limit|rate limit|insufficient|billing|capacity|exceeded/.test(normalized)) {
+    return {
+      category: "quota",
+      reasonCode: /\b403\b/.test(normalized) ? "PROVIDER_QUOTA_OR_AUTH_403" : "PROVIDER_QUOTA_OR_RATE_LIMIT",
+      summary: "Provider quota/rate-limit/auth-capacity failure detected from run output.",
+      fallbackCandidates,
+    };
+  }
+  if (/quota|insufficient_quota|rate.?limit|rate limit|billing hard limit|credits? exhausted|capacity exceeded/.test(normalized)) {
+    return {
+      category: "quota",
+      reasonCode: "PROVIDER_QUOTA_OR_RATE_LIMIT",
+      summary: "Provider quota or rate-limit failure detected from run output.",
       fallbackCandidates,
     };
   }
