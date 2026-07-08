@@ -4,6 +4,7 @@ import {
   activityLog,
   agents,
   assets,
+  agentWakeupRequests,
   companies,
   companyMemberships,
   documents,
@@ -177,6 +178,35 @@ async function assertCanCompleteWorkflowValidationIssue(db: Db, issue: typeof is
   if (!ledger.isCandidate || ledger.satisfied) return;
   throw unprocessable(
     "Cannot complete workflow validation issue without an official workflow_validation_verdict ledger event for that workflow QA issue.",
+  );
+}
+
+// [owner-action next-execution contract] mission_main_executor_unblock이 done으로 닫히려면
+//   source(originId)로 handback 증거가 있어야 — GAZ-315 silent success(자기 unblock issue에 workflow API
+//   실패 후 일반 done, source 향 wakeup 없음) 방지. evidence는 DB state 우선(source 회복/wakeup dispatch).
+async function assertCanCompleteOwnerActionWithHandback(db: Db, issue: typeof issues.$inferSelect) {
+  if (issue.originKind !== "mission_main_executor_unblock") return;
+  const sourceIssueId = issue.originId;
+  if (!sourceIssueId) return; // source 미지정 → 강제 불가
+
+  const [source] = await db
+    .select({ status: issues.status })
+    .from(issues)
+    .where(eq(issues.id, sourceIssueId))
+    .limit(1);
+  if (!source) return; // source 회수/삭제 → 강제 불가
+  // evidence 1: source가 blocked에서 벗어남(재오픈/회복 = supervision retry 적용 효과).
+  if (source.status !== "blocked") return;
+  // evidence 2: source 향 wakeup이 dispatch됨(dispatchOwnerDecisionWakeups 경로).
+  const [wake] = await db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
+    .where(eq(agentWakeupRequests.issueId, sourceIssueId))
+    .limit(1);
+  if (wake) return;
+
+  throw conflict(
+    "Cannot complete this owner-action (mission_main_executor_unblock): the source issue is still blocked and no wakeup has been dispatched to it. Post a Mission owner decision on the source issue or dispatch a wakeup to it before completing; do not use the Workflow API on this unblock issue.",
   );
 }
 
@@ -1488,6 +1518,7 @@ export function issueService(db: Db) {
         await assertCanCompleteMissionOversightIssue(db, existing);
         await assertCanCompleteMissionPlanQaIssue(db, existing);
         await assertCanCompleteWorkflowValidationIssue(db, existing);
+        await assertCanCompleteOwnerActionWithHandback(db, existing);
         await assertWorkflowIssueWorkProductReadyForDone({ db, issue: existing });
       }
 
