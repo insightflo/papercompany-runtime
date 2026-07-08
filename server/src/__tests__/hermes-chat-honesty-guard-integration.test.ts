@@ -77,8 +77,33 @@ describeEmbeddedPostgres("applyRunHonestyCaveat (activity_log exact proof)", () 
     expect(body).toContain("확인되지 않았습니다");
   });
 
-  it("does NOT append caveat when THIS run logged the comment (activity_log.runId = run.id)", async () => {
-    // 이 run(thisRunId)이 댓글을 남김 → exact proof ≥1 → caveat 없음.
+  it("appends caveat when a diagnostic supervision run is claimed as executor wake", async () => {
+    await db.insert(activityLog).values({
+      actorType: "agent",
+      actorId: agentId,
+      action: "mission.supervision.run",
+      entityType: "mission",
+      entityId: randomUUID(),
+      agentId,
+      companyId,
+      runId: thisRunId,
+      details: {
+        appliedActionCount: 0,
+        dispatchOwnerDecisionWakeups: false,
+        dispatchStaleSourceIssueWakeups: false,
+      },
+    });
+
+    const body = await applyRunHonestyCaveat(
+      db,
+      { id: thisRunId },
+      "미션 owner supervision을 다시 걸어 main executor를 깨웠습니다.",
+    );
+    expect(body).toContain("[서버 검증]");
+    expect(body).toContain("확인되지 않았습니다");
+  });
+
+  it("does NOT append caveat when THIS run logged the claimed comment (activity_log.runId = run.id)", async () => {
     await db.insert(activityLog).values({
       actorType: "agent",
       actorId: agentId,
@@ -90,7 +115,7 @@ describeEmbeddedPostgres("applyRunHonestyCaveat (activity_log exact proof)", () 
       runId: thisRunId,
     });
 
-    const body = await applyRunHonestyCaveat(db, { id: thisRunId }, "RES-1076 에이전트를 깨웠습니다.");
-    expect(body).toBe("RES-1076 에이전트를 깨웠습니다.");
+    const body = await applyRunHonestyCaveat(db, { id: thisRunId }, "RES-1076에 댓글을 남겼습니다.");
+    expect(body).toBe("RES-1076에 댓글을 남겼습니다.");
   });
 });
