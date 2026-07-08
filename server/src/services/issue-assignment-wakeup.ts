@@ -14,6 +14,7 @@ export interface IssueAssignmentWakeupDeps {
       requestedByActorType?: "user" | "agent" | "system";
       requestedByActorId?: string | null;
       contextSnapshot?: Record<string, unknown>;
+      idempotencyKey?: string | null;
     },
   ) => Promise<unknown>;
 }
@@ -26,10 +27,15 @@ export function queueIssueAssignmentWakeup(input: {
   contextSource: string;
   payload?: Record<string, unknown>;
   contextSnapshot?: Record<string, unknown>;
+  idempotencyKey?: string | null;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   rethrowOnError?: boolean;
 }) {
+  const idempotency =
+    typeof input.idempotencyKey === "string" && input.idempotencyKey.trim().length > 0
+      ? { idempotencyKey: input.idempotencyKey.trim() }
+      : {};
   const workflowResumeContext = {
     ...(input.payload ?? {}),
     ...(input.contextSnapshot ?? {}),
@@ -57,6 +63,7 @@ export function queueIssueAssignmentWakeup(input: {
       requestedByActorType: input.requestedByActorType,
       requestedByActorId: input.requestedByActorId ?? null,
       contextSnapshot: { issueId: input.issue.id, source: input.contextSource, ...(input.contextSnapshot ?? {}) },
+      ...idempotency,
     })
     .catch((err) => {
       logger.warn({ err, issueId: input.issue.id }, "failed to wake assignee on issue assignment");

@@ -95,6 +95,7 @@ import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./m
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
+import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import {
   extractMissionOwnerDecisionFromText,
@@ -7027,6 +7028,11 @@ export function heartbeatService(db: Db) {
     const queuePostTransactionWorkflowIssueSync = (issueId: string | null | undefined) => {
       if (issueId) postTransactionWorkflowIssueSyncIssueIds.add(issueId);
     };
+    const postTransactionDelegatedArtifactHandbacks: Array<{
+      childIssueId: string;
+      childWorkProductId: string;
+      sourceRunId: string;
+    }> = [];
     const transactionResult = await db.transaction(async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
@@ -7442,6 +7448,13 @@ export function heartbeatService(db: Db) {
               });
             }
           }
+        }
+        if (autoRegisteredWorkProduct && issue.parentId) {
+          postTransactionDelegatedArtifactHandbacks.push({
+            childIssueId: issue.id,
+            childWorkProductId: autoRegisteredWorkProduct.id,
+            sourceRunId: run.id,
+          });
         }
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
@@ -7946,6 +7959,27 @@ export function heartbeatService(db: Db) {
       for (const issueId of postTransactionWorkflowIssueSyncIssueIds) {
         await workflowService.syncRunStatusForIssue(db, issueId);
       }
+    }
+
+    for (const delegatedHandback of postTransactionDelegatedArtifactHandbacks) {
+      await handleDelegatedArtifactHandback({
+        db,
+        heartbeat: { wakeup: enqueueWakeup },
+        childIssueId: delegatedHandback.childIssueId,
+        childWorkProductId: delegatedHandback.childWorkProductId,
+        sourceRunId: delegatedHandback.sourceRunId,
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat",
+      }).catch((err: unknown) => {
+        logger.warn(
+          {
+            err,
+            childIssueId: delegatedHandback.childIssueId,
+            childWorkProductId: delegatedHandback.childWorkProductId,
+          },
+          "failed to hand back delegated artifact to parent workflow issue",
+        );
+      });
     }
 
     if (!promotedRun) return;

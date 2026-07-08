@@ -52,6 +52,7 @@ import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.j
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
 import { recordWorkflowValidationVerdictFromText } from "../services/workflow/validation-verdict-ledger.js";
 import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
+import { handleDelegatedArtifactHandback } from "../services/delegated-artifact-handback.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -821,6 +822,22 @@ export function issueRoutes(db: Db, storage: StorageService) {
       entityId: issue.id,
       details: { workProductId: product.id, type: product.type, provider: product.provider },
     });
+    try {
+      await handleDelegatedArtifactHandback({
+        db,
+        heartbeat: heartbeatService(db),
+        childIssueId: issue.id,
+        childWorkProductId: product.id,
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        sourceRunId: actor.runId,
+      });
+    } catch (err) {
+      logger.warn(
+        { err, issueId: issue.id, workProductId: product.id },
+        "failed to hand back delegated workProduct to parent workflow issue",
+      );
+    }
     res.status(201).json(product);
   });
 
