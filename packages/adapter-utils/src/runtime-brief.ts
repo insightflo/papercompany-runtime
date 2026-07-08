@@ -1,6 +1,6 @@
 import { joinPromptSections } from "./prompt-utils.js";
 import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
-import { buildWorkflowReworkContractBriefLines } from "./runtime-brief-rework-section.js";
+import { buildWorkflowReworkContractBriefLines, buildWorkflowReworkTaskHeader } from "./runtime-brief-rework-section.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -421,8 +421,12 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const issueExecutionCard = asRecord(context.paperclipIssueExecutionCard);
   const instructionInjection = asRecord(context.paperclipInstructionInjection);
   const workflowReworkContractLines = buildWorkflowReworkContractBriefLines(context.paperclipWorkflowReworkContract);
+  // [QA rework] rework 선두 헤더 + rework 모드 여부. 헤더는 brief 시작에, 상세 contract 라인은 기존 위치 유지.
+  const reworkHeaderLines = buildWorkflowReworkTaskHeader(context.paperclipWorkflowReworkContract);
+  const isReworkMode = reworkHeaderLines.length > 0;
   const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
-  const recentIssueCommentsLine = buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
+  // [QA rework] rework contract가 최신 QA feedback을 이미 가지면 최근 코멘트는 중복이므로 억제(prompt dilution 방지).
+  const recentIssueCommentsLine = isReworkMode ? null : buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
   const hermesChatLine = buildHermesChatBrief(context.paperclipHermesChat);
 
   const taskKey = asString(manifest?.taskKey ?? context.taskKey);
@@ -625,6 +629,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     taskKey || issueId || projectId || allowedKeys.length > 0 || handoffSummary
       ? "Paperclip runtime brief:"
       : null,
+    // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
+    ...reworkHeaderLines,
     taskKey ? `- Task key: ${taskKey}` : null,
     issueId ? `- Issue: ${issueId}` : null,
     projectId ? `- Project: ${projectId}` : null,
