@@ -22,7 +22,7 @@ function cardRow(card: IssueExecutionCardJson) {
 }
 
 describe("issue execution card contract", () => {
-  it("preserves artifact, verdict, and delivery prose markers in the card", () => {
+  it("preserves delivery prose markers without turning ACTION cards into readback gates", () => {
     const description = [
       "Deliverable output (use exactly this directory): /tmp/out",
       "Register the artifact in issue_work_products.",
@@ -44,12 +44,33 @@ describe("issue execution card contract", () => {
     });
 
     expect(card.requiredOutputs.workProduct.required).toBe(true);
-    expect(card.requiredOutputs.deliveryReadback.required).toBe(true);
+    expect(card.requiredOutputs.deliveryReadback.required).toBe(false);
     expect(card.preservedProseMarkers).toEqual(expect.arrayContaining([
       "[ARTIFACT]: <absolute path>",
       "PASS/REQUEST_CHANGES",
       "Delivery Verification:",
     ]));
+  });
+
+  it("requires delivery readback on QA cards that carry delivery criteria", () => {
+    const description = [
+      "Validator step.",
+      "Delivery Verification:",
+      "- Read back the public URL.",
+    ].join("\n");
+
+    const card = buildWorkflowIssueExecutionCard({
+      title: "Verify public delivery",
+      description,
+      companyId: "company-1",
+      workflowDefinitionId: "workflow-1",
+      workflowRunId: "run-1",
+      step: { id: "qa-public-readback", dependencies: ["publish"], graphWorkProductRequired: false },
+      isQaStep: true,
+    });
+
+    expect(card.requiredOutputs.verdict.required).toBe(true);
+    expect(card.requiredOutputs.deliveryReadback.required).toBe(true);
   });
 
   it("uses the structured card before legacy step metadata or prose markers", () => {

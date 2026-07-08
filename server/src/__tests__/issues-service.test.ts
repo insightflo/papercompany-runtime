@@ -734,7 +734,7 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
     return { issueId, productUrl };
   }
 
-  it("rejects delivery ACTION completion when the structured preview_url readback returns a hub shell", async () => {
+  it("allows workflow ACTION completion without running delivery readback", async () => {
     const { issueId, productUrl } = await createManualOnboardingActionFixture();
     let readbackUrl = "";
     setPublicUrlReadbackFetcher(async (url) => {
@@ -746,25 +746,86 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
       };
     });
 
-    await expect(svc.update(issueId, { status: "done" })).rejects.toThrow(
-      "manual-onboarding hub shell",
-    );
+    const updated = await svc.update(issueId, { status: "done" });
 
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
-    expect(readbackUrl).toBe(productUrl);
-    expect(issue?.status).toBe("todo");
-    expect(issue?.completedAt).toBeNull();
+    expect(updated).toEqual(expect.objectContaining({ id: issueId, status: "done" }));
+    expect(readbackUrl).toBe("");
+    expect(productUrl).toContain("manual-onboarding.pages.dev");
+    expect(issue?.status).toBe("done");
+    expect(issue?.completedAt).toBeInstanceOf(Date);
   });
 
-  it("allows delivery ACTION completion when the structured preview_url readback contains the workProduct marker", async () => {
-    const { issueId, productUrl } = await createManualOnboardingActionFixture();
+  it("allows workflow ACTION completion with delivery criteria and only a local file workProduct", async () => {
+    const issueId = randomUUID();
+    const companyId = randomUUID();
+    const missionId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: workerAgentId,
+        companyId,
+        name: "Synthesis Editor",
+        role: "worker",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "orca beginner manual",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      assigneeAgentId: workerAgentId,
+      originKind: "workflow_execution",
+      title: "[ACTION] Synthesize Korean beginner HTML manual for orca",
+      description: "Delivery Verification: final public URL readback will be checked by a downstream QA step.",
+      status: "todo",
+      priority: "medium",
+    });
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId,
+      type: "document",
+      provider: "local_file",
+      title: "orca_beginner_manual_ko.html",
+      externalId: "/srv/papercompany/projects/research-company/produced_work/orca_beginner_manual_ko.html",
+      status: "active",
+      isPrimary: true,
+      metadata: {
+        path: "/srv/papercompany/projects/research-company/produced_work/orca_beginner_manual_ko.html",
+        registeredVia: "workflow_api",
+      },
+    });
     setPublicUrlReadbackFetcher(async (url) => {
-      expect(url).toBe(productUrl);
-      return {
-        ok: true,
-        status: 200,
-        text: "<!doctype html><title>파인만 방법론: 초보자를 위한 판단 보고서</title><main>파인만 방법론 설명</main>",
-      };
+      throw new Error(`delivery readback should not run during ACTION closeout: ${url}`);
     });
 
     const updated = await svc.update(issueId, { status: "done" });

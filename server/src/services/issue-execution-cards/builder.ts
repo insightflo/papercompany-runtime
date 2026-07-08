@@ -105,7 +105,7 @@ export function buildWorkflowIssueExecutionCard(input: {
         allowed: requiresVerdict ? ["PASS", "REQUEST_CHANGES"] : [],
       },
       deliveryReadback: {
-        required: deliveryReadbackRequired(input.description, input.step),
+        required: input.isQaStep ? deliveryReadbackRequired(input.description, input.step) : false,
         marker: null,
       },
     },

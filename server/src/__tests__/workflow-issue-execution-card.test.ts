@@ -198,7 +198,7 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
     const [afterCard] = await db.select().from(issueExecutionCards).where(eq(issueExecutionCards.issueId, issue.id));
     if (!afterCard) throw new Error("execution card was not resynced");
     expect(afterCard.contentHash).not.toBe(beforeCard.contentHash);
-    expect(afterCard.cardJson.requiredOutputs.deliveryReadback.required).toBe(true);
+    expect(afterCard.cardJson.requiredOutputs.deliveryReadback.required).toBe(false);
 
     const [resyncActivity] = await db
       .select()
