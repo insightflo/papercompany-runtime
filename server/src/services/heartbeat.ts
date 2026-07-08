@@ -6364,6 +6364,23 @@ export function heartbeatService(db: Db) {
         );
       }
       let hasResumableSession = hasResumableSessionForRun(runtimeForAdapter, executionWorkspace.cwd);
+      // [QA rework context reduction] rework contract(kind=workflow_qa_rework, WORKFLOW_REWORK_CONTRACT_KIND)가
+      //   있으면 이전 세션을 resume하지 않는다. rework verdict가 이전 결론을 무효화했으므로 같은 thread의
+      //   self-belief가 지배하면 producer가 rework를 무시하고 complete하는 사고(GAZ-265 라이브 케이스)를 막는다.
+      //   prevSessionId는 참조용으로만 보존(handoff).
+      const reworkContractRaw = context.paperclipWorkflowReworkContract;
+      const hasReworkContract = typeof reworkContractRaw === "object" && reworkContractRaw !== null
+        && (reworkContractRaw as Record<string, unknown>).kind === "workflow_qa_rework";
+      if (hasReworkContract && hasResumableSession) {
+        const previousSessionId = runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null;
+        runtimeForAdapter.sessionId = null;
+        runtimeForAdapter.sessionParams = null;
+        runtimeForAdapter.sessionDisplayId = null;
+        hasResumableSession = false;
+        context.paperclipSessionRotationReason = "qa_rework_fresh_session";
+        if (previousSessionId) context.paperclipPreviousSessionId = previousSessionId;
+        refreshStepInputManifest(context, taskKey);
+      }
       let contextBudgetPreflight = await evaluateContextBudgetPreflight({
         runtimeConfig: agent.runtimeConfig,
         adapterType: agent.adapterType,
