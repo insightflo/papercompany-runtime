@@ -1,13 +1,13 @@
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { issues, issueWorkProducts } from "@paperclipai/db";
-import { and, eq, ne } from "drizzle-orm";
+import { activityLog, heartbeatRuns, issues, issueWorkProducts } from "@paperclipai/db";
+import { and, count, eq, inArray, ne } from "drizzle-orm";
 import type {
   WorkflowArtifactRegister,
   WorkflowIssueComplete,
   WorkflowVerdictSubmit,
 } from "@paperclipai/shared/validators/workflow-agent-api";
-import { notFound, unprocessable } from "../../errors.js";
+import { conflict, notFound, unprocessable } from "../../errors.js";
 import { issueService } from "../issues.js";
 import { toIssueWorkProduct, workProductService } from "../work-products.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
@@ -246,12 +246,53 @@ export async function submitWorkflowVerdict(input: {
   return result;
 }
 
+// [QA rework closeout guard] 이 run이 rework 계약을 가진 run인지(시작 시 contextSnapshot에
+//   paperclipWorkflowReworkContract.kind=workflow_qa_rework 가 있었는지) 확인.
+export async function isWorkflowReworkRun(db: Db, runId: string): Promise<boolean> {
+  const [run] = await db
+    .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .limit(1);
+  if (!run?.contextSnapshot) return false;
+  const ctx = run.contextSnapshot as Record<string, unknown>;
+  const contract = typeof ctx.paperclipWorkflowReworkContract === "object" && ctx.paperclipWorkflowReworkContract !== null
+    ? (ctx.paperclipWorkflowReworkContract as Record<string, unknown>)
+    : null;
+  return contract?.kind === "workflow_qa_rework";
+}
+
+// [QA rework closeout guard] 이 run이 관측 가능한 진행(artifact 등록 또는 댓글 side-effect)을 남겼는지
+//   activity_log.runId exact proof로 확인. honest-guard와 동일 원칙.
+export async function runMadeObservableProgress(db: Db, runId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.runId, runId),
+        inArray(activityLog.action, ["issue.workflow_artifact_registered", "issue.comment_added"]),
+      ),
+    );
+  return Number(row?.n ?? 0) > 0;
+}
+
 export async function completeWorkflowIssue(input: {
   readonly db: Db;
   readonly issue: WorkflowApiIssue;
   readonly actor: WorkflowApiActor;
   readonly data: WorkflowIssueComplete;
 }) {
+  // [QA rework closeout guard] rework run이 관측 가능한 진행 없이 complete 시도하면 차단
+  //   (producer가 rework 무시하고 complete 하는 GAZ-265 사고 방지). 진행 증거 = 이 run의 artifact 등록/댓글.
+  const reworkRunId = input.actor.runId;
+  if (reworkRunId) {
+    if (await isWorkflowReworkRun(input.db, reworkRunId) && !(await runMadeObservableProgress(input.db, reworkRunId))) {
+      throw conflict(
+        "QA rework run made no observable progress; resolve the REQUEST_CHANGES and update or register the artifact before completing the workflow issue.",
+      );
+    }
+  }
   const svc = issueService(input.db);
   const comment = input.data.comment?.trim();
   if (comment) {
