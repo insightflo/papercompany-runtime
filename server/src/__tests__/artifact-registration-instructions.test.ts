@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildAssignedIssueArtifactWorkflowText,
   buildArtifactOutputDirectoryLines,
+  buildDelegatedWorkProductContractLines,
   buildExistingArtifactRegistrationActionLines,
   buildMissingWorkProductRegistrationGateComment,
   buildWorkProductRegistrationContractLines,
@@ -44,7 +45,17 @@ describe("artifact registration instructions", () => {
       "- Write or reuse deliverable file(s) only in that directory. Do not look under other produced_work paths, run dates, or sibling mission folders.",
     ]);
     expect(text).toContain("Evidence explanation quality");
-    expect(text).toContain("observed facts");
+    expect(text).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(text).toContain("storage details");
+    expect(text).toContain("private traceability");
+  });
+
+  it("keeps delegated issue workProduct contracts focused on evidence chains", () => {
+    const text = buildDelegatedWorkProductContractLines().join("\n");
+
+    expect(text).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(text).toContain("workProducts as traceability, not the proof itself");
+    expect(text).toContain("source workflow will copy those registered workProducts back");
   });
 
   it("includes the shared contract in missing-registration gate comments", () => {
@@ -63,6 +74,8 @@ describe("artifact registration instructions", () => {
     const text = buildAssignedIssueArtifactWorkflowText();
 
     expect(text).toContain("creating the file and registering the workProduct are separate");
+    expect(text).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(text).toContain("workProducts as traceability, not the proof itself");
     expect(text).toContain("If the file is missing, create it");
     expect(text).toContain("if it already exists, reuse it");
     expect(text).toContain("Register with the Workflow API first");

@@ -28,6 +28,11 @@ const ACTIONABLE_RE = /판단 가능|결정|다음 행동|실행|가이드|manua
 const DEEP_RESEARCH_RE = /심층|상세|대충 조사 하지 말|충분히 많은 자료|출처|근거|반론|회의|deep|in-depth/iu;
 const PUBLISH_HTML_RE = /publish|게시|html|온보딩|manual-onboarding/iu;
 
+export const EVIDENCE_CHAIN_FORMAT = "source content -> observation -> interpretation -> conclusion";
+
+export const EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE =
+  `For written/report/manual/analysis deliverables, plan and write evidence as ${EVIDENCE_CHAIN_FORMAT}; treat storage paths, evidence repositories, and workProducts as traceability, not the proof itself.`;
+
 // mission goal/title/description → MissionQualityContract. 모호 goal → underspecified, hardStopRules 비움.
 export function extractMissionQualityContract(input: {
   missionGoal: string;
@@ -144,9 +149,11 @@ export function renderEvidenceExplanationWritingLines(): string[] {
   return [
     EVIDENCE_EXPLANATION_QUALITY_MARKER,
     "",
-    "Use source material as explained evidence, not as a pointer to a source container.",
-    "- For each important conclusion in a narrative/report/manual/analysis artifact, write the observed facts from the source, the reasoning that connects those facts, and the resulting conclusion.",
-    "- Do not use internal artifact names as user-facing evidence, such as `source ledger`, `comparison artifact`, `evidence.json`, `upstream workProduct`, or `the dependency says`. Those names may appear in source lists only after the evidence has been explained in the body.",
+    "Write evidence chains, not source-container pointers.",
+    `- For each important conclusion, write: ${EVIDENCE_CHAIN_FORMAT}.`,
+    "- Source content is the reader-visible material behind the claim: provider, dataset/source material, URL when available, metric/event/text excerpt, timestamp/freshness, and limitation.",
+    "- If a table is useful, make its columns match that chain: source content, observation, interpretation, conclusion, confidence/gap.",
+    "- Keep storage details such as `source_name`, `path_or_url`, internal filenames, manifests, and workProduct paths as private traceability, not public evidence.",
     "- If the evidence is weak, indirect, or only partially relevant, state that limitation instead of strengthening the conclusion.",
     "",
   ];
@@ -156,10 +163,10 @@ export function renderEvidenceExplanationQaLines(): string[] {
   return [
     EVIDENCE_EXPLANATION_QUALITY_MARKER,
     "",
-    "For narrative/report/manual/analysis artifacts, do not PASS when the artifact only points to source containers instead of explaining the evidence.",
-    "- Check that each important conclusion explains the observed facts from the source and the reasoning that connects those facts to the conclusion.",
-    "- REQUEST_CHANGES when user-facing prose says only that a `source ledger`, `comparison artifact`, `evidence.json`, dependency workProduct, or named source says the conclusion without explaining the underlying observed facts.",
-    "- Internal source names are acceptable in an appendix or source list only after the body explains the evidence itself.",
+    "Verify evidence chains before PASS.",
+    `- Each important conclusion should show: ${EVIDENCE_CHAIN_FORMAT}.`,
+    "- PASS when public prose, references, and evidence tables name the reader-visible material and connect it to the report's observation, interpretation, and conclusion.",
+    "- REQUEST_CHANGES when the artifact mostly lists source containers, storage fields, internal filenames, manifests, or workProduct paths instead of that chain.",
     "",
   ];
 }

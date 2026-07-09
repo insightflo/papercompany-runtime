@@ -63,18 +63,26 @@ describe("mission-quality-contract", () => {
   it("renders producer writing guidance for explaining evidence instead of pointing at source containers", () => {
     const lines = renderEvidenceExplanationWritingLines().join("\n");
     expect(lines).toContain("Evidence explanation quality");
-    expect(lines).toContain("observed facts");
-    expect(lines).toContain("reasoning");
-    expect(lines).toContain("source ledger");
-    expect(lines).toContain("evidence.json");
+    expect(lines).toContain("Write evidence chains");
+    expect(lines).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(lines).toContain("Source content is");
+    expect(lines).toContain("source content, observation, interpretation, conclusion");
+    expect(lines).toContain("metric/event/text excerpt");
+    expect(lines).toContain("source_name");
+    expect(lines).toContain("path_or_url");
+    expect(lines).toContain("private traceability");
+    expect(lines).not.toContain("Those names may appear in source lists only after");
   });
 
   it("renders QA rejection criteria for source-pointer prose", () => {
     const lines = renderEvidenceExplanationQaLines().join("\n");
     expect(lines).toContain("Evidence explanation quality");
+    expect(lines).toContain("Verify evidence chains before PASS");
     expect(lines).toContain("REQUEST_CHANGES");
-    expect(lines).toContain("only points to source containers");
-    expect(lines).toContain("observed facts");
+    expect(lines).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(lines).toContain("PASS when public prose");
+    expect(lines).toContain("source containers");
+    expect(lines).toContain("observation, interpretation, and conclusion");
   });
 
   it("renders verification-before-completion criteria as a claim/evidence gate", () => {

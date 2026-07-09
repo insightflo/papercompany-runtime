@@ -1249,8 +1249,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain("WorkProduct registration contract:");
     expect(createdIssue?.description).toContain("[ARTIFACT]:");
     expect(createdIssue?.description).toContain("Evidence explanation quality");
-    expect(createdIssue?.description).toContain("observed facts");
-    expect(createdIssue?.description).toContain("reasoning");
+    expect(createdIssue?.description).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(createdIssue?.description).toContain("private traceability");
+    expect(createdIssue?.description).toContain("interpretation");
     // AREA-3: the QA/validator guidance line is gated on !graphWorkProductRequired,
     // so a producer step must NOT receive it — it would contradict the [ARTIFACT]
     // FINAL LINE RULE above. QA/validator steps (flag=false) still get the line.
@@ -1408,7 +1409,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("5-axis scoring");
     expect(rubric).toContain("purposeFitness <= 3");
     expect(rubric).toContain("Evidence explanation quality");
-    expect(rubric).toContain("only points to source containers");
+    expect(rubric).toContain("source content -> observation -> interpretation -> conclusion");
+    expect(rubric).toContain("storage fields, internal filenames, manifests, or workProduct paths");
     // [Verification Before Completion] QA verdict must be based on fresh claim/evidence checks.
     expect(rubric).toContain("Verification Before Completion");
     expect(rubric).toContain("fresh evidence");

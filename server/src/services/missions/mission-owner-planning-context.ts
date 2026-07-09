@@ -20,6 +20,7 @@ import type { MissionExecutionSourceSnapshot } from "./mission-execution-sources
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import type { MissionRuleRef } from "./mission-rule-context.js";
 import { extractMissionIntent, type MissionIntent } from "./mission-intent.js";
+import { EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE } from "./mission-quality-contract.js";
 import { stat } from "node:fs/promises";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 
@@ -359,6 +360,7 @@ function buildPlanningDossier(input: {
     requiredAssessmentChecklist: [
       "Restate the mission objective and expected deliverables before selecting execution units.",
       "Assess workflow candidates, rules, KB refs, agent roster, execution sources, tools, runtime services, and file views explicitly.",
+      EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE,
       "Mark each gap as info, needs_research, or blocked and resolve blocked gaps before claiming readiness.",
       "Post a structured Mission owner plan decision JSON comment; Markdown-only comments are behavioral notes, not structured control-plane success.",
     ],

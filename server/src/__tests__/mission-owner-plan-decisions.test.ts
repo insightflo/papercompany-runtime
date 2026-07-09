@@ -1572,8 +1572,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(actionIssue?.description).toContain("WorkProduct registration contract:");
     expect(actionIssue?.description).toContain("[ARTIFACT]: <absolute path>");
     expect(actionIssue?.description).toContain("Evidence explanation quality");
-    expect(actionIssue?.description).toContain("observed facts");
+    expect(actionIssue?.description).toContain("source content -> observation -> interpretation -> conclusion");
     expect(paqoSteps[1]!.description).toContain("Evidence explanation quality");
+    expect(paqoSteps[1]!.description).toContain("source content -> observation -> interpretation -> conclusion");
     expect(paqoSteps[1]!.description).toContain("REQUEST_CHANGES");
 
     const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });

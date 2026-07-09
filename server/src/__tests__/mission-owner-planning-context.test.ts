@@ -396,6 +396,8 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     expect(context.planningDossier.assets.fileViews).toEqual(expect.objectContaining({ available: false, count: 0, labels: [], note: expect.stringMatching(/does not scan repositories or files/) }));
     expect(context.planningDossier.gaps).toEqual([expect.objectContaining({ key: "plugin_workflow_definition_reader_unconfirmed", severity: "info" })]);
     expect(context.planningDossier.requiredAssessmentChecklist).toEqual(expect.arrayContaining([
+      expect.stringContaining("source content -> observation -> interpretation -> conclusion"),
+      expect.stringContaining("workProducts as traceability, not the proof itself"),
       expect.stringMatching(/Markdown-only comments are behavioral notes/),
     ]));
   });

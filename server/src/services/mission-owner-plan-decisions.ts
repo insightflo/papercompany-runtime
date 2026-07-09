@@ -15,6 +15,7 @@ import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-exe
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
+  EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE,
   buildVerificationBeforeCompletionCriteria,
   extractMissionQualityContract,
   renderMissionQualityContractSection,
@@ -2170,6 +2171,7 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
     "- Are relevant skills reflected in assignee selection / skillRefs / reason, and are unnecessary or unavailable skills avoided?",
     "- Are required tools, permissions, and external systems explicit and available to the assigned agent?",
     "- Does each ACTION step have a clear work-product contract?",
+    `- ${EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE}`,
     "- Is QA not collapsed into a single terminal step?",
     "",
     "Scorecard (include this table in your response before the final verdict):",

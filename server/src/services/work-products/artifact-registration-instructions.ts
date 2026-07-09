@@ -1,4 +1,7 @@
-import { renderEvidenceExplanationWritingLines } from "../missions/mission-quality-contract.js";
+import {
+  EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE,
+  renderEvidenceExplanationWritingLines,
+} from "../missions/mission-quality-contract.js";
 
 const ARTIFACT_MARKER_PLACEHOLDER = "[ARTIFACT]: <absolute path>";
 
@@ -51,6 +54,7 @@ export function buildQaReworkArtifactInstructionLine(input: {
 export function buildDelegatedWorkProductContractLines(): string[] {
   return [
     "Official workProduct contract:",
+    `- ${EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE}`,
     "- Creating the deliverable file and registering the workProduct are separate steps. A file that only exists on disk or in a comment is not registered.",
     `- If this delegated issue specifies an output directory or artifact contract, create the deliverable there when missing. If it already exists, reuse it and register it with the Workflow API or finish with the fallback \`${ARTIFACT_MARKER_PLACEHOLDER}\` line.`,
     "- Do not use the generic workProduct route. Use the Workflow API first; use the artifact marker only as fallback when the Workflow API is unavailable.",
@@ -59,7 +63,7 @@ export function buildDelegatedWorkProductContractLines(): string[] {
 }
 
 export function buildAssignedIssueArtifactWorkflowText(): string {
-  return "If the issue specifies a deliverable output directory or artifact contract, remember that creating the file and registering the workProduct are separate. If the file is missing, create it; if it already exists, reuse it. Register with the Workflow API first, or emit `[ARTIFACT]: <absolute path>` only as fallback when the Workflow API is unavailable.";
+  return `${EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE} If the issue specifies a deliverable output directory or artifact contract, remember that creating the file and registering the workProduct are separate. If the file is missing, create it; if it already exists, reuse it. Register with the Workflow API first, or emit \`[ARTIFACT]: <absolute path>\` only as fallback when the Workflow API is unavailable.`;
 }
 
 export function buildAssignedIssueArtifactWorkflowLine(): string {
