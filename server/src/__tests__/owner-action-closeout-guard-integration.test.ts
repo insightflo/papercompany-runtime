@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agentWakeupRequests, companies, createDb, issueComments, issues } from "@paperclipai/db";
+import { agentWakeupRequests, agents, companies, createDb, issueComments, issues } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 
 import {
@@ -54,7 +54,7 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
   async function insertUnblockWithSource(sourceStatus: string) {
     const [source] = await db
       .insert(issues)
-      .values({ companyId, title: "blocked source", status: sourceStatus, originKind: "workflow_execution" })
+      .values({ companyId, title: "blocked source", status: sourceStatus, originKind: "workflow_execution", assigneeAgentId: agentId })
       .returning({ id: issues.id });
     const [unblock] = await db
       .insert(issues)
@@ -106,7 +106,7 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
   it("rejects done when only a skipped wakeup exists (skipped is not execution evidence)", async () => {
     const [source] = await db
       .insert(issues)
-      .values({ companyId, title: "blocked source skipped-only", status: "blocked", originKind: "workflow_execution" })
+      .values({ companyId, title: "blocked source skipped-only", status: "blocked", originKind: "workflow_execution", assigneeAgentId: agentId })
       .returning({ id: issues.id });
     const [unblock] = await db
       .insert(issues)
@@ -124,6 +124,32 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
     });
 
     // guard must reject: skipped is not queued/deferred/coalesced.
+    await expect(svc.update(unblock.id, { status: "done" })).rejects.toThrow(/Cannot complete this owner-action/);
+  });
+
+  it("rejects done when queued wakeup targets a wrong agent (not the source assignee)", async () => {
+    const [source] = await db
+      .insert(issues)
+      .values({ companyId, title: "blocked source wrong-agent", status: "blocked", originKind: "workflow_execution", assigneeAgentId: agentId })
+      .returning({ id: issues.id });
+    const [unblock] = await db
+      .insert(issues)
+      .values({ companyId, title: "unblock wrong-agent", status: "todo", originKind: "mission_main_executor_unblock", originId: source.id })
+      .returning({ id: issues.id });
+
+    // queued wakeup for a DIFFERENT agent, not the source assignee.
+    const wrongAgentId = randomUUID();
+    await db.insert(agents).values({ id: wrongAgentId, companyId, name: "Wrong Agent", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId: wrongAgentId,
+      source: "automation",
+      status: "queued",
+      issueId: source.id,
+      requestedAt: new Date(),
+    });
+
+    // guard must reject: wakeup agentId !== source.assigneeAgentId.
     await expect(svc.update(unblock.id, { status: "done" })).rejects.toThrow(/Cannot complete this owner-action/);
   });
 

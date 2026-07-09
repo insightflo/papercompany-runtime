@@ -80,6 +80,7 @@ export async function completeUnblockActionWithSourceHandback(
   const evidenceFilter = and(
     eq(agentWakeupRequests.issueId, source.id),
     eq(agentWakeupRequests.companyId, input.companyId),
+    eq(agentWakeupRequests.agentId, source.assigneeAgentId),
     inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "coalesced"]),
   );
   const queryEvidence = () =>

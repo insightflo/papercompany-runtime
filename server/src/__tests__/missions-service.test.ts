@@ -1082,7 +1082,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(unblockIssue).toBeTruthy();
 
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue!.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue!.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue!.id, { status: "done" });
     await db.insert(issueComments).values({
       companyId,
@@ -1144,7 +1144,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({
       companyId,
@@ -1316,7 +1316,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry and wake once"].join("\n") });
 
@@ -1539,7 +1539,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry via workflow wake"].join("\n") });
 
@@ -2606,7 +2606,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry once"].join("\n") });
 
@@ -2735,9 +2735,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const blockedIssue = await issueService(db).create(companyId, { missionId, originKind: "workflow_execution", status: "blocked", title: "Unassigned blocked source" });
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
-    // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
-    await issueService(db).update(unblockIssue.id, { status: "done" });
+    // [owner-action contract] 이 테스트는 source assignee 없는 케이스 자체가 목적이므로 guard를 우회해 fixture done 처리.
+    await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, unblockIssue.id));
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry unassigned source"].join("\n") });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
@@ -2842,7 +2841,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry when explicitly applied", "Next action: wait for apply", "Evidence: OWNER_DECISION_EVIDENCE_ONLY"].join("\n") });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: "UNRELATED_OWNER_COMMENT_NOT_FOR_STATUS_SUMMARY" });
@@ -2873,7 +2872,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: apply retry"].join("\n") });
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true });
@@ -2926,7 +2925,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 10 * 60 * 1000) });
     const unblockIssue = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock")).then((rows) => rows[0]!);
     // [owner-action contract] seed queued wakeup evidence for source (new guard requires it).
-    await db.insert(agentWakeupRequests).values({ companyId, agentId: ownerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: parity check"].join("\n") });
 

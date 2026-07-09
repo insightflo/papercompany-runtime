@@ -190,20 +190,27 @@ async function assertCanCompleteOwnerActionWithHandback(db: Db, issue: typeof is
   if (!sourceIssueId) return; // source 미지정 → 강제 불가
 
   const [source] = await db
-    .select({ status: issues.status })
+    .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
     .from(issues)
     .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
     .limit(1);
   if (!source) return; // source 회수/삭제 또는 다른 회사 → 강제 불가
   // evidence 1: source가 blocked에서 벗어남(재오픈/회복 = supervision retry 적용 효과).
   if (source.status !== "blocked") return;
-  // evidence 2: source 향 wakeup이 dispatch됨 — 같은 회사 scope. skipped는 실행 큐가 아니므로 제외.
+  // evidence 2: source 담당자(assignee) 향 wakeup이 allowed status로 dispatch됨.
+  //   assignee 없는 source는 wakeup 대상이 없으므로 evidence 불가 → conflict.
+  if (!source.assigneeAgentId) {
+    throw conflict(
+      "Cannot complete this owner-action (mission_main_executor_unblock): the source issue is blocked and has no assignee agent to wake for handback.",
+    );
+  }
   const [wake] = await db
     .select({ id: agentWakeupRequests.id })
     .from(agentWakeupRequests)
     .where(and(
       eq(agentWakeupRequests.issueId, sourceIssueId),
       eq(agentWakeupRequests.companyId, issue.companyId),
+      eq(agentWakeupRequests.agentId, source.assigneeAgentId),
       inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "coalesced"]),
     ))
     .limit(1);
