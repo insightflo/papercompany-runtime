@@ -6,7 +6,7 @@
 // [주요 흐름]
 //   1. unblock + source(originId) 조회(company scope).
 //   2. heartbeat.wakeup으로 source 향 wakeup enqueue(검증/coalescing/typed column/transition event 계약 유지).
-//   3. wakeup evidence 재조회(wakeup이 null 반환한 deferred/coalesced/skipped 케이스도 row 존재 확인).
+//   3. wakeup evidence 재조회(queued/deferred_issue_execution/coalesced만 허용, skipped 제외).
 //   4. evidence 있으면 handback 댓글 + done(guard 통과). 없으면 throw.
 // [수정시 주의] direct insert 금지. 항상 heartbeat.wakeup(enqueueWakeup) 경로 사용.
 import { and, desc, eq, inArray } from "drizzle-orm";
