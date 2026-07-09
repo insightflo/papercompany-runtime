@@ -1,14 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { vi } from "vitest";
-
-// heartbeat.wakeup의 agent_runtime_state side effect가 embedded pg에서 pkey 충돌을 일으키므로 mock.
-// completion service의 evidence re-query + comment + done flow는 실제 DB로 검증.
-vi.mock("../services/heartbeat.js", () => ({
-  heartbeatService: vi.fn(() => ({
-    wakeup: vi.fn(async () => null),
-  })),
-}));
-
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

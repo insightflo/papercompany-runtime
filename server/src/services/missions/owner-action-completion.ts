@@ -75,12 +75,27 @@ export async function completeUnblockActionWithSourceHandback(
     }
   }
 
-  // [핵심] heartbeat.wakeup(enqueueWakeup) 경로로 source 향 wakeup enqueue.
-  //   direct insert 금지 — 이 경로가 company/agent 검증, typed queue columns, queued coalescing,
-  //   issue execution lock/defer, queue transition event를 처리.
-  //   best-effort: 실패해도 아래 evidence 재조회가 source of truth. (agent runtime state 충돌 등
-  //   일시적 오류가 completion을 막으면 안 됨 — 기존 queued evidence가 있으면 통과.)
-  try {
+  // [peer review] evidence-first: 이미 유효한 wakeup(queued/deferred/coalesced)이 있으면
+  //   wakeup 호출을 스킵(idempotent). catch swallow 금지 — wakeup 실패 시 completion도 실패.
+  const evidenceFilter = and(
+    eq(agentWakeupRequests.issueId, source.id),
+    eq(agentWakeupRequests.companyId, input.companyId),
+    inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "coalesced"]),
+  );
+  const queryEvidence = () =>
+    db
+      .select({ id: agentWakeupRequests.id, reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests)
+      .where(evidenceFilter)
+      .orderBy(desc(agentWakeupRequests.requestedAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+  let evidence = await queryEvidence();
+
+  if (!evidence) {
+    // 기존 evidence 없음 — heartbeat.wakeup(enqueueWakeup)으로 source 향 wakeup enqueue.
+    //   no catch: 실패하면 completion도 실패(mission terminal/budget/agent policy 등).
     await heartbeat.wakeup(source.assigneeAgentId, {
       source: "automation",
       triggerDetail: "system",
@@ -96,26 +111,8 @@ export async function completeUnblockActionWithSourceHandback(
       requestedByActorId: input.actor.userId ?? input.actor.agentId ?? "unknown",
       idempotencyKey: `owner-action-handback:${unblock.id}:${source.id}`,
     });
-  } catch {
-    // heartbeat.wakeup 실패(예: agent runtime state 충돌)는 best-effort.
-    // 아래 evidence 재조회가 통과 근거. 로깅은 heartbeat 내부에서 처리.
+    evidence = await queryEvidence();
   }
-
-  // [peer review] heartbeat.wakeup이 null을 반환한(deferred/coalesced/skipped) 케이스도
-  //   실제 wakeup evidence row가 존재하는지 company+source 기준으로 재조회.
-  //   skipped는 실행 큐가 아니므로 evidence에서 제외.
-  const [evidence] = await db
-    .select({ id: agentWakeupRequests.id })
-    .from(agentWakeupRequests)
-    .where(
-      and(
-        eq(agentWakeupRequests.issueId, source.id),
-        eq(agentWakeupRequests.companyId, input.companyId),
-        inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "coalesced"]),
-      ),
-    )
-    .orderBy(desc(agentWakeupRequests.requestedAt))
-    .limit(1);
 
   if (!evidence) {
     throw conflict(
