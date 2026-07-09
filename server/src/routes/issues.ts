@@ -2096,7 +2096,10 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(422).json({ error: "This route is only for mission_main_executor_unblock issues" });
       return;
     }
+    // [peer review] generic PATCH done과 동일한 checkout ownership 게이트(agent 통과/board 통과).
+    if (!(await assertAgentRunCheckoutOwnership(req, res, issue))) return;
 
+    const actor = getActorInfo(req);
     const result = await completeUnblockActionWithSourceHandback(db, {
       unblockIssueId: id,
       companyId: issue.companyId,
@@ -2104,7 +2107,23 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
 
     const updated = await svc.getById(id);
-    const actor = getActorInfo(req);
+
+    // [peer review] generic PATCH done 대체 경로이므로 동일한 closeout side effects 실행.
+    if (updated && updated.status === "done" && issue.status !== "done") {
+      await heartbeat.finalizeLinkedRunsForIssueStatus({
+        issueId: id,
+        companyId: issue.companyId,
+        status: "done",
+        linkedRunIds: [issue.checkoutRunId, issue.executionRunId, actor.runId],
+      });
+    }
+    await routinesSvc.syncRunStatusForIssue(id);
+    await workflowsSvc.syncRunStatusForIssue(db, id);
+    if (actor.runId) {
+      await heartbeat.reportRunActivity(actor.runId).catch((err) =>
+        logger.warn({ err, runId: actor.runId }, "failed to clear detached run warning after owner-action completion"));
+    }
+
     await logActivity(db, {
       companyId: issue.companyId,
       actorType: actor.actorType,
