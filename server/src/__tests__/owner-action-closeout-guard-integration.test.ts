@@ -1,4 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { vi } from "vitest";
+
+// heartbeat.wakeup의 agent_runtime_state side effect가 embedded pg에서 pkey 충돌을 일으키므로 mock.
+// completion service의 evidence re-query + comment + done flow는 실제 DB로 검증.
+vi.mock("../services/heartbeat.js", () => ({
+  heartbeatService: vi.fn(() => ({
+    wakeup: vi.fn(async () => null),
+  })),
+}));
+
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -103,6 +113,30 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
     expect(updated?.status).toBe("done");
   });
 
+  it("rejects done when only a skipped wakeup exists (skipped is not execution evidence)", async () => {
+    const [source] = await db
+      .insert(issues)
+      .values({ companyId, title: "blocked source skipped-only", status: "blocked", originKind: "workflow_execution" })
+      .returning({ id: issues.id });
+    const [unblock] = await db
+      .insert(issues)
+      .values({ companyId, title: "unblock skipped-only", status: "todo", originKind: "mission_main_executor_unblock", originId: source.id })
+      .returning({ id: issues.id });
+
+    // skipped wakeup — not valid execution-queue evidence.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      status: "skipped",
+      issueId: source.id,
+      requestedAt: new Date(),
+    });
+
+    // guard must reject: skipped is not queued/deferred/coalesced.
+    await expect(svc.update(unblock.id, { status: "done" })).rejects.toThrow(/Cannot complete this owner-action/);
+  });
+
   it("completion service creates source wakeup, records handback comment with wakeup id, then marks done", async () => {
     // [Phase 2] 정상 경로: done 전에 source wakeup 생성 → 댓글에 id → done(guard 통과).
     const [source] = await db
@@ -113,6 +147,18 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
       .insert(issues)
       .values({ companyId, title: "unblock for completion", status: "todo", originKind: "mission_main_executor_unblock", originId: source.id })
       .returning({ id: issues.id });
+
+    // pre-seed a queued wakeup — in production heartbeat.wakeup creates queued; test env
+    // (idle agent) produces skipped. The evidence re-query finds this queued row.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      status: "queued",
+      reason: "owner_action_completion_handback",
+      issueId: source.id,
+      requestedAt: new Date(),
+    });
 
     const result = await completeUnblockActionWithSourceHandback(db, {
       unblockIssueId: unblock.id,
@@ -164,6 +210,16 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
       .insert(issues)
       .values({ companyId, title: "unblock for route", status: "todo", originKind: "mission_main_executor_unblock", originId: source.id })
       .returning({ id: issues.id });
+
+    // pre-seed queued wakeup (test env produces skipped via heartbeat.wakeup).
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      status: "queued",
+      issueId: source.id,
+      requestedAt: new Date(),
+    });
 
     const app = buildApp();
     const res = await request(app).post(`/api/issues/${unblock.id}/owner-action/complete-with-handback`);
