@@ -89,4 +89,18 @@ describe("mission plan execution placement pure checks", () => {
 
     expect(diagnostics).toEqual([]);
   });
+
+  it("allows input check units that explicitly exclude workflow tool grant checks", () => {
+    const diagnostics = reviewDeliveryToolPreflightMarkers([
+      unit({
+        id: "input-check",
+        title: "[ACTION] [INPUT] Confirm OfficeCLI source URL, audience, and requested output type",
+        reason: "Confirm only source URL, beginner audience, and HTML output inputs. This unit must not verify downstream workflow tool grants or availability.",
+        graphWorkProductRequired: false,
+      }),
+      unit({ id: "publish", title: "[ACTION] Publish approved page", toolNames: ["manual-onboarding-publish"] }),
+    ]);
+
+    expect(diagnostics).toEqual([]);
+  });
 });

@@ -42,6 +42,12 @@ const ARTIFACT_QA_TEXT_RE =
   /\bqa\b|\bverif(?:y|ied|ication)\b|\bvalid(?:ate|ated|ation)\b|\breview\b|\baudit\b|\bquality\b|검증|리뷰|검수|품질/u;
 const ARTIFACT_QA_RE =
   /\bwork[-_\s]?product\b|\bartifact\b|\bdeliverable\b|\boutput\b|\basset\b|\btemplate\b|\bclaim\b|\bevidence\b|\bsource\b|\bcitation\b|\brubric\b|\bsuccess\s*criteria\b|\bacceptance\b|\bquality\b|\bcoverage\b|\bcontent\b|\bformat\b|\bfile\b|\bpreview\b|\brender\b|산출물|결과물|템플릿|자료|본문|내용|주장|근거|출처|품질|성공기준|수용기준|커버리지|형식|파일|미리보기|렌더|동작|검수/iu;
+const TOOL_GRANT_PREFLIGHT_MARKER_RE =
+  /\bworkflow\s*tools?\b|\btool\s*(?:access|availability|grant|permission|contract)s?\b|도구\s*(?:접근|권한|가용|계약)/iu;
+const PREFLIGHT_CONTEXT_RE =
+  /\bpre[-_\s]?flight\b|\bprerequisite\b|\bcondition\b|\binput[-_\s]?check\b|\bdelivery\b|\bdownstream\b|사전|조건|필수|하위|후속/iu;
+const TOOL_GRANT_PREFLIGHT_NEGATION_RE =
+  /\b(?:must|should|do|does|did|will|would|can|cannot|can't)\s+not\b|\bnot\s+(?:verify|check|confirm|validate|pre[-_\s]?flight)\b|하지\s*(?:않|말)|검증하지|확인하지|점검하지/iu;
 
 function readStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -146,10 +152,16 @@ export function reviewArtifactWorkProductMarkers(
   return diagnostics;
 }
 
+function affirmativeToolPreflightText(text: string): string {
+  return text
+    .split(/[\n.;!?。！？]+/u)
+    .filter((sentence) => !TOOL_GRANT_PREFLIGHT_NEGATION_RE.test(sentence))
+    .join("\n");
+}
+
 function mentionsToolGrantPreflight(unit: Record<string, unknown>): boolean {
-  const text = missionPlanUnitText(unit);
-  return /\bworkflow\s*tools?\b|\btool\s*(?:access|availability|grant|permission|contract)s?\b|도구\s*(?:접근|권한|가용|계약)/iu.test(text)
-    && /\bpre[-_\s]?flight\b|\bprerequisite\b|\bcondition\b|\binput[-_\s]?check\b|\bdelivery\b|\bdownstream\b|사전|조건|필수|하위|후속/iu.test(text);
+  const text = affirmativeToolPreflightText(missionPlanUnitText(unit));
+  return TOOL_GRANT_PREFLIGHT_MARKER_RE.test(text) && PREFLIGHT_CONTEXT_RE.test(text);
 }
 
 export function reviewDeliveryToolPreflightMarkers(
