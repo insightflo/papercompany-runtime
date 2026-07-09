@@ -192,16 +192,16 @@ async function assertCanCompleteOwnerActionWithHandback(db: Db, issue: typeof is
   const [source] = await db
     .select({ status: issues.status })
     .from(issues)
-    .where(eq(issues.id, sourceIssueId))
+    .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
     .limit(1);
-  if (!source) return; // source 회수/삭제 → 강제 불가
+  if (!source) return; // source 회수/삭제 또는 다른 회사 → 강제 불가
   // evidence 1: source가 blocked에서 벗어남(재오픈/회복 = supervision retry 적용 효과).
   if (source.status !== "blocked") return;
-  // evidence 2: source 향 wakeup이 dispatch됨(dispatchOwnerDecisionWakeups 경로).
+  // evidence 2: source 향 wakeup이 dispatch됨 — 같은 회사 scope.
   const [wake] = await db
     .select({ id: agentWakeupRequests.id })
     .from(agentWakeupRequests)
-    .where(eq(agentWakeupRequests.issueId, sourceIssueId))
+    .where(and(eq(agentWakeupRequests.issueId, sourceIssueId), eq(agentWakeupRequests.companyId, issue.companyId)))
     .limit(1);
   if (wake) return;
 
