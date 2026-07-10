@@ -64,6 +64,10 @@ import {
 import { issueService } from "./issues.js";
 import { writeQualityFinding } from "./quality-finding-writer.js";
 import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
+import {
+  buildHeartbeatFailureWikiLesson,
+  classifyWorkProductFailure,
+} from "./heartbeat-failure-wiki.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
@@ -7154,17 +7158,16 @@ export function heartbeatService(db: Db) {
           errorCode: "child_stdout_runaway_capkill",
         }, run.id);
       }
-      // Agent wiki hook (adapter_failed non-overload): adapter 실행 실패 교훈 축적 (non-blocking).
-      // provider overload(529)는 위 overload 분류로 별도 기록되므로 제외. 이 블록은 issue-linked failed run
-      // 에 도달(classifyHeartbeatRunFailure 이후)하므로 adapter_failed run을 커버.
-      if (run.status === "failed" && run.errorCode === "adapter_failed" && classification.category !== "overload") {
+      const heartbeatFailureWikiLesson = buildHeartbeatFailureWikiLesson({
+        classification,
+        runStatus: run.status,
+        runErrorCode: run.errorCode,
+      });
+      if (heartbeatFailureWikiLesson) {
         fireWikiRecord(wikiSvc, {
           companyId: run.companyId,
           agentId: run.agentId,
-          pattern: "adapter_failed (adapter 실행 실패)",
-          cause: "adapter 실행이 실패해 run 종료. opencode models discovery timeout(20s), command 시작 실패(ENOENT), adapter 내부 에러 등. provider overload(529)는 overload 분류로 별도 기록.",
-          solution: "opencode models timeout은 retry+stale serve로 완화. 반복 시 adapter command·PATH·인증·리소스 점검. command 부재는 영구 장애이므로 adapter 설정 확인.",
-          errorCode: "adapter_failed",
+          ...heartbeatFailureWikiLesson,
         }, run.id);
       }
 
@@ -7502,6 +7505,15 @@ export function heartbeatService(db: Db) {
           allowedArtifactRoot,
         })) {
           const now = new Date();
+          const explicitArtifactPaths = extractExplicitArtifactPaths(
+            stringifyRunResultJson(run.resultJson),
+            run.stdoutExcerpt,
+            run.stderrExcerpt,
+          );
+          const workProductFailure = classifyWorkProductFailure({
+            allowedArtifactRoot,
+            explicitArtifactPaths,
+          });
           await tx
             .update(issues)
             .set({
@@ -7539,21 +7551,18 @@ export function heartbeatService(db: Db) {
               previousStatus: issue.status,
               nextStatus: "blocked",
               reason: "missing_work_product_registration",
+              failureClass: workProductFailure.failureClass,
               runClaimedArtifactPaths: claimedArtifactPaths,
               commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
               sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
               commentArtifactPathsSafeForAutoRegistration: commentArtifactPathCandidates.safeForAutoRegistration,
             },
           });
-          // Agent self-learning wiki (Phase 1): workProduct 미등록 패턴 기록 (non-blocking).
           fireWikiRecord(wikiSvc, {
             companyId: issue.companyId,
             agentId: run.agentId,
             missionId: issue.missionId ?? null,
-            pattern: "workProduct 미등록",
-            cause: "run이 산출물 파일 경로를 보고했지만 issue에 공식 workProduct가 등록되지 않아 mission artifact gate가 해당 이슈를 block함.",
-            solution: "산출물 파일을 지정된 출력 디렉토리에 만들고 실행 출력 끝에 `[ARTIFACT]: <절대경로>` 한 줄을 남긴다. workProduct 등록은 시스템이 자동 처리하므로 POST/curl 등록을 시도하지 않는다.",
-            errorCode: "workproduct_registration_missing",
+            ...workProductFailure.wikiLesson,
           }, run.id);
           queuePostTransactionWorkflowIssueSync(issue.id);
           return null;
