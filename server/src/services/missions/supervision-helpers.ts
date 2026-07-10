@@ -216,38 +216,58 @@ export interface DagStepLike {
   type?: string;
 }
 
-/** step이 QA/검수 계열인지(step id 접두 qa-/validate-/verify-/audit- 또는 이름에 qa/validate/verify/review/check/audit 계열 어근). */
 export function isQaLikeStep(step: DagStepLike): boolean {
   const id = step.id.toLowerCase();
-  if (id.startsWith("qa") || id.startsWith("validate") || id.startsWith("verify") || id.startsWith("audit")) return true;
+  if (
+    id.startsWith("qa")
+    || id.startsWith("validate")
+    || id.startsWith("verify")
+    || id.startsWith("audit")
+    || id.startsWith("inspect")
+  ) return true;
   const name = `${step.name ?? ""} ${step.title ?? ""} ${step.type ?? ""}`.toLowerCase();
-  return /\b(qa|audit\w*|validat\w*|verif\w*|review\w*|check\w*)/i.test(name);
+  const explicitQaName = /\b(?:qa|audit\w*|validat\w*|verif\w*|inspect\w*)\b/iu.test(name);
+  const contextualReview = /\b(?:(?:final|quality|artifact|work\s*product|deliverable|report|output|evidence|citation|source\s*coverage|readback|delivery|compliance|acceptance)\s+(?:review\w*|check\w*)|(?:review\w*|check\w*)\s+(?:quality|artifact|work\s*product|deliverable|report|output|evidence|citation|source\s*coverage|readback|delivery|compliance|acceptance))\b/iu.test(name);
+  const koreanQaName = /검수|검증|감사|(?:최종|품질|산출물|결과물|보고서|배포|게시물)\s*(?:확인|점검|검사|검토)/u.test(name);
+  return explicitQaName || contextualReview || koreanQaName;
 }
 
 /**
  * [목적] A(DAG 역참조): QA step의 dependency 중 non-QA 생산자를 찾는다.
  * [입력] qaStepId(반려한 QA step), steps(워크플로우 정의 전체 step).
- * [출력] 생산자 step id. QA 의존성 중 (a)QA 게이트가 아니고 (b)의존성이 가장 많아
- *   위상적으로 가장 아래(=산출물을 최종 합성한 step, 예: synthesis)인 것을 생산자로 삼는다.
+ * [출력] 생산자 step id. QA 의존성이 있으면 그 QA가 검증한 생산자를 먼저 추적하고, 그렇지 않으면
+ *   직접 의존성 중 non-QA 이면서 의존성이 가장 많은 최종 합성 step을 생산자로 삼는다.
  * [주의] 생산자 후보가 없거나 모두 QA면 null.
  */
 export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: DagStepLike[]): string | null {
   if (!qaStepId) return null;
   const byId = new Map(steps.map((step) => [step.id, step]));
-  const qaStep = byId.get(qaStepId);
-  if (!qaStep) return null;
-  const deps = qaStep.dependencies ?? qaStep.dependsOn ?? [];
-  const producers = deps
-    .map((depId) => byId.get(depId))
-    .filter((step): step is DagStepLike => Boolean(step))
-    .filter((step) => !isQaLikeStep(step));
-  if (producers.length === 0) return null;
-  producers.sort(
-    (a, b) =>
-      (b.dependencies?.length ?? b.dependsOn?.length ?? 0) -
-      (a.dependencies?.length ?? a.dependsOn?.length ?? 0),
-  );
-  return producers[0]!.id;
+
+  const pickDeepest = (candidates: DagStepLike[]): DagStepLike | null => {
+    if (candidates.length === 0) return null;
+    return [...candidates].sort(
+      (a, b) =>
+        (b.dependencies?.length ?? b.dependsOn?.length ?? 0) -
+        (a.dependencies?.length ?? a.dependsOn?.length ?? 0),
+    )[0] ?? null;
+  };
+
+  const resolve = (stepId: string, visited: Set<string>): DagStepLike | null => {
+    if (visited.has(stepId)) return null;
+    visited.add(stepId);
+    const qaStep = byId.get(stepId);
+    if (!qaStep || !isQaLikeStep(qaStep)) return null;
+    const dependencies = (qaStep.dependencies ?? qaStep.dependsOn ?? [])
+      .map((dependencyId) => byId.get(dependencyId))
+      .filter((step): step is DagStepLike => Boolean(step));
+    const nestedProducers = dependencies
+      .filter(isQaLikeStep)
+      .map((dependency) => resolve(dependency.id, new Set(visited)))
+      .filter((step): step is DagStepLike => Boolean(step));
+    return pickDeepest(nestedProducers) ?? pickDeepest(dependencies.filter((dependency) => !isQaLikeStep(dependency)));
+  };
+
+  return resolve(qaStepId, new Set())?.id ?? null;
 }
 
 /**

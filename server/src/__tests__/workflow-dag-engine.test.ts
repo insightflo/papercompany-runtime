@@ -124,6 +124,16 @@ describe("normalizeWorkflowStepsForExecution", () => {
     ]);
   });
 
+  it("forces persisted QA steps to use verdict gates even when legacy data requires a workProduct", () => {
+    const normalized = normalizeWorkflowStepsForExecution([
+      { id: "inspection", title: "Final inspection", graphWorkProductRequired: true },
+      { id: "qa-legacy", title: "Legacy QA", graphWorkProductRequired: "true" },
+      { id: "materialize-report", title: "Materialize report", graphWorkProductRequired: true },
+    ]);
+
+    expect(normalized.map((step) => step.graphWorkProductRequired)).toEqual([false, false, true]);
+  });
+
   it("normalizes workflow graph execution controls into the native runtime contract", () => {
     expect(
       normalizeWorkflowStepsForExecution([
@@ -860,6 +870,42 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       { stepId: "validate-report", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
     ]);
     expect(definition.steps.find((step) => step.id === "validate-report")?.conditionalDependencies).toBeUndefined();
+  });
+
+  it("treats final inspection as QA, removes its workProduct gate, and adds a rework back-edge", async () => {
+    const companyId = randomUUID();
+    const producerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Final Inspection Workflow Company",
+      issuePrefix: `FI${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      { id: producerAgentId, companyId, name: "Producer", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: qaAgentId, companyId, name: "Inspector", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+
+    const definition = await workflowService.createDefinition(db, {
+      companyId,
+      name: "Final Inspection Workflow",
+      steps: [
+        { id: "materialize-report", name: "Materialize report", agentId: producerAgentId, dependencies: [], graphWorkProductRequired: true },
+        { id: "qa-dashboard-html", name: "Validate report HTML", agentId: qaAgentId, dependencies: ["materialize-report"] },
+        { id: "signal-analysis", name: "Signal analysis", agentId: producerAgentId, dependencies: [] },
+        { id: "strategy-summary", name: "Strategy summary", agentId: producerAgentId, dependencies: ["signal-analysis"] },
+        { id: "inspection", name: "Final inspection", agentId: qaAgentId, dependencies: ["signal-analysis", "strategy-summary", "qa-dashboard-html"], graphWorkProductRequired: true },
+      ],
+    });
+
+    expect(definition.steps.find((step) => step.id === "materialize-report")?.conditionalDependencies).toEqual([
+      { stepId: "qa-dashboard-html", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+      { stepId: "inspection", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+    ]);
+    expect(definition.steps.find((step) => step.id === "strategy-summary")?.conditionalDependencies).toBeUndefined();
+    expect(definition.steps.find((step) => step.id === "inspection")?.graphWorkProductRequired).toBe(false);
   });
 
   it("preserves author-defined QA back-edges instead of replacing their loop cap", async () => {
