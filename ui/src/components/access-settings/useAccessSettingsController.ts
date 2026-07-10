@@ -9,6 +9,7 @@ import {
 } from "../../api/access";
 import { queryKeys } from "../../lib/queryKeys";
 import { getErrorMessage, toggleGrant } from "./utils";
+import { useMemberPicker } from "./useMemberPicker";
 
 export function useAccessSettingsController(selectedCompanyId: string | null) {
   const { pushToast } = useToast();
@@ -98,6 +99,8 @@ export function useAccessSettingsController(selectedCompanyId: string | null) {
       });
     }
   }
+
+  const memberPicker = useMemberPicker(selectedCompanyId, () => invalidateAccessQueries());
 
   const updateMemberPermissionsMutation = useMutation({
     mutationFn: ({ memberId, grants }: { memberId: string; grants: AccessGrantInput[] }) =>
@@ -219,16 +222,25 @@ export function useAccessSettingsController(selectedCompanyId: string | null) {
     editingGroupName,
     newGroupDescription,
     newGroupName,
+    memberSearchQuery: memberPicker.memberSearchQuery,
+    memberSearchResults: memberPicker.memberSearchResults,
+    memberSearchLoading: memberPicker.memberSearchLoading,
+    memberSearchError: memberPicker.memberSearchError,
+    selectedUserId: memberPicker.selectedUserId,
     selectedGroupId,
+    addMemberPending: memberPicker.addMemberPending,
     createGroupPending: createGroupMutation.isPending,
     updateMemberPermissionsPending: updateMemberPermissionsMutation.isPending,
     setEditingGroupDescription,
     setEditingGroupName,
     setNewGroupDescription,
     setNewGroupName,
+    setMemberSearchQuery: memberPicker.setMemberSearchQuery,
+    setSelectedUserId: memberPicker.setSelectedUserId,
     setSelectedGroupId,
     retryAccess,
     createGroup: () => createGroupMutation.mutate(),
+    addSelectedMember: memberPicker.addSelectedMember,
     deleteSelectedGroup: () => {
       if (!selectedGroup) return;
       const confirmed = window.confirm(

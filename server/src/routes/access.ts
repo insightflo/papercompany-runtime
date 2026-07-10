@@ -33,6 +33,10 @@ import {
   updatePermissionGroupGrantsSchema,
   PERMISSION_KEYS
 } from "@paperclipai/shared";
+import {
+  addCompanyMemberSchema,
+  searchCompanyUsersQuerySchema,
+} from "@paperclipai/shared/validators/access";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import {
   forbidden,
@@ -2848,6 +2852,36 @@ export function accessRoutes(
     );
     res.json(enriched);
   });
+
+  router.get("/companies/:companyId/users/search", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+    const query = searchCompanyUsersQuerySchema.parse(req.query);
+    res.json(await access.searchAvailableUsers(companyId, query.q, query.limit));
+  });
+
+  router.post(
+    "/companies/:companyId/members",
+    validate(addCompanyMemberSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyPermission(req, companyId, "users:manage_permissions");
+      const result = await access.addUserMember(companyId, req.body.userId);
+      if (!result) throw notFound("User not found");
+      if (result.change !== "unchanged") {
+        await logActivity(db, {
+          companyId,
+          actorType: "user",
+          actorId: req.actor.userId ?? "board",
+          action: result.change === "created" ? "company_member.added" : "company_member.reactivated",
+          entityType: "company_membership",
+          entityId: result.membership.id,
+          details: { userId: result.membership.principalId },
+        });
+      }
+      res.status(result.change === "created" ? 201 : 200).json(result.membership);
+    },
+  );
 
   router.patch(
     "/companies/:companyId/members/:memberId/permissions",

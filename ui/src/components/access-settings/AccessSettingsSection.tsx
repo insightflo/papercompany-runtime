@@ -18,6 +18,12 @@ export function AccessSettingsSection({ selectedCompanyId }: { selectedCompanyId
     editingGroupName,
     groupById,
     groupMutationPending,
+    addMemberPending,
+    addSelectedMember,
+    memberSearchError,
+    memberSearchLoading,
+    memberSearchQuery,
+    memberSearchResults,
     newGroupDescription,
     newGroupName,
     permissionGroups,
@@ -27,10 +33,13 @@ export function AccessSettingsSection({ selectedCompanyId }: { selectedCompanyId
     selectedGroupDetail,
     selectedGroupDetailQuery,
     selectedGroupId,
+    selectedUserId,
     setEditingGroupDescription,
     setEditingGroupName,
+    setMemberSearchQuery,
     setNewGroupDescription,
     setNewGroupName,
+    setSelectedUserId,
     setSelectedGroupId,
     toggleGroupGrant,
     toggleGroupMember,
@@ -93,8 +102,17 @@ export function AccessSettingsSection({ selectedCompanyId }: { selectedCompanyId
               <AccessUsersView
                 members={userMembers}
                 groupById={groupById}
-                disabled={updateMemberPermissionsPending}
+                disabled={updateMemberPermissionsPending || addMemberPending}
                 onToggleGrant={toggleUserGrant}
+                memberSearchQuery={memberSearchQuery}
+                onMemberSearchQueryChange={setMemberSearchQuery}
+                searchResults={memberSearchResults}
+                searchLoading={memberSearchLoading}
+                searchError={memberSearchError}
+                selectedUserId={selectedUserId}
+                onSelectUser={setSelectedUserId}
+                addUserPending={addMemberPending}
+                onAddSelectedUser={addSelectedMember}
               />
             </TabsContent>
 
