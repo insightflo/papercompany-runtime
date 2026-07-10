@@ -171,6 +171,10 @@ export type {
   CompanySkillCreateRequest,
   CompanySkillFileDetail,
   CompanySkillFileUpdateRequest,
+  ToolDefinition,
+  ToolDefinitionAdapterType,
+  CreateToolDefinitionRequest,
+  UpdateToolDefinitionRequest,
   CompanyInstructionFileSummary,
   CompanyInstructionFileDetail,
   CompanyInstructionsBundle,
@@ -399,6 +403,10 @@ export type {
 } from "./types/index.js";
 
 export {
+  toolDefinitionAdapterTypeSchema,
+  toolDefinitionSchema,
+  createToolDefinitionSchema,
+  updateToolDefinitionSchema,
   instanceGeneralSettingsSchema,
   patchInstanceGeneralSettingsSchema,
   type PatchInstanceGeneralSettings,

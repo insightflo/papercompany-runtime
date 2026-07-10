@@ -25,6 +25,15 @@ export {
   type UpdateCompanyBranding,
 } from "./company.js";
 export {
+  toolDefinitionAdapterTypeSchema,
+  toolDefinitionSchema,
+  createToolDefinitionSchema,
+  updateToolDefinitionSchema,
+  type ToolDefinitionAdapterType,
+  type CreateToolDefinition,
+  type UpdateToolDefinition,
+} from "./tool-definition.js";
+export {
   companySkillSourceTypeSchema,
   companySkillTrustLevelSchema,
   companySkillCompatibilitySchema,

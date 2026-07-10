@@ -26,7 +26,7 @@ import {
 } from "../services/workflow/tool-catalog.js";
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { conflict, notFound, unauthorized, unprocessable } from "../errors.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 function serializeValue(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -269,6 +269,7 @@ export function workflowRoutes(db: Db) {
   router.post("/companies/:companyId/workflows/tools/grants", validate(workflowToolGrantSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    assertBoard(req);
     const actor = actorForActivity(req);
     const grant = await grantWorkflowToolToAgent(db, {
       companyId,
@@ -276,16 +277,40 @@ export function workflowRoutes(db: Db) {
       toolName: req.body.toolName,
       grantedBy: actor.actorId ?? actor.agentId ?? actor.actorType,
     });
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow.tool_granted",
+      entityType: "agent",
+      entityId: req.body.agentId,
+      details: { toolName: req.body.toolName },
+    });
     res.status(201).json(grant);
   });
 
   router.delete("/companies/:companyId/workflows/tools/grants", validate(workflowToolGrantSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const actor = actorForActivity(req);
     const revoked = await revokeWorkflowToolFromAgent(db, {
       companyId,
       agentId: req.body.agentId,
       toolName: req.body.toolName,
+    });
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow.tool_revoked",
+      entityType: "agent",
+      entityId: req.body.agentId,
+      details: { toolName: req.body.toolName, revoked },
     });
     res.json({ revoked });
   });
@@ -293,7 +318,21 @@ export function workflowRoutes(db: Db) {
   router.post("/companies/:companyId/workflows/tools/sync-from-tool-registry", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    res.json(await syncToolRegistryToolsToCore(db, companyId));
+    assertBoard(req);
+    const result = await syncToolRegistryToolsToCore(db, companyId);
+    const actor = actorForActivity(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow.tools_synced",
+      entityType: "company",
+      entityId: companyId,
+      details: result,
+    });
+    res.json(result);
   });
 
   router.get("/companies/:companyId/workflows", async (req, res) => {
