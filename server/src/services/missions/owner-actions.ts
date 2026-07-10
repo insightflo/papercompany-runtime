@@ -34,6 +34,57 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
   const legacyWorkflowMissionGraceMs = 5 * 60 * 1000;
 
+  async function findOpenMissionWork(
+    companyId: string,
+    missionId: string,
+  ): Promise<{ id: string; status: string } | null> {
+    return db
+      .select({ id: issues.id, status: issues.status })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.missionId, missionId),
+        isNull(issues.hiddenAt),
+        sql`${issues.status} not in ('done', 'cancelled')`,
+        sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function reopenCompletedWorkflowMissionForOpenWork(
+    mission: MissionRow,
+    openWork: { id: string; status: string },
+  ): Promise<MissionRow> {
+    const now = new Date();
+    const updates: Partial<MissionRow> = {
+      status: "active",
+      completedAt: null,
+      startedAt: mission.startedAt ?? now,
+      updatedAt: now,
+    };
+    await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+    const reopenedMission = { ...mission, ...updates };
+    await ensureMainExecutorOversightIssue(reopenedMission, mission.title);
+    await logActivity(db, {
+      companyId: mission.companyId,
+      actorType: "system",
+      actorId: "mission-owner-supervision",
+      agentId: mission.ownerAgentId,
+      action: "mission.reopened_for_unsettled_work",
+      entityType: "mission",
+      entityId: mission.id,
+      details: {
+        previousStatus: mission.status,
+        nextStatus: "active",
+        openIssueId: openWork.id,
+        openIssueStatus: openWork.status,
+        reason: "completed_workflow_mission_has_open_non_oversight_work",
+      },
+    });
+    return reopenedMission;
+  }
+
   function isMissionOwnerActionParentPlacementRejected(error: unknown) {
     return error instanceof HttpError &&
       error.status === 422 &&
@@ -119,17 +170,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
           .limit(1)
           .then((rows) => rows[0] ?? null);
         if (legacyPluginRun) {
-          const openWork = await db
-            .select({ id: issues.id })
-            .from(issues)
-            .where(and(
-              eq(issues.missionId, mission.id),
-              isNull(issues.hiddenAt),
-              sql`${issues.status} not in ('done', 'cancelled')`,
-              sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
-            ))
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
+          const openWork = await findOpenMissionWork(mission.companyId, mission.id);
           if (!openWork) {
             const completedAt = legacyPluginRun.updatedAt ?? new Date();
             const updates: Partial<MissionRow> = {
@@ -182,6 +223,15 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     const latestStatus = latestRun?.status.trim().toLowerCase() ?? null;
     if (latestStatus && (completedWorkflowRunStatuses.has(latestStatus) || cancelledWorkflowRunStatuses.has(latestStatus))) {
       if (mission.status === "planning") return mission;
+      if (completedWorkflowRunStatuses.has(latestStatus)) {
+        const openWork = await findOpenMissionWork(mission.companyId, mission.id);
+        if (openWork) {
+          if (mission.status === "completed" && canReconcileTerminalWorkflowMission) {
+            return reopenCompletedWorkflowMissionForOpenWork(mission, openWork);
+          }
+          if (mission.status === "active") return mission;
+        }
+      }
       if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) {
         if (completedWorkflowRunStatuses.has(latestStatus)) {
           await completeOpenMissionOversightIfSettled(mission, mission.completedAt ?? new Date());
@@ -262,17 +312,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   async function completeOpenMissionOversightIfSettled(mission: MissionRow, completedAt: Date): Promise<void> {
     if (mission.status !== "completed") return;
 
-    const openWork = await db
-      .select({ id: issues.id })
-      .from(issues)
-      .where(and(
-        eq(issues.missionId, mission.id),
-        isNull(issues.hiddenAt),
-        sql`${issues.status} not in ('done', 'cancelled')`,
-        sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
-      ))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
+    const openWork = await findOpenMissionWork(mission.companyId, mission.id);
     if (openWork) return;
 
     const now = new Date();
