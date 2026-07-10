@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  authUsers,
   companies,
   companyMemberships,
   createDb,
@@ -56,6 +57,17 @@ describeDb("accessService.canUser - group-aware permission resolution", () => {
       principalType: "user",
       principalId: userId,
       status: "active",
+    });
+  }
+
+  async function addAuthUser(userId: string, name: string, email: string): Promise<void> {
+    await db.insert(authUsers).values({
+      id: userId,
+      name,
+      email,
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
   }
 
@@ -186,5 +198,127 @@ describeDb("accessService.canUser - group-aware permission resolution", () => {
     await addGroupMember(companyId, group.id, userId);
     await addGroupGrant(companyId, group.id, "agents:create");
     expect(await access.canUser(companyId, userId, "agents:create")).toBe(false);
+  });
+
+  it("searches auth users who do not already have active company membership", async () => {
+    const companyId = await setupCompany();
+    const activeUserId = randomUUID();
+    const suspendedUserId = randomUUID();
+    const candidateUserId = randomUUID();
+    const searchToken = `picker-${randomUUID()}`;
+    await addAuthUser(activeUserId, "Active Alice", `active@${searchToken}.test`);
+    await addAuthUser(suspendedUserId, "Suspended Sam", `suspended@${searchToken}.test`);
+    await addAuthUser(candidateUserId, "Candidate Cora", `candidate@${searchToken}.test`);
+    await addActiveUserMember(companyId, activeUserId);
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: suspendedUserId,
+      status: "suspended",
+    });
+
+    const results = await access.searchAvailableUsers(companyId, searchToken, 10);
+
+    expect(results.map((user) => user.id)).toEqual([candidateUserId, suspendedUserId]);
+    expect(results[0]).toEqual({
+      id: candidateUserId,
+      name: "Candidate Cora",
+      email: `candidate@${searchToken}.test`,
+    });
+  });
+
+  it("adds or reactivates a company user membership only for known auth users", async () => {
+    const companyId = await setupCompany();
+    const userId = randomUUID();
+    await addAuthUser(userId, "Reactivated Robin", "robin@example.com");
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: userId,
+      status: "suspended",
+      membershipRole: "member",
+    });
+
+    const reactivated = await access.addUserMember(companyId, userId);
+    const unchanged = await access.addUserMember(companyId, userId);
+    const unknown = await access.addUserMember(companyId, randomUUID());
+
+    expect(reactivated).toEqual({
+      change: "reactivated",
+      membership: expect.objectContaining({
+        companyId,
+        principalType: "user",
+        principalId: userId,
+        status: "active",
+        membershipRole: "member",
+      }),
+    });
+    expect(unchanged).toEqual({
+      change: "unchanged",
+      membership: expect.objectContaining({ principalId: userId, status: "active" }),
+    });
+    expect(unknown).toBeNull();
+  });
+
+  it("creates one membership for repeated add requests", async () => {
+    const companyId = await setupCompany();
+    const userId = randomUUID();
+    await addAuthUser(userId, "New Nora", "nora@example.com");
+
+    const created = await access.addUserMember(companyId, userId);
+    const repeated = await access.addUserMember(companyId, userId);
+
+    expect(created?.change).toBe("created");
+    expect(repeated?.change).toBe("unchanged");
+    const rows = await db
+      .select()
+      .from(companyMemberships)
+      .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalId, userId)));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("keeps an active membership role unchanged when the user is added again", async () => {
+    const companyId = await setupCompany();
+    const userId = randomUUID();
+    await addAuthUser(userId, "Owner Olivia", "owner@example.com");
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: userId,
+      status: "active",
+      membershipRole: "owner",
+    });
+
+    const result = await access.addUserMember(companyId, userId);
+
+    expect(result).toEqual({
+      change: "unchanged",
+      membership: expect.objectContaining({
+        principalId: userId,
+        status: "active",
+        membershipRole: "owner",
+      }),
+    });
+  });
+
+  it("reactivates a suspended membership once under concurrent add requests", async () => {
+    const companyId = await setupCompany();
+    const userId = randomUUID();
+    await addAuthUser(userId, "Concurrent Casey", "casey@example.com");
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: userId,
+      status: "suspended",
+      membershipRole: "owner",
+    });
+
+    const results = await Promise.all([
+      access.addUserMember(companyId, userId),
+      access.addUserMember(companyId, userId),
+    ]);
+
+    expect(results.map((result) => result?.change).sort()).toEqual(["reactivated", "unchanged"]);
+    expect(results.every((result) => result?.membership.membershipRole === "owner")).toBe(true);
   });
 });

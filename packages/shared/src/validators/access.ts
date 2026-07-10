@@ -85,6 +85,19 @@ export const updateMemberPermissionsSchema = z.object({
 
 export type UpdateMemberPermissions = z.infer<typeof updateMemberPermissionsSchema>;
 
+export const searchCompanyUsersQuerySchema = z.object({
+  q: z.string().trim().max(120).default(""),
+  limit: z.coerce.number().int().catch(10).transform((value) => Math.min(Math.max(value, 1), 25)),
+});
+
+export type SearchCompanyUsersQuery = z.infer<typeof searchCompanyUsersQuerySchema>;
+
+export const addCompanyMemberSchema = z.object({
+  userId: z.string().trim().min(1).max(256),
+});
+
+export type AddCompanyMember = z.infer<typeof addCompanyMemberSchema>;
+
 export const updateUserCompanyAccessSchema = z.object({
   companyIds: z.array(z.string().uuid()).default([]),
 });
