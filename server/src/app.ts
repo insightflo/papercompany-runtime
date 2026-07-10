@@ -14,6 +14,7 @@ import { healthRoutes } from "./routes/health.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
+import { toolDefinitionRoutes } from "./routes/tool-definitions.js";
 import { companyInstructionRoutes } from "./routes/company-instructions.js";
 import { agentRoutes } from "./routes/agents.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -351,6 +352,7 @@ export async function createApp(
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(hermesChatRoutes(db));
   api.use(companySkillRoutes(db));
+  api.use(toolDefinitionRoutes(db));
   api.use(companyInstructionRoutes(db));
   api.use(agentRoutes(db));
   api.use(assetRoutes(db, opts.storageService));

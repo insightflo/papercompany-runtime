@@ -131,6 +131,7 @@ async function resolveCoreGrantSubjects(
     .where(and(
       eq(toolDefinitions.companyId, input.companyId),
       eq(toolDefinitions.name, toolName),
+      eq(toolDefinitions.adapterType, "builtin"),
     ))
     .limit(1);
   if (!tool) throw notFound("Workflow tool not found");
@@ -362,6 +363,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       .where(eq(agents.companyId, companyId)),
   ]);
   const coreTools: WorkflowToolCatalogTool[] = coreDefinitions
+    .filter((definition) => definition.adapterType === "builtin")
     .map((definition) => ({
       name: definition.name,
       displayName: definition.name,
@@ -385,7 +387,10 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       eq(toolDefinitions.id, agentToolGrants.toolId),
       eq(toolDefinitions.companyId, companyId),
     ))
-    .where(eq(agentToolGrants.companyId, companyId));
+    .where(and(
+      eq(agentToolGrants.companyId, companyId),
+      eq(toolDefinitions.adapterType, "builtin"),
+    ));
   const coreGrantItems: WorkflowToolCatalogGrant[] = coreGrants
     .map((grant) => ({
       agentId: grant.agentId,

@@ -23,3 +23,4 @@ export { hermesChatApi } from "./hermesChat";
 export { instanceSettingsApi } from "./instanceSettings";
 export { sidebarBadgesApi } from "./sidebarBadges";
 export { companySkillsApi } from "./companySkills";
+export { toolDefinitionsApi, workflowToolsApi } from "./tools";

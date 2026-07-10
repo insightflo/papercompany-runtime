@@ -79,7 +79,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
       companyId,
       name: "collect-evening",
       description: "Collect evening data",
-      adapterType: "plugin",
+      adapterType: "builtin",
       adapterConfig: {},
     });
     await db.insert(agentToolGrants).values({
@@ -116,6 +116,56 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
     });
   });
 
+  it("does not expose non-builtin definitions as grantable workflow tools", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Executable Tool Company",
+      issuePrefix: "ETC",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Tool Operator",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(toolDefinitions).values([
+      {
+        companyId,
+        name: "collect-local",
+        description: "Collect with a local command",
+        adapterType: "builtin",
+        adapterConfig: { command: "true" },
+      },
+      {
+        companyId,
+        name: "collect-http",
+        description: "HTTP adapter is not executable by the workflow core",
+        adapterType: "http",
+        adapterConfig: { url: "https://example.test" },
+      },
+    ]);
+
+    const catalog = await listWorkflowToolCatalog(db, companyId);
+
+    expect(catalog.tools.map((tool) => tool.name)).toEqual(["collect-local"]);
+    expect(catalog.sources.core.count).toBe(1);
+    await expect(grantWorkflowToolToAgent(db, {
+      companyId,
+      agentId,
+      toolName: "collect-http",
+      grantedBy: "board",
+    })).rejects.toThrow("Workflow tool not found");
+  });
+
   it("keeps synced core tools active when the Tool Registry plugin is not ready", async () => {
     const companyId = randomUUID();
     const toolId = randomUUID();
@@ -139,7 +189,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
         apiVersion: 1,
         description: "Tool Registry",
         capabilities: [],
-        entrypoints: {},
+        entrypoints: { worker: "./dist/worker.js" },
       },
       status: "error",
     });
@@ -211,7 +261,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
         companyId,
         name: "core-report",
         description: "Create a report",
-        adapterType: "http",
+        adapterType: "builtin",
         adapterConfig: {},
       },
       {
@@ -219,7 +269,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
         companyId: otherCompanyId,
         name: "core-report",
         description: "Other company report",
-        adapterType: "http",
+        adapterType: "builtin",
         adapterConfig: {},
       },
     ]);
@@ -287,7 +337,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
         apiVersion: 1,
         description: "Tool Registry",
         capabilities: [],
-        entrypoints: {},
+        entrypoints: { worker: "./dist/worker.js" },
       },
       status: "ready",
     });
@@ -384,6 +434,8 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
         version: "0.1.0",
         apiVersion: 1,
         description: "Research Workbench",
+        author: "Papercompany",
+        categories: ["workflow"],
         capabilities: ["agent.tools.register"],
         entrypoints: { worker: "./dist/worker.js" },
         tools: [
@@ -427,8 +479,10 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
           id: "collect-sources",
           name: "Collect sources",
           type: "agent",
+          agentId,
           agentName: "Research Agent",
           toolNames: ["insightflo.research-workbench:research-search"],
+          dependencies: [],
         },
       ],
     })).resolves.toBeUndefined();

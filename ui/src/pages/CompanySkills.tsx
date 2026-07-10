@@ -20,6 +20,7 @@ import { EmptyState } from "../components/EmptyState";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { ToolAdminPanel } from "./company-skills/ToolAdminPanel";
 import {
   Dialog,
   DialogContent,
@@ -52,6 +53,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  Wrench,
 } from "lucide-react";
 
 type SkillTreeNode = {
@@ -758,6 +760,7 @@ export function CompanySkills() {
   const { pushToast } = useToast();
   const [skillFilter, setSkillFilter] = useState("");
   const [source, setSource] = useState("");
+  const [surface, setSurface] = useState<"skills" | "tools">("skills");
   const [createOpen, setCreateOpen] = useState(false);
   const [emptySourceHelpOpen, setEmptySourceHelpOpen] = useState(false);
   const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null);
@@ -1062,9 +1065,40 @@ export function CompanySkills() {
         </DialogContent>
       </Dialog>
 
+      <div className="mb-4 inline-grid grid-cols-2 border border-border text-sm">
+        <button
+          type="button"
+          className={cn(
+            "flex items-center justify-center gap-1.5 px-3 py-2 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+            surface === "skills" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/40",
+          )}
+          onClick={() => setSurface("skills")}
+          aria-pressed={surface === "skills"}
+        >
+          <Boxes className="h-3.5 w-3.5" />
+          Skills
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "flex items-center justify-center gap-1.5 border-l border-border px-3 py-2 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+            surface === "tools" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/40",
+          )}
+          onClick={() => setSurface("tools")}
+          aria-pressed={surface === "tools"}
+        >
+          <Wrench className="h-3.5 w-3.5" />
+          Tools
+        </button>
+      </div>
+
+      {surface === "tools" ? (
+        <ToolAdminPanel companyId={selectedCompanyId} />
+      ) : (
       <div className="grid min-h-[calc(100vh-12rem)] gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
         <aside className="border-r border-border">
           <div className="border-b border-border px-4 py-3">
+            <>
             <div className="flex items-center justify-between gap-2">
               <div>
                 <h1 className="text-base font-semibold">Skills</h1>
@@ -1119,6 +1153,7 @@ export function CompanySkills() {
                 {scanStatusMessage}
               </p>
             )}
+            </>
           </div>
 
           {createOpen && (
@@ -1183,6 +1218,7 @@ export function CompanySkills() {
           />
         </div>
       </div>
+      )}
     </>
   );
 }

@@ -11,6 +11,7 @@ import { companySkillsApi } from "../api/companySkills";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
+import { workflowToolsApi, type WorkflowToolOption } from "../api/tools";
 import { ApiError } from "../api/client";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { activityApi } from "../api/activity";
@@ -70,6 +71,7 @@ import {
   ChevronDown,
   ArrowLeft,
   HelpCircle,
+  Wrench,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -2313,6 +2315,11 @@ function AgentSkillsTab({
     queryFn: () => companySkillsApi.list(companyId!),
     enabled: Boolean(companyId),
   });
+  const { data: workflowCatalog, isLoading: workflowToolsLoading, error: workflowToolsError } = useQuery({
+    queryKey: queryKeys.workflowTools.catalog(companyId ?? ""),
+    queryFn: () => workflowToolsApi.catalog(companyId!),
+    enabled: Boolean(companyId),
+  });
 
   const syncSkills = useMutation({
     mutationFn: (desiredSkills: string[]) => agentsApi.syncSkills(agent.id, desiredSkills, companyId),
@@ -2324,6 +2331,21 @@ function AgentSkillsTab({
         queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.id) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.urlKey) }),
       ]);
+    },
+  });
+  const updateWorkflowToolGrant = useMutation<void, Error, { toolName: string; granted: boolean }>({
+    mutationFn: async ({ toolName, granted }: { toolName: string; granted: boolean }) => {
+      if (!companyId) throw new Error("No company selected");
+      const payload = { agentId: agent.id, toolName };
+      if (granted) {
+        await workflowToolsApi.grant(companyId, payload);
+        return;
+      }
+      await workflowToolsApi.revoke(companyId, payload);
+    },
+    onSuccess: () => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.workflowTools.catalog(companyId) });
     },
   });
 
@@ -2347,9 +2369,11 @@ function AgentSkillsTab({
     );
     skipNextSkillAutosaveRef.current = nextState.shouldSkipAutosave;
     hasHydratedSkillSnapshotRef.current = nextState.hasHydratedSnapshot;
-    setSkillDraft(nextState.draft);
+    if (!arraysEqual(skillDraft, nextState.draft)) {
+      setSkillDraft(nextState.draft);
+    }
     lastSavedSkillsRef.current = nextState.lastSaved;
-    setLastSavedSkills(nextState.lastSaved);
+    setLastSavedSkills((current) => arraysEqual(current, nextState.lastSaved) ? current : nextState.lastSaved);
   }, [skillDraft, skillSnapshot]);
 
   useEffect(() => {
@@ -2468,6 +2492,54 @@ function AgentSkillsTab({
     : hasUnsavedChanges
       ? "Saving soon..."
       : null;
+  const workflowTools = workflowCatalog?.tools ?? [];
+  const workflowGrants = workflowCatalog?.grants ?? [];
+  const grantedWorkflowToolNames = useMemo(
+    () => new Set(
+      workflowGrants
+        .filter((grant) => grant.agentId === agent.id)
+        .map((grant) => grant.toolName),
+    ),
+    [agent.id, workflowGrants],
+  );
+  const mutableWorkflowTools = workflowTools.filter((tool) => tool.source === "core");
+  const readonlyWorkflowTools = workflowTools.filter((tool) => tool.source !== "core");
+  const renderWorkflowToolRow = (tool: WorkflowToolOption, mutable: boolean) => {
+    const granted = grantedWorkflowToolNames.has(tool.name);
+    const disabled = !mutable || !tool.enabled || updateWorkflowToolGrant.isPending;
+    return (
+      <label
+        key={`${tool.source ?? "core"}:${tool.name}`}
+        className={cn(
+          "flex items-start gap-3 border-b border-border px-3 py-3 text-sm last:border-b-0",
+          mutable ? "hover:bg-accent/20" : "bg-muted/20",
+        )}
+      >
+        <input
+          type="checkbox"
+          checked={granted}
+          disabled={disabled}
+          onChange={(event) => updateWorkflowToolGrant.mutate({ toolName: tool.name, granted: event.target.checked })}
+          className="mt-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+          aria-label={`${granted ? "Revoke" : "Grant"} workflow tool ${tool.displayName} for ${agent.name}`}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">{tool.displayName}</span>
+            <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+              {tool.source ?? "core"}
+            </span>
+            {!tool.enabled ? (
+              <span className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+                disabled
+              </span>
+            ) : null}
+          </span>
+          {tool.description ? <span className="mt-1 block text-xs text-muted-foreground">{tool.description}</span> : null}
+        </span>
+      </label>
+    );
+  };
 
   return (
     <div className="max-w-4xl space-y-5">
@@ -2499,6 +2571,47 @@ function AgentSkillsTab({
           {unsupportedSkillMessage}
         </div>
       ) : null}
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <Wrench className="h-4 w-4 text-muted-foreground" />
+            Workflow tools
+          </h3>
+          {updateWorkflowToolGrant.isPending ? (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Saving
+            </span>
+          ) : null}
+        </div>
+        {workflowToolsLoading ? (
+          <PageSkeleton variant="list" />
+        ) : workflowToolsError ? (
+          <div className="border-y border-border px-3 py-4 text-sm text-destructive">
+            {workflowToolsError.message}
+          </div>
+        ) : workflowTools.length === 0 ? (
+          <div className="border-y border-border px-3 py-4 text-sm text-muted-foreground">
+            No workflow tools are registered for this company.
+          </div>
+        ) : (
+          <div className="border-y border-border">
+            {mutableWorkflowTools.map((tool) => renderWorkflowToolRow(tool, true))}
+            {readonlyWorkflowTools.length > 0 ? (
+              <div className="border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+                Source-managed tools
+              </div>
+            ) : null}
+            {readonlyWorkflowTools.map((tool) => renderWorkflowToolRow(tool, false))}
+          </div>
+        )}
+        {updateWorkflowToolGrant.isError ? (
+          <p className="text-xs text-destructive">
+            {updateWorkflowToolGrant.error instanceof Error ? updateWorkflowToolGrant.error.message : "Failed to update workflow tool access"}
+          </p>
+        ) : null}
+      </section>
 
       {isLoading ? (
         <PageSkeleton variant="list" />

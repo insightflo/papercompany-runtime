@@ -310,6 +310,13 @@ describe("workflow routes", () => {
       toolName: "collect-evening",
       grantedBy: "board-user-1",
     });
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: COMPANY_ID,
+      action: "workflow.tool_granted",
+      entityType: "agent",
+      entityId: "77777777-7777-4777-8777-777777777777",
+      details: expect.objectContaining({ toolName: "collect-evening" }),
+    }));
 
     const revoke = await request(createApp())
       .delete(`/api/companies/${COMPANY_ID}/workflows/tools/grants`)
@@ -325,6 +332,32 @@ describe("workflow routes", () => {
       agentId: "77777777-7777-4777-8777-777777777777",
       toolName: "collect-evening",
     });
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: COMPANY_ID,
+      action: "workflow.tool_revoked",
+      entityType: "agent",
+      entityId: "77777777-7777-4777-8777-777777777777",
+      details: expect.objectContaining({ toolName: "collect-evening", revoked: true }),
+    }));
+  });
+
+  it("blocks agent credentials from changing workflow tool grants", async () => {
+    const agentActor = {
+      type: "agent",
+      agentId: "77777777-7777-4777-8777-777777777777",
+      companyId: COMPANY_ID,
+      runId: null,
+    };
+
+    const grant = await request(createApp(agentActor))
+      .post(`/api/companies/${COMPANY_ID}/workflows/tools/grants`)
+      .send({
+        agentId: "77777777-7777-4777-8777-777777777777",
+        toolName: "collect-evening",
+      });
+
+    expect(grant.status).toBe(403);
+    expect(mockWorkflowToolCatalog.grantWorkflowToolToAgent).not.toHaveBeenCalled();
   });
 
   it("syncs tool-registry workflow tools into core records through a company-scoped route", async () => {
@@ -347,6 +380,18 @@ describe("workflow routes", () => {
       skippedGrants: 4,
     });
     expect(mockWorkflowToolCatalog.syncToolRegistryToolsToCore).toHaveBeenCalledWith(expect.anything(), COMPANY_ID);
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: COMPANY_ID,
+      action: "workflow.tools_synced",
+      entityType: "company",
+      entityId: COMPANY_ID,
+      details: {
+        createdTools: 2,
+        updatedTools: 1,
+        createdGrants: 3,
+        skippedGrants: 4,
+      },
+    }));
   });
 
   it("creates a workflow definition with Phase B fields and logs activity", async () => {

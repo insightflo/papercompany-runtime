@@ -195,6 +195,12 @@ export type {
   WorkflowStepRunDto,
   WorkflowRunSlotDto,
 } from "./workflow.js";
+export type {
+  ToolDefinition,
+  ToolDefinitionAdapterType,
+  CreateToolDefinitionRequest,
+  UpdateToolDefinitionRequest,
+} from "./tool-definition.js";
 export type { CostEvent, CostSummary, CostByAgent, CostByProviderModel, CostByBiller, CostByAgentModel, CostWindowSpendRow, CostByProject } from "./cost.js";
 export type { FinanceEvent, FinanceSummary, FinanceByBiller, FinanceByKind } from "./finance.js";
 export type {

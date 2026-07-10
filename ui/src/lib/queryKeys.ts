@@ -12,6 +12,12 @@ export const queryKeys = {
     file: (companyId: string, skillId: string, relativePath: string) =>
       ["company-skills", companyId, skillId, "file", relativePath] as const,
   },
+  toolDefinitions: {
+    list: (companyId: string) => ["tool-definitions", companyId] as const,
+  },
+  workflowTools: {
+    catalog: (companyId: string) => ["workflow-tools", companyId] as const,
+  },
   companyInstructions: {
     bundle: (companyId: string) => ["company-instructions", companyId] as const,
     file: (companyId: string, relativePath: string) =>
