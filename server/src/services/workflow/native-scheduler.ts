@@ -9,6 +9,7 @@ import { processQueuedWorkflowToolStepRuns, type WorkflowToolStepQueueDispatchRe
 import { logger as defaultLogger } from "../../middleware/logger.js";
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000;
+const DEFAULT_TOOL_STEP_QUEUE_INTERVAL_MS = 10_000;
 
 export type NativeWorkflowSchedulerMode = "shadow" | "active";
 
@@ -42,6 +43,7 @@ export interface CreateNativeWorkflowSchedulerOptions {
   db: Db;
   mode: NativeWorkflowSchedulerMode;
   tickIntervalMs?: number;
+  toolStepQueueIntervalMs?: number;
   listCandidates?: (
     db: Db,
     options?: ComputeDueScheduledWorkflowCandidatesOptions,
@@ -80,12 +82,15 @@ export function createNativeWorkflowScheduler(
   options: CreateNativeWorkflowSchedulerOptions,
 ): NativeWorkflowScheduler {
   const tickIntervalMs = options.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
+  const toolStepQueueIntervalMs = options.toolStepQueueIntervalMs ?? DEFAULT_TOOL_STEP_QUEUE_INTERVAL_MS;
   const listCandidates = options.listCandidates ?? listDueScheduledWorkflowCandidates;
   const claimScheduledRun = options.claimScheduledRun ?? workflowService.claimScheduledRun;
   const dispatchQueuedToolSteps = options.dispatchQueuedToolSteps ?? processQueuedWorkflowToolStepRuns;
   const log = options.logger ?? defaultLogger;
   let interval: ReturnType<typeof setInterval> | null = null;
+  let toolStepQueueInterval: ReturnType<typeof setInterval> | null = null;
   let tickInFlight = false;
+  let toolStepQueueTickInFlight = false;
   let tickCount = 0;
   let lastTickAt: string | null = null;
   let lastCandidateCount = 0;
@@ -95,6 +100,36 @@ export function createNativeWorkflowScheduler(
   let lastToolStepClaimedCount = 0;
   let lastToolStepExecutedCount = 0;
   let lastToolStepFailedCount = 0;
+
+  async function dispatchToolStepQueue(now = new Date()): Promise<WorkflowToolStepQueueDispatchResult> {
+    if (options.mode !== "active") {
+      return { claimedCount: 0, executedCount: 0, failedCount: 0, skippedCount: 0 };
+    }
+    if (toolStepQueueTickInFlight) {
+      log.warn({ mode: options.mode }, "Native workflow tool-step queue tick skipped because previous tick is still running");
+      return { claimedCount: 0, executedCount: 0, failedCount: 0, skippedCount: 1 };
+    }
+
+    toolStepQueueTickInFlight = true;
+    try {
+      const result = await dispatchQueuedToolSteps(options.db, { now });
+      lastToolStepClaimedCount = result.claimedCount;
+      lastToolStepExecutedCount = result.executedCount;
+      lastToolStepFailedCount = result.failedCount;
+      return result;
+    } catch (error) {
+      lastToolStepClaimedCount = 0;
+      lastToolStepExecutedCount = 0;
+      lastToolStepFailedCount = 1;
+      log.error({
+        mode: options.mode,
+        err: error instanceof Error ? error.message : String(error),
+      }, "Native workflow scheduler failed to dispatch queued workflow tool steps");
+      return { claimedCount: 0, executedCount: 0, failedCount: 1, skippedCount: 0 };
+    } finally {
+      toolStepQueueTickInFlight = false;
+    }
+  }
 
   async function tick(now = new Date()): Promise<void> {
     if (tickInFlight) {
@@ -150,20 +185,7 @@ export function createNativeWorkflowScheduler(
           }
         }
 
-        try {
-          toolStepQueueResult = await dispatchQueuedToolSteps(options.db, { now });
-        } catch (error) {
-          toolStepQueueResult = {
-            claimedCount: 0,
-            executedCount: 0,
-            failedCount: 1,
-            skippedCount: 0,
-          };
-          log.error({
-            mode: options.mode,
-            err: error instanceof Error ? error.message : String(error),
-          }, "Native workflow scheduler failed to dispatch queued workflow tool steps");
-        }
+        toolStepQueueResult = await dispatchToolStepQueue(now);
 
         lastClaimedCount = claimedCount;
         lastSkippedCount = skippedCount;
@@ -219,17 +241,42 @@ export function createNativeWorkflowScheduler(
         void tick();
       }, tickIntervalMs);
       interval.unref?.();
+      if (options.mode === "active") {
+        toolStepQueueInterval = setInterval(() => {
+          void dispatchToolStepQueue().then((result) => {
+            if (
+              result.claimedCount === 0
+              && result.executedCount === 0
+              && result.failedCount === 0
+              && result.skippedCount === 0
+            ) return;
+            log.info({
+              mode: options.mode,
+              claimedCount: result.claimedCount,
+              executedCount: result.executedCount,
+              failedCount: result.failedCount,
+              skippedCount: result.skippedCount,
+            }, "Native workflow tool-step queue tick");
+          });
+        }, toolStepQueueIntervalMs);
+        toolStepQueueInterval.unref?.();
+      }
     },
     stop() {
-      if (!interval) return;
-      clearInterval(interval);
-      interval = null;
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+      if (toolStepQueueInterval) {
+        clearInterval(toolStepQueueInterval);
+        toolStepQueueInterval = null;
+      }
       log.info({ mode: options.mode }, "Native workflow scheduler stopped");
     },
     tick,
     getState() {
       return {
-        running: interval !== null,
+        running: interval !== null || toolStepQueueInterval !== null,
         tickCount,
         lastTickAt,
         lastCandidateCount,

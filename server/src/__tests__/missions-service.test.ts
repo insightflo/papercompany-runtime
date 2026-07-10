@@ -5060,6 +5060,111 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(oversight?.completedAt).toBeNull();
   });
 
+  it("reopens a completed workflow mission so oversight can recover remaining blocked work", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const blockedIssueId = randomUUID();
+    const oversightIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Workflow Mission Recovery Company",
+      issuePrefix: `MR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Mission Owner",
+      role: "ceo",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Workflow mission with unresolved work",
+      description: "Created automatically for workflow run: recovery-workflow",
+      status: "completed",
+      completedAt: new Date("2026-06-09T04:41:12.533Z"),
+    });
+    await db.insert(issues).values([
+      {
+        id: blockedIssueId,
+        companyId,
+        missionId,
+        title: "Blocked producer",
+        status: "blocked",
+        priority: "medium",
+        originKind: "workflow_execution",
+      },
+      {
+        id: oversightIssueId,
+        companyId,
+        missionId,
+        title: "[OVERSIGHT] Workflow mission with unresolved work",
+        status: "done",
+        priority: "medium",
+        originKind: "mission_main_executor_oversight",
+        completedAt: new Date("2026-06-09T04:41:12.533Z"),
+      },
+    ]);
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Recovery workflow",
+      stepsJson: [],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      status: "completed",
+      triggeredBy: "test",
+      startedAt: new Date("2026-06-09T04:00:00.000Z"),
+      completedAt: new Date("2026-06-09T04:41:12.533Z"),
+    });
+
+    const detail = await missionService(db).getById(missionId);
+    const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
+
+    expect(detail.status).toBe("active");
+    expect(detail.completedAt).toBeNull();
+    expect(oversight?.status).toBe("todo");
+    expect(oversight?.completedAt).toBeNull();
+
+    const foreignCompanyId = randomUUID();
+    await db.insert(companies).values({
+      id: foreignCompanyId,
+      name: "Foreign Workflow Company",
+      issuePrefix: `FW${foreignCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, blockedIssueId));
+    await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, oversightIssueId));
+    await db.update(missions).set({ status: "completed", completedAt: new Date() }).where(eq(missions.id, missionId));
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId: foreignCompanyId,
+      missionId,
+      title: "Foreign blocked issue with invalid mission linkage",
+      status: "blocked",
+      priority: "medium",
+      originKind: "workflow_execution",
+    });
+
+    const settledDetail = await missionService(db).getById(missionId);
+    expect(settledDetail.status).toBe("completed");
+  });
+
   it("cleans up mission runtime state when a mission is cancelled", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

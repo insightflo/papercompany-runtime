@@ -45,6 +45,15 @@ describe("resolveProducerStepIdFromDag (A: DAG 역참조 → 생산자)", () => 
     ];
     expect(resolveProducerStepIdFromDag("qa-b", onlyQaDeps)).toBeNull();
   });
+
+  it("QA를 의존하는 승인 step을 QA 반려로 오인하지 않는다", () => {
+    const steps: DagStepLike[] = [
+      { id: "write-report", name: "Write report", dependencies: [] },
+      { id: "validate-report", name: "Validate report", dependencies: ["write-report"] },
+      { id: "lead-approval", name: "Lead approval", dependencies: ["validate-report"] },
+    ];
+    expect(resolveProducerStepIdFromDag("lead-approval", steps)).toBeNull();
+  });
 });
 
 describe("isQaLikeStep", () => {
@@ -60,6 +69,19 @@ describe("isQaLikeStep", () => {
   it("ACTION/연구 step은 QA가 아니다", () => {
     expect(isQaLikeStep({ id: "action-4-dcbc31ebc7", name: "Synthesis" })).toBe(false);
     expect(isQaLikeStep({ id: "action-2-fed63a3217", name: "Technology Research" })).toBe(false);
+    expect(isQaLikeStep({ id: "research-prerequisites", name: "필요 조건 확인 및 자료 조사" })).toBe(false);
+    expect(isQaLikeStep({ id: "check-prerequisites", name: "필요 조건 확인 및 자료 조사" })).toBe(false);
+    expect(isQaLikeStep({ id: "step-7", name: "Check prerequisites" })).toBe(false);
+    expect(isQaLikeStep({ id: "step-8", name: "Approval check" })).toBe(false);
+    expect(isQaLikeStep({ id: "step-9", name: "Review requirements" })).toBe(false);
+  });
+
+  it("명시적인 한국어 품질 단계는 QA로 본다", () => {
+    expect(isQaLikeStep({ id: "step-4", name: "최종 확인" })).toBe(true);
+    expect(isQaLikeStep({ id: "step-5", name: "산출물 품질 확인" })).toBe(true);
+    expect(isQaLikeStep({ id: "step-6", name: "보고서 검수" })).toBe(true);
+    expect(isQaLikeStep({ id: "step-10", name: "Final review" })).toBe(true);
+    expect(isQaLikeStep({ id: "step-11", name: "Artifact check" })).toBe(true);
   });
 });
 
