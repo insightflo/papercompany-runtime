@@ -606,6 +606,9 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
           toolName: "paperclip.echo",
           success: true,
           stdout: "ok",
+          data: {
+            sources: [{ title: "Route source", url: "https://example.com/route-source" }],
+          },
           stderr: "",
           exitCode: 0,
         },
@@ -621,6 +624,9 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       toolName: "paperclip.echo",
       success: true,
       stdout: "ok",
+      data: {
+        sources: [{ title: "Route source", url: "https://example.com/route-source" }],
+      },
       stderr: "",
       exitCode: 0,
       error: undefined,

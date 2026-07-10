@@ -41,6 +41,7 @@ export function registerNativeWorkflowToolResultEventHandlers(
       stepId: optionalString(payload.stepId),
       toolName: optionalString(payload.toolName),
       stdout: typeof payload.stdout === "string" ? payload.stdout : undefined,
+      data: payload.data,
       stderr: typeof payload.stderr === "string" ? payload.stderr : undefined,
       exitCode: optionalExitCode(payload.exitCode),
       error: typeof payload.error === "string" ? payload.error : undefined,

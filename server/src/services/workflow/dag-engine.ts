@@ -2643,6 +2643,7 @@ export async function completeWorkflowToolStepFromResult(
     stepId?: string;
     toolName?: string;
     stdout?: string;
+    data?: unknown;
     stderr?: string;
     exitCode?: number | null;
     error?: string;
@@ -2685,6 +2686,7 @@ export async function completeWorkflowToolStepFromResult(
     toolName: input.toolName ?? null,
     success: input.success,
     stdout: input.stdout ?? null,
+    ...(input.data === undefined ? {} : { data: input.data }),
     stderr: input.stderr ?? null,
     exitCode: input.exitCode ?? null,
     error: input.error ?? null,

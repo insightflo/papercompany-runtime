@@ -5188,6 +5188,76 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
   });
 
+  it("preserves structured tool data alongside stdout when an issue-less tool step completes", async () => {
+    const companyId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+    const sourceData = {
+      sources: [{ title: "Public program", url: "https://example.com/program" }],
+    };
+
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Structured Tool Result Company",
+      issuePrefix: `SD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Structured Tool Result Workflow",
+      stepsJson: [{
+        id: "collect",
+        name: "Collect public sources",
+        agentId: "",
+        dependencies: [],
+        toolNames: ["research-search"],
+      }],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    await executeWorkflowRun(db, runId);
+    await processQueuedWorkflowToolStepRuns(db);
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const request = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+
+    await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: stepRun!.id,
+      requestId: request.requestId,
+      workflowRunId: runId,
+      stepId: "collect",
+      toolName: "research-search",
+      success: true,
+      stdout: "Research search completed.",
+      data: sourceData,
+    });
+
+    const [completedStepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, stepRun!.id));
+
+    expect(completedStepRun?.metadata).toEqual(expect.objectContaining({
+      toolResult: expect.objectContaining({
+        stdout: "Research search completed.",
+        data: sourceData,
+      }),
+    }));
+  });
+
   it("advances native workflow steps from the tool-registry plugin result event", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();
@@ -5236,6 +5306,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
     const dispatched = executeToolStep.mock.calls[0]?.[0] as { requestId: string };
+    const eventData = {
+      sources: [{ title: "Event source", url: "https://example.com/event-source" }],
+    };
 
     const result = await eventBus.emit({
       eventId: randomUUID(),
@@ -5252,6 +5325,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         toolName: "fetch-context",
         success: true,
         stdout: "event ok",
+        data: eventData,
         exitCode: 0,
       },
     });
@@ -5269,6 +5343,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         toolName: "fetch-context",
         success: true,
         stdout: "event ok",
+        data: eventData,
         exitCode: 0,
       }),
     }));
