@@ -18,19 +18,64 @@ async function setupHarness(config = { backend: "vane-headless", vaneBaseUrl: "h
   return harness;
 }
 
-function makeDuckDuckGoLiteHtml() {
-  return `
-    <html>
-      <body>
-        <a class="result-link" href="/l/?uddg=https%3A%2F%2Fexample.com%2Ffirst">First &amp; Result</a>
-        <td class="result-snippet">First snippet with <b>markup</b>.</td>
-        <a class="result-link" href="https://docs.example.com/second">Second Result</a>
-        <td class="result-snippet">Second snippet.</td>
-        <a class="result-link" href="https://example.com/third">Third Result</a>
-        <td class="result-snippet">Third snippet.</td>
-      </body>
-    </html>
-  `;
+function makeSseResponse(payload, init = {}) {
+  return new Response(`event: message\ndata: ${JSON.stringify(payload)}\n\n`, {
+    status: init.status ?? 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      ...(init.headers ?? {}),
+    },
+  });
+}
+
+function makeExaSearchText() {
+  return `Title: First & Result
+URL: https://example.com/first
+Published: N/A
+Author: N/A
+Highlights:
+First snippet with markup.
+
+---
+
+Title: Second Result
+URL: https://docs.example.com/second
+Published: N/A
+Author: N/A
+Highlights:
+Second snippet.`;
+}
+
+function makeExaHttp(sessionId) {
+  const calls = [];
+  const responses = [
+    makeSseResponse(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          protocolVersion: "2025-03-26",
+          serverInfo: { name: "exa-search-server", version: "3.2.1" },
+        },
+      },
+      { headers: { "Mcp-Session-Id": sessionId } },
+    ),
+    new Response(null, { status: 202 }),
+    makeSseResponse({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { content: [{ type: "text", text: makeExaSearchText() }] },
+    }),
+  ];
+  return {
+    calls,
+    async fetch(url, init) {
+      calls.push({ url, init });
+      const response = responses.shift();
+      if (!response) throw new Error(`No more mock responses for ${sessionId}`);
+      return response;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +181,25 @@ test("health is ok with empty config because direct-web is the default backend",
 
 test("empty config searches through direct-web and returns an evidence bundle", async () => {
   const fetchCalls = [];
+  const responses = [
+    makeSseResponse(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          protocolVersion: "2025-03-26",
+          serverInfo: { name: "exa-search-server", version: "3.2.1" },
+        },
+      },
+      { headers: { "Mcp-Session-Id": "exa-session-worker" } },
+    ),
+    new Response(null, { status: 202 }),
+    makeSseResponse({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { content: [{ type: "text", text: makeExaSearchText() }] },
+    }),
+  ];
   const harness = createTestHarness({
     manifest,
     config: {},
@@ -145,10 +209,9 @@ test("empty config searches through direct-web and returns an evidence bundle", 
   harness.ctx.http = {
     async fetch(url, init) {
       fetchCalls.push({ url, init });
-      return new Response(makeDuckDuckGoLiteHtml(), {
-        status: 200,
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
+      const response = responses.shift();
+      if (!response) throw new Error("No more mock responses");
+      return response;
     },
   };
 
@@ -163,14 +226,17 @@ test("empty config searches through direct-web and returns an evidence bundle", 
   });
 
   assert.ok(!result.error, `Expected no error, got: ${result.error}`);
-  assert.equal(fetchCalls.length, 1);
-  assert.match(String(fetchCalls[0].url), /^https:\/\/lite\.duckduckgo\.com\/lite\//);
+  assert.equal(fetchCalls.length, 3);
+  assert.equal(fetchCalls.every((call) => String(call.url) === "https://mcp.exa.ai/mcp"), true);
 
   const data = result.data;
   assert.ok(data, "Expected data to be present");
   assert.equal(data.query, "papercompany direct web");
   assert.equal(data.rawEngine.name, "direct-web");
-  assert.equal(data.rawEngine.baseUrl, "https://lite.duckduckgo.com/lite/");
+  assert.equal(data.rawEngine.provider, "exa-mcp");
+  assert.equal(data.rawEngine.baseUrl, "https://mcp.exa.ai/mcp");
+  assert.equal(data.rawEngine.attempts.length, 1);
+  assert.equal(data.rawEngine.attempts[0].status, "ok");
   assert.equal(data.sources.length, 2);
   assert.equal(data.sources[0].title, "First & Result");
   assert.equal(data.sources[0].url, "https://example.com/first");
@@ -181,6 +247,31 @@ test("empty config searches through direct-web and returns an evidence bundle", 
     result.content.includes("via direct-web backend"),
     `Expected content to name direct-web backend, got: ${result.content}`,
   );
+});
+
+test("direct-web handler uses the current plugin HTTP client for each execution", async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {},
+    capabilities: manifest.capabilities,
+  });
+  const firstHttp = makeExaHttp("exa-session-first");
+  const secondHttp = makeExaHttp("exa-session-second");
+  harness.ctx.http = firstHttp;
+
+  const pluginModule = await import("../dist/worker.js");
+  const plugin = pluginModule.default;
+  pluginModule.setAdapter();
+  await plugin.definition.setup(harness.ctx);
+
+  const first = await harness.executeTool("research-search", { query: "first query", maxResults: 2 });
+  harness.ctx.http = secondHttp;
+  const second = await harness.executeTool("research-search", { query: "second query", maxResults: 2 });
+
+  assert.ok(!first.error, `Expected first search to succeed, got: ${first.error}`);
+  assert.ok(!second.error, `Expected second search to use the replacement HTTP client, got: ${second.error}`);
+  assert.equal(firstHttp.calls.length, 3);
+  assert.equal(secondHttp.calls.length, 3);
 });
 
 // ---------------------------------------------------------------------------

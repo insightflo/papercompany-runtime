@@ -45,12 +45,39 @@ import { logger } from "../middleware/logger.js";
 
 /** Maximum time (ms) a plugin fetch request may take before being aborted. */
 const PLUGIN_FETCH_TIMEOUT_MS = 30_000;
+const MAX_PLUGIN_RESPONSE_BODY_BYTES = 200 * 1024 * 1024;
+const MIN_PLUGIN_RESPONSE_BODY_BYTES = 1_024;
+const PLUGIN_RESPONSE_LIMIT_HEADER = "x-paperclip-max-response-bytes";
 
 /** Maximum time (ms) to wait for a DNS lookup before aborting. */
 const DNS_LOOKUP_TIMEOUT_MS = 5_000;
 
 /** Only these protocols are allowed for plugin HTTP requests. */
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+
+export function resolvePluginResponseBodyLimit(init?: RequestInit): {
+  init: RequestInit | undefined;
+  maxResponseBodyBytes: number;
+} {
+  const headers = new Headers(init?.headers);
+  const requested = Number.parseInt(headers.get(PLUGIN_RESPONSE_LIMIT_HEADER) ?? "", 10);
+  headers.delete(PLUGIN_RESPONSE_LIMIT_HEADER);
+
+  const maxResponseBodyBytes = Number.isSafeInteger(requested)
+    && requested >= MIN_PLUGIN_RESPONSE_BODY_BYTES
+    && requested <= MAX_PLUGIN_RESPONSE_BODY_BYTES
+    ? requested
+    : MAX_PLUGIN_RESPONSE_BODY_BYTES;
+
+  if (!init) {
+    return { init: undefined, maxResponseBodyBytes };
+  }
+
+  return {
+    init: { ...init, headers },
+    maxResponseBodyBytes,
+  };
+}
 
 /**
  * Check if an IP address is in a private/reserved range (RFC 1918, loopback,
@@ -222,6 +249,7 @@ async function executePinnedHttpRequest(
   target: ValidatedFetchTarget,
   init: RequestInit | undefined,
   signal: AbortSignal,
+  maxResponseBodyBytes: number,
 ): Promise<{ status: number; statusText: string; headers: Record<string, string>; body: string }> {
   const { options, body } = buildPinnedRequestOptions(target, init);
 
@@ -237,16 +265,15 @@ async function executePinnedHttpRequest(
     req.end();
   });
 
-  const MAX_RESPONSE_BODY_BYTES = 200 * 1024 * 1024; // 200 MB
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   await new Promise<void>((resolve, reject) => {
     response.on("data", (chunk: Buffer | string) => {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       totalBytes += buf.length;
-      if (totalBytes > MAX_RESPONSE_BODY_BYTES) {
+      if (totalBytes > maxResponseBodyBytes) {
         chunks.length = 0;
-        response.destroy(new Error(`Response body exceeded ${MAX_RESPONSE_BODY_BYTES} bytes`));
+        response.destroy(new Error(`Response body exceeded ${maxResponseBodyBytes} bytes`));
         return;
       }
       chunks.push(buf);
@@ -673,8 +700,13 @@ export function buildHostServices(
         const timeout = setTimeout(() => controller.abort(), PLUGIN_FETCH_TIMEOUT_MS);
 
         try {
-          const init = params.init as RequestInit | undefined;
-          return await executePinnedHttpRequest(target, init, controller.signal);
+          const request = resolvePluginResponseBodyLimit(params.init as RequestInit | undefined);
+          return await executePinnedHttpRequest(
+            target,
+            request.init,
+            controller.signal,
+            request.maxResponseBodyBytes,
+          );
         } finally {
           clearTimeout(timeout);
         }

@@ -73,7 +73,7 @@ vi.mock("../middleware/logger.js", () => ({
 }));
 
 import type { PluginEventBus } from "../services/plugin-event-bus.js";
-import { buildHostServices } from "../services/plugin-host-services.js";
+import { buildHostServices, resolvePluginResponseBodyLimit } from "../services/plugin-host-services.js";
 
 describe("buildHostServices issues", () => {
   beforeEach(() => {
@@ -406,5 +406,21 @@ describe("buildHostServices issues", () => {
     }));
 
     services.dispose();
+  });
+});
+
+describe("plugin outbound HTTP response limits", () => {
+  it("uses and strips a plugin-requested response limit before making the upstream request", () => {
+    const resolved = resolvePluginResponseBodyLimit({
+      method: "GET",
+      headers: {
+        "X-Paperclip-Max-Response-Bytes": "2000000",
+        Accept: "application/json",
+      },
+    });
+
+    expect(resolved.maxResponseBodyBytes).toBe(2_000_000);
+    expect(new Headers(resolved.init?.headers).get("x-paperclip-max-response-bytes")).toBeNull();
+    expect(new Headers(resolved.init?.headers).get("accept")).toBe("application/json");
   });
 });

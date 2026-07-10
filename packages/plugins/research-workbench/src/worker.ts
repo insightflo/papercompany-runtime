@@ -19,7 +19,7 @@ import {
 import manifest from "./manifest.js";
 import { createVaneHeadlessAdapter } from "./adapters/vane-headless.js";
 import { createScriptSearchAdapter } from "./adapters/script-search.js";
-import { createDirectWebAdapter, DIRECT_WEB_BASE_URL } from "./adapters/direct-web.js";
+import { createDirectWebAdapter, getDirectWebProviderBaseUrl } from "./adapters/direct-web.js";
 import type {
   VaneHeadlessSearchOutput,
   EvidenceBundle as EvidenceBundleType,
@@ -86,7 +86,6 @@ export function setAdapter(custom?: ResearchAdapter): void {
   adapterOverridden = Boolean(custom);
   vaneAdapter = null;
   scriptAdapter = null;
-  directWebAdapter = null;
 }
 
 // Module-level plugin context stash. onHealth() receives no ctx argument, so it
@@ -138,7 +137,10 @@ async function computeResearchHealth(): Promise<PluginHealthDiagnostics> {
   const config = resolveConfig(raw);
 
   if (config.backend === "direct-web") {
-    return { status: "ok", message: "Research Workbench backend 'direct-web' configured" };
+    return {
+      status: "ok",
+      message: "Research Workbench adaptive direct-web configured (Exa MCP, then DuckDuckGo)",
+    };
   }
 
   if (config.backend === "vane-headless") {
@@ -245,7 +247,6 @@ function buildSearchInput(
 
 let vaneAdapter: ReturnType<typeof createVaneHeadlessAdapter> | null = null;
 let scriptAdapter: ReturnType<typeof createScriptSearchAdapter> | null = null;
-let directWebAdapter: ReturnType<typeof createDirectWebAdapter> | null = null;
 
 function getOrCreateVaneAdapter(
   ctx: PluginContext,
@@ -275,17 +276,14 @@ function getOrCreateScriptAdapter(
   return scriptAdapter;
 }
 
-function getOrCreateDirectWebAdapter(
+function createDirectWebAdapterForRequest(
   ctx: PluginContext,
   config: InstanceConfig,
 ): ReturnType<typeof createDirectWebAdapter> {
-  if (!directWebAdapter) {
-    directWebAdapter = createDirectWebAdapter({
-      http: ctx.http,
-      timeoutMs: config.timeoutMs,
-    });
-  }
-  return directWebAdapter;
+  return createDirectWebAdapter({
+    http: ctx.http,
+    timeoutMs: config.timeoutMs,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +364,7 @@ async function handleDirectWebSearch(
   config: InstanceConfig,
   input: ResearchSearchInput,
 ): Promise<ToolResult> {
-  const directWeb = getOrCreateDirectWebAdapter(ctx, config);
+  const directWeb = createDirectWebAdapterForRequest(ctx, config);
   const query = input.query;
   const maxResults = input.maxResults ?? config.defaultMaxResults;
 
@@ -394,6 +392,7 @@ async function handleDirectWebSearch(
         retryable,
         ...(retryAfter != null ? { retryAfterSeconds: retryAfter } : {}),
         error: output.error,
+        providerAttempts: output.engine.attempts ?? [],
       },
     };
   }
@@ -405,7 +404,9 @@ async function handleDirectWebSearch(
     retrievedAt: output.retrievedAt,
     rawEngine: {
       name: "direct-web",
-      baseUrl: DIRECT_WEB_BASE_URL,
+      baseUrl: getDirectWebProviderBaseUrl(output.engine.provider),
+      provider: output.engine.provider,
+      attempts: output.engine.attempts,
       upstreamVersion: output.engine.upstreamVersion,
       patchVersion: output.engine.patchVersion,
     },

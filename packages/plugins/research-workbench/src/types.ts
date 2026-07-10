@@ -63,10 +63,30 @@ export interface VaneHeadlessSearchResult {
   raw?: Record<string, unknown>;
 }
 
+export type DirectWebProviderName = "exa-mcp" | "duckduckgo";
+
+export type DirectWebProviderFailureReason =
+  | "auth_required"
+  | "empty_results"
+  | "http_error"
+  | "network_error"
+  | "protocol_error"
+  | "response_too_large"
+  | "timeout";
+
+export interface DirectWebProviderAttempt {
+  provider: DirectWebProviderName;
+  status: "ok" | "error";
+  reason?: DirectWebProviderFailureReason;
+  detail?: string;
+}
+
 export type ResearchSearchEngineName = "direct-web" | "vane-headless" | "script";
 
 export interface VaneHeadlessSearchEngineInfo {
   name: ResearchSearchEngineName;
+  provider?: DirectWebProviderName;
+  attempts?: DirectWebProviderAttempt[];
   upstreamVersion?: string;
   patchVersion?: string;
 }
@@ -115,6 +135,8 @@ export interface EvidenceBundle {
   };
   rawEngine: {
     name: ResearchSearchEngineName;
+    provider?: DirectWebProviderName;
+    attempts?: DirectWebProviderAttempt[];
     upstreamVersion?: string;
     patchVersion?: string;
     baseUrl: string;
