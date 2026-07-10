@@ -307,29 +307,39 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
   if (!Array.isArray(rawSteps)) return [];
   return rawSteps.map((rawStep) => {
     const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as PersistedWorkflowStep;
+    const id = typeof step.id === "string" && step.id.trim() ? step.id.trim() : crypto.randomUUID();
+    const name = typeof step.name === "string" && step.name.trim()
+      ? step.name.trim()
+      : typeof step.title === "string" && step.title.trim()
+        ? step.title.trim()
+        : typeof step.id === "string" && step.id.trim()
+          ? step.id.trim()
+          : "Untitled step";
     const dependencies = normalizeStringArray(step.dependencies) ?? normalizeStringArray(step.dependsOn) ?? [];
     const toolNames = normalizeStringArray(step.toolNames)
       ?? normalizeStringArray(step.tools)
       ?? normalizeStringArray(step.toolName);
     const executionControls = normalizeWorkflowStepExecutionControls(step);
     const conditionalDependencies = normalizeConditionalEdges(step.conditionalDependencies);
+    const graphWorkProductRequired = isQaLikeStep({
+      id,
+      name,
+      title: typeof step.title === "string" ? step.title : undefined,
+      type: typeof step.type === "string" ? step.type : undefined,
+    })
+      ? false
+      : readWorkProductRequirementMarker(step) === true;
     return {
       ...step,
-      id: typeof step.id === "string" && step.id.trim() ? step.id.trim() : crypto.randomUUID(),
-      name: typeof step.name === "string" && step.name.trim()
-        ? step.name.trim()
-        : typeof step.title === "string" && step.title.trim()
-          ? step.title.trim()
-          : typeof step.id === "string" && step.id.trim()
-            ? step.id.trim()
-            : "Untitled step",
+      id,
+      name,
       agentId: typeof step.agentId === "string" ? step.agentId : "",
       dependencies,
       ...(toolNames ? { toolNames } : {}),
       ...(executionControls ? { executionControls } : {}),
       // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
       conditionalDependencies,
-      graphWorkProductRequired: readWorkProductRequirementMarker(step) === true,
+      graphWorkProductRequired,
     };
   });
 }

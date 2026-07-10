@@ -1,7 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNativeWorkflowScheduler } from "../services/workflow/native-scheduler.js";
 
 describe("native workflow scheduler shadow loop", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("reads due candidates on tick without claiming runs in shadow mode", async () => {
     const listCandidates = vi.fn().mockResolvedValue([
       {
@@ -152,6 +160,79 @@ describe("native workflow scheduler shadow loop", () => {
       toolStepExecutedCount: 2,
       toolStepFailedCount: 0,
     }), "Native workflow scheduler active tick");
+  });
+
+  it("dispatches queued tool steps every ten seconds without polling scheduled workflows", async () => {
+    const listCandidates = vi.fn().mockResolvedValue([]);
+    const dispatchQueuedToolSteps = vi.fn().mockResolvedValue({
+      claimedCount: 0,
+      executedCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const scheduler = createNativeWorkflowScheduler({
+      db: {} as never,
+      mode: "active",
+      listCandidates,
+      dispatchQueuedToolSteps,
+      logger,
+    });
+
+    scheduler.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    listCandidates.mockClear();
+    dispatchQueuedToolSteps.mockClear();
+    logger.info.mockClear();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(dispatchQueuedToolSteps).toHaveBeenCalledTimes(1);
+    expect(listCandidates).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalledWith(expect.anything(), "Native workflow tool-step queue tick");
+    scheduler.stop();
+  });
+
+  it("does not overlap a ten-second queue tick with an unresolved dispatch", async () => {
+    let resolveDispatch!: () => void;
+    let markDispatchStarted!: () => void;
+    const dispatchStarted = new Promise<void>((resolve) => {
+      markDispatchStarted = resolve;
+    });
+    const dispatchQueuedToolSteps = vi.fn().mockImplementation(() => {
+      markDispatchStarted();
+      return new Promise((resolve) => {
+        resolveDispatch = () => resolve({
+          claimedCount: 1,
+          executedCount: 1,
+          failedCount: 0,
+          skippedCount: 0,
+        });
+      });
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const scheduler = createNativeWorkflowScheduler({
+      db: {} as never,
+      mode: "active",
+      listCandidates: vi.fn().mockResolvedValue([]),
+      dispatchQueuedToolSteps,
+      logger,
+    });
+
+    scheduler.start();
+    await dispatchStarted;
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(dispatchQueuedToolSteps).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { mode: "active" },
+      "Native workflow tool-step queue tick skipped because previous tick is still running",
+    );
+
+    resolveDispatch();
+    await Promise.resolve();
+    scheduler.stop();
   });
 
   it("continues active claims after a candidate claim fails", async () => {

@@ -77,6 +77,7 @@ function normalizeWorkflowSteps(
       name: normalized.name,
       agentId: normalized.agentId,
       dependencies: normalized.dependencies,
+      graphWorkProductRequired: normalized.graphWorkProductRequired,
       ...(normalized.conditionalDependencies ? { conditionalDependencies: normalized.conditionalDependencies } : {}),
       ...(toolNames ? { toolNames } : {}),
     };
