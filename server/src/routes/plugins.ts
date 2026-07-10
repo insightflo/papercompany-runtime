@@ -775,6 +775,7 @@ export function pluginRoutes(
         stepId: typeof params.stepId === "string" ? params.stepId : undefined,
         toolName: typeof params.toolName === "string" ? params.toolName : undefined,
         stdout: typeof params.stdout === "string" ? params.stdout : undefined,
+        data: params.data,
         stderr: typeof params.stderr === "string" ? params.stderr : undefined,
         exitCode: typeof params.exitCode === "number" ? params.exitCode : null,
         error: typeof params.error === "string" ? params.error : undefined,
