@@ -48,6 +48,19 @@ describe("hasDisallowedCycle — annotated back-edge(bounded loop) 허용", () =
     ];
     expect(hasDisallowedCycle(steps)).toBe(false);
   });
+  it("다른 분기가 QA에 먼저 도달해도 annotated back-edge loop를 허용", () => {
+    const steps = [
+      step("qa-input"),
+      step("qa-gate", { dependencies: ["qa-input"] }),
+      step("producer-input"),
+      step("producer", {
+        dependencies: ["producer-input"],
+        conditionalDependencies: [{ stepId: "inspection", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 }],
+      }),
+      step("inspection", { dependencies: ["qa-gate", "producer"] }),
+    ];
+    expect(hasDisallowedCycle(steps)).toBe(false);
+  });
 });
 
 describe("hasDisallowedCycle — 우연/잘못된 cycle 거부", () => {
