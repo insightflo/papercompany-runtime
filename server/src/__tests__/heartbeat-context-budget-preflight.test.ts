@@ -1323,7 +1323,8 @@ describe("heartbeat context budget preflight", () => {
       originKind: "workflow_execution",
     });
 
-    executeSpy.mockImplementation(async ({ runId }) => {
+    executeSpy.mockImplementation(async ({ runId, agent }) => {
+      if (agent.id !== agentId) return successfulAdapterResult();
       await db
         .update(issues)
         .set({
@@ -1395,6 +1396,26 @@ describe("heartbeat context budget preflight", () => {
           entityId: issueId,
         }),
       ]),
+    );
+
+    let ownerRun: typeof heartbeatRuns.$inferSelect | null = null;
+    const ownerRunDeadline = Date.now() + 5_000;
+    while (Date.now() < ownerRunDeadline) {
+      ownerRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, ownerAgentId))
+        .then((rows) => rows[0] ?? null);
+      if (ownerRun) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (!ownerRun) throw new Error("Mission owner recovery run was not created");
+    if (!ownerRun.issueId) throw new Error("Mission owner recovery run has no issue");
+    expect((await waitForRunTerminal(heartbeat, ownerRun.id)).status).toBe("succeeded");
+    await waitForIssueStatus(
+      db,
+      ownerRun.issueId,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
   });
 
