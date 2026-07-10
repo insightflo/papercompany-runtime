@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   authUsers,
@@ -176,6 +176,83 @@ export function accessService(db: Db) {
         ),
       )
       .orderBy(sql`${companyMemberships.createdAt} asc`);
+  }
+
+  async function searchAvailableUsers(companyId: string, query: string, limit: number) {
+    const trimmed = query.trim();
+    const pattern = `%${trimmed}%`;
+    const activeMembershipExists = sql`not exists (
+      select 1 from company_memberships active_membership
+      where active_membership.company_id = ${companyId}
+        and active_membership.principal_type = 'user'
+        and active_membership.principal_id = ${authUsers.id}
+        and active_membership.status = 'active'
+    )`;
+    return db
+      .select({
+        id: authUsers.id,
+        name: authUsers.name,
+        email: authUsers.email,
+      })
+      .from(authUsers)
+      .where(
+        and(
+          activeMembershipExists,
+          trimmed
+            ? or(
+                ilike(authUsers.name, pattern),
+                ilike(authUsers.email, pattern),
+                eq(authUsers.id, trimmed),
+              )
+            : undefined,
+        ),
+      )
+      .orderBy(asc(authUsers.name), asc(authUsers.email))
+      .limit(limit);
+  }
+
+  async function addUserMember(companyId: string, userId: string) {
+    const user = await db
+      .select({ id: authUsers.id })
+      .from(authUsers)
+      .where(eq(authUsers.id, userId))
+      .then((rows) => rows[0] ?? null);
+    if (!user) return null;
+    const inserted = await db
+      .insert(companyMemberships)
+      .values({
+        companyId,
+        principalType: "user",
+        principalId: userId,
+        status: "active",
+        membershipRole: "member",
+      })
+      .onConflictDoNothing({
+        target: [
+          companyMemberships.companyId,
+          companyMemberships.principalType,
+          companyMemberships.principalId,
+        ],
+      })
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (inserted) return { membership: inserted, change: "created" as const };
+
+    const reactivated = await db
+      .update(companyMemberships)
+      .set({ status: "active", updatedAt: new Date() })
+      .where(and(
+        eq(companyMemberships.companyId, companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, userId),
+        ne(companyMemberships.status, "active"),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (reactivated) return { membership: reactivated, change: "reactivated" as const };
+
+    const existing = await getMembership(companyId, "user", userId);
+    return existing ? { membership: existing, change: "unchanged" as const } : null;
   }
 
   async function setMemberPermissions(
@@ -586,6 +663,8 @@ export function accessService(db: Db) {
     getMembership,
     ensureMembership,
     listMembers,
+    searchAvailableUsers,
+    addUserMember,
     listActiveUserMemberships,
     copyActiveUserMemberships,
     setMemberPermissions,
