@@ -5,6 +5,7 @@ import type {
   PermissionKey,
   PrincipalPermissionGrant,
 } from "@paperclipai/shared";
+import type { CompanyUserSearchResult } from "@paperclipai/shared";
 import { api } from "./client";
 
 type InviteSummary = {
@@ -175,6 +176,14 @@ export const accessApi = {
 
   listMembers: (companyId: string) =>
     api.get<CompanyAccessMember[]>(`/companies/${companyId}/members`),
+
+  searchUsers: (companyId: string, query: string, limit: number = 10) =>
+    api.get<CompanyUserSearchResult[]>(
+      `/companies/${companyId}/users/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
+
+  addMember: (companyId: string, userId: string) =>
+    api.post<CompanyMembership>(`/companies/${companyId}/members`, { userId }),
 
   updateMemberPermissions: (
     companyId: string,
