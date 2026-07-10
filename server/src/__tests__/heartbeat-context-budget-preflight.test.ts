@@ -7064,7 +7064,7 @@ describe("classifyHeartbeatRunFailure — guardrail precedence over auth", () =>
   it("classifies a Step Input Manifest broad-scan block as command, not auth, when stdout contains auth-like text", () => {
     const result = classifyHeartbeatRunFailure({
       status: "failed",
-      errorMessage: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+      errorMessage: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
       stdoutExcerpt: "The API returned Unauthorized (login required). Please re-auth.",
       errorCode: null,
     });

@@ -10,6 +10,7 @@ import {
   createDb,
   heartbeatRuns,
   issueComments,
+  issueExecutionCards,
   issueWorkProducts,
   issues,
   missionPlanArtifacts,
@@ -54,6 +55,7 @@ import {
 import { workflowService } from "../services/workflow/engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
 import { reconcileDeadlockedWorkflowRuns, reconcileRunnableWorkflowStepWakeups, reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
+import { buildRuntimeSearchPathPermissions } from "../services/runtime-search-path-permissions.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -3767,6 +3769,89 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(desc).toContain(evidencePath);
     expect(desc).not.toContain(`- audit: ${auditIssue!.identifier ?? auditIssue!.id} has no registered dependency workProduct.`);
     expect(desc).not.toContain("Dependency workProduct hard-stop:");
+
+    const outlineCard = await db
+      .select({ cardJson: issueExecutionCards.cardJson })
+      .from(issueExecutionCards)
+      .where(eq(issueExecutionCards.issueId, outlineIssue!.id))
+      .then((rows) => rows[0]?.cardJson ?? null);
+    expect(outlineCard?.evidenceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "dependency_work_product",
+        path: evidencePath,
+      }),
+    ]));
+    const unrelatedIssue = await issueService(db).create(companyId, {
+      title: "Unrelated workProduct source",
+      description: "Outside the current workflow run.",
+      status: "done",
+    });
+    const unrelatedProductId = randomUUID();
+    const archivedProductId = randomUUID();
+    const delegatedProductId = randomUUID();
+    await db.insert(workflowStepRuns).values({
+      workflowRunId: runId,
+      stepId: "same-run-sibling",
+      issueId: unrelatedIssue.id,
+      status: "completed",
+    });
+    await db.insert(issueWorkProducts).values([
+      {
+        id: unrelatedProductId,
+        companyId,
+        issueId: unrelatedIssue.id,
+        type: "file",
+        provider: "local",
+        title: "unrelated.md",
+        status: "active",
+        metadata: { path: "/srv/papercompany/projects/research-company/unrelated.md" },
+      },
+      {
+        id: archivedProductId,
+        companyId,
+        issueId: upstream.collect!.id,
+        type: "file",
+        provider: "local",
+        title: "archived.md",
+        status: "archived",
+        metadata: { path: "/srv/papercompany/projects/research-company/archived.md" },
+      },
+      {
+        id: delegatedProductId,
+        companyId,
+        issueId: upstream.collect!.id,
+        type: "file",
+        provider: "delegated",
+        title: "delegated.md",
+        status: "active",
+        metadata: { path: "/srv/papercompany/projects/other-company/delegated.md" },
+      },
+    ]);
+    await db
+      .update(issueExecutionCards)
+      .set({
+        cardJson: {
+          ...outlineCard!,
+          evidenceRefs: [
+            ...outlineCard!.evidenceRefs,
+            { type: "dependency_work_product", id: unrelatedProductId },
+            { type: "dependency_work_product", id: archivedProductId },
+            { type: "dependency_work_product", id: delegatedProductId },
+          ],
+        },
+      })
+      .where(eq(issueExecutionCards.issueId, outlineIssue!.id));
+    const runtimeSearchPaths = await buildRuntimeSearchPathPermissions({
+      db,
+      companyId,
+      issueId: outlineIssue!.id,
+      workingDirectory: "/srv/papercompany/projects/research-company",
+    });
+    expect(runtimeSearchPaths).toMatchObject({
+      version: 1,
+      workingDirectory: "/srv/papercompany/projects/research-company",
+      dependencyFiles: [evidencePath],
+    });
   });
 
   it("Plan B: ignores ARTIFACT paths declared on unrelated issues/comments outside the dependency scope", async () => {

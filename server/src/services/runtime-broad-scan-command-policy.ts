@@ -1,12 +1,13 @@
+import path from "node:path";
 import { asString, parseObject } from "../adapters/utils.js";
 
 const COMMAND_PREFIX_PATTERNS = [
-  { label: "find .", pattern: /(^|\s)find\s+/ },
-  { label: "git ls-files", pattern: /(^|\s)git\s+ls-files(\s|$)/ },
-  { label: "tree", pattern: /(^|\s)tree(\s|$)/ },
-  { label: "ls -R", pattern: /(^|\s)ls\s+-(?:[A-Za-z]*R[A-Za-z]*)(\s|$)/ },
-  { label: "rg without path", pattern: /(^|\s)rg\s+/ },
-  { label: "grep -R without path", pattern: /(^|\s)grep\s+-(?:[^\n]*R|R[^\n]*)(\s|$)/ },
+  { label: "find .", pattern: /(^|\s)find\s+/i },
+  { label: "git ls-files", pattern: /(^|\s)git\s+ls-files(\s|$)/i },
+  { label: "tree", pattern: /(^|\s)tree(\s|$)/i },
+  { label: "ls -R", pattern: /(^|\s)ls\s+-(?:[A-Za-z]*R[A-Za-z]*)(\s|$)/i },
+  { label: "rg without an allowed file path", pattern: /(^|\s)rg\s+/i },
+  { label: "grep -R without path", pattern: /(^|\s)grep\s+-(?:[^\n]*R|R[^\n]*)(\s|$)/i },
 ] as const;
 
 type BroadScanCommandLabel = (typeof COMMAND_PREFIX_PATTERNS)[number]["label"];
@@ -15,6 +16,8 @@ type SearchExecutable = "rg" | "grep";
 interface RuntimeBroadScanCommandInput {
   readonly command: string;
   readonly allowedPaths: readonly string[];
+  readonly allowedDirectories: readonly string[];
+  readonly workingDirectory?: string | null;
   readonly shellVariables: ReadonlyMap<string, string>;
   readonly stdinFromPipe?: boolean;
 }
@@ -82,7 +85,7 @@ export function extractRuntimeCommand(adapterType: string, line: string) {
 }
 
 export function normalizeRuntimeShellCommand(command: string) {
-  return stripShellCommentLines(command.toLowerCase().trim());
+  return stripShellCommentLines(command.trim());
 }
 
 export function splitRuntimeShellSegments(command: string): readonly ShellSegment[] {
@@ -127,7 +130,7 @@ function evaluateCandidate(label: BroadScanCommandLabel, input: RuntimeBroadScan
     return areAllExplicitTargetPathsAllowed(input) ? null : label;
   }
   if (label === "git ls-files") return label;
-  if (label === "rg without path" || label === "grep -R without path") {
+  if (label === "rg without an allowed file path" || label === "grep -R without path") {
     return evaluateSearchCommand(label, input);
   }
   if (label === "tree" || label === "ls -R") {
@@ -139,11 +142,16 @@ function evaluateCandidate(label: BroadScanCommandLabel, input: RuntimeBroadScan
 }
 
 function evaluateSearchCommand(label: BroadScanCommandLabel, input: RuntimeBroadScanCommandInput) {
-  const executable: SearchExecutable = label === "rg without path" ? "rg" : "grep";
+  const executable: SearchExecutable = label === "rg without an allowed file path" ? "rg" : "grep";
   const explicitTargets = extractSearchTargetPaths(input.command, executable, input.shellVariables);
   if (explicitTargets.some(isRepoWideTargetToken)) return label;
   if (input.stdinFromPipe && explicitTargets.length === 0) return null;
-  return explicitTargets.length > 0 && explicitTargets.every((target) => isAllowedTargetPath(target, input.allowedPaths))
+  return explicitTargets.length > 0 && explicitTargets.every((target) => isAllowedTargetPath(
+    target,
+    input.allowedPaths,
+    input.allowedDirectories,
+    input.workingDirectory,
+  ))
     ? null
     : label;
 }
@@ -151,7 +159,12 @@ function evaluateSearchCommand(label: BroadScanCommandLabel, input: RuntimeBroad
 function areAllExplicitTargetPathsAllowed(input: RuntimeBroadScanCommandInput) {
   const explicitTargets = extractExplicitTargetPaths(input.command, input.shellVariables);
   if (explicitTargets.length === 0) return false;
-  return explicitTargets.every((target) => isAllowedTargetPath(target, input.allowedPaths));
+  return explicitTargets.every((target) => isAllowedTargetPath(
+    target,
+    input.allowedPaths,
+    input.allowedDirectories,
+    input.workingDirectory,
+  ));
 }
 
 function hasRepoWideTarget(command: string, shellVariables: ReadonlyMap<string, string>) {
@@ -159,7 +172,7 @@ function hasRepoWideTarget(command: string, shellVariables: ReadonlyMap<string, 
 }
 
 function isRepoWideTargetToken(token: string) {
-  const normalized = cleanToken(token);
+  const normalized = cleanToken(token).toLowerCase();
   return normalized === "." || normalized === "./" || normalized === "$pwd" || normalized === "$(pwd)" || normalized === "`pwd`";
 }
 
@@ -178,37 +191,63 @@ function extractSearchTargetPaths(
   shellVariables: ReadonlyMap<string, string>,
 ) {
   const tokens = shellTokenize(command);
-  const commandIndex = tokens.findIndex((token) => token === executable);
+  const commandIndex = tokens.findIndex((token) => token.toLowerCase() === executable);
   if (commandIndex < 0) return [];
   const positional: string[] = [];
+  let patternProvidedByOption = false;
   for (let index = commandIndex + 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (!token || token === "--") continue;
     if (token.startsWith("-")) {
-      if (optionTakesValue(token) && index + 1 < tokens.length) index += 1;
+      const normalizedOption = token.toLowerCase();
+      if (normalizedOption === "-f" || normalizedOption === "--file" || normalizedOption.startsWith("--file=")) return [];
+      if (normalizedOption === "-e" || normalizedOption === "--regexp") patternProvidedByOption = true;
+      if ((normalizedOption.startsWith("-e") && normalizedOption.length > 2) || normalizedOption.startsWith("--regexp=")) {
+        patternProvidedByOption = true;
+      }
+      if (optionTakesValue(normalizedOption) && index + 1 < tokens.length) index += 1;
       continue;
     }
-    positional.push(resolveShellVariableToken(token, shellVariables));
+    positional.push(cleanToken(token));
   }
-  return positional.slice(1).map(cleanToken).filter(Boolean);
+  return (patternProvidedByOption ? positional : positional.slice(1)).filter(Boolean);
 }
 
-function isAllowedTargetPath(target: string, allowedPaths: readonly string[]) {
+function isAllowedTargetPath(
+  target: string,
+  allowedPaths: readonly string[],
+  allowedDirectories: readonly string[],
+  workingDirectory?: string | null,
+) {
   const normalized = cleanToken(target);
   if (isRepoWideTargetToken(normalized)) return false;
-  if (allowedPaths.some((relativePath) => pathMatchesAllowedPath(normalized, relativePath))) return true;
-  return isExplicitSingleFileTarget(normalized);
+  if (!isExplicitSingleFileTarget(normalized)) return false;
+  const resolvedTarget = resolvePath(normalized, workingDirectory);
+  if (!resolvedTarget) return false;
+  if (allowedPaths.some((allowedPath) => resolvePath(allowedPath, workingDirectory) === resolvedTarget)) return true;
+  return allowedDirectories.some((allowedDirectory) => {
+    const resolvedDirectory = resolvePath(allowedDirectory, workingDirectory);
+    if (!resolvedDirectory) return false;
+    const relative = path.relative(resolvedDirectory, resolvedTarget);
+    return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
+  });
 }
 
-function pathMatchesAllowedPath(target: string, allowedPath: string) {
-  const normalizedAllowedPath = cleanToken(allowedPath);
-  return target === normalizedAllowedPath || target.endsWith(`/${normalizedAllowedPath}`);
+function resolvePath(value: string, workingDirectory?: string | null) {
+  const normalized = cleanToken(value);
+  if (!normalized || hasParentTraversal(normalized)) return null;
+  if (path.isAbsolute(normalized)) return path.resolve(normalized);
+  if (!workingDirectory || !path.isAbsolute(workingDirectory)) return null;
+  return path.resolve(workingDirectory, normalized);
+}
+
+function hasParentTraversal(target: string) {
+  return target.split("/").some((segment) => segment === "..");
 }
 
 function isExplicitSingleFileTarget(target: string) {
   if (!target || /[*?[\]{}]/.test(target)) return false;
   if (target.endsWith("/")) return false;
-  if (!target.startsWith("/")) return false;
   const fileName = target.split("/").filter(Boolean).at(-1) ?? "";
   return /\.[a-z0-9][a-z0-9_-]*$/i.test(fileName);
 }
@@ -281,7 +320,7 @@ function stripShellCommentLines(command: string) {
 }
 
 function cleanToken(token: string) {
-  return token.replace(/^['"`]+|['"`,:;!?]+$/g, "").toLowerCase();
+  return token.replace(/^['"`]+|['"`,:;!?]+$/g, "");
 }
 
 function parseJsonLine(line: string) {

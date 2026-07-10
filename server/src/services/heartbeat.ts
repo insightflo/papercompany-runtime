@@ -74,6 +74,7 @@ import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-cl
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
+import { buildRuntimeSearchPathPermissions } from "./runtime-search-path-permissions.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
 import {
   collectRecentIssueCommentArtifactPathCandidates,
@@ -2676,7 +2677,7 @@ export function classifyHeartbeatRunFailure(input: {
     .join("\n")
     .toLowerCase();
   if (
-    /step input manifest|runtime broad scan|broad scan (command|instruction)|rg without path|\bfind \.|git ls-files|\bls -r|\btree\b|\bgrep -r/.test(
+    /step input manifest|runtime broad scan|broad scan (command|instruction)|\bfind \.|git ls-files|\bls -r|\btree\b|\bgrep -r/.test(
       strongEvidenceText,
     )
   ) {
@@ -6004,6 +6005,21 @@ export function heartbeatService(db: Db) {
       context.paperclipFileViews = fileViews;
     } else {
       delete context.paperclipFileViews;
+    }
+    if (issueId) {
+      const runtimeSearchPaths = await buildRuntimeSearchPathPermissions({
+        db,
+        companyId: agent.companyId,
+        issueId,
+        workingDirectory: executionWorkspace.cwd,
+      });
+      if (runtimeSearchPaths) {
+        context.paperclipRuntimeSearchPaths = runtimeSearchPaths;
+      } else {
+        delete context.paperclipRuntimeSearchPaths;
+      }
+    } else {
+      delete context.paperclipRuntimeSearchPaths;
     }
     const runtimeServiceIntents = (() => {
       const runtimeConfig = parseObject(resolvedConfig.workspaceRuntime);

@@ -59,12 +59,13 @@ export function buildWorkflowIssueExecutionCard(input: {
   step: WorkflowCardStep;
   stepOutputDir?: string | null;
   qaRubricPath?: string | null;
+  evidenceRefs?: IssueExecutionCardJson["evidenceRefs"];
   isQaStep: boolean;
 }): IssueExecutionCardJson {
   const prose = extractProseIssueContract(input.description);
   const requiresWorkProduct = input.step.graphWorkProductRequired === true || prose.workProductRequired;
   const requiresVerdict = input.isQaStep || prose.workflowVerdictRequired;
-  const evidenceRefs = [
+  const evidenceRefs = dedupeEvidenceRefs([
     input.stepOutputDir ? {
       type: "output_dir",
       path: input.stepOutputDir,
@@ -75,7 +76,8 @@ export function buildWorkflowIssueExecutionCard(input: {
       path: input.qaRubricPath,
       description: "Generated QA rubric for validator step",
     } : null,
-  ].filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    ...(input.evidenceRefs ?? []),
+  ].filter((entry): entry is NonNullable<typeof entry> => entry !== null));
 
   return {
     version: 1,
@@ -120,4 +122,14 @@ export function buildWorkflowIssueExecutionCard(input: {
       generatedBy: "workflow.dag-engine.createWorkflowStepIssue",
     },
   };
+}
+
+function dedupeEvidenceRefs(refs: IssueExecutionCardJson["evidenceRefs"]) {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = [ref.type, ref.id ?? "", ref.path ?? ""].join("\u0000");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

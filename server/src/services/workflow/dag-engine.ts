@@ -8,7 +8,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
@@ -46,6 +46,7 @@ import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
+import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import {
   buildArtifactOutputDirectoryLines,
   buildWorkProductRegistrationContractLines,
@@ -1350,6 +1351,7 @@ async function createWorkflowStepIssue(input: {
   const dependencyWorkProductRows = artifactLookupIssueRows.length > 0
     ? await input.db
       .select({
+        id: issueWorkProducts.id,
         issueId: issueWorkProducts.issueId,
         title: issueWorkProducts.title,
         type: issueWorkProducts.type,
@@ -1360,7 +1362,11 @@ async function createWorkflowStepIssue(input: {
         status: issueWorkProducts.status,
       })
       .from(issueWorkProducts)
-      .where(inArray(issueWorkProducts.issueId, artifactLookupIssueRows.map((row) => row.issueId)))
+      .where(and(
+        eq(issueWorkProducts.companyId, input.run.companyId),
+        inArray(issueWorkProducts.issueId, artifactLookupIssueRows.map((row) => row.issueId)),
+        ne(issueWorkProducts.status, "archived"),
+      ))
     : [];
   const dependencyWorkProductsByIssueId = new Map<string, typeof dependencyWorkProductRows>();
   for (const product of dependencyWorkProductRows) {
@@ -1368,6 +1374,24 @@ async function createWorkflowStepIssue(input: {
     products.push(product);
     dependencyWorkProductsByIssueId.set(product.issueId, products);
   }
+  const dependencyIssueRowsByIssueId = new Map(
+    artifactLookupIssueRows.map((row) => [row.issueId, row]),
+  );
+  const dependencyWorkProductEvidenceRefs: IssueExecutionCardJson["evidenceRefs"] =
+    dependencyWorkProductRows.flatMap((product) => {
+      if (product.provider !== "local" && product.provider !== "local_file") return [];
+      const localPath = resolveWorkProductLocalFilePath(product);
+      if (!localPath) return [];
+      const dependencyIssue = dependencyIssueRowsByIssueId.get(product.issueId);
+      return [{
+        type: "dependency_work_product",
+        id: product.id,
+        path: localPath,
+        description: dependencyIssue
+          ? `Registered workProduct from workflow step ${dependencyIssue.stepId}`
+          : "Registered dependency workProduct",
+      }];
+    });
   // [Plan B] 업스트림이 정식 workProduct 를 등록하지 않았더라도, producer 가 run output /
   // issue description / comment 에 남긴 명시적 `[ARTIFACT]: <absolute path>` 선언을 보조
   // evidence 로 downstream input 에 주입한다. broad filesystem scan 을 차단하기 위해 오직
@@ -1651,6 +1675,7 @@ async function createWorkflowStepIssue(input: {
         step: input.step,
         stepOutputDir: workProductPaths?.stepOutputDir ?? null,
         qaRubricPath,
+        evidenceRefs: dependencyWorkProductEvidenceRefs,
       });
       return reusableIssue.id;
     }
@@ -1682,6 +1707,7 @@ async function createWorkflowStepIssue(input: {
     step: input.step,
     stepOutputDir: workProductPaths?.stepOutputDir ?? null,
     qaRubricPath,
+    evidenceRefs: dependencyWorkProductEvidenceRefs,
   });
 
   await applyIssueCreatedSideEffects({

@@ -22,6 +22,46 @@ function cardRow(card: IssueExecutionCardJson) {
 }
 
 describe("issue execution card contract", () => {
+  it("preserves registered dependency workProducts as structured evidence refs", () => {
+    const card = buildWorkflowIssueExecutionCard({
+      title: "Merge opportunity candidates",
+      description: "Merge registered dependency workProducts only.",
+      companyId: "company-1",
+      workflowDefinitionId: "workflow-1",
+      workflowRunId: "run-1",
+      step: { id: "merge", dependencies: ["normalize-government"], graphWorkProductRequired: true },
+      stepOutputDir: "/srv/papercompany/projects/inflo/produced_work/current",
+      evidenceRefs: [
+        {
+          type: "dependency_work_product",
+          id: "work-product-1",
+          path: "/srv/papercompany/projects/inflo/produced_work/parent/government-iris-candidates.md",
+          description: "Registered workProduct from normalize-government",
+        },
+        {
+          type: "dependency_work_product",
+          id: "work-product-1",
+          path: "/srv/papercompany/projects/inflo/produced_work/parent/government-iris-candidates.md",
+          description: "Duplicate dependency ref",
+        },
+      ],
+      isQaStep: false,
+    });
+
+    expect(card.evidenceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "output_dir",
+        path: "/srv/papercompany/projects/inflo/produced_work/current",
+      }),
+      expect.objectContaining({
+        type: "dependency_work_product",
+        id: "work-product-1",
+        path: "/srv/papercompany/projects/inflo/produced_work/parent/government-iris-candidates.md",
+      }),
+    ]));
+    expect(card.evidenceRefs.filter((ref) => ref.type === "dependency_work_product")).toHaveLength(1);
+  });
+
   it("preserves delivery prose markers without turning ACTION cards into readback gates", () => {
     const description = [
       "Deliverable output (use exactly this directory): /tmp/out",

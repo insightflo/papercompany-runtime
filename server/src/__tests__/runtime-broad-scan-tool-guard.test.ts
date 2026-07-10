@@ -80,6 +80,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
         paperclipFileViews: [
           { workspaceId: null, relativePath: "src/server.ts", source: "wake_comment", exists: true },
         ],
+        paperclipWorkspace: { cwd: "/workspace" },
       },
     });
 
@@ -122,13 +123,14 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
         paperclipFileViews: [
           { workspaceId: null, relativePath: "src/server.ts", source: "wake_comment", exists: true },
         ],
+        paperclipWorkspace: { cwd: "/workspace" },
       },
     });
 
     expect(result).toEqual({
       blocked: true,
-      matchedCommand: "rg without path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+      matchedCommand: "rg without an allowed file path",
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
     });
   });
 
@@ -168,13 +170,14 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
         paperclipFileViews: [
           { workspaceId: null, relativePath: "src/server.ts", source: "wake_comment", exists: true },
         ],
+        paperclipWorkspace: { cwd: "/workspace" },
       },
     });
 
     expect(result).toEqual({
       blocked: true,
-      matchedCommand: "rg without path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+      matchedCommand: "rg without an allowed file path",
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
     });
   });
 
@@ -291,8 +294,8 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
 
     expect(result).toEqual({
       blocked: true,
-      matchedCommand: "rg without path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+      matchedCommand: "rg without an allowed file path",
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
     });
   });
 
@@ -332,13 +335,14 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
         paperclipFileViews: [
           { workspaceId: null, relativePath: "src/server.ts", source: "wake_comment", exists: true },
         ],
+        paperclipWorkspace: { cwd: "/workspace" },
       },
     });
 
     expect(result).toEqual({
       blocked: true,
-      matchedCommand: "rg without path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without path"',
+      matchedCommand: "rg without an allowed file path",
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
     });
   });
 

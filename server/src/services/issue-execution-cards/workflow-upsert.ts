@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { workflowStepRuns } from "@paperclipai/db";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
 import { buildWorkflowIssueExecutionCard } from "./builder.js";
@@ -25,6 +25,7 @@ export async function upsertWorkflowIssueExecutionCard(input: {
   step: WorkflowCardStep;
   stepOutputDir?: string | null;
   qaRubricPath?: string | null;
+  evidenceRefs?: IssueExecutionCardJson["evidenceRefs"];
 }): Promise<IssueExecutionCardRow> {
   const workflowStepRunId = await input.db
     .select({ id: workflowStepRuns.id })
@@ -56,6 +57,7 @@ export async function upsertWorkflowIssueExecutionCard(input: {
       step: input.step,
       stepOutputDir: input.stepOutputDir ?? null,
       qaRubricPath: input.qaRubricPath ?? null,
+      evidenceRefs: input.evidenceRefs,
       isQaStep: isQaLikeStep(input.step),
     }),
   });

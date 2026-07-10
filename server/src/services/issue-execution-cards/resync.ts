@@ -62,6 +62,7 @@ export async function resyncIssueExecutionCardAfterIssueUpdate(input: {
     step,
     stepOutputDir: existingCard.cardJson.requiredOutputs.workProduct.outputDir ?? null,
     qaRubricPath: findQaRubricPath(existingCard.cardJson.evidenceRefs),
+    evidenceRefs: existingCard.cardJson.evidenceRefs,
   });
   if (nextCard.contentHash === existingCard.contentHash) return null;
 
