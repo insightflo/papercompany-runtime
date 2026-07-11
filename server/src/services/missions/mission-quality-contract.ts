@@ -51,11 +51,11 @@ export function extractMissionQualityContract(input: {
     signals.beginnerFacing || signals.actionableReport || signals.deepResearch || signals.publishHtml;
 
   const evaluationAxes = [
-    "purposeFitness",
-    "userProblemSolving",
-    "contextFit",
-    "executability",
-    "formatProcessQuality",
+    "intentFidelity",
+    "outcomeUsefulness",
+    "executionFeasibility",
+    "verificationStrength",
+    "integrationCompleteness",
   ];
   const mustDeliver: string[] = [];
   const failureCriteria: string[] = [];
@@ -63,7 +63,7 @@ export function extractMissionQualityContract(input: {
 
   if (signals.beginnerFacing || signals.actionableReport) {
     mustDeliver.push(
-      "A deliverable a non-expert can understand and act on (what / why / how / example / misconception / judgment criterion).",
+      "A deliverable the intended audience can understand and use for the mission's stated decision or action.",
     );
     failureCriteria.push(
       "Well-structured but a non-expert still cannot understand it or judge what to do next.",
@@ -78,7 +78,7 @@ export function extractMissionQualityContract(input: {
   // 주입되며, reviewPlanAgainstIntent 의 deterministic invalid 와 무관하다.
   if (signals.beginnerFacing) {
     hardStopRules.push(
-      "Beginner/report-for-beginners artifact but the plan/successCriteria/QA unit has NO beginner-comprehension criterion (what/why/how/example/misconception/judgment) — REQUEST_CHANGES.",
+      "Beginner-facing artifact but the plan has no audience-appropriate comprehension or usability criterion tied to the requested outcome — REQUEST_CHANGES.",
     );
   }
   if (signals.deepResearch) {
@@ -130,15 +130,33 @@ export function renderMissionQualityContractSection(contract: MissionQualityCont
   return lines;
 }
 
-// [목적] QA rubric 용 고정 문구 + 5축 점수 라인. writeQaRubricMarkdown/buildPlanQaReviewDescription 공용.
+export function renderAdaptiveQualityProfileLines(): string[] {
+  return [
+    "## Adaptive quality profile",
+    "",
+    "Infer the mission's work type, user context, risk, and final use from the original request. Select only the relevant quality dimensions:",
+    "- Research / opportunity discovery: source authority, freshness, coverage, eligibility, deduplication, and selection rationale.",
+    "- Proposal / business plan: requirement compliance, evaluator alignment, evidence, numerical consistency, feasibility, and submission readiness.",
+    "- Software delivery: requirement behavior, tests, security, deployment, regression risk, and observed runtime behavior.",
+    "- Operations / maintenance: reproducibility, root cause, recovery, control evidence, and service continuity.",
+    "- Manual / beginner-facing guidance: audience comprehension, procedural reproducibility, examples only where useful, and result accuracy.",
+    "- General business output: decision usefulness, factual accuracy, completeness, and fitness for the receiving work system.",
+    "- Add or combine dimensions when the mission does not fit these examples.",
+    "- Do not apply a profile merely because its terms appear in this guidance. Derive it from the mission itself.",
+    "",
+  ];
+}
+
 export const MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE =
   "This QA is purpose-fitness first. Do not pass a deliverable merely because it is well-structured, published, or source-backed if it does not solve the original mission goal.";
 
-export function renderMissionQualityScoringLines(): string[] {
+export function renderMissionQualityReviewLines(): string[] {
   return [
-    "## 5-axis scoring (0-5)",
-    "- purposeFitness, userProblemSolving, contextFit, executability, formatProcessQuality.",
-    "- purposeFitness <= 3 or userProblemSolving <= 3 => REQUEST_CHANGES.",
+    "## Outcome review standard",
+    "- Use only the dimensions relevant to this action, its mission-specific quality profile, and its declared acceptance criteria.",
+    "- Judge observable fitness for use, factual or behavioral correctness, evidence strength, integration with downstream work, and material risk.",
+    "- REQUEST_CHANGES only for an observed blocking defect that prevents safe or useful use, downstream consumption, or verification.",
+    "- Keep optional improvements separate from the verdict so they do not create a rework loop.",
     "",
   ];
 }

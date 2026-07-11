@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
@@ -13,13 +13,12 @@ import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-execution-placement.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
+import { buildPlanQaReviewDescription } from "./missions/mission-plan-review-description.js";
 import {
-  MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
-  EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE,
-  buildVerificationBeforeCompletionCriteria,
-  extractMissionQualityContract,
-  renderMissionQualityContractSection,
-} from "./missions/mission-quality-contract.js";
+  renderMissionPlanQaUnitContractLines,
+  renderMissionPlanUnitContractLines,
+} from "./missions/mission-plan-unit-contract.js";
+import { buildVerificationBeforeCompletionCriteria } from "./missions/mission-quality-contract.js";
 import { buildDeliveryVerificationCriteria } from "./workflow/delivery-verification-gate.js";
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
@@ -1144,6 +1143,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const actor = requestedBy ?? { actorType: "system" as const, actorId: DEFAULT_OWNER_PLAN_MATERIALIZER_ACTOR_ID };
   const missionRow = await loadMissionRow(db, companyId, missionId);
   const missionTitle = missionRow?.title ?? missionId;
+  const missionDescription = missionRow?.description ?? null;
 
   // ── Plan-QA 게이트(항상 활성): 같은 decisionHash 가 이미 materialize 됐으면 통과, 아니면 QA verdict 대기 ──
   if (activeOwnerDecision?.decisionHash === decisionHash) {
@@ -1246,7 +1246,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
       }
       // (c) 같은 hash 인데 PLAN-QA 게이트 미생성(레거시 plan 진입) → 게이트 생성 후 대기
-      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
+      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, enqueuePlanQaWakeup });
       await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { issueId: legacyPlanQaIssue.id, status: "pending", decisionHash } });
       await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "plan_qa_pending" });
       return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: legacyPlanQaIssue.id, diagnostics: [] };
@@ -1257,7 +1257,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // ── 새 decision (decisionHash 불일치): revision 생성 + PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연 ──
   const planQaIssue = collected.decisionIssueOriginKind === "mission_plan_qa"
     ? { id: collected.decisionIssueId }
-    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, draft: draftResult.draft, enqueuePlanQaWakeup });
+    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, enqueuePlanQaWakeup });
   const refs = mergeMissionPlanRefs(
     activePlan?.refs,
     {
@@ -1904,6 +1904,7 @@ function buildPaqoWorkflowSteps(
     const toolArgs = readSelectedUnitWorkflowToolArgs(unit);
     const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
     const skillRefs = readSelectedUnitSkillRefs(unit);
+    const outcomeContractLines = renderMissionPlanUnitContractLines(unit);
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
       name: `[${groupLabel}] ${title}`,
@@ -1920,6 +1921,7 @@ function buildPaqoWorkflowSteps(
         `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
         skillRefs.length > 0 ? `Skill refs considered by PLAN: ${skillRefs.join(", ")}` : null,
         toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
+        ...outcomeContractLines,
         sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
       ].filter(Boolean).join("\n"),
     } satisfies WorkflowStep;
@@ -1930,6 +1932,12 @@ function buildPaqoWorkflowSteps(
   // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.
   const isPublishPlan = /publish|deploy|manual-onboarding|게시|온보딩|release|배포/iu.test(
     `${draft.missionGoal ?? ""} ${plannedSteps.map((s) => `${s.name} ${s.description ?? ""}`).join(" ")}`,
+  );
+  const unitOutcomeContractLines = renderMissionPlanQaUnitContractLines(
+    executableUnits.map((unit, index) => ({
+      title: selectedSteps[index]?.name ?? `Execution unit ${index + 1}`,
+      unit,
+    })),
   );
 
   const qaStep: WorkflowStep = {
@@ -1949,6 +1957,7 @@ function buildPaqoWorkflowSteps(
       isPublishPlan ? "" : null,
       draft.successCriteria.length > 0 ? `Success criteria: ${JSON.stringify(draft.successCriteria)}` : null,
       draft.steps.length > 0 ? `Planned steps: ${JSON.stringify(draft.steps)}` : null,
+      ...unitOutcomeContractLines,
     ].filter(Boolean).join("\n"),
   };
 
@@ -2144,66 +2153,9 @@ function readPlanQaRef(refs: unknown): PlanQaRef | null {
   return { issueId, status, verdict, decisionHash, reviewedAt };
 }
 
-function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draft: PlanRevisionDraft }): string {
-  const lines: string[] = [
-    "Plan QA review gate. The mission owner plan decision is on hold until this review passes.",
-    "Verify the plan against the mission goal before releasing it for materialization.",
-    "",
-  ];
-  if (input.missionGoal) lines.push(`Mission goal: ${input.missionGoal}`, "");
-  // [AREA: Mission Quality Contract] goal 에서 품질 수식어(초보자/심층/실행가능) 역추적 → 주입.
-  // 판정은 PLAN-QA agent 가 rubric 로(deterministic invalid 아님).
-  const qualityContract = extractMissionQualityContract({ missionGoal: input.missionGoal ?? "" });
-  lines.push(MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE, "");
-  lines.push(...renderMissionQualityContractSection(qualityContract));
-  lines.push(
-    "Checklist (judge against the mission goal):",
-    "- Purpose fitness — does the plan actually accomplish the mission's stated purpose (not just structure it)?",
-    "- Are the mission goal's core verbs reflected in concrete steps?",
-    "- Is the step split sufficient to deliver the goal without mixing unrelated failure modes?",
-    "- Does every step have a clear instruction: task target, required inputs, expected output, and success criteria?",
-    "- Does the plan need a URL / input normalization step? Is it present?",
-    "- Are parallel vs sequential dependencies appropriate (no over- or under-serialization)?",
-    "- Are artifact QA and delivery smoke/readback QA separated into distinct steps (not collapsed into one)?",
-    "- For delivery missions, does artifact QA run after artifact production and before deploy/publish/send, with destination readback/final QA after delivery?",
-    "- For deep-research missions with multiple named domains/perspectives, are source/research units split by domain or given explicit multi-query/toolArgs coverage instead of one vague search task?",
-    "- Is each step's assignee appropriate by role / capability / skill?",
-    "- Are relevant skills reflected in assignee selection / skillRefs / reason, and are unnecessary or unavailable skills avoided?",
-    "- Are required tools, permissions, and external systems explicit and available to the assigned agent?",
-    "- Does each ACTION step have a clear work-product contract?",
-    `- ${EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE}`,
-    "- Is QA not collapsed into a single terminal step?",
-    "",
-    "Scorecard (include this table in your response before the final verdict):",
-    "| Area | Score (0-2) | Evidence | Required fix if below 2 |",
-    "|---|---:|---|---|",
-    "| Goal coverage |  |  |  |",
-    "| Purpose fitness |  |  |  |",
-    "| User problem solving |  |  |  |",
-    "| Step split / sequencing |  |  |  |",
-    "| Agent fit |  |  |  |",
-    "| Instruction quality |  |  |  |",
-    "| Skill fit |  |  |  |",
-    "| Tool / permission fit |  |  |  |",
-    "| Work-product contract |  |  |  |",
-    "| QA / recovery design |  |  |  |",
-    "",
-    "Hard blockers:",
-    "- Any score of 0 must be REQUEST_CHANGES.",
-    "- Any missing required output, unavailable assignee/tool/skill, or collapsed artifact/delivery QA must be REQUEST_CHANGES.",
-    "- Any artifact QA scheduled after deploy/publish/send, or missing before delivery for a produced artifact, must be REQUEST_CHANGES.",
-    "",
-    "Official verdict API (required before completing):",
-    "POST `/api/issues/<this PLAN-QA issue id>/mission-plan-qa/verdict` with `{ \"verdict\": \"pass\", \"diagnostics\": [] }` or `{ \"verdict\": \"request_changes\", \"diagnostics\": [...] }`.",
-    "Do not use `/workflow/verdict`; this is a mission_plan_qa issue, not a workflow_execution issue.",
-    "Fallback/parser compatibility: also finish your run output with exactly one standalone final line: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
-  );
-  return lines.join("\n");
-}
-
 async function loadMissionRow(db: Db, companyId: string, missionId: string) {
   const [row] = await db
-    .select({ id: missions.id, title: missions.title })
+    .select({ id: missions.id, title: missions.title, description: missions.description })
     .from(missions)
     .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
     .limit(1);
@@ -2229,10 +2181,10 @@ async function ensurePlanQaReviewIssue(input: {
   companyId: string;
   missionId: string;
   missionTitle: string;
+  missionDescription: string | null;
   planningIssueId: string | null;
   decisionHash: string;
   missionGoal?: string | null;
-  draft: PlanRevisionDraft;
   enqueuePlanQaWakeup?: PlanQaWakeupHandler;
 }): Promise<{ id: string }> {
   const originId = `plan-qa:${input.missionId}:${input.decisionHash}`;
@@ -2266,7 +2218,11 @@ async function ensurePlanQaReviewIssue(input: {
     return { id: existing[0].id };
   }
   const assigneeAgentId = await findMissionQaAssignee(input.db, input.companyId);
-  const description = buildPlanQaReviewDescription({ missionGoal: input.missionGoal, draft: input.draft });
+  const description = buildPlanQaReviewDescription({
+    missionTitle: input.missionTitle,
+    missionDescription: input.missionDescription,
+    missionGoal: input.missionGoal,
+  });
   // reviewer 가 없어도 issue 는 만들고 materialize 는 금지. 할당 누락을 description 에 명시.
   const fullDescription = assigneeAgentId
     ? description
@@ -2402,6 +2358,7 @@ async function readPlanQaVerdict(input: {
   const [structuredVerdict] = await input.db
     .select({
       verdict: missionPlanQaVerdicts.verdict,
+      sourceCommentId: missionPlanQaVerdicts.sourceCommentId,
       createdAt: missionPlanQaVerdicts.createdAt,
       updatedAt: missionPlanQaVerdicts.updatedAt,
     })
@@ -2410,6 +2367,9 @@ async function readPlanQaVerdict(input: {
     .orderBy(desc(missionPlanQaVerdicts.updatedAt), desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
     .limit(1);
   const structuredVerdictValue = normalizePlanQaVerdict(structuredVerdict?.verdict);
+  if (structuredVerdictValue && !structuredVerdict?.sourceCommentId) {
+    return structuredVerdictValue;
+  }
 
   // fallback: comment-based read (기존 로직 유지 — legacy parser)
   const [planQaIssue] = await input.db
@@ -2604,6 +2564,7 @@ async function persistCommentDerivedPlanQaVerdict(input: {
         diagnostics: [],
         updatedAt: now,
       },
+      setWhere: isNotNull(missionPlanQaVerdicts.sourceCommentId),
     });
 }
 

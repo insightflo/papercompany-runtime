@@ -1,0 +1,91 @@
+import { renderAdaptiveQualityProfileLines } from "./mission-quality-contract.js";
+import { renderUntrustedMissionRequestLines } from "./mission-request-prompt-boundary.js";
+
+export type MissionPlanningDescriptionInput = {
+  readonly missionId: string;
+  readonly title: string;
+  readonly description: string | null;
+  readonly runnableRosterLines: readonly string[];
+};
+
+export function buildMissionPlanningDescription(input: MissionPlanningDescriptionInput): string {
+  const decisionExample = {
+    missionId: input.missionId,
+    missionGoal: "Outcome, target user, use case, constraints, and unacceptable outcomes derived from the request",
+    selectedExecutionUnits: [{
+      id: "unit-source-1",
+      kind: "mission_plan_unit",
+      title: "Concrete ACTION title",
+      assigneeAgentId: "agent-id-from-roster",
+      selectionState: "selected",
+      reason: "Why this unit is necessary for the mission outcome",
+      expectedOutput: "Observable output consumed by a downstream unit or final user",
+      acceptanceCriteria: ["Criteria specific to this action and mission type"],
+      evidenceRequired: ["Proof surface and evidence needed to verify the criteria"],
+      sourceRef: { type: "mission_plan_unit", id: "unit-source-1" },
+      dependsOn: [],
+      toolNames: [],
+      knowledgeBaseIds: [],
+      skillRefs: [],
+      graphWorkProductRequired: true,
+    }, {
+      id: "unit-qa-1",
+      kind: "mission_plan_unit",
+      title: "[QA] Validate the produced result against its action criteria",
+      assigneeAgentId: "qa-agent-id-from-roster",
+      selectionState: "selected",
+      reason: "Why this review is necessary and which result it validates",
+      expectedOutput: "Evidence-backed quality verdict",
+      acceptanceCriteria: ["Verify the upstream action's declared acceptance criteria"],
+      evidenceRequired: ["Fresh evidence from the declared proof surface"],
+      sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" },
+      dependsOn: ["unit-source-1"],
+      toolNames: [],
+      knowledgeBaseIds: [],
+      skillRefs: [],
+      graphWorkProductRequired: false,
+    }],
+    requiredInputs: [],
+    successCriteria: [{
+      criterion: "Mission-level outcome criterion derived from the original request",
+      proof: "How final outcome review can observe it",
+    }],
+    steps: [],
+  };
+
+  return [
+    "Plan the mission before execution begins, then close this issue when the mission-level work structure is materialized.",
+    "",
+    ...renderUntrustedMissionRequestLines({ title: input.title, description: input.description }),
+    "## Planning method",
+    "- Treat the original request as the source of truth. Infer the mission's work type, target user, use case, constraints, risk, and intended final use before selecting steps.",
+    "- Define an outcome contract: the usable final result, mission-level success criteria, unacceptable outcomes, and the proof surface that can demonstrate completion.",
+    "- Decompose the outcome into execution units. Each unit must declare expectedOutput, acceptanceCriteria, and evidenceRequired that are specific to that action.",
+    "- Match each unit to the actual agents, tools, skills, knowledge bases, permissions, and work systems available in the runtime planning dossier.",
+    "- Use parallel branches for independent work and explicit dependsOn edges where one output is required by another.",
+    "- Add ACTION QA for consequential unit outputs, integration QA where multiple outputs must combine, and final outcome review against the original request. Do not add ceremonial QA that has no distinct claim to verify.",
+    "- Do not invent requirements. When information truly blocks planning, identify the exact missing decision instead of filling it with a generic template.",
+    "",
+    ...renderAdaptiveQualityProfileLines(),
+    "## Materialization contract",
+    "- Do not create mission-level [ACTION], [QA], or [OVERSIGHT] issues directly from this PLAN issue.",
+    "- Post exactly one structured `### Mission owner plan decision` JSON comment; the server materializes the selected work through the server-native DAG.",
+    "- In selectedExecutionUnits, use explicit assigneeAgentId values from the runnable roster. Do not invent or reuse omitted agent ids.",
+    "- Use condition/input-check units only for real prerequisites, producer units for official workProducts, QA units for observable validation, and oversight/recovery for mission-owner intervention.",
+    "- For deploy/publish/send missions, preserve: input/source work -> production -> artifact QA -> delivery -> destination readback/final QA.",
+    "- For multi-domain research, split independent domains or declare explicit multi-query coverage rather than one vague search task.",
+    "- Add toolNames only to the unit that calls the tool and only when its assignee has the grant. Apply the same rule to knowledgeBaseIds and skillRefs.",
+    "- Set `graphWorkProductRequired: true` for ACTION units that produce official deliverables; use `graphWorkProductRequired: false` only for pure condition/input-check/QA units, and keep the upstream producer unit true when a downstream unit validates, synthesizes, publishes, or approves that deliverable.",
+    "- Every non-root unit must use dependsOn values that exactly match an upstream unit id or sourceRef.id. The steps array is human-readable context, not execution ordering.",
+    "- Identify blockers and approval needs early. Do not perform ACTION or QA work from this PLAN issue.",
+    "",
+    "## Required decision comment shape",
+    "### Mission owner plan decision",
+    "```json",
+    JSON.stringify(decisionExample, null, 2),
+    "```",
+    "",
+    "## Available runnable company roster",
+    ...input.runnableRosterLines,
+  ].join("\n");
+}

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildVerificationBeforeCompletionCriteria,
   extractMissionQualityContract,
+  renderAdaptiveQualityProfileLines,
   renderEvidenceExplanationQaLines,
   renderEvidenceExplanationWritingLines,
   renderMissionQualityContractSection,
@@ -23,12 +24,12 @@ describe("mission-quality-contract", () => {
     expect(contract.underspecified).toBe(false);
 
     // mustDeliver / failureCriteria 에 beginner comprehension + source depth 반영
-    expect(contract.mustDeliver.some((m) => /non-expert/iu.test(m))).toBe(true);
+    expect(contract.mustDeliver.some((m) => /intended audience/iu.test(m))).toBe(true);
     expect(contract.mustDeliver.some((m) => /source breadth|depth/iu.test(m))).toBe(true);
     expect(contract.failureCriteria.some((f) => /non-expert still cannot/iu.test(f))).toBe(true);
 
-    // clear beginner 신호 → hard-stop rule 포함
-    expect(contract.hardStopRules.some((h) => /beginner-comprehension/iu.test(h))).toBe(true);
+    expect(contract.hardStopRules.some((h) => /audience-appropriate/iu.test(h))).toBe(true);
+    expect(contract.hardStopRules.join("\n")).not.toMatch(/what\s*\/\s*why\s*\/\s*how/iu);
     expect(contract.hardStopRules.some((h) => /source-breadth/iu.test(h))).toBe(true);
   });
 
@@ -40,24 +41,33 @@ describe("mission-quality-contract", () => {
     expect(contract.clarifyNote).toMatch(/underspecified|clarify/iu);
   });
 
-  it("evaluation axes always include the 5 purpose-fitness axes", () => {
+  it("uses outcome-oriented axes for every mission", () => {
     const contract = extractMissionQualityContract({ missionGoal: "do something" });
     expect(contract.evaluationAxes).toEqual([
-      "purposeFitness",
-      "userProblemSolving",
-      "contextFit",
-      "executability",
-      "formatProcessQuality",
+      "intentFidelity",
+      "outcomeUsefulness",
+      "executionFeasibility",
+      "verificationStrength",
+      "integrationCompleteness",
     ]);
   });
 
-  it("renders a Mission quality contract section with the 5 purpose-fitness axes", () => {
+  it("renders a Mission quality contract section with outcome-oriented axes", () => {
     const contract = extractMissionQualityContract({
       missionGoal: "초보자용 심층 가이드 작성",
     });
     const lines = renderMissionQualityContractSection(contract);
     expect(lines.join("\n")).toContain("## Mission quality contract");
-    expect(lines.join("\n")).toContain("purposeFitness");
+    expect(lines.join("\n")).toContain("intentFidelity");
+  });
+
+  it("renders adaptive profiles as selectable guidance rather than a universal checklist", () => {
+    const lines = renderAdaptiveQualityProfileLines().join("\n");
+    expect(lines).toContain("Infer the mission's work type");
+    expect(lines).toContain("Research / opportunity discovery");
+    expect(lines).toContain("Software delivery");
+    expect(lines).toContain("Manual / beginner-facing guidance");
+    expect(lines).toContain("Do not apply a profile merely because its terms appear in this guidance");
   });
 
   it("renders producer writing guidance for explaining evidence instead of pointing at source containers", () => {

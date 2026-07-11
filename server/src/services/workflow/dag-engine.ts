@@ -21,8 +21,9 @@ import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
   VERIFICATION_BEFORE_COMPLETION_MARKER,
   extractMissionQualityContract,
+  renderAdaptiveQualityProfileLines,
   renderMissionQualityContractSection,
-  renderMissionQualityScoringLines,
+  renderMissionQualityReviewLines,
   renderVerificationBeforeCompletionGateLines,
 } from "../missions/mission-quality-contract.js";
 import {
@@ -704,7 +705,8 @@ async function writeQaRubricMarkdown(input: {
             missionDescription: input.missionDescription,
           }),
         ),
-        ...renderMissionQualityScoringLines(),
+        ...renderAdaptiveQualityProfileLines(),
+        ...renderMissionQualityReviewLines(),
       ]
     : [];
   const verificationGateLines = input.renderedStepDescription?.includes(VERIFICATION_BEFORE_COMPLETION_MARKER)

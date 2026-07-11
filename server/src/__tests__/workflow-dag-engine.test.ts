@@ -1462,11 +1462,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain(`workflowRunId: ${runId}`);
     expect(rubric).toContain("collect-evidence");
     expect(rubric).toContain("evidence.json");
-    // [Mission Quality Contract] qa-rubric 에 contract + purpose-fitness-first + 5-axis 주입 확인.
     expect(rubric).toContain("Mission quality contract");
     expect(rubric).toContain("purpose-fitness first");
-    expect(rubric).toContain("5-axis scoring");
-    expect(rubric).toContain("purposeFitness <= 3");
+    expect(rubric).toContain("Adaptive quality profile");
+    expect(rubric).toContain("Outcome review standard");
+    expect(rubric).toContain("REQUEST_CHANGES only for an observed blocking defect");
+    expect(rubric).not.toContain("5-axis scoring");
     expect(rubric).toContain("Evidence explanation quality");
     expect(rubric).toContain("source content -> observation -> interpretation -> conclusion");
     expect(rubric).toContain("storage fields, internal filenames, manifests, or workProduct paths");

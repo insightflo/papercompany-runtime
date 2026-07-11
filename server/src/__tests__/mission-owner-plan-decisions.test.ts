@@ -1489,6 +1489,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
           kind: "workflow_definition_step",
           title: "Research current workflow surfaces",
           reason: "Need source evidence before synthesis",
+          expectedOutput: "A current workflow-surface evidence report",
+          acceptanceCriteria: ["Every conclusion is traceable to a cited source"],
+          evidenceRequired: ["Source URL and collection timestamp"],
           sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
         },
       ],
@@ -1529,6 +1532,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     ]);
     expect(paqoSteps[0]!.agentId).toBe(ownerAgentId);
     expect(paqoSteps[0]!.graphWorkProductRequired).toBe(true);
+    expect(paqoSteps[0]!.description).toContain("Expected output: A current workflow-surface evidence report");
+    expect(paqoSteps[0]!.description).toContain("Acceptance criteria: Every conclusion is traceable to a cited source");
+    expect(paqoSteps[0]!.description).toContain("Evidence required: Source URL and collection timestamp");
     expect("toolNames" in paqoSteps[0]!).toBe(false);
     expect(paqoSteps[1]!.graphWorkProductRequired).toBe(false);
     expect(paqoSteps[1]!.dependencies).toEqual([paqoSteps[0]!.id]);
@@ -1578,6 +1584,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(paqoSteps[1]!.description).toContain("Evidence explanation quality");
     expect(paqoSteps[1]!.description).toContain("source content -> observation -> interpretation -> conclusion");
     expect(paqoSteps[1]!.description).toContain("REQUEST_CHANGES");
+    expect(paqoSteps[1]!.description).toContain("A current workflow-surface evidence report");
+    expect(paqoSteps[1]!.description).toContain("Every conclusion is traceable to a cited source");
+    expect(paqoSteps[1]!.description).toContain("Source URL and collection timestamp");
 
     const activePlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     expect(activePlan?.refs).toMatchObject({
@@ -2950,7 +2959,14 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       { id: qaAgentId, companyId, name: "Report Validator", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} },
     ]);
     await db.insert(workflowDefinitions).values({ id: sourceWorkflowId, companyId, name: "Plan QA Source Workflow", stepsJson: [{ id: "scout", name: "Scout", dependencies: [] }] });
-    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Plan QA mission", status: "active" });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "Plan QA mission",
+      description: "Select an executable plan for the original business request.",
+      status: "active",
+    });
     await db.insert(issues).values({ id: planningIssueId, companyId, missionId, title: "Mission owner planning", originKind: "mission_main_executor_plan", status: "todo" });
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
     return { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId };
@@ -3018,10 +3034,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(planQaIssues[0]!.description).toContain("REQUEST_CHANGES");
     expect(planQaIssues[0]!.description).toContain("/mission-plan-qa/verdict");
     expect(planQaIssues[0]!.description).toContain("Do not use `/workflow/verdict`");
-    expect(planQaIssues[0]!.description).toContain("Scorecard");
-    expect(planQaIssues[0]!.description).toContain("Agent fit");
-    expect(planQaIssues[0]!.description).toContain("Skill fit");
-    expect(planQaIssues[0]!.description).toContain("Tool / permission fit");
+    expect(planQaIssues[0]!.description).toContain("Verdict standard");
+    expect(planQaIssues[0]!.description).toContain("resource_gap");
+    expect(planQaIssues[0]!.description).toContain("action_contract_gap");
+    expect(planQaIssues[0]!.description).toContain("verification_gap");
     expect(enqueuePlanQaWakeup).toHaveBeenCalledTimes(1);
     expect(enqueuePlanQaWakeup).toHaveBeenCalledWith(expect.objectContaining({
       companyId,
@@ -3249,15 +3265,16 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(enqueuePlanQaWakeup).not.toHaveBeenCalled();
   });
 
-  it("plan-QA gate: description embeds Mission quality contract and purpose-fitness", async () => {
+  it("plan-QA gate: description embeds the original request and adaptive quality contract", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
     await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     const [planQaIssue] = await db.select({ description: issues.description }).from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa"))).limit(1);
     expect(planQaIssue?.description).toContain("Mission quality contract");
-    expect(planQaIssue?.description).toContain("Purpose fitness");
-    expect(planQaIssue?.description).toContain("purpose-fitness first");
+    expect(planQaIssue?.description).toContain("Select an executable plan for the original business request.");
+    expect(planQaIssue?.description).toContain("Adaptive quality profile");
+    expect(planQaIssue?.description).toContain("blocking defect");
   });
 
   it("plan-QA gate: PASS verdict materializes the PAQO workflow and records verdict=pass", async () => {
@@ -3621,7 +3638,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(runsAfter.length).toBeGreaterThan(0);
   });
 
-  it("structured plan-qa verdict: later PASS comment supersedes prior REQUEST_CHANGES row", async () => {
+  it("structured plan-qa verdict: API REQUEST_CHANGES remains authoritative over a later PASS comment", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
     await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
 
@@ -3642,31 +3659,27 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       reviewedBy: { actorType: "agent", actorId: qaAgentId },
     });
 
-    const passCommentCreatedAt = new Date(Date.now() + 1_000);
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: pendingPlanQa!.issueId!,
-      authorAgentId: qaAgentId,
-      body: "Plan is now sound.\nPASS",
-      createdAt: passCommentCreatedAt,
-      updatedAt: passCommentCreatedAt,
-    });
+    await issueService(db).addComment(
+      pendingPlanQa!.issueId!,
+      "Plan is now sound.\nPASS",
+      { agentId: qaAgentId },
+    );
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-    expect(result.status).toBe("recorded");
+    expect(result.status).toBe("plan_qa_changes_requested");
 
     const verdictRows = await db.select().from(missionPlanQaVerdicts)
       .where(eq(missionPlanQaVerdicts.planQaIssueId, pendingPlanQa!.issueId!));
     expect(verdictRows).toHaveLength(1);
-    expect(verdictRows[0]?.verdict).toBe("pass");
-    expect(verdictRows[0]?.sourceCommentId).toBeTruthy();
+    expect(verdictRows[0]?.verdict).toBe("request_changes");
+    expect(verdictRows[0]?.sourceCommentId).toBeNull();
 
     const recovered = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     const recoveredPlanQa = (recovered?.refs as Record<string, unknown> | undefined)?.planQa as { status?: string; verdict?: string } | undefined;
-    expect(recoveredPlanQa?.status).toBe("pass");
-    expect(recoveredPlanQa?.verdict).toBe("pass");
+    expect(recoveredPlanQa?.status).toBe("request_changes");
+    expect(recoveredPlanQa?.verdict).toBe("request_changes");
     const paqoWorkflow = (recovered?.refs as Record<string, unknown> | undefined)?.paqoWorkflow as { workflowRunId?: string } | undefined;
-    expect(paqoWorkflow?.workflowRunId).toBeTruthy();
+    expect(paqoWorkflow?.workflowRunId).toBeUndefined();
   });
 
   it("[PLAN-QA materialization gap] active supervision selects a planning mission with PASS verdict but no PAQO workflow", async () => {

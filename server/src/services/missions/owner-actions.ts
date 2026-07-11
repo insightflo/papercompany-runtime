@@ -15,6 +15,7 @@ import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
+import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
@@ -430,83 +431,16 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         `- ${agent.name} (${agent.role}, ${agent.status}) id=${agent.id}${agent.id === mission.ownerAgentId ? " [mission owner]" : ""}`
       ));
 
+    const description = buildMissionPlanningDescription({
+      missionId: mission.id,
+      title: mission.title,
+      description: mission.description,
+      runnableRosterLines,
+    });
+
     return issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
-      description: [
-        "Plan the mission before execution begins, then close this issue when the mission-level work structure is materialized.",
-        "",
-        `Mission: ${mission.title}`,
-        mission.description ? `Brief: ${mission.description}` : null,
-        "",
-        "Expected output:",
-        "- Do not create mission-level `[ACTION]`, `[QA]`, or `[OVERSIGHT]` issues directly from this PLAN issue.",
-        "- Post exactly one structured `### Mission owner plan decision` JSON comment; the server materializes the selected work through the server-native DAG.",
-        "- In `selectedExecutionUnits`, define execution work units with explicit `assigneeAgentId` values from the Available runnable company roster below.",
-        "- Do not invent or reuse assignee ids that are not listed in the Available runnable company roster.",
-        "- Agents with status `paused`, `running`, `error`, `pending_approval`, or `terminated` are intentionally omitted and are not runnable execution assignees.",
-        "- Use condition/input-check units for prerequisites, source/research/template units for upstream material, producer units for official workProducts/artifacts, QA units for artifact validation and delivery readback, and oversight/recovery for the mission owner.",
-        "- For missions that deploy/publish/send an artifact to a destination, preserve this order with explicit dependsOn edges: condition/input checks -> source/research/template gathering -> artifact production -> artifact QA/validation -> deploy/publish/send -> destination readback/final QA. Branch or repeat as needed, but artifact QA must be upstream of delivery.",
-        "- If a deep-research brief names multiple domains or perspectives, split source/research units by domain or give the research unit explicit multi-query/toolArgs coverage; do not collapse separate evidence domains into one vague search task.",
-        "- Evaluate available workflow tools, KB refs, agent roster skills, and company skill capabilities from the runtime planning dossier before selecting execution units; this validation belongs in PLAN/PLAN-QA, not in an ACTION preflight unit.",
-        "- Add `toolNames` only to the unit that will directly call that workflow tool, and assign that unit to an agent that has the required tool grant; do not invent tool names or ask a different preflight/check agent to judge downstream tool access from its own session.",
-        "- Add `knowledgeBaseIds` only when a listed KB ref is relevant and accessible to the assigned agent.",
-        "- Use agent/company skills to choose the best assignee, and keep `skillRefs` aligned with the selected assignee's listed desired skills; skills are not standalone workflow tools.",
-        "- Set `graphWorkProductRequired: true` on ACTION units that must create official deliverables; use `graphWorkProductRequired: false` only for pure condition/input-check/QA units with no official deliverable, and keep the upstream producer unit true when a downstream unit validates, synthesizes, publishes, or approves that deliverable.",
-        "- Express execution order with `dependsOn` arrays on each non-root `selectedExecutionUnits` entry; root units must use `dependsOn: []`.",
-        "- Use `dependsOn` values that exactly match upstream selected unit `id` or `sourceRef.id` values. The `steps` array is only human-readable phase notes and must not be the only place dependencies appear.",
-        "- Do not rely on loose issue creation order, phase text, or assignee wakeups for ordering.",
-        "- Identify blockers and approval needs early.",
-        "- Do not perform ACTION/QA work from this PLAN issue; define the DAG structure, then mark this PLAN issue done after the structured decision is posted.",
-        "",
-        "Required decision comment shape:",
-        "### Mission owner plan decision",
-        "```json",
-        JSON.stringify({
-          missionId: mission.id,
-          missionGoal: "Restate the mission goal",
-          selectedExecutionUnits: [{
-            id: "unit-source-1",
-            kind: "mission_plan_unit",
-            title: "Concrete ACTION title",
-            assigneeAgentId: "agent-id-from-roster",
-            selectionState: "selected",
-            reason: "Why this work unit is required",
-            sourceRef: { type: "mission_plan_unit", id: "unit-source-1" },
-            dependsOn: [],
-            toolNames: [],
-            knowledgeBaseIds: [],
-            skillRefs: [],
-            graphWorkProductRequired: true,
-          }, {
-            id: "unit-synthesis-1",
-            kind: "mission_plan_unit",
-            title: "Concrete synthesis ACTION title",
-            assigneeAgentId: "agent-id-from-roster",
-            selectionState: "selected",
-            reason: "Why this synthesis unit is required",
-            sourceRef: { type: "mission_plan_unit", id: "unit-synthesis-1" },
-            dependsOn: ["unit-source-1"],
-            graphWorkProductRequired: true,
-          }, {
-            id: "unit-qa-1",
-            kind: "mission_plan_unit",
-            title: "[QA] Concrete validation title",
-            assigneeAgentId: "agent-id-from-roster",
-            selectionState: "selected",
-            reason: "Why this validation unit is required",
-            sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" },
-            dependsOn: ["unit-synthesis-1"],
-            graphWorkProductRequired: false,
-          }],
-          requiredInputs: [],
-          successCriteria: [],
-          steps: [],
-        }, null, 2),
-        "```",
-        "",
-        "Available runnable company roster:",
-        ...runnableRosterLines,
-      ].filter(Boolean).join("\n"),
+      description,
       missionId: mission.id,
       originKind: "mission_main_executor_plan",
       priority: "medium",
