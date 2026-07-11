@@ -16,6 +16,7 @@ import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
+import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
 import { pruneStaleWorkflowExecutionUnits, type PluginWorkflowRunData, type PluginWorkflowStepRunData } from "./plugin-workflow.js";
 import { classifyToolStepFailure, getWorkflowStepToolNames, type ToolStepFailureClassification } from "./tool-step-failure.js";
@@ -33,24 +34,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   const cancelledWorkflowRunStatuses = new Set(["aborted", "cancelled", "canceled"]);
   const completedWorkflowRunStatuses = new Set(["completed", "succeeded", "done"]);
   const legacyWorkflowMissionGraceMs = 5 * 60 * 1000;
-
-  async function findOpenMissionWork(
-    companyId: string,
-    missionId: string,
-  ): Promise<{ id: string; status: string } | null> {
-    return db
-      .select({ id: issues.id, status: issues.status })
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, companyId),
-        eq(issues.missionId, missionId),
-        isNull(issues.hiddenAt),
-        sql`${issues.status} not in ('done', 'cancelled')`,
-        sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
-      ))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-  }
+  const findOpenMissionWork = createMissionWorkSettlement(db);
 
   async function reopenCompletedWorkflowMissionForOpenWork(
     mission: MissionRow,
