@@ -111,6 +111,27 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
     expect(diag.find((d) => d.code === "missing_publish_readback_qa")?.severity).toBe("invalid");
   });
 
+  it("ACTION verify unit 을 readback QA 로 대신 사용하지 않는다", () => {
+    const actionVerify = unit({
+      id: "u-verify",
+      title: "[ACTION] Verify published manual destination readback",
+      toolNames: ["manual-onboarding-verify"],
+      sourceRef: { type: "mission_plan_unit", id: "u-verify" },
+    });
+    const diag = reviewPlanAgainstIntent({
+      intent,
+      selectedExecutionUnits: [
+        unit({ id: "u-build", title: "[ACTION] Build HTML artifact", sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
+        unit({ id: "u-artifact-qa", title: "[QA] Validate HTML artifact", dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
+        unit({ id: "u-publish", title: "[ACTION] Publish HTML", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
+        actionVerify,
+      ],
+    });
+
+    expect(extractUnitRoles(actionVerify).readbackQa).toBe(false);
+    expect(diag.map((d) => d.code)).toContain("missing_publish_readback_qa");
+  });
+
   it("산출물 delivery plan 에서 artifact QA 가 없으면 missing_artifact_qa_before_delivery(invalid)", () => {
     const diag = reviewPlanAgainstIntent({
       intent,

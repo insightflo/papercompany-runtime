@@ -52,6 +52,17 @@ describe("delivery-verification-gate", () => {
       name: "[QA] 게시 smoke QA: R2 HTTP 200 + hub index 갱신 확인",
       description: "",
     })).toBe(true);
+    expect(isDeliveryReadbackStep({
+      id: "verify",
+      name: "[ACTION] Verify published manual destination readback",
+      description: "Run the registered verify tool.",
+    })).toBe(false);
+    expect(isDeliveryReadbackStep({
+      id: "destination-check",
+      name: "Check published result",
+      type: "agent",
+      description: "Perform final public destination readback.",
+    })).toBe(true);
   });
 
   it("synthesizeDeliveryVerificationGateStep: creates a gate step with readback hard-stop description", () => {
@@ -107,5 +118,18 @@ describe("delivery-verification-gate", () => {
     expect(steps[1]!.description).toContain("Delivery Verification:");
     expect(steps[1]!.description).toContain("REQUEST_CHANGES");
     expect(appendDeliveryVerificationCriteria(steps[1]!.description)).toBe(steps[1]!.description);
+  });
+
+  it("does not append QA verdict criteria to an ACTION verify step", () => {
+    const [step] = strengthenDeliveryReadbackSteps([{
+      id: "verify",
+      name: "[ACTION] Verify published manual destination readback",
+      agentId: "agent-1",
+      dependencies: ["publish"],
+      graphWorkProductRequired: true,
+      description: "Run the registered verify tool.",
+    }]);
+
+    expect(step?.description).toBe("Run the registered verify tool.");
   });
 });

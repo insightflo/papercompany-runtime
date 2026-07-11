@@ -61,13 +61,8 @@ function readSteps(value: unknown): DagStepLike[] {
 
 function isValidationGateIssue(issue: MissionSupervisionIssue, step: DagStepLike | null): boolean {
   if (MAIN_EXECUTOR_ORIGINS.has(issue.originKind)) return false;
-  if (step && isQaLikeStep(step)) return true;
-  const text = [issue.title, step?.id, step?.name, step?.title, step?.type]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n");
-  return /^\s*\[QA\]/iu.test(text) ||
-    /\b(QA|audit|auditor|validator|validation|validate)\b/iu.test(text) ||
-    text.includes("검증");
+  if (step) return isQaLikeStep(step);
+  return isQaLikeStep({ title: issue.title });
 }
 
 function readValidationVerdictFromHeartbeatResult(resultJson: unknown): ValidationVerdict | null {

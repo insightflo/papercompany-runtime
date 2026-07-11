@@ -673,25 +673,8 @@ function isValidationGateCandidate(input: {
     return false;
   }
 
-  if (/^\s*\[QA\]/iu.test(input.issueTitle ?? "")) return true;
-
-  const stepText = [
-    input.step?.id,
-    input.step?.name,
-    input.step?.title,
-    input.step?.type,
-  ]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n");
-  const text = stepText || input.issueTitle || "";
-
-  const validationText = /\b(QA|audit\w*|validator|validation|validat\w*|verif\w*|review\w*)\b/iu.test(text)
-    || text.includes("검증");
-  if (validationText) return true;
-
-  if (!input.step && /\bcheck\b/iu.test(text)) return true;
-
-  return false;
+  if (input.step) return isQaLikeStep(input.step);
+  return isQaLikeStep({ title: input.issueTitle });
 }
 
 async function writeQaRubricMarkdown(input: {
