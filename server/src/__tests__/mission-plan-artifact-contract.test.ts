@@ -116,6 +116,21 @@ describe("mission plan artifact workProduct contract", () => {
     expect(diagnostics.filter((diagnostic) => diagnostic.severity === "invalid")).toEqual([]);
   });
 
+  it("allows prepublish artifact QA followed by delivery readback and final QA", () => {
+    const diagnostics = reviewPlanAgainstIntent({
+      intent: extractMissionIntent("GPT guide", "Research and publish a beginner guide to the onboarding site"),
+      selectedExecutionUnits: [
+        unit({ id: "produce", title: "[ACTION] Produce beginner manual HTML", graphWorkProductRequired: true, sourceRef: { type: "mission_plan_unit", id: "produce" } }),
+        unit({ id: "prepublish-qa", title: "[QA] Validate manual claims and evidence", graphWorkProductRequired: false, dependsOn: ["produce"], sourceRef: { type: "mission_plan_unit", id: "prepublish-qa" } }),
+        unit({ id: "publish", title: "[ACTION] Publish approved manual", graphWorkProductRequired: true, toolNames: ["manual-onboarding-publish"], dependsOn: ["prepublish-qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
+        unit({ id: "verify", title: "[ACTION] Verify published manual destination readback", graphWorkProductRequired: true, toolNames: ["manual-onboarding-verify"], dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "verify" } }),
+        unit({ id: "final-qa", title: "[QA] Audit destination readback and final delivery evidence", graphWorkProductRequired: false, dependsOn: ["verify"], sourceRef: { type: "mission_plan_unit", id: "final-qa" } }),
+      ],
+    });
+
+    expect(diagnostics.filter((diagnostic) => diagnostic.severity === "invalid")).toEqual([]);
+  });
+
   it("requires a delivery tool instead of publish wording alone", () => {
     const diagnostics = reviewPlanAgainstIntent({
       intent: extractMissionIntent("Beginner guide", "Research the topic and publish the guide to the site"),

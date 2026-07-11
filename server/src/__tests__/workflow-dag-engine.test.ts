@@ -128,10 +128,21 @@ describe("normalizeWorkflowStepsForExecution", () => {
     const normalized = normalizeWorkflowStepsForExecution([
       { id: "inspection", title: "Final inspection", graphWorkProductRequired: true },
       { id: "qa-legacy", title: "Legacy QA", graphWorkProductRequired: "true" },
+      { id: "qa-agent", title: "QA agent step", type: "agent", graphWorkProductRequired: true },
       { id: "materialize-report", title: "Materialize report", graphWorkProductRequired: true },
     ]);
 
-    expect(normalized.map((step) => step.graphWorkProductRequired)).toEqual([false, false, true]);
+    expect(normalized.map((step) => step.graphWorkProductRequired)).toEqual([false, false, false, true]);
+  });
+
+  it("preserves workProduct requirements for explicitly labeled ACTION steps", () => {
+    const normalized = normalizeWorkflowStepsForExecution([
+      { id: "source-audit", title: "[ACTION] Audit supplied article and produce evidence package", graphWorkProductRequired: true },
+      { id: "verify-destination", title: "[ACTION] Verify published manual destination readback", graphWorkProductRequired: true },
+      { id: "final-review", title: "[ACTION] Final review findings and publish corrections", graphWorkProductRequired: true },
+    ]);
+
+    expect(normalized.map((step) => step.graphWorkProductRequired)).toEqual([true, true, true]);
   });
 
   it("normalizes workflow graph execution controls into the native runtime contract", () => {

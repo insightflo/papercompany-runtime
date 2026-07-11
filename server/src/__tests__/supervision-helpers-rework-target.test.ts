@@ -64,6 +64,8 @@ describe("isQaLikeStep", () => {
     expect(isQaLikeStep({ id: "step-1", name: "Verify report" })).toBe(true);
     expect(isQaLikeStep({ id: "step-2", title: "QA validation" })).toBe(true);
     expect(isQaLikeStep({ id: "step-3", title: "Audit source coverage and confidence" })).toBe(true);
+    expect(isQaLikeStep({ id: "qa-step", title: "QA step", type: "agent" })).toBe(true);
+    expect(isQaLikeStep({ id: "validate-report", title: "Validate report", type: "tool" })).toBe(true);
   });
 
   it("ACTION/연구 step은 QA가 아니다", () => {
@@ -74,6 +76,9 @@ describe("isQaLikeStep", () => {
     expect(isQaLikeStep({ id: "step-7", name: "Check prerequisites" })).toBe(false);
     expect(isQaLikeStep({ id: "step-8", name: "Approval check" })).toBe(false);
     expect(isQaLikeStep({ id: "step-9", name: "Review requirements" })).toBe(false);
+    expect(isQaLikeStep({ id: "source-audit", name: "[ACTION] Audit supplied article and produce evidence package" })).toBe(false);
+    expect(isQaLikeStep({ id: "verify-destination", name: "[ACTION] Verify published manual destination readback" })).toBe(false);
+    expect(isQaLikeStep({ id: "final-review", name: "[ACTION] Final review findings and publish corrections" })).toBe(false);
   });
 
   it("명시적인 한국어 품질 단계는 QA로 본다", () => {

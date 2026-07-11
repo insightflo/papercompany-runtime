@@ -24,7 +24,10 @@ import {
   reviewArtifactWorkProductMarkers,
 } from "./mission-plan-artifact-contract.js";
 import { buildDependencyIndex, unitDependsOn } from "./mission-plan-unit-dependencies.js";
-import { missionPlanUnitText as unitText } from "./mission-plan-unit-text.js";
+import { extractUnitRoles, hasPostDeliveryReadbackQa, type PlanQaUnitRole } from "./mission-plan-unit-roles.js";
+
+export { extractUnitRoles } from "./mission-plan-unit-roles.js";
+export type { PlanQaUnitRole } from "./mission-plan-unit-roles.js";
 
 export type PlanQaDiagnosticCode =
   | "missing_publish_unit"
@@ -42,39 +45,6 @@ export interface PlanQaDiagnostic {
   code: PlanQaDiagnosticCode;
   severity: PlanQaDiagnosticSeverity;
   message: string;
-}
-
-export interface PlanQaUnitRole {
-  publish: boolean;
-  readbackQa: boolean;
-  audienceSplit: boolean;
-  scenario: boolean;
-}
-
-/**
- * unit 의 문자열 필드(title, reason, kind, description, sourceRef.type)를 한 덩어리로 모아 역할 키워드 매칭.
- * selectedExecutionUnits entry 는 Record<string, unknown> 자유형이므로, 스키마 변형에 robust 하게
- * 등장하는 모든 문자열을 모아 검사한다.
- */
-const UNIT_ROLE_SIGNALS: ReadonlyArray<readonly [regexp: RegExp, role: keyof PlanQaUnitRole]> = [
-  // readback / QA 검증 unit. [QA] title prefix 도 포함.
-  [/^\s*\[qa\]/iu, "readbackQa"],
-  [/\bread[-\s]?back\b|\bverif(y|ied|ication)\b|\bvalid(?:ation|ate|ated)?\b|\bqa\b|\bcheck(?:ed|ing)?\b|검증|리뷰|확인\s*리포트|회독/u, "readbackQa"],
-  // audience split 근거가 든 unit(대상별 분기/각 대상 언급)
-  [/\baudience[s]?\b|대상별|분기|각각|경우에?\s*따라|타겟별|타깃별/u, "audienceSplit"],
-  [/\bAI\b|디자이너|개발자|비개발자|초보자|기획자|마케터/u, "audienceSplit"],
-  // scenario taxonomy unit
-  [/\bscenario[s]?\b|\bcases?\b|상황별|케이스별|여러\s*가지\s*상황|다양한\s*상황|경우의?\s*수/u, "scenario"],
-];
-
-/** [목적] 단일 unit 의 역할 판정. [출력] 4 역할 불리언. */
-export function extractUnitRoles(unit: Record<string, unknown>): PlanQaUnitRole {
-  const text = unitText(unit);
-  const role: PlanQaUnitRole = { publish: hasDeliveryActionRole(unit), readbackQa: false, audienceSplit: false, scenario: false };
-  for (const [regexp, key] of UNIT_ROLE_SIGNALS) {
-    if (regexp.test(text)) role[key] = true;
-  }
-  return role;
 }
 
 function successCriteriaText(successCriteria: unknown[] | undefined): string {
@@ -122,10 +92,8 @@ function reviewArtifactQaDeliveryOrder(input: {
       artifactProducerIndexes.some((producerIndex) => unitDependsOn(dependencyIndex, qaIndex, producerIndex)),
     ),
   );
-  const reversed = artifactQaIndexes.some((qaIndex) =>
-    deliveryIndexes.some((deliveryIndex) => unitDependsOn(dependencyIndex, qaIndex, deliveryIndex))) ||
-    artifactProducerIndexes.some((producerIndex) =>
-      artifactQaIndexes.some((qaIndex) => unitDependsOn(dependencyIndex, producerIndex, qaIndex)));
+  const reversed = artifactProducerIndexes.some((producerIndex) =>
+    artifactQaIndexes.some((qaIndex) => unitDependsOn(dependencyIndex, producerIndex, qaIndex)));
 
   if (!ordered || reversed) {
     return [{
@@ -174,7 +142,7 @@ export function reviewPlanAgainstIntent(input: {
         severity: "invalid",
         message: `Mission brief 에 게시/배포 의도가 있지만 ${why} selectedExecutionUnits 에 publish/stage/deploy/readback 성격의 unit 이 없습니다. 최소 하나의 게시/배포 unit 을 추가하세요.`,
       });
-    } else if (!hasRole("readbackQa")) {
+    } else if (!hasPostDeliveryReadbackQa(selectedExecutionUnits)) {
       diagnostics.push({
         code: "missing_publish_readback_qa",
         severity: "invalid",
