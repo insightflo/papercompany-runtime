@@ -3,8 +3,11 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
+  activityLog,
   companies,
   createDb,
+  agentWakeupRequests,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issueWorkProducts,
@@ -13,6 +16,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { missionService } from "../services/missions.js";
@@ -57,6 +61,7 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
     workflowRunId: randomUUID(),
     producerIssueId: randomUUID(),
     qaIssueId: randomUUID(),
+    qaStepRunId: randomUUID(),
     approvalIssueId: randomUUID(),
     ownerActionId: randomUUID(),
     oversightIssueId: randomUUID(),
@@ -66,6 +71,7 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
   await insertAgent(db, { id: ids.producerAgentId, companyId: ids.companyId, name: "Research Writer", role: "writer" });
   await insertAgent(db, { id: ids.qaAgentId, companyId: ids.companyId, name: "Readability QA", role: "qa" });
   await insertAgent(db, { id: ids.approvalAgentId, companyId: ids.companyId, name: "Research Director", role: "director" });
+  await db.update(agents).set({ status: "paused" }).where(eq(agents.id, ids.approvalAgentId));
   await db.insert(missions).values({ id: ids.missionId, companyId: ids.companyId, ownerAgentId: ids.ownerAgentId, title: "Beginner readability mission", status: "active" });
   await db.insert(workflowDefinitions).values({
     id: ids.workflowId,
@@ -87,7 +93,7 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
   ]);
   await db.insert(workflowStepRuns).values([
     { id: randomUUID(), workflowRunId: ids.workflowRunId, stepId: "write-report", issueId: ids.producerIssueId, status: "completed", completedAt: input.productUpdatedAt },
-    { id: randomUUID(), workflowRunId: ids.workflowRunId, stepId: "validate-readability", issueId: ids.qaIssueId, status: "completed", completedAt: input.verdictCreatedAt },
+    { id: ids.qaStepRunId, workflowRunId: ids.workflowRunId, stepId: "validate-readability", issueId: ids.qaIssueId, status: "completed", completedAt: input.verdictCreatedAt },
     { id: randomUUID(), workflowRunId: ids.workflowRunId, stepId: "lead-approval", issueId: ids.approvalIssueId, status: "failed" },
   ]);
   await db.insert(issueWorkProducts).values({
@@ -158,8 +164,12 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
 
   afterEach(async () => {
     await db.delete(issueWorkProducts);
+    await db.delete(workflowTransitionEvents);
     await db.delete(workflowStepRuns);
+    await db.delete(heartbeatRunEvents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(issueComments);
@@ -192,10 +202,24 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
     expect(result.appliedActions).toContainEqual(expect.objectContaining({ sourceIssueId: ids.qaIssueId, resultStatus: "todo" }));
   });
 
-  it("blocks approval retry without requeueing QA when current-generation QA explicitly requests changes", async () => {
+  it("keeps an official REQUEST_CHANGES verdict authoritative over a PASS comment", async () => {
     const ids = await seedApprovalWithReadabilityGate(db, {
       productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
       verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
+      verdictBody: "PASS",
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId: ids.companyId,
+      missionId: ids.missionId,
+      workflowRunId: ids.workflowRunId,
+      workflowStepRunId: ids.qaStepRunId,
+      issueId: ids.qaIssueId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict: "request_changes",
+      decision: "request_changes",
+      reason: "workflow_api",
+      createdAt: new Date("2026-07-04T01:19:00.000Z"),
     });
     const { result, wakeups } = await runSupervision(db, ids.missionId);
 
@@ -242,5 +266,32 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
     expect(wakeups).toEqual([{ sourceIssueId: ids.approvalIssueId, targetAgentId: ids.approvalAgentId }]);
     expect(approvalIssue).toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
     expect(result.appliedActions).toContainEqual(expect.objectContaining({ sourceIssueId: ids.approvalIssueId, resultStatus: "todo" }));
+  });
+
+  it("allows the approval retry from an official ledger PASS", async () => {
+    const ids = await seedApprovalWithReadabilityGate(db, {
+      productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
+      verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
+      verdictBody: null,
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId: ids.companyId,
+      missionId: ids.missionId,
+      workflowRunId: ids.workflowRunId,
+      workflowStepRunId: ids.qaStepRunId,
+      issueId: ids.qaIssueId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict: "pass",
+      decision: "pass",
+      reason: "workflow_api",
+      createdAt: new Date("2026-07-04T01:20:00.000Z"),
+    });
+
+    const { wakeups } = await runSupervision(db, ids.missionId);
+    const [approvalIssue] = await db.select().from(issues).where(eq(issues.id, ids.approvalIssueId));
+
+    expect(wakeups).toEqual([{ sourceIssueId: ids.approvalIssueId, targetAgentId: ids.approvalAgentId }]);
+    expect(approvalIssue).toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
   });
 });

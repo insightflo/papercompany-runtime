@@ -981,14 +981,15 @@ export function createSupervision({ db, deps, ownerActions }: {
                   commentsByIssueId,
                 });
                 const sourceHasCompletedCorrectionEvidence = Boolean(sourceCorrectionEvidence);
+                const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
+                const markerInput = { ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id, decision: "retry_source_issue" as const };
                 const sourceIsRetryableStaleQueue = (sourceCandidate.status === "todo" || sourceCandidate.status === "backlog")
                   && !sourceHasActiveHeartbeat
-                  && (sourceHasFailedRun || sourceHasCompletedCorrectionEvidence);
+                  && (sourceHasFailedRun || sourceHasCompletedCorrectionEvidence || hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput));
                 if (!isProducerRework && sourceCandidate.status !== "blocked" && !sourceIsRetryableStaleQueue) {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked, stale queue after failed execution, or stale queue with completed correction evidence` }));
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked, or not a stale queue with failure, correction, or prior retry evidence` }));
                   break;
                 }
-                const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
                 const originComments = issue.originId && issue.originId !== sourceCandidate.id
                   ? commentsByIssueId.get(issue.originId) ?? []
                   : [];
@@ -998,7 +999,6 @@ export function createSupervision({ db, deps, ownerActions }: {
                   ...comments,
                   issue.description,
                 ]);
-                const markerInput = { ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id, decision: "retry_source_issue" as const };
                 const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
                   missionId: mission.id,
                   ownerActionIssueId: issue.id,
