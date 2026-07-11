@@ -56,6 +56,25 @@ describe("evaluateRuntimeBroadScanToolGuard file targets", () => {
     expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
   });
 
+  it("allows an exact sibling file under a declared dependency parent directory", () => {
+    const result = evaluateCodexCommand(
+      "rg -n 'logo' produced_work/build-html/assets/manifest.json",
+      {
+        paperclipRuntimeSearchPaths: runtimeSearchPaths({
+          workingDirectory: "/srv/papercompany/projects/research-company",
+          dependencyFiles: [
+            "/srv/papercompany/projects/research-company/produced_work/build-html/index.html",
+          ],
+          dependencyDirectories: [
+            "/srv/papercompany/projects/research-company/produced_work/build-html",
+          ],
+        }),
+      },
+    );
+
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
+  });
+
   it("blocks a shortened suffix of the assigned output directory", () => {
     const result = evaluateCodexCommand("rg -n TODO normalize-government-iris/private.md", {
       paperclipRuntimeSearchPaths: runtimeSearchPaths({
@@ -211,12 +230,14 @@ function runtimeSearchPaths(input: {
   workingDirectory: string;
   outputDir?: string;
   dependencyFiles?: string[];
+  dependencyDirectories?: string[];
 }) {
   return {
     version: 1,
     workingDirectory: input.workingDirectory,
     outputDirectory: input.outputDir ?? null,
     dependencyFiles: input.dependencyFiles ?? [],
+    dependencyDirectories: input.dependencyDirectories ?? [],
   };
 }
 

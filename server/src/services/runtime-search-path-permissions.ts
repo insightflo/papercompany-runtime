@@ -15,6 +15,7 @@ export type RuntimeSearchPathPermissions = {
   workingDirectory: string;
   outputDirectory: string | null;
   dependencyFiles: string[];
+  dependencyDirectories: string[];
 };
 
 export async function buildRuntimeSearchPathPermissions(input: {
@@ -28,6 +29,7 @@ export async function buildRuntimeSearchPathPermissions(input: {
     workingDirectory: path.resolve(input.workingDirectory),
     outputDirectory: null,
     dependencyFiles: [],
+    dependencyDirectories: [],
   };
   const card = await input.db
     .select({
@@ -103,7 +105,17 @@ export async function buildRuntimeSearchPathPermissions(input: {
     const localPath = resolveWorkProductLocalFilePath(product);
     return localPath ? [path.resolve(localPath)] : [];
   })));
+  permissions.dependencyDirectories = Array.from(new Set(
+    permissions.dependencyFiles
+      .map((file) => path.dirname(file))
+      .filter((directory) => isPathInside(directory, permissions.workingDirectory)),
+  ));
   return permissions;
+}
+
+function isPathInside(candidate: string, parent: string) {
+  const relative = path.relative(parent, candidate);
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function collectDependencyStepIds(rawSteps: unknown, currentStepId: string) {
