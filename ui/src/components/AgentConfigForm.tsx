@@ -151,10 +151,12 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 const codexThinkingEffortOptions = [
   { id: "", label: "Auto" },
-  { id: "minimal", label: "Minimal" },
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
+  { id: "xhigh", label: "XHigh" },
+  { id: "max", label: "Max" },
+  { id: "ultra", label: "Ultra" },
 ] as const;
 
 const openCodeThinkingEffortOptions = [

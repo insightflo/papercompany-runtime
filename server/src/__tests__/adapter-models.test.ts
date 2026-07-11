@@ -61,7 +61,9 @@ describe("adapter model listing", () => {
     const models = await listAdapterModels("codex_local");
 
     expect(models).toEqual(codexFallbackModels);
-    expect(models.some((model) => model.id === "gpt-5.5")).toBe(true);
+    expect(models.some((model) => model.id === "gpt-5.6-terra")).toBe(true);
+    expect(models.some((model) => model.id === "gpt-5.6-sol")).toBe(true);
+    expect(models.some((model) => model.id === "gpt-5.6-luna")).toBe(true);
     expect(models.some((model) => model.id === "gpt-5.4-mini")).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -247,8 +249,8 @@ describe("adapter model listing", () => {
       const models = await listAdapterModels("hermes_local");
 
       expect(models).toContainEqual({
-        id: "openai-codex/gpt-5.5",
-        label: "gpt-5.5",
+        id: "openai-codex/gpt-5.6-terra",
+        label: "gpt-5.6-terra",
       });
       expect(models).toContainEqual({
         id: "openai-codex/gpt-5.4-mini",
