@@ -15,6 +15,8 @@ import {
   createDb,
   issueWorkProducts,
   issues,
+  missionPlanArtifacts,
+  missionPlanQaVerdicts,
   missions,
   workflowDefinitions,
   workflowRuns,
@@ -71,11 +73,13 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     await db.delete(workflowTransitionEvents);
     await db.delete(issueWorkProducts);
     await db.delete(issueComments);
+    await db.delete(missionPlanQaVerdicts);
     await db.delete(heartbeatRuns);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(issues);
+    await db.delete(missionPlanArtifacts);
     await db.delete(missions);
     await db.delete(agents);
     await db.delete(companies);
@@ -216,6 +220,83 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       .where(eq(issues.id, ownerActionId));
     const [ownerAction] = await db.select().from(issues).where(eq(issues.id, ownerActionId));
     return { ownerAction, ownerAgentId, runId };
+  }
+
+  async function seedAssignedPlanQaIssue() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const qaAgentId = randomUUID();
+    const missionId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const decisionHash = "plan-qa-hash";
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Research Co",
+      issuePrefix: "RES",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission Owner",
+        role: "owner",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: qaAgentId,
+        companyId,
+        name: "Report Validator",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "PLAN-QA API mission",
+      status: "planning",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      missionId,
+      identifier: "RES-PLANQA",
+      title: "[PLAN-QA] Review active plan",
+      status: "in_progress",
+      originKind: "mission_plan_qa",
+      originId: `plan-qa:${missionId}:${decisionHash}`,
+      assigneeAgentId: qaAgentId,
+      startedAt: new Date("2026-07-11T00:00:00.000Z"),
+    });
+    await db.insert(missionPlanArtifacts).values({
+      companyId,
+      missionId,
+      ownerAgentId,
+      missionGoal: "Verify a mission owner plan.",
+      refs: { planQa: { issueId, status: "pending", decisionHash } },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: qaAgentId,
+      issueId,
+      status: "running",
+      startedAt: new Date("2026-07-11T00:00:01.000Z"),
+    });
+    await db.update(issues).set({ checkoutRunId: runId, executionRunId: runId }).where(eq(issues.id, issueId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    return { issue, qaAgentId, runId, decisionHash };
   }
 
   const actor: WorkflowApiActor = {
@@ -515,5 +596,35 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     expect(response.status).toBe(409);
     const events = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.issueId, sourceIssue.id));
     expect(events).toHaveLength(0);
+  });
+
+  it("routes agent PLAN-QA verdicts through the official mission plan QA API", async () => {
+    const { issue, qaAgentId, runId, decisionHash } = await seedAssignedPlanQaIssue();
+
+    const response = await request(createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: issue.companyId,
+      agentId: qaAgentId,
+      runId,
+    }))
+      .post(`/api/issues/${issue.id}/mission-plan-qa/verdict`)
+      .send({ verdict: "pass", diagnostics: [] });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({
+      status: "recorded",
+      planQaIssueId: issue.id,
+      decisionHash,
+      verdict: "pass",
+    });
+    const rows = await db.select().from(missionPlanQaVerdicts).where(eq(missionPlanQaVerdicts.planQaIssueId, issue.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      decisionHash,
+      verdict: "pass",
+      reviewerAgentId: qaAgentId,
+      sourceRunId: runId,
+    });
   });
 });

@@ -2193,10 +2193,10 @@ function buildPlanQaReviewDescription(input: { missionGoal?: string | null; draf
     "- Any missing required output, unavailable assignee/tool/skill, or collapsed artifact/delivery QA must be REQUEST_CHANGES.",
     "- Any artifact QA scheduled after deploy/publish/send, or missing before delivery for a produced artifact, must be REQUEST_CHANGES.",
     "",
-    "Verdict output format (required):",
-    "Finish your run output with exactly one standalone final line:",
-    "`PASS` (the plan is sound and may materialize) or `REQUEST_CHANGES: <specific gaps>` (the plan must be revised).",
-    "Do not include any prose after that final line.",
+    "Official verdict API (required before completing):",
+    "POST `/api/issues/<this PLAN-QA issue id>/mission-plan-qa/verdict` with `{ \"verdict\": \"pass\", \"diagnostics\": [] }` or `{ \"verdict\": \"request_changes\", \"diagnostics\": [...] }`.",
+    "Do not use `/workflow/verdict`; this is a mission_plan_qa issue, not a workflow_execution issue.",
+    "Fallback/parser compatibility: also finish your run output with exactly one standalone final line: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
   );
   return lines.join("\n");
 }

@@ -33,10 +33,16 @@ export const workflowVerdictSubmitSchema = z.object({
   reason: z.string().trim().optional().nullable(),
 });
 
+export const missionPlanQaVerdictSubmitSchema = z.object({
+  verdict: z.enum(["pass", "request_changes"]),
+  diagnostics: z.array(z.record(z.unknown())).optional().default([]),
+});
+
 export const workflowIssueCompleteSchema = z.object({
   comment: z.string().trim().optional().nullable(),
 });
 
 export type WorkflowArtifactRegister = z.infer<typeof workflowArtifactRegisterSchema>;
+export type MissionPlanQaVerdictSubmit = z.infer<typeof missionPlanQaVerdictSubmitSchema>;
 export type WorkflowVerdictSubmit = z.infer<typeof workflowVerdictSubmitSchema>;
 export type WorkflowIssueComplete = z.infer<typeof workflowIssueCompleteSchema>;

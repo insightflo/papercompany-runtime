@@ -1182,6 +1182,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         version: "0.1.0",
         apiVersion: 1,
         description: "Research Workbench",
+        author: "InsightFlo",
+        categories: ["automation"],
         capabilities: ["agent.tools.register"],
         entrypoints: { worker: "./dist/worker.js" },
         tools: [
@@ -3014,6 +3016,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(planQaIssues[0]!.assigneeAgentId).toBe(qaAgentId);
     expect(planQaIssues[0]!.description).toContain("PASS");
     expect(planQaIssues[0]!.description).toContain("REQUEST_CHANGES");
+    expect(planQaIssues[0]!.description).toContain("/mission-plan-qa/verdict");
+    expect(planQaIssues[0]!.description).toContain("Do not use `/workflow/verdict`");
     expect(planQaIssues[0]!.description).toContain("Scorecard");
     expect(planQaIssues[0]!.description).toContain("Agent fit");
     expect(planQaIssues[0]!.description).toContain("Skill fit");
