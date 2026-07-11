@@ -1,4 +1,10 @@
-import { heartbeatRuns, issueComments, issues, issueWorkProducts } from "@paperclipai/db";
+import {
+  heartbeatRuns,
+  issueComments,
+  issues,
+  issueWorkProducts,
+  workflowTransitionEvents,
+} from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "../validation-verdict.js";
@@ -91,6 +97,23 @@ async function loadLatestValidationVerdict(db: Db, issue: IssueRow): Promise<Ver
   let latest: VerdictObservation | null = null;
   const inCurrentWindow = (observedAt: Date | null) => !issue.startedAt || !observedAt ||
     observedAt.getTime() >= issue.startedAt.getTime();
+
+  const events = await db
+    .select({ verdict: workflowTransitionEvents.verdict, createdAt: workflowTransitionEvents.createdAt })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, issue.companyId),
+      eq(workflowTransitionEvents.issueId, issue.id),
+      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+    ))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id));
+  for (const event of events) {
+    const observedAt = event.createdAt ?? null;
+    if (!inCurrentWindow(observedAt)) continue;
+    if (event.verdict !== "pass" && event.verdict !== "request_changes") continue;
+    const verdict: ValidationVerdict = event.verdict === "pass" ? "pass" : "request_changes";
+    return { verdict, observedAt };
+  }
 
   const runs = await db
     .select({ resultJson: heartbeatRuns.resultJson, finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })

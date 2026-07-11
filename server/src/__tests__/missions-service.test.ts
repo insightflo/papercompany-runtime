@@ -2492,7 +2492,6 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
     const missionId = randomUUID();
-    const failedRunId = randomUUID();
     const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-late" });
     await db.insert(companies).values({ id: companyId, name: "Late Wake Dispatch Company", issuePrefix: `LW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values([
@@ -2502,7 +2501,6 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Late wake retry mission", status: "active" });
     const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Previously applied source" });
-    await db.insert(heartbeatRuns).values({ id: failedRunId, companyId, agentId: workerAgentId, issueId: sourceIssue.id, status: "timed_out", startedAt: new Date("2026-05-31T00:00:00.000Z"), finishedAt: new Date("2026-05-31T00:15:00.000Z"), errorCode: "timeout" });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title: "Retry applied without dispatch" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry once then dispatch later"].join("\n") });
 
