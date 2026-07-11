@@ -28,14 +28,17 @@ describe("delivery-verification-gate", () => {
   it("hasExistingDeliveryReadbackStep: detects QA+public-marker combo, not generic QA or generic publish", () => {
     // QA + public marker → delivery readback
     expect(hasExistingDeliveryReadbackStep([
-      { id: "s1", name: "Publish smoke QA: R2 HTTP 200 + hub index", description: "" },
+      { id: "publish", name: "Publish to R2", description: "" },
+      { id: "s1", name: "Publish smoke QA: R2 HTTP 200 + hub index", description: "", dependencies: ["publish"] },
     ])).toBe(true);
     expect(hasExistingDeliveryReadbackStep([
-      { id: "s1", name: "verify publish onboarding hub", description: "" },
+      { id: "publish", name: "manual-onboarding publisher", description: "" },
+      { id: "s1", name: "verify publish onboarding hub", description: "", dependencies: ["publish"] },
     ])).toBe(true);
     // explicit readback keyword
     expect(hasExistingDeliveryReadbackStep([
-      { id: "s1", name: "delivery-verification-gate", name2: "", description: "" } as never,
+      { id: "publish", name: "Publish to R2", description: "" },
+      { id: "s1", name: "delivery-verification-gate", description: "", dependencies: ["publish"] },
     ])).toBe(true);
     // generic QA without public marker → NOT delivery readback
     expect(hasExistingDeliveryReadbackStep([
@@ -131,5 +134,39 @@ describe("delivery-verification-gate", () => {
     }]);
 
     expect(step?.description).toBe("Run the registered verify tool.");
+  });
+
+  it("strengthens only readback QA steps that run after the delivery action", () => {
+    const steps = strengthenDeliveryReadbackSteps([
+      {
+        id: "build-html",
+        name: "Build manual HTML",
+        agentId: "agent-1",
+        dependencies: [],
+      },
+      {
+        id: "content-qa",
+        name: "[QA] Validate manual-onboarding claims before publication",
+        agentId: "agent-1",
+        dependencies: ["build-html"],
+        description: "Validate the public manual content before publication.",
+      },
+      {
+        id: "publish-manual-onboarding",
+        name: "Publish to manual-onboarding R2",
+        agentId: "agent-1",
+        dependencies: ["content-qa"],
+      },
+      {
+        id: "public-readback-qa",
+        name: "[QA] Verify public manual URL",
+        agentId: "agent-1",
+        dependencies: ["publish-manual-onboarding"],
+        description: "Read back the public URL after publication.",
+      },
+    ]);
+
+    expect(steps[1]?.description).not.toContain("Delivery Verification:");
+    expect(steps[3]?.description).toContain("Delivery Verification:");
   });
 });

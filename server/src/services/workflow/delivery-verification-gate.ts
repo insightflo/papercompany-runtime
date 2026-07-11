@@ -15,6 +15,7 @@ const DELIVERY_CRITERIA_MARKER = "Delivery Verification:";
 
 // step 이 delivery/publish 성격인지(publish 전 콘텐츠 QA 는 제외).
 export function isDeliveryRelevantStep(step: { id: string; name: string; description?: string }): boolean {
+  if (classifyWorkflowStepRole(step) === "qa") return false;
   return DELIVERY_KEYWORDS.test(`${step.id} ${step.name} ${step.description ?? ""}`);
 }
 
@@ -27,8 +28,29 @@ export function isDeliveryReadbackStep(step: { id: string; name: string; descrip
 // 이미 delivery/readback 검증 step 있는지(duplicate 판정).
 // QA-like(QA/verify/검증/확인/smoke/readback) + public-destination marker(R2/hub/Cloudflare/publish/onboarding/public)
 // 둘 다 있어야 delivery-readback step 으로 인식. 단독 QA 나 단독 publish 는 제외.
-export function hasExistingDeliveryReadbackStep(steps: Array<{ id: string; name: string; description?: string }>): boolean {
-  return steps.some(isDeliveryReadbackStep);
+export function hasExistingDeliveryReadbackStep(
+  steps: Array<{ id: string; name: string; description?: string; dependencies?: string[] }>,
+): boolean {
+  const deliveryStepIds = new Set(steps.filter(isDeliveryRelevantStep).map((step) => step.id));
+  return steps.some((step) => isDeliveryReadbackStep(step) && isDownstreamOfDelivery(step, steps, deliveryStepIds));
+}
+
+function isDownstreamOfDelivery(
+  step: { id: string; dependencies?: string[] },
+  steps: Array<{ id: string; dependencies?: string[] }>,
+  deliveryStepIds: ReadonlySet<string>,
+): boolean {
+  const stepsById = new Map(steps.map((candidate) => [candidate.id, candidate]));
+  const pending = [...(step.dependencies ?? [])];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const dependencyId = pending.pop();
+    if (!dependencyId || visited.has(dependencyId)) continue;
+    if (deliveryStepIds.has(dependencyId)) return true;
+    visited.add(dependencyId);
+    pending.push(...(stepsById.get(dependencyId)?.dependencies ?? []));
+  }
+  return false;
 }
 
 export function appendDeliveryVerificationCriteria(description?: string): string {
@@ -40,8 +62,9 @@ export function appendDeliveryVerificationCriteria(description?: string): string
 }
 
 export function strengthenDeliveryReadbackSteps(steps: WorkflowStep[]): WorkflowStep[] {
+  const deliveryStepIds = new Set(steps.filter(isDeliveryRelevantStep).map((step) => step.id));
   return steps.map((step) => {
-    if (!isDeliveryReadbackStep(step)) return step;
+    if (!isDeliveryReadbackStep(step) || !isDownstreamOfDelivery(step, steps, deliveryStepIds)) return step;
     return {
       ...step,
       description: appendDeliveryVerificationCriteria(step.description),
