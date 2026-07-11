@@ -3897,6 +3897,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       version: 1,
       workingDirectory: "/srv/papercompany/projects/research-company",
       dependencyFiles: [evidencePath],
+      dependencyDirectories: [
+        "/srv/papercompany/projects/research-company/produced_work/missions/run/steps/collect",
+      ],
     });
   });
 

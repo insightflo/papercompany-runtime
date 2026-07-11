@@ -35,7 +35,10 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
     ...readAllowedFileViewPaths(input.context.paperclipFileViews),
     ...runtimeSearchPaths.dependencyFiles,
   ];
-  const allowedDirectories = runtimeSearchPaths.outputDirectory ? [runtimeSearchPaths.outputDirectory] : [];
+  const allowedDirectories = [
+    ...(runtimeSearchPaths.outputDirectory ? [runtimeSearchPaths.outputDirectory] : []),
+    ...runtimeSearchPaths.dependencyDirectories,
+  ];
   const workspace = parseObject(input.context.paperclipWorkspace);
   const workspaceCwd = workspace?.cwd;
   const declaredWorkingDirectory = runtimeSearchPaths.workingDirectory
@@ -80,6 +83,11 @@ function readRuntimeSearchPaths(value: unknown) {
       (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
     )
     : [];
+  const dependencyDirectories = Array.isArray(permissions?.dependencyDirectories)
+    ? permissions.dependencyDirectories.filter(
+      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+    )
+    : [];
   return {
     declared: permissions?.version === 1,
     workingDirectory: typeof workingDirectory === "string" && workingDirectory.trim().length > 0
@@ -89,6 +97,7 @@ function readRuntimeSearchPaths(value: unknown) {
       ? outputDirectory
       : null,
     dependencyFiles,
+    dependencyDirectories,
   };
 }
 
