@@ -1,11 +1,13 @@
 import type { IssueExecutionCardJson } from "@paperclipai/db";
 import { ARTIFACT_MARKER, extractProseIssueContract } from "./prose-markers.js";
 import { sha256Text } from "./hash.js";
+import { resolveWorkflowQaContract } from "../workflow/workflow-qa-type.js";
 
 type WorkflowCardStep = {
   id: string;
   dependencies: string[];
   graphWorkProductRequired?: boolean;
+  qaType?: unknown;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -63,6 +65,7 @@ export function buildWorkflowIssueExecutionCard(input: {
   isQaStep: boolean;
 }): IssueExecutionCardJson {
   const prose = extractProseIssueContract(input.description);
+  const qaContract = resolveWorkflowQaContract(input.step.qaType);
   const requiresWorkProduct = input.step.graphWorkProductRequired === true || prose.workProductRequired;
   const requiresVerdict = input.isQaStep || prose.workflowVerdictRequired;
   const evidenceRefs = dedupeEvidenceRefs([
@@ -93,6 +96,8 @@ export function buildWorkflowIssueExecutionCard(input: {
       runId: input.workflowRunId,
       stepRunId: input.workflowStepRunId ?? null,
       stepId: input.step.id,
+      qaType: qaContract?.type ?? null,
+      qaInputScope: qaContract?.inputScope ?? null,
       dependencyStepIds: [...input.step.dependencies],
     },
     requiredOutputs: {

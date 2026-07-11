@@ -109,6 +109,11 @@ describe("buildStepInputManifest", () => {
         broadScanAllowed: true,
       },
       inputs: {
+        qualityAssurance: {
+          available: false,
+          type: null,
+          inputScope: null,
+        },
         workspace: {
           available: true,
           source: "project_primary",

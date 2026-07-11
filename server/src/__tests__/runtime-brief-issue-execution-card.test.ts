@@ -25,6 +25,8 @@ describe("buildPaperclipRuntimeBrief issue execution card", () => {
         workflow: {
           stepId: "sector-rotation",
           runId: "run-abc",
+          qaType: "security",
+          qaInputScope: "dependency_work_products",
           dependencyStepIds: ["collect"],
         },
         toolPermissionContract: {
@@ -50,6 +52,8 @@ describe("buildPaperclipRuntimeBrief issue execution card", () => {
     expect(brief).toContain("Workflow API closeout: register artifacts with /workflow/artifacts, register public URLs with /workflow/artifacts type=preview_url, complete with /workflow/complete");
     expect(brief).toContain("use the paperclip skill for request examples");
     expect(brief).toContain("Workflow: step=sector-rotation, run=run-abc; dependsOn=collect");
+    expect(brief).toContain("QA type: security; inputScope=dependency_work_products");
+    expect(brief).toContain("Use only declared dependency workProduct paths; do not scan the workspace");
     expect(brief).toContain("Required tools: manual-onboarding-publish");
     expect(brief).toContain("Required knowledge: sector-rotation-rubric");
     expect(brief).toContain("Evidence: step output: /runs/out/sector-rotation");

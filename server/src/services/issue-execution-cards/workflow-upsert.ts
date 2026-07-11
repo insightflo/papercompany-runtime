@@ -9,6 +9,7 @@ type WorkflowCardStep = {
   id: string;
   dependencies: string[];
   graphWorkProductRequired?: boolean;
+  qaType?: unknown;
 };
 
 export async function upsertWorkflowIssueExecutionCard(input: {

@@ -4,6 +4,7 @@
 import type { WorkflowStep } from "./dag-engine.js";
 import { buildVerificationBeforeCompletionCriteria } from "../missions/mission-quality-contract.js";
 import { classifyWorkflowStepRole } from "../workflow-step-role.js";
+import { resolveWorkflowQaContract } from "./workflow-qa-type.js";
 
 // delivery readback 이 필요한 공개 목적지 단서만 매치(generic publish/deploy 는 제외 — regression 방지).
 const DELIVERY_KEYWORDS = /manual-onboarding|onboarding[- ]?hub|onboarding[- ]?publisher|r2|cloudflare|pages\.dev|public[- ]?hub|public[- ]?destination|final[- ]?public|website|site[- ]?html|회사게시|온보딩허브/iu;
@@ -19,7 +20,9 @@ export function isDeliveryRelevantStep(step: { id: string; name: string; descrip
   return DELIVERY_KEYWORDS.test(`${step.id} ${step.name} ${step.description ?? ""}`);
 }
 
-export function isDeliveryReadbackStep(step: { id: string; name: string; description?: string; type?: string }): boolean {
+export function isDeliveryReadbackStep(step: { id: string; name: string; description?: string; type?: string; qaType?: string }): boolean {
+  const qaContract = resolveWorkflowQaContract(step.qaType);
+  if (qaContract) return qaContract.inputScope === "delivery_readback";
   if (classifyWorkflowStepRole(step) === "action") return false;
   const text = `${step.id} ${step.name} ${step.description ?? ""}`;
   return READBACK_KEYWORDS.test(text) || (QA_LIKE_RE.test(text) && PUBLIC_MARKER_RE.test(text));
@@ -77,14 +80,16 @@ export function synthesizeDeliveryVerificationGateStep(input: {
   dependencyStepIds: string[];
   agentId: string;
   definitionName?: string;
-}): WorkflowStep {
+}): WorkflowStep & { readonly qaType: "delivery" } {
   return {
     id: "delivery-verification-gate",
     name: "[Delivery Verification] Public destination readback",
     agentId: input.agentId,
+    qaType: "delivery",
     dependencies: input.dependencyStepIds,
     graphWorkProductRequired: false,
     description: [
+      "QA type: delivery",
       "Delivery Verification Gate. Verify the deliverable actually reached the final destination declared by the workflow output contract.",
       "Do NOT pass merely because the publish/deploy step completed, a workProduct was registered, or a local file exists.",
       "",

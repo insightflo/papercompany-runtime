@@ -16,6 +16,8 @@ export type RuntimeSearchPathPermissions = {
   outputDirectory: string | null;
   dependencyFiles: string[];
   dependencyDirectories: string[];
+  qaType: string | null;
+  qaInputScope: string | null;
 };
 
 export async function buildRuntimeSearchPathPermissions(input: {
@@ -30,6 +32,8 @@ export async function buildRuntimeSearchPathPermissions(input: {
     outputDirectory: null,
     dependencyFiles: [],
     dependencyDirectories: [],
+    qaType: null,
+    qaInputScope: null,
   };
   const card = await input.db
     .select({
@@ -44,6 +48,9 @@ export async function buildRuntimeSearchPathPermissions(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (!card) return null;
+
+  permissions.qaType = card.cardJson.workflow?.qaType ?? null;
+  permissions.qaInputScope = card.cardJson.workflow?.qaInputScope ?? null;
 
   const outputDirectory = card.cardJson.requiredOutputs.workProduct.outputDir;
   permissions.outputDirectory = typeof outputDirectory === "string" && path.isAbsolute(outputDirectory)

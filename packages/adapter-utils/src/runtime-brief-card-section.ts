@@ -35,6 +35,11 @@ function joinList(items: readonly string[]): string {
 }
 
 const ARRAY_CAP = 8;
+const QA_SCOPE_INSTRUCTIONS: Readonly<Record<string, string>> = {
+  mission_plan: "Review mission intent, plan structure, resources, and acceptance criteria; do not require a workProduct or public URL.",
+  dependency_work_products: "Use only declared dependency workProduct paths; do not scan the workspace.",
+  delivery_readback: "Use the declared final destination and fresh readback evidence; do not scan the workspace.",
+};
 
 export function buildIssueExecutionCardBriefLines(input: {
   readonly card: unknown;
@@ -100,6 +105,14 @@ export function buildIssueExecutionCardBriefLines(input: {
       .filter((value): value is string => value !== null)
       .join(", ");
     lines.push(`${deps.length > 0 ? `- Workflow: ${head}; dependsOn=${joinList(deps)}` : `- Workflow: ${head}`}`);
+  }
+
+  const qaType = asString(workflow?.qaType);
+  const qaInputScope = asString(workflow?.qaInputScope);
+  if (qaType && qaInputScope) {
+    lines.push(`- QA type: ${qaType}; inputScope=${qaInputScope}`);
+    const scopeInstruction = QA_SCOPE_INSTRUCTIONS[qaInputScope];
+    if (scopeInstruction) lines.push(`- QA input boundary: ${scopeInstruction}`);
   }
 
   const toolNames = asStringArray(toolContract?.requiredToolNames, ARRAY_CAP);

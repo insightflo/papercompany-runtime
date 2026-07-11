@@ -56,6 +56,7 @@ import { upsertWorkflowIssueExecutionCard } from "../issue-execution-cards/workf
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
+import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
 
 /**
  * Workflow step definition.
@@ -71,6 +72,7 @@ export interface WorkflowStep {
   dependsOn?: string[];
   description?: string;
   type?: string;
+  qaType?: string;
   toolName?: string;
   toolArgs?: unknown;
   tools?: string[];
@@ -127,6 +129,7 @@ type PersistedWorkflowStep = WorkflowStep & {
   toolName?: unknown;
   toolArgs?: unknown;
   type?: unknown;
+  qaType?: unknown;
   agentName?: unknown;
   executionControls?: unknown;
   graphConcurrencyKey?: unknown;
@@ -322,11 +325,13 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       ?? normalizeStringArray(step.toolName);
     const executionControls = normalizeWorkflowStepExecutionControls(step);
     const conditionalDependencies = normalizeConditionalEdges(step.conditionalDependencies);
+    const qaType = normalizeWorkflowQaType(step.qaType);
     const graphWorkProductRequired = isQaLikeStep({
       id,
       name,
       title: typeof step.title === "string" ? step.title : undefined,
       type: typeof step.type === "string" ? step.type : undefined,
+      qaType,
     })
       ? false
       : readWorkProductRequirementMarker(step) === true;
@@ -336,6 +341,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       name,
       agentId: typeof step.agentId === "string" ? step.agentId : "",
       dependencies,
+      qaType: qaType ?? undefined,
       ...(toolNames ? { toolNames } : {}),
       ...(executionControls ? { executionControls } : {}),
       // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.

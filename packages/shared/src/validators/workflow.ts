@@ -23,6 +23,7 @@ export const workflowStepDefinitionSchema = z.object({
   dependsOn: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
   type: z.string().optional(),
+  qaType: z.string().trim().min(1).max(64).regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/iu).optional(),
   toolName: z.string().optional(),
   toolArgs: z.unknown().optional(),
   tools: z.array(z.string()).optional(),

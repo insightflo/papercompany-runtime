@@ -1,3 +1,5 @@
+import { resolveWorkflowQaContract } from "./workflow/workflow-qa-type.js";
+
 export type WorkflowStepRole = "action" | "qa" | "oversight" | "unknown";
 
 export type WorkflowStepRoleInput = {
@@ -5,6 +7,7 @@ export type WorkflowStepRoleInput = {
   readonly name?: unknown;
   readonly title?: unknown;
   readonly type?: unknown;
+  readonly qaType?: unknown;
 };
 
 const EXPLICIT_ROLE_RE = /^\s*\[(ACTION|QA|OVERSIGHT)\]/iu;
@@ -31,6 +34,8 @@ function explicitRole(input: WorkflowStepRoleInput): WorkflowStepRole | null {
 }
 
 export function classifyWorkflowStepRole(input: WorkflowStepRoleInput): WorkflowStepRole {
+  if (resolveWorkflowQaContract(input.qaType)) return "qa";
+
   const explicit = explicitRole(input);
   if (explicit) return explicit;
 

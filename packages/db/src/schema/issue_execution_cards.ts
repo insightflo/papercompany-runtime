@@ -28,6 +28,8 @@ export type IssueExecutionCardJson = {
     runId?: string | null;
     stepRunId?: string | null;
     stepId?: string | null;
+    qaType?: string | null;
+    qaInputScope?: string | null;
     dependencyStepIds: string[];
   };
   requiredOutputs: {
