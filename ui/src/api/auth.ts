@@ -3,6 +3,11 @@ export type AuthSession = {
   user: { id: string; email: string | null; name: string | null };
 };
 
+export type SocialAuthProvider = {
+  id: string;
+  label: string;
+};
+
 function toSession(value: unknown): AuthSession | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
@@ -22,6 +27,21 @@ function toSession(value: unknown): AuthSession | null {
       name: typeof user.name === "string" ? user.name : null,
     },
   };
+}
+
+function toSocialAuthProviders(value: unknown): SocialAuthProvider[] {
+  if (!value || typeof value !== "object") return [];
+  const providers = (value as { providers?: unknown }).providers;
+  if (!Array.isArray(providers)) return [];
+
+  const parsed: SocialAuthProvider[] = [];
+  for (const provider of providers) {
+    if (!provider || typeof provider !== "object") continue;
+    const { id, label } = provider as { id?: unknown; label?: unknown };
+    if (typeof id !== "string" || typeof label !== "string") continue;
+    parsed.push({ id, label });
+  }
+  return parsed;
 }
 
 async function authPost(path: string, body: Record<string, unknown>) {
@@ -60,12 +80,34 @@ export const authApi = {
     return nested;
   },
 
+  getSocialProviders: async (): Promise<SocialAuthProvider[]> => {
+    const res = await fetch("/api/auth/providers", {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return [];
+    return toSocialAuthProviders(await res.json().catch(() => null));
+  },
+
   signInEmail: async (input: { email: string; password: string }) => {
     await authPost("/sign-in/email", input);
   },
 
   signUpEmail: async (input: { name: string; email: string; password: string }) => {
     await authPost("/sign-up/email", input);
+  },
+
+  startSocialSignIn: async (input: { provider: string; callbackURL: string }) => {
+    const payload = await authPost("/sign-in/social", {
+      provider: input.provider,
+      callbackURL: input.callbackURL,
+      disableRedirect: true,
+    });
+    const url = payload && typeof payload === "object" ? (payload as { url?: unknown }).url : null;
+    if (typeof url !== "string" || !url) {
+      throw new Error("Social sign-in did not return an authorization URL");
+    }
+    return { url };
   },
 
   signOut: async () => {

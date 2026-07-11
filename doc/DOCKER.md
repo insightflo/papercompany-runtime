@@ -68,6 +68,21 @@ services:
 
 Granular overrides remain available if needed (`PAPERCLIP_AUTH_PUBLIC_BASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `PAPERCLIP_ALLOWED_HOSTNAMES`).
 
+### Social login
+
+Papercompany can expose Google, Kakao, and Naver buttons when both credentials for a provider are configured on the instance:
+
+```sh
+PAPERCLIP_AUTH_GOOGLE_CLIENT_ID=...
+PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET=...
+PAPERCLIP_AUTH_KAKAO_CLIENT_ID=...
+PAPERCLIP_AUTH_KAKAO_CLIENT_SECRET=...
+PAPERCLIP_AUTH_NAVER_CLIENT_ID=...
+PAPERCLIP_AUTH_NAVER_CLIENT_SECRET=...
+```
+
+Register each callback as `${PAPERCLIP_PUBLIC_URL}/api/auth/callback/<provider>`. For example, Google uses `/api/auth/callback/google`. The instance signup policy also applies to social providers: `PAPERCLIP_AUTH_DISABLE_SIGN_UP=true` allows existing social accounts to sign in but prevents new accounts from being created.
+
 Set `PAPERCLIP_ALLOWED_HOSTNAMES` explicitly only when you need additional hostnames beyond the public URL host (for example Tailscale/LAN aliases or multiple private hostnames).
 
 ## Claude + Codex Local Adapters in Docker

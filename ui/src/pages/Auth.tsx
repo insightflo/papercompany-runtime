@@ -3,9 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { authApi } from "../api/auth";
 import { queryKeys } from "../lib/queryKeys";
+import { resolveAuthRedirectPath } from "../lib/auth-redirect";
 import { Button } from "@/components/ui/button";
 import { AsciiArtAnimation } from "@/components/AsciiArtAnimation";
-import { Sparkles } from "lucide-react";
+import { LogIn, Sparkles } from "lucide-react";
 
 type AuthMode = "sign_in" | "sign_up";
 
@@ -19,10 +20,15 @@ export function AuthPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const nextPath = useMemo(() => searchParams.get("next") || "/", [searchParams]);
+  const nextPath = useMemo(() => resolveAuthRedirectPath(searchParams.get("next")), [searchParams]);
   const { data: session, isLoading: isSessionLoading } = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
+    retry: false,
+  });
+  const socialProvidersQuery = useQuery({
+    queryKey: queryKeys.auth.providers,
+    queryFn: () => authApi.getSocialProviders(),
     retry: false,
   });
 
@@ -54,11 +60,25 @@ export function AuthPage() {
       setError(err instanceof Error ? err.message : "Authentication failed");
     },
   });
+  const socialMutation = useMutation({
+    mutationFn: (provider: string) =>
+      authApi.startSocialSignIn({
+        provider,
+        callbackURL: nextPath,
+      }),
+    onSuccess: ({ url }) => {
+      window.location.assign(url);
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Could not start social sign-in");
+    },
+  });
 
   const canSubmit =
     email.trim().length > 0 &&
     password.trim().length > 0 &&
     (mode === "sign_in" || (name.trim().length > 0 && password.trim().length >= 8));
+  const socialProviders = socialProvidersQuery.data ?? [];
 
   if (isSessionLoading) {
     return (
@@ -147,6 +167,31 @@ export function AuthPage() {
                   : "Create Account"}
             </Button>
           </form>
+
+          {socialProviders.length > 0 && (
+            <div className="mt-6">
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <span className="h-px flex-1 bg-border" />
+                <span>or continue with</span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+              <div className="mt-4 space-y-2">
+                {socialProviders.map((provider) => (
+                  <Button
+                    key={provider.id}
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    disabled={socialMutation.isPending}
+                    onClick={() => socialMutation.mutate(provider.id)}
+                  >
+                    <LogIn className="h-4 w-4" aria-hidden="true" />
+                    Continue with {provider.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="mt-5 text-sm text-muted-foreground">
             {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}

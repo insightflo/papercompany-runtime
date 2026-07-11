@@ -22,6 +22,7 @@ import {
   resolveDefaultStorageDir,
   resolveHomeAwarePath,
 } from "./home-paths.js";
+import { loadSocialAuthProviders, type SocialAuthProvider } from "./auth/social-providers.js";
 
 const PAPERCLIP_ENV_FILE_PATH = resolvePaperclipEnvPath();
 if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
@@ -47,6 +48,7 @@ export interface Config {
   authBaseUrlMode: AuthBaseUrlMode;
   authPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
+  authSocialProviders: readonly SocialAuthProvider[];
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   embeddedPostgresDataDir: string;
@@ -157,6 +159,7 @@ export function loadConfig(): Config {
     disableSignUpFromEnv !== undefined
       ? disableSignUpFromEnv === "true"
       : (fileConfig?.auth?.disableSignUp ?? false);
+  const authSocialProviders = loadSocialAuthProviders();
   const allowedHostnamesFromEnvRaw = process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
   const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
     ? allowedHostnamesFromEnvRaw
@@ -219,6 +222,7 @@ export function loadConfig(): Config {
     authBaseUrlMode,
     authPublicBaseUrl,
     authDisableSignUp,
+    authSocialProviders,
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     embeddedPostgresDataDir: resolveHomeAwarePath(

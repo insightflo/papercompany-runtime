@@ -23,6 +23,7 @@ import {
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
+import { toPublicSocialAuthProviders, type PublicSocialAuthProvider } from "./auth/social-providers.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
@@ -433,6 +434,7 @@ export async function startServer(): Promise<StartedServer> {
   let resolveSessionFromHeaders:
     | ((headers: Headers) => Promise<BetterAuthSessionResult | null>)
     | undefined;
+  let socialAuthProviders: readonly PublicSocialAuthProvider[] = [];
   if (config.deploymentMode === "local_trusted") {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
@@ -473,6 +475,7 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler = createBetterAuthHandler(auth);
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
+    socialAuthProviders = toPublicSocialAuthProviders(config.authSocialProviders);
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
     authReady = true;
   }
@@ -492,6 +495,7 @@ export async function startServer(): Promise<StartedServer> {
     companyDeletionEnabled: config.companyDeletionEnabled,
     betterAuthHandler,
     resolveSession,
+    socialAuthProviders,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
   let heartbeatScheduler: ReturnType<typeof createHeartbeatScheduler> | null = null;

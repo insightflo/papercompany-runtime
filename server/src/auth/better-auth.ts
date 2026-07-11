@@ -11,6 +11,7 @@ import {
   authVerifications,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
+import { buildBetterAuthSocialProviders } from "./social-providers.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -72,6 +73,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?
 
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL ?? baseUrl;
   const isHttpOnly = publicUrl ? publicUrl.startsWith("http://") : false;
+  const socialProviders = buildBetterAuthSocialProviders(config.authSocialProviders, config.authDisableSignUp);
 
   const authConfig = {
     baseURL: baseUrl,
@@ -91,6 +93,10 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
     },
+    account: {
+      encryptOAuthTokens: true,
+    },
+    ...(Object.keys(socialProviders).length > 0 ? { socialProviders } : {}),
     ...(isHttpOnly ? { advanced: { useSecureCookies: false } } : {}),
   };
 

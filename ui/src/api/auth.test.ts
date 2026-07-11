@@ -67,6 +67,42 @@ describe("authApi", () => {
     });
   });
 
+  it("loads the configured social providers", async () => {
+    const fetchMock = vi.fn(async () => mockResponse(200, {
+      providers: [{ id: "google", label: "Google" }],
+    }));
+    setFetchMock(fetchMock);
+
+    await expect(authApi.getSocialProviders()).resolves.toEqual([{ id: "google", label: "Google" }]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/auth/providers", {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  });
+
+  it("starts social sign-in without letting the server redirect the fetch request", async () => {
+    const fetchMock = vi.fn(async () => mockResponse(200, {
+      redirect: false,
+      url: "https://accounts.example.test/authorize",
+    }));
+    setFetchMock(fetchMock);
+
+    await expect(authApi.startSocialSignIn({
+      provider: "google",
+      callbackURL: "https://papercompany.example.test/missions",
+    })).resolves.toEqual({ url: "https://accounts.example.test/authorize" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/auth/sign-in/social", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "google",
+        callbackURL: "https://papercompany.example.test/missions",
+        disableRedirect: true,
+      }),
+    });
+  });
+
   it("throws server error message for failed auth posts", async () => {
     const fetchMock = vi.fn(async () => mockResponse(400, { error: { message: "Invalid credentials" } }));
     setFetchMock(fetchMock);

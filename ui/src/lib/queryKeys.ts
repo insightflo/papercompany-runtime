@@ -114,6 +114,7 @@ export const queryKeys = {
   },
   auth: {
     session: ["auth", "session"] as const,
+    providers: ["auth", "providers"] as const,
   },
   instance: {
     generalSettings: ["instance", "general-settings"] as const,

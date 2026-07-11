@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { agents, type Db } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
+import type { PublicSocialAuthProvider } from "./auth/social-providers.js";
 import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
@@ -194,6 +195,7 @@ export async function createApp(
     localPluginDir?: string;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    socialAuthProviders?: readonly PublicSocialAuthProvider[];
   },
 ) {
   const app = express();
@@ -240,6 +242,9 @@ export async function createApp(
         name: req.actor.source === "local_implicit" ? "Local Board" : null,
       },
     });
+  });
+  app.get("/api/auth/providers", (_req, res) => {
+    res.json({ providers: opts.socialAuthProviders ?? [] });
   });
   if (opts.betterAuthHandler) {
     app.all("/api/auth/*authPath", opts.betterAuthHandler);
