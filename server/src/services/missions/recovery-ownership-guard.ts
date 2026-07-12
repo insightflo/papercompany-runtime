@@ -265,23 +265,22 @@ export async function shouldNoOpOversightWakeup(
     return { noOp: false };
   }
   const ownerActionIssueId = readPayloadField(ctx.request.payload, "ownerActionIssueId");
-  let sourceIssueId = readPayloadSourceIssueId(ctx.request.payload) ?? ctx.promotedIssue.id;
-  let qaGateIssueId = sourceIssueId;
-  if (ownerActionIssueId) {
-    const ownerAction = await db
-      .select({ originId: issues.originId })
-      .from(issues)
-      .where(and(eq(issues.companyId, ctx.companyId), eq(issues.id, ownerActionIssueId)))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (ownerAction?.originId) {
-      // origin 이 실제 workflow QA step 인지 확인 — 아니면 guard 미적용(일반 owner retry).
-      const originIsQaGate = await isIssueQaGateStep(db, ctx.companyId, ownerAction.originId);
-      if (!originIsQaGate) return { noOp: false };
-      sourceIssueId = ownerAction.originId;
-      qaGateIssueId = ownerAction.originId;
-    }
+  // ownerActionIssueId 없거나 owner action 이 unblock 이 아니면 안전하게 guard 미적용(malformed payload 방지, codex 재검토).
+  if (!ownerActionIssueId) return { noOp: false };
+  const ownerAction = await db
+    .select({ originId: issues.originId, originKind: issues.originKind })
+    .from(issues)
+    .where(and(eq(issues.companyId, ctx.companyId), eq(issues.id, ownerActionIssueId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!ownerAction || ownerAction.originKind !== "mission_main_executor_unblock" || !ownerAction.originId) {
+    return { noOp: false };
   }
+  // origin 이 실제 workflow QA step 인지 확인 — 아니면 guard 미적용(일반 owner retry 오인 방지).
+  const originIsQaGate = await isIssueQaGateStep(db, ctx.companyId, ownerAction.originId);
+  if (!originIsQaGate) return { noOp: false };
+  const sourceIssueId = ownerAction.originId;
+  const qaGateIssueId = ownerAction.originId;
   const ownership = await resolveRecoveryOwnership(db, {
     companyId: ctx.companyId,
     missionId: ctx.missionId,

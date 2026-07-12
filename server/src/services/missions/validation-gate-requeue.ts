@@ -4,6 +4,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { issueService } from "../issues.js";
 import type { MissionRow, MissionServiceDeps } from "../missions.js";
 import { buildMissionOwnerDecisionWakeupIdempotencyKey, hasMissionOwnerDecisionWakeupDispatchedMarker } from "./mission-owner-recovery-events.js";
+import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { buildRetrySourceIssueWakeupResultComment } from "./mission-owner-recovery-comments.js";
 import { findValidationGateNeedingFreshPass } from "./validation-gate-assessment.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction } from "./supervision-types.js";
@@ -152,6 +153,20 @@ export async function requeueStaleValidationGateBeforeOwnerRetry(input: {
     missionIssues: input.missionIssues,
   });
   if (!gate) return null;
+
+  // [P5] source 의 QA recovery chain 이 live 면 duplicate gate reset/wakeup 금지(observe-only, codex 계약).
+  // stalled 는 producer wake ❌ — 이 함수는 gate issue 만 다루므로 gate requeue/retry 는 허용(producer 미건드).
+  const ownership = await resolveRecoveryOwnership(input.db, {
+    companyId: input.mission.companyId,
+    missionId: input.mission.id,
+    sourceIssueId: input.sourceIssue.id,
+    qaGateIssueId: gate.issue.id,
+  });
+  if (isQaRecoveryLive(ownership)) {
+    return {
+      findings: [`validation_gate_requeue_qa_recovery_live: ${input.sourceLabel} ownership=qa_recovery_live signal=${ownership.signal} — observe-only, no duplicate gate reset/wakeup`],
+    };
+  }
 
   const findings = [`owner_action_validation_gate_not_passed: ${input.sourceLabel} retry blocked; ${gate.reason}`];
   if (gate.action === "block_source_retry") {
