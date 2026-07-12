@@ -100,6 +100,7 @@ import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./m
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
+import { reconcileRecoveredWorkflowStep } from "./missions/recovery-closeout.js";
 import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
 import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
@@ -7308,7 +7309,22 @@ export function heartbeatService(db: Db) {
         successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId
       ) {
-        await recordWorkflowValidationVerdictFromRun({ db: tx, issue, run });
+        const validationLedger = await recordWorkflowValidationVerdictFromRun({ db: tx, issue, run });
+        // [P5 recovery closeout] QA PASS 공식 ledger 기록 후 same run 의 recovered producer failed step
+        //   만 reconcile + workflow run sync(codex 계약 3). 전역 issue-done 덮어쓰기 ❌.
+        if (validationLedger?.verdict === "pass" && issue.missionId) {
+          try {
+            const closeout = await reconcileRecoveredWorkflowStep(tx as unknown as Db, {
+              companyId: issue.companyId,
+              missionId: issue.missionId,
+              qaGateIssueId: issue.id,
+              source: "heartbeat_qa_pass",
+            });
+            if ("reconciled" in closeout && closeout.reconciled) queuePostTransactionWorkflowIssueSync(issue.id);
+          } catch (err) {
+            logger.warn({ err, issueId: issue.id }, "recovery closeout failed");
+          }
+        }
       }
       const workflowValidationCompletionLedger =
         isSucceededHeartbeatRunStatus(run.status) &&
