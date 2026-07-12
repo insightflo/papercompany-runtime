@@ -73,16 +73,20 @@ export function findRuntimeBroadScanCommand(input: RuntimeBroadScanCommandInput)
   return null;
 }
 
+// Simple explicit-file policy (rg/find only): blocked when there is no explicit
+// target, the target is "/", a cwd alias / PWD substitution (. ./ $PWD $(pwd)
+// `pwd` ${PWD}), or it resolves EXACTLY to the workdir / repo root. Every other
+// explicit target is allowed (no parent-traversal/extension/allowlist judgment).
+// tree/ls-R/git-ls-files keep their previous policy. repo scope allows all.
 function evaluateCandidate(label: BroadScanCommandLabel, input: RuntimeBroadScanCommandInput) {
   if (label === "find .") {
-    if (isRepoScopedDiscoveryCommand(input)) return null;
-    if (hasRepoWideTarget(input.command, input.shellVariables)) return label;
-    return areAllExplicitTargetPathsAllowed(input) ? null : label;
+    return evaluateFindCommand(input);
   }
   if (label === "git ls-files") return isRepoSearchCommandAllowed(input) ? null : label;
   if (label === "rg without an allowed file path" || label === "grep -R without path") {
     return evaluateSearchCommand(label, input);
   }
+  // tree / ls -R: unchanged policy.
   if (label === "tree" || label === "ls -R") {
     if (isRepoScopedDiscoveryCommand(input)) return null;
     return areAllExplicitTargetPathsAllowed(input) && !hasRepoWideTarget(input.command, input.shellVariables)
@@ -92,9 +96,25 @@ function evaluateCandidate(label: BroadScanCommandLabel, input: RuntimeBroadScan
   return label;
 }
 
+function evaluateFindCommand(input: RuntimeBroadScanCommandInput) {
+  if (isRepoScopedDiscoveryCommand(input)) return null;
+  // find [starting-point...] [expression]: path targets precede the expression.
+  const tokens = shellTokenize(input.command);
+  const startIndex = tokens.findIndex((t) => t.toLowerCase() === "find");
+  const targets: string[] = [];
+  for (let i = startIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token || token === "--" || token.startsWith("-")) break;
+    targets.push(cleanShellToken(resolveShellVariableToken(token, input.shellVariables)));
+  }
+  if (targets.length === 0) return "find .";
+  return targets.some((target) => isBroadScanTarget(target, input)) ? "find ." : null;
+}
+
 function evaluateSearchCommand(label: BroadScanCommandLabel, input: RuntimeBroadScanCommandInput) {
   const executable: SearchExecutable = label === "rg without an allowed file path" ? "rg" : "grep";
-  const explicitTargets = extractSearchTargetPaths(input.command, executable, input.shellVariables);
+  const explicitTargets = extractSearchTargetPaths(input.command, executable);
+  // repo scope: existing behavior (allow when targets are repo-wide or inside the repo root).
   if (isRepoSearchCommandAllowed(input) && (
     explicitTargets.length === 0 ||
     explicitTargets.some(isRepoWideTargetToken) ||
@@ -102,14 +122,13 @@ function evaluateSearchCommand(label: BroadScanCommandLabel, input: RuntimeBroad
   )) {
     return null;
   }
-  if (explicitTargets.some(isRepoWideTargetToken)) return label;
   if (input.stdinFromPipe && explicitTargets.length === 0) return null;
-  return explicitTargets.length > 0 && explicitTargets.every((target) => isAllowedTargetPath(
-    target,
-    input.allowedPaths,
-    input.allowedDirectories,
-    input.workingDirectory,
-  ))
+  if (explicitTargets.length === 0) return label;
+  // rg: simple explicit-target policy. grep -R: unchanged allow-list policy.
+  if (executable === "rg") {
+    return explicitTargets.some((target) => isBroadScanTarget(target, input)) ? label : null;
+  }
+  return explicitTargets.every((target) => isAllowedTargetPath(target, input.allowedPaths, input.allowedDirectories, input.workingDirectory))
     ? null
     : label;
 }
@@ -143,11 +162,7 @@ function extractExplicitTargetPaths(command: string, shellVariables: ReadonlyMap
     .filter((token) => token.includes("/") || /\.[a-z0-9]+$/i.test(token));
 }
 
-function extractSearchTargetPaths(
-  command: string,
-  executable: SearchExecutable,
-  shellVariables: ReadonlyMap<string, string>,
-) {
+function extractSearchTargetPaths(command: string, executable: SearchExecutable) {
   const tokens = shellTokenize(command);
   const commandIndex = tokens.findIndex((token) => token.toLowerCase() === executable);
   if (commandIndex < 0) return [];
@@ -158,7 +173,12 @@ function extractSearchTargetPaths(
     if (!token || token === "--") continue;
     if (token.startsWith("-")) {
       const normalizedOption = token.toLowerCase();
-      if (normalizedOption === "-f" || normalizedOption === "--file" || normalizedOption.startsWith("--file=")) return [];
+      if (normalizedOption === "-f" || normalizedOption === "--file" || normalizedOption.startsWith("--file=")) {
+        // rg: a patterns file supplies the pattern, so later positionals are explicit targets.
+        // grep keeps its previous policy (block regardless of target) — only rg/find relax.
+        if (executable !== "rg") return [];
+        patternProvidedByOption = true;
+      }
       if (normalizedOption === "-e" || normalizedOption === "--regexp") patternProvidedByOption = true;
       if ((normalizedOption.startsWith("-e") && normalizedOption.length > 2) || normalizedOption.startsWith("--regexp=")) {
         patternProvidedByOption = true;
@@ -168,9 +188,39 @@ function extractSearchTargetPaths(
     }
     positional.push(cleanShellToken(token));
   }
-  return (patternProvidedByOption ? positional : positional.slice(1)).filter(Boolean);
+  const patternTargets = patternProvidedByOption ? positional : positional.slice(1);
+  // rg only: recover absolute targets merged into the pattern token by escaped-quote
+  // forms (rg -n \"PATTERN\"/abs/path). Gated to backslash-bearing tokens so a bare
+  // slash-bearing regex (rg -n /api/v1) stays pathless and blocked.
+  const embedded = executable === "rg" ? positional.flatMap(extractEmbeddedAbsoluteTargets) : [];
+  return Array.from(new Set([...patternTargets, ...embedded])).filter(Boolean);
 }
 
+function extractEmbeddedAbsoluteTargets(token: string): string[] {
+  // Only the escaped-quote merge form leaves a backslash artifact in the token.
+  if (!token.includes("\\")) return [];
+  const matches = token.match(/\/(?:[^\s"\\|;&<>]+\/)*[^\s"\\|;&<>]+/gi) ?? [];
+  return matches.map((match) => cleanShellToken(match));
+}
+
+/** Blocked target: "/", parent-dir aliases (..  ../), a cwd alias / PWD substitution, or resolved target === path.resolve-normalized workdir/repoSearchRoot. Embedded ".." in a path (src/../file) is allowed; roots are normalized so trailing-slash / ".." roots still match. */
+function isBroadScanTarget(token: string, input: RuntimeBroadScanCommandInput): boolean {
+  const normalized = cleanShellToken(token).toLowerCase();
+  if (normalized === "/" || normalized === ".." || normalized === "../" || normalized === "${pwd}" || isRepoWideTargetToken(token)) return true;
+  const resolved = resolveForBroadScan(token, input.workingDirectory);
+  const rootOf = (value: string | null | undefined) => (value && path.isAbsolute(value) ? path.resolve(value) : "");
+  return !!resolved && (rootOf(input.workingDirectory) === resolved || rootOf(input.repoSearchRoot) === resolved);
+}
+
+function resolveForBroadScan(token: string, workingDirectory?: string | null): string | null {
+  const normalized = cleanShellToken(token);
+  if (!normalized) return null;
+  if (path.isAbsolute(normalized)) return path.resolve(normalized);
+  if (workingDirectory && path.isAbsolute(workingDirectory)) return path.resolve(workingDirectory, normalized);
+  return null;
+}
+
+// tree / ls -R allow-list check (unchanged policy).
 function isAllowedTargetPath(
   target: string,
   allowedPaths: readonly string[],
@@ -239,21 +289,10 @@ function isPathInsideRepoSearchRoot(target: string, input: RuntimeBroadScanComma
   return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
+const SEARCH_OPTIONS_TAKING_VALUE = new Set([
+  "-e", "-f", "--file", "-g", "--glob", "--type", "-t", "--type-not", "-T",
+  "--context", "-C", "--after-context", "-A", "--before-context", "-B",
+]);
 function optionTakesValue(token: string) {
-  return [
-    "-e",
-    "-f",
-    "-g",
-    "--glob",
-    "--type",
-    "-t",
-    "--type-not",
-    "-T",
-    "--context",
-    "-C",
-    "--after-context",
-    "-A",
-    "--before-context",
-    "-B",
-  ].includes(token);
+  return SEARCH_OPTIONS_TAKING_VALUE.has(token);
 }

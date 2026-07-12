@@ -134,7 +134,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     });
   });
 
-  it("blocks broad discovery commands when any explicit target path is undeclared", () => {
+  it("allows rg with explicit target paths even when undeclared (simple explicit-file policy)", () => {
     const line = JSON.stringify({
       type: "tool_call",
       subtype: "started",
@@ -174,11 +174,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
       },
     });
 
-    expect(result).toEqual({
-      blocked: true,
-      matchedCommand: "rg without an allowed file path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
-    });
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
   });
 
   it("allows rg as a stdin filter after a pipe", () => {
@@ -299,7 +295,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     });
   });
 
-  it("blocks mixed shell segments when a later segment performs a repo-wide scan", () => {
+  it("allows an explicit tree target then rg on an explicit file (no repo-wide target)", () => {
     const line = JSON.stringify({
       type: "tool_call",
       subtype: "started",
@@ -339,11 +335,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
       },
     });
 
-    expect(result).toEqual({
-      blocked: true,
-      matchedCommand: "rg without an allowed file path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
-    });
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
   });
 
   it("blocks opencode bash tool_use events for git ls-files", () => {
@@ -387,6 +379,46 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
       blocked: true,
       matchedCommand: "git ls-files",
       reason: 'Step Input Manifest blocked runtime broad scan command: "git ls-files". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+    });
+  });
+
+  it("keeps grep -R blocked even with a patterns file and a declared target (only rg/find relax)", () => {
+    // grep -R policy is unchanged by the rg/find simplification. -f/--file must not
+    // turn a declared file into an allowed target for grep (the bug did this because
+    // extractSearchTargetPaths is shared). Only rg treats a patterns file as pattern-supplied.
+    const line = JSON.stringify({
+      type: "item.started",
+      item: {
+        id: "item_1",
+        type: "command_execution",
+        command: "grep -R -f patterns.txt src/server.ts",
+        status: "in_progress",
+      },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "codex_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          guardrails: { broadScanAllowed: false },
+        },
+        paperclipRuntimeSearchPaths: {
+          version: 1,
+          workingDirectory: "/workspace",
+          outputDirectory: null,
+          dependencyFiles: ["/workspace/src/server.ts"],
+          dependencyDirectories: [],
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      blocked: true,
+      matchedCommand: "grep -R without path",
+      reason: 'Step Input Manifest blocked runtime broad scan command: "grep -R without path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -480,7 +512,7 @@ done'`,
     });
   });
 
-  it("blocks pi tool execution start bash commands for repo-wide discovery", () => {
+  it("allows find on an explicit sub-directory in pi tool execution", () => {
     const line = JSON.stringify({
       type: "tool_execution_start",
       toolName: "bash",
@@ -511,10 +543,6 @@ done'`,
       },
     });
 
-    expect(result).toEqual({
-      blocked: true,
-      matchedCommand: "find .",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
-    });
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
   });
 });
