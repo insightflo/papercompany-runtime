@@ -427,7 +427,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       const sourceStepIdForReuse = sourceStepRowForReuse?.stepRun?.stepId ?? null;
       const downstreamQaStep = Array.isArray(stepsForReuse) && sourceStepIdForReuse
         ? stepsForReuse.find((s) => isQaLikeStep(s as Parameters<typeof isQaLikeStep>[0])
-            && (((s as { dependencies?: string[] }).dependencies) ?? []).includes(sourceStepIdForReuse))
+            && ((((s as { dependencies?: string[] }).dependencies) ?? ((s as { dependsOn?: string[] }).dependsOn) ?? []).includes(sourceStepIdForReuse)))
         : null;
       if (downstreamQaStep && sourceStepRowForReuse) {
         const qaStepRowForReuse = stepRows.find((r) =>
