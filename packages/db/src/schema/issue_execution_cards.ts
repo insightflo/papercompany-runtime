@@ -51,6 +51,7 @@ export type IssueExecutionCardJson = {
   toolPermissionContract?: {
     requiredToolNames: string[];
     requiredKnowledgeNames: string[];
+    allowedSearchScopes?: string[];
   };
   evidenceRefs: Array<{
     type: string;

@@ -107,6 +107,7 @@ describe("buildStepInputManifest", () => {
       ],
       guardrails: {
         broadScanAllowed: true,
+        allowedSearchScopes: [],
       },
       inputs: {
         qualityAssurance: {
@@ -198,6 +199,16 @@ describe("buildStepInputManifest", () => {
           ruleNames: [],
           ruleModes: [],
           refs: {},
+        },
+        missionSearch: {
+          available: false,
+          allowedScopes: [],
+          guidance: [
+            "Mission search scopes: none.",
+            "Use missionSearch/scoped search for discovery before raw shell scans.",
+            "If repo scope is absent, read only declared workProduct, dependency, output, log, or config paths.",
+            "If repo scope is present, repository-wide discovery is allowed for development work.",
+          ],
         },
         missionWorkingNote: {
           available: true,

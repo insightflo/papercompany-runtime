@@ -1,4 +1,9 @@
 import { parseObject } from "../adapters/utils.js";
+import {
+  buildMissionSearchGuidance,
+  missionSearchScopesAllowRepo,
+  normalizeMissionSearchScopes,
+} from "./runtime-search-scopes.js";
 import type { StepInputManifest } from "./step-input-manifest-types.js";
 
 export type { StepInputManifest } from "./step-input-manifest-types.js";
@@ -80,6 +85,7 @@ export function buildStepInputManifest(input: {
   const allowedContextKeys = Object.keys(context)
     .filter((key) => key !== "paperclipStepInputManifest")
     .sort();
+  const allowedSearchScopes = normalizeMissionSearchScopes(runtimeSearchPaths.allowedSearchScopes);
 
   const workspaceSource = readString(workspace.source) || null;
   const workspaceId = readString(workspace.workspaceId) || null;
@@ -93,9 +99,15 @@ export function buildStepInputManifest(input: {
     projectId: readString(context.projectId) || null,
     allowedContextKeys,
     guardrails: {
-      broadScanAllowed: hasProjectPrimaryWorkspace,
+      broadScanAllowed: hasProjectPrimaryWorkspace || missionSearchScopesAllowRepo(allowedSearchScopes),
+      allowedSearchScopes,
     },
     inputs: {
+      missionSearch: {
+        available: allowedSearchScopes.length > 0,
+        allowedScopes: allowedSearchScopes,
+        guidance: buildMissionSearchGuidance(allowedSearchScopes),
+      },
       qualityAssurance: {
         available: readString(runtimeSearchPaths.qaType).length > 0,
         type: readString(runtimeSearchPaths.qaType) || null,

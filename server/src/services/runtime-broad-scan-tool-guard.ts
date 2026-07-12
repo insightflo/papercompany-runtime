@@ -5,6 +5,10 @@ import {
   normalizeRuntimeShellCommand,
   splitRuntimeShellSegments,
 } from "./runtime-broad-scan-command-policy.js";
+import {
+  missionSearchScopesAllowRepo,
+  normalizeMissionSearchScopes,
+} from "./runtime-search-scopes.js";
 
 export interface RuntimeBroadScanToolGuardResult {
   blocked: boolean;
@@ -43,15 +47,20 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   const workspaceCwd = workspace?.cwd;
   const declaredWorkingDirectory = runtimeSearchPaths.workingDirectory
     ?? (typeof workspaceCwd === "string" && workspaceCwd.trim().length > 0 ? workspaceCwd : null);
-  const workingDirectory = containsWorkingDirectoryChange(normalized)
+  const workingDirectoryChanged = containsWorkingDirectoryChange(normalized);
+  const workingDirectory = workingDirectoryChanged
     ? null
     : declaredWorkingDirectory;
+  const repoSearchRoot = missionSearchScopesAllowRepo(runtimeSearchPaths.allowedSearchScopes) && !workingDirectoryChanged
+    ? declaredWorkingDirectory
+    : null;
   for (const segment of splitRuntimeShellSegments(normalized)) {
     const matched = findRuntimeBroadScanCommand({
       command: segment.command,
       allowedPaths,
       allowedDirectories,
       workingDirectory,
+      repoSearchRoot,
       shellVariables: new Map(),
       stdinFromPipe: segment.stdinFromPipe,
     });
@@ -60,7 +69,7 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
     return {
       blocked: true,
       matchedCommand: matched,
-      reason: `Step Input Manifest blocked runtime broad scan command: "${matched}"`,
+      reason: `Step Input Manifest blocked runtime broad scan command: "${matched}". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.`,
     };
   }
 
@@ -88,6 +97,7 @@ function readRuntimeSearchPaths(value: unknown) {
       (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
     )
     : [];
+  const allowedSearchScopes = normalizeMissionSearchScopes(permissions?.allowedSearchScopes);
   return {
     declared: permissions?.version === 1,
     workingDirectory: typeof workingDirectory === "string" && workingDirectory.trim().length > 0
@@ -98,6 +108,7 @@ function readRuntimeSearchPaths(value: unknown) {
       : null,
     dependencyFiles,
     dependencyDirectories,
+    allowedSearchScopes,
   };
 }
 

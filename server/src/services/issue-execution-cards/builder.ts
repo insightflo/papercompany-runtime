@@ -1,6 +1,7 @@
 import type { IssueExecutionCardJson } from "@paperclipai/db";
 import { ARTIFACT_MARKER, extractProseIssueContract } from "./prose-markers.js";
 import { sha256Text } from "./hash.js";
+import { defaultMissionSearchScopes, normalizeMissionSearchScopes } from "../runtime-search-scopes.js";
 import { resolveWorkflowQaContract } from "../workflow/workflow-qa-type.js";
 
 type WorkflowCardStep = {
@@ -8,6 +9,8 @@ type WorkflowCardStep = {
   dependencies: string[];
   graphWorkProductRequired?: boolean;
   qaType?: unknown;
+  allowedSearchScopes?: unknown;
+  searchScopes?: unknown;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -68,6 +71,9 @@ export function buildWorkflowIssueExecutionCard(input: {
   const qaContract = resolveWorkflowQaContract(input.step.qaType);
   const requiresWorkProduct = input.step.graphWorkProductRequired === true || prose.workProductRequired;
   const requiresVerdict = input.isQaStep || prose.workflowVerdictRequired;
+  const allowedSearchScopes = normalizeMissionSearchScopes(
+    input.step.allowedSearchScopes ?? input.step.searchScopes,
+  );
   const evidenceRefs = dedupeEvidenceRefs([
     input.stepOutputDir ? {
       type: "output_dir",
@@ -119,6 +125,9 @@ export function buildWorkflowIssueExecutionCard(input: {
     toolPermissionContract: {
       requiredToolNames: readToolNames(input.step),
       requiredKnowledgeNames: readKnowledgeNames(input.step),
+      allowedSearchScopes: allowedSearchScopes.length > 0
+        ? allowedSearchScopes
+        : defaultMissionSearchScopes(),
     },
     evidenceRefs,
     preservedProseMarkers: prose.preservedMarkers,

@@ -28,6 +28,8 @@ export const workflowStepDefinitionSchema = z.object({
   toolArgs: z.unknown().optional(),
   tools: z.array(z.string()).optional(),
   toolNames: z.array(z.string()).optional(),
+  allowedSearchScopes: z.array(z.string()).optional(),
+  searchScopes: z.array(z.string()).optional(),
   sessionMode: z.string().optional(),
   onFailure: z.string().optional(),
   escalateTo: z.string().optional(),

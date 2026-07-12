@@ -5088,7 +5088,10 @@ describe("heartbeat context budget preflight", () => {
         allowedContextKeys: Object.keys(adapterVisibleContext)
           .filter((key) => key !== "paperclipStepInputManifest")
           .sort(),
-        guardrails: { broadScanAllowed: false },
+        guardrails: expect.objectContaining({
+          broadScanAllowed: false,
+          allowedSearchScopes: [],
+        }),
         inputs: expect.objectContaining({
           workspace: {
             available: true,

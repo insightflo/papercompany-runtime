@@ -16,6 +16,8 @@ export interface WorkflowStepDefinition {
   toolArgs?: unknown;
   tools?: string[];
   toolNames?: string[];
+  allowedSearchScopes?: string[];
+  searchScopes?: string[];
   sessionMode?: string;
   onFailure?: string;
   escalateTo?: string;

@@ -8,6 +8,7 @@ import {
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
+import { defaultMissionSearchScopes, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
 import { resolveWorkProductLocalFilePath } from "./work-products.js";
 
 export type RuntimeSearchPathPermissions = {
@@ -16,6 +17,7 @@ export type RuntimeSearchPathPermissions = {
   outputDirectory: string | null;
   dependencyFiles: string[];
   dependencyDirectories: string[];
+  allowedSearchScopes: string[];
   qaType: string | null;
   qaInputScope: string | null;
 };
@@ -32,6 +34,7 @@ export async function buildRuntimeSearchPathPermissions(input: {
     outputDirectory: null,
     dependencyFiles: [],
     dependencyDirectories: [],
+    allowedSearchScopes: defaultMissionSearchScopes(),
     qaType: null,
     qaInputScope: null,
   };
@@ -51,6 +54,12 @@ export async function buildRuntimeSearchPathPermissions(input: {
 
   permissions.qaType = card.cardJson.workflow?.qaType ?? null;
   permissions.qaInputScope = card.cardJson.workflow?.qaInputScope ?? null;
+  permissions.allowedSearchScopes = normalizeMissionSearchScopes(
+    card.cardJson.toolPermissionContract?.allowedSearchScopes,
+  );
+  if (permissions.allowedSearchScopes.length === 0) {
+    permissions.allowedSearchScopes = defaultMissionSearchScopes();
+  }
 
   const outputDirectory = card.cardJson.requiredOutputs.workProduct.outputDir;
   permissions.outputDirectory = typeof outputDirectory === "string" && path.isAbsolute(outputDirectory)

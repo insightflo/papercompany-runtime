@@ -245,6 +245,6 @@ function blockedRg() {
   return {
     blocked: true,
     matchedCommand: "rg without an allowed file path",
-    reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
+    reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
   };
 }

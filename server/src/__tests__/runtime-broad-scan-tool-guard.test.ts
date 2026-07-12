@@ -40,7 +40,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "find .",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "find ."',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -130,7 +130,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "rg without an allowed file path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -177,7 +177,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "rg without an allowed file path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -295,7 +295,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "rg without an allowed file path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -342,7 +342,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "rg without an allowed file path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path"',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -386,7 +386,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "git ls-files",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "git ls-files"',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "git ls-files". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -476,7 +476,7 @@ done'`,
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "find .",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "find ."',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 
@@ -514,7 +514,7 @@ done'`,
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "find .",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "find ."',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
     });
   });
 });

@@ -6,8 +6,14 @@ export interface StepInputManifest {
   allowedContextKeys: string[];
   guardrails: {
     broadScanAllowed: boolean;
+    allowedSearchScopes: string[];
   };
   inputs: {
+    missionSearch: {
+      available: boolean;
+      allowedScopes: string[];
+      guidance: string[];
+    };
     qualityAssurance: {
       available: boolean;
       type: string | null;
