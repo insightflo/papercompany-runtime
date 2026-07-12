@@ -419,17 +419,33 @@ export function createSupervision({ db, deps, ownerActions }: {
       const producerAgentId = sourceIssue.assigneeAgentId;
       if (!producerAgentId) return;
 
-      // [1318] live QA recovery → registration dispatch 0(observe-only, codex 계약 1/5).
-      // bounded registration wake 는 stalled recovery + artifact 일 때만(stalled 는 아래 기존 경로 진행).
-      const reuseOwnership = await resolveRecoveryOwnership(db, {
-        companyId: mission.companyId,
-        missionId: mission.id,
-        sourceIssueId: sourceIssue.id,
-        qaGateIssueId: sourceIssue.id,
-      });
-      if (isQaRecoveryLive(reuseOwnership)) {
-        findings.push(`workproduct_reuse_qa_recovery_live: ${sourceLabel} ownership=qa_recovery_live signal=${reuseOwnership.signal} — registration wake deferred to QA recovery owner`);
-        return;
+      // [1318] same-run DAG 의 downstream QA gate(source 를 dependency 로 갖는 QA step) 식별 시에만
+      //   ownership guard. downstream QA 없으면 bounded registration 허용(과도 차단 방지, codex review).
+      const sourceStepRowsForReuse = stepRowsByIssueId.get(sourceIssue.id) ?? [];
+      const sourceStepRowForReuse = sourceStepRowsForReuse[0];
+      const stepsForReuse = (sourceStepRowForReuse?.definition?.stepsJson ?? null) as DagStepLike[] | null;
+      const sourceStepIdForReuse = sourceStepRowForReuse?.stepRun?.stepId ?? null;
+      const downstreamQaStep = Array.isArray(stepsForReuse) && sourceStepIdForReuse
+        ? stepsForReuse.find((s) => isQaLikeStep(s as Parameters<typeof isQaLikeStep>[0])
+            && (((s as { dependencies?: string[] }).dependencies) ?? []).includes(sourceStepIdForReuse))
+        : null;
+      if (downstreamQaStep && sourceStepRowForReuse) {
+        const qaStepRowForReuse = stepRows.find((r) =>
+          r.stepRun.stepId === (downstreamQaStep as { id?: string }).id
+          && r.run.id === sourceStepRowForReuse.run.id);
+        const downstreamQaGateId = qaStepRowForReuse?.stepRun.issueId ?? null;
+        if (downstreamQaGateId) {
+          const reuseOwnership = await resolveRecoveryOwnership(db, {
+            companyId: mission.companyId,
+            missionId: mission.id,
+            sourceIssueId: sourceIssue.id,
+            qaGateIssueId: downstreamQaGateId,
+          });
+          if (isQaRecoveryLive(reuseOwnership)) {
+            findings.push(`workproduct_reuse_qa_recovery_live: ${sourceLabel} ownership=qa_recovery_live signal=${reuseOwnership.signal} — registration wake deferred to QA recovery owner`);
+            return;
+          }
+        }
       }
 
       // (1) graphWorkProductRequired producer step run for this issue
