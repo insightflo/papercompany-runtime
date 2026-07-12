@@ -37,6 +37,7 @@ import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDe
 import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
+import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 
 type ToolStepFailureEvidenceRow = {
   readonly startedAt: Date | null;
@@ -177,6 +178,7 @@ export function createSupervision({ db, deps, ownerActions }: {
 }) {
   // Phase 5: best-effort quality review item auto-creation for oversight findings (plan 8.1).
   const qSvc = qualityService(db);
+  const settleResolvedOwnerActionsAndFindOpenWork = createMissionWorkSettlement(db);
 
   async function runMainExecutorSupervision(input: {
     missionId: string;
@@ -188,6 +190,15 @@ export function createSupervision({ db, deps, ownerActions }: {
     dispatchStalledOwnerActionWakeups?: boolean;
     dispatchStaleSourceIssueWakeups?: boolean;
   }): Promise<MissionOwnerSupervisionResult> {
+    const missionScope = await db
+      .select({ companyId: missions.companyId })
+      .from(missions)
+      .where(eq(missions.id, input.missionId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (missionScope) {
+      await settleResolvedOwnerActionsAndFindOpenWork(missionScope.companyId, input.missionId);
+    }
     const context = await buildMissionSupervisionContext(db, { missionId: input.missionId });
     const {
       mission,
