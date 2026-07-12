@@ -774,10 +774,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect((escalation?.metadata as { controlFlowSkipped?: boolean })?.controlFlowSkipped).toBe(true);
   });
 
-  it("[P7] does not kill a stuck-looking run when a native control-flow loop is iterating (iteration_index > 0)", async () => {
+  it("[P7] does not kill a rework iteration while a workflow wakeup is live", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();
     const runId = randomUUID();
+    const qaIssueId = randomUUID();
+    const agentId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -794,6 +796,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         { id: "qa", name: "QA", type: "agent", agentId: "", dependencies: ["produce"] },
       ],
     });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Loop Worker", role: "worker" });
     await db.insert(workflowRuns).values({
       id: runId,
       workflowId,
@@ -803,16 +806,24 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       startedAt: new Date("2020-01-01T00:00:00.000Z"),
       completedAt: null,
     });
-    // produce completed + loop fired once(iteration_index=1); qa pending(no active issue/heartbeat).
-    // → activeStep 검사엔 안 걸리지만 iteration_index>0 로 60min kill 면제.
+    await db.insert(issues).values({ id: qaIssueId, companyId, title: "QA", status: "todo" });
     await db.insert(workflowStepRuns).values([
       { workflowRunId: runId, stepId: "produce", status: "completed", iterationIndex: 1, startedAt: new Date("2020-01-01T00:00:00.000Z"), completedAt: new Date("2020-01-01T00:05:00.000Z") },
-      { workflowRunId: runId, stepId: "qa", status: "pending" },
+      { workflowRunId: runId, stepId: "qa", issueId: qaIssueId, status: "pending", iterationIndex: 1 },
     ]);
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      issueId: qaIssueId,
+      workflowRunId: runId,
+      source: "test",
+      reason: "workflow_resume",
+      status: "queued",
+    });
 
     const result = await reconcileStuckWorkflowRuns(db, 60);
     expect(result).toEqual([
-      expect.objectContaining({ runId, action: "skipped", reason: expect.stringContaining("iterating") }),
+      expect.objectContaining({ runId, action: "skipped", reason: expect.stringContaining("actively executing") }),
     ]);
     const [storedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
     expect(storedRun?.status).toBe("running");
