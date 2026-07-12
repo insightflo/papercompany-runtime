@@ -22,7 +22,7 @@ interface RunRow {
   contextSnapshot: Record<string, unknown>;
 }
 
-function makeRunRow(allowedSearchScopes: string[]): RunRow {
+function makeRunRow(allowedSearchScopes: string[], dependencyFiles: string[] = ["/repo/out/evidence.json"]): RunRow {
   return {
     id: "run-1",
     agentId: "agent-1",
@@ -33,7 +33,7 @@ function makeRunRow(allowedSearchScopes: string[]): RunRow {
         version: 1,
         workingDirectory: "/repo",
         outputDirectory: "/repo/out",
-        dependencyFiles: ["/repo/out/evidence.json"],
+        dependencyFiles,
         dependencyDirectories: ["/repo/out"],
         allowedSearchScopes,
       },
@@ -87,6 +87,37 @@ describe("POST /api/agents/me/mission-search", () => {
     expect(res.body.scope).toBe("workProduct");
     expect(res.body.result.scope).toBe("workProduct");
     expect(res.body.result.files).toContain("/repo/out/evidence.json");
+  });
+
+  it("matches multiple declared workProducts via a space-separated query (OR)", async () => {
+    // Regression: a query like "qa-rubric.md report.md" must not be treated as
+    // a single phrase. Each declared filename matching ANY token is returned.
+    const runRow = makeRunRow(
+      ["workProduct", "missionOutput"],
+      ["/repo/qa-rubric.md", "/repo/report.md", "/repo/unrelated.txt"],
+    );
+    const res = await request(createApp({ runRow }))
+      .post("/api/agents/me/mission-search")
+      .send({ scope: "workProduct", query: "qa-rubric.md report.md", runContext });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.files).toEqual(
+      expect.arrayContaining(["/repo/qa-rubric.md", "/repo/report.md"]),
+    );
+    expect(res.body.result.files).not.toContain("/repo/unrelated.txt");
+  });
+
+  it("lists every workProduct when the query is empty (discovery)", async () => {
+    const runRow = makeRunRow(
+      ["workProduct"],
+      ["/repo/a.md", "/repo/b.md"],
+    );
+    const res = await request(createApp({ runRow }))
+      .post("/api/agents/me/mission-search")
+      .send({ scope: "workProduct", query: "", runContext });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.files).toEqual(expect.arrayContaining(["/repo/a.md", "/repo/b.md"]));
   });
 
   it("returns 403 when repo is not in allowedSearchScopes", async () => {

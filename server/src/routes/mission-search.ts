@@ -198,6 +198,14 @@ export function missionSearchRoutes(db: Db): Router {
   return router;
 }
 
+/** Filename scopes (workProduct, missionOutput) OR-match whitespace-separated query tokens; empty query matches all (discovery). */
+function matchesQueryTokens(query: string, haystack: string): boolean {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return true;
+  const lower = haystack.toLowerCase();
+  return tokens.some((token) => lower.includes(token));
+}
+
 async function runScopedDiscovery(
   db: Db,
   scope: MissionSearchScope,
@@ -208,21 +216,19 @@ async function runScopedDiscovery(
 ): Promise<ScopeResult> {
   switch (scope) {
     case "workProduct": {
-      const want = query.toLowerCase();
-      const files = permissions.dependencyFiles.filter((f) => !want || f.toLowerCase().includes(want)).slice(0, limit);
+      const files = permissions.dependencyFiles.filter((f) => matchesQueryTokens(query, f)).slice(0, limit);
       const directories = permissions.dependencyDirectories.slice(0, limit);
       return { scope: "workProduct", files, directories };
     }
     case "missionOutput": {
       const files: string[] = [];
       if (permissions.outputDirectory) {
-        const want = query.toLowerCase();
         const { readdirSync } = await import("node:fs");
         try {
           for (const entry of readdirSync(permissions.outputDirectory, { withFileTypes: true })) {
             if (entry.isFile()) {
               const full = path.join(permissions.outputDirectory, entry.name);
-              if (!want || full.toLowerCase().includes(want)) files.push(full);
+              if (matchesQueryTokens(query, full)) files.push(full);
             }
           }
         } catch {
