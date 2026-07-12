@@ -68,6 +68,39 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Use generic-cli-executor with toolName=daily-tech-scout");
   });
 
+  it("emits the callable missionSearch curl recipe when missionSearch guidance is present", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipStepInputManifest: {
+        version: 1,
+        taskKey: "issue:1",
+        issueId: "issue-1",
+        projectId: null,
+        allowedContextKeys: ["paperclipStepInputManifest"],
+        guardrails: { broadScanAllowed: false, allowedSearchScopes: ["workProduct", "missionOutput"] },
+        inputs: {
+          workspace: { available: true, source: "project_primary", workspaceId: "ws-1", projectId: null },
+          missionSearch: {
+            available: true,
+            allowedScopes: ["workProduct", "missionOutput"],
+            guidance: [
+              "Mission search scopes allowed this run: workProduct, missionOutput.",
+              'missionSearch (callable): curl -sS -X POST "$PAPERCLIP_API_BASE_URL/agents/me/mission-search" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d "{\"scope\":\"workProduct\",\"query\":\"<text>\",\"runContext\":{\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"runId\":\"$PAPERCLIP_RUN_ID\",\"companyId\":\"$PAPERCLIP_COMPANY_ID\"}}"',
+            ],
+          },
+        },
+      },
+    });
+
+    // The exact callable curl reaches the agent prompt.
+    expect(brief).toContain("missionSearch tool (server-enforced scoped discovery)");
+    expect(brief).toContain("$PAPERCLIP_API_BASE_URL/agents/me/mission-search");
+    expect(brief).toContain("Bearer $PAPERCLIP_API_KEY");
+    expect(brief).toContain('"$PAPERCLIP_AGENT_ID"');
+    // Scope-aware guardrail line replaces the generic broad-scan text.
+    expect(brief).toContain("allowed mission search scopes: workProduct, missionOutput");
+    expect(brief).not.toContain("Stay within the manifest-provided context");
+  });
+
   it("renders workflow tool schema and step args into the exact invocation example", () => {
     const brief = buildPaperclipRuntimeBrief({
       paperclipWorkflowStepToolContract: {

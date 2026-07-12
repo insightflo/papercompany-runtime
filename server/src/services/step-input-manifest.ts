@@ -90,7 +90,6 @@ export function buildStepInputManifest(input: {
   const workspaceSource = readString(workspace.source) || null;
   const workspaceId = readString(workspace.workspaceId) || null;
   const workspaceProjectId = readString(workspace.projectId) || null;
-  const hasProjectPrimaryWorkspace = workspaceSource === "project_primary" && workspaceId !== null;
 
   return {
     version: 1,
@@ -99,7 +98,7 @@ export function buildStepInputManifest(input: {
     projectId: readString(context.projectId) || null,
     allowedContextKeys,
     guardrails: {
-      broadScanAllowed: hasProjectPrimaryWorkspace || missionSearchScopesAllowRepo(allowedSearchScopes),
+      broadScanAllowed: missionSearchScopesAllowRepo(allowedSearchScopes),
       allowedSearchScopes,
     },
     inputs: {

@@ -446,6 +446,13 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const missionPlan = asRecord(manifestInputs?.missionPlan);
   const missionWorkingNote = asRecord(manifestInputs?.missionWorkingNote);
   const missionOwnerPlanningContext = asRecord(manifestInputs?.missionOwnerPlanningContext);
+  const missionSearch = asRecord(manifestInputs?.missionSearch);
+  const missionSearchScopes = Array.isArray(missionSearch?.allowedScopes)
+    ? missionSearch.allowedScopes.filter((scope): scope is string => typeof scope === "string")
+    : [];
+  const missionSearchGuidance = Array.isArray(missionSearch?.guidance)
+    ? missionSearch.guidance.filter((line): line is string => typeof line === "string")
+    : [];
   const guardrails = asRecord(manifest?.guardrails);
 
   const workspaceLine =
@@ -600,11 +607,14 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const missionOwnerPlanningContextLine = buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext);
 
   const guardrailLine =
-    guardrails?.broadScanAllowed === false
-      ? "- Broad scans: disallowed. Stay within the manifest-provided context."
-      : guardrails?.broadScanAllowed === true
-        ? "- Broad scans: allowed by server policy."
+    guardrails?.broadScanAllowed === true
+      ? "- Broad scans: repo scope allowed by server policy; prefer missionSearch for structured discovery."
+      : guardrails?.broadScanAllowed === false
+        ? `- Broad scans: disallowed (allowed mission search scopes: ${missionSearchScopes.length > 0 ? missionSearchScopes.join(", ") : "none"}). Use missionSearch instead of pathless rg/find.`
         : null;
+  const missionSearchLines = missionSearchGuidance.length > 0
+    ? joinPromptSections(["missionSearch tool (server-enforced scoped discovery):", ...missionSearchGuidance])
+    : null;
   const issueExecutionCardLines = issueExecutionCard
     ? buildIssueExecutionCardBriefLines({
       card: context.paperclipIssueExecutionCard,
@@ -664,6 +674,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     hermesChatLine,
     fileViewsLine,
     guardrailLine,
+    missionSearchLines,
     ...issueExecutionCardLines,
     instructionInjectionLine,
     handoffSummary,

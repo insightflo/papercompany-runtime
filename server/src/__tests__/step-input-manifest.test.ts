@@ -106,7 +106,7 @@ describe("buildStepInputManifest", () => {
         "projectId",
       ],
       guardrails: {
-        broadScanAllowed: true,
+        broadScanAllowed: false,
         allowedSearchScopes: [],
       },
       inputs: {
@@ -203,12 +203,10 @@ describe("buildStepInputManifest", () => {
         missionSearch: {
           available: false,
           allowedScopes: [],
-          guidance: [
-            "Mission search scopes: none.",
-            "Use missionSearch/scoped search for discovery before raw shell scans.",
-            "If repo scope is absent, read only declared workProduct, dependency, output, log, or config paths.",
-            "If repo scope is present, repository-wide discovery is allowed for development work.",
-          ],
+          guidance: expect.arrayContaining([
+            expect.stringContaining("missionSearch"),
+            expect.stringContaining("$PAPERCLIP_API_BASE_URL/agents/me/mission-search"),
+          ]),
         },
         missionWorkingNote: {
           available: true,

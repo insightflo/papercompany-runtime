@@ -4122,6 +4122,44 @@ export function heartbeatService(db: Db) {
     });
   }
 
+  /**
+   * Audit a broad-scan block as a redacted run event BEFORE the guard throws.
+   * Without this the offending command/instruction is lost (the throw precedes
+   * log-store append and excerpt capture). Payload is sanitized by appendRunEvent.
+   * Non-fatal: a DB failure here must not mask the original guard error.
+   */
+  async function appendBroadScanBlockEvent(
+    run: typeof heartbeatRuns.$inferSelect,
+    seq: number,
+    details: {
+      reason: string;
+      errorCode: string;
+      phase: "preflight" | "runtime" | "runtime_flush";
+      stream?: "stdout" | "stderr";
+      matchedCommand?: string | null;
+      matchedPhrase?: string | null;
+      line?: string;
+    },
+  ): Promise<void> {
+    try {
+      await appendRunEvent(run, seq, {
+        eventType: "guard.broad_scan_blocked",
+        stream: details.stream ?? "system",
+        level: "warn",
+        message: details.reason,
+        payload: {
+          errorCode: details.errorCode,
+          phase: details.phase,
+          matchedCommand: details.matchedCommand ?? null,
+          matchedPhrase: details.matchedPhrase ?? null,
+          line: details.line ?? null,
+        },
+      });
+    } catch {
+      // Non-fatal: the original broad-scan guard error must still surface.
+    }
+  }
+
   async function nextRunEventSeq(runId: string) {
     const [row] = await db
       .select({ maxSeq: sql<number | null>`max(${heartbeatRunEvents.seq})` })
@@ -6222,6 +6260,25 @@ export function heartbeatService(db: Db) {
             context,
           });
           if (runtimeGuard.blocked) {
+            // Audit the blocked command BEFORE aborting. The throw below would
+            // otherwise drop the offending line (it precedes runLogStore.append
+            // and stdoutExcerpt/stderrExcerpt capture in this callback).
+            if (handle) {
+              try {
+                await runLogStore.append(handle, { stream, chunk: sanitizedChunk, ts });
+              } catch {
+                // non-fatal — the guard error must still win
+              }
+            }
+            await appendBroadScanBlockEvent(run, seq, {
+              reason: runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command",
+              errorCode: "manifest_broad_scan_tool_blocked",
+              phase: "runtime",
+              stream,
+              matchedCommand: runtimeGuard.matchedCommand ?? null,
+              line,
+            });
+            seq++;
             throw Object.assign(new Error(runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command"), {
               code: "manifest_broad_scan_tool_blocked",
             });
@@ -6473,6 +6530,13 @@ export function heartbeatService(db: Db) {
         cwd: executionWorkspace.cwd,
       });
       if (stepInputManifestGuard.blocked) {
+        await appendBroadScanBlockEvent(run, seq, {
+          reason: stepInputManifestGuard.reason ?? "Step Input Manifest blocked broad scan instruction",
+          errorCode: "manifest_broad_scan_blocked",
+          phase: "preflight",
+          matchedPhrase: stepInputManifestGuard.matchedPhrase ?? null,
+        });
+        seq++;
         throw Object.assign(
           new Error(
             stepInputManifestGuard.reason ?? "Step Input Manifest blocked broad scan instruction",
@@ -6511,6 +6575,14 @@ export function heartbeatService(db: Db) {
           context,
         });
         if (runtimeGuard.blocked) {
+          await appendBroadScanBlockEvent(run, seq, {
+            reason: runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command",
+            errorCode: "manifest_broad_scan_tool_blocked",
+            phase: "runtime_flush",
+            matchedCommand: runtimeGuard.matchedCommand ?? null,
+            line,
+          });
+          seq++;
           throw Object.assign(new Error(runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command"), {
             code: "manifest_broad_scan_tool_blocked",
           });

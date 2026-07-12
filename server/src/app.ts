@@ -24,6 +24,7 @@ import { routineRoutes } from "./routes/routines.js";
 import { schedulerRoutes } from "./routes/scheduler.js";
 import { worktreeRoutes } from "./routes/worktree.js";
 import { missionRoutes } from "./routes/missions.js";
+import { missionSearchRoutes } from "./routes/mission-search.js";
 import { workflowAgentApiRoutes } from "./routes/workflow-agent-api.js";
 import { workflowRoutes } from "./routes/workflows.js";
 import { srbWebhookRoutes } from "./routes/srb-webhook.js";
@@ -360,6 +361,7 @@ export async function createApp(
   api.use(toolDefinitionRoutes(db));
   api.use(companyInstructionRoutes(db));
   api.use(agentRoutes(db));
+  api.use(missionSearchRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
   api.use(routineRoutes(db));

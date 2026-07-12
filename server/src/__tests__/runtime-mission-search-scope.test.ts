@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildWorkflowIssueExecutionCard } from "../services/issue-execution-cards/builder.js";
 import { evaluateRuntimeBroadScanToolGuard } from "../services/runtime-broad-scan-tool-guard.js";
 import { buildStepInputManifest } from "../services/step-input-manifest.js";
+import { buildMissionSearchGuidance } from "../services/runtime-search-scopes.js";
 
 describe("mission search scopes", () => {
   it("allows repo-wide rg and find only when repo scope is declared", () => {
@@ -64,6 +65,42 @@ describe("mission search scopes", () => {
     expect(manifest.guardrails.allowedSearchScopes).toEqual(["repo", "logs"]);
     expect(manifest.guardrails.broadScanAllowed).toBe(true);
     expect(manifest.inputs.missionSearch.guidance.join("\n")).toContain("missionSearch");
+  });
+
+  it("does not allow broad scans for project_primary workspace without repo scope", () => {
+    // Single source of truth: broadScanAllowed follows ONLY the repo scope, not
+    // a project_primary workspace OR. A project_primary run without repo scope
+    // must report disallowed so the brief and the runtime guard agree.
+    const manifest = buildStepInputManifest({
+      taskKey: "issue-1",
+      context: {
+        issueId: "issue-1",
+        paperclipWorkspace: { source: "project_primary", workspaceId: "ws-1", cwd: "/repo" },
+        paperclipRuntimeSearchPaths: {
+          allowedSearchScopes: ["workProduct", "missionOutput"],
+        },
+      },
+    });
+
+    expect(manifest.guardrails.broadScanAllowed).toBe(false);
+  });
+
+  it("renders an executable missionSearch curl recipe with a concrete scope", () => {
+    const recipe = buildMissionSearchGuidance(["workProduct", "missionOutput"]).join("\n");
+
+    // Executable URL: PAPERCLIP_API_BASE_URL already includes /api — no /api/api.
+    expect(recipe).toContain("$PAPERCLIP_API_BASE_URL/agents/me/mission-search");
+    expect(recipe).not.toContain("/api/api/");
+
+    // Double-quoted JSON / headers so the shell expands the $VAR references.
+    expect(recipe).toContain("Bearer $PAPERCLIP_API_KEY");
+    expect(recipe).toContain('"$PAPERCLIP_AGENT_ID"');
+    expect(recipe).toContain('"$PAPERCLIP_RUN_ID"');
+    expect(recipe).toContain('"$PAPERCLIP_COMPANY_ID"');
+
+    // Concrete allowed scope, never a placeholder union like <workProduct|...>.
+    expect(recipe).toContain('"scope":"workProduct"');
+    expect(recipe).not.toContain("<workProduct|");
   });
 
   it("stores allowedSearchScopes on workflow execution cards", () => {
