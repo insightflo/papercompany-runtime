@@ -94,6 +94,8 @@ function isPlanSubmissionRecoveryIssueStatus(status: string): boolean {
   return status === "blocked" || isTerminalIssueStatus(status);
 }
 
+const REJECTED_PLAN_RECOVERY_PROMPT_REVISION = "v2";
+
 // [P3] authorizeProducerRework 용 QA gate verdict 맵 로드. issue.originId(QA gate)의 최신 verdict.
 async function loadQaGateVerdictMap(
   db: Db,
@@ -324,7 +326,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         const candidates = await listCompanyExecutionCandidates(db, mission.companyId);
         const rosterFingerprint = candidateRosterFingerprint(candidates);
         const candidateRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
-        const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}:roster-${rosterFingerprint}`;
+        const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:prompt-${REJECTED_PLAN_RECOVERY_PROMPT_REVISION}:roster-${rosterFingerprint}`;
         const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
         if (missionHasActiveHeartbeat) return null;
         const rejectedMissionIssueIds = missionIssues.map((issue) => issue.id);
@@ -353,7 +355,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           rejectionReason: existingSubmission.rejectionReason,
           diagnostics: existingSubmission.diagnostics,
           markerText,
-          idempotencyKey: `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}:roster-${rosterFingerprint}`,
+          idempotencyKey: markerText,
           candidateRosterLines,
           retryAllowed,
         };

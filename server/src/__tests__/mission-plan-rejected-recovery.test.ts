@@ -179,7 +179,7 @@ describeEmbeddedPostgres("rejected PLAN recovery", () => {
     });
 
     expect(wakeKeys).toHaveLength(1);
-    expect(wakeKeys[0]).toMatch(/:roster-[a-f0-9]{12}$/);
+    expect(wakeKeys[0]).toMatch(/:prompt-v2:roster-[a-f0-9]{12}$/);
     expect(first.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "plan_submission_rejected", resultStatus: "wakeup_requested" }),
     ]));
@@ -191,6 +191,7 @@ describeEmbeddedPostgres("rejected PLAN recovery", () => {
     expect(reopenedPlan?.description).toContain("Synthesis Editor");
     expect(reopenedPlan?.description).toContain("tools=manual-onboarding-publish");
     expect(reopenedPlan?.description).toContain("include a publish/delivery unit assigned to that candidate");
+    expect(reopenedPlan?.description).toContain("If a candidate has tools but no skills in the roster");
     expect(reopenedPlan?.description).not.toContain("Hermes Operations Manager");
     const unblockIssues = await db
       .select({ id: issues.id })
@@ -199,6 +200,17 @@ describeEmbeddedPostgres("rejected PLAN recovery", () => {
     expect(unblockIssues).toEqual([]);
 
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixture.planIssueId));
+    await db.insert(missionPlanDecisionSubmissions).values({
+      companyId: fixture.companyId,
+      missionId: fixture.missionId,
+      planningIssueId: fixture.planIssueId,
+      authorAgentId: randomUUID(),
+      decisionHash: "second-rejected-plan-decision",
+      decision: { selectedExecutionUnits: [] },
+      status: "rejected",
+      rejectionReason: "invalid_execution_placement",
+      diagnostics: [{ code: "skill_ref_not_assigned_to_assignee", message: "The tool is not a skill." }],
+    });
     const unchanged = await service.runActiveMissionOwnerSupervision({
       companyId: fixture.companyId,
       staleAfterMinutes: 1,
