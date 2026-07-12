@@ -565,18 +565,10 @@ export function createSupervision({ db, deps, ownerActions }: {
           let wakeCommentId: string | undefined;
           const alreadyDispatched = hasStaleSourceIssueWakeupDispatchedMarker(comments, markerInput);
           const hasSourceDiagnosis = hasDiagnosisSignal(...comments);
-          // [P3 QA recovery ownership gate] 해당 source 의 QA recovery chain 이 live/stalled 면
-          //   stale-source wakeup 금지(QA 가 소유). chain 식별 안 되면 기존 wakeup 진행(codex 계약 1/2).
-          const staleQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
-          const staleOwnership = staleQaGateId
-            ? await resolveRecoveryOwnership(db, { companyId: mission.companyId, missionId: mission.id, sourceIssueId: issue.id, qaGateIssueId: staleQaGateId })
-            : ({ kind: "oversight_may_act", reason: "no_recovery_chain" } as const);
-          const staleQaOwned = isQaRecoveryLive(staleOwnership) || isQaRecoveryStalled(staleOwnership);
-          if (staleQaOwned) {
-            const detail = "signal" in staleOwnership ? `signal=${staleOwnership.signal}` : `reason=${staleOwnership.reason}`;
-            findings.push(`stale_source_qa_recovery_owned: ${label} ownership=${staleOwnership.kind} ${detail} — stale-source wakeup deferred to QA recovery owner`);
-          }
-          if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis && !staleQaOwned) {
+          // [P3 주의] stale-source 경로의 issue.originId 는 보통 workflow run id(QA issue id 아님)라
+          //   resolveQaGateIssueId 가 no-op. 정확한 QA gate derive 가 필요하므로 이 삽입점은 제거
+          //   (잘못된 차단 방지). QA recovery ownership 차단은 retry case(unblock issue, originId=source)에서 처리.
+          if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
             findings.push(`stale_source_wakeup_requires_diagnosis: ${label} terminal heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}; diagnose root cause before choosing same-issue wakeup or recovery issue`);
             wakeupDispatchStatus = "not_requested";
           } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched) {
