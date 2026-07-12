@@ -419,7 +419,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const planningIssue = planningIssues.find((issue) => issue.originKind === "mission_main_executor_plan");
     for (const expected of ["Post exactly one structured `### Mission owner plan decision` JSON comment", "use `graphWorkProductRequired: false` only for pure condition/input-check/QA units", "keep the upstream producer unit true when a downstream unit validates"]) expect(planningIssue?.description).toContain(expected);
     expect(planningIssue?.description).toContain("\"assigneeAgentId\": \"agent-id-from-roster\"");
-    expect(planningIssue?.description).toContain(`Main Executor (operator, active) id=${ownerAgentId} [mission owner]`);
+    expect(planningIssue?.description).toContain(`Main Executor (operator) id=${ownerAgentId} [mission owner]`);
     expect(planningIssue?.description).not.toContain(errorAgentId);
     expect(planningIssue?.description).not.toContain("Unavailable Worker");
   });
@@ -1989,7 +1989,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       mission: expect.objectContaining({ id: missionId }),
       planIssueId,
       targetAgentId: ownerAgentId,
-      idempotencyKey: `mission-owner-plan-submission-rejected:${missionId}:${planIssueId}:${decisionHash}`,
+      idempotencyKey: expect.stringMatching(new RegExp(`^mission-owner-plan-submission-rejected:${missionId}:${planIssueId}:${decisionHash}:roster-[a-f0-9]{12}$`)),
       wakeCommentId: expect.any(String),
     }));
   });

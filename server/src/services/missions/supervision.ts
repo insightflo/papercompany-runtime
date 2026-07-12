@@ -90,6 +90,10 @@ function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): stri
   }
 }
 
+function isPlanSubmissionRecoveryIssueStatus(status: string): boolean {
+  return status === "blocked" || isTerminalIssueStatus(status);
+}
+
 // [P3] authorizeProducerRework 용 QA gate verdict 맵 로드. issue.originId(QA gate)의 최신 verdict.
 async function loadQaGateVerdictMap(
   db: Db,
@@ -245,6 +249,21 @@ export function createSupervision({ db, deps, ownerActions }: {
       companyId: mission.companyId,
       missionId: mission.id,
     });
+    const [latestPlanSubmission] = await db
+      .select({
+        planningIssueId: missionPlanDecisionSubmissions.planningIssueId,
+        status: missionPlanDecisionSubmissions.status,
+      })
+      .from(missionPlanDecisionSubmissions)
+      .where(and(
+        eq(missionPlanDecisionSubmissions.companyId, mission.companyId),
+        eq(missionPlanDecisionSubmissions.missionId, mission.id),
+      ))
+      .orderBy(desc(missionPlanDecisionSubmissions.createdAt))
+      .limit(1);
+    const rejectedPlanningIssueId = latestPlanSubmission && isRejectedMissionPlanDecisionSubmissionStatus(latestPlanSubmission.status)
+      ? latestPlanSubmission.planningIssueId
+      : null;
     const hasRecordedPlanDecision = Boolean(trimmedString(activeOwnerPlanDecision.decisionHash));
     const hasPaqoWorkflowRun = Boolean(trimmedString(activePaqoWorkflow.workflowRunId));
     if (latestPlanDecision.ok && (!hasRecordedPlanDecision || !hasPaqoWorkflowRun)) {
@@ -273,18 +292,18 @@ export function createSupervision({ db, deps, ownerActions }: {
       diagnostics: unknown;
       markerText: string;
       idempotencyKey: string;
+      candidateRosterLines: string[];
+      retryAllowed: boolean;
     } | null> => {
       if (mission.status !== "planning") return null;
 
       const planIssue = missionIssues.find((issue) => (
         issue.originKind === "mission_main_executor_plan" &&
         !issue.hiddenAt &&
-        isTerminalIssueStatus(issue.status)
+        isPlanSubmissionRecoveryIssueStatus(issue.status)
       ));
       if (!planIssue) return null;
 
-      // [RES-1358] latest rejected submission recovery 자격: succeeded heartbeat 요구 ❌.
-      //   rejected PLAN(blocked/failed run issue_status_blocked) 도 복구. latest terminal run 은 evidence(optional).
       const [existingSubmission] = await db
         .select({
           id: missionPlanDecisionSubmissions.id,
@@ -302,13 +321,11 @@ export function createSupervision({ db, deps, ownerActions }: {
         .limit(1);
       if (existingSubmission) {
         if (!isRejectedMissionPlanDecisionSubmissionStatus(existingSubmission.status)) return null;
-        // [source: codex recovery review] roster fingerprint 추가 — roster 변경 시 revised retry 허용.
-        //   동일 fingerprint 반복(marker 중복) → return null(무한 requeue ❌). escalation 은 caller recommendation 경로.
-        const rosterFingerprint = candidateRosterFingerprint(await listCompanyExecutionCandidates(db, mission.companyId));
+        const candidates = await listCompanyExecutionCandidates(db, mission.companyId);
+        const rosterFingerprint = candidateRosterFingerprint(candidates);
+        const candidateRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
         const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}:roster-${rosterFingerprint}`;
         const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
-        if (planIssueComments.some((comment) => comment.includes(markerText))) return null;
-        // [codex] live guard: rejected recovery 중 active heartbeat/wakeup 중복 ❌. RES-1358 terminal failed 통과.
         if (missionHasActiveHeartbeat) return null;
         const rejectedMissionIssueIds = missionIssues.map((issue) => issue.id);
         const rejectedWakeupScope = rejectedMissionIssueIds.length > 0
@@ -324,6 +341,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           ))
           .limit(1);
         if (rejectedActiveWakeup) return null;
+        const retryAllowed = !planIssueComments.some((comment) => comment.includes(markerText));
         const latestTerminalRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
           .filter((run) => run.status === "succeeded" || run.status === "failed" || run.status === "timed_out")
           .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
@@ -335,7 +353,9 @@ export function createSupervision({ db, deps, ownerActions }: {
           rejectionReason: existingSubmission.rejectionReason,
           diagnostics: existingSubmission.diagnostics,
           markerText,
-          idempotencyKey: `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}`,
+          idempotencyKey: `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}:roster-${rosterFingerprint}`,
+          candidateRosterLines,
+          retryAllowed,
         };
       }
 
@@ -392,8 +412,9 @@ export function createSupervision({ db, deps, ownerActions }: {
       const diagnosticsSummary = planSubmissionMissingCandidate.kind === "rejected"
         ? formatMissionPlanDecisionSubmissionDiagnostics(planSubmissionMissingCandidate.diagnostics)
         : "";
+      const rejectedPlanRetryExhausted = planSubmissionMissingCandidate.kind === "rejected" && !planSubmissionMissingCandidate.retryAllowed;
       findings.push(planSubmissionMissingCandidate.kind === "rejected"
-        ? `plan_submission_rejected: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} decision_hash=${planSubmissionMissingCandidate.decisionHash} reason=${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}${diagnosticsSummary ? ` diagnostics=${diagnosticsSummary}` : ""}`
+        ? `${rejectedPlanRetryExhausted ? "plan_submission_rejected_retry_exhausted" : "plan_submission_rejected"}: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} decision_hash=${planSubmissionMissingCandidate.decisionHash} reason=${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}${diagnosticsSummary ? ` diagnostics=${diagnosticsSummary}` : ""}`
         : `plan_submission_missing: planning_issue=${planSubmissionMissingCandidate.planIssue.identifier ?? planSubmissionMissingCandidate.planIssue.id} succeeded_run=${planSubmissionMissingCandidate.succeededRun.id}`);
       if (planSubmissionMissingCandidate.kind === "missing") {
         // Phase 5 (plan 8.1 oversight stall): auto-create a company-scoped quality review item.
@@ -413,9 +434,11 @@ export function createSupervision({ db, deps, ownerActions }: {
         missionId: mission.id,
         issueId: planSubmissionMissingCandidate.planIssue.id,
         reason: planSubmissionMissingCandidate.kind === "rejected"
-          ? `Latest Mission owner plan decision submission was rejected (${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}); the mission owner must revise the decision before Plan QA or workflow materialization can continue${diagnosticsSummary ? `; diagnostics: ${diagnosticsSummary}` : ""}`
+          ? rejectedPlanRetryExhausted
+            ? `Latest Mission owner plan decision submission was already retried with unchanged execution candidates; automatic retry is stopped until the mission owner changes the plan or available execution resources${diagnosticsSummary ? `; diagnostics: ${diagnosticsSummary}` : ""}`
+            : `Latest Mission owner plan decision submission was rejected (${planSubmissionMissingCandidate.rejectionReason ?? "unknown"}); the mission owner must revise the decision before Plan QA or workflow materialization can continue${diagnosticsSummary ? `; diagnostics: ${diagnosticsSummary}` : ""}`
           : "Planning run succeeded, but no structured Mission owner plan decision submission was recorded; the mission owner must submit the decision block before Plan QA or workflow materialization can start",
-        safeToAutoApply: true,
+        safeToAutoApply: planSubmissionMissingCandidate.kind !== "rejected" || planSubmissionMissingCandidate.retryAllowed,
       });
     }
 
@@ -591,6 +614,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
       const isRecoverableQueueSource = isStaleQueueStatus && issue.originKind !== "mission_main_executor_unblock";
       const isStaleInProgressSource = issue.status === "in_progress" && issue.originKind !== "mission_main_executor_unblock";
+      const isRejectedPlanningIssue = issue.originKind === "mission_main_executor_plan" && issue.id === rejectedPlanningIssueId;
       const activePlanGateReason = activePlanRecoveryGateReason(activePlan, issue, stepRowsForIssue);
 
       if (activePlanGateReason) {
@@ -1523,7 +1547,11 @@ export function createSupervision({ db, deps, ownerActions }: {
           });
         }
       }
-      if (issue.status === "blocked" && issue.originKind !== "mission_main_executor_unblock") {
+      if (
+        issue.status === "blocked" &&
+        issue.originKind !== "mission_main_executor_unblock" &&
+        !isRejectedPlanningIssue
+      ) {
         await ownerActions.ensureMainExecutorUnblockIssue(mission, issue);
         const body = comments.join("\n").toLowerCase();
         if (hasArtifactMissingSignal(body)) {
@@ -1871,18 +1899,21 @@ export function createSupervision({ db, deps, ownerActions }: {
       });
     }
 
-    if (input.applySafeActions && planSubmissionMissingCandidate) {
-      const { planIssue, succeededRun, markerText, idempotencyKey } = planSubmissionMissingCandidate;
+    if (
+      input.applySafeActions &&
+      planSubmissionMissingCandidate &&
+      (planSubmissionMissingCandidate.kind !== "rejected" || planSubmissionMissingCandidate.retryAllowed)
+    ) {
+      const { planIssue, markerText, idempotencyKey } = planSubmissionMissingCandidate;
       const diagnosticsSummary = planSubmissionMissingCandidate.kind === "rejected"
         ? formatMissionPlanDecisionSubmissionDiagnostics(planSubmissionMissingCandidate.diagnostics)
         : "";
-      // [codex] rejected recovery: 최신 candidate roster 로 persisted PLAN description refresh.
       const refreshedDescription = planSubmissionMissingCandidate.kind === "rejected"
         ? buildMissionPlanningDescription({
             missionId: mission.id,
             title: mission.title,
             description: mission.description,
-            runnableRosterLines: formatCandidateRosterLines(await listCompanyExecutionCandidates(db, mission.companyId), mission.ownerAgentId),
+            runnableRosterLines: planSubmissionMissingCandidate.candidateRosterLines,
           })
         : undefined;
       await db
@@ -1922,7 +1953,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             `<!-- ${markerText} -->`,
             `- Mission: ${mission.title}`,
             `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
-            `- Observed run: ${succeededRun!.id} finished with status succeeded.`,
+            `- Observed run: ${planSubmissionMissingCandidate.succeededRun.id} finished with status succeeded.`,
             "- Current blocker: no structured `### Mission owner plan decision` submission is recorded, so Plan QA and workflow materialization cannot start.",
             "",
             "Required next action:",
@@ -1964,7 +1995,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           type: "plan_submission_missing",
           missionId: mission.id,
           planIssueId: planIssue.id,
-          succeededRunId: succeededRun!.id,
+          succeededRunId: planSubmissionMissingCandidate.succeededRun.id,
           resultStatus,
           idempotencyKey,
         });
@@ -2247,8 +2278,6 @@ export function createSupervision({ db, deps, ownerActions }: {
         if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
       }
 
-      // [AREA: planning-stall detection] planning 미션 중 PLAN issue done + succeeded heartbeat +
-      // 구조화 plan decision 제출 없는 정지 케이스 감지 → 후보에 추가.
       const planningRows = rows.filter((row) => row.id && !missionIds.includes(row.id));
       if (planningRows.length > 0 && deps.onPlanSubmissionMissing) {
         const planningMissionIds = planningRows.map((row) => row.id);
@@ -2264,14 +2293,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             ))
           : [];
         for (const planIssue of planIssues) {
-          if (!isTerminalIssueStatus(planIssue.status)) continue;
-          const succeededRuns = await db
-            .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
-            .from(heartbeatRuns)
-            .where(and(eq(heartbeatRuns.issueId, planIssue.id), eq(heartbeatRuns.status, "succeeded")))
-            .orderBy(asc(heartbeatRuns.createdAt))
-            .limit(1);
-          if (succeededRuns.length === 0) continue;
+          if (!isPlanSubmissionRecoveryIssueStatus(planIssue.status)) continue;
           const missionId = planIssue.missionId;
           if (!missionId) continue;
           const [existingSubmission] = await db
@@ -2288,6 +2310,13 @@ export function createSupervision({ db, deps, ownerActions }: {
             : false;
           if (existingSubmission && !hasRejectedSubmission) continue;
           if (!hasRejectedSubmission) {
+            const succeededRuns = await db
+              .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+              .from(heartbeatRuns)
+              .where(and(eq(heartbeatRuns.issueId, planIssue.id), eq(heartbeatRuns.status, "succeeded")))
+              .orderBy(asc(heartbeatRuns.createdAt))
+              .limit(1);
+            if (succeededRuns.length === 0) continue;
             const existingPlanQa = await db
               .select({ id: issues.id })
               .from(issues)

@@ -421,8 +421,6 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   async function ensureMainExecutorPlanningIssue(mission: MissionRow) {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_plan");
     if (existing) return existing;
-    // [RES-1358] 회사 전체 runnable non-liaison execution candidate(helper) — toolNames/skills 포함.
-    //   all-agent/no-grant roster → candidate roster(codex 정합). adapterConfig/secret 노출 ❌.
     const candidates = await listCompanyExecutionCandidates(db, mission.companyId);
     const runnableRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
 
