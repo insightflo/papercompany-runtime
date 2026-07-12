@@ -23,6 +23,7 @@ import { extractMissionIntent, type MissionIntent } from "./mission-intent.js";
 import { EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE } from "./mission-quality-contract.js";
 import { stat } from "node:fs/promises";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
+import { listCompanyExecutionCandidates, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
 
 export const MISSION_OWNER_PLANNING_SOURCE_REF_VOCABULARY = [
   "native_workflow_run",
@@ -145,6 +146,7 @@ export type MissionOwnerPlanningDossier = {
     ruleRefs: Array<Pick<MissionRuleRef, "id" | "key" | "name" | "mode" | "severity" | "action" | "reason">>;
     kbRefs: Array<{ id: string; name: string; type: string; reason: string }>;
     agentRoster: Array<{ agentId: string; name: string | null; role: string; capabilities: string | null; desiredSkillKeys: string[] }>;
+    candidateRoster: MissionExecutionCandidate[];
     capabilityManifest: MissionOwnerPlanningCapabilityManifest;
     fileViews: MissionOwnerPlanningBoundedAssetSummary;
     executionSourceSummary: { unitCount: number; labels: string[] };
@@ -162,6 +164,7 @@ export type MissionOwnerPlanningContext = {
   workflowCandidates: MissionOwnerPlanningWorkflowCandidate[];
   kbRefs: MissionOwnerPlanningKbRef[];
   agentRoster: MissionOwnerPlanningAgentRosterEntry[];
+  candidateRoster: MissionExecutionCandidate[];
   todoMarkers: MissionOwnerPlanningTodoMarker[];
   planningDossier: MissionOwnerPlanningDossier;
   sourceRefVocabulary: MissionOwnerPlanningSourceRefType[];
@@ -296,6 +299,7 @@ function buildPlanningDossier(input: {
   workflowCandidates: MissionOwnerPlanningWorkflowCandidate[];
   kbRefs: MissionOwnerPlanningKbRef[];
   agentRoster: MissionOwnerPlanningAgentRosterEntry[];
+  candidateRoster: MissionExecutionCandidate[];
   capabilityManifest: MissionOwnerPlanningCapabilityManifest;
   tools: MissionOwnerPlanningBoundedAssetSummary;
   todoMarkers: MissionOwnerPlanningTodoMarker[];
@@ -349,6 +353,7 @@ function buildPlanningDossier(input: {
         reason: `Granted to mission agent ${agentId}.`,
       })),
       agentRoster: input.agentRoster.map(({ agentId, name, role, capabilities, desiredSkillKeys }) => ({ agentId, name, role, capabilities, desiredSkillKeys })),
+      candidateRoster: input.candidateRoster,
       capabilityManifest: input.capabilityManifest,
       fileViews: unavailableSummary("No file-view summary is available inside MissionOwnerPlanningContext; Slice 4B does not scan repositories or files."),
       executionSourceSummary: {
@@ -641,6 +646,7 @@ export async function buildMissionOwnerPlanningContext(
   );
   const workflowCandidates = await listWorkflowCandidates(db, input.companyId, purposeTokens);
   const agentRoster = await listAgentRoster(db, input.missionId);
+  const candidateRoster = await listCompanyExecutionCandidates(db, input.companyId);
   // [P3] intent 로 capability 를 스코핑 — non-publish 미션에 publish capability 가 과다 주입되지 않게.
   const missionIntent = extractMissionIntent(mission.title, mission.description);
   const capabilityManifest = await listCompanySkillSummaries(db, input.companyId, missionIntent);
@@ -668,6 +674,7 @@ export async function buildMissionOwnerPlanningContext(
     workflowCandidates,
     kbRefs,
     agentRoster,
+    candidateRoster,
     capabilityManifest,
     tools,
     todoMarkers,
@@ -682,6 +689,7 @@ export async function buildMissionOwnerPlanningContext(
     workflowCandidates,
     kbRefs,
     agentRoster,
+    candidateRoster,
     todoMarkers,
     planningDossier,
     sourceRefVocabulary: [...MISSION_OWNER_PLANNING_SOURCE_REF_VOCABULARY],

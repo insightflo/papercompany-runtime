@@ -265,7 +265,7 @@ export function createSupervision({ db, deps, ownerActions }: {
     } | {
       kind: "rejected";
       planIssue: MissionSupervisionIssue;
-      succeededRun: MissionSupervisionHeartbeatRun;
+      succeededRun: MissionSupervisionHeartbeatRun | null;
       decisionHash: string;
       rejectionReason: string | null;
       diagnostics: unknown;
@@ -281,11 +281,8 @@ export function createSupervision({ db, deps, ownerActions }: {
       ));
       if (!planIssue) return null;
 
-      const succeededRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
-        .filter((run) => run.status === "succeeded")
-        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
-      if (!succeededRun) return null;
-
+      // [RES-1358] latest rejected submission recovery 자격: succeeded heartbeat 요구 ❌.
+      //   rejected PLAN(blocked/failed run issue_status_blocked) 도 복구. latest terminal run 은 evidence(optional).
       const [existingSubmission] = await db
         .select({
           id: missionPlanDecisionSubmissions.id,
@@ -306,10 +303,29 @@ export function createSupervision({ db, deps, ownerActions }: {
         const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}`;
         const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
         if (planIssueComments.some((comment) => comment.includes(markerText))) return null;
+        // [codex] live guard: rejected recovery 중 active heartbeat/wakeup 중복 ❌. RES-1358 terminal failed 통과.
+        if (missionHasActiveHeartbeat) return null;
+        const rejectedMissionIssueIds = missionIssues.map((issue) => issue.id);
+        const rejectedWakeupScope = rejectedMissionIssueIds.length > 0
+          ? or(eq(agentWakeupRequests.missionId, mission.id), inArray(agentWakeupRequests.issueId, rejectedMissionIssueIds))
+          : eq(agentWakeupRequests.missionId, mission.id);
+        const [rejectedActiveWakeup] = await db
+          .select({ id: agentWakeupRequests.id })
+          .from(agentWakeupRequests)
+          .where(and(
+            eq(agentWakeupRequests.companyId, mission.companyId),
+            inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+            rejectedWakeupScope,
+          ))
+          .limit(1);
+        if (rejectedActiveWakeup) return null;
+        const latestTerminalRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
+          .filter((run) => run.status === "succeeded" || run.status === "failed" || run.status === "timed_out")
+          .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
         return {
           kind: "rejected",
           planIssue,
-          succeededRun,
+          succeededRun: latestTerminalRun,
           decisionHash: existingSubmission.decisionHash,
           rejectionReason: existingSubmission.rejectionReason,
           diagnostics: existingSubmission.diagnostics,
@@ -317,6 +333,12 @@ export function createSupervision({ db, deps, ownerActions }: {
           idempotencyKey: `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}`,
         };
       }
+
+      // missing 경로: planning run 성공 후 submission 대기. succeededRun 요구(기존).
+      const succeededRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
+        .filter((run) => run.status === "succeeded")
+        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+      if (!succeededRun) return null;
 
       if (missionHasActiveHeartbeat) return null;
 
@@ -1885,7 +1907,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             `<!-- ${markerText} -->`,
             `- Mission: ${mission.title}`,
             `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
-            `- Observed run: ${succeededRun.id} finished with status succeeded.`,
+            `- Observed run: ${succeededRun!.id} finished with status succeeded.`,
             "- Current blocker: no structured `### Mission owner plan decision` submission is recorded, so Plan QA and workflow materialization cannot start.",
             "",
             "Required next action:",
@@ -1927,7 +1949,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           type: "plan_submission_missing",
           missionId: mission.id,
           planIssueId: planIssue.id,
-          succeededRunId: succeededRun.id,
+          succeededRunId: succeededRun!.id,
           resultStatus,
           idempotencyKey,
         });
