@@ -1,16 +1,6 @@
-// server/src/services/missions/recovery-ownership-guard.ts
-//
-// QA recovery ownership 게이트(req 1/2). oversight 가 source/producer 실패에 개입하기 전에
-// 해당 실패를 QA recovery chain 이 소유 중인지 판정. read-only — 상태변경은 호출측이 원자적 수행.
-//
-// 판정 로직은 classifyRecoveryOwnership(pure)에, DB 쿼리는 resolveRecoveryOwnership 에 분리.
-// qaRecoveryActive = recovery-chain OR(unblock 선행조건 아님 — wakeup/heartbeat 만으로 충분):
-//   (a) live recovery wakeup(queued/claimed, chain issueId 또는 payload sourceIssueId/issueId) ∨
-//   (b) queued/running recovery heartbeat(chain issue) ∨
-//   (c) origin QA gate 연결 recovery unblock issue(non-terminal).
-// 하나라도 참 → observe-only. unblock non-terminal + live 없음 = stalled(deadlock).
-// unblock terminal 도 current-generation 공식 workflow_validation_verdict(PASS/REQUEST_CHANGES)가 있어야
-// handoff; verdict 없는 terminal/stalled = deadlock(producer reopen ❌).
+// recovery-ownership-guard.ts — QA recovery ownership 게이트(req 1/2). read-only.
+// qaRecoveryActive = live wakeup(queued/claimed) ∨ heartbeat(queued/running) ∨ non-terminal unblock(OR).
+// 하나라도 → observe-only. stalled(deadlock)/terminal handoff(verdict) 분기.
 // consumer: supervision.ts · validation-gate-requeue.ts · heartbeat.ts(P4).
 
 import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";

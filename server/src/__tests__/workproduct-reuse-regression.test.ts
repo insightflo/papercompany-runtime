@@ -29,7 +29,7 @@ const sup = await getEmbeddedPostgresTestSupport();
 const describeEP = sup.supported ? describe : describe.skip;
 if (!sup.supported) console.warn(`skip workproduct reuse regression: ${sup.reason ?? "unsupported"}`);
 
-type Mode = "live-qa" | "stalled-qa" | "non-qa" | "missing";
+type Mode = "live-qa" | "stalled-qa" | "non-qa" | "missing" | "two-unblock-live";
 const tmpRoots: string[] = [];
 
 async function seed(db: ReturnType<typeof createDb>, mode: Mode) {
@@ -80,6 +80,11 @@ async function seed(db: ReturnType<typeof createDb>, mode: Mode) {
     // live QA recovery: claimed wakeup on unblock(downstream QA chain live).
     await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: unblockIssueId, payload: { issueId: unblockIssueId } });
   }
+  if (mode === "two-unblock-live") {
+    // 동일 chain 두 unblock: 두 번째 unblock 신규 + 이전 unblock 에 claimed wakeup → multi-unblock live(codex).
+    await db.insert(issues).values({ id: randomUUID(), companyId, missionId, identifier: `WRU2${suffix}`, title: "[Unblock2]", status: "todo", assigneeAgentId: agentId, originKind: "mission_main_executor_unblock", originId: producerIssueId });
+    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: unblockIssueId, payload: { issueId: unblockIssueId } });
+  }
   return { companyId, missionId, producerIssueId, qaIssueId, unblockIssueId };
 }
 
@@ -127,5 +132,11 @@ describeEP("RES-1318 workproduct-reuse bounded registration", () => {
   it("missing artifact → dispatch 0", async () => {
     const r = await run("missing");
     expect(r.dispatched.length).toBe(0);
+  });
+
+  it("two-unblock chain: claimed wakeup on earlier unblock → qa_recovery_live (dispatch 0)", async () => {
+    const r = await run("two-unblock-live");
+    expect(r.dispatched.length).toBe(0);
+    expect(r.producerAfter?.status).toBe("blocked");
   });
 });
