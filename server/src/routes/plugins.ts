@@ -20,14 +20,13 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
   heartbeatRuns,
   companies,
   pluginEntities,
-  pluginLogs,
   pluginWebhookDeliveries,
 } from "@paperclipai/db";
 import type {
@@ -38,6 +37,9 @@ import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { pluginLoader } from "../services/plugin-loader.js";
 import { registerPluginCatalogRoutes } from "./plugin-catalog.js";
+import { registerPluginConfigRoutes } from "./plugin-config-routes.js";
+import { registerPluginDiagnosticsRoutes } from "./plugin-diagnostics-routes.js";
+import { registerPluginLifecycleRoutes } from "./plugin-lifecycle-routes.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
@@ -48,7 +50,6 @@ import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js
 import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
-import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 import { workflowService } from "../services/workflow/engine.js";
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { issueService } from "../services/issues.js";
@@ -1829,503 +1830,30 @@ export function pluginRoutes(
     res.on("error", safeUnsubscribe);
   });
 
-  /**
-   * GET /api/plugins/:pluginId
-   *
-   * Get detailed information about a single plugin.
-   *
-   * The :pluginId parameter accepts either:
-   * - Database UUID (e.g., "abc123-def456")
-   * - Plugin key (e.g., "acme.linear")
-   *
-   * Response: PluginRecord
-   * Errors: 404 if plugin not found
-   */
-  router.get("/plugins/:pluginId", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    // Enrich with worker capabilities when available
-    const worker = bridgeDeps?.workerManager.getWorker(plugin.id);
-    const supportsConfigTest = worker
-      ? worker.supportedMethods.includes("validateConfig")
-      : false;
-
-    res.json({ ...plugin, supportsConfigTest });
+  // Lifecycle, diagnostics, and config routes for /plugins/:pluginId.
+  // Registered after static/bridge/stream routes and before jobs, in the same
+  // position these handlers occupied before extraction. See plugin-lifecycle-routes.ts,
+  // plugin-diagnostics-routes.ts, plugin-config-routes.ts.
+  registerPluginLifecycleRoutes(router, {
+    registry,
+    lifecycle,
+    workerManager: bridgeDeps?.workerManager,
+    resolvePlugin,
+    logPluginMutationActivity,
   });
-
-  /**
-   * DELETE /api/plugins/:pluginId
-   *
-   * Uninstall a plugin.
-   *
-   * Query params:
-   * - purge: If "true", permanently delete all plugin data (hard delete)
-   *          Otherwise, soft-delete with 30-day data retention
-   *
-   * Response: PluginRecord (the deleted record)
-   * Errors: 404 if plugin not found, 400 for lifecycle errors
-   */
-  router.delete("/plugins/:pluginId", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-    const purge = req.query.purge === "true";
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    try {
-      const result = await lifecycle.unload(plugin.id, purge);
-      await logPluginMutationActivity(req, "plugin.uninstalled", plugin.id, {
-        pluginId: plugin.id,
-        pluginKey: plugin.pluginKey,
-        purge,
-      });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "uninstalled" } });
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: message });
-    }
+  registerPluginDiagnosticsRoutes(router, {
+    registry,
+    db,
+    resolvePlugin,
+    computePluginHealth,
   });
-
-  /**
-   * POST /api/plugins/:pluginId/enable
-   *
-   * Enable a plugin that is currently disabled or in error state.
-   *
-   * Transitions the plugin to 'ready' state after loading and validation.
-   *
-   * Response: PluginRecord
-   * Errors: 404 if plugin not found, 400 for lifecycle errors
-   */
-  router.post("/plugins/:pluginId/enable", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    try {
-      const result = await lifecycle.enable(plugin.id);
-      await logPluginMutationActivity(req, "plugin.enabled", plugin.id, {
-        pluginId: plugin.id,
-        pluginKey: plugin.pluginKey,
-        version: result?.version ?? plugin.version,
-      });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "enabled" } });
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: message });
-    }
-  });
-
-  /**
-   * POST /api/plugins/:pluginId/disable
-   *
-   * Disable a running plugin.
-   *
-   * Request body (optional):
-   * - reason: Human-readable reason for disabling
-   *
-   * The plugin transitions to 'installed' state and stops processing events.
-   *
-   * Response: PluginRecord
-   * Errors: 404 if plugin not found, 400 for lifecycle errors
-   */
-  router.post("/plugins/:pluginId/disable", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-    const body = req.body as { reason?: string } | undefined;
-    const reason = body?.reason;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    try {
-      const result = await lifecycle.disable(plugin.id, reason);
-      await logPluginMutationActivity(req, "plugin.disabled", plugin.id, {
-        pluginId: plugin.id,
-        pluginKey: plugin.pluginKey,
-        reason: reason ?? null,
-      });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "disabled" } });
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: message });
-    }
-  });
-
-  /**
-   * GET /api/plugins/:pluginId/health
-   *
-   * Run health diagnostics on a plugin.
-   *
-   * Performs the following checks:
-   * 1. Registry: Plugin is registered in the database
-   * 2. Manifest: Manifest is valid and parseable
-   * 3. Status: Plugin is in 'ready' state
-   * 4. Error state: Plugin has no unhandled errors
-   *
-   * Response: PluginHealthCheckResult
-   * Errors: 404 if plugin not found
-   */
-  router.get("/plugins/:pluginId/health", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    const result = await computePluginHealth(plugin);
-    res.json(result);
-  });
-
-  /**
-   * GET /api/plugins/:pluginId/logs
-   *
-   * Query recent log entries for a plugin.
-   *
-   * Query params:
-   * - limit: Maximum number of entries (default 25, max 500)
-   * - level: Filter by log level (info, warn, error, debug)
-   * - since: ISO timestamp to filter logs newer than this time
-   *
-   * Response: Array of log entries, newest first.
-   */
-  router.get("/plugins/:pluginId/logs", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 25, 1), 500);
-    const level = req.query.level as string | undefined;
-    const since = req.query.since as string | undefined;
-
-    const conditions = [eq(pluginLogs.pluginId, plugin.id)];
-    if (level) {
-      conditions.push(eq(pluginLogs.level, level));
-    }
-    if (since) {
-      const sinceDate = new Date(since);
-      if (!isNaN(sinceDate.getTime())) {
-        conditions.push(gte(pluginLogs.createdAt, sinceDate));
-      }
-    }
-
-    const rows = await db
-      .select()
-      .from(pluginLogs)
-      .where(and(...conditions))
-      .orderBy(desc(pluginLogs.createdAt))
-      .limit(limit);
-
-    res.json(rows);
-  });
-
-  /**
-   * POST /api/plugins/:pluginId/upgrade
-   *
-   * Upgrade a plugin to a newer version.
-   *
-   * Request body (optional):
-   * - version: Target version (defaults to latest)
-   *
-   * If the upgrade adds new capabilities, the plugin transitions to
-   * 'upgrade_pending' state for board approval. Otherwise, it goes
-   * directly to 'ready'.
-   *
-   * Response: PluginRecord
-   * Errors: 404 if plugin not found, 400 for lifecycle errors
-   */
-  router.post("/plugins/:pluginId/upgrade", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-    const body = req.body as { version?: string } | undefined;
-    const version = body?.version;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    try {
-      // Upgrade the plugin - this would typically:
-      // 1. Download the new version
-      // 2. Compare capabilities
-      // 3. If new capabilities, mark as upgrade_pending
-      // 4. Otherwise, transition to ready
-      const result = await lifecycle.upgrade(plugin.id, version);
-      await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
-        pluginId: plugin.id,
-        pluginKey: plugin.pluginKey,
-        previousVersion: plugin.version,
-        version: result?.version ?? plugin.version,
-        targetVersion: version ?? null,
-      });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: message });
-    }
-  });
-
-  // ===========================================================================
-  // Plugin configuration routes
-  // ===========================================================================
-
-  /**
-   * GET /api/plugins/:pluginId/config
-   *
-   * Retrieve the current instance configuration for a plugin.
-   *
-   * Returns the `PluginConfig` record if one exists, or `null` if the plugin
-   * has not yet been configured.
-   *
-   * Response: `PluginConfig | null`
-   * Errors: 404 if plugin not found
-   */
-  router.get("/plugins/:pluginId/config", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    const config = await registry.getConfig(plugin.id);
-    res.json(config);
-  });
-
-  /**
-   * POST /api/plugins/:pluginId/config
-   *
-   * Save (create or replace) the instance configuration for a plugin.
-   *
-   * The caller provides the full `configJson` object. The server persists it
-   * via `registry.upsertConfig()`.
-   *
-   * Request body:
-   * - `configJson`: Configuration values matching the plugin's `instanceConfigSchema`
-   *
-   * Response: `PluginConfig`
-   * Errors:
-   * - 400 if request validation fails
-   * - 404 if plugin not found
-   */
-  router.post("/plugins/:pluginId/config", async (req, res) => {
-    assertBoard(req);
-    const { pluginId } = req.params;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    const body = req.body as { configJson?: Record<string, unknown> } | undefined;
-    if (!body?.configJson || typeof body.configJson !== "object") {
-      res.status(400).json({ error: '"configJson" is required and must be an object' });
-      return;
-    }
-
-    // Strip devUiUrl unless the caller is an instance admin. devUiUrl activates
-    // a dev-proxy in the static file route that could be abused for SSRF if any
-    // board-level user were allowed to set it.
-    if (
-      "devUiUrl" in body.configJson &&
-      !(req.actor.type === "board" && req.actor.isInstanceAdmin)
-    ) {
-      delete body.configJson.devUiUrl;
-    }
-
-    // Validate configJson against the plugin's instanceConfigSchema (if declared).
-    // This ensures CLI/API callers get the same validation the UI performs client-side.
-    const schema = plugin.manifestJson?.instanceConfigSchema;
-    if (schema && Object.keys(schema).length > 0) {
-      const validation = validateInstanceConfig(body.configJson, schema);
-      if (!validation.valid) {
-        res.status(400).json({
-          error: "Configuration does not match the plugin's instanceConfigSchema",
-          fieldErrors: validation.errors,
-        });
-        return;
-      }
-    }
-
-    try {
-      const result = await registry.upsertConfig(plugin.id, {
-        configJson: body.configJson,
-      });
-      await logPluginMutationActivity(req, "plugin.config.updated", plugin.id, {
-        pluginId: plugin.id,
-        pluginKey: plugin.pluginKey,
-        configKeyCount: Object.keys(body.configJson).length,
-      });
-
-      // Notify the running worker about the config change (PLUGIN_SPEC §25.4.4).
-      // If the worker implements onConfigChanged, send the new config via RPC.
-      // If it doesn't (METHOD_NOT_IMPLEMENTED), restart the worker so it picks
-      // up the new config on re-initialize. If no worker is running, skip.
-      if (bridgeDeps?.workerManager.isRunning(plugin.id)) {
-        try {
-          await bridgeDeps.workerManager.call(
-            plugin.id,
-            "configChanged",
-            { config: body.configJson },
-          );
-        } catch (rpcErr) {
-          if (
-            rpcErr instanceof JsonRpcCallError &&
-            rpcErr.code === PLUGIN_RPC_ERROR_CODES.METHOD_NOT_IMPLEMENTED
-          ) {
-            // Worker doesn't handle live config — restart it.
-            try {
-              await lifecycle.restartWorker(plugin.id);
-            } catch {
-              // Restart failure is non-fatal for the config save response.
-            }
-          }
-          // Other RPC errors (timeout, unavailable) are non-fatal — config is
-          // already persisted and will take effect on next worker restart.
-        }
-      }
-
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: message });
-    }
-  });
-
-  /**
-   * POST /api/plugins/:pluginId/config/test
-   *
-   * Test a plugin configuration without persisting it by calling the plugin
-   * worker's `validateConfig` RPC method.
-   *
-   * Only works when the plugin's worker implements `onValidateConfig`.
-   * If the worker does not implement the method, returns
-   * `{ valid: false, supported: false, message: "..." }` with HTTP 200.
-   *
-   * Request body:
-   * - `configJson`: Configuration values to validate
-   *
-   * Response: `{ valid: boolean; message?: string; supported?: boolean }`
-   * Errors:
-   * - 400 if request validation fails
-   * - 404 if plugin not found
-   * - 501 if bridge deps (worker manager) are not configured
-   * - 502 if the worker is unavailable
-   */
-  router.post("/plugins/:pluginId/config/test", async (req, res) => {
-    assertBoard(req);
-
-    if (!bridgeDeps) {
-      res.status(501).json({ error: "Plugin bridge is not enabled" });
-      return;
-    }
-
-    const { pluginId } = req.params;
-
-    const plugin = await resolvePlugin(registry, pluginId);
-    if (!plugin) {
-      res.status(404).json({ error: "Plugin not found" });
-      return;
-    }
-
-    if (plugin.status !== "ready") {
-      res.status(400).json({
-        error: `Plugin is not ready (current status: ${plugin.status})`,
-      });
-      return;
-    }
-
-    const body = req.body as { configJson?: Record<string, unknown> } | undefined;
-    if (!body?.configJson || typeof body.configJson !== "object") {
-      res.status(400).json({ error: '"configJson" is required and must be an object' });
-      return;
-    }
-
-    // Fast schema-level rejection before hitting the worker RPC.
-    const schema = plugin.manifestJson?.instanceConfigSchema;
-    if (schema && Object.keys(schema).length > 0) {
-      const validation = validateInstanceConfig(body.configJson, schema);
-      if (!validation.valid) {
-        res.status(400).json({
-          error: "Configuration does not match the plugin's instanceConfigSchema",
-          fieldErrors: validation.errors,
-        });
-        return;
-      }
-    }
-
-    try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
-        "validateConfig",
-        { config: body.configJson },
-      );
-
-      // The worker returns PluginConfigValidationResult { ok, warnings?, errors? }
-      // Map to the frontend-expected shape { valid, message? }
-      if (result.ok) {
-        const warningText = result.warnings?.length
-          ? `Warnings: ${result.warnings.join("; ")}`
-          : undefined;
-        res.json({ valid: true, message: warningText });
-      } else {
-        const errorText = result.errors?.length
-          ? result.errors.join("; ")
-          : "Configuration validation failed.";
-        res.json({ valid: false, message: errorText });
-      }
-    } catch (err) {
-      // If the worker does not implement validateConfig, return a structured response
-      if (
-        err instanceof JsonRpcCallError &&
-        err.code === PLUGIN_RPC_ERROR_CODES.METHOD_NOT_IMPLEMENTED
-      ) {
-        res.json({
-          valid: false,
-          supported: false,
-          message: "This plugin does not support configuration testing.",
-        });
-        return;
-      }
-
-      // Worker unavailable or other RPC errors
-      const bridgeError = mapRpcErrorToBridgeError(err);
-      res.status(502).json(bridgeError);
-    }
+  registerPluginConfigRoutes(router, {
+    registry,
+    lifecycle,
+    workerManager: bridgeDeps?.workerManager,
+    resolvePlugin,
+    logPluginMutationActivity,
+    mapRpcErrorToBridgeError,
   });
 
   // ===========================================================================
