@@ -1984,12 +1984,12 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         body: expect.stringContaining("Mission owner plan submission rejected"),
       }),
     ]));
-    expect(comments.some((comment) => comment.body.includes(`mission-owner-plan-submission-rejected:${missionId}:${planIssueId}:${decisionHash}`))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes(`mission-owner-plan-submission-rejected:${missionId}:${planIssueId}:prompt-v2:roster-`))).toBe(true);
     expect(onPlanSubmissionMissing).toHaveBeenCalledWith(expect.objectContaining({
       mission: expect.objectContaining({ id: missionId }),
       planIssueId,
       targetAgentId: ownerAgentId,
-      idempotencyKey: expect.stringMatching(new RegExp(`^mission-owner-plan-submission-rejected:${missionId}:${planIssueId}:${decisionHash}:roster-[a-f0-9]{12}$`)),
+      idempotencyKey: expect.stringMatching(new RegExp(`^mission-owner-plan-submission-rejected:${missionId}:${planIssueId}:prompt-v2:roster-[a-f0-9]{12}$`)),
       wakeCommentId: expect.any(String),
     }));
   });
