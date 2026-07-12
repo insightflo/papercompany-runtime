@@ -215,4 +215,21 @@ describeEmbeddedPostgres("RES-1315: oversight observe-only while QA recovery is 
     expect(dispatched).toEqual([seed.qaGateIssueId]);
     expect(result.findings.some((finding) => finding.includes("owner_action_qa_recovery_owned"))).toBe(false);
   });
+
+  it("settles a blocked owner action after its QA source is done during an active workflow", async () => {
+    const seed = await seedLiveQaRecovery(db, "none");
+    await db.update(issues).set({ status: "done", completedAt: new Date("2026-07-12T09:32:00.000Z") }).where(eq(issues.id, seed.qaGateIssueId));
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, seed.unblockIssueId));
+
+    await missionService(db).runMainExecutorSupervision({
+      missionId: seed.missionId,
+      staleAfterMinutes: 30,
+      applySafeActions: true,
+      applyOwnerDecisionActions: false,
+    });
+
+    const unblockAfter = await db.select().from(issues).where(eq(issues.id, seed.unblockIssueId)).then((rows) => rows[0]);
+
+    expect(unblockAfter?.status).toBe("done");
+  });
 });
