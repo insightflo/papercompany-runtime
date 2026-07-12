@@ -1,95 +1,47 @@
 // recovery-ownership-guard.ts — QA recovery ownership 게이트(req 1/2). read-only.
-// qaRecoveryActive = live wakeup(queued/claimed) ∨ heartbeat(queued/running) ∨ non-terminal unblock(OR).
-// 하나라도 → observe-only. stalled(deadlock)/terminal handoff(verdict) 분기.
+// qaRecoveryActive = live QA wakeup(queued/claimed) OR live QA heartbeat(queued/running) (OR).
+// 하나라도 → observe-only. live 없으면(deadlock/terminal/verdict 무관) oversight 기존 recovery 경로.
 // consumer: supervision.ts · validation-gate-requeue.ts · heartbeat.ts(P4).
 
-import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, heartbeatRuns, issues, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
-import { isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
+import { agentWakeupRequests, heartbeatRuns, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { isQaLikeStep } from "./supervision-helpers.js";
 
 export const RECOVERY_WAKEUP_STATUSES = ["queued", "claimed"] as const;
 export const RECOVERY_HEARTBEAT_STATUSES = ["queued", "running"] as const;
-export const TERMINAL_HANDOFF_VERDICTS = ["pass", "request_changes"] as const;
-
-// recovery chain wakeup reason 리터럴. P6 에서 requestKind 컬럼으로 대체 시 제거(Risk 7).
 export const RECOVERY_WAKEUP_REASONS = [
   "mission_validation_request_changes",
   "mission_owner_retry_source_issue",
   "mission_owner_decision_retry_source_issue",
 ] as const;
-
 export const RECOVERY_UNBLOCK_ORIGIN_KIND = "mission_main_executor_unblock";
+const OVERSIGHT_RETRY_REASONS = new Set(["mission_owner_retry_source_issue", "mission_owner_decision_retry_source_issue"]);
 
-export type RecoveryOwnershipSignal = "live_wakeup" | "live_heartbeat" | "active_unblock";
+export type RecoveryOwnershipSignal = "live_wakeup" | "live_heartbeat";
 
 export type RecoveryOwnershipVerdict =
-  | {
-      kind: "qa_recovery_live";
-      signal: RecoveryOwnershipSignal;
-      unblockIssueId?: string;
-      heartbeatRunId?: string;
-      wakeupRequestId?: string;
-    }
-  | {
-      kind: "qa_recovery_stalled";
-      unblockIssueId?: string;
-      reason: string;
-    }
-  | {
-      kind: "oversight_may_act";
-      reason: "no_recovery_chain" | "terminal_handoff_complete";
-    };
+  | { kind: "qa_recovery_live"; signal: RecoveryOwnershipSignal; unblockIssueId?: string; heartbeatRunId?: string; wakeupRequestId?: string }
+  | { kind: "oversight_may_act"; reason: string };
 
 export interface RecoveryOwnershipInput {
   companyId: string;
   missionId: string;
   sourceIssueId: string;
   qaGateIssueId?: string | null;
-  /** producer 현재 반복 완료 시각(current generation proof). terminal handoff verdict 의 신선도 기준. */
-  producerCompletedAt?: Date | null;
-}
-
-/** pure 판정 입력 — DB 쿼리 결과를 boolean 으로 정규화하여 주입. classifyRecoveryOwnership 이 소비. */
-export interface RecoveryOwnershipClassification {
-  hasUnblock: boolean;
-  unblockTerminal: boolean;
-  hasLiveWakeup: boolean;
-  hasLiveHeartbeat: boolean;
-  hasCurrentGenVerdict: boolean;
 }
 
 function uniqueIds(values: Array<string | null | undefined>): string[] {
   return Array.from(new Set(values.filter((v): v is string => typeof v === "string" && v.length > 0)));
 }
 
-// pure 판정. DB 없음 — 단위 테스트 대상. 분기 순서가 OR 신호의 안전 의미를 결정.
-export function classifyRecoveryOwnership(c: RecoveryOwnershipClassification): RecoveryOwnershipVerdict {
-  // (b) live recovery heartbeat → observe-only(unblock 유무 무관).
-  if (c.hasLiveHeartbeat) {
-    return { kind: "qa_recovery_live", signal: "live_heartbeat" };
-  }
-  // (a) live recovery wakeup → observe-only(unblock 유무 무관).
-  if (c.hasLiveWakeup) {
-    return { kind: "qa_recovery_live", signal: "live_wakeup" };
-  }
-  // live work 없음.
-  if (!c.hasUnblock) {
-    return { kind: "oversight_may_act", reason: "no_recovery_chain" };
-  }
-  // (c) unblock non-terminal → chain 살았으나 실행 없음 → deadlock 정리(producer reopen ❌).
-  if (!c.unblockTerminal) {
-    return { kind: "qa_recovery_stalled", reason: "recovery_chain_active_no_live_work" };
-  }
-  // unblock terminal — current-generation 공식 verdict 있어야 handoff. 없으면 deadlock.
-  if (c.hasCurrentGenVerdict) {
-    return { kind: "oversight_may_act", reason: "terminal_handoff_complete" };
-  }
-  return { kind: "qa_recovery_stalled", reason: "terminal_recovery_without_generation_verdict" };
+// pure 판정. live(heartbeat/wakeup)만 observe-only. 그 외는 oversight 진행.
+export function classifyRecoveryOwnership(c: { hasLiveHeartbeat: boolean; hasLiveWakeup: boolean }): RecoveryOwnershipVerdict {
+  if (c.hasLiveHeartbeat) return { kind: "qa_recovery_live", signal: "live_heartbeat" };
+  if (c.hasLiveWakeup) return { kind: "qa_recovery_live", signal: "live_wakeup" };
+  return { kind: "oversight_may_act", reason: "no_live_qa_recovery" };
 }
 
-// wakeup 의 chain 소속 판정: issueId 가 chain 이거나 payload.sourceIssueId / payload.issueId 가 chain.
 function wakeupChainScope(chainIssueIds: string[]) {
   const payloadMatches = chainIssueIds.flatMap((id) => [
     sql`${agentWakeupRequests.payload} ->> 'sourceIssueId' = ${id}`,
@@ -98,20 +50,13 @@ function wakeupChainScope(chainIssueIds: string[]) {
   return or(inArray(agentWakeupRequests.issueId, chainIssueIds), ...payloadMatches);
 }
 
-// source/producer issue 에 대한 QA recovery ownership 판정. DB 쿼리 → classifyRecoveryOwnership → ID 주입.
-export async function resolveRecoveryOwnership(
-  db: Db,
-  input: RecoveryOwnershipInput,
-): Promise<RecoveryOwnershipVerdict> {
+// source/producer issue 에 대한 QA recovery ownership. unblock lookup 은 chain IDs(live 매칭)만.
+export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipInput): Promise<RecoveryOwnershipVerdict> {
   const chainOriginIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId]);
-  if (chainOriginIds.length === 0) {
-    return { kind: "oversight_may_act", reason: "no_recovery_chain" };
-  }
+  if (chainOriginIds.length === 0) return { kind: "oversight_may_act", reason: "no_recovery_chain" };
 
-  // chain 의 모든 unblock 조회(supervision 이 새 unblock 을 만들어도 이전 unblock 의 live wakeup/heartbeat
-  //   매칭 — codex root cause). nonterminal 우선 정렬은 유지하되 limit(1) 제거.
   const unblocks = await db
-    .select({ id: issues.id, status: issues.status })
+    .select({ id: issues.id })
     .from(issues)
     .where(and(
       eq(issues.companyId, input.companyId),
@@ -119,26 +64,9 @@ export async function resolveRecoveryOwnership(
       inArray(issues.originId, chainOriginIds),
       isNull(issues.hiddenAt),
     ))
-    .orderBy(
-      sql`CASE WHEN ${issues.status} IN ('done', 'cancelled') THEN 1 ELSE 0 END`,
-      desc(issues.createdAt),
-    )
+    .orderBy(desc(issues.createdAt))
     .then((rows) => rows);
-  const unblock = unblocks[0] ?? null;
-  // 모든 unblock id 를 chain 에 포함 — 어느 unblock 에 live wakeup/heartbeat 가 붙어도 매칭.
   const chainIssueIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId, ...unblocks.map((u) => u.id)]);
-
-  const liveWakeup = await db
-    .select({ id: agentWakeupRequests.id })
-    .from(agentWakeupRequests)
-    .where(and(
-      eq(agentWakeupRequests.companyId, input.companyId),
-      inArray(agentWakeupRequests.status, [...RECOVERY_WAKEUP_STATUSES]),
-      inArray(agentWakeupRequests.reason, [...RECOVERY_WAKEUP_REASONS]),
-      wakeupChainScope(chainIssueIds),
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
 
   const liveHeartbeat = await db
     .select({ id: heartbeatRuns.id })
@@ -151,73 +79,27 @@ export async function resolveRecoveryOwnership(
     .limit(1)
     .then((rows) => rows[0] ?? null);
 
-  // handoff verdict 는 QA gate issue 에서 기록된 것만 인정(source issue verdict 는 unrelated).
-  const gateIssueIds = uniqueIds([input.qaGateIssueId]);
-  const hasUnblock = unblocks.length > 0;
-  const unblockTerminal = hasUnblock && unblocks.every((u) => isTerminalIssueStatus(u.status));
-  const hasCurrentGenVerdict = unblockTerminal && gateIssueIds.length > 0
-    ? await currentGenerationValidationVerdict(db, input.companyId, gateIssueIds, input.producerCompletedAt)
-    : false;
-
-  const verdict = classifyRecoveryOwnership({
-    hasUnblock,
-    unblockTerminal,
-    hasLiveWakeup: Boolean(liveWakeup),
-    hasLiveHeartbeat: Boolean(liveHeartbeat),
-    hasCurrentGenVerdict,
-  });
-
-  if (verdict.kind === "qa_recovery_live") {
-    return { ...verdict, unblockIssueId: unblock?.id, heartbeatRunId: liveHeartbeat?.id, wakeupRequestId: liveWakeup?.id };
-  }
-  if (verdict.kind === "qa_recovery_stalled") {
-    return { ...verdict, unblockIssueId: unblock?.id };
-  }
-  return verdict;
-}
-
-// chain QA gate(source/origin) 의 current-generation 공식 verdict(PASS/REQUEST_CHANGES).
-async function currentGenerationValidationVerdict(
-  db: Db,
-  companyId: string,
-  chainOriginIds: string[],
-  producerCompletedAt: Date | null | undefined,
-): Promise<boolean> {
-  const row = await db
-    .select({ id: workflowTransitionEvents.id })
-    .from(workflowTransitionEvents)
+  const liveWakeup = liveHeartbeat ? null : await db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
     .where(and(
-      eq(workflowTransitionEvents.companyId, companyId),
-      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      inArray(workflowTransitionEvents.verdict, [...TERMINAL_HANDOFF_VERDICTS]),
-      inArray(workflowTransitionEvents.issueId, chainOriginIds),
-      ...(producerCompletedAt ? [gte(workflowTransitionEvents.createdAt, producerCompletedAt)] : []),
+      eq(agentWakeupRequests.companyId, input.companyId),
+      inArray(agentWakeupRequests.status, [...RECOVERY_WAKEUP_STATUSES]),
+      inArray(agentWakeupRequests.reason, [...RECOVERY_WAKEUP_REASONS]),
+      wakeupChainScope(chainIssueIds),
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-  return Boolean(row);
-}
 
-export function isQaRecoveryLive(
-  verdict: RecoveryOwnershipVerdict,
-): verdict is Extract<RecoveryOwnershipVerdict, { kind: "qa_recovery_live" }> {
-  return verdict.kind === "qa_recovery_live";
+  const verdict = classifyRecoveryOwnership({
+    hasLiveHeartbeat: Boolean(liveHeartbeat),
+    hasLiveWakeup: Boolean(liveWakeup),
+  });
+  if (verdict.kind === "qa_recovery_live") {
+    return { ...verdict, heartbeatRunId: liveHeartbeat?.id, wakeupRequestId: liveWakeup?.id };
+  }
+  return verdict;
 }
-
-export function isQaRecoveryStalled(
-  verdict: RecoveryOwnershipVerdict,
-): verdict is Extract<RecoveryOwnershipVerdict, { kind: "qa_recovery_stalled" }> {
-  return verdict.kind === "qa_recovery_stalled";
-}
-
-export function mayOversightAct(
-  verdict: RecoveryOwnershipVerdict,
-): verdict is Extract<RecoveryOwnershipVerdict, { kind: "oversight_may_act" }> {
-  return verdict.kind === "oversight_may_act";
-}
-
-/** stale oversight wakeup consume-side no-op 판정(req 2). twin reason 만 검사. */
-const OVERSIGHT_RETRY_REASONS = new Set(["mission_owner_retry_source_issue", "mission_owner_decision_retry_source_issue"]);
 
 // issue 가 workflow QA gate step 인지(step definition 기반 isQaLikeStep) 확인.
 async function isIssueQaGateStep(db: Db, companyId: string, issueId: string): Promise<boolean> {
@@ -235,10 +117,14 @@ async function isIssueQaGateStep(db: Db, companyId: string, issueId: string): Pr
   return Boolean(step && isQaLikeStep(step));
 }
 
-// promote 시 호출. mission_owner_retry_source_issue(twin) wakeup 이고 source 의 QA recovery 가
-// live/stalled 면 noOp(guard 이전 큐 stale wakeup / race 회수). 다른 reason 는 그대로 진행.
-// ownerActionIssueId → owner action origin 이 실제 QA step(isQaLikeStep)일 때만 guard 적용 —
-// 일반 owner retry 는 noOp=false 로 오인 방지(codex P4 blocker).
+function readPayloadField(payload: unknown, field: string): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const v = (payload as Record<string, unknown>)[field];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+// promote 시 호출. twin reason wakeup 이 owner action origin QA chain live 면 noOp(race/stale 회수).
+// ownerActionIssueId 없거나 originKind≠unblock 또는 origin 비-QA 면 noOp=false(일반 wakeup 보호).
 export async function shouldNoOpOversightWakeup(
   db: Db,
   ctx: {
@@ -248,11 +134,8 @@ export async function shouldNoOpOversightWakeup(
     promotedIssue: { id: string; status: string };
   },
 ): Promise<{ noOp: true; reason: string; ownerActionIssueId?: string; qaSignal: string } | { noOp: false }> {
-  if (!ctx.request.reason || !OVERSIGHT_RETRY_REASONS.has(ctx.request.reason)) {
-    return { noOp: false };
-  }
+  if (!ctx.request.reason || !OVERSIGHT_RETRY_REASONS.has(ctx.request.reason)) return { noOp: false };
   const ownerActionIssueId = readPayloadField(ctx.request.payload, "ownerActionIssueId");
-  // ownerActionIssueId 없거나 owner action 이 unblock 이 아니면 안전하게 guard 미적용(malformed payload 방지, codex 재검토).
   if (!ownerActionIssueId) return { noOp: false };
   const ownerAction = await db
     .select({ originId: issues.originId, originKind: issues.originKind })
@@ -263,28 +146,20 @@ export async function shouldNoOpOversightWakeup(
   if (!ownerAction || ownerAction.originKind !== "mission_main_executor_unblock" || !ownerAction.originId) {
     return { noOp: false };
   }
-  // origin 이 실제 workflow QA step 인지 확인 — 아니면 guard 미적용(일반 owner retry 오인 방지).
   const originIsQaGate = await isIssueQaGateStep(db, ctx.companyId, ownerAction.originId);
   if (!originIsQaGate) return { noOp: false };
-  const sourceIssueId = ownerAction.originId;
-  const qaGateIssueId = ownerAction.originId;
   const ownership = await resolveRecoveryOwnership(db, {
-    companyId: ctx.companyId,
-    missionId: ctx.missionId,
-    sourceIssueId,
-    qaGateIssueId,
+    companyId: ctx.companyId, missionId: ctx.missionId,
+    sourceIssueId: ownerAction.originId, qaGateIssueId: ownerAction.originId,
   });
-  if (isQaRecoveryLive(ownership)) {
-    return { noOp: true, reason: `qa_recovery_live signal=${ownership.signal}`, ownerActionIssueId: ownerActionIssueId ?? undefined, qaSignal: ownership.signal };
-  }
-  if (isQaRecoveryStalled(ownership)) {
-    return { noOp: true, reason: `qa_recovery_stalled reason=${ownership.reason}`, ownerActionIssueId: ownerActionIssueId ?? undefined, qaSignal: ownership.reason };
+  if (ownership.kind === "qa_recovery_live") {
+    return { noOp: true, reason: `qa_recovery_live signal=${ownership.signal}`, ownerActionIssueId, qaSignal: ownership.signal };
   }
   return { noOp: false };
 }
 
-function readPayloadField(payload: unknown, field: string): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const v = (payload as Record<string, unknown>)[field];
-  return typeof v === "string" && v.length > 0 ? v : null;
+export function isQaRecoveryLive(
+  verdict: RecoveryOwnershipVerdict,
+): verdict is Extract<RecoveryOwnershipVerdict, { kind: "qa_recovery_live" }> {
+  return verdict.kind === "qa_recovery_live";
 }

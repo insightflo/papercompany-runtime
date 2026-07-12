@@ -33,7 +33,7 @@ import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-re
 import { qualityService } from "../quality.js";
 import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDecisionSubmissionStatus } from "./mission-plan-decision-ledger.js";
 import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
-import { resolveRecoveryOwnership, isQaRecoveryLive, isQaRecoveryStalled } from "./recovery-ownership-guard.js";
+import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 
 type ToolStepFailureEvidenceRow = {
@@ -976,8 +976,8 @@ export function createSupervision({ db, deps, ownerActions }: {
                       sourceIssueId: issue.originId,
                       qaGateIssueId,
                     });
-                    if (isQaRecoveryLive(ownership) || isQaRecoveryStalled(ownership)) {
-                      const detail = "signal" in ownership ? `signal=${ownership.signal}` : `reason=${ownership.reason}`;
+                    if (isQaRecoveryLive(ownership)) {
+                      const detail = `signal=${ownership.signal}`;
                       findings.push(`owner_action_qa_recovery_owned: ${label} decision=retry_source_issue source=${sourceLabel} ownership=${ownership.kind} ${detail} — observe-only, producer reopen/wakeup/state-change forbidden`);
                       break;
                     }
