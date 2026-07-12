@@ -220,3 +220,65 @@ export function mayOversightAct(
 ): verdict is Extract<RecoveryOwnershipVerdict, { kind: "oversight_may_act" }> {
   return verdict.kind === "oversight_may_act";
 }
+
+/** stale oversight wakeup consume-side no-op 판정(req 2). twin reason 만 검사. */
+const OVERSIGHT_RETRY_REASONS = new Set(["mission_owner_retry_source_issue", "mission_owner_decision_retry_source_issue"]);
+
+function readPayloadSourceIssueId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const rec = payload as Record<string, unknown>;
+  const v = rec.sourceIssueId ?? rec.issueId;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+// promote 시 호출. mission_owner_retry_source_issue(twin) wakeup 이고 source 의 QA recovery 가
+// live/stalled 면 noOp(guard 이전 큐 stale wakeup / race 회수). 다른 reason 는 그대로 진행.
+// producer 대상 wakeup 도 payload.ownerActionIssueId → owner action origin(QA gate) chain 확인(codex 계약).
+export async function shouldNoOpOversightWakeup(
+  db: Db,
+  ctx: {
+    companyId: string;
+    missionId: string;
+    request: { id: string; reason: string | null; payload?: unknown };
+    promotedIssue: { id: string; status: string };
+  },
+): Promise<{ noOp: true; reason: string } | { noOp: false }> {
+  if (!ctx.request.reason || !OVERSIGHT_RETRY_REASONS.has(ctx.request.reason)) {
+    return { noOp: false };
+  }
+  // payload.ownerActionIssueId 따라 owner action issue 의 originId(origin QA gate) 확인.
+  const ownerActionIssueId = readPayloadField(ctx.request.payload, "ownerActionIssueId");
+  let sourceIssueId = readPayloadSourceIssueId(ctx.request.payload) ?? ctx.promotedIssue.id;
+  let qaGateIssueId = sourceIssueId;
+  if (ownerActionIssueId) {
+    const ownerAction = await db
+      .select({ originId: issues.originId })
+      .from(issues)
+      .where(and(eq(issues.companyId, ctx.companyId), eq(issues.id, ownerActionIssueId)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (ownerAction?.originId) {
+      sourceIssueId = ownerAction.originId;
+      qaGateIssueId = ownerAction.originId;
+    }
+  }
+  const ownership = await resolveRecoveryOwnership(db, {
+    companyId: ctx.companyId,
+    missionId: ctx.missionId,
+    sourceIssueId,
+    qaGateIssueId,
+  });
+  if (isQaRecoveryLive(ownership)) {
+    return { noOp: true, reason: `qa_recovery_live signal=${ownership.signal}` };
+  }
+  if (isQaRecoveryStalled(ownership)) {
+    return { noOp: true, reason: `qa_recovery_stalled reason=${ownership.reason}` };
+  }
+  return { noOp: false };
+}
+
+function readPayloadField(payload: unknown, field: string): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const v = (payload as Record<string, unknown>)[field];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}

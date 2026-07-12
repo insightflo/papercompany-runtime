@@ -99,6 +99,7 @@ import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-plann
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
+import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
 import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
 import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
@@ -5336,6 +5337,28 @@ export function heartbeatService(db: Db) {
           .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`, updatedAt: new Date() })
           .where(eq(agentWakeupRequests.id, request.id));
         return null;
+      }
+
+      // [P4 consume-side oversight no-op] mission_owner_retry_source_issue(twin) wakeup 이
+      //   source/owner action 의 QA recovery chain 이 live/stalled 면 no-op(guard 이전 큐 stale/race 회수, req 2).
+      //   producer 대상이어도 payload.ownerActionIssueId → owner action origin(QA gate) chain 확인.
+      if (
+        promotedIssue?.missionId &&
+        (promotedReason === "mission_owner_retry_source_issue" || promotedReason === "mission_owner_decision_retry_source_issue")
+      ) {
+        const oversightNoOp = await shouldNoOpOversightWakeup(tx as unknown as Db, {
+          companyId: agent.companyId,
+          missionId: promotedIssue.missionId,
+          request: { id: request.id, reason: promotedReason, payload: promotedPayload },
+          promotedIssue: { id: promotedIssue.id, status: promotedIssue.status },
+        });
+        if (oversightNoOp.noOp) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({ status: "failed", finishedAt: new Date(), error: `Oversight wakeup no-op: ${oversightNoOp.reason}`, updatedAt: new Date() })
+            .where(eq(agentWakeupRequests.id, request.id));
+          return null;
+        }
       }
 
       const missionIdForWake =
