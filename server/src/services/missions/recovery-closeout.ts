@@ -3,6 +3,8 @@
 // 복구된 producer + QA PASS → failed workflow step/run 재조정(req 4). 전역 issue-done 덮어쓰기 ❌.
 // 동일 workflowRun/DAG dependency 에서 QA gate 가 검증한 producer source issue 를 DAG 역참조로 정확히
 // resolve 하여 그 producer 의 failed step 만 CAS completed 로 재조정. 다른 failed step/run/issue 미건드.
+// current-generation 기준 = active issue_work_products.updatedAt(복구 산출물 시각, 필수 증거).
+// PASS verdict 가 artifact 갱신보다 뒤일 때만 closeout(producerCompletedAt 은 optional 추가 floor).
 // 판정 로직은 classifyRecoveryCloseout(pure), DB mutation 은 reconcileRecoveredWorkflowStep.
 // producer 는 항상 DAG resolve(외부 override 금지 — 같은 run 의 다른 실패 step 닫기 방지).
 
@@ -30,8 +32,7 @@ export type RecoveryCloseoutSkipReason =
   | "no_active_workproduct"
   | "no_fresh_qa_pass"
   | "no_failed_step"
-  | "already_completed"
-  | "missing_generation_proof";
+  | "already_completed";
 
 export type RecoveryCloseoutResult =
   | {
@@ -44,7 +45,7 @@ export type RecoveryCloseoutResult =
 
 export interface RecoveryCloseoutClassification {
   hasActiveWorkProduct: boolean;
-  hasFreshQaPass: boolean; // PASS verdict on QA gate, current generation(producerCompletedAt 이후), 동일 run
+  hasFreshQaPass: boolean; // PASS on QA gate, 동일 run, observedAt >= artifact 갱신
   hasFailedProducerStep: boolean;
   alreadyCompleted: boolean;
 }
@@ -67,7 +68,7 @@ export interface RecoveryCloseoutInput {
   missionId: string;
   /** QA gate issue id(검증자). producer 는 동일 run 의 DAG 역참조로 resolve(override 불가). */
   qaGateIssueId: string;
-  /** producer 현재 반복 완료 시각 — current-generation PASS 의 필수 기준. 없으면 skip. */
+  /** optional 추가 generation floor(producer issue completedAt 등). artifact updatedAt 이 필수 기준. */
   producerCompletedAt?: Date | null;
   /** 감사 마커의 호출 출처(supervision/heartbeat 등). */
   source?: string;
@@ -78,14 +79,18 @@ type ProducerResolution = {
   workflowRunId: string;
 };
 
-// QA gate issue → 동일 run 의 producer source issue 를 DAG 역참조로 resolve.
+// QA gate issue → 동일 run(company+mission scope) 의 producer source issue 를 DAG 역참조로 resolve.
 async function resolveProducer(db: Db, input: RecoveryCloseoutInput): Promise<ProducerResolution | null> {
   const qaStepRow = await db
     .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
     .from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
     .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-    .where(and(eq(workflowRuns.companyId, input.companyId), eq(workflowStepRuns.issueId, input.qaGateIssueId)))
+    .where(and(
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.missionId, input.missionId),
+      eq(workflowStepRuns.issueId, input.qaGateIssueId),
+    ))
     .orderBy(desc(workflowStepRuns.startedAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -109,8 +114,8 @@ async function resolveProducer(db: Db, input: RecoveryCloseoutInput): Promise<Pr
   return { producerIssueId: producerStepRow.issueId, workflowRunId };
 }
 
-// 복구 producer + current-gen PASS → 그 producer 의 failed step 만 completed 재조정.
-// evidence 부족/이미 완료/다른 run verdict/producerCompletedAt 부재 → 0 mutation(skipped). idempotent.
+// 복구 producer + current-gen PASS(artifact 갱신 이후) → 그 producer 의 failed step 만 completed 재조정.
+// evidence 부족/이미 완료/다른 run verdict/artifact 갱신 전 PASS → 0 mutation(skipped). idempotent.
 export async function reconcileRecoveredWorkflowStep(
   db: Db,
   input: RecoveryCloseoutInput,
@@ -119,14 +124,9 @@ export async function reconcileRecoveredWorkflowStep(
   if (!resolution) return { skipped: true, reason: "producer_unresolved" };
   const { producerIssueId, workflowRunId } = resolution;
 
-  // current-generation proof 필수 — 없으면 증거 부족 skip.
-  if (!input.producerCompletedAt) {
-    return { skipped: true, reason: "missing_generation_proof" };
-  }
-
-  // (1) active workProduct on producer.
+  // (1) active workProduct on producer — updatedAt 이 current-generation 필수 증거.
   const activeWorkProduct = await db
-    .select({ id: issueWorkProducts.id })
+    .select({ id: issueWorkProducts.id, updatedAt: issueWorkProducts.updatedAt })
     .from(issueWorkProducts)
     .where(and(
       eq(issueWorkProducts.companyId, input.companyId),
@@ -160,7 +160,16 @@ export async function reconcileRecoveredWorkflowStep(
     .limit(1)
     .then((rows) => rows[0] ?? null);
 
-  // (3) current-gen official PASS on QA gate, 동일 run, observedAt >= producerCompletedAt.
+  // current-generation floor: artifact 갱신 시각(필수). input.producerCompletedAt 은 optional 추가 floor(더 큰 쪽).
+  const artifactUpdatedAt = activeWorkProduct?.updatedAt ?? null;
+  if (!artifactUpdatedAt) {
+    return { skipped: true, reason: "no_active_workproduct" };
+  }
+  const generationFloor = input.producerCompletedAt && input.producerCompletedAt > artifactUpdatedAt
+    ? input.producerCompletedAt
+    : artifactUpdatedAt;
+
+  // (3) current-gen official PASS on QA gate, 동일 run, observedAt >= artifact 갱신.
   const freshPass = await db
     .select({ id: workflowTransitionEvents.id })
     .from(workflowTransitionEvents)
@@ -170,7 +179,7 @@ export async function reconcileRecoveredWorkflowStep(
       eq(workflowTransitionEvents.verdict, PASS_VERDICT),
       eq(workflowTransitionEvents.issueId, input.qaGateIssueId),
       eq(workflowTransitionEvents.workflowRunId, workflowRunId),
-      gte(workflowTransitionEvents.createdAt, input.producerCompletedAt),
+      gte(workflowTransitionEvents.createdAt, generationFloor),
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -191,6 +200,7 @@ export async function reconcileRecoveredWorkflowStep(
     qaGateIssueId: input.qaGateIssueId,
     producerIssueId,
     workProductId: activeWorkProduct!.id,
+    artifactUpdatedAt: artifactUpdatedAt.toISOString(),
     qaPassTransitionEventId: freshPass!.id,
     closedAt: new Date().toISOString(),
   };
@@ -205,7 +215,7 @@ export async function reconcileRecoveredWorkflowStep(
     return { skipped: true, reason: "already_completed" };
   }
 
-  // audit log — 실제 변경된 한 step 에만. actorType=system, actorId=recovery-closeout 명시.
+  // audit log — 실제 변경된 한 step 에만. actorType=system/actorId=recovery-closeout 명시.
   await db.insert(activityLog).values({
     companyId: input.companyId,
     actorType: CLOSEOUT_ACTOR_TYPE,
