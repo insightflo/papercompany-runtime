@@ -16,7 +16,7 @@ import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
-import { listCompanyExecutionCandidates } from "./mission-execution-candidates.js";
+import { listCompanyExecutionCandidates, formatCandidateRosterLines } from "./mission-execution-candidates.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
@@ -424,9 +424,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     // [RES-1358] 회사 전체 runnable non-liaison execution candidate(helper) — toolNames/skills 포함.
     //   all-agent/no-grant roster → candidate roster(codex 정합). adapterConfig/secret 노출 ❌.
     const candidates = await listCompanyExecutionCandidates(db, mission.companyId);
-    const runnableRosterLines = candidates.map((candidate) => (
-      `- ${candidate.name} (${candidate.role}) id=${candidate.agentId}${candidate.toolNames.length > 0 ? ` tools=${candidate.toolNames.join(",")}` : ""}${candidate.desiredSkillKeys.length > 0 ? ` skills=${candidate.desiredSkillKeys.join(",")}` : ""}${candidate.agentId === mission.ownerAgentId ? " [mission owner]" : ""}`
-    ));
+    const runnableRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
 
     const description = buildMissionPlanningDescription({
       missionId: mission.id,

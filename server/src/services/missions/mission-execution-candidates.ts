@@ -6,6 +6,7 @@
 // adapter config/secret 노출 ❌ — enabled granted toolNames 만. isMissionExecutionLiaisonAgent
 // 가 adapterType(runtimeConfig/metadata)을 읽으므로 해당 필드 select 후 cast 없이 predicate 전달(codex review).
 
+import { createHash } from "node:crypto";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentToolGrants, agents, toolDefinitions } from "@paperclipai/db";
@@ -84,4 +85,18 @@ export async function listCompanyExecutionCandidates(db: Db, companyId: string):
     desiredSkillKeys: readDesiredSkillKeys(a.adapterConfig),
     toolNames: toolsByAgent.get(a.id) ?? [],
   }));
+}
+
+// [source: codex recovery review] static/dynamic/recovery roster line 공유 formatter(desiredSkillKeys 포함).
+export function formatCandidateRosterLines(candidates: MissionExecutionCandidate[], ownerAgentId: string | null): string[] {
+  return candidates.map((c) => `- ${c.name} (${c.role}) id=${c.agentId}${c.toolNames.length > 0 ? ` tools=${c.toolNames.join(",")}` : ""}${c.desiredSkillKeys.length > 0 ? ` skills=${c.desiredSkillKeys.join(",")}` : ""}${ownerAgentId && c.agentId === ownerAgentId ? " [mission owner]" : ""}`);
+}
+
+// [source: codex recovery review] stable candidate/input fingerprint — roster 변경 시 revised retry 허용, 동일 fingerprint 반복 → bounded loop 종료.
+export function candidateRosterFingerprint(candidates: MissionExecutionCandidate[]): string {
+  const sig = candidates
+    .map((c) => `${c.agentId}:${[...c.toolNames].sort().join("+")}:${[...c.desiredSkillKeys].sort().join("+")}`)
+    .sort()
+    .join("|");
+  return createHash("sha256").update(sig).digest("hex").slice(0, 12);
 }

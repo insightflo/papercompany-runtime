@@ -23,7 +23,7 @@ import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanati
 import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
-import { listCompanyExecutionCandidates } from "./mission-execution-candidates.js";
+import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint } from "./mission-execution-candidates.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
@@ -302,7 +302,10 @@ export function createSupervision({ db, deps, ownerActions }: {
         .limit(1);
       if (existingSubmission) {
         if (!isRejectedMissionPlanDecisionSubmissionStatus(existingSubmission.status)) return null;
-        const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}`;
+        // [source: codex recovery review] roster fingerprint 추가 — roster 변경 시 revised retry 허용.
+        //   동일 fingerprint 반복(marker 중복) → return null(무한 requeue ❌). escalation 은 caller recommendation 경로.
+        const rosterFingerprint = candidateRosterFingerprint(await listCompanyExecutionCandidates(db, mission.companyId));
+        const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:${existingSubmission.decisionHash}:roster-${rosterFingerprint}`;
         const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
         if (planIssueComments.some((comment) => comment.includes(markerText))) return null;
         // [codex] live guard: rejected recovery 중 active heartbeat/wakeup 중복 ❌. RES-1358 terminal failed 통과.
@@ -1879,7 +1882,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             missionId: mission.id,
             title: mission.title,
             description: mission.description,
-            runnableRosterLines: (await listCompanyExecutionCandidates(db, mission.companyId)).map((c) => `- ${c.name} (${c.role}) id=${c.agentId}${c.toolNames.length > 0 ? ` tools=${c.toolNames.join(",")}` : ""}${c.agentId === mission.ownerAgentId ? " [mission owner]" : ""}`),
+            runnableRosterLines: formatCandidateRosterLines(await listCompanyExecutionCandidates(db, mission.companyId), mission.ownerAgentId),
           })
         : undefined;
       await db
