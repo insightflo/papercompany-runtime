@@ -3,7 +3,7 @@
 // [파일 목적] mission owner action 클로저들을 factory로 캡슐화 (P2).
 //   db/deps 명시 주입 → 클로저 공유 대체. missions.ts(missionService)가 호출.
 // [수정시 주의] 부작용 있음(이슈 생성/갱신/wakeup). 순수 아님.
-import { agents, issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, asc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { HttpError, notFound } from "../../errors.js";
@@ -16,6 +16,7 @@ import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
+import { listCompanyExecutionCandidates } from "./mission-execution-candidates.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
@@ -420,16 +421,12 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   async function ensureMainExecutorPlanningIssue(mission: MissionRow) {
     const existing = await findMainExecutorIssue(mission.id, "mission_main_executor_plan");
     if (existing) return existing;
-    const companyAgents = await db
-      .select({ id: agents.id, name: agents.name, role: agents.role, status: agents.status })
-      .from(agents)
-      .where(eq(agents.companyId, mission.companyId))
-      .orderBy(asc(agents.name), asc(agents.id));
-    const runnableRosterLines = companyAgents
-      .filter((agent) => agent.status === "active" || agent.status === "idle")
-      .map((agent) => (
-        `- ${agent.name} (${agent.role}, ${agent.status}) id=${agent.id}${agent.id === mission.ownerAgentId ? " [mission owner]" : ""}`
-      ));
+    // [RES-1358] 회사 전체 runnable non-liaison execution candidate(helper) — toolNames/skills 포함.
+    //   all-agent/no-grant roster → candidate roster(codex 정합). adapterConfig/secret 노출 ❌.
+    const candidates = await listCompanyExecutionCandidates(db, mission.companyId);
+    const runnableRosterLines = candidates.map((candidate) => (
+      `- ${candidate.name} (${candidate.role}) id=${candidate.agentId}${candidate.toolNames.length > 0 ? ` tools=${candidate.toolNames.join(",")}` : ""}${candidate.desiredSkillKeys.length > 0 ? ` skills=${candidate.desiredSkillKeys.join(",")}` : ""}${candidate.agentId === mission.ownerAgentId ? " [mission owner]" : ""}`
+    ));
 
     const description = buildMissionPlanningDescription({
       missionId: mission.id,
