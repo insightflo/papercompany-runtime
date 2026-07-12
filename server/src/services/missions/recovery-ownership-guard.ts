@@ -225,13 +225,6 @@ export function mayOversightAct(
 /** stale oversight wakeup consume-side no-op 판정(req 2). twin reason 만 검사. */
 const OVERSIGHT_RETRY_REASONS = new Set(["mission_owner_retry_source_issue", "mission_owner_decision_retry_source_issue"]);
 
-function readPayloadSourceIssueId(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const rec = payload as Record<string, unknown>;
-  const v = rec.sourceIssueId ?? rec.issueId;
-  return typeof v === "string" && v.length > 0 ? v : null;
-}
-
 // issue 가 workflow QA gate step 인지(step definition 기반 isQaLikeStep) 확인.
 async function isIssueQaGateStep(db: Db, companyId: string, issueId: string): Promise<boolean> {
   const row = await db
