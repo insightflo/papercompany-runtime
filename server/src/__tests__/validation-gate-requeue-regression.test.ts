@@ -64,7 +64,7 @@ async function seed(db: ReturnType<typeof createDb>, mode: Mode) {
     { id: randomUUID(), workflowRunId: runId, stepId: "deliver", issueId: deliverIssueId, status: "pending", startedAt: new Date("2026-07-12T09:00:00.000Z") },
   ]);
   if (mode === "live") {
-    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: unblockIssueId, missionId, payload: { issueId: unblockIssueId } });
+    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: qaGateIssueId, missionId, payload: { issueId: qaGateIssueId } });
   }
 
   const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).then((r) => [r[0]]);

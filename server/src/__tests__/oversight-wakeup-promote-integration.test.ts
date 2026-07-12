@@ -60,8 +60,7 @@ async function seed(db: ReturnType<typeof createDb>, originIsQaGate: boolean) {
     { id: randomUUID(), workflowRunId: runId, stepId: "produce", issueId: producerIssueId, status: "completed", startedAt: new Date("2026-07-12T08:00:00.000Z") },
     { id: randomUUID(), workflowRunId: runId, stepId: "qa", issueId: qaGateIssueId, status: "pending", startedAt: new Date("2026-07-12T08:10:00.000Z") },
   ]);
-  // live recovery wakeup on unblock(chain live). claimed 상태 → promote 대상 아님, ownership live 신호.
-  await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: unblockIssueId, missionId, payload: { issueId: unblockIssueId } });
+  await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: qaGateIssueId, missionId, payload: { issueId: qaGateIssueId } });
   // oversight retry wakeup(queued, runId null) — promote 대상.
   const oversightWakeupId = randomUUID();
   await db.insert(agentWakeupRequests).values({

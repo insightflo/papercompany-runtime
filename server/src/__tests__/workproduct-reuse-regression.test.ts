@@ -77,13 +77,11 @@ async function seed(db: ReturnType<typeof createDb>, mode: Mode) {
     id: randomUUID(), companyId, agentId, issueId: unblockIssueId, invocationSource: "assignment", triggerDetail: "system", status: "timed_out", startedAt: new Date("2026-07-12T08:30:00.000Z"), errorCode: "execution_stale_timeout",
   });
   if (mode === "live-qa") {
-    // live QA recovery: claimed wakeup on unblock(downstream QA chain live).
-    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: unblockIssueId, payload: { issueId: unblockIssueId } });
+    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: qaIssueId, payload: { issueId: qaIssueId } });
   }
   if (mode === "two-unblock-live") {
-    // 동일 chain 두 unblock: 두 번째 unblock 신규 + 이전 unblock 에 claimed wakeup → multi-unblock live(codex).
     await db.insert(issues).values({ id: randomUUID(), companyId, missionId, identifier: `WRU2${suffix}`, title: "[Unblock2]", status: "todo", assigneeAgentId: agentId, originKind: "mission_main_executor_unblock", originId: producerIssueId });
-    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: unblockIssueId, payload: { issueId: unblockIssueId } });
+    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId, source: "test", reason: "mission_validation_request_changes", status: "claimed", claimedAt: new Date(), issueId: qaIssueId, payload: { issueId: qaIssueId } });
   }
   return { companyId, missionId, producerIssueId, qaIssueId, unblockIssueId };
 }
@@ -134,7 +132,7 @@ describeEP("RES-1318 workproduct-reuse bounded registration", () => {
     expect(r.dispatched.length).toBe(0);
   });
 
-  it("two-unblock chain: claimed wakeup on earlier unblock → qa_recovery_live (dispatch 0)", async () => {
+  it("two Unblock actions plus a claimed QA wakeup → qa_recovery_live (dispatch 0)", async () => {
     const r = await run("two-unblock-live");
     expect(r.dispatched.length).toBe(0);
     expect(r.producerAfter?.status).toBe("blocked");
