@@ -419,6 +419,19 @@ export function createSupervision({ db, deps, ownerActions }: {
       const producerAgentId = sourceIssue.assigneeAgentId;
       if (!producerAgentId) return;
 
+      // [1318] live QA recovery → registration dispatch 0(observe-only, codex 계약 1/5).
+      // bounded registration wake 는 stalled recovery + artifact 일 때만(stalled 는 아래 기존 경로 진행).
+      const reuseOwnership = await resolveRecoveryOwnership(db, {
+        companyId: mission.companyId,
+        missionId: mission.id,
+        sourceIssueId: sourceIssue.id,
+        qaGateIssueId: sourceIssue.id,
+      });
+      if (isQaRecoveryLive(reuseOwnership)) {
+        findings.push(`workproduct_reuse_qa_recovery_live: ${sourceLabel} ownership=qa_recovery_live signal=${reuseOwnership.signal} — registration wake deferred to QA recovery owner`);
+        return;
+      }
+
       // (1) graphWorkProductRequired producer step run for this issue
       const stepRowsForIssue = stepRowsByIssueId.get(sourceIssue.id) ?? [];
       const producerStepRow = stepRowsForIssue.find(
