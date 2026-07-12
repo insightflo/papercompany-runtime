@@ -29,6 +29,8 @@ export interface RecoveryOwnershipInput {
   missionId: string;
   sourceIssueId: string;
   qaGateIssueId?: string | null;
+  /** live-wakeup 쿼리에서 제외할 request id(promote 중인 자기 자신 self-noop 방지, codex review). */
+  excludeWakeupRequestId?: string | null;
 }
 
 function uniqueIds(values: Array<string | null | undefined>): string[] {
@@ -87,6 +89,7 @@ export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipI
       inArray(agentWakeupRequests.status, [...RECOVERY_WAKEUP_STATUSES]),
       inArray(agentWakeupRequests.reason, [...RECOVERY_WAKEUP_REASONS]),
       wakeupChainScope(chainIssueIds),
+      ...(input.excludeWakeupRequestId ? [sql`${agentWakeupRequests.id} <> ${input.excludeWakeupRequestId}`] : []),
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -151,6 +154,7 @@ export async function shouldNoOpOversightWakeup(
   const ownership = await resolveRecoveryOwnership(db, {
     companyId: ctx.companyId, missionId: ctx.missionId,
     sourceIssueId: ownerAction.originId, qaGateIssueId: ownerAction.originId,
+    excludeWakeupRequestId: ctx.request.id,
   });
   if (ownership.kind === "qa_recovery_live") {
     return { noOp: true, reason: `qa_recovery_live signal=${ownership.signal}`, ownerActionIssueId, qaSignal: ownership.signal };

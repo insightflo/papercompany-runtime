@@ -1177,7 +1177,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceComments.map((comment) => comment.body).join("\n")).not.toContain("mission-owner-decision-wakeup-dispatched");
   });
 
-  it("[Patch 2 cap-exhausted] native-loop producer at rework cap → AUTO retry_source_issue is NOT skipped; routes to owner action (reopens producer)", async () => {
+  it("[Patch 2 cap-exhausted] native-loop producer at rework cap → AUTO retry_source_issue NOT skipped; producer reopen unauthorized → request_replan", async () => {
     // 회귀 대상: producer rework cap(maxIterations) 이 소진된 native-loop 미션에서 AUTO(grace default)
     //   retry_source_issue 가 기존엔 owner_action_skipped_native_loop 로 막혀 매달리고 있었다.
     //   기대: cap 소진 시 guard 가 skip 을 풀고 owner_action_native_loop_cap_exhausted finding + producer 재오픈.
@@ -1230,14 +1230,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     // 2차 supervision (applyOwnerDecisionActions + grace 초과) → AUTO retry_source_issue 발화.
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 30 * 60 * 1000), applyOwnerDecisionActions: true });
 
-    // cap exhausted → skip 안 함 → owner_action_native_loop_cap_exhausted finding + producer 재오픈.
+    // cap exhausted → skip 안 함(owner_action_native_loop_cap_exhausted finding). 단 producer reopen 은
+    //   authorizeProducerRework(explicit target/fresh RC 없음 → unauthorized) 로 차단 → request_replan(codex nuance).
     expect(result.findings.join("\n")).toContain("owner_action_native_loop_cap_exhausted");
     expect(result.findings.join("\n")).not.toContain("owner_action_skipped_native_loop");
-    expect(result.appliedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "owner_decision_retry_source_issue", missionId, sourceIssueId: producerIssueId }),
+    expect(result.findings.join("\n")).toContain("producer_rework_unauthorized");
+    expect(result.appliedActions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: producerIssueId }),
     ]));
     const producerAfter = await db.select().from(issues).where(eq(issues.id, producerIssueId)).then((rows) => rows[0]!);
-    expect(producerAfter.status).toBe("todo");
+    expect(producerAfter.status).toBe("done");
   });
 
   it("does not apply retry_source_issue when the active plan says the source prerequisites are blocked", async () => {
