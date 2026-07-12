@@ -23,6 +23,8 @@ import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanati
 import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
+import { listCompanyExecutionCandidates } from "./mission-execution-candidates.js";
+import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
@@ -1871,6 +1873,15 @@ export function createSupervision({ db, deps, ownerActions }: {
       const diagnosticsSummary = planSubmissionMissingCandidate.kind === "rejected"
         ? formatMissionPlanDecisionSubmissionDiagnostics(planSubmissionMissingCandidate.diagnostics)
         : "";
+      // [codex] rejected recovery: 최신 candidate roster 로 persisted PLAN description refresh.
+      const refreshedDescription = planSubmissionMissingCandidate.kind === "rejected"
+        ? buildMissionPlanningDescription({
+            missionId: mission.id,
+            title: mission.title,
+            description: mission.description,
+            runnableRosterLines: (await listCompanyExecutionCandidates(db, mission.companyId)).map((c) => `- ${c.name} (${c.role}) id=${c.agentId}${c.toolNames.length > 0 ? ` tools=${c.toolNames.join(",")}` : ""}${c.agentId === mission.ownerAgentId ? " [mission owner]" : ""}`),
+          })
+        : undefined;
       await db
         .update(issues)
         .set({
@@ -1882,6 +1893,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           completedAt: null,
           cancelledAt: null,
           updatedAt: now,
+          ...(refreshedDescription ? { description: refreshedDescription } : {}),
         })
         .where(eq(issues.id, planIssue.id));
 
