@@ -29,7 +29,7 @@ describeEP("P4 shouldNoOpOversightWakeup: origin QA gate discrimination", () => 
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-oversight-noop-"); db = createDb(tempDb.connectionString); }, 60_000);
   afterAll(async () => { await tempDb?.cleanup(); });
 
-  async function seedMission(originIsQaGate: boolean) {
+  async function seedMission(originIsQaGate: boolean, withLive = true) {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -60,9 +60,11 @@ describeEP("P4 shouldNoOpOversightWakeup: origin QA gate discrimination", () => 
       { id: randomUUID(), workflowRunId, stepId: "produce", issueId: producerIssueId, status: "completed", startedAt: new Date("2026-07-12T08:00:00.000Z") },
       { id: randomUUID(), workflowRunId, stepId: "qa", issueId: qaGateIssueId, status: "pending", startedAt: new Date("2026-07-12T08:10:00.000Z") },
     ]);
-    // live recovery wakeup on the unblock(chain live).
-    await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId: ownerAgentId, source: "test", reason: "mission_validation_request_changes", status: "queued", issueId: unblockIssueId, missionId, payload: { issueId: unblockIssueId } });
-    return { companyId, missionId, producerIssueId, qaGateIssueId, unblockIssueId };
+    // live recovery wakeup on the unblock(chain live). withLive=false 면 생략(lone QA retry 시나리오).
+    if (withLive) {
+      await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId: ownerAgentId, source: "test", reason: "mission_validation_request_changes", status: "queued", issueId: unblockIssueId, missionId, payload: { issueId: unblockIssueId } });
+    }
+    return { companyId, ownerAgentId, missionId, producerIssueId, qaGateIssueId, unblockIssueId };
   }
 
   it("QA-gate origin ownerAction + live recovery → noOp true (producer wakeup suppressed)", async () => {
@@ -73,6 +75,19 @@ describeEP("P4 shouldNoOpOversightWakeup: origin QA gate discrimination", () => 
       promotedIssue: { id: seed.qaGateIssueId, status: "blocked" },
     });
     expect(verdict.noOp).toBe(true);
+  });
+
+  it("lone queued QA-target retry (self-id excluded) → noOp false (no self-noop)", async () => {
+    const seed = await seedMission(true, false);
+    const requestId = randomUUID();
+    // 자기 자신 retry request row(issueId=QA gate, payload ownerActionIssueId=unblock) 를 insert.
+    await db.insert(agentWakeupRequests).values({ id: requestId, companyId: seed.companyId, agentId: seed.ownerAgentId, source: "test", reason: "mission_owner_retry_source_issue", status: "queued", issueId: seed.qaGateIssueId, missionId: seed.missionId, payload: { ownerActionIssueId: seed.unblockIssueId, sourceIssueId: seed.qaGateIssueId } });
+    const verdict = await shouldNoOpOversightWakeup(db, {
+      companyId: seed.companyId, missionId: seed.missionId,
+      request: { id: requestId, reason: "mission_owner_retry_source_issue", payload: { ownerActionIssueId: seed.unblockIssueId, sourceIssueId: seed.qaGateIssueId } },
+      promotedIssue: { id: seed.qaGateIssueId, status: "blocked" },
+    });
+    expect(verdict.noOp).toBe(false);
   });
 
   it("non-QA origin ownerAction(producer) → noOp false (regular promote, guard not applied)", async () => {

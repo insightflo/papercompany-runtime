@@ -1240,6 +1240,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]));
     const producerAfter = await db.select().from(issues).where(eq(issues.id, producerIssueId)).then((rows) => rows[0]!);
     expect(producerAfter.status).toBe("done");
+    expect(result.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "request_replan", issueId: producerIssueId }),
+    ]));
   });
 
   it("does not apply retry_source_issue when the active plan says the source prerequisites are blocked", async () => {
