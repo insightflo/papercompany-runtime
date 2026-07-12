@@ -118,7 +118,9 @@ export async function resolveRecoveryOwnership(
     return { kind: "oversight_may_act", reason: "no_recovery_chain" };
   }
 
-  const unblock = await db
+  // chain 의 모든 unblock 조회(supervision 이 새 unblock 을 만들어도 이전 unblock 의 live wakeup/heartbeat
+  //   매칭 — codex root cause). nonterminal 우선 정렬은 유지하되 limit(1) 제거.
+  const unblocks = await db
     .select({ id: issues.id, status: issues.status })
     .from(issues)
     .where(and(
@@ -131,10 +133,10 @@ export async function resolveRecoveryOwnership(
       sql`CASE WHEN ${issues.status} IN ('done', 'cancelled') THEN 1 ELSE 0 END`,
       desc(issues.createdAt),
     )
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-
-  const chainIssueIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId, unblock?.id]);
+    .then((rows) => rows);
+  const unblock = unblocks[0] ?? null;
+  // 모든 unblock id 를 chain 에 포함 — 어느 unblock 에 live wakeup/heartbeat 가 붙어도 매칭.
+  const chainIssueIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId, ...unblocks.map((u) => u.id)]);
 
   const liveWakeup = await db
     .select({ id: agentWakeupRequests.id })
@@ -161,13 +163,15 @@ export async function resolveRecoveryOwnership(
 
   // handoff verdict 는 QA gate issue 에서 기록된 것만 인정(source issue verdict 는 unrelated).
   const gateIssueIds = uniqueIds([input.qaGateIssueId]);
-  const hasCurrentGenVerdict = unblock && isTerminalIssueStatus(unblock.status) && gateIssueIds.length > 0
+  const hasUnblock = unblocks.length > 0;
+  const unblockTerminal = hasUnblock && unblocks.every((u) => isTerminalIssueStatus(u.status));
+  const hasCurrentGenVerdict = unblockTerminal && gateIssueIds.length > 0
     ? await currentGenerationValidationVerdict(db, input.companyId, gateIssueIds, input.producerCompletedAt)
     : false;
 
   const verdict = classifyRecoveryOwnership({
-    hasUnblock: Boolean(unblock),
-    unblockTerminal: Boolean(unblock && isTerminalIssueStatus(unblock.status)),
+    hasUnblock,
+    unblockTerminal,
     hasLiveWakeup: Boolean(liveWakeup),
     hasLiveHeartbeat: Boolean(liveHeartbeat),
     hasCurrentGenVerdict,
