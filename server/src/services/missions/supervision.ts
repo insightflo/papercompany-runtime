@@ -1036,16 +1036,17 @@ export function createSupervision({ db, deps, ownerActions }: {
                     }
                   }
                 }
-                // [QA-gate rework] retry 타겟 = 수정 지시를 받을 upstream 생산자(synthesis 등).
-                // 과거엔 issue.originId(QA 게이트)를 써서 QA 본인을 재wake 하는 self-loop 가 원인이었다.
-                // B: 사장 결정의 Rework target(또는 Next action "revise RES-xxxx") → identifier 로 이슈 매칭.
                 const ownerReworkRef = ownerDecision.reworkTargetRef ?? parseReworkTargetRefFromNextAction(ownerDecision.nextAction);
                 let sourceIssueId: string | null = null;
-                if (ownerReworkRef) {
-                  const ownerTarget = missionIssues.find((mi) => (mi.identifier ?? null) === ownerReworkRef || mi.id === ownerReworkRef) ?? null;
-                  if (ownerTarget && ownerTarget.missionId === mission.id && !ownerTarget.hiddenAt) sourceIssueId = ownerTarget.id;
+                const resolveOwnerIssueRef = (ref: string | null | undefined) => {
+                  if (!ref) return null;
+                  const target = missionIssues.find((mi) => (mi.identifier ?? null) === ref || mi.id === ref) ?? null;
+                  return target && target.missionId === mission.id && !target.hiddenAt ? target.id : null;
+                };
+                sourceIssueId = resolveOwnerIssueRef(ownerReworkRef);
+                if (!sourceIssueId && !autoDefaulted) {
+                  sourceIssueId = resolveOwnerIssueRef(ownerDecision.sourceIssueRef);
                 }
-                // A: 사장 지목이 없으면 DAG 역참조 — origin(QA) step 의 non-QA 생산자(위상 마지막)를 찾는다.
                 let producerReworkResolved = false;
                 // [Patch 2 cap-exhausted] producer rework budget. 기본 true = budget 을 알 수 없으면 기존 동작(skip) 유지.
                 //   producer 를 찾은 경우에만 iterationIndex vs max(producer back-edge maxIterations) 으로 계산한다.

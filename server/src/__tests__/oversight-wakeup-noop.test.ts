@@ -60,9 +60,8 @@ describeEP("P4 shouldNoOpOversightWakeup: origin QA gate discrimination", () => 
       { id: randomUUID(), workflowRunId, stepId: "produce", issueId: producerIssueId, status: "completed", startedAt: new Date("2026-07-12T08:00:00.000Z") },
       { id: randomUUID(), workflowRunId, stepId: "qa", issueId: qaGateIssueId, status: "pending", startedAt: new Date("2026-07-12T08:10:00.000Z") },
     ]);
-    // live recovery wakeup on the unblock(chain live). withLive=false 면 생략(lone QA retry 시나리오).
     if (withLive) {
-      await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId: ownerAgentId, source: "test", reason: "mission_validation_request_changes", status: "queued", issueId: unblockIssueId, missionId, payload: { issueId: unblockIssueId } });
+      await db.insert(agentWakeupRequests).values({ id: randomUUID(), companyId, agentId: ownerAgentId, source: "test", reason: "mission_validation_request_changes", status: "queued", issueId: qaGateIssueId, missionId, payload: { issueId: qaGateIssueId } });
     }
     return { companyId, ownerAgentId, missionId, producerIssueId, qaGateIssueId, unblockIssueId };
   }

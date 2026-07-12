@@ -3,7 +3,7 @@
 // 하나라도 → observe-only. live 없으면(deadlock/terminal/verdict 무관) oversight 기존 recovery 경로.
 // consumer: supervision.ts · validation-gate-requeue.ts · heartbeat.ts(P4).
 
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { isQaLikeStep } from "./supervision-helpers.js";
@@ -52,23 +52,9 @@ function wakeupChainScope(chainIssueIds: string[]) {
   return or(inArray(agentWakeupRequests.issueId, chainIssueIds), ...payloadMatches);
 }
 
-// source/producer issue 에 대한 QA recovery ownership. unblock lookup 은 chain IDs(live 매칭)만.
 export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipInput): Promise<RecoveryOwnershipVerdict> {
-  const chainOriginIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId]);
-  if (chainOriginIds.length === 0) return { kind: "oversight_may_act", reason: "no_recovery_chain" };
-
-  const unblocks = await db
-    .select({ id: issues.id })
-    .from(issues)
-    .where(and(
-      eq(issues.companyId, input.companyId),
-      eq(issues.originKind, RECOVERY_UNBLOCK_ORIGIN_KIND),
-      inArray(issues.originId, chainOriginIds),
-      isNull(issues.hiddenAt),
-    ))
-    .orderBy(desc(issues.createdAt))
-    .then((rows) => rows);
-  const chainIssueIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId, ...unblocks.map((u) => u.id)]);
+  const recoveryIssueIds = uniqueIds([input.sourceIssueId, input.qaGateIssueId]);
+  if (recoveryIssueIds.length === 0) return { kind: "oversight_may_act", reason: "no_recovery_chain" };
 
   const liveHeartbeat = await db
     .select({ id: heartbeatRuns.id })
@@ -76,7 +62,7 @@ export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipI
     .where(and(
       eq(heartbeatRuns.companyId, input.companyId),
       inArray(heartbeatRuns.status, [...RECOVERY_HEARTBEAT_STATUSES]),
-      inArray(heartbeatRuns.issueId, chainIssueIds),
+      inArray(heartbeatRuns.issueId, recoveryIssueIds),
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -88,7 +74,7 @@ export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipI
       eq(agentWakeupRequests.companyId, input.companyId),
       inArray(agentWakeupRequests.status, [...RECOVERY_WAKEUP_STATUSES]),
       inArray(agentWakeupRequests.reason, [...RECOVERY_WAKEUP_REASONS]),
-      wakeupChainScope(chainIssueIds),
+      wakeupChainScope(recoveryIssueIds),
       ...(input.excludeWakeupRequestId ? [sql`${agentWakeupRequests.id} <> ${input.excludeWakeupRequestId}`] : []),
     ))
     .limit(1)
