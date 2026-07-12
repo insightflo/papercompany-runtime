@@ -99,4 +99,26 @@ describe("authorizeProducerRework", () => {
     });
     expect(result).toEqual({ authorized: true, reason: "explicit_rework_target", reworkTargetRef: "RES-2001" });
   });
+
+  it("fresh request_changes verdict authorizes rework even when a guardrail failure code is present", () => {
+    const verdicts = new Map([["qa-1", { verdict: "request_changes", observedAt: freshVerdictAt }]]);
+    const result = authorizeProducerRework({
+      ownerReworkRef: null,
+      failureReasonCode: "step_input_manifest_guardrail",
+      qaIssueId: "qa-1",
+      validationVerdictsByIssueId: verdicts,
+      producerCompletedAt,
+    });
+    expect(result.authorized).toBe(true);
+    expect(result.reason).toBe("fresh_request_changes_verdict");
+  });
+
+  it("guardrail without a fresh official request_changes is unauthorized (QA self-recovery)", () => {
+    const result = authorizeProducerRework({
+      ownerReworkRef: null,
+      failureReasonCode: "step_input_manifest_guardrail",
+      producerCompletedAt,
+    });
+    expect(result).toEqual({ authorized: false, reason: "step_input_manifest_guardrail" });
+  });
 });

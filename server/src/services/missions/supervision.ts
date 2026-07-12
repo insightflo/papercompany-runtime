@@ -3,7 +3,7 @@
 // [파일 목적] mission owner supervision(감독/회복) 본체. runMainExecutorSupervision(1100+줄) +
 //   runActiveMissionOwnerSupervision. missions.ts 클로저 분해(P3).
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
-import { agentWakeupRequests, heartbeatRuns, issueComments, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -25,14 +25,16 @@ import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } fro
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
-import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
+import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { buildNativeToolStepRecoveryResultAppliedMarker, hasNativeToolStepRecoveryResultAppliedMarker, resolveNativeToolStepRecoveryResult } from "./tool-step-recovery-result.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
-import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue } from "./mission-supervision-context.js";
+import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue, type MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
 import { qualityService } from "../quality.js";
 import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDecisionSubmissionStatus } from "./mission-plan-decision-ledger.js";
 import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
+import { resolveRecoveryOwnership, isQaRecoveryLive, isQaRecoveryStalled } from "./recovery-ownership-guard.js";
+import { authorizeProducerRework } from "./producer-rework-authorization.js";
 
 type ToolStepFailureEvidenceRow = {
   readonly startedAt: Date | null;
@@ -84,6 +86,80 @@ function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): stri
     case "stale_source_issue_wakeup":
       return `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`;
   }
+}
+
+// [P3] authorizeProducerRework 용 QA gate verdict 맵 로드. issue.originId(QA gate)의 최신 verdict.
+async function loadQaGateVerdictMap(
+  db: Db,
+  companyId: string,
+  qaGateIssueId: string | null,
+): Promise<Map<string, { verdict: string | null; observedAt: Date | null }>> {
+  const map = new Map<string, { verdict: string | null; observedAt: Date | null }>();
+  if (!qaGateIssueId) return map;
+  const rows = await db
+    .select({ verdict: workflowTransitionEvents.verdict, observedAt: workflowTransitionEvents.createdAt })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.issueId, qaGateIssueId),
+      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+    ))
+    .orderBy(desc(workflowTransitionEvents.createdAt))
+    .limit(5);
+  if (rows.length > 0) {
+    map.set(qaGateIssueId, { verdict: rows[0].verdict, observedAt: rows[0].observedAt });
+  }
+  return map;
+}
+
+// [P3] originId 가 실제 workflow QA gate step 이면 그 id, 아니면 null. QA chain 오인 방지(codex 정정 1).
+function resolveQaGateIssueId(input: {
+  originId: string | null;
+  missionIssueById: Map<string, MissionSupervisionIssue>;
+  stepRowsByIssueId: Map<string, MissionSupervisionWorkflowStepRow[]>;
+}): string | null {
+  if (!input.originId) return null;
+  const originIssue = input.missionIssueById.get(input.originId);
+  if (!originIssue || originIssue.originKind !== "workflow_execution") return null;
+  const stepRows = input.stepRowsByIssueId.get(input.originId) ?? [];
+  const stepRow = stepRows[0];
+  if (!stepRow) return null;
+  const stepId = stepRow.stepRun.stepId ?? "";
+  const steps = stepRow.definition.stepsJson as DagStepLike[] | null;
+  const step = Array.isArray(steps) ? steps.find((s) => (s as { id?: string }).id === stepId) : null;
+  // supervision-helpers 의 isQaLikeStep 사용(QA 이름/title/한국어 검수/validate/audit/qaType 포괄, codex 보완 1).
+  if (step && isQaLikeStep(step as Parameters<typeof isQaLikeStep>[0])) return input.originId;
+  return null;
+}
+
+// [P3] source 의 최신 heartbeat errorCode(guardrail 판별용).
+async function loadLatestFailureReasonCode(db: Db, companyId: string, issueId: string): Promise<string | null> {
+  const row = await db.select({ errorCode: heartbeatRuns.errorCode })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.issueId, issueId),
+      inArray(heartbeatRuns.status, ["failed", "timed_out"]),
+    ))
+    .orderBy(desc(heartbeatRuns.createdAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return row?.errorCode ?? null;
+}
+
+// [P3] source 의 active workProduct updatedAt(current-generation 기준, codex 정정 4).
+async function loadActiveWorkProductUpdatedAt(db: Db, companyId: string, issueId: string): Promise<Date | null> {
+  const row = await db.select({ updatedAt: issueWorkProducts.updatedAt })
+    .from(issueWorkProducts)
+    .where(and(
+      eq(issueWorkProducts.companyId, companyId),
+      eq(issueWorkProducts.issueId, issueId),
+      eq(issueWorkProducts.status, "active"),
+    ))
+    .orderBy(desc(issueWorkProducts.updatedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return row?.updatedAt ?? null;
 }
 
 export function createSupervision({ db, deps, ownerActions }: {
@@ -489,7 +565,18 @@ export function createSupervision({ db, deps, ownerActions }: {
           let wakeCommentId: string | undefined;
           const alreadyDispatched = hasStaleSourceIssueWakeupDispatchedMarker(comments, markerInput);
           const hasSourceDiagnosis = hasDiagnosisSignal(...comments);
-          if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
+          // [P3 QA recovery ownership gate] 해당 source 의 QA recovery chain 이 live/stalled 면
+          //   stale-source wakeup 금지(QA 가 소유). chain 식별 안 되면 기존 wakeup 진행(codex 계약 1/2).
+          const staleQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+          const staleOwnership = staleQaGateId
+            ? await resolveRecoveryOwnership(db, { companyId: mission.companyId, missionId: mission.id, sourceIssueId: issue.id, qaGateIssueId: staleQaGateId })
+            : ({ kind: "oversight_may_act", reason: "no_recovery_chain" } as const);
+          const staleQaOwned = isQaRecoveryLive(staleOwnership) || isQaRecoveryStalled(staleOwnership);
+          if (staleQaOwned) {
+            const detail = "signal" in staleOwnership ? `signal=${staleOwnership.signal}` : `reason=${staleOwnership.reason}`;
+            findings.push(`stale_source_qa_recovery_owned: ${label} ownership=${staleOwnership.kind} ${detail} — stale-source wakeup deferred to QA recovery owner`);
+          }
+          if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis && !staleQaOwned) {
             findings.push(`stale_source_wakeup_requires_diagnosis: ${label} terminal heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}; diagnose root cause before choosing same-issue wakeup or recovery issue`);
             wakeupDispatchStatus = "not_requested";
           } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched) {
@@ -855,6 +942,26 @@ export function createSupervision({ db, deps, ownerActions }: {
                 safeToAutoApply: false,
               });
               if (input.applyOwnerDecisionActions) {
+                // [P3 QA recovery ownership gate] QA recovery chain 이 live/stalled 면 producer reopen·
+                //   mission_owner_retry_source_issue wakeup·source 상태변경 전부 금지(req 1/2, codex 계약 2).
+                //   stalled(QA recovery deadlock)도 producer 재시도 ❌ — 일반 owner-action/replan 경로로 넘김.
+                //   oversight_may_act(chain 없음/terminal+verdict)만 기존 retry 처리 진행.
+                if (issue.originId) {
+                  const qaGateIssueId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+                  if (qaGateIssueId) {
+                    const ownership = await resolveRecoveryOwnership(db, {
+                      companyId: mission.companyId,
+                      missionId: mission.id,
+                      sourceIssueId: issue.originId,
+                      qaGateIssueId,
+                    });
+                    if (isQaRecoveryLive(ownership) || isQaRecoveryStalled(ownership)) {
+                      const detail = "signal" in ownership ? `signal=${ownership.signal}` : `reason=${ownership.reason}`;
+                      findings.push(`owner_action_qa_recovery_owned: ${label} decision=retry_source_issue source=${sourceLabel} ownership=${ownership.kind} ${detail} — observe-only, producer reopen/wakeup/state-change forbidden`);
+                      break;
+                    }
+                  }
+                }
                 // [QA-gate rework] retry 타겟 = 수정 지시를 받을 upstream 생산자(synthesis 등).
                 // 과거엔 issue.originId(QA 게이트)를 써서 QA 본인을 재wake 하는 self-loop 가 원인이었다.
                 // B: 사장 결정의 Rework target(또는 Next action "revise RES-xxxx") → identifier 로 이슈 매칭.
@@ -1155,8 +1262,31 @@ export function createSupervision({ db, deps, ownerActions }: {
                   break;
                 }
                 let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchOwnerDecisionWakeups ? "skipped_no_assignee" : "not_requested";
-                // producer-rework 생산자는 done(terminal)일 수 있으므로 재오픈 대상에 done 포함 + completedAt clear.
-                const reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
+                // [P3 producer rework authorization] upstream producer rework(isProducerRework ∧ source≠origin)
+                //   만 authorize 적용. 일반 source self-retry(sourceCandidate===origin)는 기존 reopen 계약 유지(codex 정정 2).
+                let reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
+                if (isProducerRework && sourceCandidate.id !== issue.originId) {
+                  // 명시 reworkTarget 또는 current-gen REQUEST_CHANGES 만 producer reopen 허용(req 3, codex 계약 3).
+                  // DAG-guess/guardrail/stale/unverified = deny+replan.
+                  const authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+                  const validationVerdictsByIssueId = await loadQaGateVerdictMap(db, mission.companyId, authQaGateId);
+                  const failureReasonCode = await loadLatestFailureReasonCode(db, mission.companyId, sourceCandidate.id);
+                  const artifactUpdatedAt = await loadActiveWorkProductUpdatedAt(db, mission.companyId, sourceCandidate.id);
+                  const reworkAuth = authorizeProducerRework({
+                    ownerReworkRef,
+                    failureReasonCode,
+                    qaIssueId: authQaGateId,
+                    validationVerdictsByIssueId,
+                    producerCompletedAt: artifactUpdatedAt ?? sourceCandidate.completedAt,
+                  });
+                  if (!reworkAuth.authorized) {
+                    findings.push(`producer_rework_unauthorized: ${label} source=${sourceCandidateLabel} reason=${reworkAuth.reason} — request_replan instead of producer reopen`);
+                    addRecommendation({ type: "request_replan", missionId: mission.id, issueId: sourceCandidate.id, reason: `producer rework unauthorized (${reworkAuth.reason}); no DAG-guess/guardrail/stale reopen`, safeToAutoApply: false });
+                    break;
+                  }
+                  const allowDoneReopen = reworkAuth.reason === "explicit_rework_target" || reworkAuth.reason === "fresh_request_changes_verdict";
+                  reopenStatuses = allowDoneReopen ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
+                }
                 await db
                   .update(issues)
                   .set({ status: "todo", updatedAt: now, ...(isProducerRework ? { completedAt: null } : {}) })
