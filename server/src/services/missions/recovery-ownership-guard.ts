@@ -15,8 +15,9 @@
 
 import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, heartbeatRuns, issues, workflowTransitionEvents } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
+import { isQaLikeStep } from "./supervision-helpers.js";
 
 export const RECOVERY_WAKEUP_STATUSES = ["queued", "claimed"] as const;
 export const RECOVERY_HEARTBEAT_STATUSES = ["queued", "running"] as const;
@@ -231,9 +232,26 @@ function readPayloadSourceIssueId(payload: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+// issue 가 workflow QA gate step 인지(step definition 기반 isQaLikeStep) 확인.
+async function isIssueQaGateStep(db: Db, companyId: string, issueId: string): Promise<boolean> {
+  const row = await db
+    .select({ stepId: workflowStepRuns.stepId, stepsJson: workflowDefinitions.stepsJson })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+    .where(and(eq(workflowRuns.companyId, companyId), eq(workflowStepRuns.issueId, issueId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!row) return false;
+  const steps = row.stepsJson as Parameters<typeof isQaLikeStep>[0][] | null;
+  const step = Array.isArray(steps) ? steps.find((s) => (s as { id?: string }).id === (row.stepId ?? "")) : null;
+  return Boolean(step && isQaLikeStep(step));
+}
+
 // promote 시 호출. mission_owner_retry_source_issue(twin) wakeup 이고 source 의 QA recovery 가
 // live/stalled 면 noOp(guard 이전 큐 stale wakeup / race 회수). 다른 reason 는 그대로 진행.
-// producer 대상 wakeup 도 payload.ownerActionIssueId → owner action origin(QA gate) chain 확인(codex 계약).
+// ownerActionIssueId → owner action origin 이 실제 QA step(isQaLikeStep)일 때만 guard 적용 —
+// 일반 owner retry 는 noOp=false 로 오인 방지(codex P4 blocker).
 export async function shouldNoOpOversightWakeup(
   db: Db,
   ctx: {
@@ -242,11 +260,10 @@ export async function shouldNoOpOversightWakeup(
     request: { id: string; reason: string | null; payload?: unknown };
     promotedIssue: { id: string; status: string };
   },
-): Promise<{ noOp: true; reason: string } | { noOp: false }> {
+): Promise<{ noOp: true; reason: string; ownerActionIssueId?: string; qaSignal: string } | { noOp: false }> {
   if (!ctx.request.reason || !OVERSIGHT_RETRY_REASONS.has(ctx.request.reason)) {
     return { noOp: false };
   }
-  // payload.ownerActionIssueId 따라 owner action issue 의 originId(origin QA gate) 확인.
   const ownerActionIssueId = readPayloadField(ctx.request.payload, "ownerActionIssueId");
   let sourceIssueId = readPayloadSourceIssueId(ctx.request.payload) ?? ctx.promotedIssue.id;
   let qaGateIssueId = sourceIssueId;
@@ -258,6 +275,9 @@ export async function shouldNoOpOversightWakeup(
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (ownerAction?.originId) {
+      // origin 이 실제 workflow QA step 인지 확인 — 아니면 guard 미적용(일반 owner retry).
+      const originIsQaGate = await isIssueQaGateStep(db, ctx.companyId, ownerAction.originId);
+      if (!originIsQaGate) return { noOp: false };
       sourceIssueId = ownerAction.originId;
       qaGateIssueId = ownerAction.originId;
     }
@@ -269,10 +289,10 @@ export async function shouldNoOpOversightWakeup(
     qaGateIssueId,
   });
   if (isQaRecoveryLive(ownership)) {
-    return { noOp: true, reason: `qa_recovery_live signal=${ownership.signal}` };
+    return { noOp: true, reason: `qa_recovery_live signal=${ownership.signal}`, ownerActionIssueId: ownerActionIssueId ?? undefined, qaSignal: ownership.signal };
   }
   if (isQaRecoveryStalled(ownership)) {
-    return { noOp: true, reason: `qa_recovery_stalled reason=${ownership.reason}` };
+    return { noOp: true, reason: `qa_recovery_stalled reason=${ownership.reason}`, ownerActionIssueId: ownerActionIssueId ?? undefined, qaSignal: ownership.reason };
   }
   return { noOp: false };
 }

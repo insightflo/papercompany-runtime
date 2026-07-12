@@ -5354,10 +5354,29 @@ export function heartbeatService(db: Db) {
           promotedIssue: { id: promotedIssue.id, status: promotedIssue.status },
         });
         if (oversightNoOp.noOp) {
+          // 의도적 supersede → status=failed ❌(stale/deadlock logic 이 재실패로 해석 위험).
+          // terminal non-failure(completed) + 구조화 queue_oversight_noop transition event(codex P4 blocker).
           await tx
             .update(agentWakeupRequests)
-            .set({ status: "failed", finishedAt: new Date(), error: `Oversight wakeup no-op: ${oversightNoOp.reason}`, updatedAt: new Date() })
+            .set({ status: "completed", finishedAt: new Date(), error: null, updatedAt: new Date() })
             .where(eq(agentWakeupRequests.id, request.id));
+          await tx.insert(workflowTransitionEvents).values({
+            companyId: agent.companyId,
+            missionId: promotedIssue.missionId,
+            issueId: promotedIssue.id,
+            wakeupRequestId: request.id,
+            eventType: "queue_oversight_noop",
+            layer: "recovery_ownership",
+            reason: oversightNoOp.reason,
+            reasonCode: "qa_recovery_oversight_noop",
+            idempotencyKey: `queue-oversight-noop:${request.id}`,
+            payload: {
+              originalRequestId: request.id,
+              ownerActionIssueId: oversightNoOp.ownerActionIssueId,
+              qaSignal: oversightNoOp.qaSignal,
+              reason: oversightNoOp.reason,
+            },
+          }).onConflictDoNothing();
           return null;
         }
       }
