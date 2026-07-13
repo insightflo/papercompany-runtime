@@ -2096,6 +2096,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(422).json({ error: "This route is only for mission_main_executor_unblock issues" });
       return;
     }
+    if (
+      req.actor.type === "agent" &&
+      (issue.status !== "in_progress" || issue.assigneeAgentId !== req.actor.agentId)
+    ) {
+      res.status(403).json({ error: "Only the checked-out assignee may complete an owner-action handback" });
+      return;
+    }
     // [peer review] generic PATCH done과 동일한 checkout ownership 게이트(agent 통과/board 통과).
     if (!(await assertAgentRunCheckoutOwnership(req, res, issue))) return;
 

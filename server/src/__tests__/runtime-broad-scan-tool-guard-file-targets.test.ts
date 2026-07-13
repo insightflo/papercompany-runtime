@@ -2,13 +2,15 @@ import { describe, expect, it } from "vitest";
 import { evaluateRuntimeBroadScanToolGuard } from "../services/runtime-broad-scan-tool-guard.js";
 import { findRuntimeBroadScanCommand } from "../services/runtime-broad-scan-command-policy.js";
 
-// Simple explicit-file policy (fix/broad-scan-explicit-file-policy), applies to
-// rg and find ONLY (tree / ls -R / git ls-files keep their previous policy):
-// blocked ONLY when there is no explicit target (implicit cwd), the target is a
-// root-like token (. ./ .. ../ /), or the resolved target is EXACTLY the working
-// directory / repo root. Every other explicit target — declared or not, file or
-// sub-directory, relative or sub-absolute — is allowed. No allowlist / extension
-// / directory / parent-traversal / prefix-contains judgment. repo scope allows all.
+// Agreed root-target policy (fix/oversight-queue-guardrail), applies to rg and
+// find ONLY (grep -R / tree / ls -R / git ls-files keep their previous policy):
+// blocked ONLY when an explicit target is a root — ".", "..", "/", a cwd alias /
+// PWD substitution, or a target that resolves EXACTLY to the working directory /
+// repo root. rg ADDITIONALLY allows pathless search (no explicit target); find
+// with no target stays blocked (implicit execution root). Every other explicit
+// non-root target — declared or not, file or sub-directory, relative or
+// sub-absolute — is allowed. No allowlist / extension / missing-path judgment.
+// repo scope allows all.
 
 describe("evaluateRuntimeBroadScanToolGuard explicit-file policy", () => {
   const WORKDIR = "/srv/papercompany/projects/research-company";
@@ -53,34 +55,41 @@ describe("evaluateRuntimeBroadScanToolGuard explicit-file policy", () => {
     expect(result.blocked).toBe(false);
   });
 
-  it("blocks pathless rg (implicit current folder)", () => {
+  it("allows pathless rg (no explicit target is no longer a guardrail failure)", () => {
     const result = evaluateCodexCommand("rg -n TODO", {
       paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }),
     });
-    expect(result).toEqual(blockedRg());
+    expect(result.blocked).toBe(false);
   });
 
-  it("blocks pathless rg whose regex pattern contains slash text (not mistaken for an absolute target)", () => {
+  it("allows pathless rg whose regex pattern contains slash text (not mistaken for a root target)", () => {
     const result = evaluateCodexCommand("rg -n /api/v1", {
       paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }),
     });
-    expect(result).toEqual(blockedRg());
+    expect(result.blocked).toBe(false);
   });
 
-  it("treats rg pattern-file (-f/--file) as pattern-supplied: explicit target allowed, no target blocked", () => {
+  it("treats rg pattern-file (-f/--file) as pattern-supplied: pathless allowed, explicit non-root allowed", () => {
     // -f / --file consume the patterns file as the option value, so a later
     // positional is an explicit search target (allowed). With no positional the
-    // command is pathless and must be blocked.
+    // command is pathless and is also allowed under the root-target-only policy.
     const ctx = { paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }) };
     expect(evaluateCodexCommand("rg -f patterns.txt src", ctx).blocked).toBe(false);
     expect(evaluateCodexCommand("rg --file patterns.txt src", ctx).blocked).toBe(false);
     expect(evaluateCodexCommand("rg --file=patterns.txt src", ctx).blocked).toBe(false);
-    expect(evaluateCodexCommand("rg -f patterns.txt", ctx)).toEqual(blockedRg());
-    expect(evaluateCodexCommand("rg --file patterns.txt", ctx)).toEqual(blockedRg());
+    expect(evaluateCodexCommand("rg -f patterns.txt", ctx).blocked).toBe(false);
+    expect(evaluateCodexCommand("rg --file patterns.txt", ctx).blocked).toBe(false);
   });
 
   it("blocks rg targeting the current directory (.)", () => {
     const result = evaluateCodexCommand("rg -n TODO .", {
+      paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }),
+    });
+    expect(result).toEqual(blockedRg());
+  });
+
+  it("blocks rg targeting the parent directory (..)", () => {
+    const result = evaluateCodexCommand("rg -n TODO ..", {
       paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }),
     });
     expect(result).toEqual(blockedRg());
@@ -92,6 +101,22 @@ describe("evaluateRuntimeBroadScanToolGuard explicit-file policy", () => {
       { paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }) },
     );
     expect(result).toEqual(blockedRg());
+  });
+
+  it("blocks find -- . (option-terminator parser bypass must not reach pathless find)", () => {
+    // `find -- .` — the `--` ends options; `.` is an explicit root target. The parser must skip `--`
+    // and keep collecting, so the root target `.` is blocked (not treated as pathless find).
+    const blocked = evaluateCodexCommand("find -- . -type f", {
+      paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }),
+    });
+    expect(blocked).toEqual(expect.objectContaining({ blocked: true }));
+  });
+
+  it("allows find -- <non-root> after the option terminator", () => {
+    const allowed = evaluateCodexCommand("find -- src -type f", {
+      paperclipRuntimeSearchPaths: runtimeSearchPaths({ workingDirectory: WORKDIR }),
+    });
+    expect(allowed.blocked).toBe(false);
   });
 
   it("blocks when an absolute target equals the path.resolve-normalized working directory (trailing slash)", () => {
@@ -207,7 +232,7 @@ function runtimeSearchPaths(input: {
 function blockedRg() {
   return {
     blocked: true,
-    matchedCommand: "rg without an allowed file path",
-    reason: 'Step Input Manifest blocked runtime broad scan command: "rg without an allowed file path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+    matchedCommand: "rg with a root target",
+    reason: 'Step Input Manifest blocked runtime broad scan command: "rg with a root target". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
   };
 }

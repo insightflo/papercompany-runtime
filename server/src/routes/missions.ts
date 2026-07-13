@@ -21,7 +21,7 @@ import { Router } from "express";
 import { type Db } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { missionService } from "../services/missions.js";
-import { findExistingWorkflowResumeWake } from "../services/workflow-resume-wake.js";
+import { dispatchSourceIssueNativeResume } from "../services/workflow/source-issue-native-resume.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -97,43 +97,28 @@ export function missionRoutes(db: Db) {
       planQaIssueId,
       decisionHash,
     }),
-    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
-      const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, sourceIssue, targetAgentId }) => {
+      // [native authority] approved Oversight retry routes through the validated native DAG helper
+      //   (prove workflowRun/definition/step/stepRun → wakeExistingWorkflowStepIssue). The old
+      //   reason=mission_owner_retry_source_issue direct wake is removed: it bypassed official
+      //   workflow retry/iteration/QA authority. report-only when no native link is provable.
+      const outcome = await dispatchSourceIssueNativeResume(db, {
         companyId: mission.companyId,
-        agentId: targetAgentId,
         issueId: sourceIssue.id,
+        allowBlockedIssue: true,
+        agentId: targetAgentId,
       });
-      if (existingWorkflowWake) {
+      if (outcome.kind === "dispatched") {
+        return { status: "dispatched" as const, runId: outcome.workflowRunId };
+      }
+      if (outcome.kind === "already_in_flight") {
         return {
-          status: "workflow_already_dispatched",
-          workflowWakeupRequestId: existingWorkflowWake.id,
-          runId: existingWorkflowWake.runId,
+          status: "workflow_already_dispatched" as const,
+          workflowWakeupRequestId: outcome.workflowWakeupRequestId,
+          runId: outcome.runId,
         };
       }
-      return heartbeat.wakeup(targetAgentId, {
-        source: "assignment",
-        triggerDetail: "system",
-        reason: "mission_owner_retry_source_issue",
-        idempotencyKey,
-        payload: {
-          issueId: sourceIssue.id,
-          missionId: mission.id,
-          ownerActionIssueId: ownerActionIssue.id,
-          mutation: "mission_owner_retry_source_issue",
-          sourceIssueId: sourceIssue.id,
-          wakeCommentId,
-        },
-        requestedByActorType: "system",
-        requestedByActorId: "mission-owner-supervision",
-        contextSnapshot: {
-          issueId: sourceIssue.id,
-          missionId: mission.id,
-          source: "mission_owner_retry_source_issue",
-          ownerActionIssueId: ownerActionIssue.id,
-          sourceIssueId: sourceIssue.id,
-          wakeCommentId,
-        },
-      });
+      return { status: "not_requested" as const, runId: null };
     },
     onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, failedRun, idempotencyKey, wakeCommentId }) => {
       return heartbeat.wakeup(mission.ownerAgentId, {

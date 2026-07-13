@@ -5,7 +5,7 @@ import { buildStepInputManifest } from "../services/step-input-manifest.js";
 import { buildMissionSearchGuidance } from "../services/runtime-search-scopes.js";
 
 describe("mission search scopes", () => {
-  it("allows repo-wide rg and find only when repo scope is declared", () => {
+  it("allows repo-wide search when repo scope is declared, but explicit root targets stay blocked", () => {
     const context = {
       paperclipRuntimeSearchPaths: {
         version: 1,
@@ -21,10 +21,15 @@ describe("mission search scopes", () => {
       },
     };
 
+    // repo scope permits pathless search and repo-discovery commands:
     expect(evaluateCodexCommand("rg -n TODO", context).blocked).toBe(false);
-    expect(evaluateCodexCommand("rg -n TODO .", context).blocked).toBe(false);
-    expect(evaluateCodexCommand("find . -type f", context).blocked).toBe(false);
     expect(evaluateCodexCommand("git ls-files", context).blocked).toBe(false);
+    // pathless find is repo-scoped discovery (implicit root, but declared repo scope) → allowed.
+    expect(evaluateCodexCommand("find -type f -name '*.ts'", context).blocked).toBe(false);
+    // [handoff req 4] an EXPLICIT root target (.) is blocked even under repo scope —
+    //   repo scope must not bypass the root-target block.
+    expect(evaluateCodexCommand("rg -n TODO .", context).blocked).toBe(true);
+    expect(evaluateCodexCommand("find . -type f", context).blocked).toBe(true);
   });
 
   it("keeps document-style missions restricted to declared paths", () => {
@@ -47,7 +52,11 @@ describe("mission search scopes", () => {
     };
 
     expect(evaluateCodexCommand("rg -n TODO out/evidence.json", context).blocked).toBe(false);
-    expect(evaluateCodexCommand("rg -n TODO", context).blocked).toBe(true);
+    // pathless rg is allowed under the agreed root-target-only policy; only an
+    // explicit root target (. / workdir / ..) or a pathless `find` (implicit root)
+    // counts as a broad scan for document-style missions.
+    expect(evaluateCodexCommand("rg -n TODO", context).blocked).toBe(false);
+    expect(evaluateCodexCommand("rg -n TODO .", context).blocked).toBe(true);
     expect(evaluateCodexCommand("find . -type f", context).blocked).toBe(true);
   });
 

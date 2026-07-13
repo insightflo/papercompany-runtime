@@ -44,6 +44,7 @@ import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-ver
 import { recordHumanOperatorRequestEvent } from "./missions/human-operator-alert-events.js";
 import { resyncIssueExecutionCardAfterIssueUpdate } from "./issue-execution-cards/resync.js";
 import { persistTerminalIssueHandoff } from "./missions/issue-terminal-handoff.js";
+import { unblockIssueHasValidatedHandbackReport } from "./missions/owner-action-unblock-handback.js";
 import {
   assertWorkflowIssueWorkProductReadyForDone,
   completeWorkflowIssueStepRunsAfterDone,
@@ -197,6 +198,13 @@ async function assertCanCompleteOwnerActionWithHandback(db: Db, issue: typeof is
   if (!source) return; // source 회수/삭제 또는 다른 회사 → 강제 불가
   // evidence 1: source가 blocked에서 벗어남(재오픈/회복 = supervision retry 적용 효과).
   if (source.status !== "blocked") return;
+  if (await unblockIssueHasValidatedHandbackReport(db, {
+    companyId: issue.companyId,
+    unblockIssueId: issue.id,
+    expectedSourceIssueId: sourceIssueId,
+  })) {
+    return;
+  }
   // evidence 2: source 담당자(assignee) 향 wakeup이 allowed status로 dispatch됨.
   //   assignee 없는 source는 wakeup 대상이 없으므로 evidence 불가 → conflict.
   if (!source.assigneeAgentId) {
@@ -211,13 +219,15 @@ async function assertCanCompleteOwnerActionWithHandback(db: Db, issue: typeof is
       eq(agentWakeupRequests.issueId, sourceIssueId),
       eq(agentWakeupRequests.companyId, issue.companyId),
       eq(agentWakeupRequests.agentId, source.assigneeAgentId),
-      inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "coalesced"]),
-    ))
+      // "claimed" 포함: queue admission 이 claim 한 wakeup 도 live evidence 이다(Phase D
+      //   stopped 판정과 동일 live 집합).
+      inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]),
+  ))
     .limit(1);
   if (wake) return;
 
   throw conflict(
-    "Cannot complete this owner-action (mission_main_executor_unblock): the source issue is still blocked and no wakeup has been dispatched to it. Post a Mission owner decision on the source issue or dispatch a wakeup to it before completing; do not use the Workflow API on this unblock issue.",
+    "Cannot complete this owner-action (mission_main_executor_unblock): the source issue is still blocked, no live wakeup has been dispatched to it, and no structured Oversight handback report is present. Post a Mission owner decision on the source issue, or complete it via the owner-action handback route so a structured report/native workflow_resume is recorded; do not use the Workflow API on this unblock issue.",
   );
 }
 

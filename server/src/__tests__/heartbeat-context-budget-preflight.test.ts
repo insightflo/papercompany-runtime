@@ -1150,6 +1150,76 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
+  it("closes a checked-out mission_main_executor_unblock issue via the guarded handback route (not raw tx.done), preserving the owner-recovery happy path", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const unblockIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip GAZ315 Guard",
+      issuePrefix: "GZ",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Owner Agent",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { promptTemplate: "Work the checked out unblock issue." },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: agentId, title: "GAZ-315 guard mission", status: "active" });
+    await db.insert(issues).values({
+      id: sourceIssueId, companyId, missionId, identifier: "GZ-SRC", title: "blocked source",
+      status: "blocked", assigneeAgentId: agentId, originKind: "workflow_execution",
+    });
+    await db.insert(issues).values({
+      id: unblockIssueId, companyId, missionId, identifier: "GZ-UNB", title: "unblock action",
+      status: "in_progress", assigneeAgentId: agentId,
+      originKind: "mission_main_executor_unblock", originId: sourceIssueId,
+    });
+
+    executeSpy.mockImplementation(async ({ runId }) => {
+      await db.update(issues).set({ checkoutRunId: runId, executionRunId: runId }).where(eq(issues.id, unblockIssueId));
+      return successfulAdapterResult();
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      agentId,
+      "on_demand",
+      { taskKey: `issue:${unblockIssueId}`, issueId: unblockIssueId },
+      "manual",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+
+    // [happy path preserved] the unblock issue still reaches done after the owner run succeeds — but
+    //   now via the guarded handback route, not a raw tx.update(done).
+    await waitForIssueStatus(db, unblockIssueId, (issue) => issue.status === "done");
+
+    // [guard fired, not bypassed] a validated structured handback report must exist on the unblock
+    //   issue (sourceIssueId === originId) — proving closeout went through assertCanCompleteOwnerActionWithHandback.
+    const comments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, unblockIssueId));
+    expect(comments.some((c) =>
+      typeof c.body === "string" &&
+      c.body.startsWith("[owner-action-handback-report]") &&
+      c.body.includes(`sourceIssueId: ${sourceIssueId}`) &&
+      c.body.includes("evidence:"),
+    )).toBe(true);
+
+    // source status unchanged (no direct checkout/status mutation).
+    const [sourceAfter] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, sourceIssueId)).limit(1);
+    expect(sourceAfter?.status).toBe("blocked");
+  });
+
   it("blocks an audit issue when a successful checked-out run ends with REQUEST_CHANGES in Codex stdout", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

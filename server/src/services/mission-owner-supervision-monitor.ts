@@ -3,7 +3,7 @@ import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 
-const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MINUTES = 30;
 
 export interface MissionOwnerSupervisionMonitorOptions {
