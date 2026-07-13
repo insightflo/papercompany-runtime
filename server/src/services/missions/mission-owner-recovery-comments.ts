@@ -30,9 +30,19 @@ export function buildRetrySourceIssueWakeupResultComment(input: {
     targetAgentId: input.targetAgentId,
     idempotencyKey: input.idempotencyKey,
   };
-  return input.status === "workflow_already_dispatched"
-    ? buildRetrySourceIssueWakeupHandledByWorkflowComment(common)
-    : buildRetrySourceIssueWakeupDispatchedComment(common);
+  if (input.status === "workflow_already_dispatched") {
+    return buildRetrySourceIssueWakeupHandledByWorkflowComment(common);
+  }
+  if (input.status === "dispatched") {
+    return buildRetrySourceIssueWakeupDispatchedComment(common);
+  }
+  return [
+    "### Mission owner retry wakeup not queued",
+    `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
+    `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
+    `Queue result: ${input.status}`,
+    `Idempotency key: ${input.idempotencyKey}`,
+  ].join("\n");
 }
 
 export function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMissionOwnerDecision | null {
@@ -171,16 +181,11 @@ export function buildRetrySourceIssueComment(input: {
   requestChangesSummary?: string | null;
 }) {
   return [
-    "### Mission owner retry applied",
-    buildMissionOwnerDecisionAppliedMarker({
-      ownerActionIssueId: input.ownerActionIssueId,
-      sourceIssueId: input.sourceIssueId,
-      decision: "retry_source_issue",
-    }),
+    "### Mission owner retry requested",
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     "Decision: retry_source_issue",
-    "Action: explicit mission-owner retry action moved the source issue back to todo; wakeup dispatch, if requested, is recorded separately.",
+    "Action: record the recovery reason and request native workflow resume; the queue runner owns the source issue state transition.",
     `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
     input.requestChangesSummary
       ? [
@@ -225,6 +230,11 @@ export function buildRetrySourceIssueWakeupDispatchedComment(input: {
 }) {
   return [
     "### Mission owner retry wakeup dispatched",
+    buildMissionOwnerDecisionAppliedMarker({
+      ownerActionIssueId: input.ownerActionIssueId,
+      sourceIssueId: input.sourceIssueId,
+      decision: "retry_source_issue",
+    }),
     buildMissionOwnerDecisionWakeupDispatchedMarker({
       missionId: input.missionId,
       ownerActionIssueId: input.ownerActionIssueId,
@@ -250,6 +260,11 @@ export function buildRetrySourceIssueWakeupHandledByWorkflowComment(input: {
 }) {
   return [
     "### Mission owner retry wakeup handled by workflow",
+    buildMissionOwnerDecisionAppliedMarker({
+      ownerActionIssueId: input.ownerActionIssueId,
+      sourceIssueId: input.sourceIssueId,
+      decision: "retry_source_issue",
+    }),
     buildMissionOwnerDecisionWakeupDispatchedMarker({
       missionId: input.missionId,
       ownerActionIssueId: input.ownerActionIssueId,

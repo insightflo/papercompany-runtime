@@ -22,6 +22,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import { resumeWorkflowRun } from "./workflow-store.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts LIVE_WAKEUP_STATUSES 와 동일 집합.
 //   이슈가 이 상태의 wake 나 queued/running heartbeat 를 가지면 중복 dispatch 금지.
@@ -80,6 +81,8 @@ export async function dispatchSourceIssueNativeResume(
       id: workflowStepRuns.id,
       workflowRunId: workflowStepRuns.workflowRunId,
       stepId: workflowStepRuns.stepId,
+      status: workflowStepRuns.status,
+      completedAt: workflowStepRuns.completedAt,
       metadata: workflowStepRuns.metadata,
     })
     .from(workflowStepRuns)
@@ -90,13 +93,13 @@ export async function dispatchSourceIssueNativeResume(
     return { kind: "report_only", reason: "no_step_run", workflowRunId: null, workflowStepRunId: null, stepId: null };
   }
 
-  // 2. workflowRun — company scope 가드 + 반드시 running 이어야 native retry 가 의미 있다.
+  // 2. workflowRun — running 은 그대로 사용하고, failed 만 native retry 대상으로 되살린다.
   const [run] = await db
     .select()
     .from(workflowRuns)
     .where(and(eq(workflowRuns.id, stepRun.workflowRunId), eq(workflowRuns.companyId, input.companyId)))
     .limit(1);
-  if (!run || run.status !== "running") {
+  if (!run || (run.status !== "running" && run.status !== "failed")) {
     return {
       kind: "report_only",
       reason: "run_not_running",
@@ -140,7 +143,13 @@ export async function dispatchSourceIssueNativeResume(
   //   dispatch 금지. native OR generic wake(queued/claimed/deferred_issue_execution/coalesced) 또는
   //   queued/running heartbeat run 모두 커버한다(회사 스코프). 이슈 단위이므로 agentId 무관.
   const [liveWake] = await db
-    .select({ id: agentWakeupRequests.id, runId: agentWakeupRequests.runId })
+    .select({
+      id: agentWakeupRequests.id,
+      runId: agentWakeupRequests.runId,
+      requestKind: agentWakeupRequests.requestKind,
+      workflowRunId: agentWakeupRequests.workflowRunId,
+      workflowStepRunId: agentWakeupRequests.workflowStepRunId,
+    })
     .from(agentWakeupRequests)
     .where(and(
       eq(agentWakeupRequests.companyId, input.companyId),
@@ -150,7 +159,20 @@ export async function dispatchSourceIssueNativeResume(
     .orderBy(desc(agentWakeupRequests.requestedAt))
     .limit(1);
   if (liveWake) {
-    return { kind: "already_in_flight", workflowWakeupRequestId: liveWake.id, runId: liveWake.runId, liveSignal: "wake" };
+    if (
+      liveWake.requestKind === "workflow_resume" &&
+      liveWake.workflowRunId === run.id &&
+      liveWake.workflowStepRunId === stepRun.id
+    ) {
+      return { kind: "already_in_flight", workflowWakeupRequestId: liveWake.id, runId: liveWake.runId, liveSignal: "wake" };
+    }
+    return {
+      kind: "report_only",
+      reason: "wake_rejected",
+      workflowRunId: run.id,
+      workflowStepRunId: stepRun.id,
+      stepId: step.id,
+    };
   }
   const [liveHeartbeat] = await db
     .select({ id: heartbeatRuns.id })
@@ -162,22 +184,108 @@ export async function dispatchSourceIssueNativeResume(
     ))
     .limit(1);
   if (liveHeartbeat) {
-    return { kind: "already_in_flight", workflowWakeupRequestId: null, runId: null, liveSignal: "heartbeat" };
+    return {
+      kind: "report_only",
+      reason: "wake_rejected",
+      workflowRunId: run.id,
+      workflowStepRunId: stepRun.id,
+      stepId: step.id,
+    };
+  }
+
+  const existingNativeWakeIds = new Set(
+    (await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.issueId, input.issueId),
+        eq(agentWakeupRequests.workflowRunId, run.id),
+        eq(agentWakeupRequests.workflowStepRunId, stepRun.id),
+        eq(agentWakeupRequests.requestKind, "workflow_resume"),
+      )))
+      .map((row) => row.id),
+  );
+
+  let wakeRun = run;
+  const revivedFailedRun = run.status === "failed";
+  const restoreFailedState = async () => {
+    if (!revivedFailedRun) return;
+    await db.update(workflowRuns).set({ status: "failed", startedAt: run.startedAt, completedAt: run.completedAt }).where(eq(workflowRuns.id, run.id));
+    await db.update(workflowStepRuns).set({ status: "failed", completedAt: stepRun.completedAt }).where(eq(workflowStepRuns.id, stepRun.id));
+  };
+  if (revivedFailedRun) {
+    if (stepRun.status !== "failed") {
+      return {
+        kind: "report_only",
+        reason: "wake_rejected",
+        workflowRunId: run.id,
+        workflowStepRunId: stepRun.id,
+        stepId: step.id,
+      };
+    }
+    const resumedRun = await resumeWorkflowRun(db, run.id, input.companyId);
+    const [resumedStep] = await db
+      .update(workflowStepRuns)
+      .set({ status: "running", completedAt: null })
+      .where(and(eq(workflowStepRuns.id, stepRun.id), eq(workflowStepRuns.status, "failed")))
+      .returning({ id: workflowStepRuns.id });
+    const [rawResumedRun] = await db
+      .select()
+      .from(workflowRuns)
+      .where(and(eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, input.companyId)))
+      .limit(1);
+    if (!resumedRun || !resumedStep || !rawResumedRun) {
+      await restoreFailedState();
+      return {
+        kind: "report_only",
+        reason: "wake_rejected",
+        workflowRunId: run.id,
+        workflowStepRunId: stepRun.id,
+        stepId: step.id,
+      };
+    }
+    wakeRun = rawResumedRun;
   }
 
   // 6. 검증 완료 — wakeExistingWorkflowStepIssue 가 workflow_step_runnable/workflow_resume 계약으로
   //   native wake 를 소유한다. 이 호출만이 공식 retry/iteration/QA verdict 를 보존한다.
-  const queued = await wakeExistingWorkflowStepIssue({
-    db,
-    run,
-    definition,
-    step,
-    stepRunId: stepRun.id,
-    stepRunMetadata: stepRun.metadata,
-    issueId: input.issueId,
-    allowBlockedIssue: input.allowBlockedIssue ?? true,
-  });
-  if (!queued) {
+  let queued = false;
+  try {
+    queued = await wakeExistingWorkflowStepIssue({
+      db,
+      run: wakeRun,
+      definition,
+      step,
+      stepRunId: stepRun.id,
+      stepRunMetadata: stepRun.metadata,
+      issueId: input.issueId,
+      allowBlockedIssue: input.allowBlockedIssue ?? true,
+    });
+  } catch {
+    await restoreFailedState();
+    return {
+      kind: "report_only",
+      reason: "wake_rejected",
+      workflowRunId: run.id,
+      workflowStepRunId: stepRun.id,
+      stepId: step.id,
+    };
+  }
+  const acceptedQueueStatuses = new Set(["queued", "claimed", "deferred_issue_execution", "coalesced", "completed"]);
+  const newNativeWakes = (await db
+    .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
+    .from(agentWakeupRequests)
+    .where(and(
+      eq(agentWakeupRequests.companyId, input.companyId),
+      eq(agentWakeupRequests.issueId, input.issueId),
+      eq(agentWakeupRequests.workflowRunId, run.id),
+      eq(agentWakeupRequests.workflowStepRunId, stepRun.id),
+      eq(agentWakeupRequests.requestKind, "workflow_resume"),
+    )))
+    .filter((row) => !existingNativeWakeIds.has(row.id) && acceptedQueueStatuses.has(row.status));
+  if (!queued || newNativeWakes.length !== 1) {
+    await restoreFailedState();
     return {
       kind: "report_only",
       reason: "wake_rejected",

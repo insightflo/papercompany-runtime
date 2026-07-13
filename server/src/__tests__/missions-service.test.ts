@@ -1166,14 +1166,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     const applyResult = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 30 * 60 * 1000), applyOwnerDecisionActions: true });
     expect(applyResult.appliedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "owner_decision_retry_source_issue", missionId, ownerActionIssueId: unblockIssue.id, sourceIssueId: blockedIssue.id, resultStatus: "todo" }),
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", missionId, ownerActionIssueId: unblockIssue.id, sourceIssueId: blockedIssue.id, resultStatus: "blocked" }),
     ]));
-    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: workerAgentId }));
+    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: workerAgentId }));
     await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, blockedIssue.id))).resolves.toHaveLength(0);
     expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
     const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id));
-    expect(sourceComments.map((comment) => comment.body).join("\n")).toContain("mission-owner-decision-applied");
-    expect(sourceComments.map((comment) => comment.body).join("\n")).toContain("explicit mission-owner retry action");
+    expect(sourceComments.map((comment) => comment.body).join("\n")).not.toContain("mission-owner-decision-applied");
+    expect(sourceComments.map((comment) => comment.body).join("\n")).toContain("request native workflow resume");
     expect(sourceComments.map((comment) => comment.body).join("\n")).not.toContain("mission-owner-decision-wakeup-dispatched");
   });
 
@@ -1339,7 +1339,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(result.appliedActions).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: blockedIssue.id, wakeupDispatchStatus: "dispatched", idempotencyKey }),
     ]));
-    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: workerAgentId }));
+    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: workerAgentId }));
     const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id));
     const sourceBody = sourceComments.map((comment) => comment.body).join("\n");
     expect(sourceBody).toContain("mission-owner-decision-applied");
@@ -2746,11 +2746,11 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
     expect(result.findings.join("\n")).toContain("source issue has no assignee; wakeup dispatch skipped");
     expect(result.appliedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: blockedIssue.id, resultStatus: "todo", wakeupDispatchStatus: "skipped_no_assignee" }),
+      expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: blockedIssue.id, resultStatus: "blocked", wakeupDispatchStatus: "skipped_no_assignee" }),
     ]));
-    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "todo", assigneeAgentId: null }));
+    await expect(db.select().from(issues).where(eq(issues.id, blockedIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: null }));
     const sourceBody = await db.select().from(issueComments).where(eq(issueComments.issueId, blockedIssue.id)).then((rows) => rows.map((row) => row.body).join("\n"));
-    expect(sourceBody).toContain("mission-owner-decision-applied");
+    expect(sourceBody).not.toContain("mission-owner-decision-applied");
     expect(sourceBody).not.toContain("mission-owner-decision-wakeup-dispatched");
   });
 
@@ -2862,7 +2862,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(JSON.stringify(result.ownerActionExplanations)).not.toContain("UNRELATED_OWNER_COMMENT_NOT_FOR_STATUS_SUMMARY");
   });
 
-  it("explains applied retry decisions as no-wakeup retries", async () => {
+  it("does not explain a retry as applied when no wakeup was queued", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
@@ -2881,10 +2881,10 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true });
     expect(result.ownerActionExplanations).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        status: "retry_applied_no_wakeup",
-        sourceIssue: expect.objectContaining({ id: blockedIssue.id, status: "todo", assigneeAgentId: workerAgentId }),
-        retryApplied: true,
-        explanation: expect.stringContaining("no heartbeat wakeup was created"),
+        status: "decision_recorded_read_only",
+        sourceIssue: expect.objectContaining({ id: blockedIssue.id, status: "blocked", assigneeAgentId: workerAgentId }),
+        retryApplied: false,
+        explanation: expect.stringContaining("recorded but not applied"),
       }),
     ]));
     await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, blockedIssue.id))).resolves.toHaveLength(0);

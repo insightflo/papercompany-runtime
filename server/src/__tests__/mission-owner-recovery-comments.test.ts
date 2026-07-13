@@ -3,6 +3,7 @@ import {
   buildMissionOwnerUnblockDescription,
   buildRetrySourceIssueComment,
   buildRetrySourceIssueWakeupDispatchedComment,
+  buildRetrySourceIssueWakeupResultComment,
   buildStaleSourceIssueWakeupDispatchedComment,
   buildValidatorRetryEvidenceComment,
   extractLatestMissionOwnerDecision,
@@ -30,9 +31,10 @@ describe("mission owner recovery comments", () => {
       sourceLabel: "SRC-1",
       decisionReason: "owner approved retry",
     });
-    expect(retryComment).toContain("mission-owner-decision-applied");
+    expect(retryComment).not.toContain("mission-owner-decision-applied");
     expect(retryComment).toContain("Decision: retry_source_issue");
     expect(retryComment).toContain("owner approved retry");
+    expect(retryComment).not.toContain("moved the source issue back to todo");
   });
 
   it("formats wakeup and validator recovery comments", () => {
@@ -46,6 +48,7 @@ describe("mission owner recovery comments", () => {
       idempotencyKey: "key-1",
     });
     expect(wakeup).toContain("mission-owner-decision-wakeup-dispatched");
+    expect(wakeup).toContain("mission-owner-decision-applied");
     expect(wakeup).toContain("Target agent: agent-1");
     expect(wakeup).toContain("Idempotency key: key-1");
 
@@ -70,6 +73,24 @@ describe("mission owner recovery comments", () => {
     expect(validatorEvidence).toContain("- artifact repaired");
     expect(validatorEvidence).toContain("- tests passed");
   });
+
+  it.each(["not_requested", "failed", "skipped_no_assignee"] as const)(
+    "does not render %s as applied or dispatched",
+    (status) => {
+      const result = buildRetrySourceIssueWakeupResultComment({
+        status,
+        missionId: "mission-1",
+        ownerActionIssueId: "owner-1",
+        ownerActionLabel: "OWN-1",
+        sourceIssueId: "source-1",
+        sourceLabel: "SRC-1",
+        targetAgentId: "agent-1",
+        idempotencyKey: "key-1",
+      });
+      expect(result).not.toContain("mission-owner-decision-applied");
+      expect(result).not.toContain("mission-owner-decision-wakeup-dispatched");
+    },
+  );
 
   it("formats unblock descriptions and conservative status summaries", () => {
     const description = buildMissionOwnerUnblockDescription(

@@ -1380,7 +1380,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                       missionId: mission.id,
                       ownerActionIssueId: issue.id,
                       sourceIssueId: sourceCandidate.id,
-                      resultStatus: "todo",
+                      resultStatus: sourceCandidate.status,
                       wakeupDispatchStatus,
                       idempotencyKey,
                     });
@@ -1415,10 +1415,12 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const allowDoneReopen = reworkAuth.reason === "explicit_rework_target" || reworkAuth.reason === "fresh_request_changes_verdict";
                   reopenStatuses = allowDoneReopen ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
                 }
-                await db
-                  .update(issues)
-                  .set({ status: "todo", updatedAt: now, ...(isProducerRework ? { completedAt: null } : {}) })
-                  .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
+                if (isProducerRework) {
+                  await db
+                    .update(issues)
+                    .set({ status: "todo", updatedAt: now, completedAt: null })
+                    .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
+                }
                 const retryComment = await issueService(db).addComment(
                   sourceCandidate.id,
                   buildRetrySourceIssueComment({
@@ -1478,7 +1480,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   missionId: mission.id,
                   ownerActionIssueId: issue.id,
                   sourceIssueId: sourceCandidate.id,
-                  resultStatus: "todo",
+                  resultStatus: isProducerRework ? "todo" : sourceCandidate.status,
                   wakeupDispatchStatus,
                   idempotencyKey,
                 });

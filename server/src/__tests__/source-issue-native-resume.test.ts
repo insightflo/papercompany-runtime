@@ -51,7 +51,11 @@ describeEmbeddedPostgres("dispatchSourceIssueNativeResume (validated native DAG 
   });
 
   // source(running) + definition + step + stepRun(issueId=source) fixture. stepId/definition steps 일치.
-  async function seedLinkedSource({ runStatus = "running", stepId = "src" }: { runStatus?: string; stepId?: string } = {}) {
+  async function seedLinkedSource({
+    runStatus = "running",
+    stepStatus = "running",
+    stepId = "src",
+  }: { runStatus?: string; stepStatus?: string; stepId?: string } = {}) {
     const workflowId = randomUUID();
     const workflowRunId = randomUUID();
     const stepRunId = randomUUID();
@@ -67,7 +71,13 @@ describeEmbeddedPostgres("dispatchSourceIssueNativeResume (validated native DAG 
       .values({ companyId, title: "linked source", status: "blocked", originKind: "workflow_execution", assigneeAgentId: agentId })
       .returning({ id: issues.id });
     await db.insert(workflowStepRuns).values({
-      id: stepRunId, workflowRunId, stepId, issueId: source.id, status: "running", startedAt: new Date(),
+      id: stepRunId,
+      workflowRunId,
+      stepId,
+      issueId: source.id,
+      status: stepStatus,
+      startedAt: new Date(),
+      completedAt: stepStatus === "failed" ? new Date() : null,
     });
     return { source, workflowRunId, stepRunId, stepId, workflowId };
   }
@@ -130,12 +140,44 @@ describeEmbeddedPostgres("dispatchSourceIssueNativeResume (validated native DAG 
     expect(wakes).toHaveLength(0);
   });
 
+  it("revives a failed run and failed step, then queues exactly one native workflow_resume", async () => {
+    const { source, workflowRunId, stepRunId, stepId, workflowId } = await seedLinkedSource({
+      runStatus: "failed",
+      stepStatus: "failed",
+    });
+
+    const outcome = await dispatchSourceIssueNativeResume(db, {
+      companyId, issueId: source.id, allowBlockedIssue: true, agentId,
+    });
+
+    expect(outcome).toEqual({ kind: "dispatched", workflowRunId, workflowDefinitionId: workflowId, stepId, workflowStepRunId: stepRunId });
+    await expect(db.select().from(workflowRuns).where(eq(workflowRuns.id, workflowRunId)).then((rows) => rows[0])).resolves.toEqual(
+      expect.objectContaining({ status: "running", completedAt: null }),
+    );
+    await expect(db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)).then((rows) => rows[0])).resolves.toEqual(
+      expect.objectContaining({ status: "running", completedAt: null }),
+    );
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.issueId, source.id),
+      eq(agentWakeupRequests.workflowRunId, workflowRunId),
+      eq(agentWakeupRequests.workflowStepRunId, stepRunId),
+      eq(agentWakeupRequests.requestKind, "workflow_resume"),
+    ));
+    expect(wakes).toHaveLength(1);
+    const issueAfterQueue = await db.select().from(issues).where(eq(issues.id, source.id)).then((rows) => rows[0]);
+    expect(issueAfterQueue?.status).not.toBe("todo");
+    expect(["blocked", "in_progress"]).toContain(issueAfterQueue?.status);
+  });
+
   it("returns already_in_flight when a native workflow_resume wake already covers the source", async () => {
-    const { source } = await seedLinkedSource();
+    const { source, workflowRunId, stepRunId } = await seedLinkedSource();
     // existing queued workflow_resume wake (runId null → counts as live per findExistingWorkflowResumeWake).
     const [existing] = await db.insert(agentWakeupRequests).values({
       companyId, agentId, issueId: source.id, source: "automation", status: "queued", requestedAt: new Date(),
       reason: "workflow_step_runnable",
+      requestKind: "workflow_resume",
+      workflowRunId,
+      workflowStepRunId: stepRunId,
       payload: { issueId: source.id, mutation: "workflow_resume" },
     }).returning({ id: agentWakeupRequests.id });
 
