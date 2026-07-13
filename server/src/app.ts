@@ -73,6 +73,7 @@ import { createNonceCleanupJob } from "./services/srb/nonce-cleanup.js";
 import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
 import { createMissionOwnerSupervisionMonitor } from "./services/mission-owner-supervision-monitor.js";
 import { findExistingWorkflowResumeWake } from "./services/workflow-resume-wake.js";
+import { dispatchSourceIssueNativeResume } from "./services/workflow/source-issue-native-resume.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./services/missions/plan-qa-wakeup.js";
 import { createAlertRules, setAlertRules } from "./services/alert-rules.js";
 import { createChannelRegistry } from "./channel/index.js";
@@ -707,41 +708,31 @@ export async function createApp(
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, wakeCommentId }) => {
-      const existingWorkflowWake = await findExistingWorkflowResumeWake(db, {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, sourceIssue, targetAgentId }) => {
+      // [native authority] approved Oversight retry must route through the validated native DAG
+      //   helper (prove workflowRun/definition/persisted step/stepRun → wakeExistingWorkflowStepIssue),
+      //   NOT a direct special wake. The old reason=mission_owner_decision_retry_source_issue wake is
+      //   removed: it bypassed the official workflow retry/iteration/QA authority. If no native link is
+      //   provable (or wake is rejected), record/report-only and do NOT wake the source directly.
+      const outcome = await dispatchSourceIssueNativeResume(db, {
         companyId: mission.companyId,
-        agentId: targetAgentId,
         issueId: sourceIssue.id,
+        allowBlockedIssue: true,
+        agentId: targetAgentId,
       });
-      if (existingWorkflowWake) {
+      if (outcome.kind === "dispatched") {
+        return { status: "dispatched" as const, runId: outcome.workflowRunId };
+      }
+      if (outcome.kind === "already_in_flight") {
         return {
-          status: "workflow_already_dispatched",
-          workflowWakeupRequestId: existingWorkflowWake.id,
-          runId: existingWorkflowWake.runId,
+          status: "workflow_already_dispatched" as const,
+          workflowWakeupRequestId: outcome.workflowWakeupRequestId,
+          runId: outcome.runId,
         };
       }
-      return heartbeat.wakeup(targetAgentId, {
-        source: "assignment",
-        triggerDetail: "system",
-        reason: "mission_owner_decision_retry_source_issue",
-        idempotencyKey,
-        payload: {
-          issueId: sourceIssue.id,
-          missionId: mission.id,
-          mutation: "mission_owner_decision_retry_source_issue",
-          ownerActionIssueId: ownerActionIssue.id,
-          wakeCommentId,
-        },
-        requestedByActorType: "system",
-        requestedByActorId: "mission-owner-supervision-monitor",
-        contextSnapshot: {
-          issueId: sourceIssue.id,
-          missionId: mission.id,
-          source: "mission_owner_decision_retry_source_issue",
-          ownerActionIssueId: ownerActionIssue.id,
-          wakeCommentId,
-        },
-      });
+      // report-only: native link could not be proven. Oversight retains evidence; the native
+      //   workflow resumes only when a resumable step link exists.
+      return { status: "not_requested" as const, runId: null };
     },
     onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(mission.ownerAgentId, {
       source: "assignment",

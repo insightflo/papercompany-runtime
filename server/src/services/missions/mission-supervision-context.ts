@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  agentWakeupRequests,
   heartbeatRuns,
   issueComments,
   issues,
@@ -14,6 +15,8 @@ import { notFound } from "../../errors.js";
 import { listMissionExecutionSourceSnapshots, type MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { listMissionGovernanceThread, type MissionGovernanceThread } from "./governance-thread.js";
 import { loadMissionRuntimeSnapshot, type MissionRuntimeSnapshot } from "./mission-runtime-snapshot.js";
+// live wakeup 상태 집합은 unblock handback guard 와 단일 source-of-truth 로 공유한다(드리프트 방지).
+import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
 
 export type MissionSupervisionMission = typeof missions.$inferSelect;
 export type MissionSupervisionIssue = typeof issues.$inferSelect;
@@ -32,6 +35,9 @@ export type MissionSupervisionContext = {
   commentsByIssueId: Map<string, string[]>;
   heartbeatCountByIssueId: Map<string, number>;
   heartbeatRunsByIssueId: Map<string, MissionSupervisionHeartbeatRun[]>;
+  // issueId 들의 "live wakeup"(queued/claimed/deferred_issue_execution/coalesced) 보유 집합.
+  // stopped-execution 판정 전 per-issue live 배제에 쓴다(heartbeat run 과 OR 로 묶어 판정).
+  liveWakeupIssueIds: Set<string>;
   stepRows: MissionSupervisionWorkflowStepRow[];
   stepRowsByIssueId: Map<string, MissionSupervisionWorkflowStepRow[]>;
   executionSnapshot: MissionExecutionSourceSnapshot;
@@ -99,6 +105,23 @@ export async function buildMissionSupervisionContext(
     heartbeatRunsByIssueId.set(run.issueId, list);
   }
 
+  // stopped-execution 판정용 per-issue live wakeup 집합. status 가 LIVE_WAKEUP_STATUSES 인
+  // wakeup 을 가진 issue 만 담는다(terminal/skipped 는 live 가 아님).
+  const liveWakeupRows = missionIssueIds.length > 0
+    ? await db
+      .select({ issueId: agentWakeupRequests.issueId })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, mission.companyId),
+        inArray(agentWakeupRequests.issueId, missionIssueIds),
+        inArray(agentWakeupRequests.status, [...LIVE_WAKEUP_STATUSES]),
+      ))
+    : [];
+  const liveWakeupIssueIds = new Set<string>();
+  for (const row of liveWakeupRows) {
+    if (row.issueId) liveWakeupIssueIds.add(row.issueId);
+  }
+
   const stepRows = await db
     .select({
       stepRun: workflowStepRuns,
@@ -151,6 +174,7 @@ export async function buildMissionSupervisionContext(
     commentsByIssueId,
     heartbeatCountByIssueId,
     heartbeatRunsByIssueId,
+    liveWakeupIssueIds,
     stepRows,
     stepRowsByIssueId,
     executionSnapshot,

@@ -17,6 +17,7 @@ import { completeWorkflowToolStepFromResult, retryIssueLessToolWorkflowStep, syn
 import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "../mission-owner-plan-decisions.js";
 import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
+import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
 import type { MissionServiceDeps } from "../missions.js";
 import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
@@ -207,6 +208,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       commentsByIssueId,
       heartbeatCountByIssueId,
       heartbeatRunsByIssueId,
+      liveWakeupIssueIds,
       stepRows,
       stepRowsByIssueId,
       executionSnapshot,
@@ -623,6 +625,11 @@ export function createSupervision({ db, deps, ownerActions }: {
       const comments = commentsByIssueId.get(issue.id) ?? [];
       const stepRowsForIssue = stepRowsByIssueId.get(issue.id) ?? [];
       const hasActiveHeartbeat = runsForIssue.some((run) => run.status === "queued" || run.status === "running");
+      // [Phase D stopped-exclusion] 이 issue 가 live wakeup(queued/claimed/deferred_issue_execution/
+      //   coalesced) 을 가지면 execution queue 에 진입한/진행 중인 작업이므로 stopped 가 아니다.
+      //   live heartbeat run 과 OR 로 묶어 per-issue liveness 를 판정한다(mission-wide heuristic 대신).
+      const hasLiveWake = liveWakeupIssueIds.has(issue.id);
+      const issueLive = hasActiveHeartbeat || hasLiveWake;
       const failedRunsForIssue = runsForIssue.filter((run) => run.status === "failed" || run.status === "timed_out" || run.error || run.errorCode || (run.exitCode != null && run.exitCode !== 0));
       const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
       const isRecoverableQueueSource = isStaleQueueStatus && issue.originKind !== "mission_main_executor_unblock";
@@ -642,11 +649,37 @@ export function createSupervision({ db, deps, ownerActions }: {
         continue;
       }
 
-      if (isStaleInProgressSource && ageMs >= staleAfterMs && !missionHasActiveHeartbeat) {
+      if (isStaleInProgressSource && ageMs >= staleAfterMs && !issueLive) {
         const latestFailedRun = failedRunsForIssue
           .slice()
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-        if (latestFailedRun && !hasActiveHeartbeat) {
+        if (!latestFailedRun) {
+          findings.push(`stale_in_progress_no_execution: ${label} is in_progress but has no heartbeat run and no live wakeup/queue evidence — ${issue.title}`);
+          addRecommendation({
+            type: "retry_unit_if_safe",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Source issue ${label} is in_progress with no execution record; owner must diagnose and recover through the native workflow path`,
+            safeToAutoApply: false,
+          });
+          addRecommendation({
+            type: "request_replan",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Mission source ${label} is marked in_progress without a live run or queue request; owner should recover, replan, or escalate`,
+            safeToAutoApply: false,
+          });
+          if (!issue.hiddenAt && !isTerminalIssueStatus(issue.status)) {
+            await ownerActions.ensureMainExecutorUnblockIssue(mission, issue, {
+              renewAfterNoActionWaiting: true,
+              governanceEvidence: [
+                `stale_in_progress_no_execution: ${label} is in_progress but has no heartbeat run or live wakeup request.`,
+                "Recovery boundary: Unblock must report evidence to Oversight; only the native workflow layer may resume a proven workflow step.",
+              ],
+            });
+          }
+        }
+        if (latestFailedRun && !issueLive) {
           const idempotencyKey = `mission-stale-source-wakeup:${mission.id}:${issue.id}:${latestFailedRun.id}`;
           const markerInput = {
             missionId: mission.id,
@@ -725,7 +758,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
       }
 
-      if (input.dispatchStalledOwnerActionWakeups && issue.originKind === "mission_main_executor_unblock" && isStaleQueueStatus && ageMs >= staleAfterMs && !missionHasActiveHeartbeat) {
+      if (input.dispatchStalledOwnerActionWakeups && issue.originKind === "mission_main_executor_unblock" && isStaleQueueStatus && ageMs >= staleAfterMs && !issueLive) {
         const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
         const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (issue.originId ?? "unknown-source");
         const latestFailedRun = failedRunsForIssue
@@ -733,10 +766,10 @@ export function createSupervision({ db, deps, ownerActions }: {
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
         if (runsForIssue.length === 0) {
           findings.push(`owner_action_stalled_no_execution: ${label} ${issue.status} is an owner unblock action for ${sourceLabel} but has no heartbeat run and no mission issue has queued/running execution — ${issue.title}`);
-        } else if (latestFailedRun && !hasActiveHeartbeat) {
+        } else if (latestFailedRun && !issueLive) {
           findings.push(`owner_action_stalled_after_failed_run: ${label} ${issue.status} is an owner unblock action for ${sourceLabel} after failed heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}${latestFailedRun.exitCode != null ? ` exitCode=${latestFailedRun.exitCode}` : ""}; no mission issue has queued/running execution — ${issue.title}`);
         }
-        if ((runsForIssue.length === 0 || latestFailedRun) && !hasActiveHeartbeat) {
+        if ((runsForIssue.length === 0 || latestFailedRun) && !issueLive) {
           addRecommendation({
             type: "request_approval",
             missionId: mission.id,
@@ -764,7 +797,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
       }
 
-      if (isRecoverableQueueSource && ageMs >= staleAfterMs && !missionHasActiveHeartbeat && failedRunsForIssue.length === 0) {
+      if (isRecoverableQueueSource && ageMs >= staleAfterMs && !issueLive && failedRunsForIssue.length === 0) {
         // [AREA: wakeup queue / Phase 1.5] 같은 issue 에 pending 실행요청(status=queued, runId null)이
         // 있으면 "멈춤(stale)"이 아니라 엔진 승급을 기다리는 "대기" 상태다. 단 요청이 queue TTL 초과로
         // 오래됐으면 promotion 이 막힌 진짜 stale 로 본다(mission_run_active 가 풀렸는데도 안 올라간 경우 등).
@@ -818,7 +851,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           }
         }
       }
-      if (isRecoverableQueueSource && ageMs >= staleAfterMs && failedRunsForIssue.length > 0 && !hasActiveHeartbeat) {
+      if (isRecoverableQueueSource && ageMs >= staleAfterMs && failedRunsForIssue.length > 0 && !issueLive) {
         const latestFailedRun = failedRunsForIssue
           .slice()
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
@@ -1211,17 +1244,26 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const retryUnresolvedMarker = blockedOriginIssue
                     ? `mission-owner-retry-unresolved:${mission.id}:${issue.id}:${sourceCandidate.id}:${blockedOriginIssue.id}`
                     : null;
+                  // [liveness] retry chain 이 per-issue live(queued/claimed/deferred_issue_execution/
+                  //   coalesced wake 중 하나) 면 아직 진행 중이므로 "해결 못 함" 에스컬레이션 금지.
+                  //   mission-global heartbeat-only 판정은 claimed/deferred/coalesced wake 를 놓친다.
+                  const retryChainLiveWake = liveWakeupIssueIds.has(issue.id)
+                    || liveWakeupIssueIds.has(sourceCandidate.id)
+                    || (blockedOriginIssue ? liveWakeupIssueIds.has(blockedOriginIssue.id) : false);
                   const retryResolvedNothing = isProducerRework
                     && blockedOriginIssue?.status === "blocked"
                     && isTerminalIssueStatus(sourceCandidate.status)
-                    && !missionHasActiveHeartbeat;
+                    && !missionHasActiveHeartbeat
+                    && !retryChainLiveWake;
                   if (retryResolvedNothing && blockedOriginIssue && retryUnresolvedMarker) {
                     const [pendingWakeup] = await db
                       .select({ id: agentWakeupRequests.id })
                       .from(agentWakeupRequests)
                       .where(and(
                         eq(agentWakeupRequests.companyId, mission.companyId),
-                        inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+                        // [liveness] 전체 LIVE_WAKEUP_STATUSES 로 확대 — deferred_issue_execution/
+                        //   coalesced 도 "대기 중" 으로 인정해 거짓 replan/escalate 방지.
+                        inArray(agentWakeupRequests.status, [...LIVE_WAKEUP_STATUSES]),
                         or(
                           eq(agentWakeupRequests.missionId, mission.id),
                           eq(agentWakeupRequests.issueId, issue.id),
@@ -1595,7 +1637,6 @@ export function createSupervision({ db, deps, ownerActions }: {
           addRecommendation({ type: "request_replan", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs recovery/replan evidence`, safeToAutoApply: false });
           addRecommendation({ type: "escalate_blocked", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs owner escalation or impossible-completion report`, safeToAutoApply: false });
         }
-        // workProduct-reuse recovery wake (헬퍼 위 참조). 활성 heartbeat 없을 때만.
         if (!missionHasActiveHeartbeat) {
           await tryDispatchWorkProductReuseWake({ sourceIssue: issue, sourceLabel: label, sourceComments: comments });
         }
@@ -2273,6 +2314,23 @@ export function createSupervision({ db, deps, ownerActions }: {
             .filter((missionId) => !activeHeartbeatMissionIds.has(missionId))
           : [],
       );
+      const staleInProgressMissionIds = new Set(
+        rowMissionIds.length > 0
+          ? (await db
+            .select({ missionId: issues.missionId })
+            .from(issues)
+            .where(and(
+              eq(issues.companyId, companyId),
+              inArray(issues.missionId, rowMissionIds),
+              isNull(issues.hiddenAt),
+              eq(issues.status, "in_progress"),
+              lte(issues.createdAt, staleCutoff),
+              sql`${issues.originKind} not in ('mission_main_executor_oversight', 'mission_main_executor_unblock')`,
+            )))
+            .map((row) => row.missionId)
+            .filter((missionId): missionId is string => Boolean(missionId))
+          : [],
+      );
       const staleQueueNoActiveExecutionMissionIds = new Set(
         staleQueueIssueRows
           .map((row) => row.missionId)
@@ -2289,7 +2347,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       for (const row of rows) {
         const snapshot = snapshots[row.id];
         const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
+        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || staleInProgressMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
       }
 
       const planningRows = rows.filter((row) => row.id && !missionIds.includes(row.id));

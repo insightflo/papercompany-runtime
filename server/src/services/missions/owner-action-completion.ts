@@ -1,20 +1,42 @@
 // server/src/services/missions/owner-action-completion.ts
 //
-// [파일 목적] mission_main_executor_unblock 이슈가 done으로 닫히기 전에 source(originId) 실행 큐를
-//   materialize하는 completion service. guard(assertCanCompleteOwnerActionWithHandback)의 backstop에
-//   대응하는 정상 경로: source wakeup 생성(heartbeat.wakeup 경로) → 댓글에 id 기록 → done.
+// [파일 목적] mission_main_executor_unblock 이슈가 done으로 닫히기 전에 source(originId) 회복을
+//   "직접 retry/checkout 없이" 처리하는 completion service. 검증된 native DAG 헬퍴
+//   (dispatchSourceIssueNativeResume → wakeExistingWorkflowStepIssue) 가 유일한 wake 경로다.
+//   정상 경로: (1) source 가 blocked 이고 native step link 가 증명되면 wakeExistingWorkflowStepIssue
+//   로 workflow_resume native dispatch, (2) 이미 live native wake 가 있으면 observe-only,
+//   (3) native link 증명 불가면 structured report 만 남긴다(직접 wake 금지). 이후 구조화 handback
+//   report 를 unblock 에 기록 → done(guard 가 검증된 report 또는 live wake/회복 으로 통과).
 // [주요 흐름]
 //   1. unblock + source(originId) 조회(company scope).
-//   2. heartbeat.wakeup으로 source 향 wakeup enqueue(검증/coalescing/typed column/transition event 계약 유지).
-//   3. wakeup evidence 재조회(queued/deferred_issue_execution/coalesced만 허용, skipped 제외).
-//   4. evidence 있으면 handback 댓글 + done(guard 통과). 없으면 throw.
-// [수정시 주의] direct insert 금지. 항상 heartbeat.wakeup(enqueueWakeup) 경로 사용.
-import { and, desc, eq, inArray } from "drizzle-orm";
+//   2. source 회복/terminal check → 회복 시 done, terminal mission 거부.
+//   3. evidence 수집 → dispatchSourceIssueNativeResume 로 native dispatch 시도.
+//   4. outcome → dispatchKind·wakeupRequestId 분류. 구조화 report comment 기록 → done.
+// [수정시 주의] source 직접 checkout/status 변경/새 endpoint/범용 retry framework 금지. 공식
+//   retry/iteration/QA verdict 는 workflow layer 소유. wake 은 오직 검증된 native workflow_resume
+//   경로(wakeExistingWorkflowStepIssue)로만 — bare queueIssueAssignmentWakeup 합성 금지.
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, issues, missions } from "@paperclipai/db";
 import { issueService } from "../issues.js";
-import { heartbeatService } from "../heartbeat.js";
 import { conflict, notFound, unprocessable } from "../../errors.js";
+import { dispatchSourceIssueNativeResume, type SourceIssueNativeResumeOutcome } from "../workflow/source-issue-native-resume.js";
+import {
+  buildUnblockHandbackReportComment,
+  deriveUnblockDispatchClassification,
+  gatherUnblockSourceEvidence,
+  handUnblockReportToOversightOwner,
+  type UnblockDispatchKind,
+} from "./owner-action-unblock-handback.js";
+
+export interface CompleteUnblockHandbackResult {
+  wakeupRequestId: string | null;
+  dispatchKind: UnblockDispatchKind;
+  sourceIssueId: string | null;
+  nativeOutcome: SourceIssueNativeResumeOutcome | null;
+  // report-only 경로에서 Oversight owner work item 을 깨운 wakeup(queue evidence).
+  oversightWakeupRequestId: string | null;
+}
 
 export async function completeUnblockActionWithSourceHandback(
   db: Db,
@@ -23,9 +45,10 @@ export async function completeUnblockActionWithSourceHandback(
     companyId: string;
     actor: { agentId?: string | null; userId?: string | null };
   },
-): Promise<{ wakeupRequestId: string | null }> {
+): Promise<CompleteUnblockHandbackResult> {
   const svc = issueService(db);
-  const heartbeat = heartbeatService(db);
+  // native wake 은 dispatchSourceIssueNativeResume → wakeExistingWorkflowStepIssue 가 internally
+  //   heartbeatService(db) 로 수행한다. 여기서 직접 wake/queue 호출은 없다.
 
   // unblock 이슈 조회 — company scope.
   const [unblock] = await db
@@ -42,7 +65,7 @@ export async function completeUnblockActionWithSourceHandback(
   // source가 없으면 그냥 done(guard도 originId null로 early return).
   if (!sourceIssueId) {
     await svc.update(unblock.id, { status: "done" });
-    return { wakeupRequestId: null };
+    return { wakeupRequestId: null, dispatchKind: "report_only", sourceIssueId: null, nativeOutcome: null, oversightWakeupRequestId: null };
   }
 
   // source 이슈 조회 — 같은 company scope.
@@ -53,14 +76,11 @@ export async function completeUnblockActionWithSourceHandback(
     .limit(1);
   if (!source) throw notFound("Source issue not found");
 
-  // source가 이미 회복(blocked 아님)이면 wakeup 불필요 — 그냥 done.
+  // source가 이미 회복(blocked 아님)이면 handback 불필요 — 이전 동작 유지하며 done(terminal
+  //   mission check 보다 먼저, recovered source 는 handback 대상이 아니므로).
   if (source.status !== "blocked") {
     await svc.update(unblock.id, { status: "done" });
-    return { wakeupRequestId: null };
-  }
-
-  if (!source.assigneeAgentId) {
-    throw unprocessable("Source issue has no assignee agent to wake for handback");
+    return { wakeupRequestId: null, dispatchKind: "report_only", sourceIssueId: source.id, nativeOutcome: null, oversightWakeupRequestId: null };
   }
 
   // mission terminal check — terminal mission의 issue는 handback하면 안 됨.
@@ -75,65 +95,100 @@ export async function completeUnblockActionWithSourceHandback(
     }
   }
 
-  // [peer review] evidence-first: 이미 유효한 wakeup(queued/deferred/coalesced)이 있으면
-  //   wakeup 호출을 스킵(idempotent). catch swallow 금지 — wakeup 실패 시 completion도 실패.
-  const evidenceFilter = and(
-    eq(agentWakeupRequests.issueId, source.id),
-    eq(agentWakeupRequests.companyId, input.companyId),
-    eq(agentWakeupRequests.agentId, source.assigneeAgentId),
-    inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "coalesced"]),
-  );
-  const queryEvidence = () =>
-    db
-      .select({ id: agentWakeupRequests.id, reason: agentWakeupRequests.reason })
-      .from(agentWakeupRequests)
-      .where(evidenceFilter)
-      .orderBy(desc(agentWakeupRequests.requestedAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
+  const evidence = await gatherUnblockSourceEvidence(db, { companyId: input.companyId, source });
 
-  let evidence = await queryEvidence();
+  // [req] source 가 blocked 일 때 검증된 native DAG 헬퍼로만 wake 시도. bare
+  //   queueIssueAssignmentWakeup 합성 없이 wakeExistingWorkflowStepIssue 가 link/run/definition/step
+  //   를 증명하고 workflow_step_runnable/workflow_resume 계약으로 wake 한다.
+  const outcome: SourceIssueNativeResumeOutcome = await dispatchSourceIssueNativeResume(db, {
+    companyId: input.companyId,
+    issueId: source.id,
+    allowBlockedIssue: true,
+    agentId: source.assigneeAgentId,
+  });
 
-  if (!evidence) {
-    // 기존 evidence 없음 — heartbeat.wakeup(enqueueWakeup)으로 source 향 wakeup enqueue.
-    //   no catch: 실패하면 completion도 실패(mission terminal/budget/agent policy 등).
-    await heartbeat.wakeup(source.assigneeAgentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "owner_action_completion_handback",
-      payload: { issueId: source.id, missionId: source.missionId, mutation: "issue_assignment" },
-      contextSnapshot: {
-        issueId: source.id,
-        missionId: source.missionId,
-        source: "owner_action_handback",
-        sourceUnblockIssueId: unblock.id,
-      },
-      requestedByActorType: input.actor.userId ? "user" : "agent",
-      requestedByActorId: input.actor.userId ?? input.actor.agentId ?? "unknown",
-      idempotencyKey: `owner-action-handback:${unblock.id}:${source.id}`,
+  let dispatchedWakeupRequestId: string | null = null;
+  let oversightWakeupRequestId: string | null = null;
+  let dispatchKind: UnblockDispatchKind = "report_only";
+  const classification = deriveUnblockDispatchClassification(evidence, outcome);
+  if (outcome.kind === "dispatched") {
+    dispatchKind = "workflow_resume";
+    dispatchedWakeupRequestId = await resolveDispatchedWakeupRequestId(db, {
+      companyId: input.companyId,
+      sourceId: source.id,
+      agentId: source.assigneeAgentId ?? "",
     });
-    evidence = await queryEvidence();
-  }
-
-  if (!evidence) {
-    throw conflict(
-      "Owner-action handback failed: no wakeup evidence was created for the source issue. The source issue remains blocked.",
+  } else if (outcome.kind === "already_in_flight") {
+    dispatchKind = "native_resume_in_flight";
+    dispatchedWakeupRequestId = outcome.workflowWakeupRequestId;
+  } else {
+    dispatchKind = "report_only";
+    const reportComment = await svc.addComment(
+      unblock.id,
+      buildUnblockHandbackReportComment(evidence, classification, null, null),
+      {
+        agentId: input.actor.agentId ?? undefined,
+        userId: input.actor.userId ?? undefined,
+      },
+    );
+    oversightWakeupRequestId = await handUnblockReportToOversightOwner(db, {
+      companyId: input.companyId,
+      missionId: source.missionId ?? unblock.missionId,
+      unblockIssueId: unblock.id,
+      reportCommentId: reportComment.id,
+    });
+    if (!oversightWakeupRequestId) {
+      throw conflict("Report-only unblock handback did not enter the live Oversight execution queue");
+    }
+    await svc.addComment(
+      unblock.id,
+      `Oversight handback queue accepted (wakeupRequestId: ${oversightWakeupRequestId}).`,
+      {
+        agentId: input.actor.agentId ?? undefined,
+        userId: input.actor.userId ?? undefined,
+      },
     );
   }
 
-  const wakeupId = evidence.id;
+  if (dispatchKind !== "report_only") {
+    await svc.addComment(
+      unblock.id,
+      buildUnblockHandbackReportComment(evidence, classification, dispatchedWakeupRequestId, null),
+      {
+        agentId: input.actor.agentId ?? undefined,
+        userId: input.actor.userId ?? undefined,
+      },
+    );
+  }
 
-  // unblock 이슈에 handback 댓글 기록(wakeup id 포함, 감사 추적용).
-  await svc.addComment(
-    unblock.id,
-    `Owner-action handback complete: source issue ${source.identifier ?? source.id} wakeup dispatched (wakeup: ${wakeupId.slice(0, 8)}).`,
-    {
-      agentId: input.actor.agentId ?? undefined,
-      userId: input.actor.userId ?? undefined,
-    },
-  );
-
-  // 이제 done 표시 — guard가 source wakeup evidence(company+issueId)를 확인하고 통과.
+  // done 표시 — guard 가 (a) source 회복 (b) source live wake (c) 검증된 구조화 report 중 하나로 통과.
   await svc.update(unblock.id, { status: "done" });
-  return { wakeupRequestId: wakeupId };
+  return {
+    wakeupRequestId: dispatchedWakeupRequestId,
+    dispatchKind,
+    sourceIssueId: source.id,
+    nativeOutcome: outcome,
+    oversightWakeupRequestId,
+  };
+}
+
+// native dispatch 가 queue admission 에 만든 agent_wakeup_requests row 를 회수(응답/감사용).
+// idempotencyKey 컬럼이 별도로 없으므로 (companyId, issueId, agentId) 최신 row 로 충분 — 방금
+// dispatch 한 직후이므로 최신이 곧 row. agentId 가 없으면 조회의미 없어 null.
+async function resolveDispatchedWakeupRequestId(
+  db: Db,
+  input: { companyId: string; sourceId: string; agentId: string },
+): Promise<string | null> {
+  if (!input.agentId) return null;
+  const [row] = await db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
+    .where(and(
+      eq(agentWakeupRequests.companyId, input.companyId),
+      eq(agentWakeupRequests.issueId, input.sourceId),
+      eq(agentWakeupRequests.agentId, input.agentId),
+    ))
+    .orderBy(desc(agentWakeupRequests.requestedAt))
+    .limit(1);
+  return row?.id ?? null;
 }

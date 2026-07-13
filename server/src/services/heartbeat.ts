@@ -7185,6 +7185,14 @@ export function heartbeatService(db: Db) {
     const queuePostTransactionWorkflowIssueSync = (issueId: string | null | undefined) => {
       if (issueId) postTransactionWorkflowIssueSyncIssueIds.add(issueId);
     };
+    // [GAZ-315] mission_main_executor_unblock 은 raw tx.update(done) auto-complete 로 닫히면
+    //   assertCanCompleteOwnerActionWithHandback 가 우회된다. checkout 필드는 tx 내에서 정리하되
+    //   done 전환은 post-tx completeUnblockActionWithSourceHandback(issueService.update → guard) 에게
+    //   넘긴다. owner-recovery happy path 는 유지된다(report 기록 → guard 통과 → done).
+    const postTransactionUnblockCompletions: Array<{ issueId: string; companyId: string; agentId: string | null }> = [];
+    const queuePostTransactionUnblockCompletion = (entry: { issueId: string; companyId: string; agentId: string | null }) => {
+      postTransactionUnblockCompletions.push(entry);
+    };
     const postTransactionDelegatedArtifactHandbacks: Array<{
       childIssueId: string;
       childWorkProductId: string;
@@ -7798,6 +7806,43 @@ export function heartbeatService(db: Db) {
         }
       }
 
+      if (shouldAutoCompleteSuccessfulIssue && issue.originKind === "mission_main_executor_unblock") {
+        const unblockNow = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "blocked",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: unblockNow,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.unblock_handback_pending",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: { previousStatus: issue.status, nextStatus: "blocked", reason: "mission_main_executor_unblock_closeout_via_handback_guard" },
+        });
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: "Unblock execution succeeded. Guarded source handback is pending; this owner-action remains blocked until the handback is recorded.",
+        });
+        queuePostTransactionUnblockCompletion({ issueId: issue.id, companyId: issue.companyId, agentId: run.agentId });
+        return {
+          promotedRun: null,
+          postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
+        };
+      }
+
       if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
         const now = new Date();
         const latestRunForComment = await tx
@@ -8135,6 +8180,22 @@ export function heartbeatService(db: Db) {
       const { workflowService } = await import("./workflow/engine.js");
       for (const issueId of postTransactionWorkflowIssueSyncIssueIds) {
         await workflowService.syncRunStatusForIssue(db, issueId);
+      }
+    }
+
+    // [GAZ-315] flush deferred unblock closeout through the guarded handback route. This writes the
+    //   validated report (+ native dispatch / Oversight handoff as applicable) and sets done via
+    //   issueService.update → assertCanCompleteOwnerActionWithHandback fires. Happy path preserved.
+    if (postTransactionUnblockCompletions.length > 0) {
+      const { completeUnblockActionWithSourceHandback } = await import("./missions/owner-action-completion.js");
+      for (const entry of postTransactionUnblockCompletions) {
+        await completeUnblockActionWithSourceHandback(db, {
+          unblockIssueId: entry.issueId,
+          companyId: entry.companyId,
+          actor: { agentId: entry.agentId },
+        }).catch((err: unknown) => {
+          logger.warn({ err, issueId: entry.issueId }, "failed to close mission_main_executor_unblock via handback guard");
+        });
       }
     }
 

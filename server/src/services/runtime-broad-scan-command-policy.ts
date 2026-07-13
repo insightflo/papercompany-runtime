@@ -11,7 +11,7 @@ const COMMAND_PREFIX_PATTERNS = [
   { label: "git ls-files", pattern: /(^|\s)git\s+ls-files(\s|$)/i },
   { label: "tree", pattern: /(^|\s)tree(\s|$)/i },
   { label: "ls -R", pattern: /(^|\s)ls\s+-(?:[A-Za-z]*R[A-Za-z]*)(\s|$)/i },
-  { label: "rg without an allowed file path", pattern: /(^|\s)rg\s+/i },
+  { label: "rg with a root target", pattern: /(^|\s)rg\s+/i },
   { label: "grep -R without path", pattern: /(^|\s)grep\s+-(?:[^\n]*R|R[^\n]*)(\s|$)/i },
 ] as const;
 
@@ -73,17 +73,20 @@ export function findRuntimeBroadScanCommand(input: RuntimeBroadScanCommandInput)
   return null;
 }
 
-// Simple explicit-file policy (rg/find only): blocked when there is no explicit
-// target, the target is "/", a cwd alias / PWD substitution (. ./ $PWD $(pwd)
-// `pwd` ${PWD}), or it resolves EXACTLY to the workdir / repo root. Every other
-// explicit target is allowed (no parent-traversal/extension/allowlist judgment).
-// tree/ls-R/git-ls-files keep their previous policy. repo scope allows all.
+// rg/find root-target policy: block ONLY an explicit root target — ".", "..", "/",
+// a cwd alias / PWD substitution (. ./ $PWD $(pwd) `pwd` ${PWD}), or a target that
+// resolves EXACTLY to the workdir / repo root. rg additionally ALLOWS pathless
+// search (no explicit target); find with no target stays blocked (implicit execution
+// root). Every other explicit non-root target is allowed (no allowlist/extension
+// judgment). grep -R, tree, ls -R, git ls-files keep their previous stricter policy.
+// repo scope allows all. (ponytail: missing declared path is NOT a guardrail failure
+// for ordinary rg — only an explicit root target is.)
 function evaluateCandidate(label: BroadScanCommandLabel, input: RuntimeBroadScanCommandInput) {
   if (label === "find .") {
     return evaluateFindCommand(input);
   }
   if (label === "git ls-files") return isRepoSearchCommandAllowed(input) ? null : label;
-  if (label === "rg without an allowed file path" || label === "grep -R without path") {
+  if (label === "rg with a root target" || label === "grep -R without path") {
     return evaluateSearchCommand(label, input);
   }
   // tree / ls -R: unchanged policy.
@@ -97,37 +100,53 @@ function evaluateCandidate(label: BroadScanCommandLabel, input: RuntimeBroadScan
 }
 
 function evaluateFindCommand(input: RuntimeBroadScanCommandInput) {
-  if (isRepoScopedDiscoveryCommand(input)) return null;
   // find [starting-point...] [expression]: path targets precede the expression.
   const tokens = shellTokenize(input.command);
   const startIndex = tokens.findIndex((t) => t.toLowerCase() === "find");
   const targets: string[] = [];
+  // `--` 는 option 종결자 — 이후 비-option 토큰은 starting-point 다. 기존에 `--` 에서 break 하면
+  //   `find -- .` 가 pathless 로 우회되어 explicit root `.` 차단을 빠져나간다. `--` 는 skip 하고 계속.
   for (let i = startIndex + 1; i < tokens.length; i += 1) {
     const token = tokens[i];
-    if (!token || token === "--" || token.startsWith("-")) break;
+    if (!token) break;
+    if (token === "--") continue;
+    if (token.startsWith("-")) break;
     targets.push(cleanShellToken(resolveShellVariableToken(token, input.shellVariables)));
   }
-  if (targets.length === 0) return "find .";
-  return targets.some((target) => isBroadScanTarget(target, input)) ? "find ." : null;
+  // [handoff req 4] explicit root target (., .., /, cwd-alias, workdir/repo root) is ALWAYS blocked,
+  //   even under repo scope — MUST precede the repo-scope allowance so `find . -type f` cannot bypass.
+  if (targets.some((target) => isBroadScanTarget(target, input))) return "find .";
+  // pathless find = implicit execution root → blocked unless repo-scoped discovery allows it.
+  if (targets.length === 0) {
+    return isRepoScopedDiscoveryCommand(input) ? null : "find .";
+  }
+  // explicit non-root target → allowed (no allowlist judgment for find targets).
+  return null;
 }
 
 function evaluateSearchCommand(label: BroadScanCommandLabel, input: RuntimeBroadScanCommandInput) {
-  const executable: SearchExecutable = label === "rg without an allowed file path" ? "rg" : "grep";
+  const executable: SearchExecutable = label === "rg with a root target" ? "rg" : "grep";
   const explicitTargets = extractSearchTargetPaths(input.command, executable);
-  // repo scope: existing behavior (allow when targets are repo-wide or inside the repo root).
+  // [handoff req 4] an explicit root target (., .., /, cwd-alias, workdir, repo root) is ALWAYS
+  //   blocked for rg and grep -R — even under repo scope. This MUST precede the repo-scope allowance
+  //   so repo-scoped `rg -n TODO .` / `grep -R .` cannot bypass the root-target block.
+  if (explicitTargets.some((target) => isBroadScanTarget(target, input))) {
+    return label;
+  }
+  // repo scope: with no root target, pathless / explicit-in-repo search is allowed.
   if (isRepoSearchCommandAllowed(input) && (
     explicitTargets.length === 0 ||
-    explicitTargets.some(isRepoWideTargetToken) ||
     explicitTargets.every((target) => isPathInsideRepoSearchRoot(target, input))
   )) {
     return null;
   }
+  // rg: pathless search and explicit non-root targets are allowed (root already excluded above).
+  if (executable === "rg") {
+    return null;
+  }
+  // grep -R keeps the stricter allow-list policy (block when pathless or any target is off the allowlist).
   if (input.stdinFromPipe && explicitTargets.length === 0) return null;
   if (explicitTargets.length === 0) return label;
-  // rg: simple explicit-target policy. grep -R: unchanged allow-list policy.
-  if (executable === "rg") {
-    return explicitTargets.some((target) => isBroadScanTarget(target, input)) ? label : null;
-  }
   return explicitTargets.every((target) => isAllowedTargetPath(target, input.allowedPaths, input.allowedDirectories, input.workingDirectory))
     ? null
     : label;
