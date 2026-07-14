@@ -97,6 +97,10 @@ describe("mission search scopes", () => {
   it("renders an executable missionSearch curl recipe with a concrete scope", () => {
     const recipe = buildMissionSearchGuidance(["workProduct", "missionOutput"]).join("\n");
 
+    expect(recipe).toContain("missionSearch API (callable): curl");
+    expect(recipe).toContain("use the missionSearch API instead");
+    expect(recipe).not.toContain("missionSearch tool");
+
     // Executable URL: PAPERCLIP_API_BASE_URL already includes /api — no /api/api.
     expect(recipe).toContain("$PAPERCLIP_API_BASE_URL/agents/me/mission-search");
     expect(recipe).not.toContain("/api/api/");

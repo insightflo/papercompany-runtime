@@ -84,7 +84,7 @@ describe("buildPaperclipRuntimeBrief", () => {
             allowedScopes: ["workProduct", "missionOutput"],
             guidance: [
               "Mission search scopes allowed this run: workProduct, missionOutput.",
-              'missionSearch (callable): curl -sS -X POST "$PAPERCLIP_API_BASE_URL/agents/me/mission-search" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d "{\"scope\":\"workProduct\",\"query\":\"<text>\",\"runContext\":{\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"runId\":\"$PAPERCLIP_RUN_ID\",\"companyId\":\"$PAPERCLIP_COMPANY_ID\"}}"',
+              'missionSearch API (callable): curl -sS -X POST "$PAPERCLIP_API_BASE_URL/agents/me/mission-search" -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d "{\"scope\":\"workProduct\",\"query\":\"<text>\",\"runContext\":{\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"runId\":\"$PAPERCLIP_RUN_ID\",\"companyId\":\"$PAPERCLIP_COMPANY_ID\"}}"',
             ],
           },
         },
@@ -92,7 +92,8 @@ describe("buildPaperclipRuntimeBrief", () => {
     });
 
     // The exact callable curl reaches the agent prompt.
-    expect(brief).toContain("missionSearch tool (server-enforced scoped discovery)");
+    expect(brief).toContain("missionSearch API (server-enforced scoped discovery)");
+    expect(brief).not.toContain("missionSearch tool");
     expect(brief).toContain("$PAPERCLIP_API_BASE_URL/agents/me/mission-search");
     expect(brief).toContain("Bearer $PAPERCLIP_API_KEY");
     expect(brief).toContain('"$PAPERCLIP_AGENT_ID"');

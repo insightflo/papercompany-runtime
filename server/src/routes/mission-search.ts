@@ -1,7 +1,7 @@
 /**
- * @fileoverview missionSearch — a real, scope-enforced discovery tool.
+ * @fileoverview missionSearch — a scope-enforced discovery API.
  *
- * Agents (e.g. codex_local) invoke this via the runtime brief's curl recipe using
+ * Agents (e.g. codex_local) invoke this API via the runtime brief's curl recipe using
  * `$PAPERCLIP_API_URL` + `$PAPERCLIP_API_KEY`. The server enforces that only the
  * run's allowed search scopes (from the issue execution card) are honored, then
  * performs discovery per scope so the agent never needs pathless rg/find.

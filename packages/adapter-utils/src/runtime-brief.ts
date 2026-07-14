@@ -613,7 +613,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
         ? `- Broad scans: disallowed (allowed mission search scopes: ${missionSearchScopes.length > 0 ? missionSearchScopes.join(", ") : "none"}). Use missionSearch instead of pathless rg/find.`
         : null;
   const missionSearchLines = missionSearchGuidance.length > 0
-    ? joinPromptSections(["missionSearch tool (server-enforced scoped discovery):", ...missionSearchGuidance])
+    ? joinPromptSections(["missionSearch API (server-enforced scoped discovery):", ...missionSearchGuidance])
     : null;
   const issueExecutionCardLines = issueExecutionCard
     ? buildIssueExecutionCardBriefLines({
