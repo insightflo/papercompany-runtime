@@ -85,9 +85,9 @@ export function toolDefinitionRoutes(db: Db) {
     const existing = await requireCompanyTool(db, companyId, toolId);
     const detachesSourceOwnership =
       existing.adapterConfig.source === "tool-registry"
-      && (req.body.adapterType === "http" || req.body.adapterType === "mcp")
+      && ["builtin", "http", "mcp"].includes(req.body.adapterType)
       && Boolean(req.body.adapterConfig)
-      && req.body.adapterConfig.source === undefined;
+      && (req.body.adapterConfig.source === undefined || req.body.adapterConfig.source === "");
     if (!detachesSourceOwnership) {
       assertMutableTool(existing);
     }

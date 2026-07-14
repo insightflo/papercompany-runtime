@@ -718,7 +718,7 @@ Workflow tool definitions with `adapterType` `builtin`, `http`, or `mcp` are sel
 - `http`: POST to an absolute HTTPS URL, resolve header authentication from a company secret, and map the configured result and artifact fields from a JSON response envelope. Write the artifact atomically to the workflow step output directory.
 - `mcp`: connect to an absolute HTTPS Streamable HTTP endpoint with the official MCP client, call the configured remote tool once, then close the connection. Header authentication uses the same company-secret reference model.
 - Remote diagnostics must be bounded and must not expose the resolved secret. Remote 401/403 responses map to a local 403 without returning the remote body.
-- Tool Registry-owned definitions may be atomically detached to `http` or `mcp` by a board update that replaces the adapter configuration and omits the registry source marker. Later registry syncs must not overwrite the detached definition.
+- Tool Registry-owned definitions may be atomically detached by a board update that replaces the adapter configuration and clears or omits the registry source marker. The adapter may remain `builtin` or change to `http`/`mcp`; later registry syncs must not overwrite the detached definition.
 
 ## 12. Governance and Approval Flows
 
