@@ -124,7 +124,10 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         completedAt: workflowRuns.completedAt,
       })
       .from(workflowRuns)
-      .where(eq(workflowRuns.missionId, mission.id));
+      .where(and(
+        eq(workflowRuns.companyId, mission.companyId),
+        eq(workflowRuns.missionId, mission.id),
+      ));
     for (const run of nativeRuns) {
       linkedRuns.push({
         status: run.status,
@@ -185,7 +188,14 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       .map((run) => run.startedAt)
       .filter((value): value is Date => value instanceof Date)
       .sort((left, right) => left.getTime() - right.getTime())[0] ?? new Date();
+    const hasStartedExecutionRun = linkedRuns.some((run) =>
+      run.startedAt instanceof Date && (
+        activeWorkflowRunStatuses.has(run.status.trim().toLowerCase()) ||
+        recoverableFailedWorkflowRunStatuses.has(run.status.trim().toLowerCase())
+      ),
+    );
     if (normalizedStatuses.some((status) => activeWorkflowRunStatuses.has(status))) {
+      if (mission.status === "planning" && !hasStartedExecutionRun) return mission;
       if (mission.status === "completed") return mission;
       if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;
       const updates: Partial<MissionRow> = {
@@ -245,6 +255,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     }
 
     if (normalizedStatuses.some((status) => recoverableFailedWorkflowRunStatuses.has(status))) {
+      if (mission.status === "planning" && !hasStartedExecutionRun) return mission;
       if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) return mission;
       if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;
       const updates: Partial<MissionRow> = {

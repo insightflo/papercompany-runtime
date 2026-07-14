@@ -17,6 +17,7 @@ import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
+import { activatePlanningMissionForWorkflowRun } from "../missions/mission-workflow-lifecycle.js";
 import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
   VERIFICATION_BEFORE_COMPLETION_MARKER,
@@ -3267,14 +3268,31 @@ export async function executeWorkflowRun(
     companyId: context.run.companyId,
     steps: context.steps,
   });
-  await db
-    .update(workflowRuns)
-    .set({
-      status: "running",
-      startedAt: new Date(),
-      completedAt: null,
-    })
-    .where(eq(workflowRuns.id, runId));
+  const startedAt = new Date();
+  await db.transaction(async (tx) => {
+    const [startedRun] = await tx
+      .update(workflowRuns)
+      .set({ status: "running", startedAt, completedAt: null })
+      .where(and(
+        eq(workflowRuns.id, runId),
+        eq(workflowRuns.companyId, context.run.companyId),
+      ))
+      .returning({
+        id: workflowRuns.id,
+        companyId: workflowRuns.companyId,
+        missionId: workflowRuns.missionId,
+        startedAt: workflowRuns.startedAt,
+      });
+    if (!startedRun?.startedAt) {
+      throw new Error(`Workflow run disappeared before execution start: ${runId}`);
+    }
+    await activatePlanningMissionForWorkflowRun(tx, {
+      companyId: startedRun.companyId,
+      missionId: startedRun.missionId,
+      workflowRunId: startedRun.id,
+      startedAt: startedRun.startedAt,
+    });
+  });
   return syncWorkflowRunState(db, runId);
 }
 
