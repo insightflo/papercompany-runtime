@@ -273,7 +273,7 @@ export function StepEditor({
             </div>
             {step.type === "tool" && (
               <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
-                <FieldLabel help="JSON arguments passed to the workflow tool. Invalid JSON is saved as an empty object by the serializer.">Tool Args (JSON)</FieldLabel>
+                <FieldLabel help="JSON arguments passed to the workflow tool. Invalid JSON blocks saving and shows a parse error.">Tool Args (JSON)</FieldLabel>
                 <textarea
                   style={{ ...textareaStyle, minHeight: "96px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "12px" }}
                   value={step.toolArgs}

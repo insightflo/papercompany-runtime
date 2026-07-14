@@ -1,8 +1,7 @@
 import { Fragment, useState, type FormEvent, type JSX } from "react";
 import type { LabelOption, ProjectOption, StepEditorMode, WorkflowToolGrant, WorkflowToolOption } from "./workflow-page-types.js";
 import type { CreateParentIssuePolicy } from "./workflow-parent-policy.js";
-import type { StepDraft } from "./step-draft.js";
-import { stepsToJson } from "./step-draft.js";
+import { workflowStepsToJsonForSave, type StepDraft } from "./step-draft.js";
 import { buildWorkflowInterfaceMetadata, normalizeMaxDailyRunsInput } from "./workflow-form-utils.js";
 import { summarizeWorkflowGraphTriggers } from "./workflow-graph.js";
 import { createCompanyLabel, usePluginAction } from "./workflow-page-api.js";
@@ -88,15 +87,9 @@ export function WorkflowCreateForm({
       return;
     }
 
-    let parsedSteps: unknown[];
-    if (newStepMode === "json") {
-      try {
-        parsedSteps = JSON.parse(newJsonText);
-        if (!Array.isArray(parsedSteps)) { setCreateError("steps는 JSON 배열이어야 합니다."); return; }
-      } catch (e) { setCreateError(`JSON 파싱 실패: ${e instanceof Error ? e.message : String(e)}`); return; }
-    } else {
-      parsedSteps = stepsToJson(newWorkflowSteps);
-    }
+    const serializedSteps = workflowStepsToJsonForSave(newStepMode, newJsonText, newWorkflowSteps);
+    if ("error" in serializedSteps) { setCreateError(serializedSteps.error); return; }
+    const parsedSteps = serializedSteps.steps;
     const invalidStep = parsedSteps.find((s) => !(s as Record<string, unknown>).id);
     if (invalidStep) {
       setCreateError("모든 step에 ID가 필요합니다.");

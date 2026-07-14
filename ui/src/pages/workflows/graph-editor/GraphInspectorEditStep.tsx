@@ -96,7 +96,7 @@ export function GraphInspectorEditStep({
                   />
                 </div>
                 <div key="tool-args-field" style={{ display: "grid", gap: "4px" }}>
-                  <FieldLabel help="JSON arguments sent to the selected workflow tool. Keep this valid JSON for predictable execution.">Tool Args (JSON)</FieldLabel>
+                  <FieldLabel help="JSON arguments sent to the selected workflow tool. Invalid JSON blocks saving and shows a parse error.">Tool Args (JSON)</FieldLabel>
                   <textarea
                     style={{ ...textareaStyle, minHeight: "92px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: "12px" }}
                     value={selectedStep.toolArgs}

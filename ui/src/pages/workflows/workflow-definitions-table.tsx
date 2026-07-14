@@ -204,21 +204,15 @@ export function DefinitionsTable({
         return;
       }
       const { patch } = patchResult;
-      const updated = await updateWorkflow({
+      await updateWorkflow({
         companyId,
         workflowId,
         id: workflowId,
         patch,
         ...patch,
       });
-      const updatedRecord = updated && typeof updated === "object" ? updated as Record<string, unknown> : {};
-      const updatedWorkflow = (updatedRecord.workflow && typeof updatedRecord.workflow === "object"
-        ? updatedRecord.workflow
-        : updatedRecord) as WorkflowOverviewData["workflows"][number] | null;
-      if (updatedWorkflow?.id) {
-        beginEdit(updatedWorkflow);
-      }
       await refreshOverview();
+      setTableNotice({ tone: "success", message: "저장되었습니다." });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setTableError(`수정 실패: ${message}`);

@@ -2,6 +2,10 @@ import { type JSX } from "react";
 import { buttonDisabledStyle, buttonStyle, headerRowStyle, mutedTextStyle, pageStyle, titleStyle } from "./workflow-page-styles.js";
 import { ErrorState } from "./shared-controls.js";
 
+export function shouldShowWorkflowLoadingState(loading: boolean, hasData: boolean): boolean {
+  return loading && !hasData;
+}
+
 export function WorkflowLoadingState({
   pluginId,
   isRefreshing,

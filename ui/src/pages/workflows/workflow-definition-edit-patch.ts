@@ -1,4 +1,4 @@
-import { stepsToJson, type StepDraft } from "./step-draft.js";
+import { workflowStepsToJsonForSave, type StepDraft } from "./step-draft.js";
 import { buildWorkflowInterfaceMetadata, normalizeMaxDailyRunsInput } from "./workflow-form-utils.js";
 import type { StepEditorMode, WorkflowOverviewData } from "./workflow-page-types.js";
 import type { CreateParentIssuePolicy } from "./workflow-parent-policy.js";
@@ -50,20 +50,9 @@ export function buildWorkflowDefinitionEditPatch(
     return { error: parsedMaxDailyRuns.error };
   }
 
-  let steps: unknown[];
-  if (input.editStepMode === "json") {
-    try {
-      const parsedSteps = JSON.parse(input.editJsonText) as unknown;
-      if (!Array.isArray(parsedSteps)) {
-        return { error: "steps는 JSON 배열이어야 합니다." };
-      }
-      steps = parsedSteps;
-    } catch (error) {
-      return { error: `JSON 파싱 실패: ${error instanceof Error ? error.message : String(error)}` };
-    }
-  } else {
-    steps = stepsToJson(input.editingSteps);
-  }
+  const serializedSteps = workflowStepsToJsonForSave(input.editStepMode, input.editJsonText, input.editingSteps);
+  if ("error" in serializedSteps) return { error: serializedSteps.error };
+  const steps = serializedSteps.steps;
 
   const legacyMetadata = buildWorkflowInterfaceMetadata(
     input.currentLegacyMetadata,

@@ -8,7 +8,7 @@ import { WorkflowHelpOverlay } from "./workflows/workflow-help-overlay.js";
 import { WorkflowDefinitionsResizeHandle } from "./workflows/workflow-definitions-resize-handle.js";
 import { WorkflowPageHeader } from "./workflows/workflow-page-header.js";
 import { WorkflowDefinitionsToolbar } from "./workflows/workflow-definitions-toolbar.js";
-import { WorkflowErrorState, WorkflowLoadingState } from "./workflows/workflow-page-states.js";
+import { shouldShowWorkflowLoadingState, WorkflowErrorState, WorkflowLoadingState } from "./workflows/workflow-page-states.js";
 import { DefinitionsTable } from "./workflows/workflow-definitions-table.js";
 import { WorkflowCreateForm } from "./workflows/workflow-create-form.js";
 export { WorkflowDashboardWidget, WorkflowSidebarLink } from "./workflows/workflow-sidebar-and-widget.js";
@@ -145,7 +145,7 @@ export function WorkflowPage(props: PluginPageProps): JSX.Element {
   );
   const filteredWorkflows = workflowStatusFilter === "active" ? activeWorkflows : archivedWorkflows;
 
-  if (overview.loading) {
+  if (shouldShowWorkflowLoadingState(overview.loading, overview.data !== null)) {
     return <WorkflowLoadingState pluginId={PLUGIN_ID} isRefreshing={isRefreshing} refreshButtonLabel={refreshButtonLabel} onRefresh={refreshOverview} />;
   }
 
