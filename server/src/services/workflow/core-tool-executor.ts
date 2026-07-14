@@ -4,6 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { agentToolGrants, agents, heartbeatRuns, issues, toolDefinitions, workflowStepRuns } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
+import { executeRemoteWorkflowTool, type CoreWorkflowToolRemoteDeps } from "./remote-tool-executor.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -97,7 +98,6 @@ export async function resolveRunStepEnv(db: Db, runId: string): Promise<Record<s
   if (paths?.stepOutputDir) env.PAPERCLIP_STEP_OUTPUT_DIR = paths.stepOutputDir;
   return env;
 }
-
 export type CoreWorkflowToolExecutionResult = {
   status: 200 | 403 | 404 | 422 | 500 | 501;
   body: {
@@ -137,7 +137,7 @@ export async function checkCoreWorkflowToolsAvailable(
   return { available: true };
 }
 
-export async function executeCoreBuiltinWorkflowTool(input: {
+export async function executeCoreWorkflowTool(input: {
   db: Db;
   companyId: string;
   agentId?: string | null;
@@ -145,7 +145,11 @@ export async function executeCoreBuiltinWorkflowTool(input: {
   issueId?: string | null;
   toolName: string;
   parameters: unknown;
+  requestId: string;
+  workflowRunId?: string | null;
+  stepId?: string | null;
   stepEnv?: Record<string, string>;
+  remoteDeps?: CoreWorkflowToolRemoteDeps;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const [tool] = await input.db
     .select({
@@ -193,6 +197,20 @@ export async function executeCoreBuiltinWorkflowTool(input: {
       return { status: 403, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
     }
   }
+
+  const remoteResult = await executeRemoteWorkflowTool({
+    db: input.db,
+    companyId: input.companyId,
+    toolName: input.toolName,
+    parameters: input.parameters,
+    requestId: input.requestId,
+    workflowRunId: input.workflowRunId,
+    stepId: input.stepId,
+    adapterType: tool.adapterType,
+    adapterConfig: tool.adapterConfig,
+    remoteDeps: input.remoteDeps,
+  });
+  if (remoteResult) return remoteResult;
 
   if (tool.adapterType !== "builtin") {
     return {

@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import { agentToolGrants, agents, pluginEntities, plugins, toolDefinitions } from "@paperclipai/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { toolService } from "../tools/registry.js";
 import { notFound } from "../../errors.js";
 import type { WorkflowStep } from "./dag-engine.js";
@@ -8,6 +8,12 @@ import { listDefaultWorkflowPluginAgentTools } from "./plugin-agent-tools.js";
 
 const TOOL_REGISTRY_PLUGIN_KEY = "insightflo.tool-registry";
 const TOOL_CONFIG_ENTITY_TYPE = "tool-config";
+const CORE_EXECUTABLE_ADAPTER_TYPES = new Set(["builtin", "http", "mcp"]);
+const CORE_EXECUTABLE_ADAPTER_TYPE_VALUES = ["builtin", "http", "mcp"];
+
+function isCoreExecutableAdapterType(value: unknown): boolean {
+  return typeof value === "string" && CORE_EXECUTABLE_ADAPTER_TYPES.has(value);
+}
 const AGENT_TOOL_GRANT_ENTITY_TYPE = "agent-tool-grant";
 
 export type WorkflowToolCatalogTool = {
@@ -126,15 +132,20 @@ async function resolveCoreGrantSubjects(
   if (!agent) throw notFound("Workflow tool agent not found");
 
   const [tool] = await db
-    .select({ id: toolDefinitions.id, name: toolDefinitions.name })
+    .select({
+      id: toolDefinitions.id,
+      name: toolDefinitions.name,
+      adapterType: toolDefinitions.adapterType,
+    })
     .from(toolDefinitions)
     .where(and(
       eq(toolDefinitions.companyId, input.companyId),
       eq(toolDefinitions.name, toolName),
-      eq(toolDefinitions.adapterType, "builtin"),
     ))
     .limit(1);
-  if (!tool) throw notFound("Workflow tool not found");
+  if (!tool || !isCoreExecutableAdapterType(tool.adapterType)) {
+    throw notFound("Workflow tool not found");
+  }
 
   return { agent, tool };
 }
@@ -256,7 +267,10 @@ export async function syncToolRegistryToolsToCore(
       instructions: stringValue(data.instructions) || undefined,
     };
     const [existing] = await db
-      .select({ id: toolDefinitions.id })
+      .select({
+        id: toolDefinitions.id,
+        adapterConfig: toolDefinitions.adapterConfig,
+      })
       .from(toolDefinitions)
       .where(and(
         eq(toolDefinitions.companyId, companyId),
@@ -265,19 +279,25 @@ export async function syncToolRegistryToolsToCore(
       .limit(1);
 
     if (existing) {
-      await db
-        .update(toolDefinitions)
-        .set({
-          description,
-          inputSchema: argsSchema,
-          adapterType: "builtin",
-          adapterConfig,
-          enabled: true,
-          updatedAt: new Date(),
-        })
-        .where(eq(toolDefinitions.id, existing.id));
-      toolIdByName.set(name, existing.id);
-      updatedTools += 1;
+      const isRegistryOwned = recordValue(existing.adapterConfig).source === "tool-registry";
+      if (isRegistryOwned) {
+        await db
+          .update(toolDefinitions)
+          .set({
+            description,
+            inputSchema: argsSchema,
+            adapterType: "builtin",
+            adapterConfig,
+            enabled: true,
+            updatedAt: new Date(),
+          })
+          .where(eq(toolDefinitions.id, existing.id));
+        toolIdByName.set(name, existing.id);
+        updatedTools += 1;
+      }
+      // Board-managed definitions (e.g. an http tool detached from the registry)
+      // are left untouched; their existing core grants remain authoritative, so
+      // the name is intentionally not added to toolIdByName for grant recreation.
     } else {
       const [created] = await db
         .insert(toolDefinitions)
@@ -363,7 +383,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       .where(eq(agents.companyId, companyId)),
   ]);
   const coreTools: WorkflowToolCatalogTool[] = coreDefinitions
-    .filter((definition) => definition.adapterType === "builtin")
+    .filter((definition) => isCoreExecutableAdapterType(definition.adapterType))
     .map((definition) => ({
       name: definition.name,
       displayName: definition.name,
@@ -389,7 +409,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
     ))
     .where(and(
       eq(agentToolGrants.companyId, companyId),
-      eq(toolDefinitions.adapterType, "builtin"),
+      inArray(toolDefinitions.adapterType, CORE_EXECUTABLE_ADAPTER_TYPE_VALUES),
     ));
   const coreGrantItems: WorkflowToolCatalogGrant[] = coreGrants
     .map((grant) => ({

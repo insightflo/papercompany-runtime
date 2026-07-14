@@ -116,56 +116,6 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
     });
   });
 
-  it("does not expose non-builtin definitions as grantable workflow tools", async () => {
-    const companyId = randomUUID();
-    const agentId = randomUUID();
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Executable Tool Company",
-      issuePrefix: "ETC",
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Tool Operator",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
-    await db.insert(toolDefinitions).values([
-      {
-        companyId,
-        name: "collect-local",
-        description: "Collect with a local command",
-        adapterType: "builtin",
-        adapterConfig: { command: "true" },
-      },
-      {
-        companyId,
-        name: "collect-http",
-        description: "HTTP adapter is not executable by the workflow core",
-        adapterType: "http",
-        adapterConfig: { url: "https://example.test" },
-      },
-    ]);
-
-    const catalog = await listWorkflowToolCatalog(db, companyId);
-
-    expect(catalog.tools.map((tool) => tool.name)).toEqual(["collect-local"]);
-    expect(catalog.sources.core.count).toBe(1);
-    await expect(grantWorkflowToolToAgent(db, {
-      companyId,
-      agentId,
-      toolName: "collect-http",
-      grantedBy: "board",
-    })).rejects.toThrow("Workflow tool not found");
-  });
-
   it("keeps synced core tools active when the Tool Registry plugin is not ready", async () => {
     const companyId = randomUUID();
     const toolId = randomUUID();

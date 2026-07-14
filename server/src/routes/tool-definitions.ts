@@ -83,7 +83,14 @@ export function toolDefinitionRoutes(db: Db) {
     assertCompanyAccess(req, companyId);
     assertBoard(req);
     const existing = await requireCompanyTool(db, companyId, toolId);
-    assertMutableTool(existing);
+    const detachesSourceOwnership =
+      existing.adapterConfig.source === "tool-registry"
+      && (req.body.adapterType === "http" || req.body.adapterType === "mcp")
+      && Boolean(req.body.adapterConfig)
+      && req.body.adapterConfig.source === undefined;
+    if (!detachesSourceOwnership) {
+      assertMutableTool(existing);
+    }
     let tool;
     try {
       tool = await toolService.updateDefinition(db, toolId, req.body);

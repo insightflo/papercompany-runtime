@@ -82,7 +82,7 @@ import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
 import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from "./services/workflow/dag-engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
-import { checkCoreWorkflowToolsAvailable, executeCoreBuiltinWorkflowTool } from "./services/workflow/core-tool-executor.js";
+import { checkCoreWorkflowToolsAvailable, executeCoreWorkflowTool } from "./services/workflow/core-tool-executor.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
 import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
@@ -463,13 +463,16 @@ export async function createApp(
       return { accepted: true };
     }
 
-    const coreResult = await executeCoreBuiltinWorkflowTool({
+    const coreResult = await executeCoreWorkflowTool({
       db,
       companyId: request.companyId,
       agentId: request.agentId,
       agentName: request.agentName,
       toolName: request.toolName,
       parameters: request.args ?? {},
+      requestId: request.requestId,
+      workflowRunId: request.workflowRunId,
+      stepId: request.stepId,
       stepEnv: {
         PAPERCLIP_WORKFLOW_RUN_ID: request.workflowRunId,
         PAPERCLIP_WORKFLOW_STEP_ID: request.stepId,

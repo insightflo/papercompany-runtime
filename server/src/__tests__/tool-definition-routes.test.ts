@@ -139,7 +139,6 @@ describe("tool definition routes", () => {
       description: "Updated",
       enabled: false,
     }));
-
     const res = await request(createApp())
       .patch(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}`)
       .send({ description: "Updated", enabled: false });
@@ -184,6 +183,75 @@ describe("tool definition routes", () => {
     expect(remove.status).toBe(409);
     expect(mockToolService.updateDefinition).not.toHaveBeenCalled();
     expect(mockToolService.deleteDefinition).not.toHaveBeenCalled();
+  });
+
+  it("allows a board-only atomic source-detaching conversion to http", async () => {
+    mockToolService.getDefinitionById.mockResolvedValue(toolDefinition({
+      adapterType: "builtin",
+      adapterConfig: { source: "tool-registry", command: "pnpm collect" },
+    }));
+    mockToolService.updateDefinition.mockResolvedValue(toolDefinition({
+      adapterType: "http",
+      adapterConfig: { url: "https://n8n.example.test/webhook/daily-tech-scout", method: "POST" },
+    }));
+
+    const res = await request(createApp())
+      .patch(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}`)
+      .send({
+        adapterType: "http",
+        adapterConfig: {
+          url: "https://n8n.example.test/webhook/daily-tech-scout",
+          method: "POST",
+        },
+      });
+    expect(res.status).toBe(200);
+    expect(mockToolService.updateDefinition).toHaveBeenCalledWith(expect.anything(), TOOL_ID, {
+      adapterType: "http",
+      adapterConfig: {
+        url: "https://n8n.example.test/webhook/daily-tech-scout",
+        method: "POST",
+      },
+    });
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "company.tool_updated",
+      entityId: TOOL_ID,
+    }));
+  });
+
+  it("allows a board-only atomic source-detaching conversion to mcp", async () => {
+    mockToolService.getDefinitionById.mockResolvedValue(toolDefinition({
+      adapterType: "builtin",
+      adapterConfig: { source: "tool-registry", command: "pnpm collect" },
+    }));
+    mockToolService.updateDefinition.mockResolvedValue(toolDefinition({
+      adapterType: "mcp",
+      adapterConfig: { url: "https://mcp.example.test/mcp", toolName: "daily-tech-scout" },
+    }));
+    const res = await request(createApp())
+      .patch(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}`)
+      .send({
+        adapterType: "mcp",
+        adapterConfig: { url: "https://mcp.example.test/mcp", toolName: "daily-tech-scout" },
+      });
+    expect(res.status).toBe(200);
+    expect(mockToolService.updateDefinition).toHaveBeenCalledWith(expect.anything(), TOOL_ID, {
+      adapterType: "mcp",
+      adapterConfig: { url: "https://mcp.example.test/mcp", toolName: "daily-tech-scout" },
+    });
+  });
+  it("still blocks a source-managed conversion that keeps registry ownership", async () => {
+    mockToolService.getDefinitionById.mockResolvedValue(toolDefinition({
+      adapterType: "builtin",
+      adapterConfig: { source: "tool-registry", command: "pnpm collect" },
+    }));
+    const res = await request(createApp())
+      .patch(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}`)
+      .send({
+        adapterType: "http",
+        adapterConfig: { source: "tool-registry", url: "https://example.test", method: "POST" },
+      });
+    expect(res.status).toBe(409);
+    expect(mockToolService.updateDefinition).not.toHaveBeenCalled();
   });
 
   it("returns a conflict when a tool name already exists", async () => {

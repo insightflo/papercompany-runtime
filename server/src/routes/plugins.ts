@@ -59,7 +59,7 @@ import {
   type WorkflowExecutionMode,
 } from "../services/workflow/dag-engine.js";
 import {
-  executeCoreBuiltinWorkflowTool,
+  executeCoreWorkflowTool,
   resolveRunStepEnv,
 } from "../services/workflow/core-tool-executor.js";
 
@@ -1101,13 +1101,16 @@ export function pluginRoutes(
 
     try {
       const stepEnv = await resolveRunStepEnv(db, String(runContext.runId));
-      const coreResult = await executeCoreBuiltinWorkflowTool({
+      const coreResult = await executeCoreWorkflowTool({
         db,
         companyId: runContext.companyId,
         agentId: runContext.agentId,
         issueId: workflowRunIssueId,
         toolName: tool,
         parameters: parameters ?? {},
+        requestId: randomUUID(),
+        workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
+        stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
         stepEnv,
       });
       if (coreResult.status !== 404 || coreResult.body.source === "core") {

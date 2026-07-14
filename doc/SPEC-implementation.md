@@ -711,6 +711,15 @@ Scheduler must skip invocation when:
 - an existing run is active
 - hard budget limit has been hit
 
+## 11.6 Workflow Tool Adapters
+
+Workflow tool definitions with `adapterType` `builtin`, `http`, or `mcp` are selectable and grantable. Execution always enforces the existing company-scoped agent grant before invoking an adapter.
+
+- `http`: POST to an absolute HTTPS URL, resolve header authentication from a company secret, and map the configured result and artifact fields from a JSON response envelope. Write the artifact atomically to the workflow step output directory.
+- `mcp`: connect to an absolute HTTPS Streamable HTTP endpoint with the official MCP client, call the configured remote tool once, then close the connection. Header authentication uses the same company-secret reference model.
+- Remote diagnostics must be bounded and must not expose the resolved secret. Remote 401/403 responses map to a local 403 without returning the remote body.
+- Tool Registry-owned definitions may be atomically detached to `http` or `mcp` by a board update that replaces the adapter configuration and omits the registry source marker. Later registry syncs must not overwrite the detached definition.
+
 ## 12. Governance and Approval Flows
 
 ## 12.1 Hiring
