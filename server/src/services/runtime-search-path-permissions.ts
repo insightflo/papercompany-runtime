@@ -1,9 +1,10 @@
 import path from "node:path";
-import { and, eq, inArray, not } from "drizzle-orm";
+import { and, asc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   issueExecutionCards,
   issueWorkProducts,
+  issues,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -50,7 +51,9 @@ export async function buildRuntimeSearchPathPermissions(input: {
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-  if (!card) return null;
+  if (!card) {
+    return buildMissionRecoverySearchPermissions(input, permissions);
+  }
 
   permissions.qaType = card.cardJson.workflow?.qaType ?? null;
   permissions.qaInputScope = card.cardJson.workflow?.qaInputScope ?? null;
@@ -116,6 +119,51 @@ export async function buildRuntimeSearchPathPermissions(input: {
       not(eq(issueWorkProducts.status, "archived")),
     ));
 
+  permissions.dependencyFiles = Array.from(new Set(products.flatMap((product) => {
+    if (product.provider !== "local" && product.provider !== "local_file") return [];
+    const localPath = resolveWorkProductLocalFilePath(product);
+    return localPath ? [path.resolve(localPath)] : [];
+  })));
+  permissions.dependencyDirectories = Array.from(new Set(
+    permissions.dependencyFiles
+      .map((file) => path.dirname(file))
+      .filter((directory) => isPathInside(directory, permissions.workingDirectory)),
+  ));
+  return permissions;
+}
+
+async function buildMissionRecoverySearchPermissions(
+  input: { db: Db; companyId: string; issueId: string; workingDirectory: string },
+  permissions: RuntimeSearchPathPermissions,
+): Promise<RuntimeSearchPathPermissions | null> {
+  const recoveryIssue = await input.db
+    .select({ missionId: issues.missionId, originKind: issues.originKind })
+    .from(issues)
+    .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (recoveryIssue?.originKind !== "mission_main_executor_unblock" || !recoveryIssue.missionId) {
+    return null;
+  }
+
+  const products = await input.db
+    .select({
+      provider: issueWorkProducts.provider,
+      metadata: issueWorkProducts.metadata,
+      url: issueWorkProducts.url,
+      externalId: issueWorkProducts.externalId,
+    })
+    .from(issueWorkProducts)
+    .innerJoin(issues, eq(issueWorkProducts.issueId, issues.id))
+    .where(and(
+      eq(issueWorkProducts.companyId, input.companyId),
+      eq(issues.companyId, input.companyId),
+      eq(issues.missionId, recoveryIssue.missionId),
+      not(eq(issueWorkProducts.status, "archived")),
+    ))
+    .orderBy(asc(issueWorkProducts.createdAt), asc(issueWorkProducts.id));
+
+  permissions.allowedSearchScopes = ["workProduct"];
   permissions.dependencyFiles = Array.from(new Set(products.flatMap((product) => {
     if (product.provider !== "local" && product.provider !== "local_file") return [];
     const localPath = resolveWorkProductLocalFilePath(product);

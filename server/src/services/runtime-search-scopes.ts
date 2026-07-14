@@ -32,6 +32,12 @@ export function missionSearchScopesAllowRepo(scopes: readonly MissionSearchScope
 }
 
 export function buildMissionSearchGuidance(scopes: readonly MissionSearchScope[]): string[] {
+  if (scopes.length === 0) {
+    return [
+      "missionSearch is unavailable because this run has no declared search scope.",
+      "Do not scan the workspace or repository root. Request or use declared mission workProduct paths instead.",
+    ];
+  }
   const repoAllowed = scopes.includes("repo");
   const exampleScope = scopes[0] ?? "workProduct";
   const scopeText = scopes.length > 0 ? scopes.join(", ") : "none";

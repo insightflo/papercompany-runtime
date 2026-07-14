@@ -57,6 +57,7 @@ import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
+import { resolveWorkflowToolStepArgs } from "./tool-step-args.js";
 
 /**
  * Workflow step definition.
@@ -2027,14 +2028,6 @@ function getSingleToolStepName(step: WorkflowStep): string {
   return toolName;
 }
 
-function buildWorkflowToolStepArgs(
-  step: PersistedWorkflowStep,
-  run: typeof workflowRuns.$inferSelect,
-): unknown {
-  const args = step.toolArgs ?? {};
-  return renderWorkflowToolStepArgTemplates(args, run);
-}
-
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((item) => stableJson(item)).join(",")}]`;
@@ -2045,6 +2038,14 @@ function stableJson(value: unknown): string {
     return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function renderWorkflowRunTextTemplate(
+  value: string,
+  run: typeof workflowRuns.$inferSelect,
+): string {
+  const runDate = run.runDate ?? "";
+  return value.replaceAll("{$runDate}", runDate).replaceAll("{$date}", runDate);
 }
 
 function getMetadataRecord(value: unknown, key: string): Record<string, unknown> {
@@ -2214,32 +2215,6 @@ async function completeToolStepRunFromCache(input: {
     .where(eq(workflowStepRuns.id, input.stepRun.id));
 }
 
-function renderWorkflowRunTextTemplate(
-  value: string,
-  run: typeof workflowRuns.$inferSelect,
-): string {
-  const runDate = run.runDate ?? "";
-  return value.replaceAll("{$runDate}", runDate).replaceAll("{$date}", runDate);
-}
-
-function renderWorkflowToolStepArgTemplates(
-  value: unknown,
-  run: typeof workflowRuns.$inferSelect,
-): unknown {
-  if (typeof value === "string") {
-    return renderWorkflowRunTextTemplate(value, run);
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => renderWorkflowToolStepArgTemplates(item, run));
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, renderWorkflowToolStepArgTemplates(entry, run)]),
-    );
-  }
-  return value;
-}
-
 async function failToolStepRun(
   db: Db,
   stepRun: typeof workflowStepRuns.$inferSelect,
@@ -2304,7 +2279,27 @@ async function startIssueLessToolStepRun(input: {
 
   const toolName = getSingleToolStepName(step);
   const requestId = `${run.id}:${step.id}:${Date.now()}`;
-  const args = buildWorkflowToolStepArgs(step as PersistedWorkflowStep, run);
+  let args: unknown;
+  try {
+    args = await resolveWorkflowToolStepArgs({
+      db,
+      run,
+      step: step as PersistedWorkflowStep,
+      workflowSteps: normalizeWorkflowStepsForExecution(definition.stepsJson),
+    });
+  } catch (error) {
+    await failToolStepRunWithDispatchError({
+      db,
+      step,
+      stepRun,
+      now,
+      requestId,
+      toolName,
+      args: step.toolArgs ?? {},
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
   const concurrencyKey = step.executionControls?.concurrencyKey;
   const concurrencyLimit = step.executionControls?.concurrencyLimit;
   if (concurrencyKey && typeof concurrencyLimit === "number" && concurrencyLimit > 0) {
@@ -2438,7 +2433,12 @@ export async function processQueuedWorkflowToolStepRuns(
     const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
     const args = Object.prototype.hasOwnProperty.call(invocation, "args")
       ? invocation.args
-      : buildWorkflowToolStepArgs(step as PersistedWorkflowStep, row.run);
+      : await resolveWorkflowToolStepArgs({
+        db,
+        run: row.run,
+        step: step as PersistedWorkflowStep,
+        workflowSteps: steps,
+      });
     if (!requestId) {
       await failToolStepRunWithDispatchError({
         db,

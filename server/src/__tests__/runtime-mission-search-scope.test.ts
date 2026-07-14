@@ -112,6 +112,13 @@ describe("mission search scopes", () => {
     expect(recipe).not.toContain("<workProduct|");
   });
 
+  it("does not advertise a callable missionSearch recipe when no scope is available", () => {
+    const guidance = buildMissionSearchGuidance([]).join("\n");
+
+    expect(guidance).toContain("missionSearch is unavailable");
+    expect(guidance).not.toContain("curl -sS");
+  });
+
   it("stores allowedSearchScopes on workflow execution cards", () => {
     const card = buildWorkflowIssueExecutionCard({
       title: "Develop feature",

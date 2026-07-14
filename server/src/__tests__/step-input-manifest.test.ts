@@ -203,10 +203,10 @@ describe("buildStepInputManifest", () => {
         missionSearch: {
           available: false,
           allowedScopes: [],
-          guidance: expect.arrayContaining([
-            expect.stringContaining("missionSearch"),
-            expect.stringContaining("$PAPERCLIP_API_BASE_URL/agents/me/mission-search"),
-          ]),
+          guidance: [
+            "missionSearch is unavailable because this run has no declared search scope.",
+            "Do not scan the workspace or repository root. Request or use declared mission workProduct paths instead.",
+          ],
         },
         missionWorkingNote: {
           available: true,
