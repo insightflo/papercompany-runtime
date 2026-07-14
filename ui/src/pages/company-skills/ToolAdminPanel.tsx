@@ -162,6 +162,7 @@ export function ToolAdminPanel({ companyId }: { companyId: string }) {
           <EmptyState icon={Wrench} message="Create the first company tool definition." />
         ) : (
           <ToolDefinitionEditor
+            companyId={companyId}
             selectedTool={selectedTool}
             form={form}
             setForm={setForm}

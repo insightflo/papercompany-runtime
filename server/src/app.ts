@@ -359,7 +359,6 @@ export async function createApp(
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(hermesChatRoutes(db));
   api.use(companySkillRoutes(db));
-  api.use(toolDefinitionRoutes(db));
   api.use(companyInstructionRoutes(db));
   api.use(agentRoutes(db));
   api.use(missionSearchRoutes(db));
@@ -415,6 +414,7 @@ export async function createApp(
     lifecycleManager: lifecycle,
     db,
   });
+  api.use(toolDefinitionRoutes(db, { toolDispatcher }));
 
   setWorkflowToolStepReadinessChecker(async ({ companyId, toolNames }) => {
     const nonPluginToolNames = toolNames.filter((toolName) => !toolDispatcher.getTool(toolName));

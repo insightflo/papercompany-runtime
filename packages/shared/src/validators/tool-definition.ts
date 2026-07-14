@@ -33,3 +33,9 @@ export const updateToolDefinitionSchema = createToolDefinitionSchema
 export type ToolDefinitionAdapterType = z.infer<typeof toolDefinitionAdapterTypeSchema>;
 export type CreateToolDefinition = z.infer<typeof createToolDefinitionSchema>;
 export type UpdateToolDefinition = z.infer<typeof updateToolDefinitionSchema>;
+
+export const testToolSchema = z.object({
+  input: z.record(z.unknown()),
+}).strict();
+
+export type TestToolRequest = z.infer<typeof testToolSchema>;

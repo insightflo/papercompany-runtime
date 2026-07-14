@@ -2,6 +2,7 @@ import type {
   CreateToolDefinitionRequest,
   ToolDefinition,
   UpdateToolDefinitionRequest,
+  ToolTestOutcome,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -49,6 +50,11 @@ export const toolDefinitionsApi = {
     api.patch<ToolDefinition>(companyToolsPath(companyId, `/${encodeURIComponent(toolId)}`), payload),
   remove: (companyId: string, toolId: string) =>
     api.delete<{ ok: true }>(companyToolsPath(companyId, `/${encodeURIComponent(toolId)}`)),
+  test: (companyId: string, toolId: string, input: Record<string, unknown>) =>
+    api.post<ToolTestOutcome>(
+      companyToolsPath(companyId, `/${encodeURIComponent(toolId)}/test`),
+      { input },
+    ),
 };
 
 export const workflowToolsApi = {

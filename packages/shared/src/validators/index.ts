@@ -32,6 +32,8 @@ export {
   type ToolDefinitionAdapterType,
   type CreateToolDefinition,
   type UpdateToolDefinition,
+  testToolSchema,
+  type TestToolRequest,
 } from "./tool-definition.js";
 export {
   companySkillSourceTypeSchema,

@@ -2,13 +2,20 @@ import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   createToolDefinitionSchema,
+  testToolSchema,
   updateToolDefinitionSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { conflict, notFound } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { toolService } from "../services/tools/registry.js";
+import { executeToolTest, type ToolTestDispatcher, type ToolTestExecutor } from "../services/tools/test-executor.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+
+type ToolDefinitionRoutesOptions = {
+  toolDispatcher?: ToolTestDispatcher;
+  executeTest?: ToolTestExecutor;
+};
 
 async function requireCompanyTool(db: Db, companyId: string, toolId: string) {
   const tool = await toolService.getDefinitionById(db, toolId);
@@ -38,7 +45,8 @@ function throwToolNameConflict(error: unknown, name: string): never {
   throw error;
 }
 
-export function toolDefinitionRoutes(db: Db) {
+export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOptions = {}) {
+  const { toolDispatcher, executeTest = executeToolTest } = options;
   const router = Router();
 
   router.get("/companies/:companyId/tools", async (req, res) => {
@@ -148,6 +156,43 @@ export function toolDefinitionRoutes(db: Db) {
     });
     res.json({ ok: true });
   });
+
+  router.post(
+    "/companies/:companyId/tools/:toolId/test",
+    validate(testToolSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const toolId = req.params.toolId as string;
+      assertCompanyAccess(req, companyId);
+      assertBoard(req);
+      const tool = await requireCompanyTool(db, companyId, toolId);
+      const outcome = await executeTest({
+        db,
+        companyId,
+        tool,
+        input: req.body.input,
+        dispatcher: toolDispatcher,
+      });
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "company.tool_tested",
+        entityType: "tool_definition",
+        entityId: tool.id,
+        details: {
+          name: tool.name,
+          adapterType: tool.adapterType,
+          ok: outcome.ok,
+          httpStatus: outcome.httpStatus,
+        },
+      });
+      res.json(outcome);
+    },
+  );
 
   return router;
 }

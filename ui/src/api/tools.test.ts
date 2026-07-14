@@ -61,6 +61,23 @@ describe("tools api clients", () => {
     }));
   });
 
+  it("tests a saved tool through the company-scoped test endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      mockResponse(200, { ok: true, status: "success", httpStatus: 200, result: { ok: true } }),
+    );
+    setFetchMock(fetchMock);
+
+    await toolDefinitionsApi.test("company-1", "tool-1", { limit: 2 });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/companies/company-1/tools/tool-1/test",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ input: { limit: 2 } }),
+      }),
+    );
+  });
+
   it("grants and revokes workflow tools through the existing catalog routes", async () => {
     const fetchMock = vi.fn(async () => mockResponse(200, { ok: true }));
     setFetchMock(fetchMock);

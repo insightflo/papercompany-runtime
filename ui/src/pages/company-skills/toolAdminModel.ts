@@ -78,3 +78,79 @@ export function buildToolPayload(form: ToolFormState): CreateToolDefinitionReque
     enabled: form.enabled,
   };
 }
+
+export type AdapterAuthState =
+  | { kind: "ok"; headerName: string; secretId: string | null; version: number | "latest" }
+  | { kind: "no-auth" }
+  | { kind: "invalid" };
+
+/**
+ * Reads the `adapterConfig.auth` header-auth block from the raw JSON form
+ * state. Returns `invalid` when the JSON cannot be parsed so the selector can
+ * stay disabled until the Advanced JSON is fixed.
+ */
+export function readAdapterAuth(adapterConfigJson: string): AdapterAuthState {
+  let cfg: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(adapterConfigJson);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { kind: "invalid" };
+    }
+    cfg = parsed as Record<string, unknown>;
+  } catch {
+    return { kind: "invalid" };
+  }
+  const auth = cfg.auth;
+  if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
+    return { kind: "no-auth" };
+  }
+  const a = auth as Record<string, unknown>;
+  const headerName = typeof a.headerName === "string" ? a.headerName : "";
+  const secretId = typeof a.secretId === "string" && a.secretId.trim() ? a.secretId : null;
+  const version =
+    a.version === "latest" || (typeof a.version === "number" && a.version > 0)
+      ? (a.version as number | "latest")
+      : "latest";
+  return { kind: "ok", headerName, secretId, version };
+}
+
+export type AdapterAuthPatch = {
+  headerName?: string;
+  secretId?: string | null;
+  version?: number | "latest";
+};
+
+/**
+ * Merges a header-auth patch into the raw adapter config JSON, preserving all
+ * other adapterConfig fields. Selecting a secret always pins `version: latest`.
+ * Throws if the JSON is invalid — callers must guard with `readAdapterAuth`.
+ */
+export function writeAdapterAuth(adapterConfigJson: string, patch: AdapterAuthPatch): string {
+  const parsed: unknown = JSON.parse(adapterConfigJson);
+  const cfg =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  const current =
+    cfg.auth && typeof cfg.auth === "object" && !Array.isArray(cfg.auth)
+      ? (cfg.auth as Record<string, unknown>)
+      : {};
+  const headerName =
+    patch.headerName !== undefined
+      ? patch.headerName
+      : typeof current.headerName === "string"
+        ? current.headerName
+        : "Authorization";
+  const secretId =
+    patch.secretId !== undefined
+      ? patch.secretId
+      : typeof current.secretId === "string"
+        ? current.secretId
+        : "";
+  const version = patch.version !== undefined ? patch.version : (current.version ?? "latest");
+  return JSON.stringify(
+    { ...cfg, auth: { type: "header", headerName, secretId, version } },
+    null,
+    2,
+  );
+}

@@ -1,14 +1,17 @@
+import { useState } from "react";
 import type {
   ToolDefinition,
   ToolDefinitionAdapterType,
 } from "@paperclipai/shared";
-import { Check, Pencil, Plus, Power, PowerOff, Trash2 } from "lucide-react";
+import { Check, FlaskConical, Pencil, Plus, Power, PowerOff, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "../../lib/utils";
 import type { ToolFormState } from "./toolAdminModel";
 import { isSourceManagedTool } from "./toolAdminModel";
+import { ToolAuthSelector } from "./ToolAuthSelector";
+import { ToolTestDialog } from "./ToolTestDialog";
 
 function adapterTypeFromValue(value: string): ToolDefinitionAdapterType {
   switch (value) {
@@ -38,6 +41,7 @@ export function ToolStatus({ enabled }: { enabled: boolean }) {
 }
 
 type ToolDefinitionEditorProps = {
+  companyId: string;
   selectedTool: ToolDefinition | null;
   form: ToolFormState;
   setForm: (form: ToolFormState) => void;
@@ -50,6 +54,7 @@ type ToolDefinitionEditorProps = {
 };
 
 export function ToolDefinitionEditor({
+  companyId,
   selectedTool,
   form,
   setForm,
@@ -60,7 +65,9 @@ export function ToolDefinitionEditor({
   onToggleEnabled,
   onDelete,
 }: ToolDefinitionEditorProps) {
+  const [testOpen, setTestOpen] = useState(false);
   const sourceManaged = selectedTool ? isSourceManagedTool(selectedTool.adapterConfig) : false;
+  const usesHeaderAuth = form.adapterType === "http" || form.adapterType === "mcp";
 
   return (
     <section className="max-w-3xl space-y-5">
@@ -74,6 +81,17 @@ export function ToolDefinitionEditor({
           ) : null}
         </div>
         <div className="flex items-center gap-2">
+          {selectedTool ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setTestOpen(true)}
+              aria-label={`Test ${selectedTool.name}`}
+            >
+              <FlaskConical className="mr-1.5 h-3.5 w-3.5" />
+              Test
+            </Button>
+          ) : null}
           {selectedTool ? (
             <Button
               variant="ghost"
@@ -132,10 +150,26 @@ export function ToolDefinitionEditor({
           <span className="font-medium">Input schema</span>
           <Textarea value={form.inputSchemaJson} onChange={(event) => setForm({ ...form, inputSchemaJson: event.target.value })} aria-label="Tool input schema JSON" className="min-h-36 font-mono" disabled={sourceManaged} />
         </label>
-        <label className="space-y-1.5 text-sm">
-          <span className="font-medium">Adapter config</span>
-          <Textarea value={form.adapterConfigJson} onChange={(event) => setForm({ ...form, adapterConfigJson: event.target.value })} aria-label="Tool adapter config JSON" className="min-h-36 font-mono" disabled={sourceManaged} />
-        </label>
+        {usesHeaderAuth ? (
+          <ToolAuthSelector
+            companyId={companyId}
+            adapterConfigJson={form.adapterConfigJson}
+            onAdapterConfigChange={(json) => setForm({ ...form, adapterConfigJson: json })}
+            disabled={sourceManaged}
+          />
+        ) : null}
+        <details className="space-y-1.5 text-sm">
+          <summary className="cursor-pointer font-medium text-muted-foreground">
+            Advanced — adapter config JSON
+          </summary>
+          <Textarea
+            value={form.adapterConfigJson}
+            onChange={(event) => setForm({ ...form, adapterConfigJson: event.target.value })}
+            aria-label="Tool adapter config JSON"
+            className="min-h-36 font-mono"
+            disabled={sourceManaged}
+          />
+        </details>
         <button
           type="button"
           role="switch"
@@ -152,6 +186,15 @@ export function ToolDefinitionEditor({
         </button>
         {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
       </div>
+
+      {selectedTool ? (
+        <ToolTestDialog
+          companyId={companyId}
+          tool={selectedTool}
+          open={testOpen}
+          onOpenChange={setTestOpen}
+        />
+      ) : null}
     </section>
   );
 }

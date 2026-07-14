@@ -47,14 +47,14 @@ function createApp(actor: Record<string, unknown> = {
   companyIds: [COMPANY_ID],
   source: "authenticated",
   isInstanceAdmin: false,
-}, db: unknown = {}) {
+}, db: unknown = {}, options: { executeTest?: unknown } = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as never as { actor: unknown }).actor = actor;
     next();
   });
-  app.use("/api", toolDefinitionRoutes(db as never));
+  app.use("/api", toolDefinitionRoutes(db as never, options));
   app.use(errorHandler);
   return app;
 }
@@ -296,5 +296,61 @@ describe("tool definition routes", () => {
       entityType: "tool_definition",
       entityId: TOOL_ID,
     }));
+  });
+  it("runs a board-only tool test and logs activity", async () => {
+    const mockExecuteTest = vi.fn(async () => ({
+      ok: true,
+      status: "success" as const,
+      httpStatus: 200,
+      result: { ok: true },
+    }));
+
+    const res = await request(createApp(undefined, undefined, { executeTest: mockExecuteTest }))
+      .post(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}/test`)
+      .send({ input: { query: "ai" } });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({ ok: true, status: "success", httpStatus: 200 }));
+    expect(mockExecuteTest).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: COMPANY_ID,
+      tool: expect.objectContaining({ id: TOOL_ID }),
+      input: { query: "ai" },
+    }));
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: COMPANY_ID,
+      action: "company.tool_tested",
+      entityType: "tool_definition",
+      entityId: TOOL_ID,
+      details: expect.objectContaining({ ok: true, httpStatus: 200 }),
+    }));
+  });
+
+  it("blocks agent credentials from testing a tool", async () => {
+    const mockExecuteTest = vi.fn();
+    const agentActor = {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: COMPANY_ID,
+      runId: null,
+    };
+
+    const res = await request(createApp(agentActor, undefined, { executeTest: mockExecuteTest }))
+      .post(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}/test`)
+      .send({ input: {} });
+
+    expect(res.status).toBe(403);
+    expect(mockExecuteTest).not.toHaveBeenCalled();
+  });
+
+  it("does not test a tool owned by another company", async () => {
+    mockToolService.getDefinitionById.mockResolvedValue(toolDefinition({ companyId: OTHER_COMPANY_ID }));
+    const mockExecuteTest = vi.fn();
+
+    const res = await request(createApp(undefined, undefined, { executeTest: mockExecuteTest }))
+      .post(`/api/companies/${COMPANY_ID}/tools/${TOOL_ID}/test`)
+      .send({ input: {} });
+
+    expect(res.status).toBe(404);
+    expect(mockExecuteTest).not.toHaveBeenCalled();
   });
 });
