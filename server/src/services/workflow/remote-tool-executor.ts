@@ -1,6 +1,11 @@
 import type { Db } from "@paperclipai/db";
+import { createCompanyWorkProductStorageService } from "../company-work-product-storage.js";
 import { secretService } from "../secrets.js";
 import type { CoreWorkflowToolExecutionResult } from "./core-tool-executor.js";
+import {
+  mirrorWorkflowArtifactToCompanyStorage,
+  type WorkflowArtifactMirrorDeps,
+} from "./artifact-mirror.js";
 import { executeHttpWorkflowTool } from "./http-tool-adapter.js";
 import { executeMcpWorkflowTool } from "./mcp-tool-adapter.js";
 import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
@@ -12,12 +17,25 @@ export type CoreWorkflowToolRemoteDeps = {
     secretId: string,
     version: number | "latest",
   ) => Promise<string>;
+  artifactMirrorDeps?: Omit<WorkflowArtifactMirrorDeps, "resolveSecretValue">;
 };
 
 function readObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function artifactPathFromResult(
+  adapterConfig: unknown,
+  result: CoreWorkflowToolExecutionResult,
+): string | null {
+  const response = readObject(readObject(adapterConfig).response);
+  const field = typeof response.artifactPathResultField === "string"
+    ? response.artifactPathResultField.trim()
+    : "";
+  const artifactPath = field ? readObject(result.body.data)[field] : null;
+  return typeof artifactPath === "string" && artifactPath.trim() ? artifactPath.trim() : null;
 }
 
 export async function executeRemoteWorkflowTool(input: {
@@ -50,7 +68,41 @@ export async function executeRemoteWorkflowTool(input: {
     resolveSecretValue,
   };
 
-  return input.adapterType === "http"
+  const result = input.adapterType === "http"
     ? executeHttpWorkflowTool(adapterInput, deps)
     : executeMcpWorkflowTool(adapterInput, deps);
+  const adapterResult = await result;
+  const artifactPath = adapterResult.status === 200 && stepOutputDir
+    ? artifactPathFromResult(input.adapterConfig, adapterResult)
+    : null;
+  if (!artifactPath || !stepOutputDir) return adapterResult;
+
+  try {
+    const storage = await createCompanyWorkProductStorageService(input.db).get(input.companyId);
+    await mirrorWorkflowArtifactToCompanyStorage(
+      storage,
+      {
+        companyId: input.companyId,
+        workflowRunId: input.workflowRunId,
+        stepId: input.stepId,
+        stepOutputDir,
+        artifactPath,
+      },
+      {
+        resolveSecretValue,
+        ...(input.remoteDeps?.artifactMirrorDeps ?? {}),
+      },
+    );
+  } catch {
+    return {
+      status: 500,
+      body: {
+        tool: input.toolName,
+        source: "core",
+        error: `Workflow tool "${input.toolName}" could not mirror the response artifact to configured work-product storage`,
+      },
+    };
+  }
+
+  return adapterResult;
 }
