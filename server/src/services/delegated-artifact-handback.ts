@@ -1,10 +1,13 @@
 import type { Db } from "@paperclipai/db";
-import { activityLog, issueComments } from "@paperclipai/db";
+import { activityLog, issueComments, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import {
   queueIssueAssignmentWakeup,
   type IssueAssignmentWakeupDeps,
 } from "./issue-assignment-wakeup.js";
 import { findExistingWorkflowResumeWake } from "./workflow-resume-wake.js";
+import { evaluateSemanticStructuralReadiness } from "./workflow/control-flow/structural-semantic-readiness.js";
+import type { WorkflowStep } from "./workflow/dag-engine.js";
 import {
   hasExistingHandbackDispatch,
   loadActiveChildWorkProduct,
@@ -112,6 +115,33 @@ export async function handleDelegatedArtifactHandback(input: {
 
   const parentStepRun = await loadDelegatedParentStepRun(input.db, parentIssue);
   if (!parentStepRun) return { status: "skipped", reason: "parent_workflow_step_run_not_found" };
+
+  // Handback has its own workflow_resume queue path. Keep it behind the same
+  // exact structural-PASS guard as normal/reconciler resumes.
+  const workflowContext = await input.db
+    .select({ run: workflowRuns, definition: workflowDefinitions })
+    .from(workflowRuns)
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+    .where(and(
+      eq(workflowRuns.id, parentStepRun.workflowRunId),
+      eq(workflowRuns.companyId, parentIssue.companyId),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!workflowContext) return { status: "skipped", reason: "parent_workflow_step_run_not_found" };
+  const workflowSteps = Array.isArray(workflowContext.definition.stepsJson)
+    ? workflowContext.definition.stepsJson as WorkflowStep[]
+    : [];
+  const parentStep = workflowSteps.find((step) => step.id === parentStepRun.stepId);
+  if (!parentStep) return { status: "skipped", reason: "parent_workflow_step_run_not_found" };
+  const structuralReadiness = await evaluateSemanticStructuralReadiness({
+    db: input.db,
+    companyId: parentIssue.companyId,
+    workflowRunId: parentStepRun.workflowRunId,
+    step: parentStep,
+    steps: workflowSteps,
+  });
+  if (!structuralReadiness.ready) return { status: "skipped", reason: "parent_not_runnable" };
 
   const idempotencyKey = buildIdempotencyKey({
     parentIssueId: parentIssue.id,

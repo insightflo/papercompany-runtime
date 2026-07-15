@@ -20,6 +20,14 @@ import {
 } from "./missions/mission-plan-unit-contract.js";
 import { buildVerificationBeforeCompletionCriteria } from "./missions/mission-quality-contract.js";
 import { buildDeliveryVerificationCriteria } from "./workflow/delivery-verification-gate.js";
+import {
+  isDeclaredStructuralUnit,
+  validateStructuralUnit,
+  validateStructuralTopology,
+  validateDeclaredStructuralPlan,
+  rewriteStepToolArgs,
+} from "./missions/structural-materialization.js";
+import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
@@ -1145,6 +1153,33 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const missionTitle = missionRow?.title ?? missionId;
   const missionDescription = missionRow?.description ?? null;
 
+  // Validate declared structural topology and capability before *any* branch
+  // can create/wake PLAN-QA or materialize a plan. Invalid topology is a plan
+  // error, not something materialization is allowed to repair silently.
+  const structuralPlanErrors = validateDeclaredStructuralPlan(draftResult.draft.refs.selectedExecutionUnits);
+  const structuralReadinessErrors = await validateDeclaredStructuralPlanReadiness({
+    db,
+    companyId,
+    units: draftResult.draft.refs.selectedExecutionUnits,
+  });
+  const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
+  if (allStructuralErrors.length > 0) {
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "structural_plan_validation_failed",
+      diagnostics: allStructuralErrors.map((message) => ({ code: "structural_plan_error", message, severity: "invalid" as const })),
+    });
+    return {
+      status: "invalid",
+      reason: "structural_plan_validation_failed",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: allStructuralErrors.map((e) => ({ code: "structural_plan_error", message: e, severity: "invalid" as const })),
+    };
+  }
+
   // ── Plan-QA 게이트(항상 활성): 같은 decisionHash 가 이미 materialize 됐으면 통과, 아니면 QA verdict 대기 ──
   if (activeOwnerDecision?.decisionHash === decisionHash) {
     if (activePlan) {
@@ -1881,7 +1916,8 @@ function buildPaqoWorkflowSteps(
         ?? toNonEmptyString(unit.name)
         ?? toNonEmptyString(unit.id)
         ?? `Execution unit ${index + 1}`;
-    return inferPaqoIssueGroup(unit, rawTitle) !== "oversight";
+    return isDeclaredStructuralUnit(unit)
+      || inferPaqoIssueGroup(unit, rawTitle) !== "oversight";
   });
   const selectedSteps = executableUnits.map((unit, index) => {
     const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
@@ -1897,28 +1933,45 @@ function buildPaqoWorkflowSteps(
     const group = inferPaqoIssueGroup(unit, rawTitle);
     const title = stripIssueGroupPrefix(rawTitle);
     const groupLabel = group.toUpperCase();
-    const graphWorkProductRequired = readPaqoGraphWorkProductRequired(unit, group);
-    const toolNames = selectedUnitWorkflowToolNames(unit, title, {
-      researchWorkbenchAvailable: options.researchWorkbenchAvailable === true,
-    });
+    // [Hybrid QA] Structural gates never require a graph workProduct — they
+    //   are deterministic tool steps, not artifact producers.
+    const graphWorkProductRequired = isDeclaredStructuralUnit(unit)
+      ? false
+      : readPaqoGraphWorkProductRequired(unit, group);
+    validateStructuralUnit(unit, title, index);
+    const declaredStructural = isDeclaredStructuralUnit(unit);
+    const toolNames = declaredStructural
+      ? readSelectedUnitWorkflowToolNames(unit)
+      : selectedUnitWorkflowToolNames(unit, title, {
+          researchWorkbenchAvailable: options.researchWorkbenchAvailable === true,
+        });
     const toolArgs = readSelectedUnitWorkflowToolArgs(unit);
     const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
     const skillRefs = readSelectedUnitSkillRefs(unit);
     const outcomeContractLines = renderMissionPlanUnitContractLines(unit);
+    // [Hybrid QA] structural tool-only unit: materialize with no agentId so no
+    //   LLM heartbeat runs. The gate executes as an issue-less tool step and
+    //   must complete before semantic QA. assigneeAgentId stays as plan-time
+    //   grant metadata only — it is NOT used as the workflow agentId.
+    const isStructural = declaredStructural;
+    const stepAgentId = isStructural ? "" : assigneeAgentId;
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
       name: `[${groupLabel}] ${title}`,
-      agentId: assigneeAgentId,
+      agentId: stepAgentId,
       dependencies: [],
       graphWorkProductRequired,
       ...(toolNames.length > 0 ? { toolNames } : {}),
       ...(toolArgs !== undefined ? { toolArgs } : {}),
       ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
+      ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : {}),
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
         "",
         `Mission: ${mission.title}`,
-        `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
+        isStructural
+          ? `Materialized as issue-less structural tool gate (no agent heartbeat).`
+          : `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
         skillRefs.length > 0 ? `Skill refs considered by PLAN: ${skillRefs.join(", ")}` : null,
         toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
         ...outcomeContractLines,
@@ -1928,6 +1981,12 @@ function buildPaqoWorkflowSteps(
   });
   const plannedSteps = applyPlanStepDependencies(executableUnits, selectedSteps, draft.steps);
   if (plannedSteps.length === 0) return [];
+  // [Hybrid QA] Structural materialization passes (extracted):
+  //   - toolArgs reference rewriting
+  //   - scoped prompt injection for all QA downstream of structural gates
+  const unitIdToStepId = buildUnitStepIdMap(executableUnits, plannedSteps);
+  rewriteStepToolArgs(plannedSteps, unitIdToStepId);
+  validateStructuralTopology(plannedSteps as Parameters<typeof validateStructuralTopology>[0]);
 
   // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.
   const isPublishPlan = /publish|deploy|manual-onboarding|게시|온보딩|release|배포/iu.test(

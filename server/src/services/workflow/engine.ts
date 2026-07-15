@@ -10,6 +10,8 @@ import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
+import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
+import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { missionService } from "../missions.js";
 import { isQaLikeStep, synthesizeQaReworkBackEdge } from "../missions/supervision-helpers.js";
 import {
@@ -243,6 +245,17 @@ async function assertWorkflowToolReadiness(
 ): Promise<void> {
   await assertWorkflowToolStepsReady({ companyId, steps });
   await assertWorkflowToolReferencesSelectable(db, { companyId, steps });
+  // [Hybrid QA] Structural gates fail closed at create/update/trigger/resume
+  //   unless their single named tool is registered, enabled, declares the
+  //   structural_validation_v1 capability, and the assignee has a grant.
+  //   A plugin-only or unregistered name cannot bypass this. Ordinary tool/agent
+  //   steps are unaffected (isStructuralGateStep skips them).
+  const structuralErrors = await validateStructuralGateReadinessForSteps({ db, companyId, steps });
+  const topologyErrors = getStructuralTopologyErrors(steps);
+  const allErrors = [...structuralErrors, ...topologyErrors];
+  if (allErrors.length > 0) {
+    throw new Error(`Structural gate validation failed: ${allErrors.join("; ")}`);
+  }
 }
 
 /**

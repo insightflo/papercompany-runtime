@@ -217,3 +217,21 @@ export function renderVerificationBeforeCompletionGateLines(): string[] {
 export function buildVerificationBeforeCompletionCriteria(): string {
   return renderVerificationBeforeCompletionGateLines().join("\n").trimEnd();
 }
+
+
+export const STRUCTURAL_GATE_ALREADY_RUN_MARKER = "## Structural validation already performed";
+
+export function renderStructuralGateAlreadyRunLines(): string[] {
+  return [
+    STRUCTURAL_GATE_ALREADY_RUN_MARKER,
+    "",
+    "Upstream structural (deterministic) tool gates have already validated the specific machine contracts they were declared to cover (e.g. IDs, schema keys, URL patterns, selectors, roles, status, hashes).",
+    "- Only the exact machine-contract checks explicitly delegated to a structural gate are authoritative. Do not repeat those specific checks.",
+    "- You MUST still verify any completion claim or machine contract that was NOT explicitly delegated to a structural gate — for example probes, delivery readback, or output-contract checks the gate does not cover.",
+    "- Focus your semantic evaluation on coherence, tone and manner, factual accuracy, argument consistency, audience fitness, and purpose-fitness for the mission goal.",
+    "- Do not invent generic wording rules, prose style rules, or generic HTML structure rules. Those are not machine contracts.",
+    "- You MAY verify an exact literal string when the user request or a real interface contract explicitly requires that exact value (e.g. a required label, a compliance field, a configured brand name). In that case the literal is a machine contract, not a style preference.",
+    "- If a structural gate failed, it was already reported to the producer for rework. Semantic QA runs only when the gate passes.",
+    "",
+  ];
+}

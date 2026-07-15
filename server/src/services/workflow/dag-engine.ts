@@ -46,6 +46,7 @@ import {
 import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
+import { applyStructuralGatePass } from "./control-flow/structural-gate-rework.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
@@ -59,6 +60,20 @@ import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-ma
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
 import { resolveWorkflowToolStepArgs } from "./tool-step-args.js";
+import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
+import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
+import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
+import {
+  captureStructuralGateProducerToken,
+  evaluateSemanticStructuralReadiness,
+  renderStructuralGateCoverageLines,
+} from "./control-flow/structural-semantic-readiness.js";
+import {
+  shouldRejectStructuralCallback,
+  planStructuralCompletion,
+  atomicStructuralCompletion,
+  checkDependencyFreshness,
+} from "./control-flow/structural-completion.js";
 
 /**
  * Workflow step definition.
@@ -697,6 +712,7 @@ async function writeQaRubricMarkdown(input: {
   missionGoal?: string | null;
   missionTitle?: string | null;
   missionDescription?: string | null;
+  structuralGateCoverageLines?: string[];
 }): Promise<void> {
   await mkdir(path.dirname(input.filePath), { recursive: true });
   // [AREA: Mission Quality Contract] mission goal 에서 품질 contract 도출 → rubric 주입.
@@ -740,6 +756,7 @@ async function writeQaRubricMarkdown(input: {
     input.renderedStepDescription?.trim()
       || "No step-specific criteria were provided by the workflow owner. Validate only objective completeness, dependency workProduct availability, and explicit workflow success requirements.",
     "",
+    ...(input.structuralGateCoverageLines ?? []),
     "## Dependency inputs",
     "",
     input.dependencyIssueLines.length > 0
@@ -1110,26 +1127,22 @@ async function syncStepRunsFromIssueState(
     const latestVerdict = latestValidationVerdictByIssueId.get(issue.id);
     if (latestVerdict?.verdict !== "request_changes" || !latestVerdict.observedAt) continue;
 
-    const dependencyIssueRows = step.dependencies
-      .map((dependencyStepId) => stepRunByStepId.get(dependencyStepId))
-      .map((dependencyStepRun) => dependencyStepRun?.issueId ? issueById.get(dependencyStepRun.issueId) : null);
-    if (dependencyIssueRows.length !== step.dependencies.length) continue;
-    if (dependencyIssueRows.some((dependencyIssue) => !dependencyIssue || dependencyIssue.status !== "done")) continue;
-
-    const dependencyCompletedTimes = dependencyIssueRows
-      .map((dependencyIssue) => dependencyIssue?.completedAt?.getTime() ?? 0)
-      .filter((time) => time > 0);
-    if (dependencyCompletedTimes.length === 0) continue;
-    if (Math.max(...dependencyCompletedTimes) <= latestVerdict.observedAt.getTime()) continue;
+    // [Hybrid QA] Tolerate issue-less structural tool gate dependencies (extracted).
+    const depCheck = checkDependencyFreshness(step.dependencies, stepRunByStepId, issueById);
+    if (!depCheck.allFound || !depCheck.allDone) continue;
+    if (depCheck.maxCompletedAt === 0) continue;
+    if (depCheck.maxCompletedAt <= latestVerdict.observedAt.getTime()) continue;
     // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
     //   중복 실행 요청을 만들지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가
     //   한 번이라도 있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate
     //   request 를 끊는다. 이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재요청이 허용된다.
-    const dependencyMaxCompletedAt = Math.max(...dependencyCompletedTimes);
+    const dependencyMaxCompletedAt = depCheck.maxCompletedAt;
     const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
     if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
 
     if (!context) continue;
+    // [Hybrid QA] Force fresh session on semantic QA recheck so stale verdict/session
+    //   state is not reused after a new producer generation.
     const queued = await wakeExistingWorkflowStepIssue({
       db,
       run: context.run,
@@ -1140,6 +1153,7 @@ async function syncStepRunsFromIssueState(
       issueId: issue.id,
       allowCompletedIssue: true,
       allowBlockedIssue: true,
+      forceFreshSession: true,
     });
     if (!queued) continue;
 
@@ -1183,8 +1197,13 @@ async function syncStepRunsFromIssueState(
     });
   }
 
+  // [Hybrid QA 136A] Skip issue→status mapping for step runs that were explicitly
+  //   reset for rework (pending with iterationIndex > 0). The producer issue may
+  //   still be "done" from before the reset; stale issue evidence must not
+  //   override the rework reset back to completed.
   for (const stepRun of stepRuns) {
     if (!stepRun.issueId) continue;
+    if (stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0) continue;
     const issue = issueById.get(stepRun.issueId);
     if (!issue) continue;
 
@@ -1307,13 +1326,24 @@ async function createWorkflowStepIssue(input: {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
-}): Promise<string> {
+}): Promise<string | null> {
   const issueSvc = issueService(input.db);
   const heartbeat = heartbeatService(input.db);
 
+  const executionSteps = buildWorkflowExecutionSteps(input.definition);
+  const structuralReadiness = await evaluateSemanticStructuralReadiness({
+    db: input.db,
+    companyId: input.run.companyId,
+    workflowRunId: input.run.id,
+    step: input.step,
+    steps: executionSteps,
+  });
+  if (!structuralReadiness.ready) return null;
+  const structuralGateCoverageLines = renderStructuralGateCoverageLines(structuralReadiness.coverage);
+
   const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, input.step);
   const workflowStepsById = new Map(
-    normalizeWorkflowStepsForExecution(input.definition.stepsJson).map((step) => [step.id, step]),
+    executionSteps.map((step) => [step.id, step]),
   );
   const gateProducerStepIdsByGateStepId = collectGateValidatedProducerStepIds(
     input.step.dependencies,
@@ -1590,6 +1620,7 @@ async function createWorkflowStepIssue(input: {
       missionGoal: missionGoalForRubric,
       missionTitle: missionTitleForRubric,
       missionDescription: missionDescriptionForRubric,
+      structuralGateCoverageLines,
     });
   }
   const description = [
@@ -1602,6 +1633,7 @@ async function createWorkflowStepIssue(input: {
     qaRubricPath ? "- Read the rubric file before judging the dependency workProducts. Do not invent extra criteria in the issue body." : null,
     qaRubricPath ? "- Finish with exactly `PASS` or `REQUEST_CHANGES: <specific gaps>`." : null,
     qaRubricPath ? null : renderedStepDescription,
+    ...structuralGateCoverageLines,
     "",
     "Workflow execution boundary:",
     `- workflowRunId: ${input.run.id}`,
@@ -1779,7 +1811,20 @@ export async function wakeExistingWorkflowStepIssue(input: {
   issueId: string;
   allowCompletedIssue?: boolean;
   allowBlockedIssue?: boolean;
+  /** When true, the heartbeat session is forced fresh (no stale context reuse). */
+  forceFreshSession?: boolean;
 }): Promise<boolean> {
+  // This guards every resume entry point (normal recheck, reconciler, owner
+  // recovery). A semantic QA issue may not be queued from status alone.
+  const structuralReadiness = await evaluateSemanticStructuralReadiness({
+    db: input.db,
+    companyId: input.run.companyId,
+    workflowRunId: input.run.id,
+    step: input.step,
+    steps: buildWorkflowExecutionSteps(input.definition),
+  });
+  if (!structuralReadiness.ready) return false;
+
   const [issue] = await input.db
     .select({
       id: issues.id,
@@ -1854,6 +1899,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       workflowDefinitionId: input.definition.id,
       stepId: input.step.id,
       ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
+      ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
     },
     contextSnapshot: {
@@ -1867,6 +1913,8 @@ export async function wakeExistingWorkflowStepIssue(input: {
       stepId: input.step.id,
       source: "workflow.resume",
       wakeReason: "workflow_step_runnable",
+      ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
+      ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
     },
     requestedByActorType: "system",
@@ -2280,13 +2328,14 @@ async function startIssueLessToolStepRun(input: {
 
   const toolName = getSingleToolStepName(step);
   const requestId = `${run.id}:${step.id}:${Date.now()}`;
+  const workflowSteps = normalizeWorkflowStepsForExecution(definition.stepsJson);
   let args: unknown;
   try {
     args = await resolveWorkflowToolStepArgs({
       db,
       run,
       step: step as PersistedWorkflowStep,
-      workflowSteps: normalizeWorkflowStepsForExecution(definition.stepsJson),
+      workflowSteps,
     });
   } catch (error) {
     await failToolStepRunWithDispatchError({
@@ -2323,26 +2372,32 @@ async function startIssueLessToolStepRun(input: {
       return true;
     }
   }
-  const cachedStepRun = await findCachedToolStepRun({
-    db,
-    run,
-    definition,
-    step,
-    toolName,
-    args,
-    now,
-  });
-  if (cachedStepRun) {
-    await completeToolStepRunFromCache({
+  // [Hybrid QA] Structural gates must NOT use generic tool cache. Cache bypasses
+  //   the verdict ledger, requestId binding, and generation tracking. A cached
+  //   result has no data.verdict, no official transition-event row, and no
+  //   current-generation requestId — semantic QA could run on an unvalidated gate.
+  if (!isStructuralGateStep(step)) {
+    const cachedStepRun = await findCachedToolStepRun({
       db,
-      stepRun,
-      sourceStepRun: cachedStepRun,
+      run,
+      definition,
       step,
       toolName,
       args,
       now,
     });
-    return true;
+    if (cachedStepRun) {
+      await completeToolStepRunFromCache({
+        db,
+        stepRun,
+        sourceStepRun: cachedStepRun,
+        step,
+        toolName,
+        args,
+        now,
+      });
+      return true;
+    }
   }
 
   if (toolName !== "delegate_to_company" && !workflowToolStepExecutor) {
@@ -2359,6 +2414,23 @@ async function startIssueLessToolStepRun(input: {
     return false;
   }
 
+  const structuralGateProducerToken = isStructuralGateStep(step)
+    ? await captureStructuralGateProducerToken({ db, workflowRunId: run.id, gate: step, steps: workflowSteps })
+    : null;
+  if (isStructuralGateStep(step) && !structuralGateProducerToken) {
+    await failToolStepRunWithDispatchError({
+      db,
+      step,
+      stepRun,
+      now,
+      requestId,
+      toolName,
+      args,
+      error: "Structural gate producer generation is unavailable.",
+    });
+    return false;
+  }
+
   const metadata: Record<string, unknown> = {
     ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
     toolInvocation: {
@@ -2371,6 +2443,7 @@ async function startIssueLessToolStepRun(input: {
       status: "queued",
       queuedAt: now.toISOString(),
     },
+    ...(structuralGateProducerToken ? { structuralGateProducerToken } : {}),
   };
   delete metadata.concurrencyBlocked;
 
@@ -2553,7 +2626,9 @@ export async function processQueuedWorkflowToolStepRuns(
         toolName,
         args,
         requestId,
-        agentId: typeof step.agentId === "string" ? step.agentId.trim() : undefined,
+        agentId: (typeof step.agentId === "string" && step.agentId.trim())
+          ? step.agentId.trim()
+          : (typeof step.assigneeAgentId === "string" ? step.assigneeAgentId.trim() : undefined),
         agentName,
       });
       if (dispatchResult?.accepted === false) {
@@ -2667,7 +2742,12 @@ export async function completeWorkflowToolStepFromResult(
   if (input.requestId && row.stepRun.lastDispatchRequestId && input.requestId !== row.stepRun.lastDispatchRequestId) {
     return null;
   }
-
+  // [Hybrid QA] Structural gate callback guard and verdict handling (extracted).
+  const stepForGuard = normalizeWorkflowStepsForExecution(row.definition.stepsJson)
+    .find((candidate) => candidate.id === row.stepRun.stepId);
+  if (shouldRejectStructuralCallback(stepForGuard, input.requestId, row.stepRun.lastDispatchRequestId)) {
+    return null;
+  }
   const canRecoverTerminalFailure = input.allowTerminalRecovery === true
     && input.success
     && row.stepRun.status === "failed";
@@ -2681,6 +2761,7 @@ export async function completeWorkflowToolStepFromResult(
     : {};
   const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+  const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
   const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
     || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
   const baseToolResult = {
@@ -2700,34 +2781,55 @@ export async function completeWorkflowToolStepFromResult(
   const resultMetadata: Record<string, unknown> = deleteAfterUse
     ? {
       ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
-      retentionDeleted: {
-        deleteAfterUse: true,
-        toolName: input.toolName ?? null,
-        success: input.success,
-        exitCode: input.exitCode ?? null,
-        deletedAt: now.toISOString(),
-      },
+      retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
     }
-    : {
-      ...existingMetadata,
-      toolResult,
-    };
-  if (deleteAfterUse) {
-    delete resultMetadata.toolInvocation;
-    delete resultMetadata.toolResult;
-    delete resultMetadata.cacheHit;
+    : { ...existingMetadata, toolResult };
+  if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
+
+  // [Hybrid QA] Structural gates: atomic ledger+status transaction with CAS.
+  // The status patch is derived PURELY (no DB/ledger write) via
+  // planStructuralCompletion; the authoritative verdict is recorded exactly once
+  // INSIDE the atomic transaction below. Never pre-write the ledger outside the
+  // transaction — a pre-tx write cannot roll back on CAS loss and would orphan a
+  // verdict row with no matching step status update.
+  // Non-structural tool steps: unchanged non-transactional path.
+  if (isStructuralGateStep(stepForGuard)) {
+    const structuralGateProducerToken = readStructuralGateProducerToken(
+      existingMetadata.structuralGateProducerToken,
+    );
+    const atomic = await atomicStructuralCompletion({
+      db, step: stepForGuard, success: input.success, data: input.data,
+      companyId: row.run.companyId, workflowRunId: row.run.id,
+      workflowStepRunId: row.stepRun.id, missionId: row.run.missionId, requestId: toolRequestId!,
+      observedStatus: row.stepRun.status,
+      observedIterationIndex: row.stepRun.iterationIndex ?? null,
+      observedRequestId: row.stepRun.lastDispatchRequestId,
+      observedCompletedAt: row.stepRun.completedAt,
+      producerToken: structuralGateProducerToken,
+      patch: {
+        startedAt: row.stepRun.startedAt ?? now, completedAt: now,
+        metadata: resultMetadata,
+        fallbackFailureSummary: input.error ?? input.stderr ?? null,
+      },
+    });
+    if (!atomic.casWon) return getWorkflowExecutionResultSnapshot(db, row.run.id);
+    return syncWorkflowRunState(db, row.run.id);
   }
-  await db
-    .update(workflowStepRuns)
-    .set({
-      status: input.success ? "completed" : "failed",
-      startedAt: row.stepRun.startedAt ?? now,
-      completedAt: now,
-      lastDispatchErrorAt: input.success ? null : now,
-      lastDispatchErrorSummary: input.success ? null : input.error ?? input.stderr ?? null,
-      metadata: resultMetadata,
-    })
-    .where(eq(workflowStepRuns.id, row.stepRun.id));
+
+  // Non-structural path (unchanged): pure plan, no ledger involvement.
+  const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = planStructuralCompletion({
+    step: stepForGuard, success: input.success, data: input.data,
+  });
+  await db.update(workflowStepRuns).set({
+    status: effectiveSuccess ? "completed" : "failed",
+    startedAt: row.stepRun.startedAt ?? now, completedAt: now,
+    lastDispatchErrorAt: effectiveSuccess ? null : now,
+    lastDispatchErrorSummary: effectiveSuccess ? null
+      : structuralGateRejected ? "structural_gate_request_changes"
+      : structuralContractFailure ? "structural_gate_contract_failure"
+      : (input.error ?? input.stderr ?? null),
+    metadata: resultMetadata,
+  }).where(eq(workflowStepRuns.id, row.stepRun.id));
 
   return syncWorkflowRunState(db, row.run.id);
 }
@@ -2749,14 +2851,47 @@ export async function retryIssueLessToolWorkflowStep(
   if (!isIssueLessToolStep(step) || stepRun.issueId) return null;
   if (stepRun.status !== "failed") return null;
 
-  await db
+  // CAS: only reset if still failed with the exact observed dispatch state.
+  // An old callback must not complete during the gap before new dispatch.
+  const observedRequestId = stepRun.lastDispatchRequestId;
+  const observedCompletedAt = stepRun.completedAt;
+  const retryCas = await db
     .update(workflowStepRuns)
     .set({
       status: "pending",
       startedAt: null,
       completedAt: null,
+      // Clear old dispatch state before sync so old callbacks can't match
+      lastDispatchRequestId: null,
+      lastDispatchAttemptAt: null,
+      lastDispatchAcceptedAt: null,
+      lastDispatchErrorAt: null,
+      lastDispatchErrorSummary: null,
+      // Clear stale tool-result/invocation metadata
+      metadata: (() => {
+        const m = stepRun.metadata && typeof stepRun.metadata === "object" && !Array.isArray(stepRun.metadata)
+          ? { ...(stepRun.metadata as Record<string, unknown>) } : {};
+        delete m.toolResult;
+        delete m.toolInvocation;
+        delete m.toolQueue;
+        delete m.cacheHit;
+        delete m.controlFlowSkipped;
+        return m;
+      })(),
     })
-    .where(eq(workflowStepRuns.id, stepRun.id));
+    .where(and(
+      eq(workflowStepRuns.id, stepRun.id),
+      eq(workflowStepRuns.status, "failed"),
+      ...(observedRequestId
+        ? [eq(workflowStepRuns.lastDispatchRequestId, observedRequestId)]
+        : [isNull(workflowStepRuns.lastDispatchRequestId)]),
+      ...(observedCompletedAt
+        ? [eq(workflowStepRuns.completedAt, observedCompletedAt)]
+        : [isNull(workflowStepRuns.completedAt)]),
+    ))
+    .returning({ id: workflowStepRuns.id });
+
+  if (retryCas.length === 0) return null; // CAS lost — row changed since snapshot
 
   const refreshedStepRuns = await db
     .select()
@@ -3041,6 +3176,12 @@ export async function syncWorkflowRunState(
         isStepEligible: (step) => {
           const run = skipRunMap.get(step.id);
           if (!run || run.status !== "pending" || run.issueId != null) return false;
+          // [Hybrid QA 132] Don't skip steps that depend on a structural gate —
+          // the structural pass may reset the gate, making this step reachable.
+          if (step.dependencies.some((depId) => {
+            const depStep = context.steps.find((s) => s.id === depId);
+            return isStructuralGateStep(depStep);
+          })) return false;
           return !hasRecoverableQaRequestChangesDependency(
             step,
             context.steps,
@@ -3096,6 +3237,21 @@ export async function syncWorkflowRunState(
     });
     stepRuns = reworkResult.stepRuns;
   }
+  // [Hybrid QA] structural gate rework pass — when a structural (deterministic)
+  //   tool gate returned request_changes, reset the producer for rework within
+  //   the existing maxIterations cap. Also resets completed downstream structural
+  //   gates when a producer is reworked (fresh gate re-run, no stale PASS).
+  //   Runs after applyBackEdgeReworkPass so both QA and structural gate rejections
+  //   are handled before the launch loop.
+  if (context.run.status !== "cancelled" && context.steps.some(isStructuralGateStep)) {
+    const structuralResult = await applyStructuralGatePass({
+      db,
+      run: context.run,
+      steps: context.steps,
+      stepRuns,
+    });
+    stepRuns = structuralResult.stepRuns;
+  }
 
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (hasFailure) {
@@ -3103,9 +3259,11 @@ export async function syncWorkflowRunState(
   }
   // [IF/loop] short-circuit narrowing: legacy 워크플로(hasConditionalEdges=false)에선 기존과 동일하게
   //   hasFailure 시 launch 를 건너뛴다. conditional edge 가 있으면 failure/always-gated step 도 발화해야
-  //   하므로 launch loop 를 항상 실행한다 — findRunnableSteps(edge-aware) 가 sole gate 이고, legacy step 은
-  //   선행 실패 시 runnable 에 포함되지 않아 잘못 발화하지 않는다.
-  if (!hasFailure || hasConditionalEdges) {
+  //   하므로 launch loop 를 항상 실행한다. [Hybrid QA 136B] structural gate failures are
+  //   recoverable (request_changes triggers rework), so allow launch when structural
+  //   gates exist — pending sibling gates must be able to finish.
+  const hasStructuralGates = context.steps.some(isStructuralGateStep);
+  if (!hasFailure || hasConditionalEdges || hasStructuralGates) {
     let shouldContinue = true;
     while (shouldContinue) {
       shouldContinue = false;
@@ -3156,6 +3314,7 @@ export async function syncWorkflowRunState(
           definition: context.definition,
           step,
         });
+        if (!issueId) continue;
         await db
           .update(workflowStepRuns)
           .set({ issueId })
@@ -3268,6 +3427,20 @@ export async function executeWorkflowRun(
     companyId: context.run.companyId,
     steps: context.steps,
   });
+  // [Hybrid QA] Persisted runtime execution: a structural gate must fail closed
+  //   here too (tool registered + enabled + structural_validation_v1 capability
+  //   + assignee grant), even if the definition was inserted bypassing the engine
+  //   create/update path. Ordinary tool/agent steps are unaffected.
+  const structuralErrors = await validateStructuralGateReadinessForSteps({
+    db,
+    companyId: context.run.companyId,
+    steps: context.steps,
+  });
+  const structuralTopologyErrors = getStructuralTopologyErrors(context.steps);
+  const allStructuralErrors = [...structuralErrors, ...structuralTopologyErrors];
+  if (allStructuralErrors.length > 0) {
+    throw new Error(`Structural gate validation failed: ${allStructuralErrors.join("; ")}`);
+  }
   const startedAt = new Date();
   await db.transaction(async (tx) => {
     const [startedRun] = await tx
