@@ -40,7 +40,6 @@ export function CompanySettings() {
   const [timezone, setTimezone] = useState("");
   const [logoUrl, setLogoUrl] = useState("");
   const [workProductRoot, setWorkProductRoot] = useState("");
-  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
 
   // Sync local state from selected company
   useEffect(() => {
@@ -154,14 +153,12 @@ export function CompanySettings() {
         .then((asset) => companiesApi.update(selectedCompanyId!, { logoAssetId: asset.assetId })),
     onSuccess: (company) => {
       syncLogoState(company.logoUrl);
-      setLogoUploadError(null);
     }
   });
 
   const clearLogoMutation = useMutation({
     mutationFn: () => companiesApi.update(selectedCompanyId!, { logoAssetId: null }),
     onSuccess: (company) => {
-      setLogoUploadError(null);
       syncLogoState(company.logoUrl);
     }
   });
@@ -170,7 +167,6 @@ export function CompanySettings() {
     const file = event.target.files?.[0] ?? null;
     event.currentTarget.value = "";
     if (!file) return;
-    setLogoUploadError(null);
     logoUploadMutation.mutate(file);
   }
 
@@ -331,12 +327,11 @@ export function CompanySettings() {
                       </Button>
                     </div>
                   )}
-                  {(logoUploadMutation.isError || logoUploadError) && (
+                  {logoUploadMutation.isError && (
                     <span className="text-xs text-destructive">
-                      {logoUploadError ??
-                        (logoUploadMutation.error instanceof Error
-                          ? logoUploadMutation.error.message
-                          : "Logo upload failed")}
+                      {logoUploadMutation.error instanceof Error
+                        ? logoUploadMutation.error.message
+                        : "Logo upload failed"}
                     </span>
                   )}
                   {clearLogoMutation.isError && (
