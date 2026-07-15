@@ -1156,7 +1156,10 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // Validate declared structural topology and capability before *any* branch
   // can create/wake PLAN-QA or materialize a plan. Invalid topology is a plan
   // error, not something materialization is allowed to repair silently.
-  const structuralPlanErrors = validateDeclaredStructuralPlan(draftResult.draft.refs.selectedExecutionUnits);
+  const structuralPlanErrors = validateDeclaredStructuralPlan(
+    draftResult.draft.refs.selectedExecutionUnits,
+    draftResult.draft.steps as Record<string, unknown>[],
+  );
   const structuralReadinessErrors = await validateDeclaredStructuralPlanReadiness({
     db,
     companyId,

@@ -20,13 +20,22 @@ import {
   renderWorkflowReworkComment,
   type QaReworkFeedback,
 } from "./rework-contract.js";
-import { isStructuralGateStep, type StructuralGateStep } from "./structural-gate.js";
+import { isStructuralGateStep, sameStructuralGateProducerToken, type StructuralGateStep } from "./structural-gate.js";
+import { isQaLikeStep } from "../../workflow-step-role.js";
 import { loadStructuralGateVerdictByRequest, type StructuralGateVerdictRecord } from "./structural-gate-ledger.js";
 import { QA_REWORK_DEFAULT_MAX_ITERATIONS } from "../../missions/workflow-qa-rework.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 const TERMINAL = new Set(["completed", "failed", "skipped"]);
 const GATE_CLEAR_KEYS = ["toolInvocation", "toolResult", "toolQueue", "cacheHit", "concurrencyBlocked", "controlFlowSkipped", "retentionDeleted"];
+// Clear stale dispatch + verdict/tool metadata on a semantic QA reset so old
+// completion evidence (request id, timestamps, error, verdict metadata) cannot
+// leak into the new generation. Mirrors the gate-retry clean-pending surface.
+const SEMANTIC_QA_CLEAR_KEYS = [
+  "toolInvocation", "toolResult", "toolQueue", "cacheHit",
+  "concurrencyBlocked", "controlFlowSkipped", "retentionDeleted",
+  "structuralGateVerdict", "structuralGateProducerToken", "semanticQaVerdict",
+];
 
 interface LoopRun { id: string; companyId: string; status: string; missionId?: string | null }
 interface ReworkableStep extends StructuralGateStep { conditionalDependencies?: import("./types.js").ConditionalEdge[] }
@@ -53,6 +62,15 @@ function findProducerForGate(gateId: string, steps: readonly ReworkableStep[]): 
     if (dep && !isStructuralGateStep(dep)) return dep;
   }
   return null;
+}
+
+// A QA step is any non-gate step the shared classifier treats as QA-like
+// (mirrors structural-semantic-readiness / structural-topology). This includes
+// mission-level `[QA] Verify mission result` steps that carry NO qaType, so they
+// are invalidated on producer rework exactly like qaType:"semantic" steps.
+function isSemanticQaStep(step: ReworkableStep): boolean {
+  if (isStructuralGateStep(step)) return false;
+  return isQaLikeStep(step);
 }
 
 function readGateGen(meta: unknown): number | null {
@@ -106,6 +124,18 @@ export async function applyStructuralGatePass(input: {
     if (!pRun || pRun.status !== "completed") continue;
     const pCompleted = pRun.completedAt?.getTime() ?? 0;
     if (pCompleted && vRec.observedAt.getTime() < pCompleted) continue;
+
+    // [W002] Request-scoped verdict must bind to the EXACT live producer
+    //   generation — not merely a matching completedAt timestamp. A verdict
+    //   with NO producerToken, or one whose producerToken differs in
+    //   stepId/iterationIndex/completedAt from the live producer, must not
+    //   rework that producer (stale verdict from a prior generation). Exact
+    //   evidence is required — a null/undefined token is NOT current.
+    if (!vRec.producerToken || !sameStructuralGateProducerToken(vRec.producerToken, {
+      producerStepId: producer.id,
+      iterationIndex: pRun.iterationIndex ?? 0,
+      completedAt: pRun.completedAt ? pRun.completedAt.toISOString() : "",
+    })) continue;
 
     const max = resolveProducerCap(producer);
     const iter = pRun.iterationIndex ?? 0;
@@ -168,6 +198,51 @@ export async function applyStructuralGatePass(input: {
     }
     resetIds.add(pStep.id);
     reworkedCount++;
+
+    // [W002] A structural request_changes reworks the producer for a new
+    //   generation. Invalidate ONLY semantic QA steps that directly depend on
+    //   BOTH the reworked producer AND its related structural gate(s) — so an
+    //   OLD completed semantic PASS cannot satisfy the new generation. Ordinary
+    //   downstream actions that depend on only one side (or neither) are left
+    //   untouched; no graphWorkProductRequired / broad heuristic is used.
+    const affectedGateIds = steps
+      .filter((x) => isStructuralGateStep(x) && findProducerForGate(x.id, steps)?.id === pStep.id)
+      .map((x) => x.id);
+    const downstreamIds = steps
+      .filter((step) => {
+        if (step.id === pStep.id) return false;
+        if (isStructuralGateStep(step)) return false; // gates have their own retry path
+        if (!isSemanticQaStep(step)) return false; // only semantic QA steps
+        const deps = step.dependencies ?? [];
+        return deps.includes(pStep.id) && affectedGateIds.some((g) => deps.includes(g));
+      })
+      .map((step) => step.id);
+    for (const downstreamId of downstreamIds) {
+      const dRun = srMap.get(downstreamId);
+      if (!dRun || !TERMINAL.has(dRun.status)) continue;
+      // Mirror gate-retry clean pending: clear dispatch request/timestamps/error
+      // and stale verdict/tool metadata, guarded by exact current snapshot so a
+      // newer completion (different request/iteration) cannot be clobbered.
+      const meta = dRun.metadata && typeof dRun.metadata === "object" && !Array.isArray(dRun.metadata)
+        ? { ...(dRun.metadata as Record<string, unknown>) } : {};
+      for (const k of SEMANTIC_QA_CLEAR_KEYS) delete meta[k];
+      const dReset = await db.update(workflowStepRuns).set({
+        status: "pending", startedAt: null, completedAt: null,
+        lastDispatchAttemptAt: null, lastDispatchAcceptedAt: null,
+        lastDispatchErrorAt: null, lastDispatchErrorSummary: null, lastDispatchRequestId: null,
+        metadata: meta,
+      }).where(
+        and(
+          eq(workflowStepRuns.id, dRun.id),
+          eq(workflowStepRuns.status, dRun.status),
+          eq(workflowStepRuns.iterationIndex, dRun.iterationIndex ?? 0),
+          dRun.lastDispatchRequestId
+            ? eq(workflowStepRuns.lastDispatchRequestId, dRun.lastDispatchRequestId)
+            : isNull(workflowStepRuns.lastDispatchRequestId),
+        ),
+      ).returning({ id: workflowStepRuns.id });
+      if (dReset.length > 0) resetIds.add(downstreamId);
+    }
   }
 
   // Phase 2: reset stale terminal gates using generation markers (CAS)

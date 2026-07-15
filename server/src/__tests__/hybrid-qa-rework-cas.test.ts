@@ -103,9 +103,10 @@ describeEP("hybrid QA — rework-pass CAS losing-race", () => {
 
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "WF2", stepsJson: steps });
     await db.insert(workflowRuns).values({ id: runId, companyId, workflowId: wfId, status: "running", triggeredBy: "test" });
+    const prodCompletedAt = new Date();
     const prodRun = await db.insert(workflowStepRuns).values({
       workflowRunId: runId, stepId: prodId, status: "completed",
-      issueId: null, iterationIndex: 0, completedAt: new Date(),
+      issueId: null, iterationIndex: 0, completedAt: prodCompletedAt,
       lastDispatchRequestId: oldReq,
     }).returning();
     const gateRun = await db.insert(workflowStepRuns).values({
@@ -119,7 +120,8 @@ describeEP("hybrid QA — rework-pass CAS losing-race", () => {
       issueId: null, eventType: "workflow_validation_verdict", layer: "workflow_validation",
       verdict: "request_changes", decision: "request_changes", reasonCode: "workflow_tool_result",
       idempotencyKey: `structural-gate-verdict:${companyId}:${gateRun[0].id}:${oldReq}`,
-      payload: { kind: "structural_gate_verdict", verdict: "request_changes" },
+      payload: { kind: "structural_gate_verdict", verdict: "request_changes",
+        producerToken: { producerStepId: prodId, iterationIndex: 0, completedAt: prodCompletedAt.toISOString() } },
       createdAt: new Date(),
     });
 
@@ -158,9 +160,10 @@ describeEP("hybrid QA — rework-pass CAS losing-race", () => {
 
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "WF3", stepsJson: steps });
     await db.insert(workflowRuns).values({ id: runId, companyId, workflowId: wfId, status: "running", triggeredBy: "test" });
+    const prodCompletedAt = new Date();
     await db.insert(workflowStepRuns).values({
       workflowRunId: runId, stepId: prodId, status: "completed",
-      issueId: null, iterationIndex: 0, completedAt: new Date(),
+      issueId: null, iterationIndex: 0, completedAt: prodCompletedAt,
       lastDispatchRequestId: prodReq,
     });
     const gateReqId = `g3-${randomUUID()}`;
@@ -175,6 +178,8 @@ describeEP("hybrid QA — rework-pass CAS losing-race", () => {
       issueId: null, eventType: "workflow_validation_verdict", layer: "workflow_validation",
       verdict: "request_changes", decision: "request_changes", reasonCode: "workflow_tool_result",
       idempotencyKey: `structural-gate-verdict:${companyId}:${gateRun[0].id}:${gateReqId}`,
+      payload: { kind: "structural_gate_verdict", verdict: "request_changes",
+        producerToken: { producerStepId: prodId, iterationIndex: 0, completedAt: prodCompletedAt.toISOString() } },
       createdAt: new Date(),
     });
     const freshRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
