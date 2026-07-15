@@ -11,6 +11,7 @@ import { buildAgentSnippet } from "../lib/openclaw-invite-snippet";
 import { Button } from "@/components/ui/button";
 import { Settings, Check, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { CompanyWorkProductStorageSettings } from "../components/CompanyWorkProductStorageSettings";
 import {
   Field,
   ToggleField,
@@ -401,6 +402,8 @@ export function CompanySettings() {
           )}
         </div>
       )}
+
+      <CompanyWorkProductStorageSettings companyId={selectedCompany.id} />
 
       {/* Hiring */}
       <div className="space-y-4">
