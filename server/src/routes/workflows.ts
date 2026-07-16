@@ -17,6 +17,7 @@ import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
+import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
 import {
   grantWorkflowToolToAgent,
@@ -328,6 +329,26 @@ export function workflowRoutes(db: Db) {
       agentId: actor.agentId,
       runId: actor.runId,
       action: "workflow.tools_synced",
+      entityType: "company",
+      entityId: companyId,
+      details: result,
+    });
+    res.json(result);
+  });
+
+  router.post("/companies/:companyId/workflows/qa-cap-acceptance/enable", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const result = await enableQaCapAcceptanceForCompany(db, companyId);
+    const actor = actorForActivity(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow.qa_cap_acceptance_enabled",
       entityType: "company",
       entityId: companyId,
       details: result,

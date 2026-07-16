@@ -2027,7 +2027,12 @@ function buildPaqoWorkflowSteps(
   //   QA 가 request_changes 하면 P4 loop-driver 가 producer 를 rework 한다(maxIterations cap). producer 식별은
   //   resolveProducerStepIdFromDag 에 위임(synthesizeQaReworkBackEdge 내부). forward dependencies[] 는 불변.
   //   합성 대상은 이 미션 최종 QA(qaStep) 단 하나 — 중간 단계 QA 회복은 runtime supervision 담당.
-  return synthesizeQaReworkBackEdge([...plannedSteps, qaStep], qaStep.id);
+  return synthesizeQaReworkBackEdge(
+    [...plannedSteps, qaStep],
+    qaStep.id,
+    undefined,
+    { allowCapAcceptance: true },
+  );
 }
 
 async function ensureCrossCompanyDelegationsForMissionOwnerPlan(input: {

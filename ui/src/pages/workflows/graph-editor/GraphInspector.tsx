@@ -13,9 +13,11 @@ import { GraphInspectorPolicyStructure } from "./GraphInspectorPolicyStructure.j
 import { GraphInspectorPolicyDataFlow } from "./GraphInspectorPolicyDataFlow.js";
 import { GraphInspectorPolicyRuntime } from "./GraphInspectorPolicyRuntime.js";
 import { GraphInspectorPolicyAdvanced } from "./GraphInspectorPolicyAdvanced.js";
+import { GraphInspectorPolicyQaCapAcceptance } from "./GraphInspectorPolicyQaCapAcceptance.js";
 import { GraphInspectorEditStep } from "./GraphInspectorEditStep.js";
 import { GraphInspectorRawStep } from "./GraphInspectorRawStep.js";
 import type { StepDraft } from "../step-draft.js";
+import type { QaCapAcceptancePolicy } from "../qa-cap-acceptance-policy.js";
 import {
   type WorkflowToolGrant,
   type WorkflowToolOption,
@@ -73,6 +75,7 @@ export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
   graphAgents: { id: string; name: string }[];
+  qaCapAcceptancePolicy: QaCapAcceptancePolicy;
   // handlers
   setGraphInspectorMode: (mode: WorkflowGraphInspectorMode) => void;
   setShowGraphTestDrawer: (value: boolean) => void;
@@ -96,6 +99,8 @@ export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "
   updateSelectedGroupMetadata: (patch: { title?: string; color?: string; collapsedByDefault?: boolean }) => void;
   updateSelectedContainerMetadata: (patch: Partial<StepDraft>) => void;
   setSelectedNote: (note: string) => void;
+  setQaCapAcceptanceEnabled: (enabled: boolean) => void;
+  setQaReworkMaxIterations: (value: number) => void;
   validateRawSelectedStepJson: () => void;
   applyRawSelectedStepJson: () => void;
 }
@@ -132,6 +137,7 @@ export function GraphInspector({
   availableTools,
   availableToolGrants,
   graphAgents,
+  qaCapAcceptancePolicy,
   testDrawerSlot,
   setGraphInspectorMode,
   setShowGraphTestDrawer,
@@ -163,6 +169,8 @@ export function GraphInspector({
   updateSelectedGroupMetadata,
   updateSelectedContainerMetadata,
   setSelectedNote,
+  setQaCapAcceptanceEnabled,
+  setQaReworkMaxIterations,
   validateRawSelectedStepJson,
   applyRawSelectedStepJson,
 }: GraphInspectorProps): JSX.Element {
@@ -285,6 +293,11 @@ export function GraphInspector({
                   />
                 </div>
               </div>
+              <GraphInspectorPolicyQaCapAcceptance
+                policy={qaCapAcceptancePolicy}
+                onEnabledChange={setQaCapAcceptanceEnabled}
+                onMaxIterationsChange={setQaReworkMaxIterations}
+              />
               <details key="advanced-policy-details" style={workflowPolicyDetailsStyle}>
                 <summary style={workflowPolicyDetailsSummaryStyle}>Advanced policy</summary>
                 <GraphInspectorPolicyAdvanced
