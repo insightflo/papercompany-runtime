@@ -1478,6 +1478,11 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("Adaptive quality profile");
     expect(rubric).toContain("Outcome review standard");
     expect(rubric).toContain("REQUEST_CHANGES only for an observed blocking defect");
+    expect(rubric).toContain("A failed checklist item or probe is evidence to assess, not an automatic blocking verdict");
+    expect(rubric).toContain("Return `PASS` when no blocking defect remains");
+    expect(rubric).toContain("Explain the material consequence that makes each requested change blocking");
+    expect(rubric).not.toContain("Return `PASS` only when the dependency workProducts meet every criterion above");
+    expect(rubric).not.toContain("when any criterion is missing, ambiguous, stale, or unsupported");
     expect(rubric).not.toContain("5-axis scoring");
     expect(rubric).toContain("Evidence explanation quality");
     expect(rubric).toContain("source content -> observation -> interpretation -> conclusion");

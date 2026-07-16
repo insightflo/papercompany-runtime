@@ -759,6 +759,12 @@ async function writeQaRubricMarkdown(input: {
     input.renderedStepDescription?.trim()
       || "No step-specific criteria were provided by the workflow owner. Validate only objective completeness, dependency workProduct availability, and explicit workflow success requirements.",
     "",
+    "## Verdict severity precedence",
+    "",
+    "- A failed checklist item or probe is evidence to assess, not an automatic blocking verdict.",
+    "- The Outcome review standard governs even when step-specific criteria use absolute wording such as `PASS only` or `otherwise REQUEST_CHANGES`.",
+    "- REQUEST_CHANGES only when the inspector judges that the material consequence blocks safe or useful use, downstream consumption, delivery, or verification. Otherwise return PASS and list the optional improvement separately.",
+    "",
     ...(input.structuralGateCoverageLines ?? []),
     "## Dependency inputs",
     "",
@@ -778,8 +784,8 @@ async function writeQaRubricMarkdown(input: {
     "## Required verdict",
     "",
     "- Read the dependency workProduct files directly when paths are provided.",
-    "- Return `PASS` only when the dependency workProducts meet every criterion above.",
-    "- Return `REQUEST_CHANGES: <specific gaps>` when any criterion is missing, ambiguous, stale, or unsupported.",
+    "- Return `PASS` when no blocking defect remains, even if nonblocking limitations or optional improvements remain.",
+    "- Return `REQUEST_CHANGES: <specific gaps>` only for blocking defects. Explain the material consequence that makes each requested change blocking.",
     "- End the final answer with one clear verdict: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
     "",
   ].join("\n");
