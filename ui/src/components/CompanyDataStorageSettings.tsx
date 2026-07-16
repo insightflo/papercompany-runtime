@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanySecret } from "@paperclipai/shared";
-import type { CompanyWorkProductStorageConfig } from "@paperclipai/shared/validators/company-work-product-storage";
+import type { CompanyDataStorageConfig } from "@paperclipai/shared/validators/company-data-storage";
 import { CheckCircle2, Database, Plus, XCircle } from "lucide-react";
-import { workProductStorageApi, type WorkProductStorageConnectionTest } from "../api/company-work-product-storage";
+import { dataStorageApi, type DataStorageConnectionTest } from "../api/company-data-storage";
 import { secretsApi } from "../api/secrets";
 import { useToast } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -22,9 +22,9 @@ type StorageForm = {
 };
 type SecretTarget = "access" | "secret";
 
-const LOCAL_DISK_CONFIG: CompanyWorkProductStorageConfig = { provider: "local_disk" };
+const LOCAL_DISK_CONFIG: CompanyDataStorageConfig = { provider: "local_disk" };
 
-function formFromConfig(config?: CompanyWorkProductStorageConfig): StorageForm {
+function formFromConfig(config?: CompanyDataStorageConfig): StorageForm {
   if (config?.provider === "s3") {
     return {
       provider: "s3", endpoint: config.endpoint, region: config.region, bucket: config.bucket,
@@ -38,11 +38,11 @@ function formFromConfig(config?: CompanyWorkProductStorageConfig): StorageForm {
   };
 }
 
-function configFromForm(form: StorageForm): CompanyWorkProductStorageConfig {
+function configFromForm(form: StorageForm): CompanyDataStorageConfig {
   if (form.provider === "local_disk") return LOCAL_DISK_CONFIG;
   return {
     provider: "s3", endpoint: form.endpoint.trim(), region: form.region.trim(), bucket: form.bucket.trim(),
-    keyPrefix: form.keyPrefix.trim() || undefined, forcePathStyle: form.forcePathStyle,
+    keyPrefix: form.keyPrefix.trim(), forcePathStyle: form.forcePathStyle,
     accessKeySecretId: form.accessKeySecretId, secretAccessKeySecretId: form.secretAccessKeySecretId,
   };
 }
@@ -59,17 +59,17 @@ function SecretSelect({ label, value, onChange, secrets, disabled }: {
   </label>;
 }
 
-export function CompanyWorkProductStorageSettings({ companyId }: { companyId: string }) {
+export function CompanyDataStorageSettings({ companyId }: { companyId: string }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToast();
-  const storageKey = ["company-work-product-storage", companyId] as const;
-  const storageQuery = useQuery({ queryKey: storageKey, queryFn: () => workProductStorageApi.get(companyId) });
+  const storageKey = ["company-data-storage", companyId] as const;
+  const storageQuery = useQuery({ queryKey: storageKey, queryFn: () => dataStorageApi.get(companyId) });
   const secretsQuery = useQuery({ queryKey: queryKeys.secrets.list(companyId), queryFn: () => secretsApi.list(companyId) });
   const [form, setForm] = useState(() => formFromConfig(storageQuery.data));
   const [createTarget, setCreateTarget] = useState<SecretTarget | null>(null);
   const [newSecretName, setNewSecretName] = useState("");
   const [newSecretValue, setNewSecretValue] = useState("");
-  const [testResult, setTestResult] = useState<WorkProductStorageConnectionTest | null>(null);
+  const [testResult, setTestResult] = useState<DataStorageConnectionTest | null>(null);
   const loadedConfigRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -96,31 +96,31 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
   });
 
   const saveStorage = useMutation({
-    mutationFn: () => workProductStorageApi.save(companyId, configFromForm(form)),
+    mutationFn: () => dataStorageApi.save(companyId, configFromForm(form)),
     onSuccess: (config) => {
       queryClient.setQueryData(storageKey, config); setForm(formFromConfig(config)); setTestResult(null);
-      pushToast({ tone: "success", title: "Shared-storage settings saved", body: config.provider === "s3" ? "S3-compatible shared storage is enabled." : "Shared storage is off; files stay in Papercompany's local work folder." });
+      pushToast({ tone: "success", title: "Shared Data Storage saved", body: config.provider === "s3" ? "S3-compatible shared data storage is enabled." : "Shared Data Storage uses Papercompany local disk." });
     },
     onError: (error) => pushToast({ tone: "error", title: "Storage settings could not be saved", body: error instanceof Error ? error.message : "Please review the settings." }),
   });
 
   const testConnection = useMutation({
-    mutationFn: () => workProductStorageApi.test(companyId),
+    mutationFn: () => dataStorageApi.test(companyId),
     onSuccess: (result) => {
       setTestResult(result);
-      pushToast({ tone: result.ok ? "success" : "error", title: result.ok ? "Shared-storage connection verified" : "Shared-storage connection failed", body: result.error });
+      pushToast({ tone: result.ok ? "success" : "error", title: result.ok ? "Shared Data Storage connection verified" : "Shared Data Storage connection failed", body: result.error });
     },
     onError: (error) => {
-      const message = error instanceof Error ? error.message : "Unable to test the saved shared-storage connection.";
+      const message = error instanceof Error ? error.message : "Unable to test the saved shared-data connection.";
       setTestResult({ ok: false, provider: "s3", error: message });
-      pushToast({ tone: "error", title: "Shared-storage connection failed", body: message });
+      pushToast({ tone: "error", title: "Shared Data Storage connection failed", body: message });
     },
   });
 
   const currentConfig = configFromForm(form);
   const savedConfig = storageQuery.data ?? LOCAL_DISK_CONFIG;
   const isSaved = JSON.stringify(currentConfig) === JSON.stringify(savedConfig);
-  const s3Complete = Boolean(form.endpoint.trim() && form.region.trim() && form.bucket.trim() && form.accessKeySecretId && form.secretAccessKeySecretId);
+  const s3Complete = Boolean(form.endpoint.trim() && form.region.trim() && form.bucket.trim() && form.keyPrefix.trim() && form.accessKeySecretId && form.secretAccessKeySecretId);
   const secrets = secretsQuery.data ?? [];
   const secretSelectDisabled = secretsQuery.isPending || secretsQuery.isError || createSecret.isPending;
 
@@ -129,28 +129,28 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
   }
 
   return <section className="space-y-4">
-    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Shared work-product storage</div>
+    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Shared Data Storage</div>
     <div className="space-y-4 rounded-md border border-border px-4 py-4">
       <div className="flex items-start gap-2"><Database className="mt-0.5 h-4 w-4 text-muted-foreground" />
         <div className="space-y-1 text-sm text-muted-foreground">
-          <p>Persistence and mirror destination for registered final outputs (work-products). Agents author files in the local work folder first; eligible results are then copied here.</p>
-          <p>Selecting S3 mirrors final outputs to shared object storage and never removes the local work folder where agents author files. (Cumulative input/history lives in Shared Data Storage, not here.)</p>
+          <p>Normalized, cumulative source data for this company. External workflows such as n8n place raw responses in a separate incoming store and write the normalized history and latest snapshots here; Papercompany agents read and append to this cumulative data.</p>
+          <p>Example layout: <code>&lt;prefix&gt;/&lt;category&gt;/latest.json</code> and <code>&lt;prefix&gt;/&lt;category&gt;/history/&lt;timestamp&gt;.json</code> for change detection. Final deliverables belong in Work-product Storage, not here.</p>
         </div>
       </div>
-      <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Shared storage mode</span>
+      <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Data storage mode</span>
         <select value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value === "s3" ? "s3" : "local_disk" })}
           className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm">
-          <option value="local_disk">No shared mirror (final outputs stay on local work folder)</option><option value="s3">S3-compatible shared storage</option>
+          <option value="local_disk">Local disk (Papercompany-managed company data folder)</option><option value="s3">S3-compatible shared object storage</option>
         </select>
       </label>
-      {storageQuery.isError ? <p className="text-xs text-destructive">Current shared-storage settings could not be loaded.</p> : null}
-      {form.provider === "local_disk" ? <p className="text-xs text-muted-foreground">No shared mirror. Final outputs stay in the local work folder; agents still author all files there. This does not provide a shared file store for n8n.</p> : <div className="space-y-3 border-t border-border pt-4">
-        <p className="text-xs text-muted-foreground">Use the same endpoint, bucket, and prefix in n8n when it needs access to these copied files.</p>
+      {storageQuery.isError ? <p className="text-xs text-destructive">Current shared-data settings could not be loaded.</p> : null}
+      {form.provider === "local_disk" ? <p className="text-xs text-muted-foreground">Data stays on Papercompany local disk under a company-scoped folder. Agents read and write it through the company data API; no object-storage credentials are exposed.</p> : <div className="space-y-3 border-t border-border pt-4">
+        <p className="text-xs text-muted-foreground">The key prefix is the company data root. n8n must write the exact shared layout under this prefix; agents access the same keys through the data API. Operators must choose a unique prefix per company.</p>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Endpoint</span><Input value={form.endpoint} onChange={(event) => setForm({ ...form, endpoint: event.target.value })} placeholder="https://storage.example.com" /></label>
           <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Region</span><Input value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value })} placeholder="us-east-1" /></label>
-          <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Bucket</span><Input value={form.bucket} onChange={(event) => setForm({ ...form, bucket: event.target.value })} placeholder="work-products" /></label>
-          <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Key prefix (optional)</span><Input value={form.keyPrefix} onChange={(event) => setForm({ ...form, keyPrefix: event.target.value })} placeholder="research-company" /></label>
+          <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Bucket</span><Input value={form.bucket} onChange={(event) => setForm({ ...form, bucket: event.target.value })} placeholder="shared-data" /></label>
+          <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Key prefix (required company data root)</span><Input value={form.keyPrefix} onChange={(event) => setForm({ ...form, keyPrefix: event.target.value })} placeholder="gazua" /></label>
         </div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.forcePathStyle} onChange={(event) => setForm({ ...form, forcePathStyle: event.target.checked })} />Use path-style addressing</label>
         <div className="grid gap-3 sm:grid-cols-2">
@@ -164,12 +164,12 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
           <div className="flex gap-2"><Button size="sm" onClick={() => createTarget && createSecret.mutate({ target: createTarget, name: newSecretName.trim(), value: newSecretValue })} disabled={createSecret.isPending || !newSecretName.trim() || !newSecretValue}>Create secret</Button><Button size="sm" variant="ghost" onClick={() => setCreateTarget(null)} disabled={createSecret.isPending}>Cancel</Button></div>
         </div> : <div className="flex flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => beginSecret("access")}><Plus className="h-3.5 w-3.5" />New access-key secret</Button><Button size="sm" variant="ghost" onClick={() => beginSecret("secret")}><Plus className="h-3.5 w-3.5" />New secret-access-key secret</Button></div>}
       </div>}
-      <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => saveStorage.mutate()} disabled={saveStorage.isPending || (form.provider === "s3" && !s3Complete)}>{saveStorage.isPending ? "Saving…" : "Save shared-storage settings"}</Button>
-        {form.provider === "s3" ? <Button size="sm" variant="outline" onClick={() => testConnection.mutate()} disabled={!isSaved || testConnection.isPending}>{testConnection.isPending ? "Testing…" : "Test saved shared-storage connection"}</Button> : null}
+      <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => saveStorage.mutate()} disabled={saveStorage.isPending || (form.provider === "s3" && !s3Complete)}>{saveStorage.isPending ? "Saving…" : "Save shared-data settings"}</Button>
+        {form.provider === "s3" ? <Button size="sm" variant="outline" onClick={() => testConnection.mutate()} disabled={!isSaved || testConnection.isPending}>{testConnection.isPending ? "Testing…" : "Test saved shared-data connection"}</Button> : null}
       </div>
-      {form.provider === "s3" && !isSaved ? <p className="text-xs text-muted-foreground">Save changes before testing the shared-storage connection.</p> : null}
-      {saveStorage.isError ? <p className="text-xs text-destructive">{saveStorage.error instanceof Error ? saveStorage.error.message : "Shared-storage settings could not be saved."}</p> : null}
-      {testResult ? <p className={`flex items-center gap-1.5 text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}`}>{testResult.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}{testResult.ok ? "Shared-storage connection verified." : testResult.error ?? "Shared-storage connection failed."}</p> : null}
+      {form.provider === "s3" && !isSaved ? <p className="text-xs text-muted-foreground">Save changes before testing the shared-data connection.</p> : null}
+      {saveStorage.isError ? <p className="text-xs text-destructive">{saveStorage.error instanceof Error ? saveStorage.error.message : "Shared-data settings could not be saved."}</p> : null}
+      {testResult ? <p className={`flex items-center gap-1.5 text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}`}>{testResult.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}{testResult.ok ? "Shared-data connection verified." : testResult.error ?? "Shared-data connection failed."}</p> : null}
     </div>
   </section>;
 }

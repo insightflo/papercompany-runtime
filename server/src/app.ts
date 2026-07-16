@@ -33,6 +33,7 @@ import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { secretRoutes } from "./routes/secrets.js";
+import { companyDataStorageRoutes } from "./routes/company-data-storage.js";
 import { costRoutes } from "./routes/costs.js";
 import { agentWikiRoutes } from "./routes/agent-wiki.js";
 import { channelConfigRoutes } from "./routes/channel-config.js";
@@ -377,6 +378,7 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(approvalRoutes(db));
   api.use(secretRoutes(db));
+  api.use(companyDataStorageRoutes(db));
   api.use(costRoutes(db));
   api.use(agentWikiRoutes(db));
   api.use(channelConfigRoutes(db));

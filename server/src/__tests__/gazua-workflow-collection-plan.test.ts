@@ -83,7 +83,10 @@ describe("Gazua workflow collection plan", () => {
       "Gazua data evidence contract",
     );
     expect(next.find((step) => step.id === "signal-analysis")?.description).toContain(
-      "/Users/kwak/Projects/ai/gazua-dashboard/data",
+      "PAPERCLIP_API_KEY",
+    );
+    expect(next.find((step) => step.id === "signal-analysis")?.description).toContain(
+      "blog-insights/latest.json",
     );
   });
 

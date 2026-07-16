@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Settings, Check, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { CompanyWorkProductStorageSettings } from "../components/CompanyWorkProductStorageSettings";
+import { CompanyDataStorageSettings } from "../components/CompanyDataStorageSettings";
 import {
   Field,
   ToggleField,
@@ -404,6 +405,7 @@ export function CompanySettings() {
       )}
 
       <CompanyWorkProductStorageSettings companyId={selectedCompany.id} />
+      <CompanyDataStorageSettings companyId={selectedCompany.id} />
 
       {/* Hiring */}
       <div className="space-y-4">

@@ -53,6 +53,7 @@ export { activityLog } from "./activity_log.js";
 export { companySecrets } from "./company_secrets.js";
 export { companySecretVersions } from "./company_secret_versions.js";
 export { companyWorkProductStorages } from "./company_work_product_storages.js";
+export { companyDataStorages } from "./company_data_storages.js";
 export { companySkills } from "./company_skills.js";
 export { plugins } from "./plugins.js";
 export { pluginConfig } from "./plugin_config.js";

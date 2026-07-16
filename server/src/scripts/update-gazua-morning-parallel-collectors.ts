@@ -104,6 +104,11 @@ function toolEntityData(tool: (typeof GAZUA_MORNING_COLLECTION_TOOLS)[number]): 
 
 async function main(): Promise<void> {
   const apply = process.argv.includes("--apply");
+  if (apply) {
+    throw new Error(
+      "This legacy updater would replace Gazua HTTP/n8n collectors with builtin local tools. It is retired; update the live workflow descriptions without changing HTTP tool definitions.",
+    );
+  }
   const companyIdArg = process.argv.find((arg) => arg.startsWith("--company-id="));
   const companyId = companyIdArg?.slice("--company-id=".length) || DEFAULT_COMPANY_ID;
   const db = createDb(resolveConnectionString()) as DbWithClient;

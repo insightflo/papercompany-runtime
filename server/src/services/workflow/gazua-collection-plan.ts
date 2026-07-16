@@ -95,16 +95,20 @@ export const GAZUA_MORNING_ANALYSIS_STEP_IDS = [
   "inspection",
 ];
 
-export const GAZUA_MORNING_DATA_EVIDENCE_CONTRACT = `[2026-06-16 Gazua data evidence contract]
-Before drawing conclusions, use /Users/kwak/Projects/ai/gazua-dashboard/data as the canonical evidence root, not only the workflow step comments.
+export const GAZUA_MORNING_DATA_EVIDENCE_CONTRACT = `[2026-07-16 Gazua data evidence contract: shared data]
+The five n8n collectors write normalized cumulative evidence to this company's Shared Data Storage. This is the canonical source for cross-run change detection; a workflow-run HTTP artifact is only a trace of that one execution and must not replace the cumulative source.
 
-Read the latest available source material by data category, then choose the categories relevant to this step's job:
-- market context and positioning: futures, kr-futures-flow, metadata, market_signals, signals
-- macro and regime: macro, regime, memory-trend, scfi-index
-- narrative and sector/theme evidence: insights, hbm-hbf, market_signals, smart-money, us-stockflow
-- handoff and dashboard state: gazua_handoff, gazua_dashboard, dashboard
+Use the company data API with the runtime credentials already supplied to the agent:
+API_BASE="\${PAPERCLIP_API_URL%/}"
+case "$API_BASE" in */api) ;; *) API_BASE="$API_BASE/api" ;; esac
+curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$API_BASE/companies/$PAPERCLIP_COMPANY_ID/data/objects?key=<category>/latest.json"
+curl -fsS -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$API_BASE/companies/$PAPERCLIP_COMPANY_ID/data/objects?prefix=<category>/history"
 
-Use the raw data to support report, narrative, regime, rotation, positioning, and risk judgments. Cite source_path and source_timestamp or file mtime for each material claim. If a category is missing, stale, or unusable, say "자료 부족/확인 불가" with the category name and continue with lower confidence; do not invent values from the report text itself.`;
+The n8n-backed categories are: blog-insights, macro, memory-freight, hbm-hbf, and market-calendar. Their current keys include blog-insights/latest.json, macro/latest.json, memory-freight/latest.json, hbm-hbf/latest.json, and market-calendar/latest.json. Read latest.json and the relevant history entries before making a trend, change, or new-signal claim. Cite the relative API key and the Last-Modified header (or payload timestamp) for each material claim.
+
+The remaining built-in categories can continue to use their existing local dashboard data only when their own collector produced that data: futures, kr-futures-flow, metadata, market_signals, signals, smart-money, and us-stockflow. Do not assume a local dashboard copy exists for an n8n-backed category.
+
+If a required category is missing, stale, or unusable, say "자료 부족/확인 불가" with the category name and continue with lower confidence; do not invent values from a report or a per-run artifact.`;
 
 const LEGACY_MORNING_COLLECTION_STEP_ID = "collect-market";
 const LEGACY_MORNING_COLLECTION_TOOL_NAME = "collect-morning";
