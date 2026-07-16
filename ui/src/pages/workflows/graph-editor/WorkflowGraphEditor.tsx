@@ -19,7 +19,8 @@ import { GraphCanvas } from "./GraphCanvas.js";
 import { GraphInspector } from "./GraphInspector.js";
 import {
   resolveQaCapAcceptancePolicy,
-  setQaCapAcceptancePolicy,
+  setQaCapAcceptance as applyQaCapAcceptance,
+  setQaLoopEnabled as applyQaLoopEnabled,
   setQaReworkMaxIterations as updateQaReworkMaxIterations,
 } from "../qa-cap-acceptance-policy.js";
 
@@ -94,9 +95,15 @@ function WorkflowGraphEditor({
     [selectedStep?.id, steps],
   );
 
-  const setQaCapAcceptanceEnabled = React.useCallback((enabled: boolean): void => {
+  const setQaLoopEnabled = React.useCallback((enabled: boolean, producerStepId?: string): void => {
     if (!selectedStep) return;
-    onChange(setQaCapAcceptancePolicy(steps, selectedStep.id, enabled));
+    onChange(applyQaLoopEnabled(steps, selectedStep.id, enabled, producerStepId));
+    setGraphError("");
+  }, [onChange, selectedStep, steps]);
+
+  const setQaCapAcceptance = React.useCallback((value: boolean): void => {
+    if (!selectedStep) return;
+    onChange(applyQaCapAcceptance(steps, selectedStep.id, value));
     setGraphError("");
   }, [onChange, selectedStep, steps]);
 
@@ -365,7 +372,8 @@ function WorkflowGraphEditor({
         updateSelectedGroupMetadata={updateSelectedGroupMetadata}
         updateSelectedContainerMetadata={updateSelectedContainerMetadata}
         setSelectedNote={setSelectedNote}
-        setQaCapAcceptanceEnabled={setQaCapAcceptanceEnabled}
+        setQaLoopEnabled={setQaLoopEnabled}
+        setQaCapAcceptance={setQaCapAcceptance}
         setQaReworkMaxIterations={setQaReworkMaxIterations}
         validateRawSelectedStepJson={validateRawSelectedStepJson}
         applyRawSelectedStepJson={applyRawSelectedStepJson}

@@ -99,7 +99,8 @@ export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "
   updateSelectedGroupMetadata: (patch: { title?: string; color?: string; collapsedByDefault?: boolean }) => void;
   updateSelectedContainerMetadata: (patch: Partial<StepDraft>) => void;
   setSelectedNote: (note: string) => void;
-  setQaCapAcceptanceEnabled: (enabled: boolean) => void;
+  setQaLoopEnabled: (enabled: boolean, producerStepId?: string) => void;
+  setQaCapAcceptance: (value: boolean) => void;
   setQaReworkMaxIterations: (value: number) => void;
   validateRawSelectedStepJson: () => void;
   applyRawSelectedStepJson: () => void;
@@ -169,7 +170,8 @@ export function GraphInspector({
   updateSelectedGroupMetadata,
   updateSelectedContainerMetadata,
   setSelectedNote,
-  setQaCapAcceptanceEnabled,
+  setQaLoopEnabled,
+  setQaCapAcceptance,
   setQaReworkMaxIterations,
   validateRawSelectedStepJson,
   applyRawSelectedStepJson,
@@ -295,7 +297,8 @@ export function GraphInspector({
               </div>
               <GraphInspectorPolicyQaCapAcceptance
                 policy={qaCapAcceptancePolicy}
-                onEnabledChange={setQaCapAcceptanceEnabled}
+                onLoopEnabledChange={setQaLoopEnabled}
+                onAllowCapAcceptanceChange={setQaCapAcceptance}
                 onMaxIterationsChange={setQaReworkMaxIterations}
               />
               <details key="advanced-policy-details" style={workflowPolicyDetailsStyle}>
