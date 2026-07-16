@@ -9,6 +9,7 @@ import {
 import { executeHttpWorkflowTool } from "./http-tool-adapter.js";
 import { executeMcpWorkflowTool } from "./mcp-tool-adapter.js";
 import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
+import { isPathInsideOrEqual } from "../work-products/output-paths.js";
 
 export type CoreWorkflowToolRemoteDeps = {
   fetchImpl?: typeof fetch;
@@ -76,6 +77,16 @@ export async function executeRemoteWorkflowTool(input: {
     ? artifactPathFromResult(input.adapterConfig, adapterResult)
     : null;
   if (!artifactPath || !stepOutputDir) return adapterResult;
+  if (!isPathInsideOrEqual(artifactPath, stepOutputDir)) {
+    return {
+      status: 500,
+      body: {
+        tool: input.toolName,
+        source: "core",
+        error: `Workflow tool "${input.toolName}" returned an artifact outside its assigned output directory`,
+      },
+    };
+  }
 
   try {
     const storage = await createCompanyWorkProductStorageService(input.db).get(input.companyId);
@@ -104,5 +115,5 @@ export async function executeRemoteWorkflowTool(input: {
     };
   }
 
-  return adapterResult;
+  return { ...adapterResult, artifactPath };
 }

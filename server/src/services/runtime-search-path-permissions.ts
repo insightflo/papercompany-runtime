@@ -95,6 +95,13 @@ export async function buildRuntimeSearchPathPermissions(input: {
     .then((rows) => rows[0] ?? null);
   const dependencyStepIds = collectDependencyStepIds(workflow?.stepsJson, currentStep.stepId);
   if (dependencyStepIds.length === 0) return permissions;
+  const dependencyToolArtifactPaths = card.cardJson.evidenceRefs.flatMap((ref) => {
+    if (ref.type !== "dependency_tool_artifact" || typeof ref.path !== "string" || !path.isAbsolute(ref.path)) {
+      return [];
+    }
+    const candidate = path.resolve(ref.path);
+    return isPathInside(candidate, permissions.workingDirectory) ? [candidate] : [];
+  });
 
   const linkedIssueIds = await input.db
     .select({ issueId: workflowStepRuns.issueId })
@@ -104,9 +111,8 @@ export async function buildRuntimeSearchPathPermissions(input: {
       inArray(workflowStepRuns.stepId, dependencyStepIds),
     ))
     .then((rows) => rows.flatMap((row) => row.issueId ? [row.issueId] : []));
-  if (linkedIssueIds.length === 0) return permissions;
-
-  const products = await input.db
+  const products = linkedIssueIds.length > 0
+    ? await input.db
     .select({
       provider: issueWorkProducts.provider,
       metadata: issueWorkProducts.metadata,
@@ -117,13 +123,17 @@ export async function buildRuntimeSearchPathPermissions(input: {
       eq(issueWorkProducts.companyId, input.companyId),
       inArray(issueWorkProducts.issueId, linkedIssueIds),
       not(eq(issueWorkProducts.status, "archived")),
-    ));
+    ))
+    : [];
 
-  permissions.dependencyFiles = Array.from(new Set(products.flatMap((product) => {
-    if (product.provider !== "local" && product.provider !== "local_file") return [];
-    const localPath = resolveWorkProductLocalFilePath(product);
-    return localPath ? [path.resolve(localPath)] : [];
-  })));
+  permissions.dependencyFiles = Array.from(new Set([
+    ...dependencyToolArtifactPaths,
+    ...products.flatMap((product) => {
+      if (product.provider !== "local" && product.provider !== "local_file") return [];
+      const localPath = resolveWorkProductLocalFilePath(product);
+      return localPath ? [path.resolve(localPath)] : [];
+    }),
+  ]));
   permissions.dependencyDirectories = Array.from(new Set(
     permissions.dependencyFiles
       .map((file) => path.dirname(file))

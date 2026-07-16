@@ -151,6 +151,7 @@ describeDb("remote workflow artifact storage", () => {
     expect(result.body.data).toMatchObject(RESULT);
     const artifactPath = (result.body.data as Record<string, unknown>).artifactPath;
     expect(typeof artifactPath).toBe("string");
+    expect((result as { artifactPath?: string }).artifactPath).toBe(artifactPath);
     expect(readFileSync(artifactPath as string, "utf8")).toBe(JSON.stringify(ARTIFACT));
     expect(client.send).toHaveBeenCalledTimes(1);
   });

@@ -4534,6 +4534,132 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
   });
 
+  it("hands an issue-less HTTP tool artifact to its dependent agent step", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const workProductRoot = "/srv/papercompany/projects/research-company/produced_work";
+    const artifactPath = `${workProductRoot}/missions/${missionId}/runs/${runId}/steps/normalize/normalized_news_ledger.json`;
+    const executeToolStep = vi.fn().mockResolvedValue({ accepted: true });
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-tool-artifact" });
+    setWorkflowToolStepExecutor(executeToolStep);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "HTTP Tool Artifact Handoff Company",
+      issuePrefix: `HA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      workProductRoot,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Evidence Analyst",
+      role: "researcher",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "HTTP tool artifact handoff",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "http-tool-artifact-handoff",
+      stepsJson: [
+        {
+          id: "normalize",
+          name: "Normalize source data",
+          type: "tool",
+          agentId: "",
+          dependencies: [],
+          toolNames: ["normalize-data"],
+        },
+        {
+          id: "analyze",
+          name: "Analyze normalized data",
+          type: "agent",
+          agentId,
+          dependencies: ["normalize"],
+          graphWorkProductRequired: true,
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    await executeWorkflowRun(db, runId);
+    await processQueuedWorkflowToolStepRuns(db);
+    const [toolStep] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(and(
+        eq(workflowStepRuns.workflowRunId, runId),
+        eq(workflowStepRuns.stepId, "normalize"),
+      ));
+    expect(toolStep?.lastDispatchRequestId).toBeTruthy();
+
+    await completeWorkflowToolStepFromResult(db, {
+      companyId,
+      stepRunId: toolStep!.id,
+      requestId: toolStep!.lastDispatchRequestId!,
+      workflowRunId: runId,
+      stepId: "normalize",
+      toolName: "normalize-data",
+      success: true,
+      data: { rawPath: artifactPath },
+    });
+
+    const [analyzeStep] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(and(
+        eq(workflowStepRuns.workflowRunId, runId),
+        eq(workflowStepRuns.stepId, "analyze"),
+      ));
+    expect(analyzeStep?.issueId).toBeTruthy();
+    const [analyzeIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, analyzeStep!.issueId!));
+    expect(analyzeIssue?.description).toContain("Dependency tool artifacts:");
+    expect(analyzeIssue?.description).toContain(artifactPath);
+
+    const [card] = await db
+      .select({ cardJson: issueExecutionCards.cardJson })
+      .from(issueExecutionCards)
+      .where(eq(issueExecutionCards.issueId, analyzeStep!.issueId!));
+    expect(card?.cardJson.evidenceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "dependency_tool_artifact",
+        path: artifactPath,
+      }),
+    ]));
+
+    const permissions = await buildRuntimeSearchPathPermissions({
+      db,
+      companyId,
+      issueId: analyzeStep!.issueId!,
+      workingDirectory: "/srv/papercompany/projects/research-company",
+    });
+    expect(permissions?.dependencyFiles).toEqual([artifactPath]);
+  });
+
   it("records issue-less tool dispatch failures on the step run", async () => {
     const companyId = randomUUID();
     const workflowId = randomUUID();

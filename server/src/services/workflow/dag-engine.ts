@@ -1425,6 +1425,39 @@ async function createWorkflowStepIssue(input: {
           : "Registered dependency workProduct",
       }];
     });
+  const dependencyToolArtifactRows = input.step.dependencies.length > 0
+    ? await input.db
+      .select({
+        id: workflowStepRuns.id,
+        stepId: workflowStepRuns.stepId,
+        metadata: workflowStepRuns.metadata,
+      })
+      .from(workflowStepRuns)
+      .where(and(
+        eq(workflowStepRuns.workflowRunId, input.run.id),
+        inArray(workflowStepRuns.stepId, input.step.dependencies),
+        isNull(workflowStepRuns.issueId),
+        eq(workflowStepRuns.status, "completed"),
+      ))
+    : [];
+  const dependencyToolArtifactEvidenceRefs: IssueExecutionCardJson["evidenceRefs"] =
+    dependencyToolArtifactRows.flatMap((row) => {
+      const artifactPath = readWorkflowToolArtifactPath(getMetadataRecord(row.metadata, "toolResult"));
+      if (!artifactPath) return [];
+      return [{
+        type: "dependency_tool_artifact",
+        id: row.id,
+        path: artifactPath,
+        description: `Workflow tool artifact from step ${row.stepId}`,
+      }];
+    });
+  const dependencyToolArtifactLines = dependencyToolArtifactEvidenceRefs.map((artifact) =>
+    `- ${artifact.description}: ${artifact.path}`,
+  );
+  const dependencyEvidenceRefs = [
+    ...dependencyWorkProductEvidenceRefs,
+    ...dependencyToolArtifactEvidenceRefs,
+  ];
   // [Plan B] 업스트림이 정식 workProduct 를 등록하지 않았더라도, producer 가 run output /
   // issue description / comment 에 남긴 명시적 `[ARTIFACT]: <absolute path>` 선언을 보조
   // evidence 로 downstream input 에 주입한다. broad filesystem scan 을 차단하기 위해 오직
@@ -1643,6 +1676,8 @@ async function createWorkflowStepIssue(input: {
     `- dependencyStepIds: ${JSON.stringify(input.step.dependencies)}`,
     dependencyIssueLines.length > 0 ? "Dependency issue inputs:" : null,
     ...dependencyIssueLines,
+    dependencyToolArtifactLines.length > 0 ? "Dependency tool artifacts:" : null,
+    ...dependencyToolArtifactLines,
     validatedUpstreamWorkProductLines.length > 0 ? "Validated upstream workProducts:" : null,
     ...validatedUpstreamWorkProductLines,
     dependencyArtifactPathsByIssueId.size > 0
@@ -1710,7 +1745,7 @@ async function createWorkflowStepIssue(input: {
         step: input.step,
         stepOutputDir: workProductPaths?.stepOutputDir ?? null,
         qaRubricPath,
-        evidenceRefs: dependencyWorkProductEvidenceRefs,
+        evidenceRefs: dependencyEvidenceRefs,
       });
       return reusableIssue.id;
     }
@@ -1742,7 +1777,7 @@ async function createWorkflowStepIssue(input: {
     step: input.step,
     stepOutputDir: workProductPaths?.stepOutputDir ?? null,
     qaRubricPath,
-    evidenceRefs: dependencyWorkProductEvidenceRefs,
+    evidenceRefs: dependencyEvidenceRefs,
   });
 
   await applyIssueCreatedSideEffects({
@@ -2104,6 +2139,15 @@ function getMetadataRecord(value: unknown, key: string): Record<string, unknown>
 
 function readMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readWorkflowToolArtifactPath(value: unknown): string | null {
+  const result = normalizeRecord(value);
+  const data = normalizeRecord(result.data);
+  const candidate = readMetadataString(result.artifactPath)
+    ?? readMetadataString(data.rawPath)
+    ?? readMetadataString(data.artifactPath);
+  return candidate && path.isAbsolute(candidate) ? path.resolve(candidate) : null;
 }
 
 function isCacheEnabled(step: WorkflowStep): boolean {
@@ -2721,6 +2765,7 @@ export async function completeWorkflowToolStepFromResult(
     toolName?: string;
     stdout?: string;
     data?: unknown;
+    artifactPath?: string;
     stderr?: string;
     exitCode?: number | null;
     error?: string;
@@ -2762,6 +2807,10 @@ export async function completeWorkflowToolStepFromResult(
   const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
+  const artifactPath = readWorkflowToolArtifactPath({
+    artifactPath: input.artifactPath,
+    data: input.data,
+  });
   const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
     || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
   const baseToolResult = {
@@ -2770,6 +2819,7 @@ export async function completeWorkflowToolStepFromResult(
     success: input.success,
     stdout: input.stdout ?? null,
     ...(input.data === undefined ? {} : { data: input.data }),
+    ...(artifactPath ? { artifactPath } : {}),
     stderr: input.stderr ?? null,
     exitCode: input.exitCode ?? null,
     error: input.error ?? null,

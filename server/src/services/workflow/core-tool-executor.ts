@@ -100,6 +100,7 @@ export async function resolveRunStepEnv(db: Db, runId: string): Promise<Record<s
 }
 export type CoreWorkflowToolExecutionResult = {
   status: 200 | 403 | 404 | 422 | 500 | 501;
+  artifactPath?: string;
   body: {
     content?: string;
     data?: unknown;
