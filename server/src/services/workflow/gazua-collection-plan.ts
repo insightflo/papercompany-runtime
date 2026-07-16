@@ -113,7 +113,8 @@ If a required category is missing, stale, or unusable, say "자료 부족/확인
 const LEGACY_MORNING_COLLECTION_STEP_ID = "collect-market";
 const LEGACY_MORNING_COLLECTION_TOOL_NAME = "collect-morning";
 const KR_SIGNAL_TOOL_NAME = "collect-signals-kr";
-const DATA_EVIDENCE_CONTRACT_MARKER = "Gazua data evidence contract";
+const DATA_EVIDENCE_CONTRACT_MARKER = "[2026-07-16 Gazua data evidence contract: shared data]";
+const LEGACY_DATA_EVIDENCE_CONTRACT = /\[2026-06-16 Gazua data evidence contract\][\s\S]*?(?=\n\n\[20\d{2}-\d{2}-\d{2}|$)/g;
 
 function dedupe(values: string[]): string[] {
   const seen = new Set<string>();
@@ -179,8 +180,12 @@ function buildCollectionStep(
 function withDataEvidenceContract(step: WorkflowStep): WorkflowStep {
   if (!GAZUA_MORNING_ANALYSIS_STEP_IDS.includes(step.id)) return step;
 
-  const description = step.description?.trim() ?? "";
-  if (description.includes(DATA_EVIDENCE_CONTRACT_MARKER)) return step;
+  const currentDescription = step.description?.trim() ?? "";
+  if (currentDescription.includes(DATA_EVIDENCE_CONTRACT_MARKER)) return step;
+
+  const description = currentDescription
+    .replace(LEGACY_DATA_EVIDENCE_CONTRACT, "")
+    .trim();
 
   return {
     ...step,

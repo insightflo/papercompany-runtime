@@ -136,4 +136,31 @@ describe("Gazua workflow collection plan", () => {
       expect(step.description?.match(/Gazua data evidence contract/g)).toHaveLength(1);
     }
   });
+
+  it("replaces the legacy local-data evidence contract with the shared-data contract", () => {
+    const next = buildGazuaMorningParallelCollectionSteps([
+      {
+        id: "signal-analysis",
+        name: "{$date} 시그널 해석",
+        type: "agent",
+        agentId: "",
+        agentName: "코난",
+        dependencies: [],
+        dependsOn: [],
+        description: [
+          "Analyze signals.",
+          "[2026-06-16 Gazua data evidence contract]",
+          "Use /srv/papercompany/projects/gazua-dashboard/data as the canonical evidence root.",
+          "[2026-06-29 gazua-morning instruction cleanup]",
+          "Keep source timestamps.",
+        ].join("\n\n"),
+      },
+    ]);
+
+    const description = next.find((step) => step.id === "signal-analysis")?.description ?? "";
+    expect(description).toContain("[2026-07-16 Gazua data evidence contract: shared data]");
+    expect(description).toContain("PAPERCLIP_API_KEY");
+    expect(description).not.toContain("/srv/papercompany/projects/gazua-dashboard/data");
+    expect(description).toContain("[2026-06-29 gazua-morning instruction cleanup]");
+  });
 });
