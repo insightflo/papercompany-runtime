@@ -52,13 +52,15 @@ describe("CompanyWorkProductStorageSettings", () => {
       <CompanyWorkProductStorageSettings companyId="company-1" />,
     );
 
-    expect(html).toContain("Work-product storage");
-    expect(html).toContain("S3-compatible");
+    expect(html).toContain("Shared work-product storage");
+    expect(html).toContain("S3-compatible shared storage");
+    expect(html).toContain("Papercompany writes each eligible tool result to its local work folder first, then copies it here.");
+    expect(html).toContain("Use the same endpoint, bucket, and prefix in n8n when it needs access to these copied files.");
     expect(html).toContain('value="https://storage.example.test"');
     expect(html).toContain('value="work-products"');
     expect(html).toContain("S3 work-product access key");
     expect(html).toContain("S3 work-product secret access key");
-    expect(html).toContain("Test saved connection");
+    expect(html).toContain("Test saved shared-storage connection");
     expect(html).not.toContain("AKIA");
     expect(html).not.toContain("super-secret");
   });

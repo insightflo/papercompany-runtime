@@ -99,7 +99,7 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
     mutationFn: () => workProductStorageApi.save(companyId, configFromForm(form)),
     onSuccess: (config) => {
       queryClient.setQueryData(storageKey, config); setForm(formFromConfig(config)); setTestResult(null);
-      pushToast({ tone: "success", title: "Storage settings saved", body: config.provider === "s3" ? "S3-compatible storage is selected." : "Local disk storage is selected." });
+      pushToast({ tone: "success", title: "Shared-storage settings saved", body: config.provider === "s3" ? "S3-compatible shared storage is enabled." : "Shared storage is off; files stay in Papercompany's local work folder." });
     },
     onError: (error) => pushToast({ tone: "error", title: "Storage settings could not be saved", body: error instanceof Error ? error.message : "Please review the settings." }),
   });
@@ -108,12 +108,12 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
     mutationFn: () => workProductStorageApi.test(companyId),
     onSuccess: (result) => {
       setTestResult(result);
-      pushToast({ tone: result.ok ? "success" : "error", title: result.ok ? "Storage connection verified" : "Storage connection failed", body: result.error });
+      pushToast({ tone: result.ok ? "success" : "error", title: result.ok ? "Shared-storage connection verified" : "Shared-storage connection failed", body: result.error });
     },
     onError: (error) => {
-      const message = error instanceof Error ? error.message : "Unable to test the saved connection.";
+      const message = error instanceof Error ? error.message : "Unable to test the saved shared-storage connection.";
       setTestResult({ ok: false, provider: "s3", error: message });
-      pushToast({ tone: "error", title: "Storage connection failed", body: message });
+      pushToast({ tone: "error", title: "Shared-storage connection failed", body: message });
     },
   });
 
@@ -129,19 +129,23 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
   }
 
   return <section className="space-y-4">
-    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Work-product storage</div>
+    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Shared work-product storage</div>
     <div className="space-y-4 rounded-md border border-border px-4 py-4">
       <div className="flex items-start gap-2"><Database className="mt-0.5 h-4 w-4 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">Local disk is the default. Select an S3-compatible store for private object storage such as MinIO or AWS S3.</p>
+        <div className="space-y-1 text-sm text-muted-foreground">
+          <p>Optional shared object storage for Papercompany and external workflows such as n8n.</p>
+          <p>Papercompany writes each eligible tool result to its local work folder first, then copies it here.</p>
+        </div>
       </div>
-      <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Storage provider</span>
+      <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Shared storage mode</span>
         <select value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value === "s3" ? "s3" : "local_disk" })}
           className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm">
-          <option value="local_disk">Local disk (default)</option><option value="s3">S3-compatible storage</option>
+          <option value="local_disk">No shared storage (Papercompany local folder only)</option><option value="s3">S3-compatible shared storage</option>
         </select>
       </label>
-      {storageQuery.isError ? <p className="text-xs text-destructive">Current storage settings could not be loaded.</p> : null}
-      {form.provider === "local_disk" ? <p className="text-xs text-muted-foreground">Workflow outputs remain on the configured local disk path.</p> : <div className="space-y-3 border-t border-border pt-4">
+      {storageQuery.isError ? <p className="text-xs text-destructive">Current shared-storage settings could not be loaded.</p> : null}
+      {form.provider === "local_disk" ? <p className="text-xs text-muted-foreground">Shared storage is off. Papercompany keeps workflow outputs only in its local work folder; this does not provide a shared file store for n8n.</p> : <div className="space-y-3 border-t border-border pt-4">
+        <p className="text-xs text-muted-foreground">Use the same endpoint, bucket, and prefix in n8n when it needs access to these copied files.</p>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Endpoint</span><Input value={form.endpoint} onChange={(event) => setForm({ ...form, endpoint: event.target.value })} placeholder="https://storage.example.com" /></label>
           <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Region</span><Input value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value })} placeholder="us-east-1" /></label>
@@ -160,12 +164,12 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
           <div className="flex gap-2"><Button size="sm" onClick={() => createTarget && createSecret.mutate({ target: createTarget, name: newSecretName.trim(), value: newSecretValue })} disabled={createSecret.isPending || !newSecretName.trim() || !newSecretValue}>Create secret</Button><Button size="sm" variant="ghost" onClick={() => setCreateTarget(null)} disabled={createSecret.isPending}>Cancel</Button></div>
         </div> : <div className="flex flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => beginSecret("access")}><Plus className="h-3.5 w-3.5" />New access-key secret</Button><Button size="sm" variant="ghost" onClick={() => beginSecret("secret")}><Plus className="h-3.5 w-3.5" />New secret-access-key secret</Button></div>}
       </div>}
-      <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => saveStorage.mutate()} disabled={saveStorage.isPending || (form.provider === "s3" && !s3Complete)}>{saveStorage.isPending ? "Saving…" : "Save storage settings"}</Button>
-        {form.provider === "s3" ? <Button size="sm" variant="outline" onClick={() => testConnection.mutate()} disabled={!isSaved || testConnection.isPending}>{testConnection.isPending ? "Testing…" : "Test saved connection"}</Button> : null}
+      <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => saveStorage.mutate()} disabled={saveStorage.isPending || (form.provider === "s3" && !s3Complete)}>{saveStorage.isPending ? "Saving…" : "Save shared-storage settings"}</Button>
+        {form.provider === "s3" ? <Button size="sm" variant="outline" onClick={() => testConnection.mutate()} disabled={!isSaved || testConnection.isPending}>{testConnection.isPending ? "Testing…" : "Test saved shared-storage connection"}</Button> : null}
       </div>
-      {form.provider === "s3" && !isSaved ? <p className="text-xs text-muted-foreground">Save changes before testing the connection.</p> : null}
-      {saveStorage.isError ? <p className="text-xs text-destructive">{saveStorage.error instanceof Error ? saveStorage.error.message : "Storage settings could not be saved."}</p> : null}
-      {testResult ? <p className={`flex items-center gap-1.5 text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}`}>{testResult.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}{testResult.ok ? "Connection verified." : testResult.error ?? "Storage connection failed."}</p> : null}
+      {form.provider === "s3" && !isSaved ? <p className="text-xs text-muted-foreground">Save changes before testing the shared-storage connection.</p> : null}
+      {saveStorage.isError ? <p className="text-xs text-destructive">{saveStorage.error instanceof Error ? saveStorage.error.message : "Shared-storage settings could not be saved."}</p> : null}
+      {testResult ? <p className={`flex items-center gap-1.5 text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}`}>{testResult.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}{testResult.ok ? "Shared-storage connection verified." : testResult.error ?? "Shared-storage connection failed."}</p> : null}
     </div>
   </section>;
 }
