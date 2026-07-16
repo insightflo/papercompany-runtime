@@ -7133,7 +7133,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     ]));
   });
 
-  async function seedBackEdgeLoopRun(opts: { maxIterations: number; initialProducerIteration?: number }) {
+  async function seedBackEdgeLoopRun(opts: { maxIterations: number; initialProducerIteration?: number; allowCapAcceptance?: boolean }) {
     const companyId = randomUUID();
     const producerAgentId = randomUUID();
     const qaAgentId = randomUUID();
@@ -7164,7 +7164,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           name: "Produce artifact",
           agentId: producerAgentId,
           dependencies: [],
-          conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: opts.maxIterations }],
+          conditionalDependencies: [{
+            stepId: "qa-validate",
+            when: "qa_request_changes",
+            isBackEdge: true,
+            maxIterations: opts.maxIterations,
+            ...(opts.allowCapAcceptance ? { allowCapAcceptance: true } : {}),
+          }],
           description: "Produce the artifact. Do not validate your own output.",
         },
         { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
@@ -7469,6 +7475,49 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     // attempt 도 추가되지 않음(리셋 자체가 안 일어남).
     const attempts = (produce.metadata as Record<string, unknown> | null)?.controlFlowAttempts as unknown[] | undefined;
     expect(attempts ?? []).toHaveLength(0);
+  });
+
+  it("queues an opted-in QA at the final producer generation with a cap-acceptance runtime contract", async () => {
+    heartbeatWakeup.mockResolvedValue({ id: "queued-cap-acceptance-recheck" });
+    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({
+      maxIterations: 2,
+      initialProducerIteration: 2,
+      allowCapAcceptance: true,
+    });
+    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await db.update(issues).set({
+      status: "done",
+      startedAt: new Date("2026-06-18T07:11:00.000Z"),
+      completedAt: new Date("2026-06-18T07:15:00.000Z"),
+    }).where(eq(issues.id, producerIssueId));
+
+    heartbeatWakeup.mockClear();
+    await syncWorkflowRunForIssue(db, producerIssueId);
+
+    expect(heartbeatWakeup).toHaveBeenCalledWith(qaAgentId, expect.objectContaining({
+      reason: "workflow_step_runnable",
+      payload: expect.objectContaining({
+        workflowRunId: runId,
+        stepId: "qa-validate",
+        paperclipQaCapAcceptanceContract: expect.objectContaining({
+          kind: "workflow_qa_cap_acceptance",
+          qaStepId: "qa-validate",
+          producerStepId: "produce",
+          currentIteration: 2,
+          maxIterations: 2,
+        }),
+      }),
+      contextSnapshot: expect.objectContaining({
+        forceFreshSession: true,
+        paperclipQaCapAcceptanceContract: expect.objectContaining({
+          verdictEndpoint: expect.stringContaining(`/issues/${qaIssueId}/workflow/verdict`),
+          nonblockingAcceptance: {
+            classification: "nonblocking",
+            limitationsRequired: true,
+          },
+        }),
+      }),
+    }));
   });
 
   it("[P4 control-flow loop] bounded happy path: rework then QA pass → workflow completes (loop terminates)", async () => {

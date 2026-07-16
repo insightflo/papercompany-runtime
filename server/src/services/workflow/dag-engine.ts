@@ -48,6 +48,7 @@ import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 import { applyStructuralGatePass } from "./control-flow/structural-gate-rework.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
+import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
@@ -1966,6 +1967,23 @@ export async function wakeExistingWorkflowStepIssue(input: {
   const capAcceptancePayload = capAcceptanceContext.accepted.length > 0
     ? { acceptedQaLimitations: capAcceptanceContext }
     : {};
+  const executionStepRuns = await input.db
+    .select({
+      stepId: workflowStepRuns.stepId,
+      status: workflowStepRuns.status,
+      iterationIndex: workflowStepRuns.iterationIndex,
+    })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, input.run.id));
+  const qaCapAcceptanceContract = buildQaCapAcceptanceRuntimeContract({
+    qaStep: input.step,
+    qaIssueId: issue.id,
+    steps: buildWorkflowExecutionSteps(input.definition),
+    stepRuns: executionStepRuns,
+  });
+  const qaCapAcceptancePayload = qaCapAcceptanceContract
+    ? { paperclipQaCapAcceptanceContract: qaCapAcceptanceContract }
+    : {};
 
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
@@ -1982,6 +2000,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
       ...capAcceptancePayload,
+      ...qaCapAcceptancePayload,
     },
     contextSnapshot: {
       issueId: issue.id,
@@ -1998,6 +2017,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
       ...capAcceptancePayload,
+      ...qaCapAcceptancePayload,
     },
     requestedByActorType: "system",
     requestedByActorId: `workflow:${input.definition.id}`,
