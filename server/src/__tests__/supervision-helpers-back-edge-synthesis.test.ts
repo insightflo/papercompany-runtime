@@ -80,6 +80,21 @@ describe("synthesizeQaReworkBackEdge — 기본 합성", () => {
     const after = backEdge("a", "qa-1", 5);
     expect(after[0]!.conditionalDependencies![0]!.maxIterations).toBe(5);
   });
+
+  it("generic synthesis remains default-off while explicit mission QA opt-in is preserved", () => {
+    const steps = [action("a"), qa("qa-1", ["a"])];
+    const defaultEdge = synthesizeQaReworkBackEdge(steps, "qa-1")[0]!.conditionalDependencies![0]!;
+    expect(defaultEdge.allowCapAcceptance).toBeUndefined();
+
+    const optedIn = synthesizeQaReworkBackEdge(steps, "qa-1", 2, { allowCapAcceptance: true });
+    expect(optedIn[0]!.conditionalDependencies![0]).toEqual({
+      stepId: "qa-1",
+      when: "qa_request_changes",
+      isBackEdge: true,
+      maxIterations: 2,
+      allowCapAcceptance: true,
+    });
+  });
 });
 
 describe("synthesizeQaReworkBackEdge — skip/edge cases", () => {

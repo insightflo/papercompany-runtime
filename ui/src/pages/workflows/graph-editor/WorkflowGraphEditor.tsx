@@ -17,6 +17,11 @@ import { useWorkflowGraphCanvasViewport } from "./useWorkflowGraphCanvasViewport
 import { useWorkflowGraphActions } from "./useWorkflowGraphActions.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { GraphInspector } from "./GraphInspector.js";
+import {
+  resolveQaCapAcceptancePolicy,
+  setQaCapAcceptancePolicy,
+  setQaReworkMaxIterations as updateQaReworkMaxIterations,
+} from "../qa-cap-acceptance-policy.js";
 
 function WorkflowGraphEditor({
   steps,
@@ -84,6 +89,22 @@ function WorkflowGraphEditor({
     updateSelectedApproval, updateSelectedTesting, updateSelectedExecution, updateSelectedDataFlow,
     updateSelectedResources, setSelectedNote, updateSelectedContainerMetadata,
   } = useWorkflowGraphMetadataHandlers({ steps, onChange, selectedStep, setGraphError });
+  const qaCapAcceptancePolicy = React.useMemo(
+    () => resolveQaCapAcceptancePolicy(steps, selectedStep?.id ?? ""),
+    [selectedStep?.id, steps],
+  );
+
+  const setQaCapAcceptanceEnabled = React.useCallback((enabled: boolean): void => {
+    if (!selectedStep) return;
+    onChange(setQaCapAcceptancePolicy(steps, selectedStep.id, enabled));
+    setGraphError("");
+  }, [onChange, selectedStep, steps]);
+
+  const setQaReworkMaxIterations = React.useCallback((value: number): void => {
+    if (!selectedStep) return;
+    onChange(updateQaReworkMaxIterations(steps, selectedStep.id, value));
+    setGraphError("");
+  }, [onChange, selectedStep, steps]);
 
   const closeGraphContextMenu = React.useCallback((): void => {
     setGraphContextMenu(null);
@@ -304,6 +325,7 @@ function WorkflowGraphEditor({
         availableTools={availableTools}
         availableToolGrants={availableToolGrants}
         graphAgents={graphAgents}
+        qaCapAcceptancePolicy={qaCapAcceptancePolicy}
         testDrawerSlot={showOverviewInspector && showGraphTestDrawer ? (
           <WorkflowGraphTestDrawer
             key="test-drawer"
@@ -343,6 +365,8 @@ function WorkflowGraphEditor({
         updateSelectedGroupMetadata={updateSelectedGroupMetadata}
         updateSelectedContainerMetadata={updateSelectedContainerMetadata}
         setSelectedNote={setSelectedNote}
+        setQaCapAcceptanceEnabled={setQaCapAcceptanceEnabled}
+        setQaReworkMaxIterations={setQaReworkMaxIterations}
         validateRawSelectedStepJson={validateRawSelectedStepJson}
         applyRawSelectedStepJson={applyRawSelectedStepJson}
       />

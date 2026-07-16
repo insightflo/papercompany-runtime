@@ -1545,7 +1545,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     }>;
     const actionWithEdge = paqoStepsRaw.find((step) => step.id === paqoSteps[0]!.id)!;
     expect(actionWithEdge.conditionalDependencies).toEqual([
-      { stepId: paqoSteps[1]!.id, when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+      { stepId: paqoSteps[1]!.id, when: "qa_request_changes", isBackEdge: true, maxIterations: 2, allowCapAcceptance: true },
     ]);
     expect(paqoStepsRaw.find((step) => step.id === paqoSteps[1]!.id)!.conditionalDependencies).toBeUndefined();
 
@@ -1804,7 +1804,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     }>;
     const actionWithEdge = paqoStepsRaw.find((step) => step.id === paqoSteps[0]!.id)!;
     expect(actionWithEdge.conditionalDependencies).toEqual([
-      { stepId: paqoSteps[1]!.id, when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+      { stepId: paqoSteps[1]!.id, when: "qa_request_changes", isBackEdge: true, maxIterations: 2, allowCapAcceptance: true },
     ]);
     expect(paqoStepsRaw.find((step) => step.id === paqoSteps[1]!.id)!.conditionalDependencies).toBeUndefined();
 

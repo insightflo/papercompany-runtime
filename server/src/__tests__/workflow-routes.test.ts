@@ -43,6 +43,10 @@ const mockWorkProductsService = vi.hoisted(() => ({
   listForIssue: vi.fn(),
 }));
 
+const mockQaCapAcceptanceRollout = vi.hoisted(() => ({
+  enableQaCapAcceptanceForCompany: vi.fn(),
+}));
+
 vi.mock("../services/workflow/engine.js", () => ({
   workflowService: mockWorkflowService,
 }));
@@ -60,6 +64,8 @@ vi.mock("../services/activity-log.js", () => ({
 vi.mock("../services/work-products.js", () => ({
   workProductService: () => mockWorkProductsService,
 }));
+
+vi.mock("../services/workflow/qa-cap-acceptance-rollout.js", () => mockQaCapAcceptanceRollout);
 
 function workflowDefinition(overrides: Record<string, unknown> = {}) {
   return {
@@ -180,6 +186,12 @@ describe("workflow routes", () => {
       },
     });
     mockWorkProductsService.listForIssue.mockResolvedValue([]);
+    mockQaCapAcceptanceRollout.enableQaCapAcceptanceForCompany.mockResolvedValue({
+      inspectedWorkflows: 4,
+      updatedWorkflows: 2,
+      updatedQaEdges: 3,
+      skippedActiveWorkflows: 1,
+    });
   });
 
   it("resolves agentId-only workflow steps to agent names in the overview", async () => {
@@ -392,6 +404,46 @@ describe("workflow routes", () => {
         skippedGrants: 4,
       },
     }));
+  });
+
+  it("enables bounded QA cap acceptance for eligible company workflows", async () => {
+    const res = await request(createApp())
+      .post(`/api/companies/${COMPANY_ID}/workflows/qa-cap-acceptance/enable`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      inspectedWorkflows: 4,
+      updatedWorkflows: 2,
+      updatedQaEdges: 3,
+      skippedActiveWorkflows: 1,
+    });
+    expect(mockQaCapAcceptanceRollout.enableQaCapAcceptanceForCompany).toHaveBeenCalledWith(expect.anything(), COMPANY_ID);
+    expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: COMPANY_ID,
+      action: "workflow.qa_cap_acceptance_enabled",
+      entityType: "company",
+      entityId: COMPANY_ID,
+      details: res.body,
+    }));
+  });
+
+  it("blocks cross-company and agent QA cap acceptance rollout", async () => {
+    const crossCompany = await request(createApp())
+      .post(`/api/companies/${OTHER_COMPANY_ID}/workflows/qa-cap-acceptance/enable`)
+      .send({});
+    expect(crossCompany.status).toBe(403);
+
+    const agent = await request(createApp({
+      type: "agent",
+      agentId: "77777777-7777-4777-8777-777777777777",
+      companyId: COMPANY_ID,
+      runId: null,
+    }))
+      .post(`/api/companies/${COMPANY_ID}/workflows/qa-cap-acceptance/enable`)
+      .send({});
+    expect(agent.status).toBe(403);
+    expect(mockQaCapAcceptanceRollout.enableQaCapAcceptanceForCompany).not.toHaveBeenCalled();
   });
 
   it("creates a workflow definition with Phase B fields and logs activity", async () => {

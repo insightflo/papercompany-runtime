@@ -16,6 +16,10 @@ export type BackEdgeCapableStep = DagStepLike & {
 
 export const QA_REWORK_DEFAULT_MAX_ITERATIONS = 2;
 
+export type QaReworkBackEdgeOptions = {
+  allowCapAcceptance?: boolean;
+};
+
 export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: readonly DagStepLike[]): string | null {
   if (!qaStepId) return null;
   const byId = new Map(steps.map((step) => [step.id, step]));
@@ -51,6 +55,7 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
   steps: T[],
   qaStepId: string,
   maxIterations: number = QA_REWORK_DEFAULT_MAX_ITERATIONS,
+  options: QaReworkBackEdgeOptions = {},
 ): T[] {
   if (!qaStepId || steps.length === 0) return steps;
   const effectiveMaxIterations = maxIterations >= 1 ? Math.floor(maxIterations) : QA_REWORK_DEFAULT_MAX_ITERATIONS;
@@ -68,6 +73,7 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
     when: "qa_request_changes",
     isBackEdge: true,
     maxIterations: effectiveMaxIterations,
+    ...(options.allowCapAcceptance === true ? { allowCapAcceptance: true } : {}),
   };
   return steps.map((step) => step.id === producerId
     ? { ...step, conditionalDependencies: [...existing, backEdge] }
