@@ -31,7 +31,9 @@ export function buildQaCapAcceptanceBriefLines(value: unknown): readonly string[
     "QA cap decision contract:",
     `- Reinspect the current producer generation: ${producerStepId} (${currentIteration}/${maxIterations}) for QA step ${qaStepId}.`,
     "- Submit PASS when every QA criterion is satisfied.",
-    "- If any remaining gap blocks safe downstream progress, submit normal REQUEST_CHANGES. Do not classify it as nonblocking; the workflow must remain blocked.",
+    "- Treat a remaining gap as blocking only when it creates material risk to safe or useful downstream progress.",
+    "- Blocking principles: a missing or unreadable required output; unsafe or materially false content; or a state where downstream consumption, delivery, or verification cannot proceed.",
+    "- Do not classify a gap as blocking merely because a checklist item or canonical probe failed. Judge the material consequence, then submit normal REQUEST_CHANGES only when the workflow must remain blocked.",
     joinPromptSections([
       "- Only when remaining limitations do not block safe downstream progress, submit REQUEST_CHANGES through the official endpoint with:",
       '  `nonblockingAcceptance: { "classification": "nonblocking", "limitations": ["specific remaining limitation"] }`',
