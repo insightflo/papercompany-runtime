@@ -317,8 +317,10 @@ export {
 export {
   workflowArtifactRegisterSchema,
   workflowVerdictSubmitSchema,
+  workflowNonblockingAcceptanceSchema,
   workflowIssueCompleteSchema,
   type WorkflowArtifactRegister,
+  type WorkflowNonblockingAcceptance,
   type WorkflowVerdictSubmit,
   type WorkflowIssueComplete,
 } from "./workflow-agent-api.js";

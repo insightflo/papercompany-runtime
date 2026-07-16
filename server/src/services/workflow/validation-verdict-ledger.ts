@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, gte, or } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   heartbeatRuns,
@@ -10,7 +10,8 @@ import {
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
-import type { WorkflowValidationVerdictPayload } from "@paperclipai/shared";
+import { workflowNonblockingAcceptanceSchema } from "@paperclipai/shared";
+import type { WorkflowNonblockingAcceptance, WorkflowValidationVerdictPayload } from "@paperclipai/shared";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "../validation-verdict.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 
@@ -182,11 +183,17 @@ export async function recordWorkflowValidationVerdict(input: {
   readonly actorAgentId?: string | null;
   readonly heartbeatRunId?: string | null;
   readonly sourceText?: string | null;
+  readonly nonblockingAcceptance?: WorkflowNonblockingAcceptance | null;
 }): Promise<WorkflowValidationLedgerResult> {
   const context = await resolveWorkflowValidationContext(input.db, input.issue, { mode: "record" });
   if (!context.isCandidate || !context.workflowRunId || !context.workflowStepRunId) {
     return { ...context, satisfied: false, verdict: null };
   }
+  // [qa-cap acceptance] nonblocking 분류는 request_changes verdict 와만 공존. heartbeat/comment 경로는
+  //   이 필드를 넘기지 않으므로 구조적 수용은 오직 공식 workflow API(request_changes) 만 가능하다.
+  const acceptance = input.nonblockingAcceptance && input.verdict === "request_changes"
+    ? input.nonblockingAcceptance
+    : null;
   const payload = {
     kind: "workflow_validation_verdict",
     workflowRunId: context.workflowRunId,
@@ -194,6 +201,7 @@ export async function recordWorkflowValidationVerdict(input: {
     issueId: input.issue.id,
     verdict: input.verdict,
     diagnostics: [],
+    ...(acceptance ? { nonblockingAcceptance: acceptance } : {}),
   } satisfies WorkflowValidationVerdictPayload;
   const sourceKey = input.heartbeatRunId
     ? `run:${input.heartbeatRunId}`
@@ -285,4 +293,57 @@ export async function hasWorkflowValidationCompletionLedger(input: {
     .then((rows) => rows[0] ?? null);
   const verdict = row?.verdict === "pass" || row?.verdict === "request_changes" ? row.verdict : null;
   return { ...context, satisfied: Boolean(verdict), verdict };
+}
+
+/**
+ * [qa-cap acceptance] 해당 QA issue 의 최신 request_changes verdict event 에서 nonblockingAcceptance 를
+ *   읽어 반환한다. cap 수용 게이트가 "현재 공식 분류" 로 사용하는 유일한 원천.
+ * [엄격 바인딩] 오직 공식 workflow API 원천(reason="workflow_api") + heartbeatRunId non-null 만 인정 —
+ *   comment(issue_patch_comment)/heartbeat_result 파생 verdict 는 fields 가 유사해도 절대 수용 ❌.
+ *   payload JSON 은 신뢰 불가 → schema 재검증(bounded nonempty). caller 가 observedAt/workflowStepRunId/
+ *   heartbeatRunId 로 current-generation + exact QA step binding 을 판정한다(stale ❌).
+ */
+export async function loadLatestNonblockingAcceptance(input: {
+  readonly db: WorkflowValidationDb;
+  readonly companyId: string;
+  readonly issueId: string;
+}): Promise<{
+  readonly acceptance: WorkflowNonblockingAcceptance;
+  readonly observedAt: Date | null;
+  readonly workflowStepRunId: string | null;
+  readonly heartbeatRunId: string | null;
+} | null> {
+  // [execution freshness] load the LATEST official workflow_api verdict for the issue FIRST —
+  //   do NOT prefilter to request_changes/nonblocking. Only if that latest row is request_changes
+  //   AND its payload parses as a bounded nonblocking acceptance does it qualify. A newer official
+  //   PASS (or a request_changes without acceptance) is the current verdict and must disqualify.
+  const row = await input.db
+    .select({
+      verdict: workflowTransitionEvents.verdict,
+      payload: workflowTransitionEvents.payload,
+      createdAt: workflowTransitionEvents.createdAt,
+      workflowStepRunId: workflowTransitionEvents.workflowStepRunId,
+      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+    })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, input.companyId),
+      eq(workflowTransitionEvents.issueId, input.issueId),
+      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      eq(workflowTransitionEvents.reason, "workflow_api"),
+      isNotNull(workflowTransitionEvents.heartbeatRunId),
+    ))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!row || row.verdict !== "request_changes") return null;
+  const payload = asRecord(row.payload);
+  const parsed = workflowNonblockingAcceptanceSchema.safeParse(payload.nonblockingAcceptance);
+  if (!parsed.success) return null;
+  return {
+    acceptance: parsed.data,
+    observedAt: row.createdAt ?? null,
+    workflowStepRunId: row.workflowStepRunId ?? null,
+    heartbeatRunId: row.heartbeatRunId ?? null,
+  };
 }

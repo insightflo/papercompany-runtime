@@ -1,3 +1,5 @@
+import type { WorkflowNonblockingAcceptance } from "./validators/workflow-agent-api.js";
+
 export type MissionPlanQaVerdictValue = "pass" | "request_changes";
 
 export interface MissionPlanDecisionSubmissionPayload {
@@ -23,6 +25,8 @@ export interface WorkflowValidationVerdictPayload {
   issueId: string;
   verdict: MissionPlanQaVerdictValue;
   diagnostics?: Array<Record<string, unknown>>;
+  /** [qa-cap acceptance] 공식 request_changes verdict 의 명시적 nonblocking 분류. cap 수용 게이트가 읽는다. */
+  nonblockingAcceptance?: WorkflowNonblockingAcceptance;
 }
 
 export interface WorkflowTransitionEventPayload {

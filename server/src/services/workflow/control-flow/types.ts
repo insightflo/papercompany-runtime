@@ -33,6 +33,13 @@ export interface ConditionalEdge {
   when?: ConditionalEdgeWhen;
   isBackEdge?: boolean;
   maxIterations?: number;
+  /**
+   * [qa-cap acceptance opt-in] 이 back-edge 한정의 opt-in(default false). true 일 때만,
+   *   cap(maxIterations) 도달 시 공식 workflow verdict API 로 명시적 nonblocking classification +
+   *   bounded nonempty limitations 가 제출된 current fresh semantic QA 반려를 completed 로 수용(CAS)한다.
+   *   재시도/producer reset/추가 LLM 없음. retry cap 은 hard token boundary 로 그대로 유지.
+   */
+  allowCapAcceptance?: boolean;
 }
 
 /**
@@ -74,10 +81,12 @@ export function normalizeConditionalEdges(raw: unknown): ConditionalEdge[] | und
       : undefined;
     // back-edge 는 maxIterations 동반 필수. 없으면 무한 loop 위험이라 drop.
     if (isBackEdge && !maxIterations) continue;
+    // allowCapAcceptance 는 back-edge 한정의 opt-in boolean. non-back-edge 에선 의미 없으니 무시.
+    const allowCapAcceptance = isBackEdge && value.allowCapAcceptance === true;
     edges.push({
       stepId,
       ...(when ? { when } : {}),
-      ...(isBackEdge ? { isBackEdge: true, maxIterations: maxIterations! } : {}),
+      ...(isBackEdge ? { isBackEdge: true, maxIterations: maxIterations!, ...(allowCapAcceptance ? { allowCapAcceptance: true } : {}) } : {}),
     });
   }
   return edges.length > 0 ? edges : undefined;

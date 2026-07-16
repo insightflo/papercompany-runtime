@@ -787,8 +787,12 @@ export {
 export {
   workflowArtifactRegisterSchema,
   workflowVerdictSubmitSchema,
+  workflowNonblockingAcceptanceSchema,
   workflowIssueCompleteSchema,
+  WORKFLOW_NONBLOCKING_LIMITATION_MAX_LENGTH,
+  WORKFLOW_NONBLOCKING_LIMITATION_MAX_ITEMS,
   type WorkflowArtifactRegister,
+  type WorkflowNonblockingAcceptance,
   type WorkflowVerdictSubmit,
   type WorkflowIssueComplete,
 } from "./validators/workflow-agent-api.js";
