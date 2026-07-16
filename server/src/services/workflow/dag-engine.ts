@@ -47,6 +47,8 @@ import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 import { applyStructuralGatePass } from "./control-flow/structural-gate-rework.js";
+import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
+import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
@@ -1073,6 +1075,23 @@ async function loadLatestValidationVerdicts(
   return verdicts;
 }
 
+/**
+ * [qa-cap acceptance anti-flap, generation-aware] a completed QA is protected from
+ *   request_changes+done re-derivation ONLY while its qaCapAccepted sentinel's
+ *   producerStepId/producerIteration match a CURRENTLY completed producer row in this run.
+ *   A new producer generation (rework) breaks the match => protection lifts, re-derivation resumes.
+ */
+function matchesCurrentCapAcceptedProducer(
+  qaStepRun: (typeof workflowStepRuns.$inferSelect),
+  stepRuns: ReadonlyArray<(typeof workflowStepRuns.$inferSelect)>,
+): boolean {
+  const sentinel = readAcceptanceRecord(normalizeRecord(qaStepRun.metadata).qaCapAccepted);
+  if (!sentinel) return false; // forged/malformed metadata never suppresses QA re-derivation
+  return stepRuns.some(
+    (r) => r.stepId === sentinel.producerStepId && r.status === "completed" && (r.iterationIndex ?? 0) === sentinel.producerIteration,
+  );
+}
+
 async function syncStepRunsFromIssueState(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
@@ -1204,6 +1223,10 @@ async function syncStepRunsFromIssueState(
   for (const stepRun of stepRuns) {
     if (!stepRun.issueId) continue;
     if (stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0) continue;
+    // [qa-cap acceptance] cap 수용으로 completed 된 QA 는 request_changes+done 재유도(flap)에서 보호 —
+    //   단, sentinel 의 producerStepId/producerIteration 이 현 sync 의 completed producer row 와 정확히
+    //   일치(현 generation)할 때만. 새 producer generation(rework) 시 보호 해제 → 재유도 허용.
+    if (stepRun.status === "completed" && matchesCurrentCapAcceptedProducer(stepRun, stepRuns)) continue;
     const issue = issueById.get(stepRun.issueId);
     if (!issue) continue;
 
@@ -1780,6 +1803,17 @@ async function createWorkflowStepIssue(input: {
     evidenceRefs: dependencyEvidenceRefs,
   });
 
+  // [qa-cap acceptance] inject predecessor cap-accepted nonblocking limitations so a freshly
+  //   created downstream issue carries them in both execution payload and contextSnapshot.
+  const capAcceptanceContext = await loadDownstreamQaCapAcceptanceContext({
+    db: input.db,
+    workflowRunId: input.run.id,
+    predecessorStepIds: resolveEdges(input.step).filter((e) => e.isBackEdge !== true).map((e) => e.stepId),
+  });
+  const capAcceptancePayload = capAcceptanceContext.accepted.length > 0
+    ? { acceptedQaLimitations: capAcceptanceContext }
+    : {};
+
   await applyIssueCreatedSideEffects({
     db: input.db,
     heartbeat,
@@ -1796,6 +1830,7 @@ async function createWorkflowStepIssue(input: {
       workflowStepId: input.step.id,
       issueExecutionCardId: executionCardRow.id,
       issueExecutionCardHash: executionCardRow.contentHash,
+      ...capAcceptancePayload,
     },
     contextSnapshot: {
       taskId: createdIssue.id,
@@ -1807,6 +1842,7 @@ async function createWorkflowStepIssue(input: {
       paperclipIssueExecutionCard: executionCardRow.cardJson,
       paperclipIssueExecutionCardId: executionCardRow.id,
       paperclipIssueExecutionCardHash: executionCardRow.contentHash,
+      ...capAcceptancePayload,
     },
     waitForWakeCompletion: true,
   });
@@ -1921,6 +1957,15 @@ export async function wakeExistingWorkflowStepIssue(input: {
   const reworkContext = reworkContract
     ? { paperclipWorkflowReworkContract: reworkContract }
     : {};
+  // [qa-cap acceptance] resumed downstream issue sees predecessor cap-accepted limitations.
+  const capAcceptanceContext = await loadDownstreamQaCapAcceptanceContext({
+    db: input.db,
+    workflowRunId: input.run.id,
+    predecessorStepIds: resolveEdges(input.step).filter((e) => e.isBackEdge !== true).map((e) => e.stepId),
+  });
+  const capAcceptancePayload = capAcceptanceContext.accepted.length > 0
+    ? { acceptedQaLimitations: capAcceptanceContext }
+    : {};
 
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
@@ -1936,6 +1981,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
       ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
+      ...capAcceptancePayload,
     },
     contextSnapshot: {
       issueId: issue.id,
@@ -1951,6 +1997,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
       ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
+      ...capAcceptancePayload,
     },
     requestedByActorType: "system",
     requestedByActorId: `workflow:${input.definition.id}`,

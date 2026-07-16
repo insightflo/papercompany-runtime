@@ -43,6 +43,7 @@ import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rework-contract.js";
+import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
 import type { StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -355,12 +356,19 @@ export async function applyBackEdgeReworkPass(
     reworkedCount += 1;
   }
 
-  if (reworkedCount > 0) {
-    const stepRuns = await db
-      .select()
-      .from(workflowStepRuns)
-      .where(eq(workflowStepRuns.workflowRunId, run.id));
-    return { stepRuns, reworkedCount };
-  }
-  return { stepRuns: input.stepRuns, reworkedCount };
+  const effectiveStepRuns = reworkedCount > 0
+    ? await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id))
+    : input.stepRuns;
+  // [qa-cap acceptance] at-cap opted-in back-edge 는, 모든 current fresh 반려 semantic QA 가 공식
+  //   nonblocking verdict 로 수용되면 해당 FAILED QA 만 CAS completed 로 바꾼다(producer/reset/retry ❌).
+  //   under-cap 은 위 rework path 가 담당하므로 여기선 no-op. 결과 stepRuns 를 cap pass 가 갱신한다.
+  const capResult = await applyCapAcceptancePass({
+    db,
+    run,
+    steps,
+    stepRuns: effectiveStepRuns,
+    predsByStepId,
+    validationVerdictsByIssueId: input.validationVerdictsByIssueId,
+  });
+  return { stepRuns: capResult.stepRuns, reworkedCount };
 }

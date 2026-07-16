@@ -255,6 +255,8 @@ export async function submitWorkflowVerdict(input: {
     actorAgentId: input.actor.agentId,
     heartbeatRunId: input.actor.runId,
     sourceText: input.data.reason ?? input.data.verdict,
+    // [qa-cap acceptance] 공식 request_changes body 만 nonblockingAcceptance 를 carry 한다(schema refine 보장).
+    nonblockingAcceptance: input.data.nonblockingAcceptance ?? null,
   });
   if (!result.isCandidate) {
     throw unprocessable("Workflow verdict API can only be used on workflow execution issues linked to a workflow step run");
