@@ -229,6 +229,22 @@ export function deriveUnblockDispatchClassification(
         nativeReportReason: null,
         workflowDefinitionId: null,
       };
+    // cap-override outcomes are owner-action retry paths; they never reach this Unblock-completion
+    //   flow (which dispatches without ownerAction), but the union must stay exhaustive.
+    case "cap_override_applied":
+      return {
+        failureClass: "blocked_no_live_run",
+        recommendedNativeAction: "workflow_resume",
+        nativeReportReason: null,
+        workflowDefinitionId: outcome.workflowDefinitionId,
+      };
+    case "cap_override_already_applied":
+      return {
+        failureClass: "blocked_native_resume_in_flight",
+        recommendedNativeAction: "native_resume_in_flight",
+        nativeReportReason: null,
+        workflowDefinitionId: null,
+      };
     case "report_only": {
       // reason → failureClass 매핑. no_step_run 만 기존 "blocked_no_native_step" 라벨 유지.
       const failureClass = outcome.reason === "no_step_run"

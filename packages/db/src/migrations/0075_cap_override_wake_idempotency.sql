@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "agent_wakeup_requests_cap_override_live_idempotency_uq" ON "agent_wakeup_requests" USING btree ("company_id", "idempotency_key") WHERE "idempotency_key" like 'cap-override-wake:%' and "status" in ('queued', 'claimed', 'deferred_issue_execution', 'coalesced', 'completed');

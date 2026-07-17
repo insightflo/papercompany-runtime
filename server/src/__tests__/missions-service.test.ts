@@ -1514,7 +1514,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
       sourceIssue: expect.objectContaining({ id: sourceIssue.id }),
       targetAgentId: workerAgentId,
-      wakeCommentId: expect.any(String),
+      decisionCommentId: expect.any(String),
     }));
     const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
     const sourceBody = sourceComments.map((comment) => comment.body).join("\n");
@@ -2576,7 +2576,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
       targetAgentId: validatorAgentId,
       idempotencyKey,
-      wakeCommentId: expect.any(String),
+      decisionCommentId: expect.any(String),
     }));
     expect(second.appliedActions).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "owner_decision_retry_source_issue", sourceIssueId: sourceIssue.id, wakeupDispatchStatus: "dispatched", idempotencyKey }),

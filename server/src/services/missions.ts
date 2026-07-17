@@ -344,6 +344,10 @@ export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
   targetAgentId: string;
   idempotencyKey: string;
   wakeCommentId?: string;
+  // [cap-override authority] 실제 owner-action decision comment ID — retry_source_issue 결정을 담은
+  //   owner-action issue 위의 comment(cap-override 가 same-company/owner-author/decision/exact-producer/
+  //   post-cap-handoff 를 DB fail-closed 검증). producer evidence comment ❌.
+  decisionCommentId?: string | null;
 }) => Promise<MissionOwnerDecisionWakeupDispatchResult | unknown> | MissionOwnerDecisionWakeupDispatchResult | unknown;
 
 export type MissionStaleSourceIssueWakeupRequestedHandler = (input: {

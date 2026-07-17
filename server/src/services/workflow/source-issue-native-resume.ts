@@ -23,6 +23,8 @@ import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
 import { resumeWorkflowRun } from "./workflow-store.js";
+import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
+import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts LIVE_WAKEUP_STATUSES 와 동일 집합.
 //   이슈가 이 상태의 wake 나 queued/running heartbeat 를 가지면 중복 dispatch 금지.
@@ -35,7 +37,14 @@ export type SourceIssueNativeResumeReportReason =
   | "run_not_running"
   | "no_definition"
   | "step_not_found"
-  | "wake_rejected";
+  | "wake_rejected"
+  // cap-override(failed run + completed producer at/beyond cap 의 owner 1회 retry) 검증 거부 사유.
+  | "cap_override_wrong_scope"
+  | "cap_override_no_current_request_changes"
+  | "cap_override_under_cap"
+  | "cap_override_no_back_edge"
+  | "cap_override_no_marker"
+  | "cap_override_queue_rolled_back";
 
 export type SourceIssueNativeResumeOutcome =
   | {
@@ -53,6 +62,10 @@ export type SourceIssueNativeResumeOutcome =
       runId: string | null;
       liveSignal: "wake" | "heartbeat";
     }
+  // [cap-override] owner 가 QA rework cap 초과 producer 1회 retry(failed run + completed producer
+  //   at/beyond cap + current official RC verdict + same-company/same-mission owner action). one-shot audit.
+  | { kind: "cap_override_applied"; workflowRunId: string; workflowDefinitionId: string; stepId: string; workflowStepRunId: string; ownerActionIssueId: string; fromIteration: number; toIteration: number; cap: number }
+  | { kind: "cap_override_already_applied"; ownerActionIssueId: string }
   | {
       kind: "report_only";
       reason: SourceIssueNativeResumeReportReason;
@@ -73,9 +86,22 @@ export async function dispatchSourceIssueNativeResume(
     issueId: string;
     allowBlockedIssue?: boolean;
     agentId?: string | null;
+    // [cap-override] mission owner retry_source_issue owner-action(failed run + completed producer at/beyond cap 일 때 분기).
+    //   authority = 실제 owner-action decision comment ID(cap-override 가 DB 에서 fail-closed 검증).
+    ownerAction?: { ownerActionIssueId: string; missionId: string; decisionCommentId: string };
+    /** [test isolation] optional wake dependency — production omits (uses real wakeExistingWorkflowStepIssue).
+     *  tests inject a no-spawn wake that still creates the exact-key agentWakeupRequests row (contract preserved). */
+    wakeFn?: typeof wakeExistingWorkflowStepIssue;
   },
 ): Promise<SourceIssueNativeResumeOutcome> {
   // 1. source issue 의 최신 step run. startedAt/completedAt desc 로 "가장 진행된" run 을 잡는다.
+  // [BLOCKER1] durable crash-window recovery FIRST: a prior cap-override forward may have committed
+  //   (run=running/step=pending/issue=todo/audit=pending) and crashed before wake. resolve any existing
+  //   audit for this decision before the failed/completed gate. returns null when no audit → fresh/normal path.
+  if (input.ownerAction) {
+    const recovered = await recoverOwnerCapOverride(db, { companyId: input.companyId, issueId: input.issueId, allowBlockedIssue: input.allowBlockedIssue, ownerAction: input.ownerAction, wakeFn: input.wakeFn });
+    if (recovered) return recovered;
+  }
   const [stepRun] = await db
     .select({
       id: workflowStepRuns.id,
@@ -107,6 +133,17 @@ export async function dispatchSourceIssueNativeResume(
       workflowStepRunId: stepRun.id,
       stepId: stepRun.stepId,
     };
+  }
+
+  // [cap-override] failed run + completed producer(at/beyond cap) + owner action → cap 초과 1회 retry.
+  if (run.status === "failed" && stepRun.status === "completed" && input.ownerAction) {
+    return applyOwnerCapOverrideRetry(db, {
+      companyId: input.companyId,
+      issueId: input.issueId,
+      allowBlockedIssue: input.allowBlockedIssue ?? true,
+      ownerAction: input.ownerAction,
+      wakeFn: input.wakeFn,
+    });
   }
 
   // 3. definition — company scope 가드(타 회사 definition 우발 매칭 방지)로 조회.
@@ -252,7 +289,7 @@ export async function dispatchSourceIssueNativeResume(
   //   native wake 를 소유한다. 이 호출만이 공식 retry/iteration/QA verdict 를 보존한다.
   let queued = false;
   try {
-    queued = await wakeExistingWorkflowStepIssue({
+    queued = await (input.wakeFn ?? wakeExistingWorkflowStepIssue)({
       db,
       run: wakeRun,
       definition,

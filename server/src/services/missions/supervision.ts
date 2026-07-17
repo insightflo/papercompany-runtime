@@ -3,7 +3,7 @@
 // [파일 목적] mission owner supervision(감독/회복) 본체. runMainExecutorSupervision(1100+줄) +
 //   runActiveMissionOwnerSupervision. missions.ts 클로저 분해(P3).
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
-import { agentWakeupRequests, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -19,7 +19,7 @@ import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
 import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
 import type { MissionServiceDeps } from "../missions.js";
-import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
+import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, extractMissionOwnerDecisionFromText, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
 import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
@@ -64,6 +64,31 @@ function hasToolStepFailureExecutionEvidence(stepRun: ToolStepFailureEvidenceRow
   return Object.keys(asRecord(metadata.toolInvocation)).length > 0
     || Object.keys(asRecord(metadata.toolResult)).length > 0
     || Object.keys(asRecord(metadata.retentionDeleted)).length > 0;
+}
+// [D cap-override authority] owner-action issue 의 latest recognized decision(createdAt,id DESC 첫 parsed)
+//   만 권위. 그 decision 이 retry_source_issue 일 때만 ID 전달. newer replan/escalate/invalid decision 이
+//   먼저면 stale retry 를 건너뛰지 않고 null → cap-override wake 금지.
+async function resolveOwnerRetryDecisionCommentId(db: Db, companyId: string, ownerActionIssueId: string): Promise<string | null> {
+  const rows = await db.select({ id: issueComments.id, body: issueComments.body })
+    .from(issueComments)
+    .where(and(eq(issueComments.companyId, companyId), eq(issueComments.issueId, ownerActionIssueId)))
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+    .limit(32);
+  const latest = rows.find((row) => extractMissionOwnerDecisionFromText(row.body ?? "") !== null);
+  if (!latest) return null;
+  return extractMissionOwnerDecisionFromText(latest.body ?? "")?.decision === "retry_source_issue" ? latest.id : null;
+}
+// [integration blocker] dispatchSourceIssueNativeResume 의 cap-override 진입 조건과 동일: source issue 의
+//   최신 step run 의 run 이 failed 이고 step 이 completed. 이면 supervision 이 producer issue 를 먼저 reopen
+//   하지 않고 cap-override 의 atomic reopen/rollback 에 맡긴다. under-cap/running 정상 경로는 기존 reopen 유지.
+async function isCapOverrideRetryCandidate(db: Db, companyId: string, sourceIssueId: string): Promise<boolean> {
+  const [stepRun] = await db.select({ status: workflowStepRuns.status, workflowRunId: workflowStepRuns.workflowRunId })
+    .from(workflowStepRuns).where(eq(workflowStepRuns.issueId, sourceIssueId))
+    .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt)).limit(1);
+  if (!stepRun || stepRun.status !== "completed") return false;
+  const [run] = await db.select({ status: workflowRuns.status }).from(workflowRuns)
+    .where(and(eq(workflowRuns.id, stepRun.workflowRunId), eq(workflowRuns.companyId, companyId))).limit(1);
+  return Boolean(run && run.status === "failed");
 }
 
 function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): string {
@@ -1356,7 +1381,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                           sourceIssue: sourceCandidate,
                           targetAgentId: sourceCandidate.assigneeAgentId,
                           idempotencyKey,
-                          wakeCommentId: wakeEvidenceComment?.id ?? requestChangesContextComment?.id,
+                          decisionCommentId: await resolveOwnerRetryDecisionCommentId(db, mission.companyId, issue.id),
                         });
                         wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                         await issueService(db).addComment(
@@ -1423,10 +1448,16 @@ export function createSupervision({ db, deps, ownerActions }: {
                   reopenStatuses = allowDoneReopen ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
                 }
                 if (isProducerRework) {
-                  await db
-                    .update(issues)
-                    .set({ status: "todo", updatedAt: now, completedAt: null })
-                    .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
+                  // [integration blocker] cap-override candidate(failed run + completed producer step) 는
+                  //   supervision 이 여기서 issue 를 reopen 하지 않는다 — cap-override 가 자체 forward/rollback
+                  //   트랜잭션에서 producer issue 를 todo 로 atomic reopen/복원한다. supervision 이 먼저 reopen 하면
+                  //   cap-override reject/queue-rollback 시 issue 만 todo 로 남아 run=failed/step=completed 가 된다.
+                  if (!(await isCapOverrideRetryCandidate(db, mission.companyId, sourceCandidate.id))) {
+                    await db
+                      .update(issues)
+                      .set({ status: "todo", updatedAt: now, completedAt: null })
+                      .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
+                  }
                 }
                 const retryComment = await issueService(db).addComment(
                   sourceCandidate.id,
@@ -1455,7 +1486,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                         sourceIssue: sourceCandidate,
                         targetAgentId: sourceCandidate.assigneeAgentId,
                         idempotencyKey,
-                        wakeCommentId: wakeEvidenceComment?.id ?? (requestChangesSummary ? retryComment.id : undefined),
+                        decisionCommentId: await resolveOwnerRetryDecisionCommentId(db, mission.companyId, issue.id),
                       });
                       wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                       await issueService(db).addComment(

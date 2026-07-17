@@ -714,27 +714,28 @@ export async function createApp(
         },
       });
     },
-    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, sourceIssue, targetAgentId }) => {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, decisionCommentId }) => {
       // [native authority] approved Oversight retry must route through the validated native DAG
       //   helper (prove workflowRun/definition/persisted step/stepRun → wakeExistingWorkflowStepIssue),
       //   NOT a direct special wake. The old reason=mission_owner_decision_retry_source_issue wake is
       //   removed: it bypassed the official workflow retry/iteration/QA authority. If no native link is
       //   provable (or wake is rejected), record/report-only and do NOT wake the source directly.
+      // [cap-override] ownerAction 를 넘기면 failed run + completed producer(at/beyond cap) 일 때
+      //   1회 cap 초과 retry 가 승인된다(one-shot audit + rollback).
       const outcome = await dispatchSourceIssueNativeResume(db, {
         companyId: mission.companyId,
         issueId: sourceIssue.id,
         allowBlockedIssue: true,
         agentId: targetAgentId,
+        ownerAction: { ownerActionIssueId: ownerActionIssue.id, missionId: mission.id, decisionCommentId: decisionCommentId ?? "" },
       });
-      if (outcome.kind === "dispatched") {
+      if (outcome.kind === "dispatched" || outcome.kind === "cap_override_applied") {
         return { status: "dispatched" as const, runId: outcome.workflowRunId };
       }
-      if (outcome.kind === "already_in_flight") {
-        return {
-          status: "workflow_already_dispatched" as const,
-          workflowWakeupRequestId: outcome.workflowWakeupRequestId,
-          runId: outcome.runId,
-        };
+      if (outcome.kind === "already_in_flight" || outcome.kind === "cap_override_already_applied") {
+        return outcome.kind === "already_in_flight"
+          ? { status: "workflow_already_dispatched" as const, workflowWakeupRequestId: outcome.workflowWakeupRequestId, runId: outcome.runId }
+          : { status: "workflow_already_dispatched" as const, workflowWakeupRequestId: null, runId: null };
       }
       // report-only: native link could not be proven. Oversight retains evidence; the native
       //   workflow resumes only when a resumable step link exists.

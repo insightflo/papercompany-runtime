@@ -97,26 +97,26 @@ export function missionRoutes(db: Db) {
       planQaIssueId,
       decisionHash,
     }),
-    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, sourceIssue, targetAgentId }) => {
+    onOwnerDecisionRetrySourceIssueApplied: async ({ mission, ownerActionIssue, sourceIssue, targetAgentId, idempotencyKey, decisionCommentId }) => {
       // [native authority] approved Oversight retry routes through the validated native DAG helper
       //   (prove workflowRun/definition/step/stepRun → wakeExistingWorkflowStepIssue). The old
       //   reason=mission_owner_retry_source_issue direct wake is removed: it bypassed official
       //   workflow retry/iteration/QA authority. report-only when no native link is provable.
+      // [cap-override] ownerAction 로 failed run + completed producer(at/beyond cap) 1회 retry 승인.
       const outcome = await dispatchSourceIssueNativeResume(db, {
         companyId: mission.companyId,
         issueId: sourceIssue.id,
         allowBlockedIssue: true,
         agentId: targetAgentId,
+        ownerAction: { ownerActionIssueId: ownerActionIssue.id, missionId: mission.id, decisionCommentId: decisionCommentId ?? "" },
       });
-      if (outcome.kind === "dispatched") {
+      if (outcome.kind === "dispatched" || outcome.kind === "cap_override_applied") {
         return { status: "dispatched" as const, runId: outcome.workflowRunId };
       }
-      if (outcome.kind === "already_in_flight") {
-        return {
-          status: "workflow_already_dispatched" as const,
-          workflowWakeupRequestId: outcome.workflowWakeupRequestId,
-          runId: outcome.runId,
-        };
+      if (outcome.kind === "already_in_flight" || outcome.kind === "cap_override_already_applied") {
+        return outcome.kind === "already_in_flight"
+          ? { status: "workflow_already_dispatched" as const, workflowWakeupRequestId: outcome.workflowWakeupRequestId, runId: outcome.runId }
+          : { status: "workflow_already_dispatched" as const, workflowWakeupRequestId: null, runId: null };
       }
       return { status: "not_requested" as const, runId: null };
     },

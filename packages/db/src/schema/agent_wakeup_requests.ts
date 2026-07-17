@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, integer, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -48,5 +49,8 @@ export const agentWakeupRequests = pgTable(
     issueStatusIdx: index("agent_wakeup_requests_issue_status_idx").on(table.issueId, table.status),
     missionStatusIdx: index("agent_wakeup_requests_mission_status_idx").on(table.companyId, table.missionId, table.status),
     workflowStepStatusIdx: index("agent_wakeup_requests_workflow_step_status_idx").on(table.workflowStepRunId, table.status),
+    capOverrideLiveIdempotencyUq: uniqueIndex("agent_wakeup_requests_cap_override_live_idempotency_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} like 'cap-override-wake:%' and ${table.status} in ('queued', 'claimed', 'deferred_issue_execution', 'coalesced', 'completed')`),
   }),
 );

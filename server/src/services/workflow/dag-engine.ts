@@ -15,6 +15,7 @@ import { issueService } from "../issues.js";
 import { heartbeatService, extractExplicitArtifactPaths } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
+import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
 import { activatePlanningMissionForWorkflowRun } from "../missions/mission-workflow-lifecycle.js";
@@ -1891,6 +1892,8 @@ export async function wakeExistingWorkflowStepIssue(input: {
   allowBlockedIssue?: boolean;
   /** When true, the heartbeat session is forced fresh (no stale context reuse). */
   forceFreshSession?: boolean;
+  /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
+  idempotencyKey?: string | null;
 }): Promise<boolean> {
   // This guards every resume entry point (normal recheck, reconciler, owner
   // recovery). A semantic QA issue may not be queued from status alone.
@@ -2027,6 +2030,8 @@ export async function wakeExistingWorkflowStepIssue(input: {
     },
     requestedByActorType: "system",
     requestedByActorId: `workflow:${input.definition.id}`,
+    idempotencyKey: input.idempotencyKey ?? null,
+    rethrowOnError: isCapOverrideWakeKey(input.idempotencyKey),
   });
   return true;
 }
