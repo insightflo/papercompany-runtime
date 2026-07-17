@@ -7,13 +7,14 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { issues, workflowTransitionEvents } from "@paperclipai/db";
+import { issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { MissionRow } from "../missions.js";
 import type { MissionServiceDeps } from "../missions.js";
 import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { detectQaReworkCapExhaustion } from "./qa-rework-cap-oversight-detection.js";
 import { dispatchCapWake } from "./qa-rework-cap-oversight-wake.js";
+import { extractMissionOwnerDecisionFromText } from "./mission-owner-recovery-events.js";
 
 export type { QaReworkCapExhaustion } from "./qa-rework-cap-oversight-detection.js";
 export { detectQaReworkCapExhaustion } from "./qa-rework-cap-oversight-detection.js";
@@ -258,11 +259,24 @@ async function reuseExistingIssue(wakeInput: WakeInput, issueId: string): Promis
   if (!issue) throw new Error(`qa-cap-oversight: linked issue ${issueId} not found`);
   if (issue.hiddenAt) await db.update(issues).set({ hiddenAt: null, updatedAt: new Date() }).where(eq(issues.id, issueId));
   await reconcileOrphanIssues(db, mission.companyId, mission.id, buildQaCapKeyMarker(wakeInput.keyHash), issue.id);
-  await dispatchCapWake({
-    db, mission, issue, oversightIssue,
-    workflowRunId: wakeInput.exhaustion.workflowRunId,
-    keyHash: wakeInput.keyHash, onOwnerActionCreated: wakeInput.onOwnerActionCreated,
+  const decisionComments = await db.select({ body: issueComments.body }).from(issueComments).where(and(
+    eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, issue.id),
+  ));
+  const hasOwnerDecision = decisionComments.some(({ body }) => {
+    const decision = extractMissionOwnerDecisionFromText(body)?.decision;
+    return decision === "retry_source_issue"
+      || decision === "replan_mission"
+      || decision === "escalate"
+      || decision === "report_impossible"
+      || decision === "request_input";
   });
+  if (!hasOwnerDecision) {
+    await dispatchCapWake({
+      db, mission, issue, oversightIssue,
+      workflowRunId: wakeInput.exhaustion.workflowRunId,
+      keyHash: wakeInput.keyHash, onOwnerActionCreated: wakeInput.onOwnerActionCreated,
+    });
+  }
   return { issue, created: false };
 }
 
