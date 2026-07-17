@@ -39,6 +39,7 @@ import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-sourc
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
+import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 
 type ToolStepFailureEvidenceRow = {
   readonly startedAt: Date | null;
@@ -1026,6 +1027,12 @@ export function createSupervision({ db, deps, ownerActions }: {
           findings.push(`owner_action_decision_invalid: ${label} has unsupported decision=${ownerDecision.invalidDecision} — ${issue.title}`);
           ownerDecision = null;
         } else if (!ownerDecision) {
+          // [Patch 2 cap-exhausted] QA rework cap oversight issues must NOT be grace-defaulted.
+          //   Wait for explicit owner decision — no auto-retry, no grace-default.
+          if (isQaReworkCapOversightIssue(issue.description)) {
+            findings.push(`qa_rework_cap_oversight_pending_decision: ${label} — explicit owner decision required, no grace-default`);
+            continue;
+          }
           // [grace window] owner 가 recovery action 을 고르지 않은 채 오래되면 자동으로
           // retry_source_issue default 로 적용한다. owner 가 heartbeat 비활성/wakeOnDemand
           // 로 decision comment 를 안 쓰면 mission 이 무한 stall(6h+ 사례) 하므로, grace 가
@@ -1768,6 +1775,37 @@ export function createSupervision({ db, deps, ownerActions }: {
           reason: `Failed workflow step ${row.stepRun.stepId} needs recovery/replan path signal`,
           safeToAutoApply: false,
         });
+      }
+    }
+    // [Patch 2 cap-exhausted] detect QA rework cap exhaustion and create/reuse
+    //   exactly one actionable owner/unblock issue per (run + producer + QA +
+    //   cap generation). Wake through the owner-action callback. Never auto-retry
+    //   or grace-default — the grace-default guard above skips these issues.
+    const capExhaustions = await detectQaReworkCapExhaustion({
+      db,
+      companyId: mission.companyId,
+      stepRows,
+    });
+    for (const exhaustion of capExhaustions) {
+      const workflowName = stepRows.find((row) => row.run.id === exhaustion.workflowRunId)?.definition.name ?? exhaustion.workflowRunId;
+      try {
+        const result = await ensureQaReworkCapOversightIssue({
+          db,
+          mission,
+          oversightIssue,
+          exhaustion,
+          workflowName,
+          createIssue: ownerActions.createMissionOwnerActionIssue,
+          onOwnerActionCreated: deps.onOwnerActionCreated,
+        });
+        if (!result) {
+          findings.push(`qa_rework_cap_oversight_concurrent: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} qa=${exhaustion.qaStepId} — claim in progress, will retry next tick`);
+          continue;
+        }
+        findings.push(`qa_rework_cap_oversight: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} qa=${exhaustion.qaStepId} generation=${exhaustion.producerIteration}/${exhaustion.maxIterations}${result.created ? " issue_created" : " issue_exists"} issue=${result.issue.identifier ?? result.issue.id}`);
+      } catch (err) {
+        logger.warn({ err, missionId: mission.id, workflowRunId: exhaustion.workflowRunId }, "qa-cap-oversight ensure failed — will retry next supervision tick");
+        findings.push(`qa_rework_cap_oversight_error: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} qa=${exhaustion.qaStepId} — ${err instanceof Error ? err.message : "unknown"}`);
       }
     }
 

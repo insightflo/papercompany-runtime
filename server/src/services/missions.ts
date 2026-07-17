@@ -334,7 +334,7 @@ export type MissionOwnerActionCreatedHandler = (input: {
   mission: MissionRow;
   issue: typeof issues.$inferSelect;
   sourceIssue: typeof issues.$inferSelect;
-  reason?: "mission_unblock_action_created" | "mission_unblock_action_stalled" | "tool_step_failure_recovery_created";
+  reason?: "mission_unblock_action_created" | "mission_unblock_action_stalled" | "tool_step_failure_recovery_created" | "qa_rework_cap_oversight_created";
 }) => Promise<unknown> | unknown;
 
 export type MissionOwnerDecisionRetrySourceIssueAppliedHandler = (input: {
