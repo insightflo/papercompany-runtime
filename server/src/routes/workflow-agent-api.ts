@@ -24,11 +24,11 @@ import { submitMissionPlanQaVerdict } from "../services/missions/mission-plan-qa
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import {
   completeWorkflowIssue,
-  registerWorkflowArtifact,
   submitWorkflowVerdict,
   type WorkflowApiActor,
   type WorkflowApiDelegation,
 } from "../services/workflow/agent-api.js";
+import { registerWorkflowArtifactWithStorage } from "../services/workflow/registered-artifact-storage.js";
 
 function routeParam(value: string | string[] | undefined, name: string): string {
   if (typeof value === "string" && value.trim()) return value;
@@ -144,7 +144,7 @@ export function workflowAgentApiRoutes(db: Db) {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
     const { actor, delegation } = await authorizeWorkflowApi(req, db, issue, { allowMissionOwnerUnblockDelegation: true });
     const data: WorkflowArtifactRegister = req.body;
-    const product = await registerWorkflowArtifact({ db, issue, actor, data, delegation });
+    const product = await registerWorkflowArtifactWithStorage({ db, issue, actor, data, delegation });
     await logActivity(db, {
       companyId: issue.companyId,
       actorType: actor.actorType,

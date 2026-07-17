@@ -145,7 +145,7 @@ async function findExistingWorkflowPreviewUrl(input: {
   return row ? toIssueWorkProduct(row) : null;
 }
 
-async function assertWorkflowArtifactPath(input: {
+export async function assertWorkflowArtifactPath(input: {
   readonly db: Db;
   readonly issue: WorkflowApiIssue;
   readonly artifactPath: string;

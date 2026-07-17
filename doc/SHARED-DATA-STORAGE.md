@@ -48,6 +48,14 @@ Ownership and purpose:
 - **Work product root:** local agent authoring workspace/path. Selecting S3 storage does not remove it.
 - **Work-product Storage:** persistence or mirror destination for registered final outputs, written by Papercompany after local authoring.
 
+When an agent registers a workflow file through the official Workflow API, Papercompany keeps the local file as the working copy and uploads the same bytes to the configured Work-product Storage before accepting the registration. If that upload fails, the workProduct is not registered, so the workflow cannot silently advance with a local-only final output.
+
+For S3-compatible storage, registered workflow files use this key layout:
+
+```text
+<key-prefix>/companies/<company-id>/workflow-runs/<workflow-run-id>/steps/<step-id>/<filename>
+```
+
 ## Configuration
 
 Company Settings exposes **Shared Data Storage** with:

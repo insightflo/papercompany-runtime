@@ -19,6 +19,13 @@ export type WorkflowArtifactMirrorDeps = {
   createS3Client?: (config: S3ClientConfig) => S3ClientLike | Promise<S3ClientLike>;
 };
 
+export type WorkflowArtifactStorageMirror = {
+  provider: "s3";
+  endpoint: string;
+  bucket: string;
+  objectKey: string;
+};
+
 function normalizePrefix(prefix: string | undefined) {
   return prefix?.trim().replace(/^\/+|\/+$/g, "") ?? "";
 }
@@ -65,12 +72,42 @@ export async function mirrorWorkflowArtifactToCompanyStorage(
     artifactPath: string;
   },
   deps: WorkflowArtifactMirrorDeps,
-): Promise<void> {
-  if (config.provider === "local_disk") return;
+): Promise<WorkflowArtifactStorageMirror | null> {
+  if (config.provider === "local_disk") return null;
   if (!isPathInsideOrEqual(input.artifactPath, input.stepOutputDir)) {
     throw unprocessable("Workflow artifact must be inside the step output directory");
   }
 
+  return uploadLocalArtifactToCompanyStorage(config, input, deps);
+}
+
+export async function mirrorRegisteredWorkflowArtifactToCompanyStorage(
+  config: CompanyWorkProductStorageConfig,
+  input: {
+    companyId: string;
+    workflowRunId?: string | null;
+    stepId?: string | null;
+    artifactPath: string;
+  },
+  deps: WorkflowArtifactMirrorDeps,
+): Promise<WorkflowArtifactStorageMirror | null> {
+  if (config.provider === "local_disk") return null;
+  if (!path.isAbsolute(input.artifactPath)) {
+    throw unprocessable("Registered workflow artifact must use an absolute local path");
+  }
+  return uploadLocalArtifactToCompanyStorage(config, input, deps);
+}
+
+async function uploadLocalArtifactToCompanyStorage(
+  config: Extract<CompanyWorkProductStorageConfig, { provider: "s3" }>,
+  input: {
+    companyId: string;
+    workflowRunId?: string | null;
+    stepId?: string | null;
+    artifactPath: string;
+  },
+  deps: WorkflowArtifactMirrorDeps,
+): Promise<WorkflowArtifactStorageMirror> {
   const [accessKeyId, secretAccessKey, body] = await Promise.all([
     deps.resolveSecretValue(input.companyId, config.accessKeySecretId, "latest"),
     deps.resolveSecretValue(input.companyId, config.secretAccessKeySecretId, "latest"),
@@ -84,11 +121,18 @@ export async function mirrorWorkflowArtifactToCompanyStorage(
     credentials: { accessKeyId, secretAccessKey },
   });
   const fileName = path.basename(input.artifactPath);
+  const objectKey = objectKeyFor(config, input);
   await client.send(new PutObjectCommand({
     Bucket: config.bucket,
-    Key: objectKeyFor(config, input),
+    Key: objectKey,
     Body: body,
     ContentType: contentTypeFor(fileName),
     ContentLength: body.length,
   }));
+  return {
+    provider: "s3",
+    endpoint: config.endpoint,
+    bucket: config.bucket,
+    objectKey,
+  };
 }
