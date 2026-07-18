@@ -82,6 +82,15 @@ test("source list covers dashboard cards without weekly freight requests", () =>
   assert.equal(SOURCE_REQUESTS.some((item) => item.key === "fear_greed" && item.url.includes("alternative.me")), true);
 });
 
+test("source fetch uses the exact serial batching configuration", () => {
+  const fetch = workflowByName().byName["Fetch market sources"];
+  assert.deepEqual(fetch.parameters.options, {
+    batching: { batch: { batchSize: 1, batchInterval: 1500 } },
+    timeout: 30_000,
+    response: { response: { neverError: true, responseFormat: "text" } },
+  });
+});
+
 test("workflow has the fixed nodes, versions, authenticated paths, and KST settings", () => {
   const { workflow, byName } = workflowByName();
   assert.equal(workflow.name, "Gazua - Market Pulse 30m Collect and A1 Sync");

@@ -4,6 +4,8 @@ This directory generates `Gazua - Market Pulse 30m Collect and A1 Sync`. It coll
 
 The 30-minute source set includes Yahoo Finance market symbols, alternative.me Fear and Greed, and the exact `DDR5 16Gb (2Gx8) 4800/5600` DRAMeXchange row. Weekly freight indexes are intentionally left to their existing collector.
 
+`Fetch market sources` serializes source requests with n8n HTTP batching (`batchSize: 1`, `batchInterval: 1500`) to avoid Yahoo and auxiliary-source request bursts.
+
 ## UI-managed credentials
 
 Create or select these credentials in n8n. Do not put their values in source, exported workflow JSON, shell history, or request bodies.
