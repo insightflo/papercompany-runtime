@@ -43,7 +43,7 @@ function reaches(workflow, from, target) {
 test("schedule expressions cover the approved KST window", () => {
   assert.deepEqual(KST_CRON_EXPRESSIONS, [
     "0,30 9-23 * * 1",
-    "0,30 * * 2-5",
+    "0,30 * * * 2-5",
     "0,30 0-5 * * 6",
     "0 6 * * 6",
   ]);
