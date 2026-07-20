@@ -1,11 +1,21 @@
+import { existsSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { WORKFLOW_TOOL_EXECUTION_REQUEST_EVENT } from "@paperclipai/shared";
-import manifest from "../../../../papercompany-plugins/packages/tool-registry/src/manifest.js";
-import plugin from "../../../../papercompany-plugins/packages/tool-registry/src/worker.js";
-import { ACTION_KEYS } from "../../../../papercompany-plugins/packages/tool-registry/src/constants.js";
 
-describe("tool-registry workflow result delivery", () => {
+const pluginRepoAvailable = existsSync(new URL("../../../../papercompany-plugins/", import.meta.url));
+const loadPluginModule = (path: URL) => import(path.href);
+const manifest = pluginRepoAvailable
+  ? (await loadPluginModule(new URL("../../../../papercompany-plugins/packages/tool-registry/src/manifest.js", import.meta.url))).default
+  : undefined!;
+const plugin = pluginRepoAvailable
+  ? (await loadPluginModule(new URL("../../../../papercompany-plugins/packages/tool-registry/src/worker.js", import.meta.url))).default
+  : undefined!;
+const { ACTION_KEYS } = pluginRepoAvailable
+  ? await loadPluginModule(new URL("../../../../papercompany-plugins/packages/tool-registry/src/constants.js", import.meta.url))
+  : undefined!;
+
+describe.skipIf(!pluginRepoAvailable)("tool-registry workflow result delivery", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });

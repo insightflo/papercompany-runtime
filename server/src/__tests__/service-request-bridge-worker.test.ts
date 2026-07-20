@@ -1,13 +1,22 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { Agent, Company, Issue } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
-import manifest from "../../../../papercompany-plugins/packages/service-request-bridge/src/manifest.js";
-import worker from "../../../../papercompany-plugins/packages/service-request-bridge/src/worker.js";
-import {
-  BRIDGE_DIRECTIONS,
-  ENTITY_TYPES,
-} from "../../../../papercompany-plugins/packages/service-request-bridge/src/constants.js";
-import { upsertBridgePair } from "../../../../papercompany-plugins/packages/service-request-bridge/src/store.js";
+
+const pluginRepoAvailable = existsSync(new URL("../../../../papercompany-plugins/", import.meta.url));
+const loadPluginModule = (path: URL) => import(path.href);
+const manifest = pluginRepoAvailable
+  ? (await loadPluginModule(new URL("../../../../papercompany-plugins/packages/service-request-bridge/src/manifest.js", import.meta.url))).default
+  : undefined!;
+const worker = pluginRepoAvailable
+  ? (await loadPluginModule(new URL("../../../../papercompany-plugins/packages/service-request-bridge/src/worker.js", import.meta.url))).default
+  : undefined!;
+const { BRIDGE_DIRECTIONS, ENTITY_TYPES } = pluginRepoAvailable
+  ? await loadPluginModule(new URL("../../../../papercompany-plugins/packages/service-request-bridge/src/constants.js", import.meta.url))
+  : undefined!;
+const { upsertBridgePair } = pluginRepoAvailable
+  ? await loadPluginModule(new URL("../../../../papercompany-plugins/packages/service-request-bridge/src/store.js", import.meta.url))
+  : undefined!;
 
 function makeCompany(id: string, name: string, issuePrefix: string): Company {
   const now = new Date("2026-04-09T00:00:00.000Z");
@@ -113,7 +122,7 @@ function makeAgent(input: {
   };
 }
 
-describe("service-request-bridge worker", () => {
+describe.skipIf(!pluginRepoAvailable)("service-request-bridge worker", () => {
   it("creates the bridge pair before blocking the source issue", async () => {
     const harness = createTestHarness({
       manifest,
