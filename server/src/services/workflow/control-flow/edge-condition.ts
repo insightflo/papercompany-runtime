@@ -44,6 +44,12 @@ export interface PredFacts {
   isQaGate: boolean;
   verdict: "pass" | "request_changes" | null;
   verdictChecked?: boolean;
+  /**
+   * IF control node 의 persisted outcome. dag-engine buildPredFactsMap 이 오직 completed 된
+   * IF step 의 검증된 controlNodeResult 로부터만 채운다. condition_true/false edge 평가용.
+   * agent/tool step 에선 절대 신뢰하지 않는다(fail-closed → 양 분기 모두 비활성).
+   */
+  controlOutcome?: "condition_true" | "condition_false";
 }
 
 /**
@@ -110,6 +116,12 @@ function edgeHolds(when: ConditionalEdgeWhen | undefined, pred: PredFacts): bool
       }
       // P2(맵 미제공): verdict 를 알 수 없으므로 기존 fallback(QA gate && failed) 유지.
       return pred.isQaGate && pred.status === "failed";
+    case "condition_true":
+      // IF control node 의 true output. completed + 검증된 outcome 정확히 일치할 때만 발화.
+      // 누락/잘못된 metadata, 실패한 IF, 혹은 비-IF step 에선 controlOutcome 가 없어 false (fail-closed).
+      return pred.status === "completed" && pred.controlOutcome === "condition_true";
+    case "condition_false":
+      return pred.status === "completed" && pred.controlOutcome === "condition_false";
     default:
       return false;
   }

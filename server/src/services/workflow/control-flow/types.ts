@@ -17,9 +17,11 @@ export type ConditionalEdgeWhen =
   | "success" // 선행 completed (legacy dependencies[] 와 동일)
   | "failure" // 선행 failed|skipped (IF on failure)
   | "qa_request_changes" // 선행이 QA gate 이고 verdict=request_changes (loop 발화용)
-  | "always"; // 선행 any terminal
+  | "always" // 선행 any terminal
+  | "condition_true" // 선행이 IF control node 이고 outcome=condition_true (forward 분기)
+  | "condition_false"; // 선행이 IF control node 이고 outcome=condition_false (forward 분기)
 
-const CONDITIONAL_EDGE_WHEN_VALUES: readonly ConditionalEdgeWhen[] = ["success", "failure", "qa_request_changes", "always"];
+const CONDITIONAL_EDGE_WHEN_VALUES: readonly ConditionalEdgeWhen[] = ["success", "failure", "qa_request_changes", "always", "condition_true", "condition_false"];
 
 /**
  * [목적] 풍부한 edge: 대상 step + 발화 조건(when) + loop annotation.

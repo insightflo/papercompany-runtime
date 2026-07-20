@@ -53,6 +53,8 @@ export function GraphCanvasContextMenu({
             disabled={availableTools.length === 0}
             onClick={() => runCanvasContextAction("tool")}
           >Add Tool<span>+</span></button>
+          <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("if")}>Add IF<span>?</span></button>
+          <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("complete")}>Add Complete<span>✓</span></button>
           <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("branch")}>Add Branch<span>B</span></button>
           <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("loop")}>Add Loop<span>L</span></button>
           <button type="button" style={graphContextMenuButtonStyle} onClick={() => runCanvasContextAction("approval")}>Add Approval<span>A</span></button>

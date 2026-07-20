@@ -4,12 +4,15 @@ import type {
   WorkflowGraphRunStatus,
   WorkflowGraphWorkProduct,
 } from "./workflow-graph.js";
+import type { WorkflowConditionGroup } from "@paperclipai/shared";
 
 export type StepDraft = {
   id: string;
   title: string;
   description: string;
-  type: "agent" | "tool";
+  type: "agent" | "tool" | "if" | "complete";
+  conditionGroup: WorkflowConditionGroup;
+  completionReason: string;
   toolName: string;
   toolArgs: string;
   agentId: string;

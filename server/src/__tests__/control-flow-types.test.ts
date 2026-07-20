@@ -87,4 +87,14 @@ describe("normalizeWorkflowStepsForExecution round-trip (conditionalDependencies
     expect(steps[0]?.conditionalDependencies).toBeUndefined();
     expect(steps[0]?.dependencies).toEqual([]);
   });
+  it("condition_true / condition_false forward 분기 edge 를 보존한다", () => {
+    const out = normalizeConditionalEdges([
+      { stepId: "if-1", when: "condition_true" },
+      { stepId: "if-1", when: "condition_false" },
+    ]);
+    expect(out).toEqual([
+      { stepId: "if-1", when: "condition_true" },
+      { stepId: "if-1", when: "condition_false" },
+    ]);
+  });
 });

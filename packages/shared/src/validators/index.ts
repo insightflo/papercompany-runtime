@@ -315,6 +315,27 @@ export {
 } from "./workflow.js";
 
 export {
+  WORKFLOW_IF_MAX_CONDITIONS,
+  WORKFLOW_IF_JSON_PATH_PATTERN,
+  WORKFLOW_CONDITION_OPERATORS,
+  workflowConditionSourceSchema,
+  workflowConditionSchema,
+  workflowConditionGroupSchema,
+  workflowIfControlResultSchema,
+  workflowCompleteControlResultSchema,
+  workflowControlNodeResultSchema,
+  type WorkflowConditionDataType,
+  type WorkflowConditionCombinator,
+  type WorkflowConditionOperator,
+  type WorkflowConditionSource,
+  type WorkflowCondition,
+  type WorkflowConditionGroup,
+  type WorkflowIfControlResult,
+  type WorkflowCompleteControlResult,
+  type WorkflowControlNodeResult,
+} from "./workflow-condition.js";
+
+export {
   workflowArtifactRegisterSchema,
   workflowVerdictSubmitSchema,
   workflowNonblockingAcceptanceSchema,

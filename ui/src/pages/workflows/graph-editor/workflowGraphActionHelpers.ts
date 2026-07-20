@@ -50,6 +50,8 @@ export function getSelectedStepIdAfterDelete<TStep extends StepWithId>(previousS
 export function isGraphPaletteNodeAction(actionId: string): actionId is WorkflowGraphPaletteNodeKind {
   return actionId === "agent"
     || actionId === "tool"
+    || actionId === "if"
+    || actionId === "complete"
     || actionId === "branch"
     || actionId === "loop"
     || actionId === "approval"

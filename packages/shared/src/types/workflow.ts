@@ -1,8 +1,26 @@
+import type { WorkflowConditionGroup } from "../validators/workflow-condition.js";
+
 export type WorkflowDefinitionStatus = "active" | "paused" | "archived";
 export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
 export type WorkflowTriggerSource = "manual" | "api" | "schedule" | "label" | string;
 export type WorkflowRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | string;
 export type WorkflowStepRunStatus = "pending" | "running" | "completed" | "failed" | "skipped" | string;
+
+export type WorkflowConditionalEdgeWhen =
+  | "success"
+  | "failure"
+  | "qa_request_changes"
+  | "always"
+  | "condition_true"
+  | "condition_false";
+
+export interface WorkflowConditionalDependency {
+  stepId: string;
+  when?: WorkflowConditionalEdgeWhen;
+  isBackEdge?: boolean;
+  maxIterations?: number;
+  allowCapAcceptance?: boolean;
+}
 
 export interface WorkflowStepDefinition {
   id: string;
@@ -11,7 +29,10 @@ export interface WorkflowStepDefinition {
   description?: string;
   dependsOn?: string[];
   dependencies?: string[];
+  conditionalDependencies?: WorkflowConditionalDependency[];
   type?: string;
+  conditionGroup?: WorkflowConditionGroup;
+  completionReason?: string;
   toolName?: string;
   toolArgs?: unknown;
   tools?: string[];

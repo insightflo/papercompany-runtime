@@ -9,6 +9,7 @@ import {
   parseOptionalNonNegativeInteger,
   parseOptionalPositiveInteger,
 } from "./step-draft-parsers.js";
+import { cloneWorkflowConditionGroup } from "./workflow-control-nodes.js";
 
 export function stepsToJson(drafts: StepDraft[]): unknown[] {
   const safeText = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
@@ -22,7 +23,26 @@ export function stepsToJson(drafts: StepDraft[]): unknown[] {
       type: d.type,
       dependsOn: safeCsv(d.dependsOn),
     };
-    if (d.type === "tool") {
+    delete step.conditionGroup;
+    delete step.completionReason;
+    if (d.type === "if") {
+      delete step.agentId;
+      delete step.agentName;
+      delete step.tools;
+      delete step.toolNames;
+      delete step.toolName;
+      delete step.toolArgs;
+      step.conditionGroup = cloneWorkflowConditionGroup(d.conditionGroup);
+    } else if (d.type === "complete") {
+      delete step.agentId;
+      delete step.agentName;
+      delete step.tools;
+      delete step.toolNames;
+      delete step.toolName;
+      delete step.toolArgs;
+      step.dependsOn = [];
+      if (safeText(d.completionReason)) step.completionReason = safeText(d.completionReason);
+    } else if (d.type === "tool") {
       step.toolName = safeText(d.toolName);
       try { step.toolArgs = JSON.parse(d.toolArgs || "{}"); } catch { step.toolArgs = {}; }
     } else {
@@ -130,6 +150,8 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       "name",
       "description",
       "type",
+      "conditionGroup",
+      "completionReason",
       "toolName",
       "toolArgs",
       "agentId",
@@ -212,7 +234,9 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       id: s.id,
       title: s.title,
       description: raw.description as string || "",
-      type: (s.type as "agent" | "tool") || "agent",
+      type: s.type === "tool" || s.type === "if" || s.type === "complete" ? s.type : "agent",
+      conditionGroup: cloneWorkflowConditionGroup(raw.conditionGroup),
+      completionReason: typeof raw.completionReason === "string" ? raw.completionReason : "",
       toolName: s.toolName || "",
       toolArgs: JSON.stringify(
         rawToolArgs && typeof rawToolArgs === "object" ? rawToolArgs : {},

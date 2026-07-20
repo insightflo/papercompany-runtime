@@ -10,6 +10,7 @@
 import * as React from "react";
 import { Fragment, type JSX } from "react";
 import type { StepDraft } from "../step-draft.js";
+import type { PendingWorkflowConnection } from "../workflow-control-nodes.js";
 import {
   type WorkflowGraphContainerSummary,
   type WorkflowGraphEdge,
@@ -20,8 +21,6 @@ import { graphPolicyBadgeStyle, statusBadgeStyle } from "../workflow-page-styles
 import {
   graphCanvasStyle,
   graphEdgeRemoveButtonStyle,
-  graphNodeInputHandleStyle,
-  graphNodeOutputHandleStyle,
   graphNodeStyle,
   graphWorkbenchMainStyle,
 } from "./graphStyles.js";
@@ -36,6 +35,7 @@ import {
 import { GraphCanvasEditTools, GraphCanvasViewTools } from "./GraphCanvasControls.js";
 import { GraphCanvasContextMenu } from "./GraphCanvasContextMenu.js";
 import { GraphCanvasStatusStrip } from "./GraphCanvasStatusStrip.js";
+import { GraphNodeHandles } from "./GraphNodeHandles.js";
 
 export interface GraphCanvasProps {
   graph: WorkflowGraphModel;
@@ -46,7 +46,7 @@ export interface GraphCanvasProps {
   canvasPanY: number;
   isCanvasPanning: boolean;
   draggingStepId: string | null;
-  connectingFromStepId: string | null;
+  pendingConnection: PendingWorkflowConnection | null;
   graphCanvasRef: React.RefObject<HTMLDivElement | null>;
   selectedStep: StepDraft | null;
   selectedEdgeId: string | null;
@@ -71,9 +71,9 @@ export interface GraphCanvasProps {
   endNodeDrag: (event: React.PointerEvent<HTMLButtonElement>) => void;
   handleNodeClick: (event: React.MouseEvent<HTMLButtonElement>, stepId: string) => void;
   handleNodeContextMenu: (event: React.MouseEvent<HTMLElement>, stepId: string) => void;
-  beginEdgeConnection: (event: React.PointerEvent<HTMLElement>, sourceId: string) => void;
+  beginEdgeConnection: (event: React.PointerEvent<HTMLElement>, connection: PendingWorkflowConnection) => void;
   completeEdgeConnection: (event: React.PointerEvent<HTMLElement> | React.MouseEvent<HTMLElement>, targetId: string) => void;
-  disconnect: (sourceId: string, targetId: string) => void;
+  disconnect: (sourceId: string, targetId: string, when?: string) => void;
   setCanvasScaleFromPoint: (nextScale: number, clientX?: number, clientY?: number) => void;
   runWorkbenchAction: (actionId: string) => void;
   runNodeContextAction: (actionId: string, stepId: string) => void;
@@ -97,7 +97,7 @@ export function GraphCanvas({
   canvasPanY,
   isCanvasPanning,
   draggingStepId,
-  connectingFromStepId,
+  pendingConnection,
   graphCanvasRef,
   selectedStep,
   selectedEdgeId,
@@ -316,7 +316,7 @@ export function GraphCanvas({
                 const target = graph.nodes.find((node) => node.id === edge.target);
                 if (!source || !target) return null;
                 const startX = source.x + 172;
-                const startY = source.y + 38;
+                const startY = source.y + (edge.when === "condition_true" ? 24 : edge.when === "condition_false" ? 54 : 38);
                 const endX = target.x;
                 const endY = target.y + 38;
                 const midX = startX + Math.max(34, (endX - startX) / 2);
@@ -380,7 +380,7 @@ export function GraphCanvas({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                disconnect(selectedEdgeActionAnchor.edge.source, selectedEdgeActionAnchor.edge.target);
+                disconnect(selectedEdgeActionAnchor.edge.source, selectedEdgeActionAnchor.edge.target, selectedEdgeActionAnchor.edge.when);
               }}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -419,38 +419,11 @@ export function GraphCanvas({
                   onContextMenu={(event) => handleNodeContextMenu(event, node.step.id)}
                   onClick={(event) => handleNodeClick(event, node.step.id)}
                 >
-                  <span
-                    key="input-handle"
-                    data-graph-handle="true"
-                    data-graph-handle-kind="input"
-                    data-step-id={node.step.id}
-                    title={connectingFromStepId ? `Connect to ${node.step.id}` : `Input: ${node.step.id}`}
-                    aria-hidden="true"
-                    style={graphNodeInputHandleStyle(Boolean(connectingFromStepId && connectingFromStepId !== node.step.id))}
-                    onPointerDown={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                    }}
-                    onPointerUp={(event) => completeEdgeConnection(event, node.step.id)}
-                    onClick={(event) => completeEdgeConnection(event, node.step.id)}
-                  />
-                  <span
-                    key="output-handle"
-                    data-graph-handle="true"
-                    data-graph-handle-kind="output"
-                    data-step-id={node.step.id}
-                    title={`Start relationship from ${node.step.id}`}
-                    aria-hidden="true"
-                    style={graphNodeOutputHandleStyle(connectingFromStepId === node.step.id)}
-                    onPointerDown={(event) => beginEdgeConnection(event, node.step.id)}
-                    onPointerUp={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                    }}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                    }}
+                  <GraphNodeHandles
+                    step={node.step}
+                    pendingConnection={pendingConnection}
+                    beginEdgeConnection={beginEdgeConnection}
+                    completeEdgeConnection={completeEdgeConnection}
                   />
                   <span key="meta-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
                     <span key="kind" style={{ fontSize: "11px", color: "var(--muted-foreground, #94a3b8)", textTransform: "uppercase" }}>
@@ -466,6 +439,11 @@ export function GraphCanvas({
                   <span key="location" style={{ display: "block", marginTop: "4px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "11px", color: "var(--muted-foreground, #94a3b8)", overflowWrap: "anywhere" }}>
                     L{node.layer} · {node.id || "(no id)"}
                   </span>
+                  {node.kind === "if" && node.runStatus.controlOutcome ? (
+                    <span key="if-outcome" style={{ display: "block", marginTop: "5px", fontSize: "11px", color: node.runStatus.controlOutcome === "condition_true" ? "#22c55e" : "#fb923c", fontWeight: 800 }}>
+                      IF outcome: {node.runStatus.controlOutcome === "condition_true" ? "true" : "false"}
+                    </span>
+                  ) : null}
                   {matched ? (
                     <span key="match" style={{ display: "block", marginTop: "5px", fontSize: "11px", color: "#fbbf24", fontWeight: 700 }}>
                       Search match

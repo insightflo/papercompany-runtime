@@ -302,30 +302,40 @@ export function WorkflowRunGraphPreview({
               const sOff = getNodeOffset(source.step.id);
               const tOff = getNodeOffset(target.step.id);
               const startX = source.x + sOff.dx + 172;
-              const startY = source.y + sOff.dy + 38;
+              const startY = source.y + sOff.dy + (edge.when === "condition_true" ? 24 : edge.when === "condition_false" ? 54 : 38);
               const endX = target.x + tOff.dx;
               const endY = target.y + tOff.dy + 38;
               const midX = startX + Math.max(34, (endX - startX) / 2);
+              const isBranchEdge = edge.when === "condition_true" || edge.when === "condition_false";
+              const selectedBranch = isBranchEdge && source.runStatus.controlOutcome === edge.when;
+              const unselectedBranch = isBranchEdge && Boolean(source.runStatus.controlOutcome) && !selectedBranch;
+              const stroke = selectedBranch ? "#22c55e" : unselectedBranch ? "#64748b" : graphEdgeColor(edge.kind);
+              const displayLabel = selectedBranch
+                ? `selected: ${graphEdgeDisplayLabel(edge)}`
+                : unselectedBranch
+                  ? `not selected: ${graphEdgeDisplayLabel(edge)}`
+                  : graphEdgeDisplayLabel(edge);
               return (
                 <g key={edge.id}>
                   <path
                     d={`M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX - 8} ${endY}`}
                     fill="none"
-                    stroke={graphEdgeColor(edge.kind)}
-                    strokeWidth={edge.kind === "failure" ? "2" : "1.5"}
-                    strokeDasharray={graphEdgeDashArray(edge.kind)}
+                    stroke={stroke}
+                    strokeWidth={selectedBranch ? "3" : edge.kind === "failure" ? "2" : "1.5"}
+                    strokeDasharray={unselectedBranch ? "3 5" : graphEdgeDashArray(edge.kind)}
+                    opacity={unselectedBranch ? 0.55 : 1}
                     markerEnd="url(#workflow-run-arrow)"
                   />
-                  {graphEdgeDisplayLabel(edge) ? (
+                  {displayLabel ? (
                     <text
                       x={midX}
                       y={(startY + endY) / 2 - 6}
-                      fill={graphEdgeColor(edge.kind)}
+                      fill={stroke}
                       fontSize="11"
                       fontWeight="700"
                       textAnchor="middle"
                     >
-                      {graphEdgeDisplayLabel(edge)}
+                      {displayLabel}
                     </text>
                   ) : null}
                 </g>
@@ -360,6 +370,11 @@ export function WorkflowRunGraphPreview({
               <span style={{ display: "block", marginTop: "4px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "11px", color: "var(--muted-foreground, #94a3b8)", overflowWrap: "anywhere" }}>
                 L{node.layer} · {node.id || "(no id)"}
               </span>
+              {node.kind === "if" && node.runStatus.controlOutcome ? (
+                <span style={{ display: "block", marginTop: "5px", fontSize: "11px", color: node.runStatus.controlOutcome === "condition_true" ? "#22c55e" : "#fb923c", fontWeight: 800 }}>
+                  IF outcome: {node.runStatus.controlOutcome === "condition_true" ? "true" : "false"}
+                </span>
+              ) : null}
               {node.advanced.badges.length > 0 ? (
                 <span style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "6px" }}>
                   {node.advanced.badges.map((badge) => (

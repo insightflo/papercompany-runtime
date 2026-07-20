@@ -127,6 +127,24 @@ directly advance downstream steps after issue or agent-run events. Manual missio
 creation and plugin workflow creation are separate management surfaces that feed
 the same server-native workflow service.
 
+The native DAG engine also owns two control-node types:
+
+- `if` evaluates one bounded `all`/`any` condition group against registered JSON
+  work products produced by completed forward ancestors in the same company,
+  workflow run, and attempt. It accepts only the shared typed operator set and
+  restricted JSON paths; it does not execute arbitrary JavaScript or coerce data
+  types. Outgoing edges must be labeled `condition_true` or `condition_false`.
+- `complete` is an engine-owned successful terminal. It must have one incoming
+  forward IF edge and no outgoing edges. Reaching it completes that selected
+  branch; ordinary run and mission reconciliation remains authoritative.
+
+Both node types run without creating an issue, agent wakeup, heartbeat, or tool
+invocation. Their bounded result is stored in `workflow_step_runs.metadata` for
+idempotent resume. Missing, stale, ambiguous, malformed, foreign-run, or oversized
+condition evidence fails closed: the run fails and must never silently select the
+False branch. Topology validation rejects unlabeled IF outputs, condition sources
+that are not forward ancestors, Complete fan-out, and unsafe parallel convergence.
+
 ## 6.5 Cross-Company Mission Delegation
 
 Cross-company collaboration is mission-scoped, not issue-mirror scoped. A source

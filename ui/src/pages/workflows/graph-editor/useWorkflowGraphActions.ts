@@ -3,8 +3,6 @@ import { useEffect } from "react";
 import type { StepDraft } from "../step-draft.js";
 import {
   appendStepAfter,
-  connectSteps,
-  disconnectSteps,
   duplicateWorkflowContainer,
   duplicateWorkflowStep,
   expandWorkflowGraphSelection,
@@ -20,6 +18,13 @@ import {
   type WorkflowGraphSelectionMode,
   type WorkflowGraphSelectionSummary,
 } from "../workflow-graph.js";
+import {
+  connectWorkflowSteps,
+  disconnectWorkflowSteps,
+  removeWorkflowControlNodeReferences,
+  renameWorkflowControlNodeReferences,
+  type PendingWorkflowConnection,
+} from "../workflow-control-nodes.js";
 import type { GraphContextMenuState, GraphEdgeActionAnchor } from "./graphUiUtils.js";
 import {
   getFirstNewStepId,
@@ -48,7 +53,7 @@ export function useWorkflowGraphActions({
   selectedStepIdForKeyboard,
   selectedEdgeId,
   selectedEdgeActionAnchor,
-  connectingFromStepId,
+  pendingConnection,
   setSelectedStepId,
   setSelectedPathStepIds,
   setFailureHandlerStepId,
@@ -56,7 +61,7 @@ export function useWorkflowGraphActions({
   setGraphInspectorMode,
   setShowGraphDetails,
   setSelectedEdgeId,
-  setConnectingFromStepId,
+  setPendingConnection,
   setGraphContextMenu,
   setCanvasScaleFromPoint,
   centerCanvasOnGraphPoint,
@@ -73,7 +78,7 @@ export function useWorkflowGraphActions({
   selectedStepIdForKeyboard: string;
   selectedEdgeId: string | null;
   selectedEdgeActionAnchor: GraphEdgeActionAnchor | null;
-  connectingFromStepId: string | null;
+  pendingConnection: PendingWorkflowConnection | null;
   setSelectedStepId: SetState<string | null>;
   setSelectedPathStepIds: SetState<string[]>;
   setFailureHandlerStepId: SetState<string>;
@@ -81,7 +86,7 @@ export function useWorkflowGraphActions({
   setGraphInspectorMode: SetState<WorkflowGraphInspectorMode>;
   setShowGraphDetails: SetState<boolean>;
   setSelectedEdgeId: SetState<string | null>;
-  setConnectingFromStepId: SetState<string | null>;
+  setPendingConnection: SetState<PendingWorkflowConnection | null>;
   setGraphContextMenu: SetState<GraphContextMenuState | null>;
   setCanvasScaleFromPoint: (nextScale: number, clientX?: number, clientY?: number) => void;
   centerCanvasOnGraphPoint: (graphX: number, graphY: number) => void;
@@ -99,7 +104,8 @@ export function useWorkflowGraphActions({
     if (!selectedStep) return;
     try {
       setGraphError("");
-      const next = renameWorkflowStep(steps, selectedStep.id, nextStepId);
+      const renamed = renameWorkflowStep(steps, selectedStep.id, nextStepId);
+      const next = renameWorkflowControlNodeReferences(renamed, selectedStep.id, nextStepId);
       onChange(next);
       const trimmed = nextStepId.trim();
       if (trimmed) setSelectedStepId(trimmed);
@@ -128,20 +134,20 @@ export function useWorkflowGraphActions({
     setGraphError("");
   }
 
-  function connect(sourceId: string, targetId: string): void {
+  function connect(sourceId: string, targetId: string, when: PendingWorkflowConnection["when"] = "success"): void {
     try {
       setGraphError("");
       setSelectedEdgeId(null);
-      onChange(connectSteps(steps, sourceId, targetId));
+      onChange(connectWorkflowSteps(steps, { sourceStepId: sourceId, when }, targetId));
     } catch (error) {
       setGraphError(error instanceof Error ? error.message : String(error));
     }
   }
 
-  function disconnect(sourceId: string, targetId: string): void {
+  function disconnect(sourceId: string, targetId: string, when?: string): void {
     setGraphError("");
     setSelectedEdgeId((edgeId) => edgeId === `${sourceId}->${targetId}` ? null : edgeId);
-    onChange(disconnectSteps(steps, sourceId, targetId));
+    onChange(disconnectWorkflowSteps(steps, sourceId, targetId, when));
   }
 
   function addAfter(stepId: string | null): void {
@@ -250,7 +256,7 @@ export function useWorkflowGraphActions({
   }
 
   function deleteStep(stepId: string): void {
-    const next = removeWorkflowStep(steps, stepId);
+    const next = removeWorkflowControlNodeReferences(removeWorkflowStep(steps, stepId), stepId);
     onChange(next);
     setSelectedStepId(getSelectedStepIdAfterDelete(steps, next, stepId));
   }
@@ -263,7 +269,7 @@ export function useWorkflowGraphActions({
   function deleteSelectedEdge(): boolean {
     const edge = selectedEdgeActionAnchor?.edge ?? graph.edges.find((candidate) => candidate.id === selectedEdgeId);
     if (!edge) return false;
-    disconnect(edge.source, edge.target);
+    disconnect(edge.source, edge.target, edge.when);
     return true;
   }
 
@@ -292,7 +298,7 @@ export function useWorkflowGraphActions({
       event.stopPropagation();
       const edge = graph.edges.find((candidate) => candidate.id === selectedEdgeId);
       if (edge) {
-        disconnect(edge.source, edge.target);
+        disconnect(edge.source, edge.target, edge.when);
         return;
       }
       if (!selectedStepIdForKeyboard) return;
@@ -305,7 +311,7 @@ export function useWorkflowGraphActions({
   function handleCanvasClick(): void {
     closeGraphContextMenu();
     setSelectedEdgeId(null);
-    setConnectingFromStepId(null);
+    setPendingConnection(null);
   }
 
   function handleCanvasContextMenu(event: React.MouseEvent<HTMLDivElement>): void {
@@ -326,7 +332,7 @@ export function useWorkflowGraphActions({
     event.preventDefault();
     event.stopPropagation();
     closeGraphContextMenu();
-    setConnectingFromStepId(null);
+    setPendingConnection(null);
     setSelectedEdgeId(edge.id);
     setGraphError("");
   }
@@ -334,7 +340,7 @@ export function useWorkflowGraphActions({
   function handleEdgeContextMenu(event: React.MouseEvent<Element>, edge: WorkflowGraphEdge): void {
     event.preventDefault();
     event.stopPropagation();
-    setConnectingFromStepId(null);
+    setPendingConnection(null);
     setSelectedEdgeId(edge.id);
     setGraphContextMenu({
       kind: "edge",
@@ -347,22 +353,21 @@ export function useWorkflowGraphActions({
   }
 
   function connectPendingEdgeTo(targetId: string): void {
-    const sourceId = connectingFromStepId;
-    if (!sourceId) return;
-    setConnectingFromStepId(null);
-    if (sourceId === targetId) {
+    if (!pendingConnection) return;
+    setPendingConnection(null);
+    if (pendingConnection.sourceStepId === targetId) {
       setGraphError("Cannot connect a step to itself.");
       return;
     }
-    connect(sourceId, targetId);
+    connect(pendingConnection.sourceStepId, targetId, pendingConnection.when);
   }
 
-  function beginEdgeConnection(event: React.PointerEvent<HTMLElement>, sourceId: string): void {
+  function beginEdgeConnection(event: React.PointerEvent<HTMLElement>, connection: PendingWorkflowConnection): void {
     event.preventDefault();
     event.stopPropagation();
     closeGraphContextMenu();
     setSelectedEdgeId(null);
-    setConnectingFromStepId(sourceId);
+    setPendingConnection(connection);
     setGraphError("");
   }
 

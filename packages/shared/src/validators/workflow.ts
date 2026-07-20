@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workflowConditionGroupSchema } from "./workflow-condition.js";
 
 const nullableUuidSchema = z.string().uuid().nullable();
 const nullableDateTimeStringSchema = z.string().datetime().nullable();
@@ -22,7 +23,9 @@ export const workflowStepDefinitionSchema = z.object({
   description: z.string().optional(),
   dependsOn: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
-  type: z.string().optional(),
+  type: z.enum(["agent", "tool", "if", "complete"]).or(z.string()).optional(),
+  conditionGroup: workflowConditionGroupSchema.optional(),
+  completionReason: z.string().trim().min(1).max(500).optional(),
   qaType: z.string().trim().min(1).max(64).regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/iu).optional(),
   toolName: z.string().optional(),
   toolArgs: z.unknown().optional(),
@@ -47,7 +50,32 @@ export const workflowStepDefinitionSchema = z.object({
     graphWorkProductPattern: z.string().optional(),
     graphResourceRefs: z.array(z.string()).optional(),
     graphSecretRefs: z.array(z.string()).optional(),
-  }).passthrough();
+  })
+  .passthrough()
+  .superRefine((step, ctx) => {
+    const nodeType = typeof step.type === "string" ? step.type : undefined;
+    const hasConditionGroup = step.conditionGroup !== undefined;
+    const hasCompletionReason = step.completionReason !== undefined;
+    if (nodeType === "if") {
+      if (!hasConditionGroup) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["conditionGroup"], message: "IF step requires conditionGroup" });
+      }
+      if (hasCompletionReason) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completionReason"], message: "completionReason is only allowed on complete steps" });
+      }
+    } else if (nodeType === "complete") {
+      if (hasConditionGroup) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["conditionGroup"], message: "conditionGroup is not allowed on complete steps" });
+      }
+    } else {
+      if (hasConditionGroup) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["conditionGroup"], message: "conditionGroup is only allowed on if steps" });
+      }
+      if (hasCompletionReason) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completionReason"], message: "completionReason is only allowed on complete steps" });
+      }
+    }
+  });
 
 export const workflowDefinitionSchema = z.object({
   id: z.string().uuid(),
