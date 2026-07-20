@@ -15,10 +15,34 @@ import {
 } from "./helpers/qa-cap-oversight-fixture.js";
 import { missionService } from "../services/missions.js";
 import { isQaReworkCapOversightIssue } from "../services/missions/qa-rework-cap-oversight.js";
+import { MISSION_OWNER_DECISION_OPTIONS } from "../services/missions/mission-owner-recovery-events.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`skip qa-cap decision wake: ${support.reason ?? "unsupported"}`);
+
+const DECISION_CASES = [
+  ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => [
+    decision,
+    (sourceIssueId: string) => [
+      "### Mission owner decision",
+      `Decision: ${decision}`,
+      `Source issue: ${sourceIssueId}`,
+      "Reason: explicit owner decision recorded",
+    ].join("\n"),
+    false,
+  ] as const),
+  [
+    "legacy adjudication request_input",
+    () => "## Mission-owner adjudication recorded\nDecision: request_input\nReason: operator credentials required",
+    true,
+  ] as const,
+  [
+    "legacy sentence request_input",
+    () => "Mission-owner decision recorded: request_input",
+    true,
+  ] as const,
+];
 
 async function seedCapExhaustion(db: QaCapTestDb) {
   const base = await seedQaCapBase(db);
@@ -62,9 +86,9 @@ describeEP("QA cap owner decision wake suppression", () => {
   afterEach(async () => { await cleanQaCapFixture(db); });
   afterAll(async () => { await tempDb?.cleanup(); });
 
-  it.each(["retry_source_issue", "replan_mission"] as const)(
-    "does not re-wake an existing cap action after %s is recorded",
-    async (decision) => {
+  it.each(DECISION_CASES)(
+    "wakes a truly undecided todo action, then does not re-wake after %s",
+    async (_label, commentBody, applyOwnerDecisionActions) => {
       const { base, producerIssueId } = await seedCapExhaustion(db);
       const capWake = vi.fn(async (input: { issue: { id: string } }) => {
         await db.insert(agentWakeupRequests).values({
@@ -110,20 +134,18 @@ describeEP("QA cap owner decision wake suppression", () => {
         companyId: base.companyId,
         issueId: capIssue.id,
         authorAgentId: base.agentId,
-        body: [
-          "### Mission owner decision",
-          `Decision: ${decision}`,
-          `Source issue: ${producerIssueId}`,
-          "Reason: explicit owner decision recorded",
-        ].join("\n"),
+        body: commentBody(producerIssueId),
       });
 
-      await service.runMainExecutorSupervision({
+      const result = await service.runMainExecutorSupervision({
         missionId: base.missionId,
-        applyOwnerDecisionActions: false,
+        applyOwnerDecisionActions,
         dispatchOwnerDecisionWakeups: false,
       });
       expect(capWake).toHaveBeenCalledTimes(1);
+      expect(result.findings).not.toEqual(
+        expect.arrayContaining([expect.stringContaining("owner_action_grace_default_retry")]),
+      );
     },
   );
 });

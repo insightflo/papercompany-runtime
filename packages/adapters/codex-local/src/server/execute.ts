@@ -53,16 +53,13 @@ function firstNonEmptyLine(text: string): string {
   );
 }
 
-function resolveCodexAuthErrorCode(message: string | null | undefined): string | null {
+export function resolveCodexAuthErrorCode(message: string | null | undefined): string | null {
   const normalized = (message ?? "").trim();
-  if (!normalized) return null;
-  if (!/\b401\s+unauthorized\b|\bauth error:\s*401\b/i.test(normalized)) return null;
+  if (!normalized || !/\b401\s+unauthorized\b|\bauth error:\s*401\b/i.test(normalized)) return null;
 
   const match = normalized.match(/\bauth error code:\s*([a-z0-9_]+)/i);
-  if (match?.[1]) {
-    return `codex_auth_401_${match[1].toLowerCase()}`;
-  }
-  return "codex_auth_401";
+  if (match?.[1]) return `codex_auth_401_${match[1].toLowerCase()}`;
+  return /\bauth error:\s*401\b/i.test(normalized) ? "codex_auth_401" : null;
 }
 
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {

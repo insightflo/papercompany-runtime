@@ -46,6 +46,20 @@ describe("mission owner recovery events", () => {
       evidence: "operator comment",
     });
 
+    expect(extractMissionOwnerDecisionFromText([
+      "### Mission owner decision",
+      "Decision: retry_source_issue",
+      "## Mission-owner adjudication recorded",
+      "Decision: request_input",
+      "Reason: operator credentials are required",
+    ].join("\n"))).toEqual(expect.objectContaining({
+      decision: "request_input",
+      reason: "operator credentials are required",
+    }));
+    expect(extractMissionOwnerDecisionFromText(
+      "Earlier notes.\nMission-owner decision recorded: request_input",
+    )).toEqual({ decision: "request_input" });
+
     const applied = buildMissionOwnerDecisionAppliedMarker({
       ownerActionIssueId: "owner-1",
       sourceIssueId: "source-1",

@@ -8,6 +8,10 @@ export type DagStepLike = {
   readonly name?: string;
   readonly title?: string;
   readonly type?: string;
+  readonly description?: string;
+  readonly qaType?: string;
+  readonly toolName?: string;
+  readonly toolNames?: readonly string[];
 };
 
 export type BackEdgeCapableStep = DagStepLike & {
@@ -51,6 +55,42 @@ export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: rea
   return resolve(qaStepId, new Set())?.id ?? null;
 }
 
+function resolveManualOnboardingReplayStepIds(qaStepId: string, steps: readonly DagStepLike[]): string[] {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const isAncestorOf = (candidateId: string, stepId: string, visited = new Set<string>()): boolean => {
+    if (visited.has(stepId)) return false;
+    visited.add(stepId);
+    const dependencies = byId.get(stepId)?.dependencies ?? byId.get(stepId)?.dependsOn ?? [];
+    return dependencies.some((dependencyId) =>
+      dependencyId === candidateId || isAncestorOf(candidateId, dependencyId, new Set(visited)));
+  };
+  const toolNames = (step: DagStepLike) => [
+    ...(step.toolName ? [step.toolName] : []),
+    ...(step.toolNames ?? []),
+  ];
+  const publishers = steps.filter((step) =>
+    toolNames(step).includes("manual-onboarding-publish") && isAncestorOf(step.id, qaStepId));
+  const verifiers = steps.filter((step) =>
+    toolNames(step).includes("manual-onboarding-verify") && isAncestorOf(step.id, qaStepId));
+  const connectedPublishers = publishers.filter((publisher) =>
+    verifiers.some((verifier) => isAncestorOf(publisher.id, verifier.id)));
+  const connectedVerifiers = verifiers.filter((verifier) =>
+    connectedPublishers.some((publisher) => isAncestorOf(publisher.id, verifier.id)));
+  const replayIds = new Set<string>();
+  for (const publisher of connectedPublishers) {
+    for (const verifier of connectedVerifiers) {
+      if (!isAncestorOf(publisher.id, verifier.id)) continue;
+      for (const step of steps) {
+        if (step.id === publisher.id || step.id === verifier.id
+          || (isAncestorOf(publisher.id, step.id) && isAncestorOf(step.id, verifier.id))) {
+          replayIds.add(step.id);
+        }
+      }
+    }
+  }
+  return steps.filter((step) => replayIds.has(step.id)).map((step) => step.id);
+}
+
 export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
   steps: T[],
   qaStepId: string,
@@ -59,15 +99,11 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
 ): T[] {
   if (!qaStepId || steps.length === 0) return steps;
   const effectiveMaxIterations = maxIterations >= 1 ? Math.floor(maxIterations) : QA_REWORK_DEFAULT_MAX_ITERATIONS;
+  const deliveryReplayIds = resolveManualOnboardingReplayStepIds(qaStepId, steps);
   const producerId = resolveProducerStepIdFromDag(qaStepId, steps);
-  if (!producerId) return steps;
-  const producer = steps.find((step) => step.id === producerId);
-  if (!producer) return steps;
-  const existing = producer.conditionalDependencies ?? [];
-  const alreadyHasBackEdge = existing.some(
-    (edge) => edge.stepId === qaStepId && edge.when === "qa_request_changes" && edge.isBackEdge === true,
-  );
-  if (alreadyHasBackEdge) return steps;
+  const targetIds = deliveryReplayIds.length > 0 ? deliveryReplayIds : producerId ? [producerId] : [];
+  if (targetIds.length === 0) return steps;
+  const targetIdSet = new Set(targetIds);
   const backEdge: ConditionalEdge = {
     stepId: qaStepId,
     when: "qa_request_changes",
@@ -75,9 +111,18 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
     maxIterations: effectiveMaxIterations,
     ...(options.allowCapAcceptance === true ? { allowCapAcceptance: true } : {}),
   };
-  return steps.map((step) => step.id === producerId
-    ? { ...step, conditionalDependencies: [...existing, backEdge] }
-    : step);
+  let changed = false;
+  const next = steps.map((step) => {
+    if (!targetIdSet.has(step.id)) return step;
+    const existing = step.conditionalDependencies ?? [];
+    const alreadyHasBackEdge = existing.some(
+      (edge) => edge.stepId === qaStepId && edge.when === "qa_request_changes" && edge.isBackEdge === true,
+    );
+    if (alreadyHasBackEdge) return step;
+    changed = true;
+    return { ...step, conditionalDependencies: [...existing, backEdge] };
+  });
+  return changed ? next : steps;
 }
 
 const REWORK_TARGET_IN_NEXT_ACTION =

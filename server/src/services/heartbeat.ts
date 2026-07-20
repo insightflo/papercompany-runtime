@@ -1965,10 +1965,9 @@ export function detectCodexAuthFailureForAutoBlock(input: {
 
   const normalizedErrorCode = (input.errorCode ?? "").trim().toLowerCase();
   if (normalizedErrorCode.startsWith(CODEX_AUTH_401_ERROR_CODE_PREFIX)) {
-    const suffix = normalizedErrorCode.slice(CODEX_AUTH_401_ERROR_CODE_PREFIX.length).replace(/^_+/, "");
-    const authErrorCode = suffix.length > 0 ? suffix : null;
-    return {
-      reasonCode: authErrorCode ? `CODEX_AUTH_401_${normalizeReasonCodeSegment(authErrorCode)}` : "CODEX_AUTH_401",
+    const authErrorCode = normalizedErrorCode.slice(CODEX_AUTH_401_ERROR_CODE_PREFIX.length).replace(/^_+/, "");
+    if (authErrorCode) return {
+      reasonCode: `CODEX_AUTH_401_${normalizeReasonCodeSegment(authErrorCode)}`,
       authErrorCode,
     };
   }
@@ -1986,7 +1985,8 @@ export function detectCodexAuthFailureForAutoBlock(input: {
     explicitAuthErrorCode ??
     (haystack.match(/\b(refresh_token_reused|token_expired|invalid_grant|session_expired)\b/i)?.[1]?.toLowerCase() ?? null);
 
-  if (/\b401\s+unauthorized\b|\bauth error:\s*401\b/i.test(haystack)) {
+  const hasProviderSpecific401 = Boolean(detectedAuthErrorCode) || /\bauth error:\s*401\b/i.test(haystack);
+  if (hasProviderSpecific401 && (normalizedErrorCode === CODEX_AUTH_401_ERROR_CODE_PREFIX || /\b401\s+unauthorized\b|\bauth error:\s*401\b/i.test(haystack))) {
     return {
       reasonCode: detectedAuthErrorCode
         ? `CODEX_AUTH_401_${normalizeReasonCodeSegment(detectedAuthErrorCode)}`

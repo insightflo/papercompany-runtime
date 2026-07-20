@@ -262,14 +262,8 @@ async function reuseExistingIssue(wakeInput: WakeInput, issueId: string): Promis
   const decisionComments = await db.select({ body: issueComments.body }).from(issueComments).where(and(
     eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, issue.id),
   ));
-  const hasOwnerDecision = decisionComments.some(({ body }) => {
-    const decision = extractMissionOwnerDecisionFromText(body)?.decision;
-    return decision === "retry_source_issue"
-      || decision === "replan_mission"
-      || decision === "escalate"
-      || decision === "report_impossible"
-      || decision === "request_input";
-  });
+  const hasOwnerDecision = decisionComments.some(({ body }) =>
+    Boolean(extractMissionOwnerDecisionFromText(body)?.decision));
   if (!hasOwnerDecision) {
     await dispatchCapWake({
       db, mission, issue, oversightIssue,

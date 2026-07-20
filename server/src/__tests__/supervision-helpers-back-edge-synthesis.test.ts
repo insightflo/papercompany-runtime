@@ -63,6 +63,40 @@ describe("synthesizeQaReworkBackEdge — 기본 합성", () => {
     expect(after.find((s) => s.id === "b")!.conditionalDependencies).toBeUndefined();
   });
 
+  it("delivery final QA replays publication and registered public verification as one bounded chain", () => {
+    const steps: Step[] = [
+      action("build"),
+      { id: "publish", dependencies: ["build"], toolNames: ["manual-onboarding-publish"] },
+      { id: "verify", dependencies: ["publish"], toolNames: ["manual-onboarding-verify"] },
+      qa("qa-final", ["verify"]),
+    ];
+
+    const after = synthesizeQaReworkBackEdge(steps, "qa-final");
+    const edge = { stepId: "qa-final", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 };
+    expect(after.find((step) => step.id === "publish")?.conditionalDependencies).toEqual([edge]);
+    expect(after.find((step) => step.id === "verify")?.conditionalDependencies).toEqual([edge]);
+    expect(after.find((step) => step.id === "build")?.conditionalDependencies).toBeUndefined();
+    expect(after.find((step) => step.id === "verify")?.dependencies).toEqual(["publish"]);
+  });
+
+  it("delivery replay includes every intermediate step so verify cannot outrun republish", () => {
+    const steps: Step[] = [
+      action("build"),
+      { id: "publish", dependencies: ["build"], toolNames: ["manual-onboarding-publish"] },
+      action("record-publication", ["publish"]),
+      { id: "verify", dependencies: ["record-publication"], toolNames: ["manual-onboarding-verify"] },
+      qa("qa-final", ["verify"]),
+    ];
+
+    const after = synthesizeQaReworkBackEdge(steps, "qa-final");
+    for (const stepId of ["publish", "record-publication", "verify"]) {
+      expect(after.find((step) => step.id === stepId)?.conditionalDependencies).toEqual([
+        { stepId: "qa-final", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
+      ]);
+    }
+    expect(after.find((step) => step.id === "build")?.conditionalDependencies).toBeUndefined();
+  });
+
   it("maxIterations 기본값 = QA_REWORK_DEFAULT_MAX_ITERATIONS(2)", () => {
     expect(QA_REWORK_DEFAULT_MAX_ITERATIONS).toBe(2);
     const after = backEdge("a", "qa-1");

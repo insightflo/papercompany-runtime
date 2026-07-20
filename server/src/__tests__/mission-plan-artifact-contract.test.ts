@@ -39,7 +39,7 @@ describe("mission plan artifact workProduct contract", () => {
         unit({ id: "draft", title: "Write guide artifact", graphWorkProductRequired: true, dependsOn: ["check"], sourceRef: { type: "mission_plan_unit", id: "draft" } }),
         unit({ id: "qa", title: "[QA] Validate artifact content", graphWorkProductRequired: false, dependsOn: ["draft"], sourceRef: { type: "mission_plan_unit", id: "qa" } }),
         unit({ id: "publish", title: "Publish guide to site", graphWorkProductRequired: true, toolNames: ["manual-onboarding-publish"], dependsOn: ["qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
-        unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
+        unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, toolNames: ["manual-onboarding-verify"], toolArgs: { publishResultPath: "{$steps.publish.workProductPath}" }, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
       ],
     });
     expect(diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("invalid_artifact_workproduct_marker");
@@ -54,7 +54,7 @@ describe("mission plan artifact workProduct contract", () => {
         unit({ id: "draft", title: "Write guide artifact", graphWorkProductRequired: true, dependsOn: ["check"], sourceRef: { type: "mission_plan_unit", id: "draft" } }),
         unit({ id: "qa", title: "[QA] Validate artifact content", graphWorkProductRequired: false, dependsOn: ["draft"], sourceRef: { type: "mission_plan_unit", id: "qa" } }),
         unit({ id: "publish", title: "Publish guide to site", graphWorkProductRequired: true, toolNames: ["manual-onboarding-publish"], dependsOn: ["qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
-        unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
+        unit({ id: "readback", title: "[QA] Readback published page", graphWorkProductRequired: false, toolNames: ["manual-onboarding-verify"], toolArgs: { publishResultPath: "{$steps.publish.workProductPath}" }, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "readback" } }),
       ],
     });
     expect(diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("invalid_artifact_qa_delivery_order");
@@ -106,6 +106,8 @@ describe("mission plan artifact workProduct contract", () => {
           id: "readback",
           title: "[QA] Readback published page",
           graphWorkProductRequired: false,
+          toolNames: ["manual-onboarding-verify"],
+          toolArgs: { publishResultPath: "{$steps.publish.workProductPath}" },
           dependsOn: ["publish"],
           sourceRef: { type: "mission_plan_unit", id: "readback" },
         }),
@@ -123,7 +125,7 @@ describe("mission plan artifact workProduct contract", () => {
         unit({ id: "produce", title: "[ACTION] Produce beginner manual HTML", graphWorkProductRequired: true, sourceRef: { type: "mission_plan_unit", id: "produce" } }),
         unit({ id: "prepublish-qa", title: "[QA] Validate manual claims and evidence", graphWorkProductRequired: false, dependsOn: ["produce"], sourceRef: { type: "mission_plan_unit", id: "prepublish-qa" } }),
         unit({ id: "publish", title: "[ACTION] Publish approved manual", graphWorkProductRequired: true, toolNames: ["manual-onboarding-publish"], dependsOn: ["prepublish-qa"], sourceRef: { type: "mission_plan_unit", id: "publish" } }),
-        unit({ id: "verify", title: "[ACTION] Verify published manual destination readback", graphWorkProductRequired: true, toolNames: ["manual-onboarding-verify"], dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "verify" } }),
+        unit({ id: "verify", title: "[ACTION] Verify published manual destination readback", graphWorkProductRequired: true, toolNames: ["manual-onboarding-verify"], toolArgs: { publishResultPath: "{$steps.publish.workProductPath}" }, dependsOn: ["publish"], sourceRef: { type: "mission_plan_unit", id: "verify" } }),
         unit({ id: "final-qa", title: "[QA] Audit destination readback and final delivery evidence", graphWorkProductRequired: false, dependsOn: ["verify"], sourceRef: { type: "mission_plan_unit", id: "final-qa" } }),
       ],
     });
