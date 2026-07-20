@@ -7535,6 +7535,7 @@ export function heartbeatService(db: Db) {
           })
           .from(issueWorkProducts)
           .where(eq(issueWorkProducts.issueId, issue.id))
+          .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt))
           .limit(10);
         const hasSatisfiedExistingWorkProductRegistration = hasSatisfiedWorkProductRegistration({
           existingWorkProducts,

@@ -167,7 +167,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
       originKind: "workflow_execution",
     });
 
-    return { companyId, agentId, issueId, artifactPath };
+    return { companyId, agentId, issueId, artifactPath, missionOutputRoot };
   }
 
   it("auto-registers one explicit same-run comment artifact and completes the issue", async () => {
@@ -207,6 +207,41 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
         sourceCommentIds: [sourceCommentId],
       }),
     }));
+  });
+
+  it("honors an active primary workProduct when an issue has more than ten registrations", async () => {
+    const fixture = await seedProducerIssue();
+    await db.insert(issueWorkProducts).values([
+      ...Array.from({ length: 11 }, (_, index) => ({
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        type: "document",
+        provider: "local_file",
+        externalId: `${fixture.missionOutputRoot}/runs/old/steps/draft/receipt-${index}.json`,
+        title: `receipt-${index}.json`,
+        status: "active",
+        isPrimary: false,
+      })),
+      {
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        type: "document",
+        provider: "local_file",
+        externalId: fixture.artifactPath,
+        title: "evidence.json",
+        status: "active",
+        isPrimary: true,
+      },
+    ]);
+    executeSpy.mockImplementation(async () => successfulAdapterResult());
+
+    const heartbeat = heartbeatService(db);
+    await invokeAndWaitForRun(heartbeat, fixture.agentId, fixture.issueId);
+
+    const issue = await waitForIssueStatus(db, fixture.issueId, "done");
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, fixture.issueId));
+    expect(issue?.status).toBe("done");
+    expect(comments.map((comment) => comment.body).join("\n")).not.toContain("workProduct registration missing");
   });
 
   it("auto-registers one prior claimed comment artifact only when the local file exists", async () => {
