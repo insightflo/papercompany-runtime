@@ -282,7 +282,7 @@ export async function applyBackEdgeReworkPass(
     const attempt: StepIterationAttempt = {
       iteration: currentIteration,
       verdict: "request_changes",
-      completedAt: stepRun.completedAt?.toISOString() ?? new Date().toISOString(),
+      completedAt: new Date().toISOString(),
     };
     const dependencyArtifacts = await loadProducerDependencyArtifacts({ db, stepRunMap, producerStep: step });
 

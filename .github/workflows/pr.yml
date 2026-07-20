@@ -1,10 +1,9 @@
 name: PR
 
 on:
-  workflow_dispatch:
   pull_request:
     branches:
-      - main
+      - master
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
@@ -22,7 +21,7 @@ jobs:
           fetch-depth: 0
 
       - name: Block manual lockfile edits
-        if: github.event_name == 'pull_request' && github.head_ref != 'chore/refresh-lockfile'
+        if: github.head_ref != 'chore/refresh-lockfile'
         run: |
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
@@ -39,7 +38,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version: 24
 
       - name: Validate Dockerfile deps stage
         run: |
@@ -82,7 +81,6 @@ jobs:
           fi
 
       - name: Validate dependency resolution when manifests change
-        if: github.event_name == 'pull_request'
         run: |
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
           manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$'
@@ -107,7 +105,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -145,7 +143,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -174,7 +172,6 @@ jobs:
 
       - name: Run e2e tests
         env:
-          PAPERCLIP_E2E_PORT: "3100"
           PAPERCLIP_E2E_SKIP_LLM: "true"
         run: pnpm run test:e2e
 

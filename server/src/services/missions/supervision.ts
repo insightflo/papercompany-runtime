@@ -1447,30 +1447,17 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const allowDoneReopen = reworkAuth.reason === "explicit_rework_target" || reworkAuth.reason === "fresh_request_changes_verdict";
                   reopenStatuses = allowDoneReopen ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
                 }
-                // [integration blocker] cap-override candidate(failed run + completed producer step) 는
-                // supervision 이 여기서 issue 를 reopen 하지 않는다 — cap-override 가 자체 forward/rollback
-                // 트랜잭션에서 producer issue 를 todo 로 atomic reopen/복원한다. supervision 이 먼저 reopen 하면
-                // cap-override reject/queue-rollback 시 issue 만 todo 로 남아 run=failed/step=completed 가 된다.
-                const capOverrideCandidate = isProducerRework
-                  && await isCapOverrideRetryCandidate(db, mission.companyId, sourceCandidate.id);
-                // Reopen source to todo for a producer rework (original contract) or for a self-retry that
-                //   will actually dispatch a wakeup (validation-gate current PASS / QA-gate recovery). Apply-only
-                //   (no dispatch) and no-assignee self-retries keep their current status and resultStatus.
-                const willDispatchWakeup = input.dispatchOwnerDecisionWakeups
-                  && !!sourceCandidate.assigneeAgentId
-                  && !!deps.onOwnerDecisionRetrySourceIssueApplied;
-                // Non-producer self-retry reopens only when the source is a workflow-backed gate
-                //   (approval/QA step issue) that supervision should re-activate to todo. A workflow_execution
-                //   source with no step row is resumed by the native wake path, so supervision leaves its
-                //   status untouched (the workflow engine / native resume owns its lifecycle transition).
-                const sourceIsWorkflowBacked = (stepRowsByIssueId.get(sourceCandidate.id)?.length ?? 0) > 0;
-                const shouldReopenToTodo = !capOverrideCandidate
-                  && (isProducerRework || (willDispatchWakeup && sourceIsWorkflowBacked));
-                if (shouldReopenToTodo) {
-                  await db
-                    .update(issues)
-                    .set({ status: "todo", updatedAt: now, completedAt: null })
-                    .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
+                if (isProducerRework) {
+                  // [integration blocker] cap-override candidate(failed run + completed producer step) 는
+                  //   supervision 이 여기서 issue 를 reopen 하지 않는다 — cap-override 가 자체 forward/rollback
+                  //   트랜잭션에서 producer issue 를 todo 로 atomic reopen/복원한다. supervision 이 먼저 reopen 하면
+                  //   cap-override reject/queue-rollback 시 issue 만 todo 로 남아 run=failed/step=completed 가 된다.
+                  if (!(await isCapOverrideRetryCandidate(db, mission.companyId, sourceCandidate.id))) {
+                    await db
+                      .update(issues)
+                      .set({ status: "todo", updatedAt: now, completedAt: null })
+                      .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
+                  }
                 }
                 const retryComment = await issueService(db).addComment(
                   sourceCandidate.id,
@@ -1531,7 +1518,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   missionId: mission.id,
                   ownerActionIssueId: issue.id,
                   sourceIssueId: sourceCandidate.id,
-                  resultStatus: shouldReopenToTodo ? "todo" : sourceCandidate.status,
+                  resultStatus: isProducerRework ? "todo" : sourceCandidate.status,
                   wakeupDispatchStatus,
                   idempotencyKey,
                 });
