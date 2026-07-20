@@ -479,3 +479,23 @@ Networking behavior for this smoke script:
 - auto-detects and prints a papercompany host URL reachable from inside OpenClaw Docker
 - default container-side host alias is `host.docker.internal` (override with `PAPERCLIP_HOST_FROM_CONTAINER` / `PAPERCLIP_HOST_PORT`)
 - if papercompany rejects container hostnames in authenticated/private mode, allow `host.docker.internal` via `pnpm paperclipai allowed-hostname host.docker.internal` and restart papercompany
+
+## Research Concept Radar Native Branch Migration
+
+After deploying a runtime that supports native `if` and `complete` nodes, preview
+the Research Company `agent-team-concept-radar` definition change:
+
+```sh
+pnpm workflow:migrate:concept-radar-branch
+```
+
+The command is dry-run by default. It prints the current `updatedAt` value and
+refuses an unexpected or partially migrated definition. To apply, first confirm
+there is no active workflow run, then pass that exact timestamp:
+
+```sh
+pnpm workflow:migrate:concept-radar-branch -- --apply --expected-updated-at=<updatedAt>
+```
+
+Apply mode rechecks workflow identity, timestamp, and active-run status immediately
+before the update. It never starts a workflow run.

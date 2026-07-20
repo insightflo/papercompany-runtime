@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     projects: [
       "packages/db",
+      "packages/shared",
       "packages/adapter-utils",
       "packages/adapters/gemini-local",
       "packages/adapters/opencode-local",

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useState, type JSX } from "react";
 import type { StepDraft } from "../step-draft.js";
+import type { PendingWorkflowConnection } from "../workflow-control-nodes.js";
 import type { WorkflowGraphInspectorMode, WorkflowGraphInterfaceInput, WorkflowGraphTriggerSummary } from "../workflow-graph.js";
 import type { WorkflowToolGrant, WorkflowToolOption } from "../workflow-page-types.js";
 import type { StepWorkspaceGraphEditorProps } from "../step-workspace-editor.js";
@@ -53,7 +54,7 @@ function WorkflowGraphEditor({
   const [showGraphEvidenceDrawer, setShowGraphEvidenceDrawer] = useState<boolean>(false);
   const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [connectingFromStepId, setConnectingFromStepId] = useState<string | null>(null);
+  const [pendingConnection, setPendingConnection] = useState<PendingWorkflowConnection | null>(null);
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
   const graphNodeDragRef = React.useRef<GraphNodeDragState | null>(null);
   const suppressNodeClickRef = React.useRef<string | null>(null);
@@ -175,7 +176,7 @@ function WorkflowGraphEditor({
     selectedStepIdForKeyboard,
     selectedEdgeId,
     selectedEdgeActionAnchor,
-    connectingFromStepId,
+    pendingConnection,
     setSelectedStepId,
     setSelectedPathStepIds,
     setFailureHandlerStepId,
@@ -183,7 +184,7 @@ function WorkflowGraphEditor({
     setGraphInspectorMode,
     setShowGraphDetails,
     setSelectedEdgeId,
-    setConnectingFromStepId,
+    setPendingConnection,
     setGraphContextMenu,
     setCanvasScaleFromPoint,
     centerCanvasOnGraphPoint,
@@ -258,7 +259,7 @@ function WorkflowGraphEditor({
         canvasPanY={canvasPanY}
         isCanvasPanning={isCanvasPanning}
         draggingStepId={draggingStepId}
-        connectingFromStepId={connectingFromStepId}
+        pendingConnection={pendingConnection}
         graphCanvasRef={graphCanvasRef}
         selectedStep={selectedStep}
         selectedEdgeId={selectedEdgeId}

@@ -6,6 +6,14 @@ import type { WorkflowToolGrant, WorkflowToolOption } from "./workflow-page-type
 import { buttonStyle, dangerButtonStyle, inputStyle, mutedTextStyle, selectStyle, textareaStyle } from "./workflow-page-styles.js";
 import { FieldLabel, HelpIcon } from "./shared-controls.js";
 import { splitCommaList, WorkflowToolPicker } from "./workflow-tool-picker.js";
+import { GraphInspectorControlNode } from "./graph-editor/GraphInspectorControlNode.js";
+
+const STEP_TYPE_LABELS: Record<StepDraft["type"], string> = {
+  agent: "🤖 Agent",
+  tool: "🔧 Tool",
+  if: "⬦ IF",
+  complete: "✓ Complete",
+};
 
 const stepCardStyle: CSSProperties = {
   display: "grid",
@@ -162,7 +170,7 @@ export function StepEditor({
               onDoubleClick={() => toggleCollapse(i)}
             >
               <span style={{ fontSize: "11px", color: "var(--muted-foreground, #94a3b8)", minWidth: "18px" }}>{i + 1}</span>
-              <span style={{ fontSize: "13px" }}>{step.type === "tool" ? "\uD83D\uDD27" : "\uD83E\uDD16"}</span>
+              <span style={{ fontSize: "13px" }}>{STEP_TYPE_LABELS[step.type]}</span>
               <span style={{ fontWeight: 600, fontSize: "13px", color: "var(--foreground, #f8fafc)" }}>
                 {step.id || "(no id)"}
               </span>
@@ -198,7 +206,7 @@ export function StepEditor({
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--muted-foreground, #94a3b8)" }}>
-                Step {i + 1} — {step.type === "tool" ? "\uD83D\uDD27 Tool" : "\uD83E\uDD16 Agent"}
+                Step {i + 1} — {STEP_TYPE_LABELS[step.type]}
               </span>
               <div style={{ display: "flex", gap: "4px" }}>
                 <button type="button" style={{ ...buttonStyle, padding: "4px 8px", fontSize: "11px" }} onClick={(e) => { e.stopPropagation(); toggleCollapse(i); }}>Collapse</button>
@@ -221,9 +229,9 @@ export function StepEditor({
             </div>
             <div style={stepRowStyle} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Agent creates an issue for a worker. Tool runs an available workflow tool directly.">Type</FieldLabel>
+                <FieldLabel help="Agent and Tool perform work. IF evaluates registered JSON output. Complete ends its selected branch successfully.">Type</FieldLabel>
                 <select style={selectStyle} value={step.type} onChange={(e) => {
-                  const newType = e.target.value as "agent" | "tool";
+                  const newType = e.target.value as StepDraft["type"];
                   if (newType === "tool" && availableTools.length === 0) return;
                   if (newType === "agent" && step.agentName) {
                     const granted = new Set(availableToolGrants.filter((g) => g.agentName === step.agentName).map((g) => g.toolName));
@@ -235,6 +243,8 @@ export function StepEditor({
                 }}>
                   <option value="tool" disabled={availableTools.length === 0}>{"\uD83D\uDD27"} Tool (시스템 실행)</option>
                   <option value="agent">{"\uD83E\uDD16"} Agent (에이전트 작업)</option>
+                  <option value="if">⬦ IF (조건 분기)</option>
+                  <option value="complete">✓ Complete (성공 종료)</option>
                 </select>
                 {availableTools.length === 0 ? (
                   <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool steps are inactive until workflow tools are available.</span>
@@ -251,7 +261,7 @@ export function StepEditor({
                       onChange={(value) => update(i, { toolName: value })}
                     />
                   </>
-                ) : (
+                ) : step.type === "agent" ? (
                   <>
                     <FieldLabel help="Worker assigned to this step. Changing this also trims tool access to grants for that agent.">Agent</FieldLabel>
                     <select style={selectStyle} value={step.agentId || agents.find((a) => a.name === step.agentName)?.id || ""} onChange={(e) => {
@@ -268,9 +278,25 @@ export function StepEditor({
                       ))}
                     </select>
                   </>
+                ) : (
+                  <span style={{ ...mutedTextStyle, alignSelf: "end", fontSize: "11px" }}>
+                    엔진이 직접 실행하며 에이전트나 도구를 호출하지 않습니다.
+                  </span>
                 )}
               </div>
             </div>
+            {(step.type === "if" || step.type === "complete") ? (
+              <div onClick={(event) => event.stopPropagation()}>
+                <GraphInspectorControlNode
+                  steps={steps}
+                  selectedStep={step}
+                  updateSelected={(patch) => update(i, patch)}
+                />
+                <p style={{ ...mutedTextStyle, fontSize: "11px", margin: "6px 0 0" }}>
+                  IF의 True/False 연결과 Complete 입력 연결은 그래프 편집기에서 설정하세요.
+                </p>
+              </div>
+            ) : null}
             {step.type === "tool" && (
               <div style={{ display: "grid", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
                 <FieldLabel help="JSON arguments passed to the workflow tool. Invalid JSON blocks saving and shows a parse error.">Tool Args (JSON)</FieldLabel>

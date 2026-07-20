@@ -238,6 +238,7 @@ export function GraphInspector({
           <div key="selected-step-editor" style={{ display: "contents" }}>
             <GraphInspectorEditStep
               showEditInspector={showEditInspector}
+              steps={steps}
               selectedStep={selectedStep}
               availableTools={availableTools}
               availableToolGrants={availableToolGrants}

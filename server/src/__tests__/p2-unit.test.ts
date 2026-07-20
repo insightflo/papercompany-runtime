@@ -165,6 +165,49 @@ describe("validateDag", () => {
     expect(result.errors.some((e) => /duplicate/i.test(e))).toBe(true);
   });
 
+  it("rejects invalid native IF/Complete topology at the DAG validation boundary", () => {
+    const steps: WorkflowStep[] = [
+      { id: "producer", name: "Producer", agentId: "agent-1", dependencies: [] },
+      {
+        id: "if",
+        name: "IF",
+        type: "if",
+        agentId: "",
+        dependencies: ["producer"],
+        conditionGroup: {
+          combinator: "all",
+          conditions: [{
+            source: { kind: "work_product_json", stepId: "producer", title: "decision.json", path: "$.status" },
+            dataType: "string",
+            operator: "equals",
+            rightValue: "selected",
+          }],
+        },
+      },
+      { id: "legacy-output", name: "Legacy output", agentId: "agent-1", dependencies: ["if"] },
+      {
+        id: "true-output",
+        name: "True output",
+        agentId: "agent-1",
+        dependencies: [],
+        conditionalDependencies: [{ stepId: "if", when: "condition_true" }],
+      },
+      {
+        id: "complete",
+        name: "Complete",
+        type: "complete",
+        agentId: "",
+        dependencies: [],
+        conditionalDependencies: [{ stepId: "if", when: "condition_false" }],
+      },
+    ];
+
+    const result = validateDag(steps);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(expect.stringContaining("condition_true or condition_false"));
+  });
+
   it("returns valid with empty warnings for an empty DAG", () => {
     const result = validateDag([]);
 

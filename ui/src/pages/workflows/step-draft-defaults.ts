@@ -1,4 +1,5 @@
 import type { StepDraft } from "./step-draft-types.js";
+import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "./workflow-control-nodes.js";
 
 export function emptyStep(): StepDraft {
   return {
@@ -6,6 +7,8 @@ export function emptyStep(): StepDraft {
     title: "",
     description: "",
     type: "agent",
+    conditionGroup: cloneWorkflowConditionGroup(defaultIfConditionGroup),
+    completionReason: "",
     toolName: "",
     toolArgs: "{}",
     agentId: "",

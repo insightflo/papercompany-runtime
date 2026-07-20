@@ -33,16 +33,19 @@ export function WorkflowHelpOverlay({ onClose }: { onClose: () => void }): JSX.E
               <p style={{ ...mutedTextStyle, fontWeight: 600, marginTop: "12px" }}>기본 개념</p>
               <ul style={{ margin: "4px 0", paddingLeft: "20px" }}>
                 <li><strong>Workflow</strong>: 여러 Step으로 구성된 자동화 파이프라인</li>
-                <li><strong>Step</strong>: Tool(시스템 실행) 또는 Agent(에이전트 작업) 유형</li>
+                <li><strong>Step</strong>: Agent, Tool, IF, Complete 중 하나의 실행 단위</li>
                 <li><strong>Tool Step</strong>: Tool Registry에 등록된 도구를 시스템이 직접 실행</li>
                 <li><strong>Agent Step</strong>: 지정된 에이전트가 이슈를 받아 작업 수행</li>
+                <li><strong>IF Step</strong>: 선행 단계가 등록한 JSON 결과를 검사해 True 또는 False 경로 하나를 선택</li>
+                <li><strong>Complete Step</strong>: 선택된 경로를 성공으로 끝내며 후속 연결을 만들지 않음</li>
               </ul>
 
               <p style={{ ...mutedTextStyle, fontWeight: 600, marginTop: "12px" }}>Step 설정</p>
               <ul style={{ margin: "4px 0", paddingLeft: "20px" }}>
                 <li><strong>ID</strong>: 고유 식별자 (dependsOn에서 참조)</li>
-                <li><strong>Type</strong>: Tool(도구 실행) / Agent(에이전트 작업)</li>
+                <li><strong>Type</strong>: Agent / Tool / IF(조건 분기) / Complete(성공 종료)</li>
                 <li><strong>Depends On</strong>: 선행 step ID (쉼표 구분, 비워두면 첫 step)</li>
+                <li><strong>IF 연결</strong>: 그래프에서 True와 False 출력을 각각 연결. 조건 오류는 False가 아니라 실행 실패로 처리</li>
                 <li><strong>Tools</strong>: Agent step에서 사용할 도구 이름 (사용법이 자동 전달됨)</li>
                 <li><strong>On Failure</strong>: 실패 시 정책 (retry/skip/abort)</li>
               </ul>

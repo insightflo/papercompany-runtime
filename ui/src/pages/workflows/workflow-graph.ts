@@ -1,4 +1,5 @@
 import { parse as parseYaml } from "yaml";
+import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "./workflow-control-nodes.js";
 
 export type WorkflowGraphStep = {
   id: string;
@@ -69,8 +70,15 @@ export type WorkflowGraphStep = {
   graphRunSummary?: string;
   graphRunResultPreview?: string;
   graphRunLogPreview?: string;
+  graphRunControlOutcome?: string;
   graphNote?: string;
   graphEdgeMetadata?: WorkflowGraphEdgeMetadataRecord;
+  conditionalDependencies?: Array<{
+    stepId?: unknown;
+    when?: unknown;
+    isBackEdge?: unknown;
+    [key: string]: unknown;
+  }>;
   [key: string]: unknown;
 };
 
@@ -112,6 +120,7 @@ export type WorkflowGraphStepRunStatus = {
   concurrencyBlocked?: WorkflowGraphConcurrencyBlocked;
   retentionDeleted?: WorkflowGraphRetentionDeleted;
   runtimeBadges: string[];
+  controlOutcome: string;
 };
 
 export type WorkflowGraphWorkProduct = {
@@ -310,6 +319,7 @@ export type WorkflowGraphEdge = {
   kind: WorkflowGraphEdgeKind;
   label: string;
   condition: string;
+  when?: string;
 };
 
 export type WorkflowGraphChangedStep = {
@@ -515,6 +525,8 @@ export type WorkflowGraphTestDrawerSummary = {
 export type WorkflowGraphStructurePaletteActionId =
   | "agent"
   | "tool"
+  | "if"
+  | "complete"
   | "branch"
   | "loop"
   | "approval"
@@ -970,7 +982,7 @@ export type WorkflowGraphSearchResult = {
   matchText: string;
 };
 
-export type WorkflowGraphPaletteNodeKind = "agent" | "tool" | "branch" | "loop" | "failure-handler" | "approval";
+export type WorkflowGraphPaletteNodeKind = "agent" | "tool" | "if" | "complete" | "branch" | "loop" | "failure-handler" | "approval";
 
 export function parseDependencies(value: unknown): string[] {
   if (Array.isArray(value)) {
@@ -1022,6 +1034,7 @@ function clearGraphRunOverlay<TStep extends WorkflowGraphStep>(step: TStep): Rec
     "graphRunLastDispatchRequestId",
     "graphRunResultPreview",
     "graphRunLogPreview",
+    "graphRunControlOutcome",
     "graphRunWorkProducts",
   ]) {
     delete next[key];
@@ -1077,6 +1090,7 @@ function readStepRunStatus(step: WorkflowGraphStep): WorkflowGraphStepRunStatus 
       resultPreview: typeof step.graphRunResultPreview === "string" ? step.graphRunResultPreview.trim() : "",
       logPreview: typeof step.graphRunLogPreview === "string" ? step.graphRunLogPreview.trim() : "",
     }),
+    controlOutcome: typeof step.graphRunControlOutcome === "string" ? step.graphRunControlOutcome.trim() : "",
   };
 }
 
@@ -1188,6 +1202,24 @@ function readGraphEdgeMetadata(step: WorkflowGraphStep, sourceId: string): Workf
     label: typeof record?.label === "string" ? record.label.trim() : "",
     condition: typeof record?.condition === "string" ? record.condition.trim() : "",
   };
+}
+
+function readForwardConditionalDependencies(step: WorkflowGraphStep): Array<{ stepId: string; when: string }> {
+  if (!Array.isArray(step.conditionalDependencies)) return [];
+  return step.conditionalDependencies.flatMap((edge) => {
+    if (!edge || edge.isBackEdge === true) return [];
+    const stepId = typeof edge.stepId === "string" ? edge.stepId.trim() : "";
+    const when = typeof edge.when === "string" ? edge.when.trim() : "success";
+    return stepId ? [{ stepId, when }] : [];
+  });
+}
+
+function conditionalGraphEdgeMetadata(when: string): WorkflowGraphEdgeMetadata {
+  if (when === "condition_true") return { kind: "conditional", label: "true", condition: "IF condition matched" };
+  if (when === "condition_false") return { kind: "conditional", label: "false", condition: "IF condition did not match" };
+  if (when === "failure") return { kind: "failure", label: "failure", condition: "upstream step failed" };
+  if (when === "always") return { kind: "conditional", label: "always", condition: "upstream step reached a terminal state" };
+  return { kind: "normal", label: "", condition: "" };
 }
 
 function readGraphPositionValue(value: unknown): number | undefined {
@@ -2953,6 +2985,19 @@ export function buildWorkflowGraphStructurePaletteSummary<TStep extends Workflow
         disabled: !canInsertAfterSelection,
       },
       {
+        id: "if",
+        label: "IF",
+        description: "Route execution through typed true and false outputs.",
+        tone: "warning",
+        disabled: !canInsertAfterSelection,
+      },
+      {
+        id: "complete",
+        label: "Complete",
+        description: "Finish the workflow successfully on a selected branch.",
+        tone: "success",
+      },
+      {
         id: "branch",
         label: "Branch",
         description: "Insert a condition split for alternative paths.",
@@ -3043,6 +3088,8 @@ export function buildWorkflowGraphWorkbenchSummary<TStep extends WorkflowGraphSt
         actions: [
           { id: "agent", label: "+ Agent" },
           { id: "tool", label: "+ Tool" },
+          { id: "if", label: "IF" },
+          { id: "complete", label: "Complete" },
           { id: "branch", label: "Branch" },
           { id: "loop", label: "Loop" },
           { id: "approval", label: "Approval" },
@@ -3560,6 +3607,27 @@ export function buildWorkflowGraphModel<TStep extends WorkflowGraphStep>(
         ...readGraphEdgeMetadata(step, source),
       });
     }
+    for (const edge of readForwardConditionalDependencies(step)) {
+      if (!stepMap.has(edge.stepId)) {
+        addIssue({
+          id: `missing-conditional-dependency:${edge.stepId}->${target}:${edge.when}`,
+          severity: "error",
+          code: "missing-dependency",
+          message: `Step "${target}" has a conditional dependency on missing step "${edge.stepId}".`,
+          stepId: target,
+          sourceId: edge.stepId,
+          targetId: target,
+        });
+        continue;
+      }
+      edges.push({
+        id: `${edge.stepId}->${target}:${edge.when}`,
+        source: edge.stepId,
+        target,
+        when: edge.when,
+        ...conditionalGraphEdgeMetadata(edge.when),
+      });
+    }
   }
 
   function computeLayer(stepId: string): number {
@@ -3577,7 +3645,12 @@ export function buildWorkflowGraphModel<TStep extends WorkflowGraphStep>(
     }
     visiting.add(stepId);
     const step = stepMap.get(stepId);
-    const dependencies = step ? parseDependencies(step.dependsOn).filter((dependency) => stepMap.has(dependency)) : [];
+    const dependencies = step
+      ? Array.from(new Set([
+        ...parseDependencies(step.dependsOn),
+        ...readForwardConditionalDependencies(step).map((edge) => edge.stepId),
+      ])).filter((dependency) => stepMap.has(dependency))
+      : [];
     const layer = dependencies.length === 0
       ? 0
       : Math.max(...dependencies.map((dependency) => computeLayer(dependency))) + 1;
@@ -5102,6 +5175,7 @@ export function applyStepRunsToGraphSteps<TStep extends WorkflowGraphStep>(
       || (typeof run.agentName === "string" ? run.agentName.trim() : "")
       || "";
     const metadata = readRecord(run.metadata);
+    const controlNodeResult = readRecord(metadata?.controlNodeResult);
     const resultPreview = readString(metadata?.resultPreview);
     const logPreview = readString(metadata?.logPreview);
     return {
@@ -5121,6 +5195,7 @@ export function applyStepRunsToGraphSteps<TStep extends WorkflowGraphStep>(
       graphRunLastDispatchRequestId: run.lastDispatchRequestId?.trim() || "",
       graphRunResultPreview: resultPreview,
       graphRunLogPreview: logPreview,
+      graphRunControlOutcome: readString(controlNodeResult?.outcome),
       graphRunWorkProducts: normalizeWorkProducts(run.workProducts),
       graphRunConcurrencyBlocked: readRecord(metadata?.concurrencyBlocked) ?? undefined,
       graphRunRetentionDeleted: readRecord(metadata?.retentionDeleted) ?? undefined,
@@ -5516,6 +5591,26 @@ function workflowPaletteTemplate(
     };
   }
 
+  if (kind === "if") {
+    return {
+      ...base,
+      title: "IF",
+      type: "if",
+      conditionGroup: cloneWorkflowConditionGroup(defaultIfConditionGroup),
+      completionReason: "",
+    };
+  }
+
+  if (kind === "complete") {
+    return {
+      ...base,
+      title: "Complete",
+      type: "complete",
+      dependsOn: "",
+      completionReason: "",
+    };
+  }
+
   if (kind === "branch") {
     return {
       ...base,
@@ -5588,7 +5683,7 @@ export function insertWorkflowStepFromPalette<TStep extends WorkflowGraphStep>(
     newStep,
     ...steps.slice(insertAt),
   ];
-  if (!dependencyId) return next;
+  if (!dependencyId || kind === "if" || kind === "complete") return next;
 
   return next.map((step) => {
     if (step.id === id) return step;

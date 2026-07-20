@@ -268,7 +268,11 @@ export const graphNodeStyle = (selected: boolean, kind: string, matched = false,
         ? "2px solid #22c55e"
       : "1px solid var(--border, #334155)",
   borderRadius: "8px",
-  background: kind === "tool"
+  background: kind === "if"
+    ? "color-mix(in srgb, #a855f7 16%, var(--card, #0f172a))"
+    : kind === "complete"
+      ? "color-mix(in srgb, #22c55e 14%, var(--card, #0f172a))"
+    : kind === "tool"
     ? "color-mix(in srgb, #0891b2 18%, var(--card, #0f172a))"
     : kind === "group"
       ? "color-mix(in srgb, #0ea5e9 16%, var(--card, #0f172a))"
@@ -348,6 +352,8 @@ export const graphDiagnosticRowStyle: CSSProperties = {
 export const graphPaletteItems: Array<{ kind: WorkflowGraphPaletteNodeKind; label: string; description: string }> = [
   { kind: "agent", label: "Agent", description: "Papercompany assignee step" },
   { kind: "tool", label: "Tool", description: "System tool execution" },
+  { kind: "if", label: "IF", description: "Route by typed conditions" },
+  { kind: "complete", label: "Complete", description: "Finish the workflow successfully" },
   { kind: "branch", label: "Branch", description: "Conditional flow container" },
   { kind: "loop", label: "Loop", description: "For-each container" },
   { kind: "approval", label: "Approval", description: "Suspend until approved" },

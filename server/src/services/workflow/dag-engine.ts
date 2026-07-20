@@ -10,6 +10,7 @@ import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { workflowControlNodeResultSchema, type WorkflowConditionGroup } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
 import { heartbeatService, extractExplicitArtifactPaths } from "../heartbeat.js";
@@ -67,6 +68,11 @@ import { resolveWorkflowToolStepArgs } from "./tool-step-args.js";
 import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
+import { validateWorkflowControlNodes } from "./control-flow/control-node-validation.js";
+import {
+  executeWorkflowControlNode,
+  isWorkflowControlNode,
+} from "./control-flow/control-node-executor.js";
 import {
   captureStructuralGateProducerToken,
   evaluateSemanticStructuralReadiness,
@@ -123,6 +129,12 @@ export interface WorkflowStep {
    * step 리셋은 step-reset 이 담당 — 여기선 데이터 모델만.
    */
   conditionalDependencies?: ConditionalEdge[];
+  /**
+   * Native control nodes. type:"if" 인 step 의 typed condition group(평가는 condition-evaluator),
+   * type:"complete" 인 step 의 optional 사람-readable 완료 사유. 두 필드 모두 normalize spread 로 보존.
+   */
+  conditionGroup?: WorkflowConditionGroup;
+  completionReason?: string;
   /**
    * 이 step이 파일 산출물을 생산하는지(compile-time 계약).
    * normalizeWorkflowStepsForExecution 이 명시 true/alias true만 true로 정규화한다.
@@ -245,7 +257,7 @@ export async function assertWorkflowToolStepsReady(input: {
   }
 }
 
-type WorkflowExecutionContext = {
+export type WorkflowExecutionContext = {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   steps: WorkflowStep[];
@@ -524,6 +536,11 @@ export function validateDag(steps: WorkflowStep[]): DagValidationResult {
       }
     }
   }
+
+  // Native IF/Complete nodes have stricter semantic topology than ordinary DAG
+  // steps. Validate it at the shared create/update/launch boundary so malformed
+  // branches cannot be persisted or executed.
+  errors.push(...validateWorkflowControlNodes(steps));
 
   // Check for cycles: annotated back-edge(isBackEdge+maxIterations≥1) 로 닫히는 cycle(bounded loop)은 허용,
   // 그 외 우연한 cycle 은 거부(control-flow/cycle-validator).
@@ -2072,6 +2089,75 @@ function buildStepRunMap(
 }
 
 /**
+ * [목적] completed 된 IF step 의 persisted controlNodeResult 에서 outcome 만 안전하게 유도.
+ *   agent/tool step 이나 누락/잘못된 metadata 에선 빈 객체를 반환해 condition_true/false edge 가
+ *   양쪽 모두 비활성(fail-closed) 되게 한다. metadata 는 검증된 스키마로만 통과.
+ */
+function deriveIfControlOutcome(
+  step: WorkflowStep,
+  run: typeof workflowStepRuns.$inferSelect | undefined,
+): { controlOutcome?: "condition_true" | "condition_false" } {
+  if (!run || run.status !== "completed") return {};
+  if (typeof step.type !== "string" || step.type !== "if") return {};
+  const raw = run.metadata?.controlNodeResult;
+  if (!raw || typeof raw !== "object") return {};
+  const parsed = workflowControlNodeResultSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.nodeType !== "if") return {};
+  return { controlOutcome: parsed.data.outcome };
+}
+
+async function failMalformedCompletedControlNodes(
+  db: Db,
+  context: WorkflowExecutionContext,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  const runId = context.run.id;
+  const steps = context.steps;
+  const stepById = new Map(steps.map((step) => [step.id, step]));
+  const malformed = stepRuns.filter((stepRun) => {
+    if (stepRun.status !== "completed") return false;
+    const step = stepById.get(stepRun.stepId);
+    if (!step || !isWorkflowControlNode(step)) return false;
+    const parsed = workflowControlNodeResultSchema.safeParse(
+      normalizeRecord(stepRun.metadata).controlNodeResult,
+    );
+    return !parsed.success || parsed.data.nodeType !== step.type;
+  });
+  if (malformed.length === 0) return stepRuns;
+
+  const failedAt = new Date();
+  for (const stepRun of malformed) {
+    const metadata = normalizeRecord(stepRun.metadata);
+    delete metadata.controlNodeResult;
+    metadata.controlNodeError = {
+      message: "Workflow control node completed without a valid result",
+      failedAt: failedAt.toISOString(),
+    };
+    await db
+      .update(workflowStepRuns)
+      .set({
+        status: "failed",
+        completedAt: failedAt,
+        lastDispatchErrorAt: failedAt,
+        lastDispatchErrorSummary: "Workflow control node completed without a valid result",
+        metadata,
+      })
+      .where(and(
+        eq(workflowStepRuns.id, stepRun.id),
+        eq(workflowStepRuns.workflowRunId, runId),
+        eq(workflowStepRuns.status, "completed"),
+      ));
+  }
+  // A malformed completed IF means branch selection cannot be trusted. Stop any
+  // issue work already launched from that corrupt state, then let the normal skip
+  // pass terminalize untouched branches and the normal finalizer fail the run.
+  await cancelOutstandingWorkflowIssues(db, runId);
+  const reloaded = await db.select().from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, runId));
+  return syncStepRunsFromIssueState(db, reloaded, steps, context);
+}
+
+/**
  * [목적] edge-condition 평가용 선행(pred) facts 맵 구성 — dag-engine adapter.
  *   stepRunMap(실행 상태) + step 정의 → {status, isQaGate, verdict}. 순수 edge-condition 모듈이
  *   DB/stepRun 타입을 모르게 한다(역참조/결합 회피).
@@ -2100,6 +2186,9 @@ function buildPredFactsMap(
       // validationVerdictsByIssueId 맵이 제공됐으면(P4) verdictChecked=true. 맵에 이 이슈가 없으면
       // liveVerdict=null 이고 edge-condition 은 이를 "조사했으나 판정 없음(infra 실패)"으로 해석한다.
       verdictChecked: validationVerdictsByIssueId !== undefined,
+      // IF control node outcome: 오직 completed 된 IF step 의 검증된 controlNodeResult 에서만 유도.
+      // agent/tool/잘못된 metadata/누락 시 undefined → condition_true/false edge 양쪽 모두 비활성(fail-closed).
+      ...deriveIfControlOutcome(step, run),
     });
   }
   return facts;
@@ -3240,6 +3329,66 @@ async function commentOnMainExecutorOversightForFailures(
   }
 }
 
+async function applyConditionalSkipPropagation(input: {
+  db: Db;
+  context: WorkflowExecutionContext;
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[];
+  dynamicLaunchStepIds?: Set<string>;
+  validationVerdictsByIssueId: Map<string, ValidationVerdictObservation>;
+}): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  if (input.context.run.status === "cancelled" || !workflowHasConditionalEdges(input.context.steps)) {
+    return input.stepRuns;
+  }
+  let stepRuns = input.stepRuns;
+  for (;;) {
+    const skipRunMap = buildStepRunMap(stepRuns);
+    const skipPredsByStepId = buildPredFactsMap(
+      input.context.steps,
+      skipRunMap,
+      input.validationVerdictsByIssueId,
+    );
+    const skippableSteps = findSkippableSteps(input.context.steps, skipPredsByStepId, {
+      launchedStepIds: input.dynamicLaunchStepIds,
+      isStepEligible: (step) => {
+        const run = skipRunMap.get(step.id);
+        if (!run || run.status !== "pending" || run.issueId != null) return false;
+        if (step.dependencies.some((depId) => {
+          const depStep = input.context.steps.find((candidate) => candidate.id === depId);
+          return isStructuralGateStep(depStep);
+        })) return false;
+        return !hasRecoverableQaRequestChangesDependency(
+          step,
+          input.context.steps,
+          skipRunMap,
+          input.validationVerdictsByIssueId,
+        );
+      },
+    });
+    if (skippableSteps.length === 0) return stepRuns;
+
+    const completedAt = new Date();
+    for (const step of skippableSteps) {
+      const stepRun = skipRunMap.get(step.id);
+      if (!stepRun) continue;
+      await input.db
+        .update(workflowStepRuns)
+        .set({
+          status: "skipped",
+          completedAt,
+          metadata: {
+            ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
+            controlFlowSkipped: true,
+          },
+        })
+        .where(eq(workflowStepRuns.id, stepRun.id));
+    }
+    stepRuns = await input.db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, input.context.run.id));
+  }
+}
+
 export async function syncWorkflowRunState(
   db: Db,
   runId: string,
@@ -3251,6 +3400,9 @@ export async function syncWorkflowRunState(
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
   if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
     stepRuns = await resetUnlaunchedTerminalStepRuns(db, stepRuns);
+  }
+  if (context.run.status !== "cancelled") {
+    stepRuns = await failMalformedCompletedControlNodes(db, context, stepRuns);
   }
   // [IF/loop] skip-propagation pass — 명시적 conditional false-branch 를 skipped 로 마감.
   //   hasConditionalEdges 게이트: conditional edge 가 없는 legacy 워크플로에겐 이 pass 가 no-op 이다(회귀 없음).
@@ -3294,55 +3446,13 @@ export async function syncWorkflowRunState(
       stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     }
   }
-  if (hasConditionalEdges && context.run.status !== "cancelled") {
-    let skippedInPass = 0;
-    do {
-      const skipRunMap = buildStepRunMap(stepRuns);
-      const skipPredsByStepId = buildPredFactsMap(context.steps, skipRunMap, validationVerdictsByIssueId);
-      const skippableSteps = findSkippableSteps(context.steps, skipPredsByStepId, {
-        launchedStepIds: dynamicLaunchStepIds,
-        isStepEligible: (step) => {
-          const run = skipRunMap.get(step.id);
-          if (!run || run.status !== "pending" || run.issueId != null) return false;
-          // [Hybrid QA 132] Don't skip steps that depend on a structural gate —
-          // the structural pass may reset the gate, making this step reachable.
-          if (step.dependencies.some((depId) => {
-            const depStep = context.steps.find((s) => s.id === depId);
-            return isStructuralGateStep(depStep);
-          })) return false;
-          return !hasRecoverableQaRequestChangesDependency(
-            step,
-            context.steps,
-            skipRunMap,
-            validationVerdictsByIssueId,
-          );
-        },
-      });
-      skippedInPass = skippableSteps.length;
-      if (skippedInPass === 0) break;
-
-      const now = new Date();
-      for (const step of skippableSteps) {
-        const stepRun = skipRunMap.get(step.id);
-        if (!stepRun) continue;
-        await db
-          .update(workflowStepRuns)
-          .set({
-            status: "skipped",
-            completedAt: now,
-            metadata: {
-              ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
-              controlFlowSkipped: true,
-            },
-          })
-          .where(eq(workflowStepRuns.id, stepRun.id));
-      }
-      stepRuns = await db
-        .select()
-        .from(workflowStepRuns)
-        .where(eq(workflowStepRuns.workflowRunId, runId));
-    } while (skippedInPass > 0);
-  }
+  stepRuns = await applyConditionalSkipPropagation({
+    db,
+    context,
+    stepRuns,
+    dynamicLaunchStepIds,
+    validationVerdictsByIssueId,
+  });
 
   // [IF/loop P4] back-edge rework pass — QA request_changes 로 발화한 back-edge 의 타겟(producer) 을
   //   maxIterations cap 내에서 리셋(rework). 리셋된 producer 는 이어지는 launch while-loop 에서 재실행되고,
@@ -3393,6 +3503,7 @@ export async function syncWorkflowRunState(
   const hasStructuralGates = context.steps.some(isStructuralGateStep);
   if (!hasFailure || hasConditionalEdges || hasStructuralGates) {
     let shouldContinue = true;
+    let synchronousControlPasses = 0;
     while (shouldContinue) {
       shouldContinue = false;
       const stepRunMap = buildStepRunMap(stepRuns);
@@ -3403,9 +3514,16 @@ export async function syncWorkflowRunState(
       if (runnableSteps.length === 0) break;
 
       let failedIssueLessToolStep = false;
+      let executedControlNode = false;
       for (const step of runnableSteps) {
         const stepRun = stepRunMap.get(step.id);
         if (!stepRun) continue;
+
+        if (isWorkflowControlNode(step)) {
+          await executeWorkflowControlNode({ db, context, step, stepRun });
+          executedControlNode = true;
+          continue;
+        }
 
         if (isIssueLessToolStep(step)) {
           const started = await startIssueLessToolStepRun({
@@ -3454,7 +3572,23 @@ export async function syncWorkflowRunState(
         .from(workflowStepRuns)
         .where(eq(workflowStepRuns.workflowRunId, runId));
 
-      shouldContinue = failedIssueLessToolStep;
+      if (executedControlNode) {
+        synchronousControlPasses += 1;
+        if (synchronousControlPasses > context.steps.length + 1) {
+          throw new Error(`Workflow control-node convergence limit exceeded for run ${runId}`);
+        }
+        // Only a freshly executed IF can change condition_true/condition_false
+        // reachability inside this synchronous loop. Keep the legacy QA/back-edge
+        // launch order untouched on iterations that did not execute a control node.
+        stepRuns = await applyConditionalSkipPropagation({
+          db,
+          context,
+          stepRuns,
+          dynamicLaunchStepIds,
+          validationVerdictsByIssueId,
+        });
+      }
+      shouldContinue = failedIssueLessToolStep || executedControlNode;
     }
   }
 

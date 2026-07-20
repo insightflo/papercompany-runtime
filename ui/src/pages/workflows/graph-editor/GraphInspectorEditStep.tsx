@@ -9,6 +9,7 @@ import type { WorkflowToolGrant, WorkflowToolOption } from "../workflow-page-typ
 import { buttonStyle, dangerButtonStyle, inputStyle, mutedTextStyle, primaryButtonStyle, selectStyle, textareaStyle } from "../workflow-page-styles.js";
 import { FieldLabel, HelpIcon } from "../shared-controls.js";
 import { WorkflowToolPicker, splitCommaList } from "../workflow-tool-picker.js";
+import { GraphInspectorControlNode } from "./GraphInspectorControlNode.js";
 
 type GraphAgent = { id: string; name: string };
 
@@ -17,6 +18,7 @@ type GraphAgent = { id: string; name: string };
 // [연결] GraphInspector가 렌더.
 export function GraphInspectorEditStep({
   showEditInspector,
+  steps,
   selectedStep,
   availableTools,
   availableToolGrants,
@@ -30,6 +32,7 @@ export function GraphInspectorEditStep({
   handleDeleteGraphObjectPointerDown,
 }: {
   showEditInspector: boolean;
+  steps: StepDraft[];
   selectedStep: StepDraft;
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
@@ -61,9 +64,9 @@ export function GraphInspectorEditStep({
               <input key="input" style={inputStyle} value={selectedStep.title} onChange={(event) => updateSelected({ title: event.target.value })} />
             </div>
             <div key="step-type-field" style={{ display: "grid", gap: "4px" }}>
-              <FieldLabel help="Agent creates a worker issue for an assignee. Tool runs an authorized workflow tool directly.">Type</FieldLabel>
+              <FieldLabel help="Agent and Tool execute work. IF routes true/false. Complete finishes successfully.">Type</FieldLabel>
               <select key="select" style={selectStyle} value={selectedStep.type} onChange={(event) => {
-                const newType = event.target.value as "agent" | "tool";
+                const newType = event.target.value as StepDraft["type"];
                 if (newType === "tool" && availableTools.length === 0) return;
                 if (newType === "agent" && selectedStep.agentName) {
                   const granted = new Set(availableToolGrants.filter((g) => g.agentName === selectedStep.agentName).map((g) => g.toolName));
@@ -75,6 +78,8 @@ export function GraphInspectorEditStep({
               }}>
                 <option key="agent" value="agent">Agent</option>
                 <option key="tool" value="tool" disabled={availableTools.length === 0}>Tool</option>
+                <option key="if" value="if">IF</option>
+                <option key="complete" value="complete">Complete</option>
               </select>
               {availableTools.length === 0 ? (
                 <span style={{ ...mutedTextStyle, fontSize: "11px" }}>Tool steps are inactive until workflow tools are available.</span>
@@ -84,7 +89,9 @@ export function GraphInspectorEditStep({
               <FieldLabel help="Instruction text passed to the agent or used to describe the tool step.">Description</FieldLabel>
               <textarea key="textarea" style={{ ...textareaStyle, minHeight: "76px" }} value={selectedStep.description} onChange={(event) => updateSelected({ description: event.target.value })} />
             </div>
-            {selectedStep.type === "tool" ? (
+            {selectedStep.type === "if" || selectedStep.type === "complete" ? (
+              <GraphInspectorControlNode steps={steps} selectedStep={selectedStep} updateSelected={updateSelected} />
+            ) : selectedStep.type === "tool" ? (
               <Fragment key="tool-step-fields">
                 <div key="tool-name-field" style={{ display: "grid", gap: "4px" }}>
                   <FieldLabel help="Authorized workflow tool this selected step will run. Unavailable selections remain visible for cleanup.">Tool</FieldLabel>
@@ -133,6 +140,8 @@ export function GraphInspectorEditStep({
                 </div>
                 </Fragment>
               )}
+              {selectedStep.type === "agent" || selectedStep.type === "tool" ? (
+              <Fragment key="agent-tool-runtime-fields">
               <div key="edit-runtime-contract" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>
                   Runtime contract
@@ -203,6 +212,8 @@ export function GraphInspectorEditStep({
                 </button>
                 <HelpIcon label="Creates a new step after the selected one and connects it as a downstream dependency." />
               </div>
+              </Fragment>
+              ) : null}
             <div key="node-actions" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
               <button type="button" style={buttonStyle} onClick={duplicateSelectedStep}>
                 Duplicate selected
