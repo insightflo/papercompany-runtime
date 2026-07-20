@@ -91,7 +91,7 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
         unit({ id: "u-synth", title: "산출물 초안 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
         unit({ id: "u-artifact-qa", title: "[QA] 산출물 내용/출처/형식 검증", dependsOn: ["u-synth"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
         unit({ id: "u-publish", title: "site에 산출물 게시/배포", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-        unit({ id: "u-qa", title: "[QA] 게시물 readback 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
+        unit({ id: "u-qa", title: "[QA] 게시물 readback 검증", toolNames: ["manual-onboarding-verify"], toolArgs: { publishResultPath: "{$steps.u-publish.workProductPath}" }, dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
       ],
     });
     const blocking = diag.filter((d) => d.severity === "invalid");
@@ -111,7 +111,7 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
     expect(diag.find((d) => d.code === "missing_publish_readback_qa")?.severity).toBe("invalid");
   });
 
-  it("ACTION verify unit 을 readback QA 로 대신 사용하지 않는다", () => {
+  it("ACTION verify unit without a publish-result dependency is rejected", () => {
     const actionVerify = unit({
       id: "u-verify",
       title: "[ACTION] Verify published manual destination readback",
@@ -129,7 +129,7 @@ describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
     });
 
     expect(extractUnitRoles(actionVerify).readbackQa).toBe(false);
-    expect(diag.map((d) => d.code)).toContain("missing_publish_readback_qa");
+    expect(diag.map((d) => d.code)).toContain("missing_manual_onboarding_verify_tool");
   });
 
   it("산출물 delivery plan 에서 artifact QA 가 없으면 missing_artifact_qa_before_delivery(invalid)", () => {

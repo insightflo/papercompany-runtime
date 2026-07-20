@@ -94,7 +94,10 @@ export type ExtractedMissionOwnerDecision = {
 
 export type AppliedMissionOwnerDecisionOption = "retry_source_issue" | "reassign_source_issue";
 
-const MISSION_OWNER_DECISION_BLOCK_HEADING = "### Mission owner decision";
+const MISSION_OWNER_DECISION_BLOCK_HEADINGS = [
+  "### Mission owner decision",
+  "## Mission-owner adjudication recorded",
+] as const;
 
 function firstNonEmptyLine(value: string | undefined): string | undefined {
   const normalized = value?.trim();
@@ -109,14 +112,26 @@ function readDecisionField(block: string, field: string): string | undefined {
 }
 
 export function extractMissionOwnerDecisionFromText(text: string): ExtractedMissionOwnerDecision | null {
-  const headingIndex = text.toLowerCase().lastIndexOf(MISSION_OWNER_DECISION_BLOCK_HEADING.toLowerCase());
-  if (headingIndex < 0) return null;
+  const lowerText = text.toLowerCase();
+  let latest: { index: number; blockStart: number; rawDecision?: string } | null = null;
+  for (const heading of MISSION_OWNER_DECISION_BLOCK_HEADINGS) {
+    const index = lowerText.lastIndexOf(heading.toLowerCase());
+    if (index >= 0 && (!latest || index > latest.index)) {
+      latest = { index, blockStart: index + heading.length };
+    }
+  }
+  for (const match of text.matchAll(/Mission-owner decision recorded\s*:\s*([a-z_]+)/gi)) {
+    const index = match.index;
+    if (!latest || index > latest.index) {
+      latest = { index, blockStart: index + match[0].length, rawDecision: match[1]?.toLowerCase() };
+    }
+  }
+  if (!latest) return null;
 
-  const blockStart = headingIndex + MISSION_OWNER_DECISION_BLOCK_HEADING.length;
-  const rest = text.slice(blockStart);
-  const nextHeading = rest.search(/^###\s+/m);
+  const rest = text.slice(latest.blockStart);
+  const nextHeading = rest.search(/^#{1,6}\s+/m);
   const block = nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
-  const rawDecision = readDecisionField(block, "Decision")?.toLowerCase();
+  const rawDecision = latest.rawDecision ?? readDecisionField(block, "Decision")?.toLowerCase();
   if (!rawDecision) return null;
 
   const sourceIssueRef = readDecisionField(block, "Source issue");

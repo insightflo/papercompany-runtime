@@ -24,6 +24,7 @@ import {
   reviewArtifactWorkProductMarkers,
 } from "./mission-plan-artifact-contract.js";
 import { buildDependencyIndex, unitDependsOn } from "./mission-plan-unit-dependencies.js";
+import { reviewManualOnboardingVerificationTopology } from "./mission-plan-manual-onboarding-contract.js";
 import { extractUnitRoles, hasPostDeliveryReadbackQa, type PlanQaUnitRole } from "./mission-plan-unit-roles.js";
 
 export { extractUnitRoles } from "./mission-plan-unit-roles.js";
@@ -32,6 +33,7 @@ export type { PlanQaUnitRole } from "./mission-plan-unit-roles.js";
 export type PlanQaDiagnosticCode =
   | "missing_publish_unit"
   | "missing_publish_readback_qa"
+  | "missing_manual_onboarding_verify_tool"
   | "missing_artifact_qa_before_delivery"
   | "invalid_artifact_qa_delivery_order"
   | "invalid_artifact_workproduct_marker"
@@ -124,6 +126,7 @@ export function reviewPlanAgainstIntent(input: {
   const diagnostics: PlanQaDiagnostic[] = [
     ...reviewArtifactWorkProductMarkers(selectedExecutionUnits),
     ...reviewDeliveryToolPreflightMarkers(selectedExecutionUnits),
+    ...reviewManualOnboardingVerificationTopology(selectedExecutionUnits),
   ];
   if (!intent.publish && !intent.audienceSplit && !intent.scenario) {
     return diagnostics;
