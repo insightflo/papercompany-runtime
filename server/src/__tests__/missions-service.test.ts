@@ -4312,7 +4312,6 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       name: "Date Filter Mission Company",
       issuePrefix: `DF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
-      timezone: "Asia/Seoul",
     });
 
     await db.insert(agents).values({
@@ -4334,7 +4333,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "Before range",
         status: "active",
-        createdAt: new Date("2026-03-31T14:59:59.999Z"),
+        createdAt: new Date(2026, 2, 31, 23, 59, 59, 999),
       },
       {
         id: randomUUID(),
@@ -4342,7 +4341,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "Inside range start",
         status: "active",
-        createdAt: new Date("2026-03-31T15:00:00.000Z"),
+        createdAt: new Date(2026, 3, 1, 0, 0, 0, 0),
       },
       {
         id: randomUUID(),
@@ -4350,7 +4349,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "Inside range end",
         status: "active",
-        createdAt: new Date("2026-04-29T14:59:59.999Z"),
+        createdAt: new Date(2026, 3, 29, 23, 59, 59, 999),
       },
       {
         id: randomUUID(),
@@ -4358,7 +4357,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ownerAgentId,
         title: "After range",
         status: "active",
-        createdAt: new Date("2026-04-29T15:00:00.000Z"),
+        createdAt: new Date(2026, 3, 30, 0, 0, 0, 0),
       },
     ]);
 
@@ -4385,7 +4384,6 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       name: "Local Date Filter Mission Company",
       issuePrefix: `LD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
-      timezone: "Asia/Seoul",
     });
 
     await db.insert(agents).values({

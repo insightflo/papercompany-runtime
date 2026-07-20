@@ -20,7 +20,7 @@ import {
   renderWorkflowReworkComment,
   type QaReworkFeedback,
 } from "./rework-contract.js";
-import { isStructuralGateStep, readStructuralGateProducerToken, sameStructuralGateProducerToken, type StructuralGateStep } from "./structural-gate.js";
+import { isStructuralGateStep, sameStructuralGateProducerToken, type StructuralGateStep } from "./structural-gate.js";
 import { isQaLikeStep } from "../../workflow-step-role.js";
 import { loadStructuralGateVerdictByRequest, type StructuralGateVerdictRecord } from "./structural-gate-ledger.js";
 import { QA_REWORK_DEFAULT_MAX_ITERATIONS } from "../../missions/workflow-qa-rework.js";
@@ -125,26 +125,17 @@ export async function applyStructuralGatePass(input: {
     const pCompleted = pRun.completedAt?.getTime() ?? 0;
     if (pCompleted && vRec.observedAt.getTime() < pCompleted) continue;
 
-    // [W002] A verdict must bind to the EXACT live producer generation.
-    //   - If the verdict carries a producerToken, it must match the live producer.
-    //   - If the verdict is tokenless BUT the gate dispatched with an authoritative
-    //     structuralGateProducerToken (gate.metadata), a null event token is NOT
-    //     current → reject (W002 exact-token contract).
-    //   - If neither side carries a token (legacy exact-request gate with no
-    //     producer token), fall back to the exact-current dispatch-request +
-    //     observed-after-completion binding already proven above.
-    const gateProducerToken = readStructuralGateProducerToken(
-      (sr.metadata as Record<string, unknown> | null)?.structuralGateProducerToken,
-    );
-    if (vRec.producerToken) {
-      if (!sameStructuralGateProducerToken(vRec.producerToken, {
-        producerStepId: producer.id,
-        iterationIndex: pRun.iterationIndex ?? 0,
-        completedAt: pRun.completedAt ? pRun.completedAt.toISOString() : "",
-      })) continue;
-    } else if (gateProducerToken) {
-      continue;
-    }
+    // [W002] Request-scoped verdict must bind to the EXACT live producer
+    //   generation — not merely a matching completedAt timestamp. A verdict
+    //   with NO producerToken, or one whose producerToken differs in
+    //   stepId/iterationIndex/completedAt from the live producer, must not
+    //   rework that producer (stale verdict from a prior generation). Exact
+    //   evidence is required — a null/undefined token is NOT current.
+    if (!vRec.producerToken || !sameStructuralGateProducerToken(vRec.producerToken, {
+      producerStepId: producer.id,
+      iterationIndex: pRun.iterationIndex ?? 0,
+      completedAt: pRun.completedAt ? pRun.completedAt.toISOString() : "",
+    })) continue;
 
     const max = resolveProducerCap(producer);
     const iter = pRun.iterationIndex ?? 0;

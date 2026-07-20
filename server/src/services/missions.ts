@@ -5,7 +5,7 @@
  * OQ-4 schema: owner_agent_id is the mission main executor; mission_agents carries executor/reviewer/observer roles.
  */
 
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
@@ -19,7 +19,6 @@ import {
   missionPlanArtifacts,
   missionSessions,
   missions,
-  companies,
   pluginEntities,
   projects,
   workflowDefinitions,
@@ -38,7 +37,7 @@ import {
 import { normalizeWorkflowStepsForExecution } from "./workflow/dag-engine.js";
 import { normalizeConditionalEdges } from "./workflow/control-flow/types.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
-import { asStringArray, asTrimmedString, isMissionDateOnlyFilter, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
+import { asStringArray, asTrimmedString, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
   buildWorkflowRunProgress,
   normalizeMissionWorkflowStepStatus,
@@ -617,14 +616,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
    */
   async function list(filter: ListMissionsFilter): Promise<MissionListItem[]> {
     const conditions: ReturnType<typeof eq>[] = [eq(missions.companyId, filter.companyId)];
-    const filterTimeZone = filter.from || filter.to
-      ? await db
-        .select({ timezone: companies.timezone })
-        .from(companies)
-        .where(eq(companies.id, filter.companyId))
-        .limit(1)
-        .then(([company]) => company?.timezone?.trim() || "UTC")
-      : "UTC";
 
     if (filter.status) {
       validateStatus(filter.status);
@@ -633,11 +624,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     if (filter.ownerAgentId) conditions.push(eq(missions.ownerAgentId, filter.ownerAgentId));
     if (filter.goalId) conditions.push(eq(missions.goalId, filter.goalId));
     if (filter.projectId) conditions.push(eq(missions.projectId, filter.projectId));
-    if (filter.from) conditions.push(gte(missions.createdAt, parseMissionDateFilter(filter.from, "start", filterTimeZone)));
-    if (filter.to) {
-      const toBoundary = parseMissionDateFilter(filter.to, "end", filterTimeZone);
-      conditions.push(isMissionDateOnlyFilter(filter.to) ? lt(missions.createdAt, toBoundary) : lte(missions.createdAt, toBoundary));
-    }
+    if (filter.from) conditions.push(gte(missions.createdAt, parseMissionDateFilter(filter.from, "start")));
+    if (filter.to) conditions.push(lte(missions.createdAt, parseMissionDateFilter(filter.to, "end")));
 
     const sortColumn =
       filter.sortBy === "title"
