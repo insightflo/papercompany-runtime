@@ -6,6 +6,7 @@ export interface Approval {
   type: ApprovalType;
   requestedByAgentId: string | null;
   requestedByUserId: string | null;
+  requestedByPluginId: string | null;
   status: ApprovalStatus;
   payload: Record<string, unknown>;
   decisionNote: string | null;

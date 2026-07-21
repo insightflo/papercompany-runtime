@@ -39,6 +39,7 @@ function makeApproval(status: Approval["status"]): Approval {
     type: "hire_agent",
     requestedByAgentId: null,
     requestedByUserId: null,
+    requestedByPluginId: null,
     status,
     payload: {},
     decisionNote: null,
