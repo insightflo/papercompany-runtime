@@ -31,6 +31,7 @@ import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow
 import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
+import { autofillManualOnboardingPublishResult } from "./missions/mission-plan-publish-result-autofill.js";
 import { upsertMissionPlanDecisionSubmission } from "./missions/mission-plan-decision-ledger.js";
 import {
   RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES,
@@ -1017,6 +1018,34 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       diagnostics: executionValidationDiagnostics,
     };
   }
+  // Apply one bounded, immutable manual-onboarding publish-result autofill
+  // AFTER source-ref + execution-placement validation succeed, BEFORE PLAN-QA
+  // / intent coverage / structural validation / materialization observe the
+  // draft. Original collected.decision, decisionHash, and ledgerSubmission
+  // are preserved; only the effective draft used downstream is normalized.
+  const autofillResult = autofillManualOnboardingPublishResult(
+    draftResult.draft.refs.selectedExecutionUnits,
+  );
+  const effectiveDraft = draftWithSelectedExecutionUnits(
+    draftResult.draft,
+    autofillResult.units,
+  );
+  if (autofillResult.applied) {
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: "mission-plan-qa",
+      action: "mission.plan.autofilled",
+      entityType: "mission",
+      entityId: missionId,
+      details: {
+        planningIssueId: collected.planningIssueId,
+        publisherUnitId: autofillResult.applied.publisherUnitId,
+        verifierUnitId: autofillResult.applied.verifierUnitId,
+        field: autofillResult.applied.field,
+      },
+    });
+  }
 
   // [ownership-drift invariant] planning issue(mission_main_executor_plan) assignee 가 mission.owner 와
   //   불일치하면 materialization 이 막히는 현상을 fail-fast 진단(artifact QA 와 분리된 code).
@@ -1072,8 +1101,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const missionIntent = extractMissionIntent(ownershipRow?.title ?? "", ownershipRow?.description ?? null);
   const deterministicDiagnostics = reviewPlanAgainstIntent({
     intent: missionIntent,
-    selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
-    successCriteria: draftResult.draft.successCriteria,
+    selectedExecutionUnits: effectiveDraft.refs.selectedExecutionUnits,
+    successCriteria: effectiveDraft.successCriteria,
   });
   let critiqueDiagnostics: typeof deterministicDiagnostics = [];
   const critiqueHook = getMissionPlanQaCritiqueHook();
@@ -1081,7 +1110,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     try {
       critiqueDiagnostics = await critiqueHook({
         intent: missionIntent,
-        selectedExecutionUnits: draftResult.draft.refs.selectedExecutionUnits,
+        selectedExecutionUnits: effectiveDraft.refs.selectedExecutionUnits,
         priorDiagnostics: deterministicDiagnostics,
       });
     } catch (error) {
@@ -1157,13 +1186,13 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // can create/wake PLAN-QA or materialize a plan. Invalid topology is a plan
   // error, not something materialization is allowed to repair silently.
   const structuralPlanErrors = validateDeclaredStructuralPlan(
-    draftResult.draft.refs.selectedExecutionUnits,
-    draftResult.draft.steps as Record<string, unknown>[],
+    effectiveDraft.refs.selectedExecutionUnits,
+    effectiveDraft.steps as Record<string, unknown>[],
   );
   const structuralReadinessErrors = await validateDeclaredStructuralPlanReadiness({
     db,
     companyId,
-    units: draftResult.draft.refs.selectedExecutionUnits,
+    units: effectiveDraft.refs.selectedExecutionUnits,
   });
   const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
   if (allStructuralErrors.length > 0) {
@@ -1221,9 +1250,9 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
             planQaIssueId: activePlanQa.issueId,
           };
           await runOwnerPlanMaterializationStep("ensure_cross_company_delegations", materializationFailureContext, () =>
-            ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash }));
+            ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: effectiveDraft, missionPlanArtifactId: activePlan.id, decisionHash }));
           await runOwnerPlanMaterializationStep("ensure_paqo_workflow", materializationFailureContext, () =>
-            ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: draftResult.draft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId }));
+            ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: effectiveDraft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId }));
           await runOwnerPlanMaterializationStep("close_plan_qa_issue", materializationFailureContext, () =>
             closePlanQaIssue({ db, planQaIssueId: activePlanQa.issueId }));
           await runOwnerPlanMaterializationStep("update_plan_qa_ref_pass", materializationFailureContext, () =>
@@ -1284,7 +1313,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
       }
       // (c) 같은 hash 인데 PLAN-QA 게이트 미생성(레거시 plan 진입) → 게이트 생성 후 대기
-      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, enqueuePlanQaWakeup });
+      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: effectiveDraft.missionGoal, enqueuePlanQaWakeup });
       await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { issueId: legacyPlanQaIssue.id, status: "pending", decisionHash } });
       await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "plan_qa_pending" });
       return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: legacyPlanQaIssue.id, diagnostics: [] };
@@ -1295,12 +1324,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // ── 새 decision (decisionHash 불일치): revision 생성 + PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연 ──
   const planQaIssue = collected.decisionIssueOriginKind === "mission_plan_qa"
     ? { id: collected.decisionIssueId }
-    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: draftResult.draft.missionGoal, enqueuePlanQaWakeup });
+    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: effectiveDraft.missionGoal, enqueuePlanQaWakeup });
   const refs = mergeMissionPlanRefs(
     activePlan?.refs,
     {
-      ...draftResult.draft.refs,
-      ownerPlanDecision: { ...draftResult.draft.refs.ownerPlanDecision, decisionHash },
+      ...effectiveDraft.refs,
+      ownerPlanDecision: { ...effectiveDraft.refs.ownerPlanDecision, decisionHash },
       planQa: { issueId: planQaIssue.id, status: "pending", decisionHash },
     },
     { selectedExecutionUnits: "replace" },
@@ -1312,11 +1341,11 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
     missionId,
-    ...(draftResult.draft.missionGoal ? { missionGoal: draftResult.draft.missionGoal } : {}),
+    ...(effectiveDraft.missionGoal ? { missionGoal: effectiveDraft.missionGoal } : {}),
     refs,
-    requiredInputs: draftResult.draft.requiredInputs,
-    successCriteria: draftResult.draft.successCriteria,
-    steps: draftResult.draft.steps,
+    requiredInputs: effectiveDraft.requiredInputs,
+    successCriteria: effectiveDraft.successCriteria,
+    steps: effectiveDraft.steps,
   });
   // 주의: pending 중 ensureCrossCompanyDelegationsForMissionOwnerPlan / ensurePaqoWorkflowForMissionOwnerPlan 호출 금지 — PASS 시 idempotent branch 에서 실행.
   await logActivity(db, {
