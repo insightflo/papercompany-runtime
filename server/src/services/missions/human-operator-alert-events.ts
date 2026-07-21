@@ -123,12 +123,15 @@ function activityDetails(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export async function recordHumanOperatorRequestEvent(db: Db, input: {
+// [finding 5] tx-safe materialize primitive. dedupe(by commentId) + activity insert. db 인자로 tx 를 받으면
+//   같은 트랜잭션에서 실행된다. live-event 발행은 하지 않는다(publishHumanOperatorRequestEvent 로 commit 후 분리).
+//   recordHumanOperatorRequestEvent 와 terminal reporting 모두 이 한 구현을 사용한다(parallel channel ❌).
+export async function materializeHumanOperatorRequestEvent(db: Db, input: {
   issue: OwnerDecisionIssue;
   comment: OwnerDecisionComment;
-}): Promise<HumanOperatorRequestPayload | null> {
+}): Promise<{ payload: HumanOperatorRequestPayload | null; inserted: boolean }> {
   const payload = buildHumanOperatorRequestPayload(input);
-  if (!payload) return null;
+  if (!payload) return { payload: null, inserted: false };
 
   const existingRows = await db
     .select({ id: activityLog.id, details: activityLog.details })
@@ -140,7 +143,7 @@ export async function recordHumanOperatorRequestEvent(db: Db, input: {
       eq(activityLog.entityId, input.issue.id),
     ));
   const alreadyRecorded = existingRows.some((row) => activityDetails(row.details)?.commentId === input.comment.id);
-  if (alreadyRecorded) return payload;
+  if (alreadyRecorded) return { payload, inserted: false };
 
   await db.insert(activityLog).values({
     companyId: input.issue.companyId,
@@ -152,11 +155,23 @@ export async function recordHumanOperatorRequestEvent(db: Db, input: {
     agentId: payload.actorType === "agent" ? payload.actorId ?? null : null,
     details: payload,
   });
+  return { payload, inserted: true };
+}
 
+// [finding 5] post-commit publish step. materialize 가 실제로 insert 한 경우에만 호출한다.
+export function publishHumanOperatorRequestEvent(companyId: string, payload: HumanOperatorRequestPayload): void {
   publishLiveEvent({
-    companyId: input.issue.companyId,
+    companyId,
     type: "mission.human_input_requested",
     payload,
   });
+}
+
+export async function recordHumanOperatorRequestEvent(db: Db, input: {
+  issue: OwnerDecisionIssue;
+  comment: OwnerDecisionComment;
+}): Promise<HumanOperatorRequestPayload | null> {
+  const { payload, inserted } = await materializeHumanOperatorRequestEvent(db, input);
+  if (payload && inserted) publishHumanOperatorRequestEvent(input.issue.companyId, payload);
   return payload;
 }

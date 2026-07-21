@@ -30,6 +30,7 @@ import {
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -895,5 +896,74 @@ describe("heartbeat orphaned process recovery", () => {
     const queuedRun = await heartbeat.getRun(queuedRunId);
     expect(queuedRun?.status).toBe("queued");
     expect(queuedRun?.errorCode).toBeNull();
+  });
+
+  it("marks a failed mission_main_executor_unblock blocked without emitting a Human Operator request (boundary)", async () => {
+    // [root-cause boundary] releaseIssueExecutionAndPromote marks a terminal failed/timed_out
+    //   mission_main_executor_unblock issue blocked + generic run_failure_auto_blocked only. It must NOT
+    //   itself emit the Human Operator request — that is supervision's job, gated on truly-terminal.
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const ownerActionIssueId = randomUUID();
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issuePrefix = `B${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const now = new Date();
+
+    await db.insert(companies).values({ id: companyId, name: "Boundary Co", issuePrefix, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Boundary mission", status: "active" });
+    await db.insert(issues).values({
+      id: sourceIssueId, companyId, missionId, identifier: `${issuePrefix}-1`, title: "Blocked source",
+      status: "blocked", assigneeAgentId: workerAgentId, originKind: "workflow_execution",
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId, companyId, agentId: ownerAgentId, source: "assignment", triggerDetail: "system",
+      reason: "issue_assigned", payload: { issueId: ownerActionIssueId }, status: "claimed", runId, claimedAt: now,
+    });
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId, agentId: ownerAgentId, invocationSource: "assignment", triggerDetail: "system",
+      status: "running", wakeupRequestId, contextSnapshot: { issueId: ownerActionIssueId, missionId },
+      processPid: child.pid ?? null, processStartedAt: new Date(Date.now() - 45 * 60 * 1000),
+      processLossRetryCount: 1, startedAt: now, updatedAt: now,
+    });
+    // owner-action issue references runId (checkout/execution) — insert after the run exists.
+    await db.insert(issues).values({
+      id: ownerActionIssueId, companyId, missionId, identifier: `${issuePrefix}-2`, title: "[Unblock] source",
+      status: "in_progress", assigneeAgentId: ownerAgentId, originKind: "mission_main_executor_unblock",
+      originId: sourceIssueId, checkoutRunId: runId, executionRunId: runId,
+    });
+    child.kill("SIGKILL");
+    await waitForPidExit(child.pid ?? null);
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    const reapedRun = await heartbeat.getRun(runId);
+    expect(reapedRun?.status).toBe("failed");
+
+    const updatedOwnerAction = await db.select({ status: issues.status, checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues).where(eq(issues.id, ownerActionIssueId)).then((rows) => rows[0] ?? null);
+    expect(updatedOwnerAction?.status).toBe("blocked");
+    expect(updatedOwnerAction?.checkoutRunId).toBeNull();
+    expect(updatedOwnerAction?.executionRunId).toBeNull();
+
+    const activities = await db.select().from(activityLog).where(eq(activityLog.runId, runId));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "issue.run_failure_auto_blocked", entityId: ownerActionIssueId }),
+      ]),
+    );
+    // heartbeat failure path must NOT create the Human Operator request — supervision owns that.
+    const issueActivities = await db.select().from(activityLog).where(eq(activityLog.entityId, ownerActionIssueId));
+    expect(issueActivities.some((row) => row.action === HUMAN_OPERATOR_REQUEST_ACTION)).toBe(false);
   });
 });

@@ -40,6 +40,12 @@ import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
+import {
+  TERMINAL_FAILURE_RUN_STATUSES,
+  classifyTerminalMissionContinuation,
+  emitTerminalMissionHumanOperatorReport,
+} from "./terminal-mission-human-operator-alert.js";
+import { loadTerminalValidationVerdicts } from "./terminal-mission-workflow-continuation.js";
 
 type ToolStepFailureEvidenceRow = {
   readonly startedAt: Date | null;
@@ -1642,6 +1648,67 @@ export function createSupervision({ db, deps, ownerActions }: {
             safeToAutoApply: false,
           });
         }
+        // [terminal-mission Human Operator report — review correction] recovery issue 자체가 terminal
+        //   failed/timed_out run 으로 blocked 되었을 때, mission 전체의 권위 continuation 신호를 평가해
+        //   "정말 종단"이면 structured owner-decision comment + recordHumanOperatorRequestEvent channel 로
+        //   terminal evidence snapshot 마다 정확히 한 번 보고한다. atomic claim(workflowTransitionEvents
+        //   unique index)으로 concurrency/retry-safe. system-authored(owner 귀속 ❌). 모든 continuation guard
+        //   (heartbeat/wakeup/process-loss/fallback/tool-recovery/source-resume/runnable failure|always|IF branch)
+        //   중 하나라도 남거나 불확실하면 suppress(fail-closed).
+        const issueTerminalFailedRuns = runsForIssue
+          .filter((run) => TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        if (issueTerminalFailedRuns.length > 0) {
+          const missionTerminalFailedRuns = [...heartbeatRunsByIssueId.values()]
+            .flat()
+            .filter((run) => TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
+            .map((run) => ({ id: run.id, status: run.status, errorCode: run.errorCode ?? null }));
+          const openOwnerActionRecoveryExists = missionIssues.some((missionIssue) => (
+            missionIssue.id !== issue.id
+            && missionIssue.originKind === "mission_main_executor_unblock"
+            && (missionIssue.status === "todo" || missionIssue.status === "in_progress")
+          ));
+          const workflowRunIdForReport = stepRows[0]?.run.id ?? null;
+          const stepRunIssueIds = stepRows.map((row) => row.stepRun.issueId).filter((issueId): issueId is string => Boolean(issueId));
+          const terminalVerdicts = await loadTerminalValidationVerdicts(db, stepRunIssueIds);
+          const continuation = classifyTerminalMissionContinuation({
+            missionStatus: mission.status,
+            missionHasActiveHeartbeat,
+            missionIssueIds: missionIssues.map((missionIssue) => missionIssue.id),
+            liveWakeupIssueIds,
+            openOwnerActionRecoveryExists,
+            workflowStepRows: stepRows,
+            validationVerdictsByIssueId: terminalVerdicts,
+          });
+          if (continuation.terminal) {
+            try {
+              const emitted = await emitTerminalMissionHumanOperatorReport(db, {
+                expectedCompanyId: issue.companyId,
+                expectedMissionId: issue.missionId ?? "",
+                issue: {
+                  id: issue.id,
+                  companyId: issue.companyId,
+                  missionId: issue.missionId,
+                  originKind: issue.originKind,
+                  originId: issue.originId,
+                  title: issue.title,
+                  identifier: issue.identifier,
+                },
+                missionTitle: mission.title,
+                sourceIssueIdentifier: sourceIssue?.identifier ?? null,
+                workflowRunId: workflowRunIdForReport,
+                failedRuns: missionTerminalFailedRuns,
+              });
+              if (emitted.emitted) {
+                findings.push(`terminal_mission_human_operator_request_emitted: ${label} terminal snapshot of ${missionTerminalFailedRuns.length} failed run(s); no executable continuation remains`);
+              }
+            } catch (err) {
+              logger.warn({ err, issueId: issue.id, missionId: mission.id }, "failed to emit terminal-mission human operator request");
+            }
+          } else {
+            findings.push(`terminal_mission_human_operator_request_suppressed: ${label} terminal run=${issueTerminalFailedRuns[0]!.id}; continuation remains (${continuation.suppressReason})`);
+          }
+        }
       }
       if (
         issue.status === "blocked" &&
@@ -2414,11 +2481,37 @@ export function createSupervision({ db, deps, ownerActions }: {
           .filter((missionId): missionId is string => Boolean(missionId))
           .filter((missionId) => !activeHeartbeatMissionIds.has(missionId)),
       );
+      // [terminal-mission Human Operator report 회복 · 교정] stale owner-action 회복이 todo/backlog 만
+      //   보아 blocked 된 mission_main_executor_unblock 을 놓치는 root-cause 보정. recovery run 이
+      //   failed/timed_out 된 blocked unblock 을 가진 mission 을 supervision 후보로 올린다. issue age 가
+      //   아닌 settled run state(terminal failed/timed_out run) 가 트리거이므로 createdAt delay 를 두지
+      //   않는다(교정: 새로 만들어진 owner-action 도 final recovery run 이 이미 실패했으면 다음 sweep 에
+      //   바로 eligible). 실제 terminal 판정은 per-mission supervision 의 classifyTerminalMissionContinuation
+      //   가 담당(active heartbeat / live wakeup / open recovery / runnable step 이 남으면 suppress).
+      const blockedOwnerActionFailedRunMissionIds = new Set(
+        rowMissionIds.length > 0
+          ? (await db
+            .select({ missionId: issues.missionId })
+            .from(issues)
+            .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
+            .where(and(
+              eq(issues.companyId, companyId),
+              inArray(issues.missionId, rowMissionIds),
+              isNull(issues.hiddenAt),
+              eq(issues.status, "blocked"),
+              eq(issues.originKind, "mission_main_executor_unblock"),
+              inArray(heartbeatRuns.status, ["failed", "timed_out"]),
+            )))
+            .map((row) => row.missionId)
+            .filter((missionId): missionId is string => Boolean(missionId))
+            .filter((missionId) => !activeHeartbeatMissionIds.has(missionId))
+          : [],
+      );
 
       for (const row of rows) {
         const snapshot = snapshots[row.id];
         const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || staleInProgressMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
+        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || blockedOwnerActionFailedRunMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || staleInProgressMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
       }
 
       const planningRows = rows.filter((row) => row.id && !missionIds.includes(row.id));
