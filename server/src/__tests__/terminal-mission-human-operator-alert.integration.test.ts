@@ -230,4 +230,100 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
     expect(active.missionIds).toContain(seed.missionId);
     expect((await countReportArtifacts(db, seed.ownerActionIssueId)).events).toBe(1);
   });
+
+  it("keeps terminal evidence separated by workflow run", async () => {
+    const seed = await seedTerminalFixture(db);
+    const secondSource = await issueService(db).create(seed.companyId, {
+      assigneeAgentId: seed.workerAgentId,
+      missionId: seed.missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "Second blocked source",
+    });
+    const secondOwnerActionId = "00000000-0000-4000-8000-000000000001";
+    const secondFailedRunId = randomUUID();
+    await db.insert(issues).values({
+      id: secondOwnerActionId,
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      identifier: `${seed.issuePrefix}-SECOND`,
+      title: "[Unblock] second source",
+      status: "blocked",
+      assigneeAgentId: seed.ownerAgentId,
+      originKind: "mission_main_executor_unblock",
+      originId: secondSource.id,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: secondFailedRunId,
+      companyId: seed.companyId,
+      agentId: seed.ownerAgentId,
+      issueId: secondOwnerActionId,
+      status: "failed",
+      startedAt: new Date("2026-07-01T00:03:00.000Z"),
+      finishedAt: new Date("2026-07-01T00:04:00.000Z"),
+      errorCode: "second_failure",
+    });
+
+    const firstDefinitionId = randomUUID();
+    const secondDefinitionId = randomUUID();
+    const firstWorkflowRunId = randomUUID();
+    const secondWorkflowRunId = randomUUID();
+    await db.insert(workflowDefinitions).values([
+      { id: firstDefinitionId, companyId: seed.companyId, name: "first terminal run", stepsJson: [{ id: "first", name: "First", dependencies: [] }] },
+      { id: secondDefinitionId, companyId: seed.companyId, name: "second terminal run", stepsJson: [{ id: "second", name: "Second", dependencies: [] }] },
+    ]);
+    await db.insert(workflowRuns).values([
+      { id: firstWorkflowRunId, workflowId: firstDefinitionId, companyId: seed.companyId, missionId: seed.missionId, status: "failed", triggeredBy: "system" },
+      { id: secondWorkflowRunId, workflowId: secondDefinitionId, companyId: seed.companyId, missionId: seed.missionId, status: "failed", triggeredBy: "system" },
+    ]);
+    await db.insert(workflowStepRuns).values([
+      { id: randomUUID(), workflowRunId: firstWorkflowRunId, stepId: "first", issueId: seed.sourceIssueId, status: "failed" },
+      { id: randomUUID(), workflowRunId: secondWorkflowRunId, stepId: "second", issueId: secondSource.id, status: "failed" },
+    ]);
+
+    await missionService(db).runMainExecutorSupervision({
+      missionId: seed.missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-07-01T00:10:00.000Z"),
+    });
+
+    const reports = await db
+      .select({ workflowRunId: workflowTransitionEvents.workflowRunId, payload: workflowTransitionEvents.payload })
+      .from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.eventType, REPORT_EVENT_TYPE));
+    expect(reports).toHaveLength(2);
+    expect(new Set(reports.map((report) => report.workflowRunId))).toEqual(new Set([firstWorkflowRunId, secondWorkflowRunId]));
+    const failedRunIdsByWorkflowRun = new Map(reports.map((report) => [
+      report.workflowRunId,
+      ((report.payload as { failedRuns?: Array<{ id: string }> } | null)?.failedRuns ?? []).map((run) => run.id),
+    ]));
+    expect(failedRunIdsByWorkflowRun.get(firstWorkflowRunId)).toEqual([seed.failedRunId]);
+    expect(failedRunIdsByWorkflowRun.get(secondWorkflowRunId)).toEqual([secondFailedRunId]);
+  });
+
+  it("prefers a QA-cap owner action even when it was inserted later", async () => {
+    const seed = await seedTerminalFixture(db);
+    const qaCapIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: qaCapIssueId,
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      identifier: `${seed.issuePrefix}-QA-CAP`,
+      title: "[QA Cap] owner decision required",
+      description: `<!-- qa-cap-key:${"a".repeat(32)} -->`,
+      status: "blocked",
+      assigneeAgentId: seed.ownerAgentId,
+      originKind: "mission_main_executor_unblock",
+      originId: seed.sourceIssueId,
+    });
+
+    await missionService(db).runMainExecutorSupervision({
+      missionId: seed.missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-07-01T00:10:00.000Z"),
+    });
+
+    expect((await countReportArtifacts(db, qaCapIssueId)).events).toBe(1);
+    expect((await countReportArtifacts(db, seed.ownerActionIssueId)).events).toBe(0);
+  });
 });
