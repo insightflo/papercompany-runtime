@@ -414,25 +414,6 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
-  packages/plugins/research-workbench:
-    dependencies:
-      '@paperclipai/plugin-sdk':
-        specifier: 2026.325.0
-        version: 2026.325.0(react@19.2.4)
-      '@paperclipai/shared':
-        specifier: 2026.325.0
-        version: 2026.325.0
-    devDependencies:
-      '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.0
-      tsx:
-        specifier: ^4.21.0
-        version: 4.21.0
-      typescript:
-        specifier: ^5.7.3
-        version: 5.9.3
-
   packages/plugins/sdk:
     dependencies:
       '@paperclipai/shared':
@@ -2136,18 +2117,6 @@ packages:
 
   '@paperclipai/adapter-utils@2026.529.0':
     resolution: {integrity: sha512-Y8sbhZTHyb9nYYAURkGZ7oxFiU5ypew1fDuFB59qjRLt7FyIJXP6HbdEVRNylSV3jlXksCxokw2LqpwIID7asQ==}
-
-  '@paperclipai/plugin-sdk@2026.325.0':
-    resolution: {integrity: sha512-axAIK90QVrRihlCXcGoePDc0qaf0weqOwUagWsp88v6T2NXAWXALCzFtY4IipPnaVli6xZe5ZsuC+gTlPXhMKQ==}
-    hasBin: true
-    peerDependencies:
-      react: '>=18'
-    peerDependenciesMeta:
-      react:
-        optional: true
-
-  '@paperclipai/shared@2026.325.0':
-    resolution: {integrity: sha512-l0ZeaQhswxjAyJ6G/TdgyrfbEgFKqdkly4zn4QgOPCu+x8j8Gma51Xf45M2Br3ILJlIx93HhT3hAzWKChdxgMg==}
 
   '@paralleldrive/cuid2@2.3.1':
     resolution: {integrity: sha512-XO7cAxhnTZl0Yggq6jOgjiOHhbgcO4NqFqwSmQpjK3b6TEE6Uj/jfSk6wzYyemh3+I0sHirKSetjQwn5cZktFw==}
@@ -8101,17 +8070,6 @@ snapshots:
   '@opentelemetry/api@1.9.1': {}
 
   '@paperclipai/adapter-utils@2026.529.0': {}
-
-  '@paperclipai/plugin-sdk@2026.325.0(react@19.2.4)':
-    dependencies:
-      '@paperclipai/shared': 2026.325.0
-      zod: 3.25.76
-    optionalDependencies:
-      react: 19.2.4
-
-  '@paperclipai/shared@2026.325.0':
-    dependencies:
-      zod: 3.25.76
 
   '@paralleldrive/cuid2@2.3.1':
     dependencies:
