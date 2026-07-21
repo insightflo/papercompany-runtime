@@ -24,7 +24,7 @@ import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanati
 import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
-import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint } from "./mission-execution-candidates.js";
+import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
@@ -492,6 +492,8 @@ export function createSupervision({ db, deps, ownerActions }: {
       decisionHash: string;
       rejectionReason: string | null;
       diagnostics: unknown;
+      previousDecision: unknown;
+      candidateRoster: MissionExecutionCandidate[];
       markerText: string;
       idempotencyKey: string;
       candidateRosterLines: string[];
@@ -513,6 +515,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           decisionHash: missionPlanDecisionSubmissions.decisionHash,
           rejectionReason: missionPlanDecisionSubmissions.rejectionReason,
           diagnostics: missionPlanDecisionSubmissions.diagnostics,
+          decision: missionPlanDecisionSubmissions.decision,
         })
         .from(missionPlanDecisionSubmissions)
         .where(and(
@@ -554,6 +557,8 @@ export function createSupervision({ db, deps, ownerActions }: {
           decisionHash: existingSubmission.decisionHash,
           rejectionReason: existingSubmission.rejectionReason,
           diagnostics: existingSubmission.diagnostics,
+          previousDecision: existingSubmission.decision,
+          candidateRoster: candidates,
           markerText,
           idempotencyKey: markerText,
           candidateRosterLines,
@@ -2250,7 +2255,17 @@ export function createSupervision({ db, deps, ownerActions }: {
             missionId: mission.id,
             title: mission.title,
             description: mission.description,
+            runnableCandidates: planSubmissionMissingCandidate.candidateRoster,
             runnableRosterLines: planSubmissionMissingCandidate.candidateRosterLines,
+            revisionContext: {
+              previousDecision: planSubmissionMissingCandidate.previousDecision instanceof Object
+                && !Array.isArray(planSubmissionMissingCandidate.previousDecision)
+                ? (planSubmissionMissingCandidate.previousDecision as Record<string, unknown>)
+                : { value: planSubmissionMissingCandidate.previousDecision },
+              diagnostics: Array.isArray(planSubmissionMissingCandidate.diagnostics)
+                ? planSubmissionMissingCandidate.diagnostics
+                : [],
+            },
           })
         : undefined;
       await db

@@ -439,6 +439,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       missionId: mission.id,
       title: mission.title,
       description: mission.description,
+      runnableCandidates: candidates,
       runnableRosterLines,
     });
 
