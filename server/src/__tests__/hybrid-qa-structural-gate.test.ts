@@ -148,6 +148,7 @@ describe("hybrid QA — planning description includes structural gate guidance",
     missionId: "m1",
     title: "Test mission",
     description: "Test description",
+    runnableCandidates: [],
     runnableRosterLines: ["- agent-1: engineer (tools: validate-schema)"],
   });
 
@@ -224,10 +225,11 @@ describe("hybrid QA — decision example is consistent and gate-free", () => {
     missionId: "m1",
     title: "Test",
     description: null,
+    runnableCandidates: [],
     runnableRosterLines: [],
   });
   // Extract the JSON block from the decision example
-  const jsonMatch = desc.match(/```json\n([\s\S]*?)\n```/);
+  const jsonMatch = desc.match(/Mission owner plan decision\n```json\n([\s\S]*?)\n```/);
   const example = JSON.parse(jsonMatch![1]);
 
   it("has unique unit IDs", () => {
@@ -249,6 +251,13 @@ describe("hybrid QA — decision example is consistent and gate-free", () => {
       for (const dep of unit.dependsOn) {
         expect(ids.has(dep)).toBe(true);
       }
+    }
+  });
+
+  it("every unit carries toolArgs so the copyable canonical shape is complete", () => {
+    expect(example.selectedExecutionUnits.length).toBeGreaterThan(0);
+    for (const unit of example.selectedExecutionUnits) {
+      expect(unit.toolArgs).toEqual({});
     }
   });
 });
