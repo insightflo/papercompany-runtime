@@ -288,6 +288,62 @@ export function createSupervision({ db, deps, ownerActions }: {
     const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
     const missionHasActiveHeartbeat = [...heartbeatRunsByIssueId.values()]
       .some((runs) => runs.some((run) => run.status === "queued" || run.status === "running"));
+
+    const terminalOwnerActions = missionIssues
+      .filter((issue) => issue.status === "blocked" && issue.originKind === "mission_main_executor_unblock")
+      .map((issue) => {
+        const failedRuns = (heartbeatRunsByIssueId.get(issue.id) ?? [])
+          .filter((run) => TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
+          .map((run) => ({ id: run.id, status: run.status, errorCode: run.errorCode ?? null }));
+        const runIds = new Set(
+          issue.originId
+            ? (stepRowsByIssueId.get(issue.originId) ?? []).map((row) => row.run.id)
+            : [],
+        );
+        return {
+          issue,
+          failedRuns,
+          workflowRunId: runIds.size === 1 ? [...runIds][0]! : null,
+        };
+      })
+      .filter((entry) => entry.failedRuns.length > 0)
+      .sort((left, right) => left.issue.id.localeCompare(right.issue.id));
+
+    const canonicalTerminalOwnerAction = missionIssues
+      .filter((issue) => issue.originKind === "mission_main_executor_unblock" && !issue.hiddenAt && !isTerminalIssueStatus(issue.status))
+      .sort((left, right) => {
+        const qaPreference = Number(isQaReworkCapOversightIssue(right.description))
+          - Number(isQaReworkCapOversightIssue(left.description));
+        return qaPreference || left.id.localeCompare(right.id);
+      })[0] ?? null;
+
+    const terminalReportGroups = new Map<string, {
+      triggerIssueId: string;
+      workflowRunId: string | null;
+      failedRuns: Array<{ id: string; status: string; errorCode: string | null }>;
+      sourceIssue: MissionSupervisionIssue | null;
+      workflowStepRows: MissionSupervisionWorkflowStepRow[];
+    }>();
+    for (const entry of terminalOwnerActions) {
+      const scopeKey = entry.workflowRunId ?? "mission";
+      const existing = terminalReportGroups.get(scopeKey);
+      if (existing) {
+        existing.failedRuns.push(...entry.failedRuns);
+        continue;
+      }
+      terminalReportGroups.set(scopeKey, {
+        triggerIssueId: entry.issue.id,
+        workflowRunId: entry.workflowRunId,
+        failedRuns: [...entry.failedRuns],
+        sourceIssue: entry.issue.originId ? missionIssueById.get(entry.issue.originId) ?? null : null,
+        workflowStepRows: entry.workflowRunId
+          ? stepRows.filter((row) => row.run.id === entry.workflowRunId)
+          : stepRows,
+      });
+    }
+    const terminalReportGroupByTriggerIssueId = new Map(
+      [...terminalReportGroups.values()].map((group) => [group.triggerIssueId, group]),
+    );
     const activePlanRefs = asRecord(activePlan?.refs);
     const activeOwnerPlanDecision = asRecord(activePlanRefs.ownerPlanDecision);
     const activePaqoWorkflow = asRecord(activePlanRefs.paqoWorkflow);
@@ -1658,18 +1714,16 @@ export function createSupervision({ db, deps, ownerActions }: {
         const issueTerminalFailedRuns = runsForIssue
           .filter((run) => TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-        if (issueTerminalFailedRuns.length > 0) {
-          const missionTerminalFailedRuns = [...heartbeatRunsByIssueId.values()]
-            .flat()
-            .filter((run) => TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
-            .map((run) => ({ id: run.id, status: run.status, errorCode: run.errorCode ?? null }));
+        const reportGroup = terminalReportGroupByTriggerIssueId.get(issue.id);
+        if (issueTerminalFailedRuns.length > 0 && reportGroup && canonicalTerminalOwnerAction) {
           const openOwnerActionRecoveryExists = missionIssues.some((missionIssue) => (
-            missionIssue.id !== issue.id
+            missionIssue.id !== canonicalTerminalOwnerAction.id
             && missionIssue.originKind === "mission_main_executor_unblock"
             && (missionIssue.status === "todo" || missionIssue.status === "in_progress")
           ));
-          const workflowRunIdForReport = stepRows[0]?.run.id ?? null;
-          const stepRunIssueIds = stepRows.map((row) => row.stepRun.issueId).filter((issueId): issueId is string => Boolean(issueId));
+          const stepRunIssueIds = reportGroup.workflowStepRows
+            .map((row) => row.stepRun.issueId)
+            .filter((issueId): issueId is string => Boolean(issueId));
           const terminalVerdicts = await loadTerminalValidationVerdicts(db, stepRunIssueIds);
           const continuation = classifyTerminalMissionContinuation({
             missionStatus: mission.status,
@@ -1677,30 +1731,30 @@ export function createSupervision({ db, deps, ownerActions }: {
             missionIssueIds: missionIssues.map((missionIssue) => missionIssue.id),
             liveWakeupIssueIds,
             openOwnerActionRecoveryExists,
-            workflowStepRows: stepRows,
+            workflowStepRows: reportGroup.workflowStepRows,
             validationVerdictsByIssueId: terminalVerdicts,
           });
           if (continuation.terminal) {
             try {
               const emitted = await emitTerminalMissionHumanOperatorReport(db, {
-                expectedCompanyId: issue.companyId,
-                expectedMissionId: issue.missionId ?? "",
+                expectedCompanyId: canonicalTerminalOwnerAction.companyId,
+                expectedMissionId: canonicalTerminalOwnerAction.missionId ?? "",
                 issue: {
-                  id: issue.id,
-                  companyId: issue.companyId,
-                  missionId: issue.missionId,
-                  originKind: issue.originKind,
-                  originId: issue.originId,
-                  title: issue.title,
-                  identifier: issue.identifier,
+                  id: canonicalTerminalOwnerAction.id,
+                  companyId: canonicalTerminalOwnerAction.companyId,
+                  missionId: canonicalTerminalOwnerAction.missionId,
+                  originKind: canonicalTerminalOwnerAction.originKind,
+                  originId: canonicalTerminalOwnerAction.originId,
+                  title: canonicalTerminalOwnerAction.title,
+                  identifier: canonicalTerminalOwnerAction.identifier,
                 },
                 missionTitle: mission.title,
-                sourceIssueIdentifier: sourceIssue?.identifier ?? null,
-                workflowRunId: workflowRunIdForReport,
-                failedRuns: missionTerminalFailedRuns,
+                sourceIssueIdentifier: reportGroup.sourceIssue?.identifier ?? null,
+                workflowRunId: reportGroup.workflowRunId,
+                failedRuns: reportGroup.failedRuns,
               });
               if (emitted.emitted) {
-                findings.push(`terminal_mission_human_operator_request_emitted: ${label} terminal snapshot of ${missionTerminalFailedRuns.length} failed run(s); no executable continuation remains`);
+                findings.push(`terminal_mission_human_operator_request_emitted: ${canonicalTerminalOwnerAction.identifier ?? canonicalTerminalOwnerAction.id} terminal snapshot of ${reportGroup.failedRuns.length} failed run(s); no executable continuation remains`);
               }
             } catch (err) {
               logger.warn({ err, issueId: issue.id, missionId: mission.id }, "failed to emit terminal-mission human operator request");
