@@ -4,6 +4,7 @@ import {
   HUMAN_OPERATOR_REQUEST_ACTION,
   recordHumanOperatorRequestEvent,
 } from "../services/missions/human-operator-alert-events.js";
+import { buildTerminalMissionHumanOperatorComment } from "../services/missions/terminal-mission-human-operator-alert.js";
 
 vi.mock("../services/live-events.js", () => ({
   publishLiveEvent: vi.fn((event) => event),
@@ -137,5 +138,38 @@ describe("human operator alert events", () => {
       payload: expect.objectContaining({ issueId: "owner-issue-1" }),
     }));
     expect(liveEvents.publishLiveEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes the terminal-mission report comment through the same escalate payload path", () => {
+    const body = buildTerminalMissionHumanOperatorComment({
+      issueId: ownerIssue.id,
+      issueIdentifier: ownerIssue.identifier,
+      missionTitle: "Terminal failure mission",
+      sourceIssueIdentifier: "RES-42",
+      failedRuns: [{ id: "run-1", status: "timed_out", errorCode: "execution_stale_timeout" }],
+    });
+
+    // evidence must be bounded and must never carry raw stderr / JSON / secrets
+    expect(body).not.toContain("stderr");
+    expect(body).not.toContain("{");
+    expect(body).not.toContain("SECRET");
+    expect(body).toContain("Decision: escalate");
+
+    const payload = buildHumanOperatorRequestPayload({
+      issue: ownerIssue,
+      comment: { id: "terminal-report-comment", authorAgentId: null, authorUserId: null, body },
+    });
+
+    expect(payload).toMatchObject({
+      missionId: "mission-1",
+      issueId: "owner-issue-1",
+      sourceIssueId: "source-issue-1",
+      commentId: "terminal-report-comment",
+      decision: "escalate",
+      actorType: "system",
+    });
+    expect(payload?.reason).toContain("cannot continue automatically");
+    expect(payload?.evidence).toContain("continuation=none");
+    expect(payload?.evidence).toContain("timed_out");
   });
 });
