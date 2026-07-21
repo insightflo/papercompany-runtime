@@ -533,7 +533,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   async function ensureMainExecutorUnblockIssue(
     mission: MissionRow,
     blockedIssue: typeof issues.$inferSelect,
-    options: { renewAfterNoActionWaiting?: boolean; governanceEvidence?: string[] } = {},
+    options: { renewAfterNoActionWaiting?: boolean; governanceEvidence?: string[]; notifyOwner?: boolean } = {},
   ): Promise<typeof issues.$inferSelect> {
     const existingRows = await db
       .select()
@@ -583,7 +583,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       title: `[Unblock] ${blockedLabel}: ${blockedIssue.title}`,
     });
 
-    if (deps.onOwnerActionCreated) {
+    if (options.notifyOwner !== false && deps.onOwnerActionCreated) {
       void Promise.resolve(deps.onOwnerActionCreated({
         mission,
         issue: unblockIssue,
