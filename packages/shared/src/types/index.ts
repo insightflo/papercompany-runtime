@@ -50,6 +50,14 @@ export type {
   CompanyInstructionFileUpdateRequest,
 } from "./company-instructions.js";
 export type {
+  MissionPlanTemplateOrigin,
+  MissionPlanTemplate,
+  MissionPlanTemplateList,
+  CreateMissionPlanTemplateRequest,
+  UpdateMissionPlanTemplateRequest,
+  DuplicateMissionPlanTemplateRequest,
+} from "./mission-plan-template.js";
+export type {
   AgentSkillSyncMode,
   AgentSkillState,
   AgentSkillOrigin,

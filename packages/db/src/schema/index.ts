@@ -68,6 +68,7 @@ export { pluginLogs } from "./plugin_logs.js";
 export { missions } from "./missions.js";
 export { missionDelegations, type MissionDelegationMetadata } from "./mission_delegations.js";
 export { missionPlanArtifacts } from "./mission_plan_artifacts.js";
+export { missionPlanTemplates } from "./mission_plan_templates.js";
 export { missionAgents } from "./mission_agents.js";
 export { missionSessions } from "./mission_sessions.js";
 export {

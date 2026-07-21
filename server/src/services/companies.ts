@@ -27,9 +27,11 @@ import {
   companyMemberships,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
+import { missionPlanTemplateService } from "./missions/mission-plan-templates.js";
 
 export function companyService(db: Db) {
   const ISSUE_PREFIX_FALLBACK = "CMP";
+  const planTemplates = missionPlanTemplateService(db);
 
   const companySelection = {
     id: companies.id,
@@ -137,11 +139,15 @@ export function companyService(db: Db) {
     while (suffix < 10000) {
       const candidate = `${base}${suffixForAttempt(suffix)}`;
       try {
-        const rows = await db
-          .insert(companies)
-          .values({ ...data, issuePrefix: candidate })
-          .returning();
-        return rows[0];
+        return await db.transaction(async (tx) => {
+          const created = await tx
+            .insert(companies)
+            .values({ ...data, issuePrefix: candidate })
+            .returning()
+            .then((rows) => rows[0]!);
+          await planTemplates.ensureDefaults(created.id, tx);
+          return created;
+        });
       } catch (error) {
         if (!isIssuePrefixConflict(error)) throw error;
       }
