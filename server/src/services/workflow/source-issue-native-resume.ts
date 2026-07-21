@@ -25,6 +25,7 @@ import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type Workfl
 import { resumeWorkflowRun } from "./workflow-store.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
+import { findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts LIVE_WAKEUP_STATUSES 와 동일 집합.
 //   이슈가 이 상태의 wake 나 queued/running heartbeat 를 가지면 중복 dispatch 금지.
@@ -173,6 +174,21 @@ export async function dispatchSourceIssueNativeResume(
       workflowRunId: run.id,
       workflowStepRunId: stepRun.id,
       stepId: stepRun.stepId,
+    };
+  }
+  const existingWorkflowResumeWake = input.agentId
+    ? await findExistingWorkflowResumeWake(db, {
+        companyId: input.companyId,
+        agentId: input.agentId,
+        issueId: input.issueId,
+      })
+    : null;
+  if (existingWorkflowResumeWake) {
+    return {
+      kind: "already_in_flight",
+      workflowWakeupRequestId: existingWorkflowResumeWake.id,
+      runId: existingWorkflowResumeWake.runId,
+      liveSignal: "wake",
     };
   }
 

@@ -52,6 +52,7 @@ import { applyStructuralGatePass } from "./control-flow/structural-gate-rework.j
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
+import { readAttempts } from "./control-flow/verdict-store.js";
 import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
@@ -998,6 +999,16 @@ function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" |
 function stepRunNeedsWorkflowResume(stepRun: typeof workflowStepRuns.$inferSelect): boolean {
   return stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0;
 }
+function isPendingReworkAwaitingCurrentIssueCompletion(
+  stepRun: typeof workflowStepRuns.$inferSelect,
+  issueCompletedAt: Date | null,
+): boolean {
+  if (stepRun.status !== "pending" || (stepRun.iterationIndex ?? 0) === 0) return false;
+  const priorCompletedAt = readAttempts(stepRun.metadata).at(-1)?.completedAt;
+  if (!priorCompletedAt || !issueCompletedAt) return true;
+  const priorCompletedMs = new Date(priorCompletedAt).getTime();
+  return !Number.isFinite(priorCompletedMs) || issueCompletedAt.getTime() <= priorCompletedMs;
+}
 
 /**
  * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes|null) 를 heartbeat(성공) + comment
@@ -1241,20 +1252,17 @@ async function syncStepRunsFromIssueState(
     });
   }
 
-  // [Hybrid QA 136A] Skip issue→status mapping for step runs that were explicitly
-  //   reset for rework (pending with iterationIndex > 0). The producer issue may
-  //   still be "done" from before the reset; stale issue evidence must not
-  //   override the rework reset back to completed.
+  // A rework reset ignores the prior issue completion but accepts a later
+  // completion from the current iteration.
   for (const stepRun of stepRuns) {
     if (!stepRun.issueId) continue;
-    if (stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0) continue;
+    const issue = issueById.get(stepRun.issueId);
+    if (!issue) continue;
+    if (isPendingReworkAwaitingCurrentIssueCompletion(stepRun, issue.completedAt)) continue;
     // [qa-cap acceptance] cap 수용으로 completed 된 QA 는 request_changes+done 재유도(flap)에서 보호 —
     //   단, sentinel 의 producerStepId/producerIteration 이 현 sync 의 completed producer row 와 정확히
     //   일치(현 generation)할 때만. 새 producer generation(rework) 시 보호 해제 → 재유도 허용.
     if (stepRun.status === "completed" && matchesCurrentCapAcceptedProducer(stepRun, stepRuns)) continue;
-    const issue = issueById.get(stepRun.issueId);
-    if (!issue) continue;
-
     const isValidationCheck = validationCandidateIssueIdSet.has(issue.id);
     const latestValidationVerdict = latestValidationVerdictByIssueId.get(issue.id);
     const ungatedStatus = isValidationCheck

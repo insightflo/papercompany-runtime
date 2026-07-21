@@ -36,20 +36,72 @@ export function parsePluginDate(value: unknown): Date | null {
   return Number.isFinite(parsed) ? new Date(parsed) : null;
 }
 
-/** mission date 필터(YYYY-MM-DD 또는 ISO)를 boundary(start=00:00:00 / end=23:59:59) Date로 변환. */
-export function parseMissionDateFilter(value: string, boundary: "start" | "end"): Date {
+const MISSION_DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+export function isMissionDateOnlyFilter(value: string): boolean {
+  return MISSION_DATE_ONLY_PATTERN.test(value.trim());
+}
+
+function missionTimeZoneOffsetMilliseconds(instant: Date, formatter: Intl.DateTimeFormat): number {
+  const parts = new Map(formatter.formatToParts(instant).map((part) => [part.type, part.value]));
+  return Date.UTC(
+    Number(parts.get("year")),
+    Number(parts.get("month")) - 1,
+    Number(parts.get("day")),
+    Number(parts.get("hour")),
+    Number(parts.get("minute")),
+    Number(parts.get("second")),
+    instant.getUTCMilliseconds(),
+  ) - instant.getTime();
+}
+
+function missionDateBoundaryInTimeZone(
+  year: number,
+  month: number,
+  day: number,
+  boundary: "start" | "end",
+  timeZone: string,
+): Date {
+  const localDate = new Date(Date.UTC(year, month, day + (boundary === "end" ? 1 : 0)));
+  const intendedUtcTimestamp = Date.UTC(
+    localDate.getUTCFullYear(),
+    localDate.getUTCMonth(),
+    localDate.getUTCDate(),
+  );
+
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+      hourCycle: "h23",
+    });
+    let instant = new Date(intendedUtcTimestamp);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      instant = new Date(intendedUtcTimestamp - missionTimeZoneOffsetMilliseconds(instant, formatter));
+    }
+    return instant;
+  } catch {
+    throw badRequest(`Invalid mission date filter timezone: ${timeZone}`);
+  }
+}
+
+/** Converts YYYY-MM-DD to a local-day start/end-exclusive boundary in the company timezone, or parses an ISO instant. */
+export function parseMissionDateFilter(value: string, boundary: "start" | "end", timeZone = "UTC"): Date {
   const normalized = value.trim();
-  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
+  const dateOnlyMatch = MISSION_DATE_ONLY_PATTERN.exec(normalized);
   if (dateOnlyMatch) {
     const [, year, month, day] = dateOnlyMatch;
-    return new Date(
+    return missionDateBoundaryInTimeZone(
       Number(year),
       Number(month) - 1,
       Number(day),
-      boundary === "start" ? 0 : 23,
-      boundary === "start" ? 0 : 59,
-      boundary === "start" ? 0 : 59,
-      boundary === "start" ? 0 : 999,
+      boundary,
+      timeZone,
     );
   }
 
