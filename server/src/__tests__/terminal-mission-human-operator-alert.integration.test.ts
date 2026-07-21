@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -128,6 +128,87 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
     expect(after.commentRows[0]?.body).not.toContain("Process lost raw stderr leak");
     expect(after.commentRows[0]?.body).not.toContain("{");
     expect(after.commentRows[0]?.authorAgentId).toBeNull();
+  });
+
+  it("reports a terminal failed workflow even when no owner-action run failed", async () => {
+    const seed = await seedTerminalFixture(db);
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, seed.failedRunId));
+    await db.delete(issues).where(eq(issues.id, seed.ownerActionIssueId));
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, seed.sourceIssueId));
+
+    const definitionId = randomUUID();
+    const workflowRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: definitionId,
+      companyId: seed.companyId,
+      name: "gazua-morning terminal failure",
+      stepsJson: [
+        {
+          id: "materialize-html-report",
+          name: "Materialize HTML report",
+          dependencies: [],
+          conditionalDependencies: [{ stepId: "inspection", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 }],
+        },
+        { id: "inspection", name: "Independent inspection", dependencies: ["materialize-html-report"] },
+        { id: "sync-dashboard", name: "Sync dashboard", dependencies: ["inspection"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId: definitionId,
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      status: "failed",
+      triggeredBy: "system",
+      completedAt: new Date("2026-07-01T00:08:00.000Z"),
+    });
+    await db.insert(workflowStepRuns).values([
+      { id: randomUUID(), workflowRunId, stepId: "materialize-html-report", status: "completed", iterationIndex: 2 },
+      { id: randomUUID(), workflowRunId, stepId: "inspection", issueId: seed.sourceIssueId, status: "failed" },
+      { id: randomUUID(), workflowRunId, stepId: "sync-dashboard", status: "skipped" },
+    ]);
+
+    const onOwnerActionCreated = vi.fn();
+    const svc = missionService(db, { onOwnerActionCreated });
+    const result = await svc.runMainExecutorSupervision({
+      missionId: seed.missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-07-01T00:10:00.000Z"),
+    });
+    await svc.runMainExecutorSupervision({
+      missionId: seed.missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-07-01T00:11:00.000Z"),
+    });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining("terminal_mission_human_operator_request_emitted"),
+    ]));
+    expect(onOwnerActionCreated).not.toHaveBeenCalled();
+    const ownerActions = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, seed.companyId),
+        eq(issues.missionId, seed.missionId),
+        eq(issues.originKind, "mission_main_executor_unblock"),
+        eq(issues.originId, seed.sourceIssueId),
+      ));
+    expect(ownerActions).toHaveLength(1);
+    const [ownerAction] = ownerActions;
+    expect(ownerAction).toBeDefined();
+    const artifacts = await countReportArtifacts(db, ownerAction!.id);
+    expect(artifacts.events).toBe(1);
+    expect(artifacts.comments).toBe(1);
+    expect(artifacts.audits).toBe(1);
+    const [report] = await db
+      .select({ workflowRunId: workflowTransitionEvents.workflowRunId, payload: workflowTransitionEvents.payload })
+      .from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.eventType, REPORT_EVENT_TYPE));
+    expect(report?.workflowRunId).toBe(workflowRunId);
+    expect((report?.payload as { failedRuns?: Array<{ id: string }> } | null)?.failedRuns).toEqual([
+      expect.objectContaining({ id: workflowRunId }),
+    ]);
   });
 
   it("is idempotent for the same terminal snapshot across repeated supervision runs", async () => {

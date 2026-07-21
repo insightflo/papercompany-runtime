@@ -143,7 +143,7 @@ export function buildTerminalMissionHumanOperatorComment(
     "### Mission owner decision",
     `Decision: ${TERMINAL_REPORT_DECISION}`,
     `Source issue: ${sourceToken}`,
-    "Reason: Mission cannot continue automatically. The owner-action recovery is blocked after a terminal run failure and no heartbeat, wakeup, tool recovery, source resume, or runnable workflow step remains.",
+    "Reason: Mission cannot continue automatically. The workflow or its owner-action recovery reached a terminal failure and no heartbeat, wakeup, tool recovery, source resume, or runnable workflow step remains.",
     "Next action: Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.",
     `Evidence: ${evidence}`,
   ].join("\n");
