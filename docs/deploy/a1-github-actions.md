@@ -33,6 +33,10 @@ sudo -n systemctl restart papercompany-runtime.service
 
 These repository variables can override the production defaults:
 
+- `A1_LEGACY_DEPLOY_ENABLED`: defaults to enabled when unset. Set to `false`
+  only when the Operations-owned, Human Operator-approved deployment path is
+  ready. The `verify` job continues to run so the exact `main` commit can still
+  satisfy the approval gate; only the legacy SSH deployment job is skipped.
 - `A1_SSH_PORT`: default `22`
 - `A1_DEPLOY_PATH`: default `/srv/papercompany/papercompany-runtime`
 - `A1_SERVICE_NAME`: default `papercompany-runtime.service`

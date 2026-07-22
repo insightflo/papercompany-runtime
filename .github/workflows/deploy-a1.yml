@@ -49,7 +49,10 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.ref == 'refs/heads/main'
+    # Keep main verification available for approval-driven deployment while
+    # allowing Operations to take ownership of the actual A1 deploy step.
+    # Unset preserves the legacy behavior; set false only during cutover.
+    if: github.ref == 'refs/heads/main' && vars.A1_LEGACY_DEPLOY_ENABLED != 'false'
 
     env:
       A1_SSH_HOST: ${{ secrets.A1_SSH_HOST }}
