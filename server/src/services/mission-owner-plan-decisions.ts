@@ -5,6 +5,7 @@ import { agents, companies, issueComments, issues, missionPlanArtifacts, mission
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
+import { renderRevisionContextLines } from "./missions/mission-planning-description.js";
 import { missionDelegationService } from "./mission-delegations.js";
 import { workflowService } from "./workflow/engine.js";
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
@@ -1279,7 +1280,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       }
       // (b) 같은 decisionHash 의 PLAN-QA 게이트 진행중 → verdict 로 분기
       if (activePlanQa && activePlanQa.decisionHash === decisionHash && activePlanQa.issueId) {
-        const verdict = await readPlanQaVerdict({
+        const planQaVerdict = await readPlanQaVerdict({
           db,
           companyId,
           missionId,
@@ -1290,7 +1291,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
             ? collected.commentCreatedAt
             : null,
         });
-        if (verdict === "pass") {
+        if (planQaVerdict?.verdict === "pass") {
           // [PLAN-QA structured PASS recovery] 각 step 을 labeled runner 로 감싸
           //   throw 시 durable activity 를 남긴다. 어느 step 에서 죽었는지가 DB 에 남고,
           //   refs.planQa 는 pending 으로 잔존해 후속 recordLatest 호출이 멱등하게 재완수.
@@ -1314,8 +1315,13 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "recorded" });
           return { status: "recorded", missionPlanArtifact: finalPlan, revision: finalPlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: [] };
         }
-        if (verdict === "request_changes") {
-          const planningIssueForRework = await reopenPlanningIssueForPlanChanges({ db, planningIssueId: collected.planningIssueId });
+        if (planQaVerdict?.verdict === "request_changes") {
+          // Forward the exact structured request_changes diagnostics: the reopened PLAN keeps
+          // the original mission instruction and surfaces the prior decision + diagnostics so
+          // the next planning pass revises rather than restarts from a generic prompt.
+          const requestChangeDiagnostics = planQaVerdict.diagnostics;
+          const planningIssueForRework = await reopenPlanningIssueForPlanChanges({ db, companyId, missionId, planningIssueId: collected.planningIssueId, priorDecision: collected.decision as unknown as Record<string, unknown>, diagnostics: requestChangeDiagnostics });
+          const requestChangeLedgerDiagnostics = requestChangeDiagnostics.map((diagnostic) => toPlanDecisionDiagnostic(diagnostic, collected.commentId));
           if (planningIssueForRework?.assigneeAgentId && enqueuePlanningIssueWakeup) {
             await enqueuePlanningIssueWakeup({
               companyId,
@@ -1347,9 +1353,9 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
             ...ledgerSubmission,
             status: "rejected",
             rejectionReason: "plan_qa_changes_requested",
-            diagnostics: [],
+            diagnostics: requestChangeLedgerDiagnostics,
           });
-          return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
+          return { status: "plan_qa_changes_requested", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: requestChangeLedgerDiagnostics };
         }
         // pending / verdict 없음 → 대기 (어떤 경로에서도 materialize 금지)
         await ensurePlanQaWakeupForIssue({
@@ -2485,6 +2491,17 @@ async function ensurePlanQaWakeupForIssue(input: {
   });
 }
 
+type PlanQaStructuredVerdict = { verdict: ValidationVerdict; diagnostics: Array<Record<string, unknown>> };
+
+function coercePlanQaDiagnostics(raw: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(raw) ? raw.filter((entry): entry is Record<string, unknown> => isPlainObject(entry)) : [];
+}
+function toPlanDecisionDiagnostic(diagnostic: Record<string, unknown>, commentId?: string): RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic {
+  const code = typeof diagnostic.code === "string" && diagnostic.code.trim() ? diagnostic.code.trim() : "plan_qa_request_changes";
+  const message = typeof diagnostic.message === "string" && diagnostic.message.trim() ? diagnostic.message.trim() : "Plan QA requested changes.";
+  return commentId ? { code, message, commentId } : { code, message };
+}
+
 async function readPlanQaVerdict(input: {
   db: Db;
   companyId: string;
@@ -2493,7 +2510,7 @@ async function readPlanQaVerdict(input: {
   planQaIssueId: string;
   decisionHash?: string | null;
   afterCreatedAt?: Date | null;
-}): Promise<ValidationVerdict | null> {
+}): Promise<PlanQaStructuredVerdict | null> {
   // [AREA: structured events / Task 4] Prefer the newest authorized verdict signal.
   // Structured rows are the durable source, but a later authorized PLAN-QA comment must
   // supersede an older row so unblock/re-review loops cannot strand the plan on stale data.
@@ -2510,14 +2527,16 @@ async function readPlanQaVerdict(input: {
       sourceCommentId: missionPlanQaVerdicts.sourceCommentId,
       createdAt: missionPlanQaVerdicts.createdAt,
       updatedAt: missionPlanQaVerdicts.updatedAt,
+      diagnostics: missionPlanQaVerdicts.diagnostics,
     })
     .from(missionPlanQaVerdicts)
     .where(and(...structuredConditions))
     .orderBy(desc(missionPlanQaVerdicts.updatedAt), desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
     .limit(1);
   const structuredVerdictValue = normalizePlanQaVerdict(structuredVerdict?.verdict);
+  const structuredDiagnostics = coercePlanQaDiagnostics(structuredVerdict?.diagnostics);
   if (structuredVerdictValue && !structuredVerdict?.sourceCommentId) {
-    return structuredVerdictValue;
+    return { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics };
   }
 
   // fallback: comment-based read (기존 로직 유지 — legacy parser)
@@ -2531,7 +2550,7 @@ async function readPlanQaVerdict(input: {
       isNull(issues.hiddenAt),
     ))
     .limit(1);
-  if (!planQaIssue) return structuredVerdictValue;
+  if (!planQaIssue) return structuredVerdictValue ? { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics } : null;
 
   const commentConditions = [
     eq(issueComments.companyId, input.companyId),
@@ -2567,7 +2586,7 @@ async function readPlanQaVerdict(input: {
 
   for (const { row, verdict } of verdictRows) {
     if (structuredPlanQaVerdictSupersedesComment(row.createdAt, structuredVerdictValue, structuredVerdict?.updatedAt ?? structuredVerdict?.createdAt ?? null)) {
-      return structuredVerdictValue;
+      return structuredVerdictValue ? { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics } : null;
     }
 
     if (typeof row.authorUserId === "string" && row.authorUserId.trim().length > 0) {
@@ -2583,7 +2602,7 @@ async function readPlanQaVerdict(input: {
         decisionHash: input.decisionHash,
         verdict,
       });
-      return verdict;
+      return { verdict, diagnostics: [] };
     }
 
     const authorAgentId = row.authorAgentId;
@@ -2601,7 +2620,7 @@ async function readPlanQaVerdict(input: {
         decisionHash: input.decisionHash,
         verdict,
       });
-      return verdict;
+      return { verdict, diagnostics: [] };
     }
 
     const authorAgent = agentById.get(authorAgentId);
@@ -2622,11 +2641,11 @@ async function readPlanQaVerdict(input: {
         decisionHash: input.decisionHash,
         verdict,
       });
-      return verdict;
+      return { verdict, diagnostics: [] };
     }
   }
 
-  return structuredVerdictValue;
+  return structuredVerdictValue ? { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics } : null;
 }
 
 function readPlanQaCommentVerdict(body: string): ValidationVerdict | null {
@@ -2755,7 +2774,14 @@ type PlanningIssueForRework = {
   assigneeAgentId: string | null;
 };
 
-async function reopenPlanningIssueForPlanChanges(input: { db: Db; planningIssueId: string | null }): Promise<PlanningIssueForRework | null> {
+export async function reopenPlanningIssueForPlanChanges(input: {
+  db: Db;
+  companyId: string;
+  missionId: string;
+  planningIssueId: string | null;
+  priorDecision?: Record<string, unknown>;
+  diagnostics?: readonly Record<string, unknown>[];
+}): Promise<PlanningIssueForRework | null> {
   if (!input.planningIssueId) return null;
   const [row] = await input.db
     .select({
@@ -2764,12 +2790,26 @@ async function reopenPlanningIssueForPlanChanges(input: { db: Db; planningIssueI
       assigneeAgentId: issues.assigneeAgentId,
       checkoutRunId: issues.checkoutRunId,
       executionRunId: issues.executionRunId,
+      description: issues.description,
     })
     .from(issues)
-    .where(eq(issues.id, input.planningIssueId))
+    .where(and(eq(issues.companyId, input.companyId), eq(issues.missionId, input.missionId), eq(issues.id, input.planningIssueId)))
     .limit(1);
   if (!row) return null;
-  if (row.status === "todo") return { id: row.id, status: row.status, assigneeAgentId: row.assigneeAgentId };
+  // Reopened PLAN retry handoff: keep the original mission instruction (already in the
+  // description) and surface the prior decision + exact diagnostics so the next planning
+  // pass revises rather than restarts from a generic prompt.
+  const reopenedDescription = appendPlanRevisionBaseline({
+    baseDescription: row.description,
+    priorDecision: input.priorDecision,
+    diagnostics: input.diagnostics,
+  });
+  if (row.status === "todo") {
+    if (reopenedDescription !== null) {
+      await input.db.update(issues).set({ description: reopenedDescription, updatedAt: new Date() }).where(and(eq(issues.companyId, input.companyId), eq(issues.missionId, input.missionId), eq(issues.id, row.id)));
+    }
+    return { id: row.id, status: row.status, assigneeAgentId: row.assigneeAgentId };
+  }
   const isTerminal = row.status === "done" || row.status === "cancelled" || row.status === "completed";
   const isStatusOnlyInProgress = row.status === "in_progress" && !row.checkoutRunId && !row.executionRunId;
   if (isTerminal || isStatusOnlyInProgress) {
@@ -2783,9 +2823,10 @@ async function reopenPlanningIssueForPlanChanges(input: { db: Db; planningIssueI
         executionLockedAt: null,
         completedAt: null,
         cancelledAt: null,
+        ...(reopenedDescription !== null ? { description: reopenedDescription } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(issues.id, row.id))
+      .where(and(eq(issues.companyId, input.companyId), eq(issues.missionId, input.missionId), eq(issues.id, row.id)))
       .returning({
         id: issues.id,
         status: issues.status,
@@ -2794,6 +2835,45 @@ async function reopenPlanningIssueForPlanChanges(input: { db: Db; planningIssueI
     return updated ?? null;
   }
   return null;
+}
+
+const PLAN_REVISION_BLOCK_START = "<!-- paperclip-plan-revision-baseline-start -->";
+const PLAN_REVISION_BLOCK_END = "<!-- paperclip-plan-revision-baseline-end -->";
+
+function appendPlanRevisionBaseline(input: {
+  baseDescription: string | null;
+  priorDecision?: Record<string, unknown>;
+  diagnostics?: readonly Record<string, unknown>[];
+}): string | null {
+  const hasPriorDecision = input.priorDecision !== undefined && Object.keys(input.priorDecision).length > 0;
+  const hasDiagnostics = Array.isArray(input.diagnostics) && input.diagnostics.length > 0;
+  if (!hasPriorDecision && !hasDiagnostics) return null;
+  const revisionLines = renderRevisionContextLines({
+    previousDecision: input.priorDecision ?? {},
+    diagnostics: input.diagnostics ?? [],
+  });
+  // Strip any prior revision baseline first: the sentinel-wrapped PLAN-QA block (this
+  // function's own output) AND any legacy sentinel-less "## Revision baseline" block left by
+  // a structural rejection. Stripping both before appending guarantees exactly one baseline
+  // while preserving "## Required decision comment shape" and the roster that follow it.
+  const base = stripLegacyRevisionBaselineBlock(stripPlanRevisionBaselineBlock(input.baseDescription ?? ""));
+  return [base, "", PLAN_REVISION_BLOCK_START, ...revisionLines, PLAN_REVISION_BLOCK_END].join("\n");
+}
+
+function stripPlanRevisionBaselineBlock(description: string): string {
+  const start = description.indexOf(PLAN_REVISION_BLOCK_START);
+  if (start === -1) return description.trimEnd();
+  const end = description.indexOf(PLAN_REVISION_BLOCK_END, start);
+  const tail = end === -1 ? "" : description.slice(end + PLAN_REVISION_BLOCK_END.length);
+  return (description.slice(0, start) + tail).trimEnd();
+}
+const LEGACY_REVISION_BASELINE_RE = /(?:^|\n)## Revision baseline[\s\S]*?\n## Requested corrections[\s\S]*?(?=\n## |$)/;
+
+function stripLegacyRevisionBaselineBlock(description: string): string {
+  // A structurally-rejected PLAN can already embed a sentinel-less revision block mid
+  // description. Remove it (header through the corrections section, up to the next top-level
+  // header) so we never present two competing baselines.
+  return description.replace(LEGACY_REVISION_BASELINE_RE, "").replace(/\n{3,}/g, "\n\n").trimEnd();
 }
 
 function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decisionHash?: string } | null {
