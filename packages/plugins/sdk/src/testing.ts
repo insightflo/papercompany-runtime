@@ -595,6 +595,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return updated;
       },
     },
+    approvals: {
+      async create(input) {
+        requireCapability(manifest, capabilitySet, "approvals.create");
+        throw new Error("approvals.create is not supported in the in-memory test harness");
+      },
+    },
     data: {
       register(key, handler) {
         dataHandlers.set(key, handler);

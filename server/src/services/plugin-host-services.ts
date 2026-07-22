@@ -8,6 +8,7 @@ import type {
   Project,
   Issue,
   Goal,
+  Approval,
   PluginWorkspace,
   IssueComment,
 } from "@paperclipai/plugin-sdk";
@@ -16,6 +17,8 @@ import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
 import { issueService } from "./issues.js";
 import { goalService } from "./goals.js";
+import { approvalService } from "./approvals.js";
+import { validatePluginApprovalCreate } from "./plugin-approval-validation.js";
 import { documentService } from "./documents.js";
 import { heartbeatService } from "./heartbeat.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
@@ -497,6 +500,7 @@ export function buildHostServices(
   const issues = issueService(db);
   const documents = documentService(db);
   const goals = goalService(db);
+  const approvalSvc = approvalService(db);
   const activity = activityService(db);
   const costs = costService(db);
   const assets = assetService(db);
@@ -1086,6 +1090,44 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         requireInCompany("Goal", await goals.getById(params.goalId), companyId);
         return (await goals.update(params.goalId, params.patch as any)) as Goal;
+      },
+    },
+
+    approvals: {
+      async create(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const validated = validatePluginApprovalCreate({
+          type: params.type,
+          payload: params.payload,
+          title: params.title,
+          summary: params.summary,
+        });
+        const payload: Record<string, unknown> = { ...validated.payload };
+        if (validated.title) payload.title = validated.title;
+        if (validated.summary) payload.summary = validated.summary;
+        const approval = await approvalSvc.create(companyId, {
+          type: validated.type,
+          payload,
+          status: "pending",
+          requestedByPluginId: pluginId,
+          requestedByAgentId: null,
+          requestedByUserId: null,
+          decisionNote: null,
+          decidedByUserId: null,
+          decidedAt: null,
+          updatedAt: new Date(),
+        });
+        await logActivity(db, {
+          companyId,
+          actorType: "system",
+          actorId: pluginId,
+          action: "approval.created",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type, sourcePluginId: pluginId },
+        });
+        return approval as Approval;
       },
     },
 
