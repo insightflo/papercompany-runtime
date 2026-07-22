@@ -75,6 +75,7 @@ export function PlanTemplatesPanel({ companyId }: { companyId: string }) {
       await refresh();
       pushToast({ tone: "success", title: "Plan template duplicated", body: template.name });
     },
+    onError: (error) => pushToast({ tone: "error", title: "Duplicate failed", body: error instanceof Error ? error.message : "Unable to duplicate plan template." }),
   });
 
   const deleteMutation = useMutation({
@@ -88,7 +89,7 @@ export function PlanTemplatesPanel({ companyId }: { companyId: string }) {
   });
 
   const readOnly = selected?.origin === "system_default" && !creating;
-  const canSave = draft.name.trim() && draft.selectionDescription.trim() && draft.instructions.trim() && (creating || Boolean(selected));
+  const canSave = Boolean(draft.name.trim() && draft.selectionDescription.trim() && draft.instructions.trim() && (creating || selected));
 
   return (
     <div className="grid min-h-[calc(100vh-15rem)] gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
@@ -112,7 +113,8 @@ export function PlanTemplatesPanel({ companyId }: { companyId: string }) {
             <FilePlus2 className="mr-2 h-4 w-4" />New custom template
           </Button>
         </div>
-        {listQuery.isLoading ? <div className="p-4 text-sm text-muted-foreground">Loading templates…</div> : (
+        {listQuery.isLoading ? <div className="p-4 text-sm text-muted-foreground">Loading templates…</div>
+          : listQuery.error ? <div className="p-4 text-sm text-destructive">{listQuery.error.message}</div> : (
           <div className="py-2">
             {templates.map((template) => (
               <button
@@ -176,6 +178,7 @@ export function PlanTemplatesPanel({ companyId }: { companyId: string }) {
               <Checkbox
                 id="plan-template-enabled"
                 checked={draft.enabled}
+                disabled={creating}
                 onCheckedChange={(checked) => setDraft((value) => ({ ...value, enabled: checked === true }))}
               />
               <label htmlFor="plan-template-enabled" className="text-sm">Available to planning agents</label>
