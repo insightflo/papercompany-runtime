@@ -7,6 +7,10 @@ export type QaReworkFeedback = {
   readonly qaIssueId: string | null;
   readonly feedback: string | null;
 };
+export type ProducerWorkProductRef = {
+  readonly title: string;
+  readonly ref: string;
+};
 
 export type WorkflowReworkContract = {
   readonly kind: typeof WORKFLOW_REWORK_CONTRACT_KIND;
@@ -16,6 +20,8 @@ export type WorkflowReworkContract = {
   readonly iterationLabel: string;
   readonly qaFeedbacks: readonly QaReworkFeedback[];
   readonly dependencyArtifacts: string | null;
+  readonly producerIssueInstruction: string | null;
+  readonly producerWorkProducts: readonly ProducerWorkProductRef[];
   readonly requiredActions: readonly string[];
   readonly createdAt: string;
 };
@@ -26,6 +32,8 @@ export function buildWorkflowReworkContract(input: {
   readonly currentIteration: number;
   readonly maxIterations: number;
   readonly dependencyArtifacts?: string | null;
+  readonly producerIssueInstruction?: string | null;
+  readonly producerWorkProducts?: readonly ProducerWorkProductRef[];
   readonly createdAt?: Date;
 }): WorkflowReworkContract {
   const nextIteration = input.currentIteration + 1;
@@ -37,6 +45,8 @@ export function buildWorkflowReworkContract(input: {
     iterationLabel: `${nextIteration}/${input.maxIterations}`,
     qaFeedbacks: input.qaFeedbacks.map((feedback) => ({ ...feedback })),
     dependencyArtifacts: input.dependencyArtifacts ?? null,
+    producerIssueInstruction: input.producerIssueInstruction ?? null,
+    producerWorkProducts: (input.producerWorkProducts ?? []).map((wp) => ({ ...wp })),
     requiredActions: [
       "Treat this rework contract as the primary instruction for the current run.",
       "Address the latest REQUEST_CHANGES feedback before registering or completing the step.",
@@ -66,6 +76,8 @@ export function readWorkflowReworkContract(value: unknown): WorkflowReworkContra
     iterationLabel,
     qaFeedbacks,
     dependencyArtifacts: readString(record.dependencyArtifacts),
+    producerIssueInstruction: readString(record.producerIssueInstruction),
+    producerWorkProducts: readWorkProductRefs(record.producerWorkProducts),
     requiredActions: readStringArray(record.requiredActions),
     createdAt: readString(record.createdAt) ?? new Date(0).toISOString(),
   };
@@ -84,12 +96,23 @@ export function renderWorkflowReworkComment(contract: WorkflowReworkContract): s
       return `${sectionHeader}${sectionHeader ? "\n" : ""}${body}`;
     })
     .join("\n");
+  const instructionSection = contract.producerIssueInstruction
+    ? `### Original producer issue instruction (the task this step implements):\n${contract.producerIssueInstruction}`
+    : null;
+  const ownProductsSection = contract.producerWorkProducts.length > 0
+    ? [
+        "### Prior work products registered on this issue (verify they satisfy the feedback, update or re-register)",
+        ...contract.producerWorkProducts.map((wp) => `- ${wp.title} → ${wp.ref}`),
+      ].join("\n")
+    : null;
   return [
     "## Workflow QA rework request",
     "",
     `Producer step \`${contract.producerStepId}\` was reset for rework because the following QA validator(s) requested changes.`,
     qaList,
     `- Rework iteration: ${contract.iterationLabel}`,
+    instructionSection,
+    ownProductsSection,
     buildQaReworkArtifactInstructionLine({ feedbackScope: multi ? "ALL listed QA feedback above" : "the QA feedback" }),
     ...contract.requiredActions.map((action) => `- ${action}`),
     contract.dependencyArtifacts,
@@ -128,4 +151,18 @@ function readQaFeedback(value: unknown): QaReworkFeedback | null {
     qaIssueId: readString(record.qaIssueId),
     feedback: readString(record.feedback),
   };
+}
+
+function readWorkProductRefs(value: unknown): readonly ProducerWorkProductRef[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry): ProducerWorkProductRef | null => {
+      const record = readRecord(entry);
+      if (!record) return null;
+      const title = readString(record.title);
+      const ref = readString(record.ref);
+      if (!title || !ref) return null;
+      return { title, ref };
+    })
+    .filter((entry): entry is ProducerWorkProductRef => entry !== null);
 }
