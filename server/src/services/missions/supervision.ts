@@ -21,7 +21,7 @@ import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
 import type { MissionServiceDeps } from "../missions.js";
 import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, extractMissionOwnerDecisionFromText, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
-import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
+import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied, SOURCE_RETRY_WORK_PRODUCT_MAX, type SourceRetryWorkProduct } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
@@ -203,6 +203,46 @@ async function loadActiveWorkProductUpdatedAt(db: Db, companyId: string, issueId
     .limit(1)
     .then((rows) => rows[0] ?? null);
   return row?.updatedAt ?? null;
+}
+// [final QA / mission validation owner recovery] retry 가 깨울 source issue 의 active workProduct 를
+//   company+mission+source-issue scope 로 명시적으로 읽는다(issueWorkProducts.companyId + issueId 와
+//   issues.companyId + id + missionId 를 모두 검증). capped mission digest 에 의존하지 않고 원본 source
+//   issue title+description + active products(url/externalId/metadata path) + latest REQUEST_CHANGES feedback
+//   를 묶어 전달. 카운트는 bound.
+async function loadActiveSourceIssueWorkProducts(
+  db: Db,
+  companyId: string,
+  missionId: string,
+  issueId: string,
+): Promise<SourceRetryWorkProduct[]> {
+  const rows = await db.select({
+    title: issueWorkProducts.title,
+    type: issueWorkProducts.type,
+    provider: issueWorkProducts.provider,
+    url: issueWorkProducts.url,
+    externalId: issueWorkProducts.externalId,
+    metadata: issueWorkProducts.metadata,
+  })
+    .from(issueWorkProducts)
+    .innerJoin(issues, eq(issueWorkProducts.issueId, issues.id))
+    .where(and(
+      eq(issueWorkProducts.companyId, companyId),
+      eq(issueWorkProducts.issueId, issueId),
+      eq(issueWorkProducts.status, "active"),
+      eq(issues.companyId, companyId),
+      eq(issues.id, issueId),
+      eq(issues.missionId, missionId),
+    ))
+    .orderBy(desc(issueWorkProducts.updatedAt))
+    .limit(SOURCE_RETRY_WORK_PRODUCT_MAX);
+  return rows.map((row) => ({
+    title: row.title,
+    type: row.type,
+    provider: row.provider,
+    url: row.url ?? null,
+    externalId: row.externalId ?? null,
+    metadata: row.metadata ?? null,
+  }));
 }
 
 export function createSupervision({ db, deps, ownerActions }: {
@@ -1629,6 +1669,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                     .set({ status: "todo", updatedAt: now, completedAt: null })
                     .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
                 }
+                const activeSourceWorkProducts = await loadActiveSourceIssueWorkProducts(db, mission.companyId, mission.id, sourceCandidate.id);
                 const retryComment = await issueService(db).addComment(
                   sourceCandidate.id,
                   buildRetrySourceIssueComment({
@@ -1638,6 +1679,9 @@ export function createSupervision({ db, deps, ownerActions }: {
                     sourceLabel: sourceCandidateLabel,
                     decisionReason: ownerDecision.reason,
                     requestChangesSummary,
+                    sourceInstruction: sourceCandidate.description,
+                    sourceTitle: sourceCandidate.title,
+                    activeWorkProducts: activeSourceWorkProducts,
                   }),
                   { agentId: mission.ownerAgentId },
                 );

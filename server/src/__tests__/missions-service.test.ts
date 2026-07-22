@@ -1521,6 +1521,119 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceBody).toContain("Latest REQUEST_CHANGES summary");
     expect(sourceBody).toContain(requestChangesSummary);
   });
+  it("bundles original source instruction + active workProducts + latest REQUEST_CHANGES into the retry wake context (inactive/foreign excluded)", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const onOwnerDecisionRetrySourceIssueApplied = vi.fn().mockResolvedValue({ wakeupRequestId: "wake-bundle-ctx", runId: "run-bundle-ctx" });
+
+    await db.insert(companies).values({ id: companyId, name: "Retry Bundle Context Company", issuePrefix: `RB${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Retry bundle context mission", status: "active" });
+
+    const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
+
+    const distinctiveInstruction = "Distinctive-ORIG-INSTRUCTION: rebuild the Top25 table generator so every 비고 cell escapes pipe characters before rendering.";
+    const sourceIssue = await issueService(db).create(companyId, {
+      assigneeAgentId: workerAgentId,
+      missionId,
+      originKind: "workflow_execution",
+      status: "blocked",
+      title: "Synthesize distinctive report draft",
+      description: distinctiveInstruction,
+    });
+
+    const activeProductTitle = "Distinctive-ACTIVE-PRODUCT tech-ai-news obsidian note";
+    const activeProductUrl = "https://example.test/distinctive/active.md";
+    const activeProductExternalId = "/distinctive/artifacts/active-note.md";
+    const activeProductMetadataPath = "/distinctive/vault/active-note.md";
+    const inactiveProductTitle = "Distinctive-INACTIVE-PRODUCT archived superseded draft (must be excluded)";
+    const foreignMissionProductTitle = "Distinctive-FOREIGN-MISSION-PRODUCT same company different mission (must be excluded)";
+    const foreignCompanyProductTitle = "Distinctive-FOREIGN-COMPANY-PRODUCT different company (must be excluded)";
+
+    await db.insert(issueWorkProducts).values({ companyId, issueId: sourceIssue.id, type: "local_file", provider: "local_file", title: activeProductTitle, url: activeProductUrl, externalId: activeProductExternalId, metadata: { path: activeProductMetadataPath }, status: "active" });
+    await db.insert(issueWorkProducts).values({ companyId, issueId: sourceIssue.id, type: "local_file", provider: "local_file", title: inactiveProductTitle, url: "https://example.test/distinctive/inactive.md", status: "archived" });
+
+    // same company, different mission + different source issue — must be excluded by mission+source scope.
+    const foreignMissionId = randomUUID();
+    await db.insert(missions).values({ id: foreignMissionId, companyId, ownerAgentId, title: "Foreign mission", status: "active" });
+    const foreignMissionSourceIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId: foreignMissionId, originKind: "workflow_execution", status: "todo", title: "Foreign mission source issue" });
+    await db.insert(issueWorkProducts).values({ companyId, issueId: foreignMissionSourceIssue.id, type: "local_file", provider: "local_file", title: foreignMissionProductTitle, url: "https://example.test/distinctive/foreign-mission.md", status: "active" });
+
+    // true foreign-COMPANY isolation: active product in a different company must be excluded by company scope.
+    const foreignCompanyId = randomUUID();
+    const foreignCompanyAgentId = randomUUID();
+    const foreignCompanyMissionId = randomUUID();
+    await db.insert(companies).values({ id: foreignCompanyId, name: "Foreign Company", issuePrefix: `FC${foreignCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: foreignCompanyAgentId, companyId: foreignCompanyId, name: "Foreign Worker", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(missions).values({ id: foreignCompanyMissionId, companyId: foreignCompanyId, ownerAgentId: foreignCompanyAgentId, title: "Foreign company mission", status: "active" });
+    const foreignCompanySourceIssue = await issueService(db).create(foreignCompanyId, { assigneeAgentId: foreignCompanyAgentId, missionId: foreignCompanyMissionId, originKind: "workflow_execution", status: "todo", title: "Foreign company source issue" });
+    await db.insert(issueWorkProducts).values({ companyId: foreignCompanyId, issueId: foreignCompanySourceIssue.id, type: "local_file", provider: "local_file", title: foreignCompanyProductTitle, url: "https://example.test/distinctive/foreign-company.md", status: "active" });
+
+    const requestChangesSummary = "REQUEST_CHANGES: Distinctive-RC regenerate the infographic; 3 hallucinated panels and 8 missing source articles remain.";
+    const ownerAction = await issueService(db).create(companyId, {
+      assigneeAgentId: ownerAgentId,
+      description: [
+        "Mission-owner signal from validation gate.",
+        "",
+        "### Validation excerpt",
+        "```text",
+        requestChangesSummary,
+        "```",
+      ].join("\n"),
+      missionId,
+      originKind: "mission_main_executor_unblock",
+      originId: sourceIssue.id,
+      status: "done",
+      title: "Retry report producer with bundled context",
+    });
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: ownerAction.id,
+      authorAgentId: ownerAgentId,
+      body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry with full source context"].join("\n"),
+    });
+
+    await svc.runMainExecutorSupervision({
+      missionId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-07-01T01:30:00.000Z"),
+      applyOwnerDecisionActions: true,
+      dispatchOwnerDecisionWakeups: true,
+    });
+
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
+    expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
+      sourceIssue: expect.objectContaining({ id: sourceIssue.id }),
+      targetAgentId: workerAgentId,
+    }));
+
+    const sourceComments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
+    const sourceBody = sourceComments.map((comment) => comment.body).join("\n");
+    // (1) original source issue title + description
+    expect(sourceBody).toContain("Original source issue instruction:");
+    expect(sourceBody).toContain("Title: Synthesize distinctive report draft");
+    expect(sourceBody).toContain(distinctiveInstruction);
+    // (2) that source issue's own active workProducts — title + url + externalId + metadata path
+    expect(sourceBody).toContain("Active workProducts on this source issue");
+    expect(sourceBody).toContain(activeProductTitle);
+    expect(sourceBody).toContain(`url=${activeProductUrl}`);
+    expect(sourceBody).toContain(`externalId=${activeProductExternalId}`);
+    expect(sourceBody).toContain(`path=${activeProductMetadataPath}`);
+    // (3) exact latest REQUEST_CHANGES feedback
+    expect(sourceBody).toContain("Latest REQUEST_CHANGES summary");
+    expect(sourceBody).toContain(requestChangesSummary);
+    // inactive product excluded (status != active)
+    expect(sourceBody).not.toContain(inactiveProductTitle);
+    // same-company different mission/source excluded (mission+source scope)
+    expect(sourceBody).not.toContain(foreignMissionProductTitle);
+    // true foreign-company isolation excluded (company scope)
+    expect(sourceBody).not.toContain(foreignCompanyProductTitle);
+  });
 
   it("marks retry_source_issue wakeup handled when workflow resume already dispatched it", async () => {
     const companyId = randomUUID();

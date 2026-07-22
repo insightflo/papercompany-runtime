@@ -36,6 +36,38 @@ describe("mission owner recovery comments", () => {
     expect(retryComment).toContain("owner approved retry");
     expect(retryComment).not.toContain("moved the source issue back to todo");
   });
+  it("bundles source title+description, active workProduct url/externalId/metadata path, and REQUEST_CHANGES", () => {
+    const comment = buildRetrySourceIssueComment({
+      ownerActionIssueId: "owner-1",
+      ownerActionLabel: "OWN-1",
+      sourceIssueId: "source-1",
+      sourceLabel: "SRC-1",
+      decisionReason: "owner approved retry",
+      sourceTitle: "Distinctive source title",
+      sourceInstruction: "Distinctive source description body.",
+      activeWorkProducts: [
+        { title: "Active note", type: "local_file", provider: "local_file", url: "https://example.test/a.md", externalId: "/artifacts/a.md", metadata: { path: "/vault/a.md" } },
+        { title: "Dup path product", type: "preview_url", provider: "web", url: null, externalId: "/same.md", metadata: { path: "/same.md" } },
+      ],
+      requestChangesSummary: "REQUEST_CHANGES: distinctive feedback",
+    });
+    // title + description
+    expect(comment).toContain("Original source issue instruction:");
+    expect(comment).toContain("Title: Distinctive source title");
+    expect(comment).toContain("Distinctive source description body.");
+    // url + externalId + distinct metadata path
+    expect(comment).toContain("url=https://example.test/a.md");
+    expect(comment).toContain("externalId=/artifacts/a.md");
+    expect(comment).toContain("path=/vault/a.md");
+    // metadata path deduped when it equals externalId (no duplicate path= token)
+    expect(comment).toContain("externalId=/same.md");
+    expect(comment).not.toContain("path=/same.md");
+    // REQUEST_CHANGES feedback
+    expect(comment).toContain("Latest REQUEST_CHANGES summary:");
+    expect(comment).toContain("REQUEST_CHANGES: distinctive feedback");
+    // shows count of active products
+    expect(comment).toContain("showing 2");
+  });
 
   it("formats wakeup and validator recovery comments", () => {
     const wakeup = buildRetrySourceIssueWakeupDispatchedComment({
