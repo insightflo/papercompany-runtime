@@ -8,6 +8,7 @@ import {
 } from "./mission-owner-recovery-events.js";
 import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
 import { buildExistingArtifactRegistrationActionLines } from "../work-products/artifact-registration-instructions.js";
+import { metadataDigestPath } from "./mission-execution-digest.js";
 
 export { buildMainExecutorBrief, buildMissionOwnerUnblockDescription } from "./mission-owner-unblock-description.js";
 
@@ -172,6 +173,44 @@ export function summarizeOwnerDecisionNotApplied(input: {
   return `owner_action_decision_not_applied: ${input.ownerActionLabel} ${input.decision ?? "retry_source_issue"} source=${input.sourceLabel} — ${input.reason}`;
 }
 
+// [final QA / mission validation owner recovery] retry 가 깨운 source issue 가 받아야 할
+//   컨텍스트: (1) 원본 source issue instruction/description, (2) 해당 source issue 의 active
+//   workProducts, (3) latest REQUEST_CHANGES feedback. capped mission digest 에 의존하지 않고
+//   source-issue scope 에서 직접 읽은 값을 그대로 주입한다. 텍스트/카운트는 bound.
+export type SourceRetryWorkProduct = {
+  readonly title: string;
+  readonly type: string;
+  readonly provider: string;
+  readonly url: string | null;
+  readonly externalId: string | null;
+  readonly metadata: Record<string, unknown> | null;
+};
+
+export const SOURCE_RETRY_WORK_PRODUCT_MAX = 8;
+const SOURCE_INSTRUCTION_MAX_CHARS = 1600;
+
+function trimSourceInstruction(value: string): string {
+  const normalized = value
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (normalized.length <= SOURCE_INSTRUCTION_MAX_CHARS) return normalized;
+  return `${normalized.slice(0, SOURCE_INSTRUCTION_MAX_CHARS).trimEnd()}...`;
+}
+
+function formatSourceRetryWorkProductLine(product: SourceRetryWorkProduct): string {
+  const title = product.title.trim() || "(untitled workProduct)";
+  const parts = [`type=${product.type}`, `provider=${product.provider}`];
+  if (product.url) parts.push(`url=${product.url}`);
+  const externalId = product.externalId?.trim() || null;
+  if (externalId) parts.push(`externalId=${externalId}`);
+  const metadataPath = metadataDigestPath(product.metadata);
+  if (metadataPath && metadataPath !== externalId && metadataPath !== product.url) {
+    parts.push(`path=${metadataPath}`);
+  }
+  return `- ${title} (${parts.join(", ")})`;
+}
+
 export function buildRetrySourceIssueComment(input: {
   ownerActionIssueId: string;
   ownerActionLabel: string;
@@ -179,7 +218,17 @@ export function buildRetrySourceIssueComment(input: {
   sourceLabel: string;
   decisionReason?: string;
   requestChangesSummary?: string | null;
+  sourceTitle?: string | null;
+  sourceInstruction?: string | null;
+  activeWorkProducts?: readonly SourceRetryWorkProduct[];
 }) {
+  const titleTrim = input.sourceTitle?.trim() || null;
+  const trimmedInstruction = input.sourceInstruction?.trim() ? trimSourceInstruction(input.sourceInstruction) : null;
+  const instructionBlock = [
+    titleTrim ? `Title: ${titleTrim}` : null,
+    trimmedInstruction,
+  ].filter((line): line is string => line !== null).join("\n\n");
+  const products = (input.activeWorkProducts ?? []).slice(0, SOURCE_RETRY_WORK_PRODUCT_MAX);
   return [
     "### Mission owner retry requested",
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
@@ -187,6 +236,22 @@ export function buildRetrySourceIssueComment(input: {
     "Decision: retry_source_issue",
     "Action: record the recovery reason and request native workflow resume; the queue runner owns the source issue state transition.",
     `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
+    instructionBlock
+      ? [
+          "",
+          "Original source issue instruction:",
+          "```text",
+          instructionBlock,
+          "```",
+        ].join("\n")
+      : null,
+    products.length > 0
+      ? [
+          "",
+          `Active workProducts on this source issue (showing ${products.length}):`,
+          ...products.map(formatSourceRetryWorkProductLine),
+        ].join("\n")
+      : null,
     input.requestChangesSummary
       ? [
           "",

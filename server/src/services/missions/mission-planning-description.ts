@@ -6,7 +6,7 @@ import type { MissionExecutionCandidate } from "./mission-execution-candidates.j
 
 export type MissionPlanningRevisionContext = {
   readonly previousDecision: Record<string, unknown>;
-  readonly diagnostics: readonly { code?: string; message?: string }[];
+  readonly diagnostics: readonly Record<string, unknown>[];
 };
 
 export type MissionPlanningDescriptionInput = {
@@ -23,7 +23,7 @@ function isPlainObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function renderRevisionContextLines(revisionContext: MissionPlanningRevisionContext): string[] {
+export function renderRevisionContextLines(revisionContext: MissionPlanningRevisionContext): string[] {
   const rawDiagnostics = Array.isArray(revisionContext.diagnostics) ? revisionContext.diagnostics : [];
   const diagnosticLines: string[] = [];
   for (const diagnostic of rawDiagnostics) {

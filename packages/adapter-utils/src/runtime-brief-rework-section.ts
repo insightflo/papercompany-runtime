@@ -36,11 +36,22 @@ export function buildWorkflowReworkContractBriefLines(value: unknown): readonly 
 
   const dependencyArtifacts = asString(contract.dependencyArtifacts);
   const requiredActions = asStringArray(contract.requiredActions);
+  const producerIssueInstruction = asString(contract.producerIssueInstruction);
+  const producerWorkProducts = Array.isArray(contract.producerWorkProducts)
+    ? contract.producerWorkProducts.map(asRecord).filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
   return [
     "Workflow rework contract:",
     `- Rework target: ${producerStepId}${iterationLabel ? ` (${iterationLabel})` : ""}`,
     "- Current run priority: resolve the latest REQUEST_CHANGES below before registering artifacts or completing the issue.",
     ...requiredActions.slice(0, 4).map((action) => `- Required: ${truncateBriefLine(action, 260)}`),
+    producerIssueInstruction ? `- Original issue instruction: ${truncateBriefLine(producerIssueInstruction, 500)}` : null,
+    producerWorkProducts.length > 0
+      ? joinPromptSections([
+          "- Your prior work products on this issue (verify, update, or re-register):",
+          ...producerWorkProducts.slice(0, 8).map((wp) => `  - ${asString(wp.title) ?? "artifact"} → ${asString(wp.ref) ?? "(no ref)"}`),
+        ], "\n")
+      : null,
     ...qaFeedbacks.slice(0, 4).flatMap((feedback, index) => {
       const qaStepId = asString(feedback.qaStepId) ?? `qa-${index + 1}`;
       const qaIssueId = asString(feedback.qaIssueId);
@@ -78,12 +89,20 @@ export function buildWorkflowReworkTaskHeader(value: unknown): readonly string[]
 
   const dependencyArtifacts = asString(contract.dependencyArtifacts);
   const requiredActions = asStringArray(contract.requiredActions);
+  const producerIssueInstruction = asString(contract.producerIssueInstruction);
+  const producerWorkProducts = Array.isArray(contract.producerWorkProducts)
+    ? contract.producerWorkProducts.map(asRecord).filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
 
   return [
     "=== CURRENT REWORK TASK (highest priority — resolve before anything else) ===",
     `- Target step: ${producerStepId}${iterationLabel ? ` | iteration ${iterationLabel}` : ""}`,
     `- Latest QA failure (${latestQaStepId}${latestQaIssueId ? ` ${latestQaIssueId}` : ""}): ${truncateBriefLine(latestFeedback, 600)}`,
     ...requiredActions.slice(0, 3).map((action) => `- Required: ${truncateBriefLine(action, 220)}`),
+    producerIssueInstruction ? `- Original instruction: ${truncateBriefLine(producerIssueInstruction, 300)}` : null,
+    producerWorkProducts.length > 0
+      ? `- Own prior products: ${producerWorkProducts.slice(0, 4).map((wp) => `${asString(wp.title) ?? "artifact"}→${truncateBriefLine(asString(wp.ref) ?? "", 120)}`).join("; ")}`
+      : null,
     dependencyArtifacts ? `- Dependency artifacts: ${truncateBriefLine(dependencyArtifacts, 400)}` : null,
     "- FORBIDDEN: do NOT call /workflow/complete or mark done until the REQUEST_CHANGES above is resolved and the artifact is updated or re-registered.",
     "=== end rework task ===",

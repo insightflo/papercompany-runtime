@@ -28,9 +28,9 @@
  *     재호출하지 않으므로 1 sync = (step 당) 최대 1 리셋.
  */
 
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, issueComments, issueWorkProducts, workflowStepRuns } from "@paperclipai/db";
+import { heartbeatRuns, issueComments, workflowStepRuns } from "@paperclipai/db";
 import {
   conditionalEdgeHolds,
   resolveEdges,
@@ -43,6 +43,7 @@ import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rework-contract.js";
+import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
 import type { StepIterationAttempt } from "./types.js";
 
@@ -152,68 +153,6 @@ async function loadQaReworkFeedback(input: {
 }
 
 /**
- * [목적] producer 가 rework 재실행할 때 current(this-run) upstream(dependency) workProduct 절대경로를
- *   rework 댓글에 주입. agent 가 issue 댓글을 읽으므로, stale 이전-run 경로 대신 current 산출물을 보게 해
- *   "producer가 rework 후에도 stale/무생산을 반복"하는 deeper 루트(rework context freshness)를 끊는다.
- * [입력] db, stepRunMap(stepId→stepRun), producerStep(dependencies). [출력] current dependency artifact 섹션文本|null.
- */
-async function loadProducerDependencyArtifacts(input: {
-  db: Db;
-  stepRunMap: Map<string, StepRun>;
-  producerStep: { dependencies?: string[] };
-}): Promise<string | null> {
-  const depStepIds = Array.isArray(input.producerStep.dependencies) ? input.producerStep.dependencies : [];
-  if (depStepIds.length === 0) return null;
-  const issueToStepId = new Map<string, string>();
-  const depIssueIds: string[] = [];
-  for (const depStepId of depStepIds) {
-    const issueId = input.stepRunMap.get(depStepId)?.issueId;
-    if (typeof issueId === "string" && issueId.length > 0) {
-      depIssueIds.push(issueId);
-      issueToStepId.set(issueId, depStepId);
-    }
-  }
-  if (depIssueIds.length === 0) return null;
-  const products = await input.db
-    .select({
-      issueId: issueWorkProducts.issueId,
-      title: issueWorkProducts.title,
-      url: issueWorkProducts.url,
-      externalId: issueWorkProducts.externalId,
-      metadata: issueWorkProducts.metadata,
-      status: issueWorkProducts.status,
-    })
-    .from(issueWorkProducts)
-    .where(inArray(issueWorkProducts.issueId, depIssueIds));
-  const byStepId = new Map<string, string[]>();
-  for (const product of products) {
-    if (typeof product.status === "string" && product.status !== "active") continue;
-    const stepId = issueToStepId.get(product.issueId);
-    if (!stepId) continue;
-    const metaPath = product.metadata && typeof product.metadata === "object"
-      ? (product.metadata as Record<string, unknown>).path
-      : null;
-    const ref = product.url ?? product.externalId ?? (typeof metaPath === "string" ? metaPath : null);
-    if (typeof ref !== "string" || ref.trim().length === 0) continue;
-    const arr = byStepId.get(stepId) ?? [];
-    arr.push(`${product.title ?? "artifact"} → ${ref}`);
-    byStepId.set(stepId, arr);
-  }
-  const lines = ["### Current upstream artifacts (refreshed for this rework — use THESE paths, not previous-run files):"];
-  let any = false;
-  for (const depStepId of depStepIds) {
-    const arr = byStepId.get(depStepId);
-    if (arr && arr.length > 0) {
-      lines.push(`- ${depStepId}: ${arr.join("; ")}`);
-      any = true;
-    } else {
-      lines.push(`- ${depStepId}: (no active workProduct registered)`);
-    }
-  }
-  return any ? lines.join("\n") : null;
-}
-
-/**
  * [목적] back-edge(QA 반려) 로 발화해야 하는 terminal step 들을 cap 내에서 리셋(rework).
  * [입력] ApplyBackEdgeReworkInput. [출력] { stepRuns(리셋 반영), reworkedCount }.
  * [주의] 동일 sync 내 1회 호출 전제. cap 초과 시 해당 step 은 건드리지 않는다(bounded 종료).
@@ -284,7 +223,8 @@ export async function applyBackEdgeReworkPass(
       verdict: "request_changes",
       completedAt: stepRun.completedAt?.toISOString() ?? new Date().toISOString(),
     };
-    const dependencyArtifacts = await loadProducerDependencyArtifacts({ db, stepRunMap, producerStep: step });
+    const dependencyArtifacts = await loadProducerDependencyArtifacts({ db, companyId: run.companyId, stepRunMap, producerStep: step });
+    const producerOwnContext = await loadProducerOwnReworkContext({ db, companyId: run.companyId, missionId: run.missionId ?? null, workflowRunId: run.id, producerStepId: step.id, producerIssueId: stepRun.issueId ?? null });
 
     // 모든 반려 QA 의 feedback 을 합쳐 하나의 rework comment 로 생산자에게 전달.
     const qaFeedbacks = [];
@@ -301,6 +241,8 @@ export async function applyBackEdgeReworkPass(
       currentIteration,
       maxIterations,
       dependencyArtifacts,
+      producerIssueInstruction: producerOwnContext.instruction,
+      producerWorkProducts: producerOwnContext.workProducts,
     });
 
     await resetStepRunForRework({

@@ -20,6 +20,7 @@ import {
   renderWorkflowReworkComment,
   type QaReworkFeedback,
 } from "./rework-contract.js";
+import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { isStructuralGateStep, readStructuralGateProducerToken, sameStructuralGateProducerToken, type StructuralGateStep } from "./structural-gate.js";
 import { isQaLikeStep } from "../../workflow-step-role.js";
 import { loadStructuralGateVerdictByRequest, type StructuralGateVerdictRecord } from "./structural-gate-ledger.js";
@@ -162,7 +163,17 @@ export async function applyStructuralGatePass(input: {
   // Execute coalesced reworks with CAS guard
   let reworkedCount = 0;
   for (const { pStep, pRun, max, iter, fbs } of byProducer.values()) {
-    const contract = buildWorkflowReworkContract({ producerStepId: pStep.id, qaFeedbacks: fbs, currentIteration: iter, maxIterations: max });
+    const dependencyArtifacts = await loadProducerDependencyArtifacts({ db, companyId: run.companyId, stepRunMap: srMap, producerStep: pStep });
+    const producerOwnContext = await loadProducerOwnReworkContext({ db, companyId: run.companyId, missionId: run.missionId ?? null, workflowRunId: run.id, producerStepId: pStep.id, producerIssueId: pRun.issueId ?? null });
+    const contract = buildWorkflowReworkContract({
+      producerStepId: pStep.id,
+      qaFeedbacks: fbs,
+      currentIteration: iter,
+      maxIterations: max,
+      dependencyArtifacts,
+      producerIssueInstruction: producerOwnContext.instruction,
+      producerWorkProducts: producerOwnContext.workProducts,
+    });
 
     // CAS: only reset if still completed with expected iteration + dispatch evidence.
     // Same-iteration newer completion (different requestId/completedAt) survives.

@@ -61,4 +61,36 @@ describe("workflow rework runtime brief", () => {
     // [acceptance] rework 모드에선 최근 코멘트 중복 억제(contract가 QA feedback을 이미 携带).
     expect(brief).not.toContain("duplicate-comment-marker-xyz");
   });
+  it("renders producer own instruction and work products separately from upstream dependency artifacts", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipWorkflowReworkContract: {
+        kind: "workflow_qa_rework",
+        producerStepId: "produce",
+        iterationLabel: "1/2",
+        requiredActions: ["Address the latest REQUEST_CHANGES feedback before completing."],
+        qaFeedbacks: [
+          { qaStepId: "qa", qaIssueId: "Q-1", feedback: "REQUEST_CHANGES: fix the broken layout." },
+        ],
+        dependencyArtifacts: "- upstream: /srv/out/sources.json",
+        producerIssueInstruction: "produce-report\n\nProduce the final HTML report.",
+        producerWorkProducts: [
+          { title: "report-v1", ref: "/srv/out/report.html" },
+        ],
+      },
+    });
+
+    // Own instruction present in both header and detail sections.
+    expect(brief).toContain("Original instruction");
+    expect(brief).toContain("produce-report");
+    expect(brief).toContain("Produce the final HTML report.");
+    // Own prior products present.
+    expect(brief).toContain("prior work products");
+    expect(brief).toContain("report-v1");
+    expect(brief).toContain("/srv/out/report.html");
+    // Upstream dependency artifacts remain separate.
+    expect(brief).toContain("Dependency artifacts");
+    expect(brief).toContain("sources.json");
+    // QA feedback present.
+    expect(brief).toContain("fix the broken layout");
+  });
 });

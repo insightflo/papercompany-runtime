@@ -34,7 +34,7 @@ function issueDigestLabel(issue: { id: string; identifier: string | null }): str
   return issue.identifier ?? issue.id;
 }
 
-function metadataDigestPath(metadata: Record<string, unknown> | null | undefined): string | null {
+export function metadataDigestPath(metadata: Record<string, unknown> | null | undefined): string | null {
   if (!metadata) return null;
   const direct = asTrimmedString(metadata.path)
     ?? asTrimmedString(metadata.filePath)
