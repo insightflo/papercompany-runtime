@@ -272,14 +272,14 @@ export function GraphInspector({
               </select>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
                 <div style={{ display: "grid", gap: "4px" }}>
-                  <FieldLabel help="Maximum retry attempts for this step when retry is enabled. Zero disables retries.">Max retries</FieldLabel>
+                  <FieldLabel help="Maximum number of additional retry attempts after the initial attempt when retry is enabled. Zero disables retries.">Max retries</FieldLabel>
                   <input
                     style={inputStyle}
                     type="number"
                     min={0}
                     step={1}
-                    value={selectedStep.maxRetries}
-                    placeholder={selectedStep.onFailure === "retry" ? "max retries (default 2)" : "max retries"}
+                    disabled={selectedStep.onFailure !== "retry"} value={selectedStep.maxRetries}
+                    placeholder={selectedStep.onFailure === "retry" ? "max retries (default 2)" : "inactive"}
                     onChange={(event) => updateSelectedAdvanced({ maxRetries: event.target.value })}
                   />
                 </div>

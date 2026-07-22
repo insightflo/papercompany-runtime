@@ -13,11 +13,17 @@
 //   workproduct_reuse wakeup 의 중복 억제 동작이 바뀐다. 두 호출처가 같은 함수를 쓰므로
 //   한 번 수정으로 양쪽에 반영된다.
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 
 export interface ExistingWorkflowResumeWake {
   id: string;
+  runId: string | null;
+}
+
+export interface AcceptedWorkflowResumeWake {
+  id: string;
+  status: string;
   runId: string | null;
 }
 
@@ -55,4 +61,42 @@ export async function findExistingWorkflowResumeWake(
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
+}
+
+export async function findAcceptedWorkflowResumeWakeForStep(
+  db: Db,
+  input: {
+    companyId: string;
+    issueId: string;
+    workflowRunId: string;
+    workflowStepRunId: string;
+  },
+): Promise<AcceptedWorkflowResumeWake[]> {
+  const rows = await db
+    .select({
+      id: agentWakeupRequests.id,
+      status: agentWakeupRequests.status,
+      runId: agentWakeupRequests.runId,
+    })
+    .from(agentWakeupRequests)
+    .where(and(
+      eq(agentWakeupRequests.companyId, input.companyId),
+      eq(agentWakeupRequests.issueId, input.issueId),
+      eq(agentWakeupRequests.workflowRunId, input.workflowRunId),
+      eq(agentWakeupRequests.workflowStepRunId, input.workflowStepRunId),
+      inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]),
+    ));
+  const direct = rows.filter((row) => row.status !== "coalesced");
+  if (direct.length > 0) return direct;
+  const coalesced = rows.filter((row) => row.runId);
+  if (coalesced.length === 0) return [];
+  const liveRuns = await db
+    .select({ id: heartbeatRuns.id })
+    .from(heartbeatRuns)
+    .where(and(
+      inArray(heartbeatRuns.id, coalesced.map((row) => row.runId!)),
+      inArray(heartbeatRuns.status, ["queued", "running"]),
+    ));
+  const liveRunIds = new Set(liveRuns.map((row) => row.id));
+  return coalesced.filter((row) => row.runId && liveRunIds.has(row.runId));
 }

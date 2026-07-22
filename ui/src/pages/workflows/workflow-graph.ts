@@ -71,6 +71,10 @@ export type WorkflowGraphStep = {
   graphRunResultPreview?: string;
   graphRunLogPreview?: string;
   graphRunControlOutcome?: string;
+  graphRunRetryCount?: number;
+  graphRunRetryMaxRetries?: number;
+  graphRunRetryState?: string;
+  graphRunRetryNextEligibleAt?: string;
   graphNote?: string;
   graphEdgeMetadata?: WorkflowGraphEdgeMetadataRecord;
   conditionalDependencies?: Array<{
@@ -121,6 +125,10 @@ export type WorkflowGraphStepRunStatus = {
   retentionDeleted?: WorkflowGraphRetentionDeleted;
   runtimeBadges: string[];
   controlOutcome: string;
+  retryCount: number;
+  retryMaxRetries: number;
+  retryState: string;
+  retryNextEligibleAt: string;
 };
 
 export type WorkflowGraphWorkProduct = {
@@ -163,6 +171,7 @@ export type WorkflowGraphStepRunInput = {
   lastDispatchErrorSummary?: string | null;
   lastDispatchRequestId?: string | null;
   workProducts?: WorkflowGraphWorkProduct[] | null;
+  retryCount?: number;
   metadata?: Record<string, unknown> | null;
 };
 
@@ -1082,6 +1091,10 @@ function readStepRunStatus(step: WorkflowGraphStep): WorkflowGraphStepRunStatus 
     resultPreview: typeof step.graphRunResultPreview === "string" ? step.graphRunResultPreview.trim() : "",
     logPreview: typeof step.graphRunLogPreview === "string" ? step.graphRunLogPreview.trim() : "",
     workProducts: Array.isArray(step.graphRunWorkProducts) ? normalizeWorkProducts(step.graphRunWorkProducts) : [],
+    retryCount: typeof step.graphRunRetryCount === "number" ? step.graphRunRetryCount : 0,
+    retryMaxRetries: typeof step.graphRunRetryMaxRetries === "number" ? step.graphRunRetryMaxRetries : 0,
+    retryState: typeof step.graphRunRetryState === "string" ? step.graphRunRetryState.trim() : "",
+    retryNextEligibleAt: typeof step.graphRunRetryNextEligibleAt === "string" ? step.graphRunRetryNextEligibleAt.trim() : "",
     concurrencyBlocked,
     retentionDeleted,
     runtimeBadges: buildRuntimeBadges({
@@ -1430,7 +1443,7 @@ function readStepResources(step: WorkflowGraphStep): WorkflowGraphStepResources 
 function readStepAdvanced(step: WorkflowGraphStep): WorkflowGraphStepAdvanced {
   const onFailure = typeof step.onFailure === "string" ? step.onFailure.trim() : "";
   const maxRetries = readNonNegativeInteger(step.maxRetries);
-  const retryDelaySeconds = readPositiveInteger(step.graphRetryDelaySeconds);
+  const retryDelaySeconds = readNonNegativeInteger(step.graphRetryDelaySeconds);
   const retryBackoff = normalizeRetryBackoff(step.graphRetryBackoff);
   const retryJitter = readBooleanSetting(step.graphRetryJitter) === true;
   const timeoutSeconds = readPositiveInteger(step.timeoutSeconds);
@@ -4624,7 +4637,7 @@ export function updateStepAdvancedMetadata<TStep extends WorkflowGraphStep>(
     const maxRetries = hasMaxRetries && patch.maxRetries !== undefined && Number.isFinite(patch.maxRetries) && patch.maxRetries >= 0
       ? Math.floor(patch.maxRetries)
       : undefined;
-    const retryDelaySeconds = hasRetryDelaySeconds && patch.retryDelaySeconds !== undefined && Number.isFinite(patch.retryDelaySeconds) && patch.retryDelaySeconds > 0
+    const retryDelaySeconds = hasRetryDelaySeconds && patch.retryDelaySeconds !== undefined && Number.isFinite(patch.retryDelaySeconds) && patch.retryDelaySeconds >= 0
       ? Math.floor(patch.retryDelaySeconds)
       : undefined;
     const retryBackoff = hasRetryBackoff ? normalizeRetryBackoff(patch.retryBackoff) : undefined;
@@ -5178,6 +5191,7 @@ export function applyStepRunsToGraphSteps<TStep extends WorkflowGraphStep>(
     const controlNodeResult = readRecord(metadata?.controlNodeResult);
     const resultPreview = readString(metadata?.resultPreview);
     const logPreview = readString(metadata?.logPreview);
+    const workflowRetry = readRecord(metadata?.workflowRetry);
     return {
       ...step,
       graphRunStatus: normalizeGraphRunStatus(run.status),
@@ -5199,6 +5213,10 @@ export function applyStepRunsToGraphSteps<TStep extends WorkflowGraphStep>(
       graphRunWorkProducts: normalizeWorkProducts(run.workProducts),
       graphRunConcurrencyBlocked: readRecord(metadata?.concurrencyBlocked) ?? undefined,
       graphRunRetentionDeleted: readRecord(metadata?.retentionDeleted) ?? undefined,
+      graphRunRetryCount: typeof run.retryCount === "number" ? run.retryCount : 0,
+      graphRunRetryMaxRetries: typeof workflowRetry?.maxRetries === "number" ? workflowRetry.maxRetries : 0,
+      graphRunRetryState: typeof workflowRetry?.state === "string" ? workflowRetry.state.trim() : "",
+      graphRunRetryNextEligibleAt: typeof workflowRetry?.nextEligibleAt === "string" ? workflowRetry.nextEligibleAt.trim() : "",
     };
   });
 }

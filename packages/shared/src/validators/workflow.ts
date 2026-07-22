@@ -45,12 +45,15 @@ export const workflowStepDefinitionSchema = z.object({
   agentName: z.string().optional(),
   agentId: optionalUuidSchema,
   assigneeAgentId: optionalUuidSchema,
-    // union accepts legacy string form ("true") on read; normalize coerces to boolean.
-    graphWorkProductRequired: z.union([z.boolean(), z.string()]).optional(),
-    graphWorkProductPattern: z.string().optional(),
-    graphResourceRefs: z.array(z.string()).optional(),
-    graphSecretRefs: z.array(z.string()).optional(),
-  })
+  // union accepts legacy string form ("true") on read; normalize coerces to boolean.
+  graphWorkProductRequired: z.union([z.boolean(), z.string()]).optional(),
+  graphWorkProductPattern: z.string().optional(),
+  graphResourceRefs: z.array(z.string()).optional(),
+  graphSecretRefs: z.array(z.string()).optional(),
+  graphRetryDelaySeconds: z.number().int().nonnegative().optional(),
+  graphRetryBackoff: z.enum(["fixed", "linear", "exponential"]).optional(),
+  graphRetryJitter: z.boolean().optional(),
+})
   .passthrough()
   .superRefine((step, ctx) => {
     const nodeType = typeof step.type === "string" ? step.type : undefined;

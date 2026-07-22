@@ -10,6 +10,7 @@ import { heartbeatRuns, issues, workflowRuns, workflowStepRuns } from "@papercli
 import { eq, and, lt, sql } from "drizzle-orm";
 import { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
 import { reconcileRunnableWorkflowStepWakeups } from "./runnable-step-wakeups-reconciler.js";
+import { reconcileDueWorkflowStepRetries, isStepRunAwaitingRetry } from "./retry-reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
 
 export { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
@@ -21,6 +22,7 @@ export {
   type NativeWorkflowReconcilerState,
 } from "./native-reconciler.js";
 export { reconcileRunnableWorkflowStepWakeups } from "./runnable-step-wakeups-reconciler.js";
+export { reconcileDueWorkflowStepRetries } from "./retry-reconciler.js";
 
 /**
  * Reconciliation result for a single workflow run.
@@ -121,11 +123,26 @@ export async function reconcileStuckWorkflowRuns(
         );
 
       if (pendingSteps.length > 0) {
+        const normalizeMetadata = (m: unknown): Record<string, unknown> =>
+          m && typeof m === "object" && !Array.isArray(m)
+            ? (m as Record<string, unknown>)
+            : {};
+        // [finding 2] If ANY pending step has a valid live workflow retry
+        // (waiting future/due or dispatching), the run has automatic
+        // continuation. Leave the ENTIRE run running and skip NO step —
+        // neither the retry step nor its pending siblings — and do not mark
+        // the run failed. Human Operator terminal reporting stays suppressed.
+        if (pendingSteps.some((step) => isStepRunAwaitingRetry(normalizeMetadata(step.metadata)))) {
+          results.push({
+            runId: run.id,
+            action: "skipped",
+            reason: "Workflow run has a live workflow retry in progress",
+          });
+          continue;
+        }
         const now = new Date();
         for (const step of pendingSteps) {
-          const metadata = step.metadata && typeof step.metadata === "object" && !Array.isArray(step.metadata)
-            ? step.metadata
-            : {};
+          const metadata = normalizeMetadata(step.metadata);
           await db
             .update(workflowStepRuns)
             .set({
@@ -218,6 +235,7 @@ export async function reconcileWorkflow(
   db: Db,
   options: { timeoutMinutes?: number } = {},
 ): Promise<{
+    retryReconciliationsReleased: number;
     runnableStepWakeupsQueued: number;
     deadlockedRunsRecovered: number;
     stuckRunsRecovered: number;
@@ -225,12 +243,14 @@ export async function reconcileWorkflow(
   }> {
   const timeoutMinutes = options.timeoutMinutes ?? 60;
 
+  const retryResults = await reconcileDueWorkflowStepRetries(db);
   const runnableWakeupResults = await reconcileRunnableWorkflowStepWakeups(db);
   const deadlockedResults = await reconcileDeadlockedWorkflowRuns(db);
   const stuckResults = await reconcileStuckWorkflowRuns(db, timeoutMinutes);
   const orphanStepsCleaned = await reconcileOrphanStepRuns(db);
 
   return {
+    retryReconciliationsReleased: retryResults.filter((r) => r.action === "recovered").length,
     runnableStepWakeupsQueued: runnableWakeupResults.filter((r) => r.action === "recovered").length,
     deadlockedRunsRecovered: deadlockedResults.filter((r) => r.action === "recovered").length,
     stuckRunsRecovered: stuckResults.filter((r) => r.action === "recovered").length,

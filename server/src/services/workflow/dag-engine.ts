@@ -85,6 +85,22 @@ import {
   atomicStructuralCompletion,
   checkDependencyFreshness,
 } from "./control-flow/structural-completion.js";
+import {
+  readWorkflowRetryMetadata,
+  isWorkflowRetryDue,
+} from "./retry-policy.js";
+import {
+  isRetryDelayBlockingDispatch,
+  markIssueLessRetryDispatchingFromProof,
+  shouldPreservePendingRetryFromIssueState,
+  stripRetryTrackingOnSuccess,
+  wakeIssueBackedRetryAndMarkDispatching,
+} from "./retry-launch-dispatch.js";
+import { markRetryDispatching } from "./retry-dispatch-state.js";
+import { retryIssueLessToolWorkflowStepInternal } from "./retry-issue-less-manual.js";
+import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
+import { shouldLoadValidationVerdictsForRun } from "./validation-verdict-load-gate.js";
+export { markRetryDispatching };
 
 /**
  * Workflow step definition.
@@ -143,6 +159,9 @@ export interface WorkflowStep {
    * heartbeat missing-workProduct gate가 적용된다.
    */
   graphWorkProductRequired?: boolean;
+  graphRetryDelaySeconds?: number;
+  graphRetryBackoff?: "fixed" | "linear" | "exponential";
+  graphRetryJitter?: boolean;
 }
 
 export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
@@ -1258,6 +1277,15 @@ async function syncStepRunsFromIssueState(
     if (!stepRun.issueId) continue;
     const issue = issueById.get(stepRun.issueId);
     if (!issue) continue;
+    if (stepRun.issueId && await shouldPreservePendingRetryFromIssueState({
+      db,
+      companyId: issue.companyId,
+      issueId: issue.id,
+      stepRunStatus: stepRun.status,
+      metadata: stepRun.metadata,
+    })) {
+      continue;
+    }
     if (isPendingReworkAwaitingCurrentIssueCompletion(stepRun, issue.completedAt)) continue;
     // [qa-cap acceptance] cap 수용으로 completed 된 QA 는 request_changes+done 재유도(flap)에서 보호 —
     //   단, sentinel 의 producerStepId/producerIteration 이 현 sync 의 completed producer row 와 정확히
@@ -1286,6 +1314,10 @@ async function syncStepRunsFromIssueState(
     } else if (desiredStatus === "completed") {
       patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
       patch.completedAt = issue.completedAt ?? now;
+      const cleanedRetryMetadata = stripRetryTrackingOnSuccess(stepRun.metadata);
+      if (cleanedRetryMetadata) {
+        patch.metadata = cleanedRetryMetadata;
+      }
     } else if (desiredStatus === "failed") {
       patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
       patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? now;
@@ -1295,10 +1327,16 @@ async function syncStepRunsFromIssueState(
     }
 
     if (Object.keys(patch).length === 0) continue;
+    const metadataCleanupCondition = patch.metadata
+      ? and(
+        eq(workflowStepRuns.status, stepRun.status),
+        eq(workflowStepRuns.metadata, stepRun.metadata),
+      )
+      : undefined;
     await db
       .update(workflowStepRuns)
       .set(patch)
-      .where(eq(workflowStepRuns.id, stepRun.id));
+      .where(and(eq(workflowStepRuns.id, stepRun.id), metadataCleanupCondition));
   }
 
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
@@ -2031,6 +2069,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       workflowDefinitionId: input.definition.id,
       stepId: input.step.id,
       ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
+      ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
       ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
       ...capAcceptancePayload,
@@ -2219,6 +2258,7 @@ function findRunnableSteps(
     if (step.triggerOn === "escalation") return false;
     const stepRun = stepRunMap.get(step.id);
     if (!stepRun || stepRun.status !== "pending") return false;
+    if (isRetryDelayBlockingDispatch(stepRun.metadata, new Date())) return false;
     return classifyStepActivation(step, predsByStepId).runnable;
   });
 }
@@ -3003,13 +3043,19 @@ export async function completeWorkflowToolStepFromResult(
   const toolResult = input.allowTerminalRecovery === true
     ? { ...baseToolResult, recoveredBy: "owner-action" }
     : baseToolResult;
-  const resultMetadata: Record<string, unknown> = deleteAfterUse
+  let resultMetadata: Record<string, unknown> = deleteAfterUse
     ? {
       ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
       retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
     }
     : { ...existingMetadata, toolResult };
   if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
+  const completionPlan = planStructuralCompletion({
+    step: stepForGuard, success: input.success, data: input.data,
+  });
+  if (completionPlan.effectiveSuccess) {
+    resultMetadata = stripRetryTrackingOnSuccess(resultMetadata) ?? resultMetadata;
+  }
 
   // [Hybrid QA] Structural gates: atomic ledger+status transaction with CAS.
   // The status patch is derived PURELY (no DB/ledger write) via
@@ -3041,10 +3087,8 @@ export async function completeWorkflowToolStepFromResult(
     return syncWorkflowRunState(db, row.run.id);
   }
 
-  // Non-structural path (unchanged): pure plan, no ledger involvement.
-  const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = planStructuralCompletion({
-    step: stepForGuard, success: input.success, data: input.data,
-  });
+  // Non-structural path (unchanged): reuse the pure completion plan.
+  const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
   await db.update(workflowStepRuns).set({
     status: effectiveSuccess ? "completed" : "failed",
     startedAt: row.stepRun.startedAt ?? now, completedAt: now,
@@ -3058,85 +3102,11 @@ export async function completeWorkflowToolStepFromResult(
 
   return syncWorkflowRunState(db, row.run.id);
 }
-
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
-  input: {
-    companyId: string;
-    runId: string;
-    stepId: string;
-  },
+  input: { companyId: string; runId: string; stepId: string },
 ): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
-  const context = await loadWorkflowExecutionContext(db, input.runId);
-  if (context.run.companyId !== input.companyId) return null;
-
-  const step = context.steps.find((candidate) => candidate.id === input.stepId);
-  const stepRun = context.stepRuns.find((candidate) => candidate.stepId === input.stepId);
-  if (!step || !stepRun) return null;
-  if (!isIssueLessToolStep(step) || stepRun.issueId) return null;
-  if (stepRun.status !== "failed") return null;
-
-  // CAS: only reset if still failed with the exact observed dispatch state.
-  // An old callback must not complete during the gap before new dispatch.
-  const observedRequestId = stepRun.lastDispatchRequestId;
-  const observedCompletedAt = stepRun.completedAt;
-  const retryCas = await db
-    .update(workflowStepRuns)
-    .set({
-      status: "pending",
-      startedAt: null,
-      completedAt: null,
-      // Clear old dispatch state before sync so old callbacks can't match
-      lastDispatchRequestId: null,
-      lastDispatchAttemptAt: null,
-      lastDispatchAcceptedAt: null,
-      lastDispatchErrorAt: null,
-      lastDispatchErrorSummary: null,
-      // Clear stale tool-result/invocation metadata
-      metadata: (() => {
-        const m = stepRun.metadata && typeof stepRun.metadata === "object" && !Array.isArray(stepRun.metadata)
-          ? { ...(stepRun.metadata as Record<string, unknown>) } : {};
-        delete m.toolResult;
-        delete m.toolInvocation;
-        delete m.toolQueue;
-        delete m.cacheHit;
-        delete m.controlFlowSkipped;
-        return m;
-      })(),
-    })
-    .where(and(
-      eq(workflowStepRuns.id, stepRun.id),
-      eq(workflowStepRuns.status, "failed"),
-      ...(observedRequestId
-        ? [eq(workflowStepRuns.lastDispatchRequestId, observedRequestId)]
-        : [isNull(workflowStepRuns.lastDispatchRequestId)]),
-      ...(observedCompletedAt
-        ? [eq(workflowStepRuns.completedAt, observedCompletedAt)]
-        : [isNull(workflowStepRuns.completedAt)]),
-    ))
-    .returning({ id: workflowStepRuns.id });
-
-  if (retryCas.length === 0) return null; // CAS lost — row changed since snapshot
-
-  const refreshedStepRuns = await db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, input.runId));
-  await resetUnlaunchedTerminalStepRuns(db, refreshedStepRuns);
-
-  await db
-    .update(workflowRuns)
-    .set({
-      status: "running",
-      startedAt: context.run.startedAt ?? new Date(),
-      completedAt: null,
-    })
-    .where(and(eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId)));
-
-  return {
-    stepRunId: stepRun.id,
-    result: await syncWorkflowRunState(db, input.runId),
-  };
+  return retryIssueLessToolWorkflowStepInternal({ db, ...input, loadWorkflowExecutionContext, isIssueLessToolStep, resetUnlaunchedTerminalStepRuns, syncWorkflowRunState });
 }
 
 async function finalizeWorkflowRunState(
@@ -3417,10 +3387,11 @@ export async function syncWorkflowRunState(
   //   syncStepRunsFromIssueState 이후·resetUnlaunchedTerminalStepRuns 이후에 실행한다 — QA request_changes →
   //   failed 가 반영된 후에야 when 평가가 정확하며, sentinel(controlFlowSkipped) 로 마감해 reset 의 flap(가즈아 hang)을 막는다.
   const hasConditionalEdges = workflowHasConditionalEdges(context.steps);
-  // [IF/loop P4] live validation verdict 를 한 번 로드해 skip-pass · back-edge rework · launch 의 predFacts 가 공유.
-  //   QA 의 request_changes 를 정밀 평가한다(generic failure/infra 에러 loop 발화 방지 — PLAN 설계결정).
-  //   legacy 워크플로(hasConditionalEdges=false)면 생략(회귀 없음). verdict 가 비면 edge-condition 의 P2 fallback.
-  const validationVerdictsByIssueId = hasConditionalEdges && context.run.status !== "cancelled"
+  // Plain legacy workflows must not pay the verdict-query cost. Load
+  // authoritative validation verdicts only when conditional control flow or an
+  // active issue-backed QA retry can actually consume semantic request_changes.
+  const validationVerdictsByIssueId = context.run.status !== "cancelled"
+    && shouldLoadValidationVerdictsForRun(context.steps, stepRuns)
     ? await loadLatestValidationVerdicts(
       db,
       stepRuns.map((stepRun) => stepRun.issueId).filter((issueId): issueId is string => Boolean(issueId)),
@@ -3499,6 +3470,18 @@ export async function syncWorkflowRunState(
     stepRuns = structuralResult.stepRuns;
   }
 
+  // [Workflow Retry] After recovery/rework passes settle, atomically schedule
+  // eligible failed steps; launch loop below dispatches immediate retries and
+  // leaves delayed retries pending for the reconciler.
+  if (context.run.status !== "cancelled") {
+    stepRuns = await applyWorkflowStepRetryPass({
+      db,
+      context,
+      stepRuns,
+      validationVerdictsByIssueId,
+    });
+  }
+
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
   if (hasFailure) {
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
@@ -3543,21 +3526,35 @@ export async function syncWorkflowRunState(
             now: new Date(),
           });
           failedIssueLessToolStep = failedIssueLessToolStep || !started;
+          if (started) {
+            await markIssueLessRetryDispatchingFromProof({
+              db,
+              workflowRunId: context.run.id,
+              stepRunId: stepRun.id,
+              observedRetryCount: stepRun.retryCount,
+              priorLastDispatchRequestId: stepRun.lastDispatchRequestId,
+              metadata: stepRun.metadata,
+            });
+          }
           continue;
         }
 
         if (stepRun.issueId) {
-          const resumeExistingIssue = stepRunNeedsWorkflowResume(stepRun);
-          await wakeExistingWorkflowStepIssue({
+          const retryMeta = readWorkflowRetryMetadata(normalizeRecord(stepRun.metadata).workflowRetry);
+          const resumeExistingIssue = stepRunNeedsWorkflowResume(stepRun) || retryMeta !== null;
+          await wakeIssueBackedRetryAndMarkDispatching({
             db,
-            run: context.run,
+            companyId: context.run.companyId,
+            workflowRunId: context.run.id,
             definition: context.definition,
+            run: context.run,
             step,
             stepRunId: stepRun.id,
             stepRunMetadata: stepRun.metadata,
             issueId: stepRun.issueId,
-            allowCompletedIssue: resumeExistingIssue,
-            allowBlockedIssue: resumeExistingIssue,
+            observedRetryCount: stepRun.retryCount,
+            resumeExistingIssue,
+            wakeExistingWorkflowStepIssue,
           });
           continue;
         }

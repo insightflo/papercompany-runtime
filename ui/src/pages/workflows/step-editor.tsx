@@ -400,14 +400,14 @@ export function StepEditor({
                 </select>
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Maximum number of retry attempts when the failure policy is retry.">Max Retries</FieldLabel>
+                <FieldLabel help="Maximum number of additional retry attempts after the initial attempt when the failure policy is retry.">Max Retries</FieldLabel>
                 <input
                   style={inputStyle}
                   type="number"
                   min={0}
                   step={1}
-                  value={step.maxRetries}
-                  placeholder={step.onFailure === "retry" ? "2" : "blank"}
+                  disabled={step.onFailure !== "retry"} value={step.maxRetries}
+                  placeholder={step.onFailure === "retry" ? "2" : "inactive"}
                   onChange={(e) => update(i, { maxRetries: e.target.value })}
                 />
               </div>
@@ -428,17 +428,17 @@ export function StepEditor({
                 <input
                   style={inputStyle}
                   type="number"
-                  min={1}
+                  min={0}
                   step={1}
-                  value={step.graphRetryDelaySeconds}
-                  placeholder="blank"
+                  value={step.graphRetryDelaySeconds} disabled={step.onFailure !== "retry"}
+                  placeholder={step.onFailure === "retry" ? "blank" : "inactive"}
                   onChange={(e) => update(i, { graphRetryDelaySeconds: e.target.value })}
                 />
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="How retry delay grows between attempts.">Retry backoff</FieldLabel>
-                <select style={selectStyle} value={step.graphRetryBackoff} onChange={(e) => update(i, { graphRetryBackoff: e.target.value })}>
-                  <option value="">none</option>
+                <select style={selectStyle} value={step.graphRetryBackoff} disabled={step.onFailure !== "retry"} onChange={(e) => update(i, { graphRetryBackoff: e.target.value })}>
+                  <option value="">Fixed (default)</option>
                   <option value="fixed">fixed</option>
                   <option value="linear">linear</option>
                   <option value="exponential">exponential</option>
@@ -447,7 +447,7 @@ export function StepEditor({
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--muted-foreground, #94a3b8)" }}>
                 <input
                   type="checkbox"
-                  checked={step.graphRetryJitter}
+                  checked={step.graphRetryJitter} disabled={step.onFailure !== "retry"}
                   onChange={(e) => update(i, { graphRetryJitter: e.target.checked })}
                 />
                 Add retry jitter

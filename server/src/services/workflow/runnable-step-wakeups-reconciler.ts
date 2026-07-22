@@ -77,6 +77,12 @@ export async function reconcileRunnableWorkflowStepWakeups(
         if (!step) continue;
         if (launchStepIds && !launchStepIds.has(step.id)) continue;
         if (!classifyStepActivation(step, predsByStepId).runnable) continue;
+        // [finding 1] The generic runnable-step wakeup reconciler must never
+        // bypass retry delay/fresh-session/idempotency. ANY workflowRetry
+        // metadata (valid waiting/dispatching, due, or malformed) is owned by
+        // the due-retry reconciler / normal DAG sync — never wake it here.
+        const rawMeta = stepRun.metadata as Record<string, unknown> | null;
+        if (rawMeta?.workflowRetry !== undefined && rawMeta.workflowRetry !== null) continue;
         if (await hasActiveHeartbeat(db, stepRun.issueId)) continue;
         if (await hasActiveWakeup(db, run.companyId, stepRun.issueId, run.id)) continue;
 

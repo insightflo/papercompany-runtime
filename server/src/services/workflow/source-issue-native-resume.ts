@@ -25,7 +25,7 @@ import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type Workfl
 import { resumeWorkflowRun } from "./workflow-store.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
-import { findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
+import { findAcceptedWorkflowResumeWakeForStep, findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts LIVE_WAKEUP_STATUSES 와 동일 집합.
 //   이슈가 이 상태의 wake 나 queued/running heartbeat 를 가지면 중복 dispatch 금지.
@@ -325,19 +325,13 @@ export async function dispatchSourceIssueNativeResume(
       stepId: step.id,
     };
   }
-  const acceptedQueueStatuses = new Set(["queued", "claimed", "deferred_issue_execution", "coalesced", "completed"]);
-  const newNativeWakes = (await db
-    .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
-    .from(agentWakeupRequests)
-    .where(and(
-      eq(agentWakeupRequests.companyId, input.companyId),
-      eq(agentWakeupRequests.issueId, input.issueId),
-      eq(agentWakeupRequests.workflowRunId, run.id),
-      eq(agentWakeupRequests.workflowStepRunId, stepRun.id),
-      eq(agentWakeupRequests.requestKind, "workflow_resume"),
-    )))
-    .filter((row) => !existingNativeWakeIds.has(row.id) && acceptedQueueStatuses.has(row.status));
-  if (!queued || newNativeWakes.length !== 1) {
+  const newNativeWakes = (await findAcceptedWorkflowResumeWakeForStep(db, {
+    companyId: input.companyId,
+    issueId: input.issueId,
+    workflowRunId: run.id,
+    workflowStepRunId: stepRun.id,
+  })).filter((row) => !existingNativeWakeIds.has(row.id));
+  if (newNativeWakes.length !== 1) {
     await restoreFailedState();
     return {
       kind: "report_only",

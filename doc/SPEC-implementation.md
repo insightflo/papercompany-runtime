@@ -145,6 +145,27 @@ condition evidence fails closed: the run fails and must never silently select th
 False branch. Topology validation rejects unlabeled IF outputs, condition sources
 that are not forward ancestors, Complete fan-out, and unsafe parallel convergence.
 
+
+## 6.4.0 Workflow Step Retry Policy
+
+Each workflow step definition may declare a retry policy via `onFailure: "retry"` and
+`maxRetries` (default 2, meaning extra attempts after the initial attempt; explicit 0
+disables generic retry). The native DAG engine implements this as a generic step-level
+retry that is distinct from QA back-edge rework, process-loss recovery, adapter fallback,
+owner override, and ordinary conditional failure/always routing. While `retryCount <
+maxRetries`, generic step retry is attempted before ordinary conditional failure/always
+successors take authority; those successors proceed only after generic retries are
+exhausted or disabled.
+
+`workflow_step_runs.retry_count` counts scheduled generic retries and is independent of
+`iteration_index` (QA rework counter). Retry delay settings (`graphRetryDelaySeconds`,
+`graphRetryBackoff`, `graphRetryJitter`) control the scheduling delay before each retry
+attempt. IF, Complete, and QA `request_changes` steps never generic-retry. Exhausted
+retries leave the step failed; existing failure routing and at most one deduped Human
+Operator report then apply. A retry in progress (waiting or dispatching) keeps the
+workflow run, and therefore the mission execution, running and suppresses terminal
+Human Operator reporting.
+
 ## 6.4.1 Mission Plan Template Catalog
 
 Every company owns a mission-plan template catalog. Company creation and the

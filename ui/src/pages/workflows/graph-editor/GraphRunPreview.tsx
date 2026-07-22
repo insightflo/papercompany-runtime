@@ -9,7 +9,7 @@ import { formatDateTime } from "../workflow-page-api.js";
 import { graphCanvasStyle, graphCanvasToolButtonStyle, graphCanvasToolGroupStyle, graphCanvasToolLabelStyle, graphCanvasViewToolDockStyle, graphCanvasViewToolLayerStyle, graphNodeStyle, graphSidebarStyle } from "./graphStyles.js";
 import { containerColor, graphEdgeColor, graphEdgeDashArray, graphEdgeDisplayLabel, type GraphCanvasPanState } from "./graphUiUtils.js";
 import { clampGraphCanvasScale } from "./WorkflowGraphEditorHelpers.js";
-
+import { GraphRunRetryStatus } from "./GraphRunRetryStatus.js";
 export function WorkflowRunGraphPreview({
   steps,
   pendingStepRunId,
@@ -35,7 +35,6 @@ export function WorkflowRunGraphPreview({
   const nodeDragRef = useRef<{ stepId: string; pointerId: number; startClientX: number; startClientY: number; startDx: number; startDy: number; moved: boolean } | null>(null);
   const suppressNodeClickRef = useRef<string | null>(null);
   if (steps.length === 0 || graph.nodes.length === 0) return null;
-
   const selectedNode = graph.nodes.find((node) => node.step.id === selectedStepId)
     ?? graph.nodes.find((node) => node.runStatus.status === "failed")
     ?? graph.nodes.find((node) => node.runStatus.status === "running")
@@ -677,6 +676,7 @@ export function WorkflowRunGraphPreview({
                       </span>
                     </div>
                   ) : null}
+                  <GraphRunRetryStatus runStatus={selectedNode.runStatus} />
                 </div>
               </div>
               <button

@@ -1,11 +1,16 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  applyStepRunsToGraphSteps,
   buildWorkflowGraphModel,
   disconnectSteps,
   insertWorkflowStepFromPalette,
-  applyStepRunsToGraphSteps,
+  updateStepAdvancedMetadata,
   type WorkflowGraphStep,
 } from "./workflow-graph";
+import { GraphInspectorPolicyAdvanced } from "./graph-editor/GraphInspectorPolicyAdvanced";
+import { jsonToSteps, stepsToJson } from "./step-draft-serialization";
 
 describe("workflow graph helpers", () => {
   it("removes a selected edge dependency and its edge metadata", () => {
@@ -62,5 +67,168 @@ describe("native control nodes in the workflow graph", () => {
       }],
     );
     expect(step?.graphRunControlOutcome).toBe("condition_true");
+  });
+});
+
+describe("workflow graph retry settings", () => {
+  it("reads default maxRetries as 2 when onFailure is retry", () => {
+    const graph = buildWorkflowGraphModel([
+      { id: "step-1", title: "Step 1", onFailure: "retry" },
+    ]);
+    const node = graph.nodes[0];
+    expect(node?.advanced?.onFailure).toBe("retry");
+    expect(node?.advanced?.maxRetries).toBe(null); // No explicit value → null (editor shows default 2)
+  });
+
+  it("reads explicit maxRetries 0", () => {
+    const graph = buildWorkflowGraphModel([
+      { id: "step-1", title: "Step 1", onFailure: "retry", maxRetries: 0 },
+    ]);
+    expect(graph.nodes[0]?.advanced?.maxRetries).toBe(0);
+  });
+
+  it("reads all backoff choices", () => {
+    for (const backoff of ["fixed", "linear", "exponential"]) {
+      const graph = buildWorkflowGraphModel([
+        { id: "step-1", onFailure: "retry", graphRetryBackoff: backoff },
+      ]);
+      expect(graph.nodes[0]?.advanced?.retryBackoff).toBe(backoff);
+    }
+  });
+
+  it("keeps a zero retry delay through advanced updates and draft serialization", () => {
+    const updated = updateStepAdvancedMetadata(
+      [{
+        id: "step-1",
+        title: "Step 1",
+        onFailure: "retry",
+        graphRetryDelaySeconds: 30,
+      }],
+      "step-1",
+      { retryDelaySeconds: 0 },
+    );
+
+    const [draft] = jsonToSteps([{
+      id: updated[0]!.id,
+      title: updated[0]!.title,
+      onFailure: updated[0]!.onFailure,
+      graphRetryDelaySeconds: updated[0]!.graphRetryDelaySeconds,
+    }]);
+    const [serialized] = stepsToJson([draft]) as Array<Record<string, unknown>>;
+
+    expect(updated[0]?.graphRetryDelaySeconds).toBe(0);
+    expect(draft?.graphRetryDelaySeconds).toBe("0");
+    expect(serialized).toMatchObject({ graphRetryDelaySeconds: 0 });
+  });
+
+  it("shows retry badge with default 2 when onFailure is retry", () => {
+    const graph = buildWorkflowGraphModel([
+      { id: "step-1", onFailure: "retry" },
+    ]);
+    expect(graph.nodes[0]?.advanced?.badges).toContain("Retry x2");
+  });
+
+  it("preserves saved retry settings when retry is inactive", () => {
+    const updated = updateStepAdvancedMetadata(
+      [{
+        id: "step-1",
+        onFailure: "retry",
+        graphRetryDelaySeconds: 0,
+        graphRetryBackoff: "linear",
+        graphRetryJitter: true,
+      }],
+      "step-1",
+      { onFailure: "skip" },
+    );
+
+    expect(updated[0]).toMatchObject({
+      onFailure: "skip",
+      graphRetryDelaySeconds: 0,
+      graphRetryBackoff: "linear",
+      graphRetryJitter: true,
+    });
+  });
+
+  it("disables inactive retry controls in the policy inspector", () => {
+    const [step] = jsonToSteps([{
+      id: "step-1",
+      title: "Step 1",
+      onFailure: "skip",
+      graphRetryDelaySeconds: 0,
+      graphRetryBackoff: "linear",
+      graphRetryJitter: true,
+    }]);
+
+    const markup = renderToStaticMarkup(createElement(GraphInspectorPolicyAdvanced, {
+      selectedStep: step!,
+      updateSelectedAdvanced: () => {},
+    }));
+
+    expect(markup).toContain("Fixed (default)");
+    expect(markup.match(/\bdisabled=""/g)).toHaveLength(3);
+  });
+});
+
+describe("workflow graph retry run status", () => {
+  it("reads retryCount and workflowRetry metadata from step runs", () => {
+    const [step] = applyStepRunsToGraphSteps(
+      [{ id: "worker", onFailure: "retry", maxRetries: 2 }] as WorkflowGraphStep[],
+      [{
+        id: "run-1",
+        stepId: "worker",
+        status: "pending",
+        retryCount: 1,
+        metadata: {
+          workflowRetry: {
+            state: "waiting",
+            retryNumber: 1,
+            maxRetries: 2,
+            nextEligibleAt: "2026-07-22T12:00:00.000Z",
+          },
+        },
+      }],
+    );
+    expect(step?.graphRunRetryCount).toBe(1);
+    expect(step?.graphRunRetryMaxRetries).toBe(2);
+    expect(step?.graphRunRetryState).toBe("waiting");
+    expect(step?.graphRunRetryNextEligibleAt).toBe("2026-07-22T12:00:00.000Z");
+  });
+
+  it("defaults retry fields to 0/empty when no retry metadata", () => {
+    const [step] = applyStepRunsToGraphSteps(
+      [{ id: "worker" }] as WorkflowGraphStep[],
+      [{ id: "run-1", stepId: "worker", status: "completed" }],
+    );
+    expect(step?.graphRunRetryCount).toBe(0);
+    expect(step?.graphRunRetryMaxRetries).toBe(0);
+    expect(step?.graphRunRetryState).toBe("");
+    expect(step?.graphRunRetryNextEligibleAt).toBe("");
+  });
+
+  it("surfaces retry state in graph model run status", () => {
+    const graph = buildWorkflowGraphModel(
+      applyStepRunsToGraphSteps(
+        [{ id: "worker", onFailure: "retry", maxRetries: 3 }] as WorkflowGraphStep[],
+        [{
+          id: "run-1",
+          stepId: "worker",
+          status: "pending",
+          retryCount: 2,
+          metadata: {
+            workflowRetry: {
+              state: "dispatching",
+              retryNumber: 2,
+              maxRetries: 3,
+              nextEligibleAt: "2026-07-22T12:00:00.000Z",
+            },
+          },
+        }],
+      ),
+    );
+    const runStatus = graph.nodes[0]?.runStatus;
+    expect(runStatus?.retryCount).toBe(2);
+    expect(runStatus?.retryMaxRetries).toBe(3);
+    expect(runStatus?.retryState).toBe("dispatching");
+    expect(runStatus?.retryNextEligibleAt).toBe("2026-07-22T12:00:00.000Z");
   });
 });
