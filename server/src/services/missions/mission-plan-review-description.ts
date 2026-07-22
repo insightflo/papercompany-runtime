@@ -22,10 +22,14 @@ function renderSelectedPlanTemplateLines(input: PlanQaReviewDescriptionInput): s
   if ((input.selectedPlanTemplates?.length ?? 0) === 0) return [];
   return [
     "## Selected case templates",
-    "Verify that the plan follows the applicable guidance below. The original mission request and runtime capabilities remain authoritative.",
+    "Evaluate every selected-template checklist item before deciding the verdict. The original mission request and runtime capabilities remain authoritative.",
     ...(input.selectedPlanTemplates ?? []).flatMap((template) => [
       `### ${template.name} (${template.id})`,
-      template.instructions,
+      ...template.instructions
+        .split(/\r?\n/u)
+        .map((instruction) => instruction.trim())
+        .filter(Boolean)
+        .map((instruction, index) => `- [template:${template.id}:item:${index + 1}] ${instruction}`),
     ]),
     "",
   ];
@@ -64,6 +68,7 @@ export function buildPlanQaReviewDescription(input: PlanQaReviewDescriptionInput
     "REQUEST_CHANGES only for a blocking defect that can prevent a usable result, execution, or verification.",
     "Non-blocking improvements must be listed separately as suggestions and must not trigger another planning loop.",
     "When requesting changes, identify the exact broken connection and the smallest required correction. Do not ask for a generally more detailed plan.",
+    "Return all blocking template failures together in one REQUEST_CHANGES verdict; do not stop after the first failed checklist item.",
     "",
     "Blocking defect classes:",
     "- intent_gap: a required outcome from the original request has no execution path.",

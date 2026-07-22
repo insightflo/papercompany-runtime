@@ -164,6 +164,13 @@ invalid selections, and records selection source plus template ID, key, and
 content hash in the mission plan refs. PLAN-QA receives the resolved template
 bodies so it can review the plan against the selected guidance.
 
+PLAN-QA uses the runnable semantic QA assignee selected by the plan instead of
+choosing a separate reviewer by role. If that assignee enters an error state
+while PLAN-QA is pending, the server preserves the accepted plan and reselects
+only the unavailable QA unit from the current runnable candidate roster. Each
+selected template body is rendered as a stable, itemized checklist; PLAN-QA
+must evaluate every item and return all blocking failures in one verdict.
+
 ## 6.5 Cross-Company Mission Delegation
 
 Cross-company collaboration is mission-scoped, not issue-mirror scoped. A source
