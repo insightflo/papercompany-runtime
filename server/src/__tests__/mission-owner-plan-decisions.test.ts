@@ -14,6 +14,7 @@ import {
   issues,
   missionDelegations,
   missionPlanArtifacts,
+  missionPlanTemplates,
   missionPlanDecisionSubmissions,
   missionPlanQaVerdicts,
   missions,
@@ -2972,10 +2973,11 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     return { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId };
   }
 
-  async function postDecisionComment(opts: { companyId: string; issueId: string; authorAgentId: string; missionId: string; sourceWorkflowId: string; unitId?: string }) {
+  async function postDecisionComment(opts: { companyId: string; issueId: string; authorAgentId: string; missionId: string; sourceWorkflowId: string; unitId?: string; selectedPlanTemplateIds?: string[] }) {
     const decision = {
       ...validDecision,
       missionId: opts.missionId,
+      ...(opts.selectedPlanTemplateIds ? { selectedPlanTemplateIds: opts.selectedPlanTemplateIds } : {}),
       selectedExecutionUnits: [{
         id: opts.unitId ?? "unit-1",
         kind: "workflow_definition_step",
@@ -3048,6 +3050,40 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       planningIssueId,
     }));
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
+  });
+
+  it("records an explicit agent template selection and gives its exact body to PLAN-QA", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
+    const templateId = randomUUID();
+    await db.insert(missionPlanTemplates).values({
+      id: templateId,
+      companyId,
+      key: "custom-test-template",
+      name: "Custom test template",
+      selectionDescription: "Use for this test mission.",
+      instructions: "EXACT SELECTED TEMPLATE BODY",
+      origin: "custom",
+      enabled: true,
+    });
+    await postDecisionComment({
+      companyId,
+      issueId: planningIssueId,
+      authorAgentId: ownerAgentId,
+      missionId,
+      sourceWorkflowId,
+      selectedPlanTemplateIds: [templateId],
+    });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_pending");
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
+    expect((plan?.refs as Record<string, unknown>).planTemplates).toMatchObject({
+      selectionSource: "agent",
+      items: [{ id: templateId, key: "custom-test-template" }],
+    });
+    const [planQaIssue] = await db.select({ description: issues.description }).from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "mission_plan_qa")));
+    expect(planQaIssue?.description).toContain("EXACT SELECTED TEMPLATE BODY");
   });
 
   it("plan-QA gate: accepts a revised owner decision posted on the existing PLAN-QA issue and ignores stale prior verdicts", async () => {
