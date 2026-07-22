@@ -447,12 +447,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             init: Object.keys(serializedInit).length > 0 ? serializedInit : undefined,
           });
 
-          // Reconstruct a Response-like object from the serialized result
-          return new Response(result.body, {
-            status: result.status,
-            statusText: result.statusText,
-            headers: result.headers,
-          });
+          return reconstructHttpResponse(result);
         },
       },
 
@@ -1251,4 +1246,20 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       cleanup();
     },
   };
+}
+
+export function reconstructHttpResponse(result: {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: string;
+}): Response {
+  const body = result.status === 204 || result.status === 205 || result.status === 304
+    ? null
+    : result.body;
+  return new Response(body, {
+    status: result.status,
+    statusText: result.statusText,
+    headers: result.headers,
+  });
 }

@@ -9,7 +9,10 @@ import {
   parseMessage,
   serializeMessage,
 } from "../../../packages/plugins/sdk/src/protocol.js";
-import { runWorker } from "../../../packages/plugins/sdk/src/worker-rpc-host.js";
+import {
+  reconstructHttpResponse,
+  runWorker,
+} from "../../../packages/plugins/sdk/src/worker-rpc-host.js";
 
 const manifest = {
   id: "paperclipai.rpc-status-test",
@@ -185,5 +188,19 @@ describe("plugin SDK RPC issues.create status forwarding", () => {
     expect(seenStatuses).toEqual(["blocked"]);
 
     await sendRequest("shutdown", null);
+  });
+});
+
+describe("plugin SDK RPC HTTP response reconstruction", () => {
+  it("reconstructs a bodyless 204 response without throwing", async () => {
+    const response = reconstructHttpResponse({
+      status: 204,
+      statusText: "No Content",
+      headers: {},
+      body: "",
+    });
+
+    expect(response.status).toBe(204);
+    await expect(response.text()).resolves.toBe("");
   });
 });
