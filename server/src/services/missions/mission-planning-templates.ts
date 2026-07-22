@@ -1,9 +1,17 @@
 import type { MissionExecutionCandidate } from "./mission-execution-candidates.js";
 
 export type MissionPlanningTemplateInput = {
-  readonly title: string;
-  readonly description: string | null;
+  readonly title?: string;
+  readonly description?: string | null;
   readonly candidates?: readonly MissionExecutionCandidate[];
+  readonly catalog?: readonly MissionPlanningTemplateCatalogItem[];
+};
+
+export type MissionPlanningTemplateCatalogItem = {
+  readonly id: string;
+  readonly name: string;
+  readonly selectionDescription: string;
+  readonly instructions?: string;
 };
 
 const PUBLISH_TOOL = "manual-onboarding-publish";
@@ -22,7 +30,7 @@ function hasToken(text: string, tokens: readonly string[]): boolean {
 }
 
 function combineText(input: MissionPlanningTemplateInput): string {
-  return `${input.title}\n${input.description ?? ""}`;
+  return `${input.title ?? ""}\n${input.description ?? ""}`;
 }
 
 function grantedTools(input: MissionPlanningTemplateInput): string[] {
@@ -98,80 +106,32 @@ function generalTemplateLines(): string[] {
   ];
 }
 
-function researchReportLines(grantedResearchTools: readonly string[]): string[] {
-  const toolList = grantedResearchTools.length > 0
-    ? grantedResearchTools.map((name) => `\`${name}\``).join(", ")
-    : "";
-  return [
-    "## Case template: research and report",
-    "When the mission outcome requires new findings before producing the deliverable:",
-    "- Split source gathering from writing: one unit runs the research tool, downstream units consume its `workProductPath`.",
-    "- Declare coverage explicitly: list independent queries or domains as separate units rather than one vague search task.",
-    "- The research unit is an ACTION producer (`graphWorkProductRequired: true`) when its output is consumed downstream.",
-    toolList ? `- Granted research-capable tools in this roster: ${toolList}. Reference one only on the unit whose assignee holds the grant.` : "- No research-capable tool is granted in this roster; do not invent one.",
-  ];
-}
-
-function durableFileCreationLines(): string[] {
-  return [
-    "## Case template: durable file creation",
-    "When the mission produces a durable work-product unit (document, PDF, authored artifact):",
-    "- The producer unit must set `graphWorkProductRequired: true` and declare the workProduct path as its `expectedOutput`.",
-    "- Place a producer -> artifact QA -> final outcome review chain; do not collapse authoring and review into one unit.",
-    "- Reference the artifact by `{$steps.<producer-unit-id>.workProductPath}` from downstream units.",
-  ];
-}
-
-function manualOnboardingLines(): string[] {
-  return [
-    "## Case template: manual-onboarding publish and verify",
-    "When the mission must deliver through manual onboarding and both tools are granted:",
-    "- Assign `manual-onboarding-publish` to one unit (the publisher) and `manual-onboarding-verify` to a downstream unit that depends on it.",
-    "- The verify unit must consume the registered publish result via `toolArgs.publishResultPath: \"{$steps.<publish-unit-id>.workProductPath}\"`.",
-    "- Never substitute a direct curl, guessed URL, or hard-coded destination for the registered publish result reference.",
-  ];
-}
-
-function structuralLines(grantedValidatorTools: readonly string[]): string[] {
-  const toolList = grantedValidatorTools.length > 0
-    ? grantedValidatorTools.map((name) => `\`${name}\``).join(", ")
-    : "";
-  return [
-    "## Case template: structural validation gate",
-    "When a machine-checkable contract exists and a validator tool is granted, declare a structural tool unit before semantic QA.",
-    "- Structural tool unit shape: `type: \"tool\"`, `qaType: \"structural\"`, exactly one `toolName` from the roster grant, `graphWorkProductRequired: false`.",
-    "- The gate must return `data.verdict: \"pass\" | \"request_changes\"`. A missing verdict is a hard contract failure.",
-    "- Do not invent a validator, encode visible prose as structure, or enforce exact wording. Semantic concerns remain for the agent LLM QA.",
-    toolList ? `- Granted validator-like tools in this roster: ${toolList}.` : "- No validator-like tool is granted in this roster; do not invent a structural gate.",
-  ];
-}
-
 export function renderMissionPlanningTemplateLines(input: MissionPlanningTemplateInput): string[] {
-  const text = combineText(input);
-  const granted = grantedTools(input);
-
   const lines: string[] = ["## Planning templates"];
   lines.push(...generalTemplateLines());
-
-  const grantedResearchTools = findGrantedByToken(granted, RESEARCH_TOOL_TOKENS);
-  if (grantedResearchTools.length > 0 && hasToken(text, RESEARCH_MISSION_TOKENS)) {
-    lines.push("", ...researchReportLines(grantedResearchTools));
+  if ((input.catalog?.length ?? 0) > 0) {
+    lines.push("", "## Available case-template catalog");
+    for (const template of input.catalog ?? []) {
+      lines.push(`- ${template.name} — ${template.selectionDescription} (id: ${template.id})`);
+    }
   }
-
-  if (hasToken(text, DURABLE_MISSION_TOKENS)) {
-    lines.push("", ...durableFileCreationLines());
-  }
-
-  const hasPublish = granted.includes(PUBLISH_TOOL);
-  const hasVerify = granted.includes(VERIFY_TOOL);
-  if (hasPublish && hasVerify && hasToken(text, PUBLISH_MISSION_TOKENS)) {
-    lines.push("", ...manualOnboardingLines());
-  }
-
-  const grantedValidatorTools = findGrantedByToken(granted, VALIDATOR_TOOL_TOKENS);
-  if (grantedValidatorTools.length > 0 && hasToken(text, STRUCTURAL_MISSION_TOKENS)) {
-    lines.push("", ...structuralLines(grantedValidatorTools));
-  }
-
   return lines;
+}
+
+export function selectFallbackMissionPlanTemplateKeys(input: MissionPlanningTemplateInput): string[] {
+  const text = combineText(input);
+  const granted = grantedTools(input);
+  const selected: string[] = [];
+
+  if (findGrantedByToken(granted, RESEARCH_TOOL_TOKENS).length > 0 && hasToken(text, RESEARCH_MISSION_TOKENS)) {
+    selected.push("research-report-qa");
+  }
+  if (hasToken(text, DURABLE_MISSION_TOKENS)) selected.push("durable-file-review");
+  if (granted.includes(PUBLISH_TOOL) && granted.includes(VERIFY_TOOL) && hasToken(text, PUBLISH_MISSION_TOKENS)) {
+    selected.push("manual-onboarding-publish-verify");
+  }
+  if (findGrantedByToken(granted, VALIDATOR_TOOL_TOKENS).length > 0 && hasToken(text, STRUCTURAL_MISSION_TOKENS)) {
+    selected.push("structural-validation-semantic-review");
+  }
+  return selected;
 }

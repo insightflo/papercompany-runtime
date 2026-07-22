@@ -16,6 +16,7 @@ import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
+import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines } from "./mission-execution-candidates.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
@@ -434,13 +435,16 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     if (existing) return existing;
     const candidates = await listCompanyExecutionCandidates(db, mission.companyId);
     const runnableRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
+    const planTemplateCatalog = await missionPlanTemplateService(db).list(mission.companyId, { includeDisabled: false });
 
     const description = buildMissionPlanningDescription({
+      companyId: mission.companyId,
       missionId: mission.id,
       title: mission.title,
       description: mission.description,
       runnableCandidates: candidates,
       runnableRosterLines,
+      planTemplateCatalog,
     });
 
     return issueService(db).create(mission.companyId, {

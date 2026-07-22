@@ -1,4 +1,4 @@
-import { renderMissionPlanningTemplateLines } from "./mission-planning-templates.js";
+import { renderMissionPlanningTemplateLines, type MissionPlanningTemplateCatalogItem } from "./mission-planning-templates.js";
 import { renderAdaptiveQualityProfileLines } from "./mission-quality-contract.js";
 import { renderUntrustedMissionRequestLines } from "./mission-request-prompt-boundary.js";
 
@@ -10,11 +10,13 @@ export type MissionPlanningRevisionContext = {
 };
 
 export type MissionPlanningDescriptionInput = {
+  readonly companyId?: string;
   readonly missionId: string;
   readonly title: string;
   readonly description: string | null;
   readonly runnableCandidates?: readonly MissionExecutionCandidate[];
   readonly runnableRosterLines: readonly string[];
+  readonly planTemplateCatalog?: readonly MissionPlanningTemplateCatalogItem[];
   readonly revisionContext?: MissionPlanningRevisionContext;
 };
 function isPlainObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -56,6 +58,7 @@ export function buildMissionPlanningDescription(input: MissionPlanningDescriptio
   const decisionExample = {
     missionId: input.missionId,
     missionGoal: "Outcome, target user, use case, constraints, and unacceptable outcomes derived from the request",
+    selectedPlanTemplateIds: [],
     selectedExecutionUnits: [{
       id: "unit-source-1",
       kind: "mission_plan_unit",
@@ -136,10 +139,15 @@ export function buildMissionPlanningDescription(input: MissionPlanningDescriptio
     "- If a declared structural unit has zero or more than one toolName, the plan is rejected as invalid — fix it before posting the decision.",
     "",
     ...renderMissionPlanningTemplateLines({
-      title: input.title,
-      description: input.description,
-      candidates: input.runnableCandidates,
+      catalog: input.planTemplateCatalog,
     }),
+    ...(input.companyId && (input.planTemplateCatalog?.length ?? 0) > 0 ? [
+      "",
+      "Review the compact catalog above. Fetch the full body of every applicable template before finalizing the plan:",
+      ...(input.planTemplateCatalog ?? []).map((template) => `- GET /api/companies/${input.companyId}/mission-plan-templates/${template.id}`),
+      "Return the chosen IDs in `selectedPlanTemplateIds`. Return an explicit empty array when no case template applies.",
+      "Agent selection is authoritative. The server uses legacy code matching only when this field is omitted.",
+    ] : []),
     "",
     ...(input.revisionContext ? [...renderRevisionContextLines(input.revisionContext), ""] : []),
     "## Required decision comment shape",
