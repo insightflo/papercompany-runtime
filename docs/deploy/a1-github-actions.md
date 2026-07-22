@@ -1,7 +1,8 @@
 # A1 GitHub Actions Deployment
 
-This repository deploys A1 Papercompany from GitHub Actions by SSHing into the
-A1 host and running the same deploy script that can be run manually on the host.
+This repository keeps the commit verification and legacy SSH deployment path.
+Environment-specific approval and deployment orchestration belongs in the
+operator-owned Operations repository.
 
 The deployment is intentionally server-side:
 
