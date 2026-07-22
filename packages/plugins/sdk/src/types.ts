@@ -23,6 +23,8 @@ import type {
   IssueDocumentSummary,
   Agent,
   Goal,
+  Approval,
+  ApprovalType,
 } from "@paperclipai/shared";
 
 // ---------------------------------------------------------------------------
@@ -67,6 +69,8 @@ export type {
   IssueDocumentSummary,
   Agent,
   Goal,
+  Approval,
+  ApprovalType,
 } from "@paperclipai/shared";
 
 // ---------------------------------------------------------------------------
@@ -1016,6 +1020,31 @@ export interface PluginGoalsClient {
   ): Promise<Goal>;
 }
 
+/**
+ * `ctx.approvals` — create generic Human Operator approvals.
+ *
+ * Requires the `approvals.create` capability. The host records the requesting
+ * plugin id on the approval so it receives the generic `approval.decided`
+ * resolution event for its own approvals.
+ */
+export interface PluginApprovalsClient {
+  /**
+   * Create a pending generic approval. The Human Operator resolves it through
+   * the standard approvals surface. The `type` must be a supported generic
+   * approval type (e.g. `"external_automation"`).
+   *
+   * The plugin subscribes to `approval.decided` and filters by
+   * `payload.sourcePluginId === <this plugin id>` to learn the outcome.
+   */
+  create(input: {
+    companyId: string;
+    type: ApprovalType;
+    payload: Record<string, unknown>;
+    title?: string;
+    summary?: string;
+  }): Promise<Approval>;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming (worker → UI push channel)
 // ---------------------------------------------------------------------------
@@ -1114,6 +1143,8 @@ export interface PluginContext {
   /** Make outbound HTTP requests. Requires `http.outbound`. */
   http: PluginHttpClient;
 
+  /** Create generic Human Operator approvals. Requires `approvals.create`. */
+  approvals: PluginApprovalsClient;
   /** Resolve secret references. Requires `secrets.read-ref`. */
   secrets: PluginSecretsClient;
 

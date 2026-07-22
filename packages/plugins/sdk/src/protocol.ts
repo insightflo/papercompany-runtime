@@ -29,6 +29,8 @@ import type {
   IssueDocumentSummary,
   Agent,
   Goal,
+  Approval,
+  ApprovalType,
 } from "@paperclipai/shared";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
@@ -700,6 +702,17 @@ export interface WorkerToHostMethods {
       companyId: string;
     },
     result: Goal,
+  ];
+  // Approvals
+  "approvals.create": [
+    params: {
+      companyId: string;
+      type: ApprovalType;
+      payload: Record<string, unknown>;
+      title?: string;
+      summary?: string;
+    },
+    result: Approval,
   ];
 }
 

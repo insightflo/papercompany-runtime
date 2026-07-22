@@ -20,6 +20,7 @@ import {
 import { forbidden, notFound } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
+import { shouldEmitApprovalDecided, buildApprovalDecidedDetails } from "../services/approval-decision-event.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -61,6 +62,29 @@ function getApprovalDecisionActor(req: Request) {
     ...actor,
     decisionId: actor.actorType === "agent" ? `agent:${actor.actorId}` : actor.actorId,
   };
+}
+
+async function logApprovalDecidedEvent(
+  db: Db,
+  approval: { id: string; companyId: string; type: string; status: string; requestedByPluginId: string | null },
+  actor: { actorType: "agent" | "user" | "system"; actorId: string; agentId?: string | null },
+  decision: "approved" | "rejected",
+) {
+  // Only plugin-requested approvals get a resolution broadcast, and only the
+  // minimal metadata the originating plugin needs to react. The full approval
+  // payload is never included in the broadcast; the originating plugin already
+  // holds the commit identity it recorded when creating the approval.
+  if (!shouldEmitApprovalDecided(approval)) return;
+  await logActivity(db, {
+    companyId: approval.companyId,
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    agentId: actor.agentId,
+    action: "approval.decided",
+    entityType: "approval",
+    entityId: approval.id,
+    details: buildApprovalDecidedDetails(approval, decision),
+  });
 }
 
 export function approvalRoutes(db: Db) {
@@ -188,6 +212,8 @@ export function approvalRoutes(db: Db) {
         },
       });
 
+      await logApprovalDecidedEvent(db, approval, actor, "approved");
+
       if (approval.requestedByAgentId) {
         try {
           const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
@@ -280,6 +306,8 @@ export function approvalRoutes(db: Db) {
         entityId: approval.id,
         details: { type: approval.type },
       });
+
+      await logApprovalDecidedEvent(db, approval, actor, "rejected");
     }
 
     res.json(redactApprovalPayload(approval));

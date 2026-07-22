@@ -3,6 +3,7 @@ import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ExternalLink, RefreshCw, UserRoundCheck } from "lucide-react";
 import { missionsApi, type MissionHumanOperatorRequest } from "../api/missions";
+import { ExternalAutomationApprovals } from "../components/ExternalAutomationApprovals";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
@@ -107,6 +108,8 @@ export function HumanOperator() {
           <span>{error instanceof Error ? error.message : "Failed to load human operator requests."}</span>
         </div>
       )}
+
+      <ExternalAutomationApprovals />
 
       {requests.length === 0 ? (
         <EmptyState icon={UserRoundCheck} message="No open human operator requests." />
