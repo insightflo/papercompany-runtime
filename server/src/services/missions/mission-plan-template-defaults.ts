@@ -5,7 +5,9 @@ export const DEFAULT_MISSION_PLAN_TEMPLATES = [
     selectionDescription: "Use when a mission requires fresh findings or source evidence before producing a report.",
     instructions: [
       "Split source gathering from synthesis and evidence-backed QA.",
-      "Use explicit coverage for independent queries or domains instead of one vague research task.",
+      "Require explicit source breadth and depth across the distinct official documentation surfaces relevant to the mission instead of one vague research task.",
+      "Record the search for contradictory, negative, or missing evidence, including when none is found.",
+      "The synthesis must distinguish fact, inference, and uncertainty; independent QA must reject missing breadth, depth, or unaddressed skeptical findings.",
       "A research output consumed downstream is an official work product.",
     ].join("\n"),
   },
