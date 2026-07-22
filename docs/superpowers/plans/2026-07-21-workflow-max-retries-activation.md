@@ -12,16 +12,36 @@
 
 ## Delivery boundary and prerequisite
 
-This plan is intentionally deferred. Before implementation, the terminal Human Operator reporting change from `insightflo/gazua-n8n-terminal-blocker-reporting` must be merged, deployed, and verified in production. Then refresh this branch from the new `origin/main` and update only file paths that moved during that landing; do not weaken the contracts below.
+The terminal Human Operator reporting change from `insightflo/gazua-n8n-terminal-blocker-reporting` has landed, and this plan has been refreshed against its current code paths. Its deployment and production verification remain a separate release concern; do not weaken the contracts below.
 
 The implementation must not be combined with the Gazua n8n migration or the first terminal-reporting deployment. This gives production one behavioral change at a time and leaves a clean rollback boundary.
+## Current implementation status (2026-07-22)
+
+The runtime/UI retry activation work is implemented in this worktree and has focused verification evidence. Repository-wide gate verification, Codex full verification, merge, and deployment are still pending.
+
+Focused verification executed so far:
+- `pnpm test:run ui/src/pages/workflows/workflow-definition-edit-patch.test.ts ui/src/pages/workflows/graph-editor/GraphInspectorPolicyAdvanced.retry.test.tsx` — 2 files, 5 tests passed.
+- `pnpm test:run server/src/__tests__/terminal-mission-retry-exhaustion-summary.test.ts server/src/__tests__/terminal-mission-supervision-authority.test.ts server/src/__tests__/terminal-mission-issue-less-retry.integration.test.ts server/src/__tests__/terminal-mission-human-operator-alert.test.ts server/src/__tests__/terminal-mission-human-operator-alert.integration.test.ts` — 5 files, 45 tests passed.
+- `pnpm test:run server/src/__tests__/workflow-step-retry-reconciler.test.ts server/src/__tests__/workflow-step-retry-reconciler-accounting.test.ts server/src/__tests__/workflow-step-retry-reconciler-entry.integration.test.ts server/src/__tests__/workflow-step-retry-reconciler-release.test.ts` — 4 files, 13 tests passed.
+- `pnpm test:run server/src/__tests__/hybrid-qa-retry-cas.test.ts server/src/__tests__/workflow-step-retry-policy.test.ts server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts server/src/__tests__/workflow-step-retry-issue-backed.integration.test.ts server/src/__tests__/terminal-mission-retry-exhaustion-summary.test.ts` — 5 files, 47 tests passed.
+- `pnpm --filter @paperclipai/ui typecheck` — passed.
+- `pnpm --filter @paperclipai/server typecheck` — passed.
+- `git diff --check` — clean.
+
+Full gate still pending:
+- `pnpm -r typecheck`
+- `pnpm test:run`
+- `pnpm build`
+Per-task commit checkboxes remain intentionally unchecked in this worktree because this run is explicitly no-commit until review/merge.
+
+
 
 ## Fixed behavior contract
 
 - `onFailure: "retry"` is the only setting that activates generic workflow-step retries.
 - `maxRetries` means **additional attempts after the initial attempt**. An omitted value defaults to `2`, matching the current editor copy. `0` disables generic retries.
 - `workflow_step_runs.retry_count` is the number of generic retries already scheduled. Increment it exactly once in the same compare-and-set operation that resets a failed attempt to `pending`.
-- A retry is scheduled only after existing recovery has settled. Process-loss retry, adapter fallback, tool recovery, QA rework, planning recovery, owner override, and runnable failure/always branches keep their present authority.
+- A retry is scheduled only after existing recovery has settled. Process-loss retry, adapter fallback, tool recovery, QA rework, planning recovery, and owner override keep their present authority. Ordinary failure/always branches remain pending until generic retries are exhausted or disabled.
 - Native `if` and `complete` node contract failures are never retried. Structural/semantic QA `request_changes` outcomes are handled only by the existing QA rework contract and are never counted as generic retries.
 - Ordinary issue-backed `agent`/`tool` steps and issue-less `tool` steps are eligible. Unknown step types fail closed and are not retried.
 - A retry waiting for `nextEligibleAt` keeps the workflow run `running`. It is an active automatic continuation, so terminal Human Operator reporting is suppressed.
@@ -67,25 +87,17 @@ Store prior attempt summaries in `metadata.workflowRetryAttempts`, capped to the
 
 **Files:**
 - Modify only if landed code moved: `docs/superpowers/plans/2026-07-21-workflow-max-retries-activation.md`
-- Test: `server/src/__tests__/workflow-step-retry-integration.test.ts`
+- Test: `server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts`
 
-- [ ] Fetch `origin/main`, rebase `insightflo/workflow-max-retries-plan`, and confirm the worktree is clean before adding code.
-- [ ] Read the landed terminal-blocker classifier and its tests. Record its exact module path in this plan if it differs from `server/src/services/missions/terminal-workflow-blocker.ts`.
-- [ ] Add a characterization test proving current runtime behavior: a failed issue-less tool step with `onFailure: "retry", maxRetries: 2` remains failed and `retryCount` remains `0`.
-- [ ] Run the focused test and confirm it fails for the intended missing retry behavior, not fixture setup.
+- [x] Refresh this plan from current main after the terminal-reporting landing and record any moved paths before adding code.
+- [x] Read the landed terminal-blocker classifier and its tests. The landed classifier is `server/src/services/missions/terminal-mission-workflow-continuation.ts` and the reporting module is `terminal-mission-human-operator-alert.ts`. Tests: `server/src/__tests__/terminal-mission-human-operator-alert.test.ts` and `server/src/__tests__/terminal-mission-human-operator-alert.integration.test.ts`.
+- [x] Preserve characterization coverage for issue-less retry activation in `server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts`.
+- [x] Run the focused issue-less retry coverage and record the result in the current status section.
+- [ ] Historical pre-implementation failing-test commit flow is not part of the current single-worktree execution.
 
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-integration.test.ts
-```
-
-Expected: the new retry expectation fails before implementation.
-
-- [ ] Commit the failing characterization test.
 
 ```sh
-git add server/src/__tests__/workflow-step-retry-integration.test.ts
+git add server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts
 git commit -m "test: characterize dormant workflow max retries"
 ```
 
@@ -97,22 +109,13 @@ git commit -m "test: characterize dormant workflow max retries"
 - Test: `packages/shared/src/validators/workflow.test.ts`
 - Modify: `server/src/services/workflow/dag-engine.ts`
 
-- [ ] Add failing shared-validator tests for valid fixed/linear/exponential settings and invalid negative delay, fractional delay, unknown backoff, and non-boolean jitter.
-- [ ] Add the three `graphRetry*` fields to `WorkflowStepDefinition` and `workflowStepDefinitionSchema`.
-- [ ] Narrow the DAG engine's local `WorkflowStep` fields to the same literal backoff union instead of maintaining a looser duplicate contract.
-- [ ] Keep `maxRetries` non-negative with no new arbitrary upper limit; existing saved workflow definitions must continue to parse.
+- [x] Add shared-validator coverage for valid fixed/linear/exponential settings and invalid negative delay, fractional delay, unknown backoff, and non-boolean jitter.
+- [x] Add the three `graphRetry*` fields to `WorkflowStepDefinition` and `workflowStepDefinitionSchema`.
+- [x] Narrow the DAG engine's local `WorkflowStep` fields to the same literal backoff union instead of maintaining a looser duplicate contract.
+- [x] Keep `maxRetries` non-negative with no new arbitrary upper limit; existing saved workflow definitions must continue to parse.
 - [ ] Run the shared validator tests and typecheck.
-
-Run:
-
-```sh
-pnpm vitest run packages/shared/src/validators/workflow.test.ts
-pnpm --filter @paperclipai/shared typecheck
-```
-
-Expected: both commands pass.
-
 - [ ] Commit the contract change.
+
 
 ```sh
 git add packages/shared/src/types/workflow.ts packages/shared/src/validators/workflow.ts packages/shared/src/validators/workflow.test.ts server/src/services/workflow/dag-engine.ts
@@ -125,30 +128,15 @@ git commit -m "feat: define workflow retry policy contract"
 - Create: `server/src/services/workflow/retry-policy.ts`
 - Test: `server/src/__tests__/workflow-step-retry-policy.test.ts`
 
-- [ ] Write table-driven failing tests for default retry count `2`, explicit zero, exhausted count, all backoff modes, jitter boundaries, 24-hour cap, and zero-delay jitter.
-- [ ] Write exclusion tests for IF/Complete, unknown types, QA request-changes/structural failures, non-`retry` failure policies, active process-loss/fallback/rework/recovery markers, and a runnable `failure`/`always` successor.
-- [ ] Implement `normalizeWorkflowRetryPolicy(step)` returning a fully normalized policy.
-- [ ] Implement `calculateWorkflowRetryDelaySeconds(policy, retryNumber, random)` using the fixed formulas above.
-- [ ] Implement `classifyWorkflowStepRetry(input)` as a pure decision with explicit reasons:
-
-```ts
-type WorkflowStepRetryDecision =
-  | { eligible: true; retryNumber: number; maxRetries: number; delaySeconds: number }
-  | { eligible: false; reason: "disabled" | "exhausted" | "unsupported_step" | "control_node" | "qa_rework" | "recovery_active" | "failure_route_runnable" | "malformed_state" };
-```
-
-- [ ] Make malformed metadata and ambiguous recovery state fail closed with `malformed_state`/`recovery_active` rather than scheduling a retry.
-- [ ] Run the focused tests.
-
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-policy.test.ts
-```
-
-Expected: all policy cases pass without database fixtures.
-
+- [x] Write table-driven policy tests for default retry count `2`, explicit zero, exhausted count, all backoff modes, jitter boundaries, 24-hour cap, and zero-delay jitter.
+- [x] Write exclusion tests for IF/Complete, unknown types, QA request-changes/structural failures, non-`retry` failure policies, active process-loss/fallback/rework/recovery markers, and a runnable `failure`/`always` successor.
+- [x] Implement `normalizeWorkflowRetryPolicy(step)` returning a fully normalized policy.
+- [x] Implement `calculateWorkflowRetryDelaySeconds(policy, retryNumber, random)` using the fixed formulas above.
+- [x] Implement `classifyWorkflowStepRetry(input)` as a pure decision with explicit reasons:
+- [x] Make malformed metadata and ambiguous recovery state fail closed with `malformed_state`/`recovery_active` rather than scheduling a retry.
+- [x] Run the focused tests.
 - [ ] Commit the pure policy.
+
 
 ```sh
 git add server/src/services/workflow/retry-policy.ts server/src/__tests__/workflow-step-retry-policy.test.ts
@@ -159,35 +147,26 @@ git commit -m "feat: add workflow step retry policy"
 
 **Files:**
 - Create: `server/src/services/workflow/step-retry-scheduler.ts`
-- Test: `server/src/__tests__/workflow-step-retry-integration.test.ts`
-- Reference without reusing counters: `server/src/services/workflow/control-flow/step-reset.ts`
-- Reference for event idempotency: `packages/db/src/schema/workflow_transition_events.ts`
+- Test: `server/src/__tests__/workflow-step-retry-scheduler.integration.test.ts`
+- Regression: `server/src/__tests__/workflow-step-retry-scheduler-cas.test.ts`
+- Regression: `server/src/__tests__/workflow-step-retry-exhaustion-marker.test.ts`
 
-- [ ] Add failing database tests for failed-to-pending reset, `retryCount` increment, bounded attempt archive, metadata cleanup, workflow run reopening, and retry exhaustion.
-- [ ] Add a concurrency test that calls the scheduler twice against the same failed snapshot and proves one compare-and-set winner, one transition event, and one increment.
-- [ ] Implement `scheduleWorkflowStepRetry(db, input)` in one transaction:
+- [x] Add failing database tests for failed-to-pending reset, `retryCount` increment, bounded attempt archive, metadata cleanup, workflow run reopening, and retry exhaustion.
+- [x] Add a concurrency test that calls the scheduler twice against the same failed snapshot and proves one compare-and-set winner, one transition event, and one increment.
+- [x] Implement `scheduleWorkflowStepRetry(db, input)` in one transaction:
   - insert `workflowTransitionEvents.eventType = "workflow_step_retry_scheduled"` with idempotency key `workflow-step-retry:<stepRunId>:<retryNumber>`;
   - compare the observed `status`, `retryCount`, `completedAt`, and `lastDispatchRequestId` before resetting;
   - set `status = "pending"`, increment `retryCount`, clear dispatch/result fields, write bounded retry metadata, and reopen the workflow run as `running`;
   - if the compare-and-set loses, leave the row untouched and return a non-error `already_changed` result;
   - if the row update fails after the event insert, roll back the entire transaction.
-- [ ] Do not call `resetStepRunForRework`; `iterationIndex` and `retryCount` must remain independent.
-- [ ] Clear `toolResult`, `toolInvocation`, `toolQueue`, `cacheHit`, and stale control-flow skip markers while retaining unrelated safe metadata.
-- [ ] Run the integration test twice to catch idempotency leakage.
-
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-integration.test.ts
-pnpm vitest run server/src/__tests__/workflow-step-retry-integration.test.ts
-```
-
-Expected: both runs pass and create no duplicate transition records.
-
+- [x] Do not call `resetStepRunForRework`; `iterationIndex` and `retryCount` must remain independent.
+- [x] Clear `toolResult`, `toolInvocation`, `toolQueue`, `cacheHit`, and stale control-flow skip markers while retaining unrelated safe metadata.
+- [x] Run the integration test twice to catch idempotency leakage.
 - [ ] Commit the scheduler.
 
+
 ```sh
-git add server/src/services/workflow/step-retry-scheduler.ts server/src/__tests__/workflow-step-retry-integration.test.ts
+git add server/src/services/workflow/step-retry-scheduler.ts server/src/__tests__/workflow-step-retry-scheduler.integration.test.ts
 git commit -m "feat: schedule workflow retries atomically"
 ```
 
@@ -196,29 +175,21 @@ git commit -m "feat: schedule workflow retries atomically"
 **Files:**
 - Modify: `server/src/services/workflow/dag-engine.ts`
 - Modify: `server/src/services/workflow/step-retry-scheduler.ts`
-- Test: `server/src/__tests__/workflow-step-retry-integration.test.ts`
+- Test: `server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts`
 - Regression: `server/src/__tests__/hybrid-qa-retry-cas.test.ts`
 
-- [ ] Add failing tests for an issue-less tool failure scheduling retry 1, immediate redispatch with a new request ID, success on retry, and final failure after the configured count.
-- [ ] Add a stale callback regression: a callback from attempt 0 cannot complete attempt 1 after dispatch state has been cleared and replaced.
-- [ ] Call the scheduler only after `completeWorkflowToolStepFromResult` has applied structural-gate and existing recovery decisions.
-- [ ] For delay `0`, let normal `syncWorkflowRunState` dispatch the new pending attempt immediately.
-- [ ] For a future `nextEligibleAt`, keep the step pending without calling `startIssueLessToolStepRun`.
-- [ ] Preserve the public manual `retryIssueLessToolWorkflowStep` route as an explicit Human/Owner recovery action; do not silently count that existing manual action against `maxRetries` in this change.
-- [ ] Run focused issue-less and QA regression tests.
-
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-integration.test.ts server/src/__tests__/hybrid-qa-retry-cas.test.ts
-```
-
-Expected: both files pass; QA rework behavior is unchanged.
-
+- [x] Add failing tests for an issue-less tool failure scheduling retry 1, immediate redispatch with a new request ID, success on retry, and final failure after the configured count.
+- [x] Add a stale callback regression: a callback from attempt 0 cannot complete attempt 1 after dispatch state has been cleared and replaced.
+- [x] Call the scheduler only after `completeWorkflowToolStepFromResult` has applied structural-gate and existing recovery decisions.
+- [x] For delay `0`, let normal `syncWorkflowRunState` dispatch the new pending attempt immediately.
+- [x] For a future `nextEligibleAt`, keep the step pending without calling `startIssueLessToolStepRun`.
+- [x] Preserve the public manual `retryIssueLessToolWorkflowStep` route as an explicit Human/Owner recovery action; do not silently count that existing manual action against `maxRetries` in this change.
+- [x] Run focused issue-less and QA regression tests.
 - [ ] Commit the issue-less integration.
 
+
 ```sh
-git add server/src/services/workflow/dag-engine.ts server/src/services/workflow/step-retry-scheduler.ts server/src/__tests__/workflow-step-retry-integration.test.ts
+git add server/src/services/workflow/dag-engine.ts server/src/services/workflow/step-retry-scheduler.ts server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts
 git commit -m "feat: retry failed workflow tool steps"
 ```
 
@@ -227,38 +198,20 @@ git commit -m "feat: retry failed workflow tool steps"
 **Files:**
 - Modify: `server/src/services/workflow/dag-engine.ts`
 - Modify: `server/src/services/workflow/step-retry-scheduler.ts`
-- Test: `server/src/__tests__/workflow-step-retry-integration.test.ts`
-- Regression: `server/src/__tests__/workflow-resume-wake.test.ts`
+- Test: `server/src/__tests__/workflow-step-retry-issue-backed.integration.test.ts`
+- Regression: `server/src/__tests__/workflow-step-retry-recovery-guard.test.ts`
 
-- [ ] Add failing tests for a failed linked issue becoming a pending retry, reuse of the same issue, a fresh session, and exactly one `workflow_resume` wake request.
-- [ ] After the scheduler wins, call `wakeExistingWorkflowStepIssue` with:
-
-```ts
-{
-  allowCompletedIssue: true,
-  allowBlockedIssue: true,
-  forceFreshSession: true,
-  idempotencyKey: `workflow-step-retry:${stepRun.id}:${retryNumber}`,
-}
-```
-
-- [ ] Do not update the issue status directly. Keep assignment restoration, structural readiness, wake queueing, and activity logging inside the existing wake helper.
-- [ ] If the immediate wake is rejected, keep the retry pending and let reconciliation decide whether it can be released later; do not consume another retry count.
-- [ ] Prove that a failure edge which is already runnable suppresses generic retry and proceeds through the existing branch.
-- [ ] Run the focused tests.
-
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-integration.test.ts server/src/__tests__/workflow-resume-wake.test.ts
-```
-
-Expected: both files pass and no duplicate wake is created.
-
+- [x] Add failing tests for a failed linked issue becoming a pending retry, reuse of the same issue, a fresh session, and exactly one `workflow_resume` wake request.
+- [x] After the scheduler wins, call `wakeExistingWorkflowStepIssue` with:
+- [x] Do not update the issue status directly. Keep assignment restoration, structural readiness, wake queueing, and activity logging inside the existing wake helper.
+- [x] If the immediate wake is rejected, keep the retry pending and let reconciliation decide whether it can be released later; do not consume another retry count.
+- [x] Prove that ordinary failure/always successors stay pending through retry attempts and launch only after retry exhaustion.
+- [x] Run the focused tests.
 - [ ] Commit the issue-backed integration.
 
+
 ```sh
-git add server/src/services/workflow/dag-engine.ts server/src/services/workflow/step-retry-scheduler.ts server/src/__tests__/workflow-step-retry-integration.test.ts
+git add server/src/services/workflow/dag-engine.ts server/src/services/workflow/step-retry-scheduler.ts server/src/__tests__/workflow-step-retry-issue-backed.integration.test.ts
 git commit -m "feat: retry issue backed workflow steps"
 ```
 
@@ -270,26 +223,18 @@ git commit -m "feat: retry issue backed workflow steps"
 - Modify: `server/src/services/workflow/runnable-step-wakeups-reconciler.ts`
 - Modify: `server/src/services/workflow/dag-engine.ts`
 - Test: `server/src/__tests__/workflow-step-retry-reconciler.test.ts`
-- Regression: `server/src/__tests__/workflow-dag-engine.test.ts`
+- Regression: `server/src/__tests__/workflow-step-retry-reconciler-accounting.test.ts`
 
-- [ ] Add clock-controlled failing tests for future retry suppression, due retry release, immediate retry, duplicate reconciliation, and malformed retry metadata.
-- [ ] Implement `reconcileDueWorkflowStepRetries(db, now)` and invoke it before the generic runnable-step wakeup reconciler.
-- [ ] Make every launch path consult `isWorkflowRetryDue(stepRun, now)`. A future retry may not be started merely because its status is `pending`.
-- [ ] Ensure the existing runnable-step reconciler does not bypass the delay and does not require a retry to be older than its normal five-minute settling cutoff once it is due.
-- [ ] Treat a valid future retry as live work in the stuck/deadlock reconcilers so they do not mark the run failed or skip its pending step.
-- [ ] On due issue-less retries, call normal workflow sync. On due issue-backed retries, use `wakeExistingWorkflowStepIssue` with the deterministic retry idempotency key.
-- [ ] On malformed retry metadata, do not launch. Record a bounded reconciliation failure and leave terminal reporting to re-evaluate the now-unrecoverable state.
-- [ ] Run retry and existing reconciler tests.
-
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-reconciler.test.ts server/src/__tests__/workflow-dag-engine.test.ts
-```
-
-Expected: delayed retries release once, and existing deadlock/runnable recovery remains green.
-
+- [x] Add clock-controlled failing tests for future retry suppression, due retry release, immediate retry, duplicate reconciliation, and malformed retry metadata.
+- [x] Implement `reconcileDueWorkflowStepRetries(db, now)` and invoke it before the generic runnable-step wakeup reconciler.
+- [x] Make every launch path consult `isWorkflowRetryDue(stepRun, now)`. A future retry may not be started merely because its status is `pending`.
+- [x] Ensure the existing runnable-step reconciler does not bypass the delay and does not require a retry to be older than its normal five-minute settling cutoff once it is due.
+- [x] Treat a valid future retry as live work in the stuck/deadlock reconcilers so they do not mark the run failed or skip its pending step.
+- [x] On due issue-less retries, call normal workflow sync. On due issue-backed retries, use `wakeExistingWorkflowStepIssue` with the deterministic retry idempotency key.
+- [x] On malformed retry metadata, do not launch. Record a bounded reconciliation failure and leave terminal reporting to re-evaluate the now-unrecoverable state.
+- [x] Run retry and existing reconciler tests.
 - [ ] Commit reconciliation support.
+
 
 ```sh
 git add server/src/services/workflow/retry-reconciler.ts server/src/services/workflow/reconciler.ts server/src/services/workflow/runnable-step-wakeups-reconciler.ts server/src/services/workflow/dag-engine.ts server/src/__tests__/workflow-step-retry-reconciler.test.ts server/src/__tests__/workflow-dag-engine.test.ts
@@ -299,30 +244,22 @@ git commit -m "feat: reconcile delayed workflow retries"
 ## Task 7: Interlock retry liveness with Human Operator reporting
 
 **Files:**
-- Modify landed classifier path, expected: `server/src/services/missions/terminal-workflow-blocker.ts`
-- Modify its landed test file, expected: `server/src/__tests__/terminal-workflow-blocker.test.ts`
-- Test: `server/src/__tests__/workflow-step-retry-integration.test.ts`
+- Modify: `server/src/services/missions/terminal-mission-human-operator-alert.ts`
+- Modify: `server/src/__tests__/terminal-mission-human-operator-alert.test.ts`
+- Test: `server/src/__tests__/terminal-mission-human-operator-alert.integration.test.ts`, `server/src/__tests__/terminal-mission-issue-less-retry.integration.test.ts`, `server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts`, `server/src/__tests__/workflow-step-retry-issue-backed.integration.test.ts`, and `server/src/__tests__/workflow-step-retry-reconciler.test.ts`
 
-- [ ] Add failing tests proving no Human Operator event while a retry is immediate, delayed, dispatching, or recoverably pending.
-- [ ] Add tests proving one report after the last configured retry fails and no fallback, rework, recovery action, or conditional continuation remains.
-- [ ] Add a malformed retry-state test. The classifier must distinguish “known live retry” from malformed metadata; malformed state cannot be treated as live forever.
-- [ ] Teach the terminal classifier to read retry liveness through the shared retry-policy helper rather than duplicating max-count arithmetic.
-- [ ] Keep the landed idempotency contract: repeated sync/supervision after exhaustion reuses the same owner-action issue/comment/event.
-- [ ] Ensure the report summary includes bounded `attempts: initial + retryCount` and `maxRetries`, but no raw result/error payload.
-- [ ] Run terminal-reporting and retry integration tests together.
-
-Run:
-
-```sh
-pnpm vitest run server/src/__tests__/terminal-workflow-blocker.test.ts server/src/__tests__/workflow-step-retry-integration.test.ts server/src/__tests__/human-operator-alert-events.test.ts
-```
-
-Expected: no transient report; exactly one exhausted report.
-
+- [x] Add retry-liveness coverage proving no Human Operator event while a retry is immediate, delayed, dispatching, or recoverably pending.
+- [x] Add coverage proving one report after the last configured retry fails and no fallback, rework, recovery action, or conditional continuation remains.
+- [x] Add malformed/inconsistent retry-state coverage. The classifier distinguishes “known live retry” from malformed metadata; malformed state cannot be treated as live forever.
+- [x] Teach the terminal classifier to read retry liveness through the shared retry-policy helper rather than duplicating max-count arithmetic.
+- [x] Keep the landed idempotency contract: repeated sync/supervision after exhaustion reuses the same owner-action issue/comment/event.
+- [x] Ensure the report summary includes bounded `attempts: initial + retryCount` and `maxRetries`, but no raw result/error payload.
+- [x] Run terminal-reporting and retry integration tests together.
 - [ ] Commit the reporting interlock.
 
+
 ```sh
-git add server/src/services/missions/terminal-workflow-blocker.ts server/src/__tests__/terminal-workflow-blocker.test.ts server/src/__tests__/workflow-step-retry-integration.test.ts
+git add server/src/services/missions/terminal-mission-human-operator-alert.ts server/src/services/missions/terminal-mission-retry-summary.ts server/src/__tests__/terminal-mission-human-operator-alert.test.ts server/src/__tests__/terminal-mission-retry-interlock.test.ts server/src/__tests__/terminal-mission-retry-exhaustion-summary.test.ts server/src/__tests__/terminal-mission-human-operator-alert.integration.test.ts server/src/__tests__/terminal-mission-issue-less-retry.integration.test.ts server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts server/src/__tests__/workflow-step-retry-issue-backed.integration.test.ts server/src/__tests__/workflow-step-retry-reconciler.test.ts
 git commit -m "feat: report exhausted workflow retries"
 ```
 
@@ -335,15 +272,16 @@ git commit -m "feat: report exhausted workflow retries"
 - Modify: `ui/src/pages/workflows/step-editor.tsx`
 - Modify: `ui/src/pages/workflows/graph-editor/GraphRunPreview.tsx`
 - Test: `ui/src/pages/workflows/workflow-graph.test.ts`
-- Test the nearest existing Graph inspector/run-preview test files discovered with `rg --files ui/src | rg 'GraphInspector|GraphRunPreview|workflow-graph.*test'`.
+- Regression: `ui/src/pages/workflows/graph-editor/GraphInspectorPolicyAdvanced.retry.test.tsx`
+- Regression: `ui/src/pages/workflows/workflow-definition-edit-patch.test.ts`
 
-- [ ] Add UI tests for default two retries, explicit zero, all backoff choices, delay zero, and serialization round-trip.
-- [ ] Change retry delay inputs from `min={1}` to `min={0}` so the editor matches the runtime contract.
-- [ ] Disable or visually mark delay/backoff/jitter controls as inactive unless `onFailure === "retry"`; preserve their saved values when temporarily inactive.
-- [ ] Display `attempt N of M` and `retry scheduled at <time>` from `retryCount` and bounded `workflowRetry` metadata in run preview/details.
-- [ ] Remove any copy that implies retries are active for non-`retry` failure policies.
-- [ ] Keep the existing “default 2” wording and make clear that `maxRetries` excludes the initial attempt.
-- [ ] Run focused UI tests and typecheck.
+- [x] Add UI tests for default two retries, explicit zero, all backoff choices, delay zero, and serialization round-trip.
+- [x] Change retry delay inputs from `min={1}` to `min={0}` so the editor matches the runtime contract.
+- [x] Disable or visually mark delay/backoff/jitter controls as inactive unless `onFailure === "retry"`; preserve their saved values when temporarily inactive.
+- [x] Display `attempt N of M` and `retry scheduled at <time>` from `retryCount` and bounded `workflowRetry` metadata in run preview/details.
+- [x] Remove any copy that implies retries are active for non-`retry` failure policies.
+- [x] Keep the existing “default 2” wording and make clear that `maxRetries` excludes the initial attempt.
+- [x] Run focused UI tests and typecheck.
 
 Run:
 
@@ -368,10 +306,10 @@ git commit -m "feat: show native workflow retry state"
 - Modify: `doc/SPEC-implementation.md`
 - Modify: `doc/DEVELOPING.md` only if operator commands or reconciliation behavior need documentation.
 
-- [ ] Replace the statement that `retry_count`, `onFailure`, and `maxRetries` are dead/type-only with the exact active semantics and exclusions above.
-- [ ] Document that retry count and QA iteration count are independent.
-- [ ] Document Human Operator reporting only after automatic retry exhaustion.
-- [ ] Search for stale editor/runtime claims and update only the impacted text.
+- [x] Replace the statement that `retry_count`, `onFailure`, and `maxRetries` are dead/type-only with the exact active semantics and exclusions above.
+- [x] Document that retry count and QA iteration count are independent.
+- [x] Document Human Operator reporting only after automatic retry exhaustion.
+- [x] Search for stale editor/runtime claims and update only the impacted text.
 
 Run:
 
@@ -393,10 +331,10 @@ git commit -m "docs: define workflow retry semantics"
 **Files:**
 - No new feature files. Fix only regressions caused by this branch.
 
-- [ ] Run focused retry/reporting tests first.
+- [ ] Run focused retry/reporting tests first. Focused subsets above are green; the final combined gate command below is still pending.
 
 ```sh
-pnpm vitest run server/src/__tests__/workflow-step-retry-policy.test.ts server/src/__tests__/workflow-step-retry-integration.test.ts server/src/__tests__/workflow-step-retry-reconciler.test.ts server/src/__tests__/terminal-workflow-blocker.test.ts
+pnpm vitest run server/src/__tests__/workflow-step-retry-*.test.ts server/src/__tests__/workflow-step-retry-*.integration.test.ts server/src/__tests__/hybrid-qa-retry-cas.test.ts server/src/__tests__/terminal-mission-human-operator-alert.test.ts server/src/__tests__/terminal-mission-retry-interlock.test.ts server/src/__tests__/terminal-mission-retry-exhaustion-summary.test.ts server/src/__tests__/terminal-mission-human-operator-alert.integration.test.ts server/src/__tests__/terminal-mission-issue-less-retry.integration.test.ts
 ```
 
 - [ ] Run the repository handoff gate.
@@ -409,7 +347,7 @@ pnpm build
 
 Expected: all commands pass. If the repository has a pre-existing unrelated failure, capture the exact failing test and prove all focused tests, typecheck, and build are green before requesting a merge decision.
 
-- [ ] Run `git diff --check` and inspect the final diff for unintended schema, migration, Gazua, or secret changes.
+- [x] Run `git diff --check` and inspect the final diff for unintended schema, migration, Gazua, or secret changes.
 - [ ] Deploy through the existing runtime deployment workflow only after review and merge.
 - [ ] Verify the deployment job completes and the production health endpoint returns healthy.
 - [ ] Run a controlled canary workflow with `onFailure: retry`, `maxRetries: 1`, and a test tool that fails once then succeeds. Verify two total attempts, `retryCount = 1`, no Human Operator report, and downstream continuation.
@@ -421,9 +359,9 @@ Expected: all commands pass. If the repository has a pre-existing unrelated fail
 - [ ] `maxRetries` counts retries, not total attempts.
 - [ ] `retryCount` increments once per scheduled generic retry and never for QA iteration or the existing explicit owner retry action.
 - [ ] Existing retry/fallback/rework mechanisms execute before generic workflow retry eligibility is decided.
-- [ ] Failure/always branches are not masked by retry.
+- [ ] Ordinary failure/always branches launch only after generic retries are exhausted or disabled.
 - [ ] IF/Complete and semantic QA failures are excluded.
 - [ ] Delayed retries cannot be dispatched early by any sync or reconciler path.
 - [ ] A retry in progress suppresses Human Operator reporting; exhaustion enables exactly one report.
 - [ ] Error/audit metadata is bounded and contains no raw payloads or secrets.
-- [ ] The full verification gate and two production canaries have evidence before completion is claimed.
+- [ ] The full verification gate, Codex full verification, merge/deploy, and two production canaries have evidence before completion is claimed.

@@ -1,7 +1,5 @@
 // server/src/services/missions/supervision.ts
 //
-// [파일 목적] mission owner supervision(감독/회복) 본체. runMainExecutorSupervision(1100+줄) +
-//   runActiveMissionOwnerSupervision. missions.ts 클로저 분해(P3).
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
 import { agentWakeupRequests, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
@@ -31,6 +29,7 @@ import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOw
 import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { buildNativeToolStepRecoveryResultAppliedMarker, hasNativeToolStepRecoveryResultAppliedMarker, resolveNativeToolStepRecoveryResult } from "./tool-step-recovery-result.js";
+import { issueLessToolRecoveryOwnsFailure } from "./tool-step-recovery-authority.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue, type MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
@@ -45,33 +44,12 @@ import {
   TERMINAL_FAILURE_RUN_STATUSES,
   classifyTerminalMissionContinuation,
   emitTerminalMissionHumanOperatorReport,
+  summarizeWorkflowRetryExhaustion,
 } from "./terminal-mission-human-operator-alert.js";
 import { loadTerminalValidationVerdicts } from "./terminal-mission-workflow-continuation.js";
+import { selectTerminalWorkflowAuthoritySource } from "./terminal-mission-authority-source.js";
+export { selectTerminalWorkflowAuthoritySource };
 
-type ToolStepFailureEvidenceRow = {
-  readonly startedAt: Date | null;
-  readonly lastDispatchAttemptAt: Date | null;
-  readonly lastDispatchAcceptedAt: Date | null;
-  readonly lastDispatchErrorAt: Date | null;
-  readonly lastDispatchRequestId: string | null;
-  readonly metadata: unknown;
-};
-
-function hasToolStepFailureExecutionEvidence(stepRun: ToolStepFailureEvidenceRow): boolean {
-  if (
-    stepRun.startedAt
-    || stepRun.lastDispatchAttemptAt
-    || stepRun.lastDispatchAcceptedAt
-    || stepRun.lastDispatchErrorAt
-    || trimmedString(stepRun.lastDispatchRequestId)
-  ) {
-    return true;
-  }
-  const metadata = asRecord(stepRun.metadata);
-  return Object.keys(asRecord(metadata.toolInvocation)).length > 0
-    || Object.keys(asRecord(metadata.toolResult)).length > 0
-    || Object.keys(asRecord(metadata.retentionDeleted)).length > 0;
-}
 // [D cap-override authority] owner-action issue 의 latest recognized decision(createdAt,id DESC 첫 parsed)
 //   만 권위. 그 decision 이 retry_source_issue 일 때만 ID 전달. newer replan/escalate/invalid decision 이
 //   먼저면 stale retry 를 건너뛰지 않고 null → cap-override wake 금지.
@@ -424,6 +402,12 @@ export function createSupervision({ db, deps, ownerActions }: {
         return;
       }
       try {
+        const retrySummary = summarizeWorkflowRetryExhaustion(
+          input.group.workflowStepRows.map((row) => ({
+            status: row.stepRun.status,
+            metadata: row.stepRun.metadata,
+          })),
+        );
         const emitted = await emitTerminalMissionHumanOperatorReport(db, {
           expectedCompanyId: ownerAction.companyId,
           expectedMissionId: ownerAction.missionId ?? "",
@@ -440,6 +424,8 @@ export function createSupervision({ db, deps, ownerActions }: {
           sourceIssueIdentifier: input.group.sourceIssue?.identifier ?? null,
           workflowRunId: input.group.workflowRunId,
           failedRuns: input.group.failedRuns,
+          retryAttempts: retrySummary?.retryAttempts ?? null,
+          retryMaxRetries: retrySummary?.retryMaxRetries ?? null,
         });
         if (emitted.emitted) {
           findings.push(`terminal_mission_human_operator_request_emitted: ${ownerAction.identifier ?? ownerAction.id} terminal snapshot of ${input.group.failedRuns.length} failed run(s); no executable continuation remains`);
@@ -1936,27 +1922,20 @@ export function createSupervision({ db, deps, ownerActions }: {
     for (const [workflowRunId, workflowStepRows] of [...failedWorkflowRowsByRunId.entries()].sort(([left], [right]) => left.localeCompare(right))) {
       if (hasMissionLevelRecoveryReport || workflowRunIdsAlreadyReportedByRecovery.has(workflowRunId)) continue;
       if (qaCapPendingWorkflowRunIds.has(workflowRunId) && !qaCapOwnerActionByWorkflowRunId.has(workflowRunId)) continue;
-
-      const steps = Array.isArray(workflowStepRows[0]?.definition.stepsJson)
-        ? workflowStepRows[0]!.definition.stepsJson as WorkflowStep[]
-        : [];
-      const sourceCandidates = workflowStepRows
-        .filter((row) => row.stepRun.status === "failed" && row.stepRun.issueId)
-        .map((row) => ({
-          issue: missionIssueById.get(row.stepRun.issueId!) ?? null,
-          qaLike: isQaLikeStep(steps.find((step) => step.id === row.stepRun.stepId) ?? { id: row.stepRun.stepId, name: row.stepRun.stepId }),
-        }))
-        .filter((candidate): candidate is { issue: MissionSupervisionIssue; qaLike: boolean } => Boolean(candidate.issue))
-        .sort((left, right) => Number(right.qaLike) - Number(left.qaLike) || left.issue.id.localeCompare(right.issue.id));
-      const sourceIssue = sourceCandidates[0]?.issue ?? workflowStepRows
-        .map((row) => row.stepRun.issueId ? missionIssueById.get(row.stepRun.issueId) ?? null : null)
-        .find((issue): issue is MissionSupervisionIssue => Boolean(issue))
-        ?? null;
-      if (!sourceIssue) {
-        findings.push(`terminal_mission_human_operator_request_suppressed: workflow run=${workflowRunId}; continuation authority uncertain (no linked source issue)`);
+      if (workflowStepRows.some(issueLessToolRecoveryOwnsFailure)) {
+        findings.push(`terminal_mission_human_operator_request_suppressed: workflow run=${workflowRunId}; issue-less tool recovery authority remains with manual recovery owner action`);
         continue;
       }
 
+      const sourceIssue = selectTerminalWorkflowAuthoritySource({
+        missionIssues,
+        missionIssueById,
+        workflowStepRows,
+      });
+      if (!sourceIssue) {
+        findings.push(`terminal_mission_human_operator_request_suppressed: workflow run=${workflowRunId}; continuation authority uncertain (no company+mission scoped source/main-executor issue)`);
+        continue;
+      }
       await tryEmitTerminalReport({
         ownerAction: qaCapOwnerActionByWorkflowRunId.get(workflowRunId) ?? canonicalTerminalOwnerAction,
         ensureOwnerAction: () => ownerActions.ensureMainExecutorUnblockIssue(mission, sourceIssue, {
@@ -2020,14 +1999,10 @@ export function createSupervision({ db, deps, ownerActions }: {
     const oversightBodies = (commentsByIssueId.get(oversightIssue.id) ?? []).join("\n");
     const failedStepRows = stepRows.filter((row) => row.stepRun.status === "failed");
     for (const row of failedStepRows) {
-      const workflowSteps = (row.definition.stepsJson as WorkflowStep[] | null) ?? [];
-      const workflowStep = workflowSteps.find((step) => step.id === row.stepRun.stepId) ?? null;
-      if (isIssueLessToolWorkflowStep(workflowStep, row.stepRun.issueId)) {
-        if (!hasToolStepFailureExecutionEvidence(row.stepRun)) {
-          findings.push(`tool_step_failure_unlaunched_skipped: run=${row.run.id} step=${row.stepRun.stepId} has failed status without dispatch evidence`);
-          continue;
-        }
+      if (issueLessToolRecoveryOwnsFailure(row)) {
         const workflowName = row.definition.name || row.run.workflowId;
+        const workflowSteps = (row.definition.stepsJson as WorkflowStep[] | null) ?? [];
+        const workflowStep = workflowSteps.find((step) => step.id === row.stepRun.stepId) ?? null;
         const recovery = await ownerActions.ensureToolStepFailureRecoveryIssue({
           mission,
           oversightIssue,
@@ -2056,6 +2031,12 @@ export function createSupervision({ db, deps, ownerActions }: {
           reason: `Tool step ${row.stepRun.stepId} failed as ${recovery.classification.className}; main executor must diagnose tool logs/input/external state before retry`,
           safeToAutoApply: false,
         });
+        continue;
+      }
+      const workflowSteps = (row.definition.stepsJson as WorkflowStep[] | null) ?? [];
+      const workflowStep = workflowSteps.find((step) => step.id === row.stepRun.stepId) ?? null;
+      if (isIssueLessToolWorkflowStep(workflowStep, row.stepRun.issueId)) {
+        findings.push(`tool_step_failure_unlaunched_skipped: run=${row.run.id} step=${row.stepRun.stepId} has failed status without dispatch evidence`);
         continue;
       }
       const marker = `workflow-failure:${row.run.id}:${row.stepRun.stepId}`;

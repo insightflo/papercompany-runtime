@@ -1,16 +1,11 @@
 // server/src/services/missions/terminal-mission-human-operator-alert.ts
-//
 // [파일 목적] mission 이 "정말 종단(truly terminal)" — 실행 가능한 continuation 이 하나도 남지 않아
 //   유일한 전진 경로가 Human Operator 판단뿐일 때 — terminal evidence snapshot 마다 정확히 한 번의
 //   Human Operator 요청을 발행한다. 기존 recordHumanOperatorRequestEvent channel(materialize + publish
 //   primitive)을 그대로 재사용하고 병렬 channel/중복 구현을 만들지 않는다.
 //
-// [계약/2차 교정]
-//   - 권위 분류: classifyTerminalMissionContinuation + missionWorkflowContinuationRemains 가 design 8.1 의
-//     모든 continuation guard 와 QA-gate verdict/fail-closed 를 평가. 불확실 → suppress.
-//   - exact-once/concurrency/retry-safe: 단일 tx 안에서 (a) issue scope 행 잠금+검증, (b) workflowTransitionEvents
-//     (company_id,idempotency_key) unique index onConflictDoNothing atomic claim, (c) system comment insert,
-//     (d) materializeHumanOperatorRequestEvent(tx) activity insert. commit 후 publish. rollback → claim 도 제거.
+// Contract: authoritative fail-closed classification plus one transaction for
+// scoped idempotency claim, system comment, and Human Operator activity.
 //   - snapshot idempotency: one report per (company,mission,workflowRun,sorted-failed-run-fingerprint-set).
 //     later distinct generation(새 failed run) → 새 key → 재보고. 동시 다수 failed step 은 한 snapshot 으로 aggregate.
 //     snapshot scope 는 caller 가 authoritative workflow run 단위로 전달(교정: cross-run 혼합 ❌).
@@ -31,6 +26,7 @@ import {
   type ValidationVerdictObservation,
   type WorkflowContinuationStepRow,
 } from "./terminal-mission-workflow-continuation.js";
+export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
 
 export const TERMINAL_FAILURE_RUN_STATUSES = new Set(["failed", "timed_out"]);
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled", "canceled"]);
@@ -113,7 +109,13 @@ export type TerminalMissionHumanOperatorCommentInput = {
   missionTitle: string | null;
   sourceIssueIdentifier: string | null;
   failedRuns: readonly TerminalMissionFailedRun[];
+  /** Bounded retry-exhaustion summary (attempts, maxRetries) surfaced in the
+   *  report evidence when the terminal failure followed configured retries.
+   *  Raw error payloads are never included — only counts. */
+  retryAttempts?: number | null;
+  retryMaxRetries?: number | null;
 };
+
 
 // system-authored structured owner-decision comment. owner 귀속 ❌, raw 출력 ❌.
 export function buildTerminalMissionHumanOperatorComment(
@@ -127,17 +129,19 @@ export function buildTerminalMissionHumanOperatorComment(
     return `${sanitizeToken(run.status, TOKEN_MAX) || "failed"}${code ? `:${code}` : ""}`;
   });
   const failedRunsToken = aggregated.length > 0 ? aggregated.join("|") : "failed";
-  const evidence = sanitizeToken(
-    [
-      `mission=${missionToken}`,
-      `owner-action=${ownerActionToken}`,
-      `source=${sourceToken}`,
-      `failed-runs=${failedRunsToken}`,
-      `failed-run-count=${Math.min(input.failedRuns.length, 9999)}`,
-      "continuation=none",
-    ].join("; "),
-    EVIDENCE_MAX,
-  );
+  const evidenceParts = [
+    `mission=${missionToken}`,
+    `owner-action=${ownerActionToken}`,
+    `source=${sourceToken}`,
+    `failed-runs=${failedRunsToken}`,
+    `failed-run-count=${Math.min(input.failedRuns.length, 9999)}`,
+  ];
+  if (input.retryAttempts != null && input.retryAttempts > 0) {
+    const max = input.retryMaxRetries ?? 0;
+    evidenceParts.push(`retry-exhausted=${input.retryAttempts}/${max}`);
+  }
+  evidenceParts.push("continuation=none");
+  const evidence = sanitizeToken(evidenceParts.join("; "), EVIDENCE_MAX);
 
   return [
     "### Mission owner decision",
@@ -174,6 +178,8 @@ export type EmitTerminalMissionHumanOperatorInput = {
   sourceIssueIdentifier: string | null;
   workflowRunId: string | null;
   failedRuns: readonly TerminalMissionFailedRun[];
+  retryAttempts?: number | null;
+  retryMaxRetries?: number | null;
 };
 
 export type EmitTerminalMissionHumanOperatorResult = { emitted: boolean; reason: string };
@@ -207,6 +213,8 @@ export async function emitTerminalMissionHumanOperatorReport(
     missionTitle: input.missionTitle,
     sourceIssueIdentifier: input.sourceIssueIdentifier,
     failedRuns: terminalFailedRuns,
+    retryAttempts: input.retryAttempts,
+    retryMaxRetries: input.retryMaxRetries,
   });
   const sanitizedFailedRunsPayload = terminalFailedRuns
     .slice(0, FAILED_RUN_AGGREGATE_MAX)

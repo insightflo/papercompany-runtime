@@ -13,7 +13,7 @@
 - step 활성화 게이트: `findRunnableSteps`(L1157) → `step.dependencies.every(dep => WORKFLOW_STEP_SUCCESS_STATUSES.has(dep.status))` + `status==="pending"`. `WORKFLOW_STEP_SUCCESS_STATUSES={"completed"}`(L87). `WORKFLOW_STEP_TERMINAL_STATUSES={completed,failed,skipped}`(L86).
 - 첫 실패가 launch 중단: syncWorkflowRunState L1989–1991(`hasFailure` → skip launch loop). → failure-gated step 못 붙게 함. **P2에서 우회해야.**
 - `detectCycle`(L414–449)가 모든 cycle reject → back-edge 구조적 불가. **P3에서 relax.**
-- step은 1회만 실행(pending→terminal). `retry_count` 컬럼 존재 but **미사용**. `onFailure`/`escalateTo`/`maxRetries`는 **dead type-only**.
+- `retry_count` 컬럼은 **generic workflow retry** 카운터로 활성화됨. `onFailure: "retry"` + `maxRetries`(기본값 2, 추가 시도 수)가 generic DAG retry를 제어한다. `retryCount < maxRetries`인 동안 generic retry가 권위를 가진다. exhausted된 뒤에만 ordinary failure/always continuation이 launch된다. continuation이 남지 않은 최종 exhaustion에서는 deduped Human Operator 보고가 1회 가능하다. 자세한 내용은 `retry-policy.ts`, `step-retry-scheduler.ts`, `retry-reconciler.ts` 참조.
 - step status = issue status 파생(`syncStepRunsFromIssueState`가 매 sync 덮어쓰). → step 리셋하려면 **issue도 같이 리셋**(같은 트랜잭션).
 - QA fail 신호: `isValidationGateCandidate(step)` + `request_changes` verdict → stepRun "failed"(L837–842). verdict는 **persist 안 됨**(매 sync 재계산) → P4에서 metadata.attempts[]에 persist.
 - finalize: `finalizeWorkflowRunState`(L1779) hasFailedStep + allStepsTerminal.

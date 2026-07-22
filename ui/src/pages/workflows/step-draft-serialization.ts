@@ -60,7 +60,7 @@ export function stepsToJson(drafts: StepDraft[]): unknown[] {
     if (d.onFailure) step.onFailure = d.onFailure;
     const maxRetries = parseOptionalNonNegativeInteger(String(d.maxRetries ?? ""));
     if (maxRetries !== undefined) step.maxRetries = maxRetries;
-    const graphRetryDelaySeconds = parseOptionalPositiveInteger(String(d.graphRetryDelaySeconds ?? ""));
+    const graphRetryDelaySeconds = parseOptionalNonNegativeInteger(String(d.graphRetryDelaySeconds ?? ""));
     if (graphRetryDelaySeconds !== undefined) step.graphRetryDelaySeconds = graphRetryDelaySeconds;
     if (safeText(d.graphRetryBackoff)) step.graphRetryBackoff = safeText(d.graphRetryBackoff);
     if (d.graphRetryJitter) step.graphRetryJitter = true;

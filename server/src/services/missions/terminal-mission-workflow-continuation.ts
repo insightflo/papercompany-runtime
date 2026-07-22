@@ -11,6 +11,7 @@ import { issues, workflowTransitionEvents } from "@paperclipai/db";
 import { classifyStepActivation, resolveEdges, type EdgeBearingStep, type PredFacts, type PredStatus } from "../workflow/control-flow/edge-condition.js";
 import { workflowControlNodeResultSchema } from "@paperclipai/shared";
 import { isQaLikeStep } from "../workflow-step-role.js";
+import { isStepRunAwaitingRetry } from "../workflow/retry-policy.js";
 
 const KNOWN_STEP_RUN_STATUSES = new Set(["completed", "failed", "skipped", "cancelled", "canceled", "pending", "running"]);
 const TERMINAL_STEP_RUN_STATUSES = new Set(["completed", "failed", "skipped", "cancelled", "canceled"]);
@@ -159,6 +160,18 @@ export function missionWorkflowContinuationRemains(
       }
       if (run.status === "running") return continuation(`running-step:run:${runId}:step:${step.id}`);
       if (TERMINAL_STEP_RUN_STATUSES.has(run.status)) continue; // this step is itself terminal
+      // [Workflow Retry] pending step carrying workflowRetry metadata:
+      // - VALID (waiting future/due or dispatching) → live automatic continuation
+      //   → suppress terminal Human Operator reporting.
+      // - MALFORMED → the retry cannot launch; this is not live work. Do not
+      //   treat it as continuation so terminal evaluation can proceed.
+      const stepMeta = (run.metadata ?? null) as Record<string, unknown> | null;
+      if (stepMeta && stepMeta.workflowRetry !== undefined && stepMeta.workflowRetry !== null) {
+        if (isStepRunAwaitingRetry(stepMeta)) {
+          return continuation(`workflow-retry:run:${runId}:step:${step.id}`);
+        }
+        continue; // malformed retry metadata → not live; eligible for terminal evaluation
+      }
       // pending: evaluate authority(failure/always/IF/qa edges). runnable or waiting → continuation.
       const activation = classifyStepActivation(step, preds);
       if (activation.runnable) return continuation(`runnable-step:run:${runId}:step:${step.id}`);

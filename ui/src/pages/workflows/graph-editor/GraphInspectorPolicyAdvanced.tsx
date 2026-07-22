@@ -17,6 +17,7 @@ export function GraphInspectorPolicyAdvanced({
   selectedStep: StepDraft;
   updateSelectedAdvanced: (patch: Partial<StepDraft>) => void;
 }): JSX.Element {
+  const retryPolicyActive = selectedStep.onFailure === "retry";
   return (
                 <div key="advanced-policy-fields" style={{ display: "grid", gap: "8px", paddingTop: "8px" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
@@ -25,10 +26,11 @@ export function GraphInspectorPolicyAdvanced({
                   <input
                     style={inputStyle}
                     type="number"
-                    min={1}
+                    min={0}
                     step={1}
                     value={selectedStep.graphRetryDelaySeconds}
-                    placeholder="retry delay seconds"
+                    disabled={!retryPolicyActive}
+                    placeholder={retryPolicyActive ? "retry delay seconds" : "inactive"}
                     onChange={(event) => updateSelectedAdvanced({ graphRetryDelaySeconds: event.target.value })}
                   />
                 </div>
@@ -37,9 +39,10 @@ export function GraphInspectorPolicyAdvanced({
                   <select
                     style={selectStyle}
                     value={selectedStep.graphRetryBackoff}
+                    disabled={!retryPolicyActive}
                     onChange={(event) => updateSelectedAdvanced({ graphRetryBackoff: event.target.value })}
                   >
-                    <option value="">No retry backoff</option>
+                    <option value="">Fixed (default)</option>
                     <option value="fixed">Fixed backoff</option>
                     <option value="linear">Linear backoff</option>
                     <option value="exponential">Exponential backoff</option>
@@ -50,6 +53,7 @@ export function GraphInspectorPolicyAdvanced({
                 <input
                   type="checkbox"
                   checked={selectedStep.graphRetryJitter}
+                  disabled={!retryPolicyActive}
                   onChange={(event) => updateSelectedAdvanced({ graphRetryJitter: event.target.checked })}
                 />
                 Add retry jitter
