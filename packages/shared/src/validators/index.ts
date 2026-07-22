@@ -67,6 +67,15 @@ export {
   type UpsertCompanyInstructionFile,
 } from "./company-instructions.js";
 export {
+  missionPlanTemplateOriginSchema,
+  createMissionPlanTemplateSchema,
+  updateMissionPlanTemplateSchema,
+  duplicateMissionPlanTemplateSchema,
+  type CreateMissionPlanTemplate,
+  type UpdateMissionPlanTemplate,
+  type DuplicateMissionPlanTemplate,
+} from "./mission-plan-template.js";
+export {
   agentSkillStateSchema,
   agentSkillSyncModeSchema,
   agentSkillEntrySchema,

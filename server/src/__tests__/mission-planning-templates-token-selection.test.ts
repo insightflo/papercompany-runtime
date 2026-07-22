@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderMissionPlanningTemplateLines } from "../services/missions/mission-planning-templates.js";
+import { selectFallbackMissionPlanTemplateKeys } from "../services/missions/mission-planning-templates.js";
 import type { MissionExecutionCandidate } from "../services/missions/mission-execution-candidates.js";
 
 function candidate(overrides: Partial<MissionExecutionCandidate>): MissionExecutionCandidate {
@@ -14,12 +14,12 @@ function candidate(overrides: Partial<MissionExecutionCandidate>): MissionExecut
   };
 }
 
-function renderLines(input: {
+function selectKeys(input: {
   title: string;
   description: string | null;
   candidates: MissionExecutionCandidate[];
-}): string {
-  return renderMissionPlanningTemplateLines(input).join("\n");
+}): string[] {
+  return selectFallbackMissionPlanTemplateKeys(input);
 }
 
 // [ purpose ] The template selector drives case selection off bounded
@@ -31,25 +31,15 @@ function renderLines(input: {
 //   representative tokens from each set are honored. Adding a new token to
 //   a set requires adding a representative case here.
 describe("mission planning template token selection", () => {
-  it("always emits a ## Planning templates parent heading", () => {
-    const out = renderLines({
-      title: "Generic mission",
-      description: null,
-      candidates: [candidate({})],
-    });
-    expect(out).toContain("## Planning templates");
-  });
-
   describe("research tool tokens (research/search/collect/fetch/source)", () => {
     for (const tool of ["deep-research", "web-search", "data-collect", "api-fetch", "doc-source"]) {
       it(`renders the research case for granted tool ${tool}`, () => {
-        const out = renderLines({
+        const out = selectKeys({
           title: "Source gathering and analysis",
           description: "Compile a research report.",
           candidates: [candidate({ toolNames: [tool] })],
         });
-        expect(out).toContain(tool);
-        expect(out).toMatch(/Case template: research and report/i);
+        expect(out).toContain("research-report-qa");
       });
     }
   });
@@ -57,12 +47,12 @@ describe("mission planning template token selection", () => {
   describe("research mission tokens (research/analysis/source gathering/report)", () => {
     for (const title of ["Market analysis", "Source gathering brief", "Weekly research"]) {
       it(`renders the research case for mission title "${title}"`, () => {
-        const out = renderLines({
+        const out = selectKeys({
           title,
           description: "Neutral work item.",
           candidates: [candidate({ toolNames: ["research-search"] })],
         });
-        expect(out).toMatch(/Case template: research and report/i);
+        expect(out).toContain("research-report-qa");
       });
     }
   });
@@ -78,12 +68,12 @@ describe("mission planning template token selection", () => {
       "Compile the budget spreadsheet",
     ]) {
       it(`renders the durable file case for mission title "${title}"`, () => {
-        const out = renderLines({
+        const out = selectKeys({
           title,
           description: "Standalone work item.",
           candidates: [candidate({})],
         });
-        expect(out).toMatch(/Case template: durable file creation/i);
+        expect(out).toContain("durable-file-review");
       });
     }
   });
@@ -91,12 +81,12 @@ describe("mission planning template token selection", () => {
   describe("publish mission tokens (publish/deploy/upload)", () => {
     for (const title of ["Publish the release", "Deploy the bundle", "Upload the asset"]) {
       it(`renders the manual-onboarding case for mission title "${title}" when both tools are granted`, () => {
-        const out = renderLines({
+        const out = selectKeys({
           title,
           description: "Deliver the artifact.",
           candidates: [candidate({ toolNames: ["manual-onboarding-publish", "manual-onboarding-verify"] })],
         });
-        expect(out).toMatch(/Case template: manual-onboarding publish and verify/i);
+        expect(out).toContain("manual-onboarding-publish-verify");
       });
     }
   });
@@ -104,13 +94,12 @@ describe("mission planning template token selection", () => {
   describe("structural tool tokens (validate/validator/verify/check/lint/schema/contract)", () => {
     for (const tool of ["url-validate", "quality-validator", "result-verify", "status-check", "lint-rules", "schema-guard", "contract-guard"]) {
       it(`renders the structural case for granted tool ${tool}`, () => {
-        const out = renderLines({
+        const out = selectKeys({
           title: "Validate the contract",
           description: "Verify machine-checkable constraints.",
           candidates: [candidate({ toolNames: [tool] })],
         });
-        expect(out).toContain(tool);
-        expect(out).toMatch(/Case template: structural validation gate/i);
+        expect(out).toContain("structural-validation-semantic-review");
       });
     }
   });

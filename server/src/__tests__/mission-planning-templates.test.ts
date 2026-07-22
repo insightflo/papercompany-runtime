@@ -75,13 +75,13 @@ describe("renderMissionPlanningTemplateLines — research/report case", () => {
     candidate({ agentId: "writer", name: "Writer", role: "writer" }),
   ];
 
-  it("appears for a research/report mission and uses a granted research tool", () => {
+  it("does not pre-apply a research case before the agent selects it", () => {
     const out = renderLines({
       title: "Research and publish a report",
       description: "Create an HTML report and verify the published destination.",
       candidates: researchCandidates,
     });
-    expect(out).toContain("research-search");
+    expect(out).not.toContain("research-search");
   });
 
   it("is omitted when no candidate holds a research/search tool", () => {
@@ -115,14 +115,13 @@ describe("renderMissionPlanningTemplateLines — manual-onboarding publish/verif
     }),
   ];
 
-  it("shows the canonical publishResultPath reference only when both tools are granted", () => {
+  it("does not pre-apply publish instructions before the agent selects them", () => {
     const out = renderLines({
       title: "Publish the site update",
       description: "Deploy via manual onboarding and verify the published destination.",
       candidates: publishCandidates,
     });
-    expect(out).toContain("publishResultPath");
-    expect(out).toContain("{$steps.<publish-unit-id>.workProductPath}");
+    expect(out).not.toContain("publishResultPath");
   });
 
   it("omits the canonical reference when the verify tool is missing", () => {
@@ -153,13 +152,13 @@ describe("renderMissionPlanningTemplateLines — structural validation case", ()
     expect(out).not.toMatch(/structural tool unit|qaType: "structural"/);
   });
 
-  it("may appear when a validator-like tool is granted", () => {
+  it("does not pre-apply a structural case before the agent selects it", () => {
     const out = renderLines({
       title: "Validate the contract",
       description: "Verify machine-checkable contracts.",
       candidates: [candidate({ toolNames: ["schema-validator"] })],
     });
-    expect(out).toContain("structural");
+    expect(out).not.toContain("structural");
   });
 });
 

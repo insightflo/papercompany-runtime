@@ -4,6 +4,7 @@ export { companyRoutes } from "./companies.js";
 export { companySkillRoutes } from "./company-skills.js";
 export { toolDefinitionRoutes } from "./tool-definitions.js";
 export { companyInstructionRoutes } from "./company-instructions.js";
+export { missionPlanTemplateRoutes } from "./mission-plan-templates.js";
 export { agentRoutes } from "./agents.js";
 export { projectRoutes } from "./projects.js";
 export { issueRoutes } from "./issues.js";

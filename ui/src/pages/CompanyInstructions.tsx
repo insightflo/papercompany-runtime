@@ -4,9 +4,11 @@ import { BookOpen, FileText, Plus, RefreshCw, Save, Trash } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { companyInstructionsApi } from "../api/companyInstructions";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { PlanTemplatesPanel } from "../components/PlanTemplatesPanel";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { useToast } from "../context/ToastContext";
@@ -28,6 +30,7 @@ export function CompanyInstructions() {
   const [newPath, setNewPath] = useState(DEFAULT_FILE_PATH);
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [activeTab, setActiveTab] = useState("files");
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Instructions" }]);
@@ -147,7 +150,15 @@ export function CompanyInstructions() {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-12rem)] gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
+    <div>
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="mb-5">
+        <TabsList variant="line">
+          <TabsTrigger value="files">Instruction files</TabsTrigger>
+          <TabsTrigger value="plan-templates">Plan templates</TabsTrigger>
+        </TabsList>
+      </Tabs>
+      {activeTab === "plan-templates" ? <PlanTemplatesPanel companyId={selectedCompanyId} /> : (
+      <div className="grid min-h-[calc(100vh-15rem)] gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
       <aside className="border-r border-border">
         <div className="border-b border-border px-4 py-3">
           <div className="flex items-center justify-between gap-2">
@@ -265,6 +276,8 @@ export function CompanyInstructions() {
           </div>
         )}
       </main>
+      </div>
+      )}
     </div>
   );
 }

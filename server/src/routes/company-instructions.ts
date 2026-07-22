@@ -1,10 +1,10 @@
-import { Router, type Request } from "express";
+import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { upsertCompanyInstructionFileSchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { accessService, agentService, companyInstructionsService, logActivity } from "../services/index.js";
-import { forbidden } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertCanMutateCompanyInstructions } from "./company-instructions-authz.js";
 
 export function companyInstructionRoutes(db: Db) {
   const router = Router();
@@ -12,31 +12,8 @@ export function companyInstructionRoutes(db: Db) {
   const access = accessService(db);
   const svc = companyInstructionsService();
 
-  function canCreateAgents(agent: { permissions: Record<string, unknown> | null | undefined }) {
-    if (!agent.permissions || typeof agent.permissions !== "object") return false;
-    return Boolean((agent.permissions as Record<string, unknown>).canCreateAgents);
-  }
-
-  async function assertCanMutateCompanyInstructions(req: Request, companyId: string) {
-    assertCompanyAccess(req, companyId);
-
-    if (req.actor.type === "board") {
-      if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
-      const allowed = await access.canUser(companyId, req.actor.userId, "agents:create");
-      if (!allowed) throw forbidden("Missing permission: agents:create");
-      return;
-    }
-
-    if (!req.actor.agentId) throw forbidden("Agent authentication required");
-    const actorAgent = await agents.getById(req.actor.agentId);
-    if (!actorAgent || actorAgent.companyId !== companyId) {
-      throw forbidden("Agent key cannot access another company");
-    }
-
-    const allowedByGrant = await access.hasPermission(companyId, "agent", actorAgent.id, "agents:create");
-    if (allowedByGrant || canCreateAgents(actorAgent)) return;
-    throw forbidden("Missing permission: can create agents");
-  }
+  const assertMutation = (req: Parameters<typeof assertCanMutateCompanyInstructions>[0]["req"], companyId: string) =>
+    assertCanMutateCompanyInstructions({ req, companyId, agents, access });
 
   router.get("/companies/:companyId/instructions", async (req, res) => {
     const companyId = req.params.companyId as string;
@@ -65,7 +42,7 @@ export function companyInstructionRoutes(db: Db) {
     validate(upsertCompanyInstructionFileSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await assertCanMutateCompanyInstructions(req, companyId);
+      await assertMutation(req, companyId);
       const result = await svc.writeFile(companyId, req.body.path, req.body.content);
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -89,7 +66,7 @@ export function companyInstructionRoutes(db: Db) {
   router.delete("/companies/:companyId/instructions/file", async (req, res) => {
     const companyId = req.params.companyId as string;
     const relativePath = typeof req.query.path === "string" ? req.query.path : "";
-    await assertCanMutateCompanyInstructions(req, companyId);
+    await assertMutation(req, companyId);
     if (!relativePath.trim()) {
       res.status(422).json({ error: "Query parameter 'path' is required" });
       return;

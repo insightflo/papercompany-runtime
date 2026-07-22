@@ -403,6 +403,12 @@ export type {
   PromoteQualityAnchorResponse,
   GenerateQualityDailyReportRequest,
   GenerateQualityDailyReportResponse,
+  MissionPlanTemplateOrigin,
+  MissionPlanTemplate,
+  MissionPlanTemplateList,
+  CreateMissionPlanTemplateRequest,
+  UpdateMissionPlanTemplateRequest,
+  DuplicateMissionPlanTemplateRequest,
 } from "./types/index.js";
 
 export {
@@ -703,6 +709,13 @@ export {
   type CompanyPortabilityPreview,
   type CompanyPortabilityImport,
   type UpsertCompanyInstructionFile,
+  missionPlanTemplateOriginSchema,
+  createMissionPlanTemplateSchema,
+  updateMissionPlanTemplateSchema,
+  duplicateMissionPlanTemplateSchema,
+  type CreateMissionPlanTemplate,
+  type UpdateMissionPlanTemplate,
+  type DuplicateMissionPlanTemplate,
   jsonSchemaSchema,
   pluginJobDeclarationSchema,
   pluginWebhookDeclarationSchema,

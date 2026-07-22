@@ -32,6 +32,10 @@ import { issueService } from "./issues.js";
 import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
 import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import { autofillManualOnboardingPublishResult } from "./missions/mission-plan-publish-result-autofill.js";
+import { missionPlanTemplateService } from "./missions/mission-plan-templates.js";
+import { resolveMissionPlanTemplateSelection } from "./missions/mission-plan-template-selection.js";
+import { selectFallbackMissionPlanTemplateKeys } from "./missions/mission-planning-templates.js";
+import { listCompanyExecutionCandidates } from "./missions/mission-execution-candidates.js";
 import { upsertMissionPlanDecisionSubmission } from "./missions/mission-plan-decision-ledger.js";
 import {
   RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES,
@@ -53,6 +57,7 @@ export type MissionOwnerPlanDecisionPayload = {
   missionGoal?: unknown;
   assessment?: unknown;
   selectedExecutionUnits?: unknown;
+  selectedPlanTemplateIds?: unknown;
   ruleRefs?: unknown;
   kbRefs?: unknown;
   requiredInputs?: unknown;
@@ -412,6 +417,10 @@ export type PlanRevisionDraft = {
     };
     dynamicMissionPlanning?: Record<string, unknown>;
     selfImprovementCandidates?: Record<string, unknown>[];
+    planTemplates?: {
+      selectionSource: "agent" | "code_fallback";
+      items: Array<{ id: string; key: string; contentHash: string }>;
+    };
   };
   requiredInputs: (string | Record<string, unknown>)[];
   successCriteria: (string | Record<string, unknown>)[];
@@ -984,6 +993,39 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
 
+  const [ownershipRow] = await db
+    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description })
+    .from(missions)
+    .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
+    .limit(1);
+  const planningCandidates = await listCompanyExecutionCandidates(db, companyId);
+  const enabledPlanTemplates = await missionPlanTemplateService(db).list(companyId, { includeDisabled: false });
+  const templateSelection = resolveMissionPlanTemplateSelection({
+    decision: collected.decision,
+    enabledTemplates: enabledPlanTemplates,
+    fallbackKeys: selectFallbackMissionPlanTemplateKeys({
+      title: ownershipRow?.title ?? "",
+      description: ownershipRow?.description ?? null,
+      candidates: planningCandidates,
+    }),
+  });
+  if (!templateSelection.ok) {
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "plan_template_selection_invalid",
+      diagnostics: templateSelection.diagnostics,
+    });
+    return {
+      status: "invalid",
+      reason: "plan_template_selection_invalid",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: templateSelection.diagnostics,
+    };
+  }
+
   const sourceValidationDiagnostics = await validateSelectedExecutionUnitSourceRefs({
     db,
     companyId,
@@ -1026,8 +1068,22 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const autofillResult = autofillManualOnboardingPublishResult(
     draftResult.draft.refs.selectedExecutionUnits,
   );
+  const draftWithTemplates: PlanRevisionDraft = {
+    ...draftResult.draft,
+    refs: {
+      ...draftResult.draft.refs,
+      planTemplates: {
+        selectionSource: templateSelection.selectionSource,
+        items: templateSelection.templates.map((template) => ({
+          id: template.id,
+          key: template.key,
+          contentHash: template.contentHash,
+        })),
+      },
+    },
+  };
   const effectiveDraft = draftWithSelectedExecutionUnits(
-    draftResult.draft,
+    draftWithTemplates,
     autofillResult.units,
   );
   if (autofillResult.applied) {
@@ -1051,11 +1107,6 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   //   불일치하면 materialization 이 막히는 현상을 fail-fast 진단(artifact QA 와 분리된 code).
   //   owner-actions 가 planning issue 를 mission.owner 에 assign 하므로, 정상 조건에선 일치한다.
   //   drift(재할당) 감지 시 명확한 diagnostic 로 차단 — silent block 회피.
-  const [ownershipRow] = await db
-    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description })
-    .from(missions)
-    .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
-    .limit(1);
   const [planningAssigneeRow] = await db
     .select({ assigneeAgentId: issues.assigneeAgentId })
     .from(issues)
@@ -1313,7 +1364,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: activePlanQa.issueId, diagnostics: [] };
       }
       // (c) 같은 hash 인데 PLAN-QA 게이트 미생성(레거시 plan 진입) → 게이트 생성 후 대기
-      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: effectiveDraft.missionGoal, enqueuePlanQaWakeup });
+      const legacyPlanQaIssue = await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: effectiveDraft.missionGoal, selectedPlanTemplates: templateSelection.templates, enqueuePlanQaWakeup });
       await updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { issueId: legacyPlanQaIssue.id, status: "pending", decisionHash } });
       await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "plan_qa_pending" });
       return { status: "plan_qa_pending", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, planQaIssueId: legacyPlanQaIssue.id, diagnostics: [] };
@@ -1324,7 +1375,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // ── 새 decision (decisionHash 불일치): revision 생성 + PLAN-QA 게이트 오픈. materialize/위임은 PASS 후 idempotent branch 로 지연 ──
   const planQaIssue = collected.decisionIssueOriginKind === "mission_plan_qa"
     ? { id: collected.decisionIssueId }
-    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: effectiveDraft.missionGoal, enqueuePlanQaWakeup });
+    : await ensurePlanQaReviewIssue({ db, companyId, missionId, missionTitle, missionDescription, planningIssueId: collected.planningIssueId, decisionHash, missionGoal: effectiveDraft.missionGoal, selectedPlanTemplates: templateSelection.templates, enqueuePlanQaWakeup });
   const refs = mergeMissionPlanRefs(
     activePlan?.refs,
     {
@@ -2281,6 +2332,7 @@ async function ensurePlanQaReviewIssue(input: {
   planningIssueId: string | null;
   decisionHash: string;
   missionGoal?: string | null;
+  selectedPlanTemplates?: readonly { id: string; name: string; instructions: string }[];
   enqueuePlanQaWakeup?: PlanQaWakeupHandler;
 }): Promise<{ id: string }> {
   const originId = `plan-qa:${input.missionId}:${input.decisionHash}`;
@@ -2318,6 +2370,7 @@ async function ensurePlanQaReviewIssue(input: {
     missionTitle: input.missionTitle,
     missionDescription: input.missionDescription,
     missionGoal: input.missionGoal,
+    selectedPlanTemplates: input.selectedPlanTemplates,
   });
   // reviewer 가 없어도 issue 는 만들고 materialize 는 금지. 할당 누락을 description 에 명시.
   const fullDescription = assigneeAgentId

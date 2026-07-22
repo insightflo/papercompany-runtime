@@ -26,6 +26,7 @@ import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } fro
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
+import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
@@ -2250,13 +2251,18 @@ export function createSupervision({ db, deps, ownerActions }: {
       const diagnosticsSummary = planSubmissionMissingCandidate.kind === "rejected"
         ? formatMissionPlanDecisionSubmissionDiagnostics(planSubmissionMissingCandidate.diagnostics)
         : "";
+      const planTemplateCatalog = planSubmissionMissingCandidate.kind === "rejected"
+        ? await missionPlanTemplateService(db).list(mission.companyId, { includeDisabled: false })
+        : [];
       const refreshedDescription = planSubmissionMissingCandidate.kind === "rejected"
         ? buildMissionPlanningDescription({
+            companyId: mission.companyId,
             missionId: mission.id,
             title: mission.title,
             description: mission.description,
             runnableCandidates: planSubmissionMissingCandidate.candidateRoster,
             runnableRosterLines: planSubmissionMissingCandidate.candidateRosterLines,
+            planTemplateCatalog,
             revisionContext: {
               previousDecision: planSubmissionMissingCandidate.previousDecision instanceof Object
                 && !Array.isArray(planSubmissionMissingCandidate.previousDecision)

@@ -23,6 +23,9 @@ export const queryKeys = {
     file: (companyId: string, relativePath: string) =>
       ["company-instructions", companyId, "file", relativePath] as const,
   },
+  missionPlanTemplates: {
+    list: (companyId: string) => ["mission-plan-templates", companyId] as const,
+  },
   agents: {
     list: (companyId: string) => ["agents", companyId] as const,
     detail: (id: string) => ["agents", "detail", id] as const,

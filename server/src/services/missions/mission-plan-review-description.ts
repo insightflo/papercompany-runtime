@@ -11,7 +11,25 @@ export type PlanQaReviewDescriptionInput = {
   readonly missionTitle: string;
   readonly missionDescription: string | null;
   readonly missionGoal?: string | null;
+  readonly selectedPlanTemplates?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly instructions: string;
+  }[];
 };
+
+function renderSelectedPlanTemplateLines(input: PlanQaReviewDescriptionInput): string[] {
+  if ((input.selectedPlanTemplates?.length ?? 0) === 0) return [];
+  return [
+    "## Selected case templates",
+    "Verify that the plan follows the applicable guidance below. The original mission request and runtime capabilities remain authoritative.",
+    ...(input.selectedPlanTemplates ?? []).flatMap((template) => [
+      `### ${template.name} (${template.id})`,
+      template.instructions,
+    ]),
+    "",
+  ];
+}
 
 export function buildPlanQaReviewDescription(input: PlanQaReviewDescriptionInput): string {
   const qualityContract = extractMissionQualityContract({
@@ -31,6 +49,7 @@ export function buildPlanQaReviewDescription(input: PlanQaReviewDescriptionInput
     "",
     ...renderMissionQualityContractSection(qualityContract),
     ...renderAdaptiveQualityProfileLines(),
+    ...renderSelectedPlanTemplateLines(input),
     "## Review method",
     "- Infer the relevant quality profile from the original request. Do not reuse a manual, research, software, or proposal checklist when that profile does not fit.",
     "- Do not invent requirements or preferences that the user did not state and that professional or regulatory constraints do not require.",
