@@ -1,14 +1,12 @@
 import {
-  heartbeatRuns,
-  issueComments,
   issues,
   issueWorkProducts,
   workflowTransitionEvents,
 } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, desc, eq, inArray } from "drizzle-orm";
-import { readExplicitValidationVerdict, type ValidationVerdict } from "../validation-verdict.js";
-import { extractCodexTaskCompleteMessages } from "../workflow/codex-task-output.js";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import { type ValidationVerdict } from "../validation-verdict.js";
+import { heartbeatRunScopedToIssue } from "../workflow/validation-verdict-ledger.js";
 import { asRecord, isQaLikeStep, trimmedString, type DagStepLike } from "./supervision-helpers.js";
 import type { MissionSupervisionIssue, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 
@@ -65,77 +63,46 @@ function isValidationGateIssue(issue: MissionSupervisionIssue, step: DagStepLike
   return isQaLikeStep({ title: issue.title });
 }
 
-function readValidationVerdictFromHeartbeatResult(resultJson: unknown): ValidationVerdict | null {
-  const result = asRecord(resultJson);
-  const candidates = [
-    result.verdict,
-    result.decision,
-    result.outcome,
-    result.status,
-    result.result,
-    ...extractCodexTaskCompleteMessages(trimmedString(result.stdout)),
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string") continue;
-    const verdict = readExplicitValidationVerdict(candidate, { allowLeadingVerdict: true });
-    if (verdict) return verdict;
-  }
-  return null;
-}
-
-function newerObservation(next: VerdictObservation, current: VerdictObservation | null): boolean {
-  if (!current) return true;
-  return (next.observedAt?.getTime() ?? 0) >= (current.observedAt?.getTime() ?? 0);
-}
-
-async function loadLatestValidationVerdict(db: Db, issue: IssueRow): Promise<VerdictObservation | null> {
-  let latest: VerdictObservation | null = null;
+async function loadLatestValidationVerdict(
+  db: Db,
+  issue: IssueRow,
+  binding: { readonly workflowRunId: string; readonly workflowStepRunId: string },
+): Promise<VerdictObservation | null> {
   const inCurrentWindow = (observedAt: Date | null) => !issue.startedAt || !observedAt ||
     observedAt.getTime() >= issue.startedAt.getTime();
 
+  // structured authority only: official workflow_api submissions, exact-bound to the gate's current
+  //   workflow run + step run. legacy comment/heartbeat_result derived events and any prior-run verdict
+  //   for a reused issue are ignored even if they share eventType=workflow_validation_verdict.
   const events = await db
-    .select({ verdict: workflowTransitionEvents.verdict, createdAt: workflowTransitionEvents.createdAt })
+    .select({
+      verdict: workflowTransitionEvents.verdict,
+      createdAt: workflowTransitionEvents.createdAt,
+      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+    })
     .from(workflowTransitionEvents)
     .where(and(
       eq(workflowTransitionEvents.companyId, issue.companyId),
       eq(workflowTransitionEvents.issueId, issue.id),
+      eq(workflowTransitionEvents.workflowRunId, binding.workflowRunId),
+      eq(workflowTransitionEvents.workflowStepRunId, binding.workflowStepRunId),
       eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      eq(workflowTransitionEvents.reason, "workflow_api"),
+      isNotNull(workflowTransitionEvents.heartbeatRunId),
     ))
     .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id));
   for (const event of events) {
     const observedAt = event.createdAt ?? null;
     if (!inCurrentWindow(observedAt)) continue;
     if (event.verdict !== "pass" && event.verdict !== "request_changes") continue;
+    // [verdict authority] require a checked-out heartbeat run scoped to this gate's QA issue.
+    if (!(await heartbeatRunScopedToIssue(db, event.heartbeatRunId, { companyId: issue.companyId, issueId: issue.id }))) {
+      continue;
+    }
     const verdict: ValidationVerdict = event.verdict === "pass" ? "pass" : "request_changes";
     return { verdict, observedAt };
   }
-
-  const runs = await db
-    .select({ resultJson: heartbeatRuns.resultJson, finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })
-    .from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.status, "succeeded")))
-    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
-  for (const run of runs) {
-    const observedAt = run.finishedAt ?? run.createdAt ?? null;
-    if (!inCurrentWindow(observedAt)) continue;
-    const next = { verdict: readValidationVerdictFromHeartbeatResult(run.resultJson), observedAt };
-    if (newerObservation(next, latest)) latest = next;
-  }
-
-  const comments = await db
-    .select({ body: issueComments.body, createdAt: issueComments.createdAt })
-    .from(issueComments)
-    .where(and(eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id)))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
-  for (const comment of comments) {
-    const observedAt = comment.createdAt ?? null;
-    if (!inCurrentWindow(observedAt)) continue;
-    const verdict = readExplicitValidationVerdict(comment.body);
-    if (!verdict) continue;
-    const next = { verdict, observedAt };
-    if (newerObservation(next, latest)) latest = next;
-  }
-  return latest;
+  return null;
 }
 
 async function latestDependencyOutputTime(db: Db, companyId: string, dependencyIssues: MissionSupervisionIssue[]): Promise<Date | null> {
@@ -184,19 +151,22 @@ export async function findValidationGateNeedingFreshPass(input: {
     const sourceStep = stepById.get(sourceRow.stepRun.stepId);
     const dependencyIds = sourceStep?.dependencies ?? sourceStep?.dependsOn ?? [];
     for (const dependencyId of dependencyIds) {
-      const gateIssue = findStepIssue({
-        rows: input.stepRows,
-        workflowRunId: sourceRow.stepRun.workflowRunId,
-        stepId: dependencyId,
-        issueById,
-      });
+      const gateRow = input.stepRows.find((candidate) => (
+        candidate.stepRun.workflowRunId === sourceRow.stepRun.workflowRunId &&
+        candidate.stepRun.stepId === dependencyId &&
+        candidate.stepRun.issueId
+      )) ?? null;
+      const gateIssue = gateRow?.stepRun.issueId ? issueById.get(gateRow.stepRun.issueId) ?? null : null;
       const gateStep = stepById.get(dependencyId) ?? null;
-      if (!gateIssue || !isValidationGateIssue(gateIssue, gateStep)) continue;
+      if (!gateIssue || !gateRow || !isValidationGateIssue(gateIssue, gateStep)) continue;
       const gateDependencies = (gateStep?.dependencies ?? gateStep?.dependsOn ?? [])
         .map((stepId) => findStepIssue({ rows: input.stepRows, workflowRunId: sourceRow.stepRun.workflowRunId, stepId, issueById }))
         .filter((issue): issue is MissionSupervisionIssue => issue !== null);
       const requiredAfter = await latestDependencyOutputTime(input.db, input.companyId, gateDependencies);
-      const verdict = await loadLatestValidationVerdict(input.db, gateIssue as IssueRow);
+      const verdict = await loadLatestValidationVerdict(input.db, gateIssue as IssueRow, {
+        workflowRunId: sourceRow.stepRun.workflowRunId,
+        workflowStepRunId: gateRow.stepRun.id,
+      });
       const freshEnough = !requiredAfter || (verdict?.observedAt?.getTime() ?? 0) >= requiredAfter.getTime();
       if (verdict?.verdict === "pass" && freshEnough) continue;
       const label = gateIssue.identifier ?? gateIssue.id;

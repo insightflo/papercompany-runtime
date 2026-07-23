@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   isQaLikeStep,
-  parseReworkTargetRefFromNextAction,
   resolveProducerStepIdFromDag,
   type DagStepLike,
 } from "../services/missions/supervision-helpers.js";
@@ -87,19 +86,5 @@ describe("isQaLikeStep", () => {
     expect(isQaLikeStep({ id: "step-6", name: "보고서 검수" })).toBe(true);
     expect(isQaLikeStep({ id: "step-10", name: "Final review" })).toBe(true);
     expect(isQaLikeStep({ id: "step-11", name: "Artifact check" })).toBe(true);
-  });
-});
-
-describe("parseReworkTargetRefFromNextAction (B: 사장 지목 보조)", () => {
-  it("owner 가 적은 'revise RES-XXXX' 에서 생산자 identifier를 추출한다", () => {
-    expect(parseReworkTargetRefFromNextAction("revise RES-1329 to complete tooling coverage and citation hygiene, then rerun RES-1332")).toBe("RES-1329");
-    expect(parseReworkTargetRefFromNextAction("redo CMPA-5371 with the fix")).toBe("CMPA-5371");
-    expect(parseReworkTargetRefFromNextAction("rework the RES-100 report")).toBe("RES-100");
-  });
-
-  it("rework 동사가 없거나 identifier가 없으면 null", () => {
-    expect(parseReworkTargetRefFromNextAction("rerun RES-1332 after the producer finishes")).toBeNull();
-    expect(parseReworkTargetRefFromNextAction(undefined)).toBeNull();
-    expect(parseReworkTargetRefFromNextAction("just wait")).toBeNull();
   });
 });

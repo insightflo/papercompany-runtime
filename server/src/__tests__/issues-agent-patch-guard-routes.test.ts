@@ -167,7 +167,7 @@ describe("issue routes agent patch guard", () => {
     );
   });
 
-  it("returns the service-level mission_plan_qa ledger rejection for direct agent PATCH done", async () => {
+  it("does not infer a mission_plan_qa verdict from a direct agent PATCH comment", async () => {
     const issue = {
       id: "11111111-1111-4111-8111-111111111111",
       companyId: "company-1",
@@ -194,12 +194,7 @@ describe("issue routes agent patch guard", () => {
 
     expect(res.status).toBe(422);
     expect(res.body.error).toContain("mission_plan_qa");
-    expect(mockRecordWorkflowValidationVerdictFromText).toHaveBeenCalledWith(expect.objectContaining({
-      issue,
-      text: "PASS",
-      actorAgentId: "22222222-2222-4222-8222-222222222222",
-      heartbeatRunId: "run-1",
-    }));
+    expect(mockRecordWorkflowValidationVerdictFromText).not.toHaveBeenCalled();
     expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).not.toHaveBeenCalled();

@@ -7,14 +7,14 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
+import { issues, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { MissionRow } from "../missions.js";
 import type { MissionServiceDeps } from "../missions.js";
 import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { detectQaReworkCapExhaustion } from "./qa-rework-cap-oversight-detection.js";
 import { dispatchCapWake } from "./qa-rework-cap-oversight-wake.js";
-import { extractMissionOwnerDecisionFromText } from "./mission-owner-recovery-events.js";
+import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 
 export type { QaReworkCapExhaustion } from "./qa-rework-cap-oversight-detection.js";
 export { detectQaReworkCapExhaustion } from "./qa-rework-cap-oversight-detection.js";
@@ -90,7 +90,7 @@ export function buildQaReworkCapDescription(input: {
     "The semantic QA step is still requesting changes. Automatic rework will not retry beyond this cap.",
     "",
     "### Allowed owner decisions",
-    "Post a comment with `### Mission owner decision` and one of:",
+    "Submit a structured decision to `POST /api/issues/:id/owner-recovery/decision` with one of:",
     `- \`decision: retry_source_issue\` — retry the producer beyond the cap (explicit override).`,
     "  Use the exact producer source issue so supervision dispatches to the producer, not this oversight issue:",
     `  \`Rework target: ${exhaustion.producerIssueId ?? "<producerIssueId>"}\``,
@@ -98,6 +98,7 @@ export function buildQaReworkCapDescription(input: {
     "- `decision: escalate` — escalate to a human operator.",
     "- `decision: report_impossible` — mark completion as impossible with evidence.",
     "- `decision: request_input` — request additional input or clarification.",
+    "Comments and QA-cap markers are display-only and cannot authorize a retry or wakeup.",
     "",
     "Do not auto-retry. Wait for an explicit decision.",
   ].join("\n");
@@ -259,11 +260,12 @@ async function reuseExistingIssue(wakeInput: WakeInput, issueId: string): Promis
   if (!issue) throw new Error(`qa-cap-oversight: linked issue ${issueId} not found`);
   if (issue.hiddenAt) await db.update(issues).set({ hiddenAt: null, updatedAt: new Date() }).where(eq(issues.id, issueId));
   await reconcileOrphanIssues(db, mission.companyId, mission.id, buildQaCapKeyMarker(wakeInput.keyHash), issue.id);
-  const decisionComments = await db.select({ body: issueComments.body }).from(issueComments).where(and(
-    eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, issue.id),
-  ));
-  const hasOwnerDecision = decisionComments.some(({ body }) =>
-    Boolean(extractMissionOwnerDecisionFromText(body)?.decision));
+  const ownerDecision = await loadLatestMissionOwnerDecision({
+    db,
+    companyId: mission.companyId,
+    ownerActionIssueId: issue.id,
+  });
+  const hasOwnerDecision = Boolean(ownerDecision);
   if (!hasOwnerDecision) {
     await dispatchCapWake({
       db, mission, issue, oversightIssue,

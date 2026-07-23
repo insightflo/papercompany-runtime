@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   applyPendingMigrations,
@@ -55,7 +55,6 @@ vi.mock("../adapters/index.js", () => ({
 }));
 
 import { classifyHeartbeatRunFailure, heartbeatService } from "../services/heartbeat.ts";
-import { recordLatestAuthorizedMissionOwnerPlanDecision } from "../services/mission-owner-plan-decisions.ts";
 import { secretService } from "../services/secrets.ts";
 
 type EmbeddedPostgresInstance = {
@@ -163,73 +162,6 @@ async function waitForWakeupRequestStatus(
   }
   const [request] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.runId, runId));
   throw new Error(`Timed out waiting for wakeup request for run ${runId}; latest status=${request?.status ?? "missing"}`);
-}
-
-async function waitForActiveMissionPlanArtifact(
-  db: ReturnType<typeof createDb>,
-  missionId: string,
-  predicate: (plan: typeof missionPlanArtifacts.$inferSelect) => boolean,
-) {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
-    const activePlan = plans.find((plan) => plan.status === "active") ?? null;
-    if (activePlan && predicate(activePlan)) return activePlan;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
-  throw new Error(`Timed out waiting for active mission plan ${missionId}; count=${plans.length}`);
-}
-
-async function passPlanQaAndMaterialize(
-  db: ReturnType<typeof createDb>,
-  input: { companyId: string; missionId: string },
-) {
-  let activePlan = await waitForActivePlanWithPlanQa(db, input.missionId, 1_000);
-  if (!activePlan) {
-    const pendingResult = await recordLatestAuthorizedMissionOwnerPlanDecision({
-      db,
-      companyId: input.companyId,
-      missionId: input.missionId,
-      requestedBy: { actorType: "system", actorId: "test-suite" },
-    });
-    expect(pendingResult.status).toBe("plan_qa_pending");
-    activePlan = await waitForActivePlanWithPlanQa(db, input.missionId, 1_000);
-  }
-  const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
-  expect(planQa).toMatchObject({ issueId: expect.any(String), status: "pending" });
-  await db.insert(issueComments).values({
-    companyId: input.companyId,
-    issueId: planQa!.issueId!,
-    authorUserId: "board-user-test",
-    body: "Plan QA passed.\nPASS",
-  });
-  const result = await recordLatestAuthorizedMissionOwnerPlanDecision({
-    db,
-    companyId: input.companyId,
-    missionId: input.missionId,
-    requestedBy: { actorType: "system", actorId: "test-suite" },
-  });
-  expect(result.status).toBe("recorded");
-}
-
-async function waitForActivePlanWithPlanQa(
-  db: ReturnType<typeof createDb>,
-  missionId: string,
-  timeoutMs: number,
-) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const [activePlan] = await db
-      .select()
-      .from(missionPlanArtifacts)
-      .where(eq(missionPlanArtifacts.missionId, missionId))
-      .then((plans) => plans.filter((plan) => plan.status === "active"));
-    const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
-    if (planQa?.issueId) return activePlan;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return null;
 }
 
 async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
@@ -401,6 +333,7 @@ async function seedMissionOwnerTaskContextFixture(db: ReturnType<typeof createDb
     originKind: issueKind,
     originId: issueKind === "mission_main_executor_unblock" ? sourceIssueId : null,
   });
+  // Display-only comment remains allowed for audit UI, but is never decision authority.
   await db.insert(issueComments).values({
     companyId,
     issueId: ownerTaskIssueId,
@@ -414,6 +347,35 @@ async function seedMissionOwnerTaskContextFixture(db: ReturnType<typeof createDb
       "Evidence: bounded owner comment",
     ].join("\n"),
   });
+  // Structured recovery ledger is the only authority for latestOwnerActionDecision in heartbeat context.
+  if (issueKind === "mission_main_executor_unblock") {
+    const { recordMissionOwnerDecision } = await import("../services/missions/mission-owner-recovery-ledger.js");
+    const heartbeatRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: heartbeatRunId,
+      companyId,
+      agentId,
+      issueId: ownerTaskIssueId,
+      status: "succeeded",
+      invocationSource: "automation",
+      startedAt: new Date("2026-07-01T00:00:00.000Z"),
+      finishedAt: new Date("2026-07-01T00:01:00.000Z"),
+      createdAt: new Date("2026-07-01T00:01:00.000Z"),
+    });
+    await recordMissionOwnerDecision({
+      db,
+      issue: { id: ownerTaskIssueId, companyId, missionId },
+      sourceIssueId,
+      heartbeatRunId,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: sourceIssueId,
+        reason: "source is now unblockable",
+        nextAction: "re-dispatch later after approval",
+        evidence: "structured owner recovery ledger",
+      },
+    });
+  }
 
   return { companyId, agentId, missionId, sourceIssueId, ownerTaskIssueId };
 }
@@ -439,15 +401,32 @@ describe("heartbeat context budget preflight", () => {
     delete process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS;
     delete process.env.PAPERCLIP_AGENT_JWT_ISSUER;
     delete process.env.PAPERCLIP_AGENT_JWT_AUDIENCE;
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // Drain/stop in-flight heartbeat work before deleting rows so residual adapter.execute
+    // and secret materialization cannot pollute the next test (Hermes Ops spy / company_secrets FK).
+    const idleDeadline = Date.now() + 2_000;
+    while (Date.now() < idleDeadline) {
+      const activeRuns = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, ["queued", "running"]))
+        .limit(1);
+      if (activeRuns.length === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await db
+      .update(heartbeatRuns)
+      .set({ status: "failed", finishedAt: new Date(), error: "test-teardown-drain" })
+      .where(inArray(heartbeatRuns.status, ["queued", "running"]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await db.delete(agentTaskSessions);
+    // Transition events can pin heartbeat_runs (owner recovery ledger). Delete before runs.
+    await db.delete(workflowTransitionEvents);
+    await db.update(heartbeatRuns).set({ wakeupRequestId: null });
     await cleanupHeartbeatRunRecords(db);
     // [AREA: wakeup queue] 새 skip→queued 동작이 agent_wakeup_requests 를 pending 상태로 남긴다.
     // 이전 test 의 queued wakeup 이 다음 test 의 resumeQueuedRuns 에 의해 promote 되어 공유
     // executeSpy 카운트를 오염시키지 않도록 매 test 마다 전체 삭제(격리). 반드시 runs 정리 뒤(FK).
     await db.delete(agentWakeupRequests);
-    // [Task 6C] transition events 도 정리(event write latency 가 timing race 유발 방지)
-    await db.delete(workflowTransitionEvents);
     await db.delete(workspaceRuntimeServices);
     await db.delete(issueWorkProducts);
     await db.delete(issueDocuments);
@@ -460,14 +439,19 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(missionPlanArtifacts);
     await db.update(issues).set({ parentId: null });
     await db.delete(issues);
+    await db.delete(qualityReviewItems);
     await db.delete(toolDefinitions);
     await db.delete(agentKbGrants);
     await db.delete(knowledgeBases);
     await db.delete(missionSessions);
     await db.delete(missions);
+    await db.delete(companySecretVersions);
     await db.delete(companySecrets);
     await db.delete(agentRuntimeState);
     await deleteAgentsAfterLateIssueSideEffects(db);
+    // Late heartbeat side-effects can recreate secrets after the first delete.
+    await db.delete(companySecretVersions);
+    await db.delete(companySecrets);
     await db.delete(projects);
     await db.delete(companySkills);
     await db.delete(companies);
@@ -587,11 +571,14 @@ describe("heartbeat context budget preflight", () => {
     );
     const serialized = JSON.stringify(invocationContext?.paperclipMissionOwnerTaskContext);
     expect(serialized).toContain("Governance evidence: unavailable in this context builder");
-    expect(serialized).toContain("### Mission owner decision");
+    expect(serialized).toContain("owner_recovery_api");
+    expect(serialized).toContain("display-only");
     expect(serialized).not.toContain("source issue private detail should stay bounded");
   });
 
-  it("reconciles a mission-owner unblock ARTIFACT URL back to the source issue", async () => {
+  it("does not reconcile a mission-owner unblock ARTIFACT URL from stdout as source completion authority", async () => {
+    // Structured authority only: comment/stdout [ARTIFACT] URLs are display-only and must not
+    // auto-register workProducts or mark the linked source issue done.
     const fixture = await seedMissionOwnerTaskContextFixture(db, "mission_main_executor_unblock");
     const artifactUrl = "https://manual-onboarding.pages.dev/onboarding/concepts/feynman-method-v2/index.html";
     executeSpy.mockResolvedValue({
@@ -620,31 +607,17 @@ describe("heartbeat context budget preflight", () => {
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
     expect(finalized.status).toBe("succeeded");
 
-    const sourceIssue = await waitForIssueStatus(
-      db,
-      fixture.sourceIssueId,
-      (issue) => issue.status === "done" && issue.completedAt instanceof Date,
-    );
+    const [sourceIssue] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
     expect(sourceIssue).toEqual(expect.objectContaining({
-      status: "done",
-      completedAt: expect.any(Date),
+      status: "blocked",
+      completedAt: null,
     }));
 
     const products = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.sourceIssueId));
-    expect(products).toEqual([
-      expect.objectContaining({
-        type: "preview_url",
-        provider: "mission_owner_unblock",
-        externalId: artifactUrl,
-        url: artifactUrl,
-        isPrimary: true,
-        createdByRunId: finalized.id,
-      }),
-    ]);
+    expect(products).toHaveLength(0);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, fixture.sourceIssueId));
-    expect(comments.some((comment) => comment.body.includes("Mission owner unblock result applied"))).toBe(true);
-    expect(comments.some((comment) => comment.body.includes(`[ARTIFACT]: ${artifactUrl}`))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("Mission owner unblock result applied"))).toBe(false);
   });
 
   it("defers Hermes Ops mission issue execution to the mission main executor", async () => {
@@ -703,9 +676,12 @@ describe("heartbeat context budget preflight", () => {
       originKind: "workflow_recovery",
     });
 
+    executeSpy.mockReset();
     executeSpy.mockResolvedValue(successfulAdapterResult());
 
     const heartbeat = heartbeatService(db);
+    // Clear any residual spy activity from prior-test async teardown races.
+    executeSpy.mockClear();
     const run = await heartbeat.invoke(
       opsAgentId,
       "assignment",
@@ -1220,7 +1196,8 @@ describe("heartbeat context budget preflight", () => {
     expect(sourceAfter?.status).toBe("blocked");
   });
 
-  it("blocks an audit issue when a successful checked-out run ends with REQUEST_CHANGES in Codex stdout", async () => {
+  it("does not block an audit issue from REQUEST_CHANGES text in Codex stdout alone", async () => {
+    // Official workflow_validation_verdict ledger is authority; stdout REQUEST_CHANGES is not.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1237,7 +1214,7 @@ describe("heartbeat context budget preflight", () => {
       {
         id: agentId,
         companyId,
-      name: "Source Audit Agent",
+        name: "Source Audit Agent",
         role: "qa",
         status: "active",
         adapterType: "codex_local",
@@ -1297,48 +1274,28 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
     expect(updatedIssue).toEqual(
       expect.objectContaining({
-        status: "blocked",
+        status: "done",
         checkoutRunId: null,
         executionRunId: null,
       }),
     );
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) =>
-      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
-      comment.body.includes("Add a glossary for beginner-facing jargon")
-    )).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
 
     const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
-    expect(activities).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "issue.validation_request_changes_auto_blocked",
-          entityType: "issue",
-          entityId: issueId,
-        }),
-      ]),
-    );
+    expect(activities.some((entry) => entry.action === "issue.validation_request_changes_auto_blocked")).toBe(false);
 
-    // Phase 5 connection: final/completion QA REQUEST_CHANGES auto-creates a quality review item.
     const qualityItems = await db.select().from(qualityReviewItems).where(eq(qualityReviewItems.missionId, missionId));
-    expect(qualityItems).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        companyId,
-        missionId,
-        triggerSource: "final_qa_failure",
-        failureType: "plan_goal_mismatch",
-        targetType: "mission_output",
-        title: "Final QA / purpose-fitness failure - Validate report workflow",
-      }),
-    ]));
+    expect(qualityItems.some((item) => item.triggerSource === "final_qa_failure")).toBe(false);
   });
 
-  it("blocks final QA when Codex stdout has a markdown-rule-prefixed REQUEST_CHANGES agent message", async () => {
+  it("does not block final QA from a markdown-rule-prefixed REQUEST_CHANGES agent message in stdout", async () => {
+    // Structured workflow_validation_verdict is authority; agent message text is not.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1441,52 +1398,20 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
     expect(updatedIssue).toEqual(
       expect.objectContaining({
-        status: "blocked",
+        status: "done",
         checkoutRunId: null,
         executionRunId: null,
       }),
     );
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) =>
-      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
-      comment.body.includes("hub shell")
-    )).toBe(true);
-
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
     const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
-    expect(activities).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "issue.validation_request_changes_auto_blocked",
-          entityType: "issue",
-          entityId: issueId,
-        }),
-      ]),
-    );
-
-    let ownerRun: typeof heartbeatRuns.$inferSelect | null = null;
-    const ownerRunDeadline = Date.now() + 5_000;
-    while (Date.now() < ownerRunDeadline) {
-      ownerRun = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.agentId, ownerAgentId))
-        .then((rows) => rows[0] ?? null);
-      if (ownerRun) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    if (!ownerRun) throw new Error("Mission owner recovery run was not created");
-    if (!ownerRun.issueId) throw new Error("Mission owner recovery run has no issue");
-    expect((await waitForRunTerminal(heartbeat, ownerRun.id)).status).toBe("succeeded");
-    await waitForIssueStatus(
-      db,
-      ownerRun.issueId,
-      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
-    );
+    expect(activities.some((entry) => entry.action === "issue.validation_request_changes_auto_blocked")).toBe(false);
   });
 
   // Boundary coverage for the title-based REQUEST_CHANGES validation gate
@@ -1627,7 +1552,7 @@ describe("heartbeat context budget preflight", () => {
     )).toBe(false);
   });
 
-  it("blocks a 'verify' titled issue whose checked-out run ends with REQUEST_CHANGES", async () => {
+  it("does not block a 'verify' titled issue from REQUEST_CHANGES text in the checked-out run alone", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1703,35 +1628,23 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
     expect(updatedIssue).toEqual(
       expect.objectContaining({
-        status: "blocked",
+        status: "done",
         checkoutRunId: null,
         executionRunId: null,
       }),
     );
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) =>
-      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
-      comment.body.includes("Three citations point to secondary sources"),
-    )).toBe(true);
-
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
     const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
-    expect(activities).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "issue.validation_request_changes_auto_blocked",
-          entityType: "issue",
-          entityId: issueId,
-        }),
-      ]),
-    );
+    expect(activities.some((entry) => entry.action === "issue.validation_request_changes_auto_blocked")).toBe(false);
   });
 
-  it("blocks a 'review' titled issue whose checked-out run ends with REQUEST_CHANGES", async () => {
+  it("does not block a 'review' titled issue from REQUEST_CHANGES text in the checked-out run alone", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -1807,32 +1720,20 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "blocked" && issue.checkoutRunId === null && issue.executionRunId === null,
+      (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
     expect(updatedIssue).toEqual(
       expect.objectContaining({
-        status: "blocked",
+        status: "done",
         checkoutRunId: null,
         executionRunId: null,
       }),
     );
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) =>
-      comment.body.includes("Mission validation gate: REQUEST_CHANGES") &&
-      comment.body.includes("Tone is inconsistent across sections two and four"),
-    )).toBe(true);
-
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
     const activities = await db.select().from(activityLog).where(eq(activityLog.runId, run!.id));
-    expect(activities).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "issue.validation_request_changes_auto_blocked",
-          entityType: "issue",
-          entityId: issueId,
-        }),
-      ]),
-    );
+    expect(activities.some((entry) => entry.action === "issue.validation_request_changes_auto_blocked")).toBe(false);
   });
 
   it("syncs workflow step runs after auto-completing a successful workflow execution issue", async () => {
@@ -1989,7 +1890,9 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
-  it("records a mission owner PLAN decision when heartbeat auto-completes the checked-out planning issue", async () => {
+  it("does not treat a PLAN decision comment as authority when heartbeat auto-completes the planning issue", async () => {
+    // Structured authority only: Markdown/JSON decision comments are display-only after 655e889.
+    // Heartbeat may still complete the checked-out PLAN issue, but must not materialize plans/PAQO.
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -2067,47 +1970,25 @@ describe("heartbeat context budget preflight", () => {
       planningIssueId,
       (issue) => issue.status === "done" && issue.checkoutRunId === null && issue.executionRunId === null,
     );
-    await passPlanQaAndMaterialize(db, { companyId, missionId });
 
-    const plan = await waitForActiveMissionPlanArtifact(
-      db,
-      missionId,
-      (candidate) => {
-        const refs = candidate.refs as { paqoWorkflow?: unknown } | null;
-        return !!refs && typeof refs === "object" && !!refs.paqoWorkflow;
-      },
-    );
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, planningIssueId));
+    expect(comments.map((comment) => comment.body).join("\n")).toContain("### Mission owner plan decision");
+
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
-    expect(plans.filter((candidate) => candidate.status === "active")).toHaveLength(1);
-    expect(plan.refs).toMatchObject({
-      selectedExecutionUnits: decision.selectedExecutionUnits,
-      ownerPlanDecision: {
-        planningIssueId,
-        commentId: expect.any(String),
-        decisionHash: expect.any(String),
-      },
-      paqoWorkflow: {
-        workflowDefinitionId: expect.any(String),
-        workflowRunId: expect.any(String),
-        dependencyModel: "workflow_dag_intra_mission",
-      },
-    });
+    expect(plans.filter((candidate) => candidate.status === "active")).toHaveLength(0);
 
     const paqoDefinitions = await db
       .select()
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.name, "PAQO WBS: Ship controlled rollout"));
-    expect(paqoDefinitions).toHaveLength(1);
-    const paqoRuns = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
-    expect(paqoRuns).toHaveLength(1);
-    expect(paqoRuns[0]).toMatchObject({ companyId, missionId, status: "running" });
-    const paqoStepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, paqoRuns[0]!.id));
-    expect(paqoStepRuns).toHaveLength(2);
-    const qaStepRun = paqoStepRuns.find((stepRun) => stepRun.stepId.startsWith("qa-"));
-    expect(qaStepRun).toMatchObject({ issueId: null, status: "pending" });
+    expect(paqoDefinitions).toHaveLength(0);
+    const missionRuns = await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(missionRuns).toHaveLength(0);
   });
 
-  it("records a mission owner PLAN decision captured from adapter result output", async () => {
+  it("does not treat adapter-captured PLAN decision output as plan materialization authority", async () => {
+    // Captured PLAN decision comments may remain for display/audit, but stdout/comment JSON is
+    // not control-plane authority and must not create active plans or PAQO workflows.
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -2189,29 +2070,16 @@ describe("heartbeat context budget preflight", () => {
     const commentBodies = comments.map((comment) => comment.body).join("\n\n");
     expect(commentBodies).toContain("### Captured PLAN decision output");
     expect(commentBodies).toContain("### Mission owner plan decision");
-    await passPlanQaAndMaterialize(db, { companyId, missionId });
 
-    const plan = await waitForActiveMissionPlanArtifact(
-      db,
-      missionId,
-      (candidate) => {
-        const refs = candidate.refs as { paqoWorkflow?: unknown } | null;
-        return !!refs && typeof refs === "object" && !!refs.paqoWorkflow;
-      },
-    );
-    expect(plan.refs).toMatchObject({
-      selectedExecutionUnits: decision.selectedExecutionUnits,
-      ownerPlanDecision: {
-        planningIssueId,
-        commentId: expect.any(String),
-        decisionHash: expect.any(String),
-      },
-      paqoWorkflow: {
-        workflowDefinitionId: expect.any(String),
-        workflowRunId: expect.any(String),
-        dependencyModel: "workflow_dag_intra_mission",
-      },
-    });
+    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(plans.filter((candidate) => candidate.status === "active")).toHaveLength(0);
+    const paqoDefinitions = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, "PAQO WBS: Ship controlled rollout"));
+    expect(paqoDefinitions).toHaveLength(0);
+    const missionRuns = await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
+    expect(missionRuns).toHaveLength(0);
   });
 
   it("classifies quota/auth/command provider failures for oversight", () => {
@@ -2922,6 +2790,7 @@ describe("heartbeat context budget preflight", () => {
   });
 
   it("blocks an artifact-producing mission child run when no workProduct is registered", async () => {
+    // Gate still requires a durable issueWorkProducts row; stdout path text is not registration authority.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -3010,7 +2879,8 @@ describe("heartbeat context budget preflight", () => {
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
-    expect(comments.some((comment) => comment.body.includes("20260608.md"))).toBe(true);
+    // claimed stdout paths are not authority and must not be echoed as registration claims.
+    expect(comments.some((comment) => comment.body.includes("20260608.md"))).toBe(false);
   });
 
   it("blocks missing workProduct registration even when the agent marks the issue done before run finalization", async () => {
@@ -3095,10 +2965,12 @@ describe("heartbeat context budget preflight", () => {
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
-    expect(comments.some((comment) => comment.body.includes("20260609.md"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("20260609.md"))).toBe(false);
   });
 
-  it("auto-registers a workProduct when an agent mistakenly records the artifact as an issue work-product document", async () => {
+  it("does not auto-register a workProduct from a generic issue work-product document alone", async () => {
+    // Generic issueDocuments/documents are not Workflow API registration authority. Fail closed:
+    // no auto-registration; missing durable issueWorkProducts blocks completion.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -3179,30 +3051,19 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "done" && issue.executionRunId === null,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
     );
-    expect(updatedIssue.completedAt).not.toBeNull();
+    expect(updatedIssue.completedAt).toBeNull();
 
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
-    expect(workProducts).toHaveLength(1);
-    expect(workProducts[0]).toEqual(expect.objectContaining({
-      type: "document",
-      provider: "local",
-      externalId: outputPath,
-      isPrimary: true,
-      createdByRunId: finalized.id,
-    }));
-    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
-      path: outputPath,
-      autoRegisteredFrom: "issue_document_work_product",
-      issueDocumentId: documentId,
-    }));
+    expect(workProducts).toHaveLength(0);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
   });
 
-  it("auto-registers an ARTIFACT path for a workflow collect step with an output contract", async () => {
+  it("does not auto-register an ARTIFACT path marker from stdout for a workflow collect step", async () => {
+    // Deliverable-output contracts still require durable issueWorkProducts. [ARTIFACT] stdout is not authority.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -3257,17 +3118,6 @@ describe("heartbeat context budget preflight", () => {
     executeSpy.mockImplementation(async ({ onLog }) => {
       await onLog("stdout", [
         "Collected TrendShift evidence.",
-        "/tool-index.md",
-        "/tool-index.json",
-        "/README-kali.md",
-        "/platforms/macos.md",
-        "/platforms/linux.md",
-        "/README_en.md",
-        "/README_ja.md",
-        "/docs/install.md",
-        "/docs/usage.md",
-        "/examples/basic.json",
-        "/examples/advanced.json",
         `[ARTIFACT]: ${artifactPath}`,
       ].join("\n"));
       return successfulAdapterResult();
@@ -3288,30 +3138,18 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "done" && issue.executionRunId === null,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
     );
-    expect(updatedIssue.completedAt).not.toBeNull();
+    expect(updatedIssue.completedAt).toBeNull();
 
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
-    expect(workProducts).toHaveLength(1);
-    expect(workProducts[0]).toEqual(expect.objectContaining({
-      type: "file",
-      provider: "local",
-      externalId: artifactPath,
-      title: "evidence.json",
-      isPrimary: true,
-      createdByRunId: finalized.id,
-    }));
-    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
-      path: artifactPath,
-      autoRegisteredFrom: "claimed_artifact_file",
-    }));
+    expect(workProducts).toHaveLength(0);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
   });
 
-  it("auto-registers an ARTIFACT path when a recovery run succeeds but the issue lifecycle is stale todo", async () => {
+  it("does not auto-register an ARTIFACT path marker when a recovery run succeeds with a stale todo lifecycle", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -3398,27 +3236,15 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "done" && issue.executionRunId === null,
+      (issue) => issue.status === "blocked" && issue.executionRunId === null,
     );
-    expect(updatedIssue.completedAt).not.toBeNull();
+    expect(updatedIssue.completedAt).toBeNull();
 
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issueId));
-    expect(workProducts).toHaveLength(1);
-    expect(workProducts[0]).toEqual(expect.objectContaining({
-      type: "file",
-      provider: "local",
-      externalId: artifactPath,
-      title: "feynman-methodology-storm-research.md",
-      isPrimary: true,
-      createdByRunId: finalized.id,
-    }));
-    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
-      path: artifactPath,
-      autoRegisteredFrom: "claimed_artifact_file",
-    }));
+    expect(workProducts).toHaveLength(0);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
   });
 
   it("ignores prompt and instruction paths when checking registered workProducts", async () => {
@@ -3513,7 +3339,9 @@ describe("heartbeat context budget preflight", () => {
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
-  it("blocks Korean artifact issues when a workProduct exists but does not reference the claimed file", async () => {
+  it("does not block when an active primary workProduct exists even if stdout names a different file", async () => {
+    // With structured authority, empty claimed-path matching: an active primary issueWorkProduct is enough.
+    // stdout filename claims are not authority and must not force a mismatch block.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -3564,6 +3392,7 @@ describe("heartbeat context budget preflight", () => {
         provider: "local",
         title: "초보자용 에이전틱 RAG HTML 학습 자료",
         status: "active",
+        isPrimary: true,
       });
       return {
         ...successfulAdapterResult(),
@@ -3586,13 +3415,12 @@ describe("heartbeat context budget preflight", () => {
     const updatedIssue = await waitForIssueStatus(
       db,
       issueId,
-      (issue) => issue.status === "blocked" && issue.executionRunId === null,
+      (issue) => issue.status === "done" && issue.executionRunId === null,
     );
-    expect(updatedIssue.completedAt).toBeNull();
+    expect(updatedIssue.completedAt).not.toBeNull();
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(true);
-    expect(comments.some((comment) => comment.body.includes("google_agentic_rag_for_beginners.html"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
   it("does not block when a registered workProduct satisfies the issue-declared artifact despite unrelated logged paths", async () => {
@@ -3838,7 +3666,8 @@ describe("heartbeat context budget preflight", () => {
     expect(comments.some((comment) => comment.body.includes("workProduct registration missing"))).toBe(false);
   });
 
-  it("blocks a succeeded mission validator run with REQUEST_CHANGES and wakes the mission owner", async () => {
+  it("does not block a succeeded mission validator run from REQUEST_CHANGES stdout alone or invent an owner unblock", async () => {
+    // Without an official workflow_validation_verdict ledger row, stdout REQUEST_CHANGES is not authority.
     const companyId = randomUUID();
     const validatorAgentId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -3980,77 +3809,17 @@ describe("heartbeat context budget preflight", () => {
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
     expect(finalized.status).toBe("succeeded");
 
-    const updatedIssue = await waitForIssueStatus(
-      db,
-      validatorIssueId,
-      (issue) => issue.status === "blocked" && issue.executionRunId === null,
-    );
-    expect(updatedIssue).toEqual(
-      expect.objectContaining({
-        status: "blocked",
-        checkoutRunId: null,
-        executionRunId: null,
-      }),
-    );
+    // Agent marked done and stdout RC is not authority; remain done (or auto-complete path), not blocked by NL gate.
+    const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, validatorIssueId));
+    expect(updatedIssue?.status).not.toBe("blocked");
+    expect(updatedIssue?.status).toBe("done");
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, validatorIssueId));
-    expect(comments.some((comment) => comment.body.includes("REQUEST_CHANGES"))).toBe(true);
-    expect(comments.some((comment) => comment.body.includes("validation gate"))).toBe(true);
+    expect(comments.some((comment) => comment.body.includes("Mission validation gate: REQUEST_CHANGES"))).toBe(false);
+    expect(comments.some((comment) => comment.body.includes("validation gate"))).toBe(false);
 
-    let ownerActions: Array<typeof issues.$inferSelect> = [];
-    const ownerActionDeadline = Date.now() + 5_000;
-    while (Date.now() < ownerActionDeadline) {
-      ownerActions = await db.select().from(issues).where(eq(issues.originId, validatorIssueId));
-      if (ownerActions.some((issue) => issue.originKind === "mission_main_executor_unblock")) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    expect(ownerActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        assigneeAgentId: ownerAgentId,
-        missionId,
-        originKind: "mission_main_executor_unblock",
-        parentId: null,
-        title: expect.stringContaining("[Unblock] PAP-QA"),
-      }),
-    ]));
-    const ownerAction = ownerActions.find((issue) => issue.originKind === "mission_main_executor_unblock")!;
-    expect(ownerAction.description ?? "").toContain("Mission execution digest:");
-    expect(ownerAction.description ?? "").toContain("Mission description: (none)");
-    expect(ownerAction.description ?? "").toContain(`Workflow run: tech-ai-news (${workflowRunId}) status=running`);
-    expect(ownerAction.description ?? "").toContain("Remaining workflow steps: validate-ai-news-note:running, send-telegram:pending");
-    expect(ownerAction.description ?? "").toContain("Step validate-ai-news-note (Validate note) status=running");
-    expect(ownerAction.description ?? "").toContain("Step send-telegram (Send Telegram) status=pending");
-    expect(ownerAction.description ?? "").toContain("Main executor brief:");
-    expect(ownerAction.description ?? "").toContain("Mission goal: Research mission");
-    expect(ownerAction.description ?? "").toContain("Current situation: Source issue");
-    expect(ownerAction.description ?? "").toContain("Mission execution loop:");
-    expect(ownerAction.description ?? "").toContain("Oversight signal boundary:");
-    expect(ownerAction.description ?? "").toContain("Oversight is not the recovery decision-maker.");
-    expect(ownerAction.description ?? "").toContain("Do not depend on normalized decision labels as the primary control path");
-    expect(ownerAction.description ?? "").toContain("- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.");
-    expect(ownerAction.description ?? "").not.toContain("decide whether to retry_source_issue, reassign_source_issue, or create a targeted revision issue");
-
-    let ownerWakeups: Array<typeof agentWakeupRequests.$inferSelect> = [];
-    const wakeupDeadline = Date.now() + 5_000;
-    while (Date.now() < wakeupDeadline) {
-      ownerWakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, ownerAgentId));
-      if (ownerWakeups.some((request) => {
-        const payload = request.payload as Record<string, unknown> | null;
-        return payload?.issueId === ownerAction.id && payload?.sourceIssueId === validatorIssueId;
-      })) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    const ownerWakeup = ownerWakeups.find((request) => {
-      const payload = request.payload as Record<string, unknown> | null;
-      return payload?.issueId === ownerAction.id && payload?.sourceIssueId === validatorIssueId;
-    });
-    expect(ownerWakeup).toEqual(expect.objectContaining({
-      payload: expect.objectContaining({ issueId: ownerAction.id, sourceIssueId: validatorIssueId }),
-    }));
-    if (ownerWakeup?.runId) {
-      const ownerRun = await waitForRunTerminal(heartbeat, ownerWakeup.runId);
-      expect(ownerRun.status).toBe("succeeded");
-    }
+    const ownerActions = await db.select().from(issues).where(eq(issues.originId, validatorIssueId));
+    expect(ownerActions.some((issue) => issue.originKind === "mission_main_executor_unblock")).toBe(false);
   });
 
   it("blocks workflow validator done when a succeeded run leaves no verdict ledger", async () => {

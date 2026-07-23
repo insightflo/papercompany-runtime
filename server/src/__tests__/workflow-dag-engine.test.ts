@@ -28,7 +28,15 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
-const heartbeatWakeup = vi.fn();
+// vi.hoisted: mock factories run during ESM import resolution, before plain consts init.
+// Production path: wakeExistingWorkflowStepIssue → queueIssueAssignmentWakeup({ heartbeat: heartbeatService(db) })
+// → heartbeat.wakeup(...). The heartbeatService mock alone does not always bind in this file's
+// import graph, so real enqueueWakeup runs (agent_runtime_state / activity_log FK cleanup failures
+// + 0 spy calls). Force the assignment-wakeup helper to use the test spy while keeping its
+// real guards/payload shape so existing wakeup assertions stay valid.
+const { heartbeatWakeup } = vi.hoisted(() => ({
+  heartbeatWakeup: vi.fn(),
+}));
 
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
@@ -36,6 +44,19 @@ vi.mock("../services/heartbeat.js", async (importOriginal) => {
     ...actual,
     heartbeatService: () => ({
       wakeup: heartbeatWakeup,
+    }),
+  };
+});
+
+vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/issue-assignment-wakeup.js")>();
+  return {
+    ...actual,
+    queueIssueAssignmentWakeup: (
+      input: Parameters<typeof actual.queueIssueAssignmentWakeup>[0],
+    ) => actual.queueIssueAssignmentWakeup({
+      ...input,
+      heartbeat: { wakeup: heartbeatWakeup },
     }),
   };
 });
@@ -53,6 +74,7 @@ import {
   syncWorkflowRunForIssue,
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
+import { loadWorkflowApiFeedback } from "../services/workflow/validation-verdict-ledger.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "../services/workflow/tool-result-events.js";
 import { reconcileDeadlockedWorkflowRuns, reconcileRunnableWorkflowStepWakeups, reconcileStuckWorkflowRuns } from "../services/workflow/reconciler.js";
 import { buildRuntimeSearchPathPermissions } from "../services/runtime-search-path-permissions.js";
@@ -1317,7 +1339,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(createdIssue?.description).toContain("/workflow/artifacts");
     expect(createdIssue?.description).toContain("/workflow/complete");
     expect(createdIssue?.description).toContain("WorkProduct registration contract:");
-    expect(createdIssue?.description).toContain("[ARTIFACT]:");
+    expect(createdIssue?.description).toContain("only the Workflow API registers a work product");
+    expect(createdIssue?.description).not.toContain("[ARTIFACT]:");
     expect(createdIssue?.description).toContain("Evidence explanation quality");
     expect(createdIssue?.description).toContain("source content -> observation -> interpretation -> conclusion");
     expect(createdIssue?.description).toContain("private traceability");
@@ -1640,7 +1663,6 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(deliveryRubric).toContain("final consumer path");
     expect(deliveryRubric).toContain("HTTP 200");
 
-    await addQaVerdictComment(deliveryRun.issueId!, companyId, publisherAgentId, "PASS", "2026-06-28T00:40:00.000Z");
     await recordWorkflowVerdictForIssue(deliveryRun.issueId!, "pass", "2026-06-28T00:40:00.000Z");
     await issueService(db).update(deliveryRun.issueId!, { status: "done" });
     await syncWorkflowRunForIssue(db, deliveryRun.issueId!);
@@ -2176,26 +2198,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         status: "pending",
       },
     ]);
-    await db.insert(workflowTransitionEvents).values({
-      companyId,
-      missionId,
-      workflowRunId: runId,
-      workflowStepRunId: validatorStepRunId,
-      issueId: validatorIssueId,
-      eventType: "workflow_validation_verdict",
-      layer: "workflow_validation",
-      verdict: "request_changes",
-      decision: "request_changes",
-      reason: "test",
-      reasonCode: "test",
-      payload: {
-        kind: "workflow_validation_verdict",
-        workflowRunId: runId,
-        stepRunId: validatorStepRunId,
-        issueId: validatorIssueId,
-        verdict: "request_changes",
-      },
-    });
+    await recordWorkflowVerdictForIssue(validatorIssueId, "request_changes", "2026-06-14T06:10:00.000Z");
 
     const result = await syncWorkflowRunForIssue(db, validatorIssueId);
 
@@ -2338,18 +2341,6 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         startedAt: new Date("2026-06-18T05:31:00.000Z"),
       },
     ]);
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: validatorIssueId,
-      authorAgentId: validatorAgentId,
-      createdAt: new Date("2026-06-18T05:37:09.000Z"),
-      body: [
-        "Decision context: REQUEST_CHANGES",
-        "Three source-bound fidelity fixes are required on the synthesis issue.",
-        "",
-        "REQUEST_CHANGES: Three source-bound fidelity fixes are required on the synthesis issue.",
-      ].join("\n"),
-    });
     await db.insert(workflowStepRuns).values([
       {
         workflowRunId: runId,
@@ -2374,6 +2365,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         status: "pending",
       },
     ]);
+    await recordWorkflowVerdictForIssue(
+      validatorIssueId,
+      "request_changes",
+      "2026-06-18T05:37:09.000Z",
+      "REQUEST_CHANGES: Three source-bound fidelity fixes are required on the synthesis issue.",
+    );
 
     const result = await syncWorkflowRunForIssue(db, synthIssueId);
 
@@ -2411,7 +2408,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
   });
 
-  it("allows downstream steps after a newer validator heartbeat PASS supersedes an older REQUEST_CHANGES comment", async () => {
+  it("[structured authority] a heartbeat PASS in stdout and a REQUEST_CHANGES comment do not record a verdict event or drive completion", async () => {
     const companyId = randomUUID();
     const validatorAgentId = randomUUID();
     const workflowId = randomUUID();
@@ -2535,28 +2532,28 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     expect(result?.status).toBe("running");
     expect(toolExecutor).not.toHaveBeenCalled();
-    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
-    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
-    expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
-      workflowRunId: runId,
-      stepId: "send-telegram",
-      toolName: "send-telegram",
-    }));
+    // NEGATIVE: a REQUEST_CHANGES comment and a heartbeat resultJson.stdout PASS are not verdict
+    //   authority — no structured workflow_validation_verdict event is recorded, so no downstream
+    //   completion is driven by comment/stdout.
+    const verdictEvents = await db.select({ id: workflowTransitionEvents.id })
+      .from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.issueId, validatorIssueId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
+    expect(verdictEvents).toHaveLength(0);
     const stepRows = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
-    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")).toMatchObject({
-      status: "completed",
-      issueId: validatorIssueId,
-    });
-    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
-      status: "running",
-      issueId: null,
-    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")?.status).toBe("running");
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")?.status).toBe("pending");
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 0, executedCount: 0, failedCount: 0 });
   });
 
-  it("ignores REQUEST_CHANGES comments from before the current validator execution window when a current PASS exists", async () => {
+  it("[structured authority] a REQUEST_CHANGES comment before the execution window does not record a verdict event (no stdout/comment authority)", async () => {
     const companyId = randomUUID();
     const validatorAgentId = randomUUID();
     const workflowId = randomUUID();
@@ -2680,36 +2677,31 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     expect(result?.status).toBe("running");
     expect(toolExecutor).not.toHaveBeenCalled();
-    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
-    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
-    expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
-      workflowRunId: runId,
-      stepId: "send-telegram",
-      toolName: "send-telegram",
-    }));
+    // NEGATIVE: comments and heartbeat stdout are not verdict authority — no event recorded, no completion.
+    const verdictEvents = await db.select({ id: workflowTransitionEvents.id })
+      .from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.issueId, validatorIssueId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
+    expect(verdictEvents).toHaveLength(0);
     const stepRows = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
-    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")).toMatchObject({
-      status: "completed",
-      issueId: validatorIssueId,
-    });
-    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
-      status: "running",
-      issueId: null,
-    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-note")?.status).toBe("running");
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")?.status).toBe("pending");
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 0, executedCount: 0, failedCount: 0 });
   });
 
-  // [목적] dag-engine 의 validation verdict 로딩 경로(loadLatestValidationVerdicts →
-  //   readValidationVerdictFromHeartbeatResult → extractCodexTaskCompleteMessages) 가 heartbeat run 의
-  //   resultJson.stdout(codex JSONL) 에서 REQUEST_CHANGES / PASS 를 읽는지 검증.
-  //   comment 경로는 위 두 테스트가, codex stdout 경로는 아래 두 테스트가 담당한다.
+  // stdout fixtures remain only to verify that natural-language output is not workflow authority.
   function buildCodexStdout(lines: unknown[]): string {
     return lines.map((line) => JSON.stringify(line)).join("\n");
   }
 
-  it("blocks downstream tool steps when a validator heartbeat resultJson.stdout carries REQUEST_CHANGES via codex task_complete last_agent_message", async () => {
+  it("[structured authority] a REQUEST_CHANGES verdict in heartbeat resultJson.stdout does not record a verdict event or fail the validator", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const validatorAgentId = randomUUID();
@@ -2825,9 +2817,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         completedAt: new Date("2026-06-14T06:10:00.000Z"),
       },
     ]);
-    // validator heartbeat run: codex stdout(JSONL) 가 REQUEST_CHANGES verdict 를 싣는다.
-    // task_complete 이벤트의 payload.last_agent_message 가 "REQUEST_CHANGES\n- ..." — extractCodexTaskCompleteMessages
-    // 가 이를 추출하고 readValidationVerdictFromHeartbeatResult 가 request_changes 로 판정한다.
+    // This Codex JSONL output resembles a rejection but must not cause a workflow transition.
     await db.insert(heartbeatRuns).values({
       id: verdictRunId,
       companyId,
@@ -2882,21 +2872,24 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     expect(result?.status).toBe("running");
     expect(toolExecutor).not.toHaveBeenCalled();
+    // NEGATIVE: a REQUEST_CHANGES verdict carried only in heartbeat resultJson.stdout is not authority.
+    const verdictEvents = await db.select({ id: workflowTransitionEvents.id })
+      .from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.issueId, validatorIssueId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
+    expect(verdictEvents).toHaveLength(0);
     const stepRows = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
-    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-artifact")).toMatchObject({
-      status: "failed",
-      issueId: validatorIssueId,
-    });
-    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
-      status: "pending",
-      issueId: null,
-    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-artifact")?.status).toBe("running");
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")?.status).toBe("pending");
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
   });
 
-  it("allows downstream steps when a validator heartbeat resultJson.stdout carries PASS via codex item.completed agent_message", async () => {
+  it("[structured authority] a PASS verdict in heartbeat resultJson.stdout does not record a verdict event or drive downstream", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const validatorAgentId = randomUUID();
@@ -3012,9 +3005,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         completedAt: new Date("2026-06-14T06:10:00.000Z"),
       },
     ]);
-    // validator heartbeat run: codex stdout(JSONL) 가 PASS verdict 를 싣는다.
-    // item.completed 이벤트의 item.type:"agent_message" / item.text 가 "PASS ..." — extractCodexTaskCompleteMessages
-    // 가 이를 추출하고 readValidationVerdictFromHeartbeatResult 가 pass 로 판정한다.
+    // This Codex JSONL output resembles a pass but must not cause a workflow transition.
     await db.insert(heartbeatRuns).values({
       id: verdictRunId,
       companyId,
@@ -3068,25 +3059,24 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
 
     expect(result?.status).toBe("running");
     expect(toolExecutor).not.toHaveBeenCalled();
-    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
-    expect(dispatchResult).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
-    expect(toolExecutor).toHaveBeenCalledWith(expect.objectContaining({
-      workflowRunId: runId,
-      stepId: "send-telegram",
-      toolName: "send-telegram",
-    }));
+    // NEGATIVE: a PASS verdict carried only in heartbeat resultJson.stdout is not authority — no event,
+    //   no downstream completion.
+    const verdictEvents = await db.select({ id: workflowTransitionEvents.id })
+      .from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.issueId, validatorIssueId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
+    expect(verdictEvents).toHaveLength(0);
     const stepRows = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
-    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-artifact")).toMatchObject({
-      status: "completed",
-      issueId: validatorIssueId,
-    });
-    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")).toMatchObject({
-      status: "running",
-      issueId: null,
-    });
+    expect(stepRows.find((stepRun) => stepRun.stepId === "validate-ai-news-artifact")?.status).toBe("running");
+    expect(stepRows.find((stepRun) => stepRun.stepId === "send-telegram")?.status).toBe("pending");
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+    const dispatchResult = await processQueuedWorkflowToolStepRuns(db);
+    expect(dispatchResult).toMatchObject({ claimedCount: 0, executedCount: 0, failedCount: 0 });
   });
 
   it("creates a mission for a workflow trigger without an existing mission and links run and step issues", async () => {
@@ -3472,11 +3462,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(workflowRun?.completedAt).toBeTruthy();
   });
 
-  // ---- Plan B: dependency ARTIFACT path injection ----
-  // [목적] upstream 이 정식 workProduct 를 등록하지 않아도, producer 가 run output /
-  // description / comment 에 남긴 명시적 `[ARTIFACT]: <절대경로>` 를 downstream input 에
-  // 보조 evidence 로 주입하는지 검증한다.
-  type PlanBStepDef = {
+  // Structured artifact authority: downstream input is restricted to registered DB workProducts
+  // (or native tool metadata). Natural-language `[ARTIFACT]:` markers remain non-authoritative.
+  type DependencyWorkflowStep = {
     id: string;
     name: string;
     agentId: string;
@@ -3492,7 +3480,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     workflowId: string;
     runId: string;
     agents: Array<{ id: string; name: string; role: string }>;
-    steps: PlanBStepDef[];
+    steps: DependencyWorkflowStep[];
   }): Promise<Record<string, typeof issues.$inferSelect>> {
     heartbeatWakeup.mockResolvedValue({ id: "plan-b-run" });
     await db.insert(companies).values({
@@ -3558,11 +3546,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await syncWorkflowRunForIssue(db, issueId);
   }
 
-  async function recordWorkflowVerdictForIssue(issueId: string, verdict: "pass" | "request_changes", at: string) {
+  async function recordWorkflowVerdictForIssue(issueId: string, verdict: "pass" | "request_changes", at: string, reason?: string) {
     const [row] = await db
       .select({
         companyId: issues.companyId,
         missionId: issues.missionId,
+        assigneeAgentId: issues.assigneeAgentId,
         workflowRunId: workflowStepRuns.workflowRunId,
         workflowStepRunId: workflowStepRuns.id,
       })
@@ -3571,24 +3560,42 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       .where(eq(workflowStepRuns.issueId, issueId))
       .limit(1);
     expect(row).toBeTruthy();
+    // authoritative fixture: a checked-out heartbeat run scoped to this QA issue + an exact run/step
+    //   workflow_api verdict event — the only submission the structured readers accept.
+    const heartbeatRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: heartbeatRunId,
+      companyId: row!.companyId,
+      agentId: row!.assigneeAgentId!,
+      issueId,
+      status: "succeeded",
+      invocationSource: "automation",
+      startedAt: new Date(at),
+      finishedAt: new Date(at),
+      createdAt: new Date(at),
+      updatedAt: new Date(at),
+    });
     await db.insert(workflowTransitionEvents).values({
       companyId: row!.companyId,
       missionId: row!.missionId,
       workflowRunId: row!.workflowRunId,
       workflowStepRunId: row!.workflowStepRunId,
       issueId,
+      heartbeatRunId,
       eventType: "workflow_validation_verdict",
       layer: "workflow_validation",
       verdict,
       decision: verdict,
-      reason: "test",
-      reasonCode: "test",
+      reason: "workflow_api",
+      reasonCode: "workflow_api",
+      idempotencyKey: `test-verdict:${issueId}:${row!.workflowStepRunId}:${heartbeatRunId}`,
       payload: {
         kind: "workflow_validation_verdict",
         workflowRunId: row!.workflowRunId,
         stepRunId: row!.workflowStepRunId,
         issueId,
         verdict,
+        ...(reason ? { reason } : {}),
       },
       createdAt: new Date(at),
     });
@@ -3637,18 +3644,15 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   }
 
-  function countOccurrences(haystack: string, needle: string): number {
-    return haystack.split(needle).length - 1;
-  }
 
-  it("Plan B: injects producer-declared ARTIFACT path (run output) for single upstream without a registered workProduct", async () => {
+  it("does not inject a producer stdout ARTIFACT marker without a registered workProduct", async () => {
     const companyId = randomUUID();
     const agentAId = randomUUID();
     const agentBId = randomUUID();
     const runId = randomUUID();
     const upstream = await executeDependencyWorkflow({
       companyId,
-      companyName: "PlanB Single Upstream",
+      companyName: "Structured Artifact Single Upstream",
       missionId: randomUUID(),
       workflowId: randomUUID(),
       runId,
@@ -3668,13 +3672,12 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const auditIssue = await getStepIssue(runId, "audit");
     expect(auditIssue).toBeTruthy();
     const desc = auditIssue!.description ?? "";
-    expect(desc).toContain("artifactPaths (auxiliary, producer-declared `[ARTIFACT]:`)");
-    expect(desc).toContain(artifactPath);
+    expect(desc).toContain("workProducts: none registered");
+    expect(desc).not.toContain(artifactPath);
     expect(desc).not.toContain("Dependency workProduct hard-stop:");
-    expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(0);
   });
 
-  it("Plan B: injects per-dependency ARTIFACT paths for multiple upstreams (run output + comment sources)", async () => {
+  it("does not inject stdout or comment ARTIFACT markers for multiple dependencies", async () => {
     const companyId = randomUUID();
     const agentAId = randomUUID();
     const agentBId = randomUUID();
@@ -3682,7 +3685,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const runId = randomUUID();
     const upstream = await executeDependencyWorkflow({
       companyId,
-      companyName: "PlanB Multi Upstream",
+      companyName: "Structured Artifact Multi Upstream",
       missionId: randomUUID(),
       workflowId: randomUUID(),
       runId,
@@ -3707,61 +3710,65 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const synthIssue = await getStepIssue(runId, "b");
     expect(synthIssue).toBeTruthy();
     const desc = synthIssue!.description ?? "";
-    expect(desc).toContain(a1Path);
-    expect(desc).toContain(a2Path);
+    expect(desc).toContain("workProducts: none registered");
+    expect(desc).not.toContain(a1Path);
+    expect(desc).not.toContain(a2Path);
     expect(desc).not.toContain("Dependency workProduct hard-stop:");
-    expect(countOccurrences(desc, "has no registered dependency workProduct.")).toBe(0);
   });
 
-  it("Plan B: keeps downstream pending when a required dependency is done without workProduct or ARTIFACT", async () => {
+  it("keeps graphWorkProductRequired producers incomplete without registered workProducts", async () => {
     const companyId = randomUUID();
-    const agentAId = randomUUID();
-    const agentBId = randomUUID();
-    const agentCId = randomUUID();
+    const collectorAgentId = randomUUID();
+    const auditorAgentId = randomUUID();
     const runId = randomUUID();
-    const workflowId = randomUUID();
-    const steps: PlanBStepDef[] = [
-      { id: "a1", name: "Collect A1", agentId: agentAId, dependencies: [], description: "Collect A1" },
-      { id: "a2", name: "Collect A2", agentId: agentBId, dependencies: [], description: "Collect A2" },
-      { id: "b", name: "Synthesize", agentId: agentCId, dependencies: ["a1", "a2"], description: "Synthesize A1+A2" },
-    ];
     const upstream = await executeDependencyWorkflow({
       companyId,
-      companyName: "PlanB Partial Artifact",
+      companyName: "Structured Artifact Required Dependency",
       missionId: randomUUID(),
-      workflowId,
+      workflowId: randomUUID(),
       runId,
       agents: [
-        { id: agentAId, name: "Collector A1", role: "engineer" },
-        { id: agentBId, name: "Collector A2", role: "engineer" },
-        { id: agentCId, name: "Synthesizer", role: "pm" },
+        { id: collectorAgentId, name: "Collector", role: "engineer" },
+        { id: auditorAgentId, name: "Auditor", role: "pm" },
       ],
-      steps,
+      steps: [
+        {
+          id: "collect",
+          name: "Collect",
+          agentId: collectorAgentId,
+          dependencies: [],
+          description: "Collect evidence",
+          graphWorkProductRequired: true,
+        },
+        { id: "audit", name: "Audit", agentId: auditorAgentId, dependencies: ["collect"], description: "Audit the evidence" },
+      ],
     });
-    const a1Path = "/srv/papercompany/produced_work/a1/evidence_a1.json";
-    // a1 은 ARTIFACT 선언, a2 는 workProduct 도 ARTIFACT 도 없음.
-    await completeStepIssue(upstream.a2!.id);
+    const artifactPath = "/srv/papercompany/produced_work/collect/evidence.json";
+    await seedArtifactRun({ companyId, agentId: collectorAgentId, issueId: upstream.collect!.id, artifactPath });
     await db
-      .update(workflowDefinitions)
-      .set({ stepsJson: steps.map((step) => step.id === "a2" ? { ...step, graphWorkProductRequired: true } : step) })
-      .where(eq(workflowDefinitions.id, workflowId));
-    await seedArtifactRun({ companyId, agentId: agentAId, issueId: upstream.a1!.id, artifactPath: a1Path });
-    await completeStepIssue(upstream.a1!.id);
+      .update(issues)
+      .set({ status: "done", completedAt: new Date("2026-06-24T06:05:00.000Z") })
+      .where(eq(issues.id, upstream.collect!.id));
+    await syncWorkflowRunForIssue(db, upstream.collect!.id);
 
-    const synthIssue = await getStepIssue(runId, "b");
-    expect(synthIssue).toBeNull();
+    expect(await getStepIssue(runId, "audit")).toBeNull();
     const stepRuns = await db
       .select()
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
-    const a2StepRun = stepRuns.find((stepRun) => stepRun.stepId === "a2");
-    const synthStepRun = stepRuns.find((stepRun) => stepRun.stepId === "b");
-    expect(a2StepRun?.status).toBe("running");
-    expect(synthStepRun?.status).toBe("pending");
-    expect(synthStepRun?.issueId).toBeNull();
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "collect")?.status).toBe("running");
+    expect(stepRuns.find((stepRun) => stepRun.stepId === "audit")).toMatchObject({
+      status: "pending",
+      issueId: null,
+    });
+    const workProducts = await db
+      .select()
+      .from(issueWorkProducts)
+      .where(eq(issueWorkProducts.issueId, upstream.collect!.id));
+    expect(workProducts).toEqual([]);
   });
 
-  it("Plan B: treats QA gate dependencies as pass gates and forwards the checked producer workProduct to downstream producer steps", async () => {
+  it("treats QA gate dependencies as pass gates and forwards checked producer workProducts", async () => {
     const companyId = randomUUID();
     const collectorAgentId = randomUUID();
     const validatorAgentId = randomUUID();
@@ -3769,7 +3776,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const runId = randomUUID();
     const upstream = await executeDependencyWorkflow({
       companyId,
-      companyName: "PlanB QA Gate Forwarding",
+      companyName: "Structured Artifact QA Gate Forwarding",
       missionId: randomUUID(),
       workflowId: randomUUID(),
       runId,
@@ -3931,14 +3938,14 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
   });
 
-  it("Plan B: ignores ARTIFACT paths declared on unrelated issues/comments outside the dependency scope", async () => {
+  it("does not inject ARTIFACT markers from dependency or unrelated issue text", async () => {
     const companyId = randomUUID();
     const agentAId = randomUUID();
     const agentBId = randomUUID();
     const runId = randomUUID();
     const upstream = await executeDependencyWorkflow({
       companyId,
-      companyName: "PlanB Scope Guard",
+      companyName: "Structured Artifact Scope Guard",
       missionId: randomUUID(),
       workflowId: randomUUID(),
       runId,
@@ -3953,13 +3960,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     });
     const depPath = "/srv/papercompany/produced_work/collect/evidence.json";
     const orphanPath = "/srv/papercompany/produced_work/orphan/unrelated.json";
-    // 의존성 collect issue 는 description 에 ARTIFACT 선언.
+    // The dependency description and an unrelated comment both contain non-authoritative markers.
     const collectIssue = upstream.collect!;
     await db
       .update(issues)
       .set({ description: `${collectIssue.description ?? ""}\n[ARTIFACT]: ${depPath}` })
       .where(eq(issues.id, collectIssue.id));
-    // 동일 company 의 무관 orphan issue 를 만들고 comment 에 ARTIFACT 남김 — dependency scope 밖.
+    // The unrelated issue remains outside the workflow dependency scope.
     const orphanIssue = await issueService(db).create(companyId, {
       title: "Unrelated orphan issue",
       description: "Not part of this workflow run",
@@ -3977,7 +3984,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const auditIssue = await getStepIssue(runId, "audit");
     expect(auditIssue).toBeTruthy();
     const desc = auditIssue!.description ?? "";
-    expect(desc).toContain(depPath);
+    expect(desc).toContain("workProducts: none registered");
+    expect(desc).not.toContain(depPath);
     expect(desc).not.toContain(orphanPath);
     expect(desc).not.toContain("Dependency workProduct hard-stop:");
   });
@@ -7196,28 +7204,27 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     return { companyId, producerAgentId, qaAgentId, runId, producerIssueId, qaIssueId };
   }
 
-  async function addQaVerdictComment(qaIssueId: string, companyId: string, qaAgentId: string, verdict: "REQUEST_CHANGES" | "PASS", at: string) {
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: qaIssueId,
-      authorAgentId: qaAgentId,
-      createdAt: new Date(at),
-      body: [
-        `Prior state marker for review context: Decision: ${verdict}`,
-        "Validation review complete.",
-        "",
-        verdict === "REQUEST_CHANGES"
-          ? "REQUEST_CHANGES: Fix the validation gaps before delivery."
-          : "PASS",
-      ].join("\n"),
-    });
+  async function submitQaVerdictEvidence(qaIssueId: string, companyId: string, qaAgentId: string, verdict: "REQUEST_CHANGES" | "PASS", at: string) {
+    // authoritative fixture: submits the structured workflow_api verdict event (the only decision +
+    //   feedback authority). The feedback rationale is carried in the event payload reason field.
+    const reason = [
+      `Prior state marker for review context: Decision: ${verdict}`,
+      "Validation review complete.",
+      "",
+      verdict === "REQUEST_CHANGES"
+        ? "REQUEST_CHANGES: Fix the validation gaps before delivery."
+        : "PASS",
+    ].join("\n");
+    void companyId;
+    void qaAgentId;
+    await recordWorkflowVerdictForIssue(qaIssueId, verdict === "PASS" ? "pass" : "request_changes", at, reason);
   }
 
   it("[P4 control-flow loop] QA request_changes fires the back-edge: producer is reset (rework), iteration_index++ and attempt archived", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-fire" });
     const { companyId, producerAgentId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
     // QA 가 produce 완료(07:05) 후 반려(07:10).
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
     heartbeatWakeup.mockClear();
     await syncWorkflowRunForIssue(db, producerIssueId);
@@ -7291,7 +7298,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     await db.update(issues)
       .set({ status: "done", completedAt: new Date("2026-06-18T07:20:00.000Z") })
       .where(eq(issues.id, producerIssueId));
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
     heartbeatWakeup.mockResolvedValue({ id: "queued-res995-stale" });
     heartbeatWakeup.mockClear();
@@ -7318,20 +7325,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
   });
 
-  it("[P4 control-flow loop] carries QA heartbeat feedback into the producer rework issue before QA comment commit", async () => {
+  it("[P4 control-flow loop] carries QA structured-verdict feedback into the producer rework issue", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-feedback" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
-    await db.insert(heartbeatRuns).values({
-      companyId,
-      agentId: qaAgentId,
-      issueId: qaIssueId,
-      status: "succeeded",
-      startedAt: new Date("2026-06-18T07:09:00.000Z"),
-      finishedAt: new Date("2026-06-18T07:10:00.000Z"),
-      resultJson: {
-        result: "REQUEST_CHANGES\n- Add a glossary before approval.",
-      },
-    });
+    await recordWorkflowVerdictForIssue(qaIssueId, "request_changes", "2026-06-18T07:10:00.000Z", "REQUEST_CHANGES: Add a glossary before approval.");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -7343,8 +7340,17 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const producerComments = await db.select().from(issueComments).where(eq(issueComments.issueId, producerIssueId));
     const producerCommentBody = producerComments.map((comment) => comment.body).join("\n");
     expect(producerCommentBody).toContain("Workflow QA rework request");
-    expect(producerCommentBody).toContain("QA heartbeat feedback");
+    expect(producerCommentBody).toContain("QA feedback");
     expect(producerCommentBody).toContain("Add a glossary before approval");
+    const qaStepRun = rows.find((row) => row.stepId === "qa-validate")!;
+    await recordWorkflowVerdictForIssue(qaIssueId, "pass", "2026-06-18T07:11:00.000Z");
+    await expect(loadWorkflowApiFeedback({
+      db,
+      companyId,
+      issueId: qaIssueId,
+      workflowRunId: runId,
+      workflowStepRunId: qaStepRun.id,
+    })).resolves.toContain("Add a glossary before approval");
   });
 
   it("[QA loop hardening] two parallel QA validators both request_changes in one round → ONE producer rework with merged feedback (budget consumed once)", async () => {
@@ -7408,10 +7414,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       { workflowRunId: runId, stepId: "qa-readability", issueId: readabilityQaIssueId, status: "failed", startedAt: new Date("2026-06-18T09:03:00.000Z"), completedAt: new Date("2026-06-18T09:10:00.000Z") },
     ]);
     // 두 QA 가 같은 producer 산출물을 서로 다른 이유로 동시 반려(각각 다른 feedback).
-    await db.insert(issueComments).values([
-      { companyId, issueId: claimsQaIssueId, authorAgentId: qaAgentId, createdAt: new Date("2026-06-18T09:09:00.000Z"), body: "Decision: REQUEST_CHANGES\n\nValidation review complete.\n\nREQUEST_CHANGES: Fix the claim sourcing gaps before delivery." },
-      { companyId, issueId: readabilityQaIssueId, authorAgentId: qaAgentId, createdAt: new Date("2026-06-18T09:10:00.000Z"), body: "Decision: REQUEST_CHANGES\n\nValidation review complete.\n\nREQUEST_CHANGES: Fix the readability gaps before delivery." },
-    ]);
+    // 두 QA 가 같은 producer 산출물을 서로 다른 이유로 동시 반려(각각 다른 structured feedback).
+    await recordWorkflowVerdictForIssue(claimsQaIssueId, "request_changes", "2026-06-18T09:09:00.000Z", "REQUEST_CHANGES: Fix the claim sourcing gaps before delivery.");
+    await recordWorkflowVerdictForIssue(readabilityQaIssueId, "request_changes", "2026-06-18T09:10:00.000Z", "REQUEST_CHANGES: Fix the readability gaps before delivery.");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -7436,7 +7441,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-patch3-idempotency" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
     // T1=07:10 REQUEST_CHANGES verdict (구 verdict).
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
     // T2=07:15 producer rework 완료(verdict 이후 → 기존 로직은 requeue 조건).
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:15:00.000Z") }).where(eq(issues.id, producerIssueId));
     // T3=07:16 QA recheck heartbeat succeeded (producer 완료 이후, explicit verdict 없이).
@@ -7466,7 +7471,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
   it("[P4 control-flow loop] maxIterations cap blocks further rework (no infinite loop): producer at cap is not reset", async () => {
     // 가즈아 무한 loop 회귀 가드: iteration_index 가 maxIterations 에 도달하면 더 이상 리셋하지 않는다.
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 1, initialProducerIteration: 1 });
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -7489,7 +7494,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       initialProducerIteration: 2,
       allowCapAcceptance: true,
     });
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
     await db.update(issues).set({
       status: "done",
       startedAt: new Date("2026-06-18T07:11:00.000Z"),
@@ -7528,7 +7533,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
   it("[P4 control-flow loop] bounded happy path: rework then QA pass → workflow completes (loop terminates)", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-happy" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
     // Sync 1: QA 반려 → producer rework 리셋(iter 0→1) + 재실행.
     await syncWorkflowRunForIssue(db, producerIssueId);
@@ -7559,7 +7564,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
 
     // QA 재리뷰 PASS 시뮬레이션(producer 07:30 이후). QA issue done.
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T07:40:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T07:40:00.000Z");
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:40:00.000Z"), cancelledAt: null }).where(eq(issues.id, qaIssueId));
 
     // Sync 3: QA pass → completed, back-edge 미발화, finalize → 워크플로 완료.
@@ -7589,7 +7594,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
         ].join("\n"),
       })
       .where(eq(issues.id, qaIssueId));
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -7699,8 +7704,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       { workflowRunId: runId, stepId: "qa-readability", issueId: readabilityQaIssueId, status: "failed", startedAt: new Date("2026-06-18T08:03:00.000Z"), completedAt: new Date("2026-06-18T08:10:00.000Z") },
       { workflowRunId: runId, stepId: "lead-approval", status: "pending" },
     ]);
-    await addQaVerdictComment(claimsQaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:09:00.000Z");
-    await addQaVerdictComment(readabilityQaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T08:10:00.000Z");
+    await submitQaVerdictEvidence(claimsQaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:09:00.000Z");
+    await submitQaVerdictEvidence(readabilityQaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T08:10:00.000Z");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -7722,7 +7727,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }).where(eq(issues.id, producerIssueId));
     await syncWorkflowRunForIssue(db, producerIssueId);
 
-    await addQaVerdictComment(readabilityQaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:40:00.000Z");
+    await submitQaVerdictEvidence(readabilityQaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T08:40:00.000Z");
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T08:40:00.000Z"), cancelledAt: null }).where(eq(issues.id, readabilityQaIssueId));
     await syncWorkflowRunForIssue(db, readabilityQaIssueId);
 
@@ -7797,7 +7802,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       { workflowRunId: runId, stepId: "audit-source-coverage", issueId: auditIssueId, status: "failed", startedAt: new Date("2026-06-22T05:06:00.000Z"), completedAt: new Date("2026-06-22T05:10:00.000Z") },
       { workflowRunId: runId, stepId: "synthesize-ai-news-report-draft", status: "pending" },
     ]);
-    await addQaVerdictComment(auditIssueId, companyId, auditAgentId, "REQUEST_CHANGES", "2026-06-22T05:10:00.000Z");
+    await submitQaVerdictEvidence(auditIssueId, companyId, auditAgentId, "REQUEST_CHANGES", "2026-06-22T05:10:00.000Z");
 
     await syncWorkflowRunForIssue(db, producerIssueId);
 
@@ -7870,7 +7875,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       { workflowRunId: runId, stepId: "build-html", status: "pending" },
       { workflowRunId: runId, stepId: "publish-html", status: "pending" },
     ]);
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T09:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T09:10:00.000Z");
 
     await syncWorkflowRunForIssue(db, qaIssueId);
 
@@ -7890,7 +7895,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
   it("[P4 control-flow loop] bounded failure: cap exhausted with persistent QA reject → workflow fails (no infinite loop)", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-fail" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 1 });
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
 
     // Sync 1: QA 반려 → producer rework 리셋(iter 0→1). maxIterations=1 이므로 이 한 번이 유일한 rework.
     await syncWorkflowRunForIssue(db, producerIssueId);
@@ -7915,7 +7920,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
 
     // QA 가 다시 반려(producer 07:30 이후). 이번엔 cap 초과라 producer 가 더 rework 못 한다.
-    await addQaVerdictComment(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:40:00.000Z");
+    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:40:00.000Z");
     await db.update(issues).set({ status: "blocked", completedAt: null, cancelledAt: null }).where(eq(issues.id, qaIssueId));
 
     // Sync 3: producer iter1 == cap → 리셋 안 함. QA failed → 워크플로 failed(무한 loop 아님).

@@ -28,7 +28,7 @@ function asPayload(value: unknown): HumanOperatorRequestPayload | null {
   const record = value as Record<string, unknown>;
   if (record.decision !== "request_input" && record.decision !== "escalate") return null;
   if (typeof record.missionId !== "string" || typeof record.issueId !== "string") return null;
-  if (typeof record.commentId !== "string") return null;
+  if (typeof record.decisionEventId !== "string" || !record.decisionEventId) return null;
   return record as HumanOperatorRequestPayload;
 }
 
@@ -133,6 +133,12 @@ export async function listCompanyHumanOperatorRequests(
     const targetIssueId = sourceOpen && sourceRow ? sourceRow.id : row.issueId;
     const title = payload.decision === "request_input" ? "Human/operator input requested" : "Mission blocker escalated";
     const timestamp = row.activityCreatedAt.toISOString();
+    const actor = payload.actorType
+      ? { type: payload.actorType, ...(payload.actorId ? { id: payload.actorId } : {}) }
+      : undefined;
+    const evidenceRefs = payload.commentId
+      ? [{ type: "comment" as const, ref: payload.commentId, label: "mission owner decision" }]
+      : [{ type: "log" as const, ref: payload.decisionEventId!, label: "mission owner decision" }];
     const event: GovernanceThreadEvent = {
       id: `owner_diagnosis:activity_log:${row.activityId}`,
       companyId: input.companyId,
@@ -143,8 +149,8 @@ export async function listCompanyHumanOperatorRequests(
       summary: compactSummary(payload),
       timestamp,
       severity: payload.decision === "escalate" ? "blocked" : "attention",
-      actor: { type: payload.actorType, ...(payload.actorId ? { id: payload.actorId } : {}) },
-      evidenceRefs: [{ type: "comment", ref: payload.commentId, label: "mission owner decision" }],
+      ...(actor ? { actor } : {}),
+      evidenceRefs,
       suggestedResumeTarget: { action: "request_human_input", issueId: targetIssueId },
       rawAvailable: true,
     };

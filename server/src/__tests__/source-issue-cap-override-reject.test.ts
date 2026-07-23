@@ -5,12 +5,13 @@
 //   함께 decision-authority 거부(missing/wrong-author/wrong-decision/stale decision/wrong-issue comment) 가
 //   모두 report_only 가 되고 run/producer 가 변경되지 않는다(transcript/과거 verdict/producer evidence 불신).
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { issueComments, issues, missions, workflowTransitionEvents } from "@paperclipai/db";
+import { issues, missions, workflowTransitionEvents } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 import { dispatchSourceIssueNativeResume } from "../services/workflow/source-issue-native-resume.js";
 import { buildQaCapKey } from "../services/workflow/source-issue-cap-override.js";
+import { validateOwnerDecisionComment } from "../services/workflow/source-issue-cap-override-authority.js";
 import { capOwnerAction, drainHeartbeatRuns, PRODUCER, QA, reloadRun, seedCapExhaustedRun, startCapOverrideTestDb, type SeedOpts } from "./helpers/cap-override-fixtures.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -90,66 +91,105 @@ describeEP("dispatchSourceIssueNativeResume cap-override rejection path (never t
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
 
-  // [Gap 1] decision-authority rejection: authority is the real owner decision comment, not a marker alone.
-  it("rejects when the owner decision comment is missing (no issue_comments row for the id)", async () => {
+  // [authority] missing structured decision fails closed even if caller supplies a decision event identifier.
+  it("rejects when the structured owner decision is absent", async () => {
     const s = await seed({ skipDecisionComment: true });
     const outcome = await dispatchSourceIssueNativeResume(db, { companyId: s.companyId, issueId: s.producerIssueId, allowBlockedIssue: true, ownerAction: capOwnerAction(s) });
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
     expect((await reloadRun(db, s.workflowRunId)).status).toBe("failed");
   });
-  it("rejects a decision comment authored by a non-owner agent (fail-closed authority)", async () => {
+  it("rejects a structured decision authored by a non-owner agent (fail-closed authority)", async () => {
     const s = await seed();
-    // re-author the existing decision comment to a non-owner (producer) agent.
-    await db.update(issueComments).set({ authorAgentId: s.producerAgentId }).where(eq(issueComments.id, s.decisionCommentId));
+    await db.update(workflowTransitionEvents).set({ heartbeatRunId: s.heartbeatRunId }).where(and(
+      eq(workflowTransitionEvents.companyId, s.companyId),
+      eq(workflowTransitionEvents.eventType, "mission_owner_decision"),
+    ));
     const outcome = await call(s);
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
-  it("rejects a decision comment whose decision is not retry_source_issue", async () => {
+  it("rejects a structured decision whose decision is not retry_source_issue", async () => {
     const s = await seed({ decision: "reassign_source_issue" });
     const outcome = await call(s);
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
-  it("rejects a decision comment predating the current cap handoff (stale authority)", async () => {
+  it("rejects a structured decision predating the current cap handoff (stale authority)", async () => {
     const s = await seed({ decisionCreatedAt: new Date("2026-07-08T00:00:00.000Z") });
     const outcome = await call(s);
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
-  it("rejects a decision comment that lives on a different issue than the owner-action issue", async () => {
+  it("returns the exact structured decision event identity", async () => {
     const s = await seed();
-    const stray = randomUUID();
-    await db.insert(issueComments).values({ id: stray, companyId: s.companyId, issueId: s.producerIssueId, authorAgentId: s.ownerAgentId, createdAt: new Date("2026-07-10T00:20:00.000Z"), body: "### Mission owner decision\nDecision: retry_source_issue\nReason: stray." });
-    const outcome = await dispatchSourceIssueNativeResume(db, { companyId: s.companyId, issueId: s.producerIssueId, allowBlockedIssue: true, ownerAction: capOwnerAction(s, stray) });
-    expect(outcome.kind).toBe("report_only");
-    if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
+    const result = await validateOwnerDecisionComment(db, s.companyId, {
+      decisionCommentId: s.ownerDecisionEventId,
+      ownerActionIssueId: s.ownerActionIssueId,
+      missionOwnerAgentId: s.ownerAgentId,
+      producerCompletedAt: new Date("2026-07-10T00:00:00.000Z"),
+      producerIssueId: s.producerIssueId,
+      producerIdentifier: null,
+    });
+    expect(result).toEqual(expect.objectContaining({ commentId: s.decisionCommentId, eventId: s.ownerDecisionEventId }));
   });
-  it("rejects a retry decision whose Source issue target is a different issue (exact target binding)", async () => {
+  it("rejects a supplied decision event ID that does not match the latest structured event", async () => {
+    const s = await seed();
+    await expect(validateOwnerDecisionComment(db, s.companyId, {
+      decisionCommentId: randomUUID(),
+      ownerActionIssueId: s.ownerActionIssueId,
+      missionOwnerAgentId: s.ownerAgentId,
+      producerCompletedAt: new Date("2026-07-10T00:00:00.000Z"),
+      producerIssueId: s.producerIssueId,
+      producerIdentifier: null,
+    })).resolves.toBeNull();
+  });
+  it("rejects a structured retry decision targeting a different source issue", async () => {
     const s = await seed();
     const wrongTarget = randomUUID();
-    await db.update(issueComments).set({ body: `### Mission owner decision\nDecision: retry_source_issue\nSource issue: ${wrongTarget}\nReason: targets the wrong issue.` }).where(eq(issueComments.id, s.decisionCommentId));
+    await db.update(workflowTransitionEvents).set({
+      payload: { kind: "mission_owner_decision", ownerActionIssueId: s.ownerActionIssueId, sourceIssueId: s.producerIssueId, commentId: s.decisionCommentId, decision: "retry_source_issue", reworkTargetRef: wrongTarget },
+    }).where(and(eq(workflowTransitionEvents.companyId, s.companyId), eq(workflowTransitionEvents.eventType, "mission_owner_decision")));
     const outcome = await call(s);
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
-  it("prefers Rework target over Source issue and rejects a mismatched producer target", async () => {
+  it("prefers structured Rework target over Source issue and rejects a mismatched producer target", async () => {
     const s = await seed();
-    await db.update(issueComments).set({ body: `### Mission owner decision\nDecision: retry_source_issue\nSource issue: ${s.producerIssueId}\nRework target: ${randomUUID()}\nReason: wrong explicit rework target.` }).where(eq(issueComments.id, s.decisionCommentId));
+    await db.update(workflowTransitionEvents).set({
+      payload: { kind: "mission_owner_decision", ownerActionIssueId: s.ownerActionIssueId, sourceIssueId: s.producerIssueId, commentId: s.decisionCommentId, decision: "retry_source_issue", sourceIssueRef: s.producerIssueId, reworkTargetRef: randomUUID() },
+    }).where(and(eq(workflowTransitionEvents.companyId, s.companyId), eq(workflowTransitionEvents.eventType, "mission_owner_decision")));
     const outcome = await call(s);
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
-  it("rejects a stale retry when a newer recognized decision (replan) supersedes it on the owner-action issue", async () => {
+  it("rejects a retry when a newer structured replan decision supersedes it on the owner-action issue", async () => {
     const s = await seed();
-    // newer decision comment (later createdAt) with a different decision → retry is no longer the latest recognized.
-    await db.insert(issueComments).values({ companyId: s.companyId, issueId: s.ownerActionIssueId, authorAgentId: s.ownerAgentId, createdAt: new Date("2026-07-10T00:40:00.000Z"), body: "### Mission owner decision\nDecision: replan_mission\nSource issue: other\nReason: plan must change." });
+    await db.insert(workflowTransitionEvents).values({
+      companyId: s.companyId, missionId: s.missionId, issueId: s.ownerActionIssueId, heartbeatRunId: s.ownerDecisionHeartbeatRunId,
+      eventType: "mission_owner_decision", layer: "mission_owner_recovery", decision: "replan_mission", reason: "owner_recovery_api", reasonCode: "owner_recovery_api", createdAt: new Date("2026-07-10T00:40:00.000Z"),
+      payload: { kind: "mission_owner_decision", source: "owner_recovery_api", ownerActionIssueId: s.ownerActionIssueId, sourceIssueId: s.producerIssueId, decision: "replan_mission" },
+    });
     const outcome = await call(s);
     expect(outcome.kind).toBe("report_only");
     if (outcome.kind === "report_only") expect(outcome.reason).toBe("cap_override_no_marker");
   });
 
+  it("fails closed when only a natural-language decision comment exists", async () => {
+    const s = await seed();
+    await db.delete(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, s.companyId),
+      eq(workflowTransitionEvents.eventType, "mission_owner_decision"),
+    ));
+    await expect(validateOwnerDecisionComment(db, s.companyId, {
+      decisionCommentId: s.ownerDecisionEventId,
+      ownerActionIssueId: s.ownerActionIssueId,
+      missionOwnerAgentId: s.ownerAgentId,
+      producerCompletedAt: new Date("2026-07-10T00:00:00.000Z"),
+      producerIssueId: s.producerIssueId,
+      producerIdentifier: null,
+    })).resolves.toBeNull();
+  });
   it("matches the handoff branch qa-cap-key fixed vector", () => {
     expect(buildQaCapKey({ companyId: "11111111-1111-1111-1111-111111111111", workflowRunId: "22222222-2222-2222-2222-222222222222", producerStepId: "produce", qaStepId: "qa-validate", producerIteration: 3, producerCompletedAt: new Date("2026-07-10T00:00:00.000Z") })).toBe("32da8362a2cd11e6fd1124b9965a4670");
   });

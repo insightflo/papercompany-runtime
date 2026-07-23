@@ -6,25 +6,27 @@
 //   1) getMissionRecoveryAdvice(db, ...) — 이슈/댓글/런을 로드(직접 drizzle 쿼리).
 //   2) resolveMissionRecoveryAdvice(순수 함수) — 휴리스틱으로 decision/target/leafCause/comment 산출.
 // [외부 연결]
-//   - extractLatestRequestChangesSummary(mission-owner-recovery-comments.ts)를 재사용해 REQUEST_CHANGES
-//     leaf cause를 추출. 동일 신호의 다른 consumer이므로 classifier drift가 아님.
+//   - official workflow_validation_verdict (reason=workflow_api) bound to current run+step + same-issue heartbeat.
+//   - official mission_plan_qa_verdicts (sourceCommentId null; optional active decisionHash).
 //   - plan QA producer 링크는 QA 이슈의 originId(issues.origin_id)로 해석한다.
 //   - workflow QA producer 링크는 workflow graph의 qa_request_changes back-edge로 해석한다.
 // [수정시 주의]
 //   - producer 판정은 "공식 계획/실행표 장부"에서만 읽는다. 텍스트 제목 예외를 늘리지 말 것.
+//   - comments are display/audit only and never decide recovery action.
 //   - operatorComment는 한국어 paste-ready. plan 회수 시 템플릿만 교체.
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  issueComments,
   issues,
   heartbeatRuns,
   issueWorkProducts,
+  missionPlanArtifacts,
+  missionPlanQaVerdicts,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
-import { extractLatestRequestChangesSummary } from "./mission-owner-recovery-comments.js";
 
 export type RecoveryDecision =
   | "producer_rework"
@@ -87,11 +89,29 @@ export interface IssueForAdvice {
   updatedAt: Date;
 }
 
-export interface CommentForAdvice {
-  id: string;
+/** Official workflow_validation_verdict facts only — never derived from prose comments. */
+export interface ValidationVerdictForAdvice {
   issueId: string;
-  body: string;
-  createdAt: Date;
+  verdict: "pass" | "request_changes";
+  reason?: string | null;
+  observedAt: Date;
+  workflowRunId?: string | null;
+  workflowStepRunId?: string | null;
+  heartbeatRunId?: string | null;
+}
+
+/**
+ * Official mission_plan_qa_verdicts facts only.
+ * sourceCommentId must be null (legacy comment-derived rows are display/audit only).
+ */
+export interface PlanQaVerdictForAdvice {
+  issueId: string;
+  verdict: "pass" | "request_changes";
+  reason?: string | null;
+  observedAt: Date;
+  decisionHash?: string | null;
+  /** Authoritative only when null/undefined; non-null is ignored by the resolver. */
+  sourceCommentId?: string | null;
 }
 
 export interface RunForAdvice {
@@ -117,6 +137,8 @@ export interface WorkflowConditionalDependencyForAdvice {
 
 export interface WorkflowStepForAdvice {
   workflowRunId: string;
+  /** Step-run id when known; used to bind workflow_validation_verdict to the current attempt. */
+  workflowStepRunId?: string | null;
   stepId: string;
   issueId: string | null;
   status: string;
@@ -152,12 +174,83 @@ interface QaSignal {
   producerIssueId: string | null;
 }
 
-function findLatestRequestChangesSignal(list: CommentForAdvice[]): { summary: string; requestAt: Date } | null {
-  for (const comment of list.slice().reverse()) {
-    const summary = extractLatestRequestChangesSummary([comment.body]);
-    if (summary) return { summary, requestAt: comment.createdAt };
+/** Current workflow run+step binding per issue (latest attempt only). */
+function currentWorkflowBindings(
+  workflowSteps: WorkflowStepForAdvice[],
+): Map<string, { workflowRunId: string; workflowStepRunId: string }> {
+  const bindings = new Map<string, { workflowRunId: string; workflowStepRunId: string }>();
+  for (const step of workflowSteps) {
+    if (!step.issueId || !step.workflowStepRunId) continue;
+    // Loader should pass current steps only; first occurrence wins if duplicates appear.
+    if (!bindings.has(step.issueId)) {
+      bindings.set(step.issueId, {
+        workflowRunId: step.workflowRunId,
+        workflowStepRunId: step.workflowStepRunId,
+      });
+    }
   }
-  return null;
+  return bindings;
+}
+
+function isWorkflowVerdictCurrent(
+  entry: ValidationVerdictForAdvice,
+  binding: { workflowRunId: string; workflowStepRunId: string } | undefined,
+): boolean {
+  // When the issue has a current step-run context, only that run+step is authoritative.
+  if (binding) {
+    return entry.workflowRunId === binding.workflowRunId
+      && entry.workflowStepRunId === binding.workflowStepRunId;
+  }
+  // No workflow step context for this issue — do not treat free-floating workflow verdicts as current.
+  // Plan-QA uses planQaVerdicts instead.
+  return false;
+}
+
+/**
+ * Latest official workflow verdict for the current run+step among pass and request_changes.
+ * Never prefilter request_changes: a later pass suppresses earlier request_changes.
+ * Only returns a rework signal when the latest verdict is request_changes.
+ */
+function findLatestWorkflowRequestChangesSignal(
+  issueId: string,
+  verdicts: ValidationVerdictForAdvice[],
+  bindings: Map<string, { workflowRunId: string; workflowStepRunId: string }>,
+): { summary: string; requestAt: Date } | null {
+  const binding = bindings.get(issueId);
+  const candidates = verdicts
+    .filter((entry) => (
+      entry.issueId === issueId
+      && (entry.verdict === "pass" || entry.verdict === "request_changes")
+      && isWorkflowVerdictCurrent(entry, binding)
+    ))
+    .sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime());
+  const latest = candidates[0];
+  if (!latest || latest.verdict !== "request_changes") return null;
+  const summary = (latest.reason && latest.reason.trim()) || "request_changes";
+  return { summary, requestAt: latest.observedAt };
+}
+
+/**
+ * Latest official PLAN-QA verdict among pass and request_changes for the issue.
+ * sourceCommentId-non-null rows are display-only and excluded.
+ * A later pass suppresses earlier request_changes for the same eligible generation set.
+ */
+function findLatestPlanQaRequestChangesSignal(
+  issueId: string,
+  verdicts: PlanQaVerdictForAdvice[],
+): { summary: string; requestAt: Date } | null {
+  const candidates = verdicts
+    .filter((entry) => (
+      entry.issueId === issueId
+      && (entry.verdict === "pass" || entry.verdict === "request_changes")
+      // Legacy comment-derived ledger rows are display/audit only.
+      && (entry.sourceCommentId == null)
+    ))
+    .sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime());
+  const latest = candidates[0];
+  if (!latest || latest.verdict !== "request_changes") return null;
+  const summary = (latest.reason && latest.reason.trim()) || "request_changes";
+  return { summary, requestAt: latest.observedAt };
 }
 
 function issueLabel(issue: IssueForAdvice): string {
@@ -229,15 +322,19 @@ function normalizeConditionalDependencies(value: unknown): WorkflowConditionalDe
 }
 
 /**
- * [목적] 이슈/댓글/런으로부터 recovery 처방을 산출. 순수 함수.
- * [입력] missionId, issues, comments, runs, (선택) selectedIssueId/now.
+ * [목적] 이슈/구조화 verdict/런으로부터 recovery 처방을 산출. 순수 함수.
+ * [입력] missionId, issues, validationVerdicts, planQaVerdicts, runs.
  * [출력] MissionRecoveryAdvice.
  * [주의] producer 판정이 originId direct lookup으로 안 되면 supervision_run으로 위임(duplicate 금지).
+ *   comments 입력 없음 — 구조화 verdict 만 권위.
+ *   workflow_validation_verdict 는 current run+step 에 바인딩된 것만 권위.
+ *   plan QA 는 mission_plan_qa_verdicts(sourceCommentId null) 만 권위(active scope 는 loader 가 필터).
  */
 export function resolveMissionRecoveryAdvice(input: {
   missionId: string;
   issues: IssueForAdvice[];
-  comments: CommentForAdvice[];
+  validationVerdicts?: ValidationVerdictForAdvice[];
+  planQaVerdicts?: PlanQaVerdictForAdvice[];
   runs: RunForAdvice[];
   workProducts?: WorkProductForAdvice[];
   workflowSteps?: WorkflowStepForAdvice[];
@@ -247,17 +344,11 @@ export function resolveMissionRecoveryAdvice(input: {
   const missingEvidence: string[] = [];
 
   const issueById = new Map(input.issues.map((i) => [i.id, i]));
-  const commentsByIssue = new Map<string, CommentForAdvice[]>();
-  for (const c of input.comments) {
-    const list = commentsByIssue.get(c.issueId) ?? [];
-    list.push(c);
-    commentsByIssue.set(c.issueId, list);
-  }
-  for (const list of commentsByIssue.values()) {
-    list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-  }
+  const validationVerdicts = input.validationVerdicts ?? [];
+  const planQaVerdicts = input.planQaVerdicts ?? [];
   const workflowSteps = input.workflowSteps ?? [];
   const workProducts = input.workProducts ?? [];
+  const workflowBindings = currentWorkflowBindings(workflowSteps);
 
   const workflowProducerForQa = (issueId: string) => {
     const qaSteps = workflowSteps.filter((step) => step.issueId === issueId);
@@ -296,10 +387,12 @@ export function resolveMissionRecoveryAdvice(input: {
 
   let qaSignal: QaSignal | null = null;
   for (const issue of input.issues) {
-    const list = commentsByIssue.get(issue.id) ?? [];
-    const requestChanges = findLatestRequestChangesSignal(list);
-    if (!requestChanges) continue;
     const role = classifyRecoveryRole(issue.originKind);
+    // Plan-QA uses mission_plan_qa_verdicts; workflow QA uses current-run workflow_validation_verdict.
+    const requestChanges = role === "qa"
+      ? findLatestPlanQaRequestChangesSignal(issue.id, planQaVerdicts)
+      : findLatestWorkflowRequestChangesSignal(issue.id, validationVerdicts, workflowBindings);
+    if (!requestChanges) continue;
     const workflowProducer = role === "qa" ? null : workflowProducerForQa(issue.id);
     if (role !== "qa" && !workflowProducer?.producerIssueId) {
       if (workflowProducer?.ambiguous) missingEvidence.push(workflowProducer.reason);
@@ -325,11 +418,11 @@ export function resolveMissionRecoveryAdvice(input: {
 
   const baseDoNot = DEFAULT_DO_NOT;
 
-  // 케이스 1: QA REQUEST_CHANGES 존재 → producer rework 또는 qa recheck.
+  // 케이스 1: official structured request_changes → producer rework 또는 qa recheck.
   if (qaSignal) {
     evidence.push({
-      kind: "comment",
-      label: `QA REQUEST_CHANGES on ${qaSignal.issue.identifier ?? qaSignal.issue.id}`,
+      kind: "workflow_step",
+      label: `official QA request_changes on ${qaSignal.issue.identifier ?? qaSignal.issue.id}`,
       value: qaSignal.summary,
     });
     const producerId = qaSignal.producerIssueId;
@@ -455,7 +548,7 @@ export function resolveMissionRecoveryAdvice(input: {
   }
 
   // 케이스 3: 뚜렷한 leaf cause를 기계적으로 산정할 수 없으면 human operator.
-  missingEvidence.push("REQUEST_CHANGES 댓글이 없고 no-active-run 상위 이슈도 없습니다. 수동 판단이 필요합니다.");
+  missingEvidence.push("official workflow_validation_verdict=request_changes 가 없고 no-active-run 상위 이슈도 없습니다. 수동 판단이 필요합니다.");
   return {
     missionId: input.missionId,
     selectedIssueId: input.selectedIssueId ?? null,
@@ -536,15 +629,6 @@ export async function getMissionRecoveryAdvice(
     .where(and(eq(issues.companyId, companyId), eq(issues.missionId, missionId)));
   const issueIds = issueRows.map((r) => r.id);
 
-  const commentRows = issueIds.length > 0
-    ? await db
-      .select()
-      .from(issueComments)
-      .where(and(eq(issueComments.companyId, companyId), inArray(issueComments.issueId, issueIds)))
-      .orderBy(desc(issueComments.createdAt))
-      .limit(200)
-    : [];
-
   const runRows = issueIds.length > 0
     ? await db
       .select()
@@ -570,23 +654,79 @@ export async function getMissionRecoveryAdvice(
     .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId)));
 
+  // Official workflow_api validation verdicts only, scoped to issue + same-issue heartbeat.
+  // Current run+step binding is applied after resolving the latest step run per issue.
+  const verdictRows = issueIds.length > 0
+    ? await db
+      .select({
+        issueId: workflowTransitionEvents.issueId,
+        verdict: workflowTransitionEvents.verdict,
+        payload: workflowTransitionEvents.payload,
+        createdAt: workflowTransitionEvents.createdAt,
+        workflowRunId: workflowTransitionEvents.workflowRunId,
+        workflowStepRunId: workflowTransitionEvents.workflowStepRunId,
+        heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+        heartbeatIssueId: heartbeatRuns.issueId,
+        heartbeatCompanyId: heartbeatRuns.companyId,
+      })
+      .from(workflowTransitionEvents)
+      .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, workflowTransitionEvents.heartbeatRunId))
+      .where(and(
+        eq(workflowTransitionEvents.companyId, companyId),
+        inArray(workflowTransitionEvents.issueId, issueIds),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+        eq(workflowTransitionEvents.reason, "workflow_api"),
+        isNotNull(workflowTransitionEvents.heartbeatRunId),
+        eq(heartbeatRuns.companyId, companyId),
+      ))
+      .orderBy(desc(workflowTransitionEvents.createdAt))
+      .limit(100)
+    : [];
+
+  // Latest step-run attempt per issue (current generation) — mirrors resolveWorkflowValidationContext.
+  const latestStepByIssue = new Map<string, typeof workflowStepRuns.$inferSelect>();
+  for (const row of workflowRows) {
+    const issueId = row.stepRun.issueId;
+    if (!issueId) continue;
+    const existing = latestStepByIssue.get(issueId);
+    if (!existing) {
+      latestStepByIssue.set(issueId, row.stepRun);
+      continue;
+    }
+    const existingTs = Math.max(
+      existing.startedAt?.getTime() ?? 0,
+      existing.completedAt?.getTime() ?? 0,
+    );
+    const candidateTs = Math.max(
+      row.stepRun.startedAt?.getTime() ?? 0,
+      row.stepRun.completedAt?.getTime() ?? 0,
+    );
+    if (candidateTs >= existingTs) latestStepByIssue.set(issueId, row.stepRun);
+  }
+
   const definitionStepsByRunId = new Map<string, ReturnType<typeof normalizeWorkflowDefinitionSteps>>();
-  const workflowSteps = workflowRows.map((row): WorkflowStepForAdvice => {
+  const workflowSteps: WorkflowStepForAdvice[] = [];
+  for (const row of workflowRows) {
+    const issueId = row.stepRun.issueId;
+    const latest = issueId ? latestStepByIssue.get(issueId) : null;
+    // Only expose current step-run context for recovery binding (stale attempts stay out of pure input).
+    if (latest && row.stepRun.id !== latest.id) continue;
     let definitionSteps = definitionStepsByRunId.get(row.workflowRunId);
     if (!definitionSteps) {
       definitionSteps = normalizeWorkflowDefinitionSteps(row.stepsJson);
       definitionStepsByRunId.set(row.workflowRunId, definitionSteps);
     }
     const definitionStep = definitionSteps.get(row.stepRun.stepId);
-    return {
+    workflowSteps.push({
       workflowRunId: row.workflowRunId,
+      workflowStepRunId: row.stepRun.id,
       stepId: row.stepRun.stepId,
       issueId: row.stepRun.issueId,
       status: row.stepRun.status,
       dependencies: definitionStep?.dependencies ?? [],
       conditionalDependencies: definitionStep?.conditionalDependencies ?? [],
-    };
-  });
+    });
+  }
 
   const toIssue = (r: typeof issueRows[number]): IssueForAdvice => ({
     id: r.id,
@@ -599,15 +739,112 @@ export async function getMissionRecoveryAdvice(
     updatedAt: r.updatedAt,
   });
 
+  const currentBindings = currentWorkflowBindings(workflowSteps);
+  const validationVerdicts: ValidationVerdictForAdvice[] = [];
+  for (const row of verdictRows) {
+    if (!row.issueId) continue;
+    if (row.heartbeatCompanyId !== companyId || row.heartbeatIssueId !== row.issueId) continue;
+    if (row.verdict !== "pass" && row.verdict !== "request_changes") continue;
+    const binding = currentBindings.get(row.issueId);
+    if (!binding) continue;
+    if (row.workflowRunId !== binding.workflowRunId || row.workflowStepRunId !== binding.workflowStepRunId) continue;
+    const payload = row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+      ? row.payload as Record<string, unknown>
+      : {};
+    const reason = typeof payload.reason === "string" ? payload.reason : null;
+    validationVerdicts.push({
+      issueId: row.issueId,
+      verdict: row.verdict,
+      reason,
+      observedAt: row.createdAt,
+      workflowRunId: row.workflowRunId,
+      workflowStepRunId: row.workflowStepRunId,
+      heartbeatRunId: row.heartbeatRunId,
+    });
+  }
+
+  // Official PLAN-QA verdicts: fail closed unless active plan refs.planQa has exact {issueId, decisionHash}.
+  // Never fall back to all mission PLAN-QA verdicts when the binding is missing/malformed.
+  const activePlan = await db
+    .select({ refs: missionPlanArtifacts.refs })
+    .from(missionPlanArtifacts)
+    .where(and(
+      eq(missionPlanArtifacts.companyId, companyId),
+      eq(missionPlanArtifacts.missionId, missionId),
+      eq(missionPlanArtifacts.status, "active"),
+    ))
+    .orderBy(desc(missionPlanArtifacts.revision), desc(missionPlanArtifacts.createdAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  const activePlanQaRef = activePlan?.refs && typeof activePlan.refs === "object" && !Array.isArray(activePlan.refs)
+    ? (activePlan.refs as Record<string, unknown>).planQa
+    : null;
+  const activePlanQaRecord = activePlanQaRef && typeof activePlanQaRef === "object" && !Array.isArray(activePlanQaRef)
+    ? activePlanQaRef as Record<string, unknown>
+    : null;
+  const activePlanQaIssueId = typeof activePlanQaRecord?.issueId === "string" && activePlanQaRecord.issueId.trim()
+    ? activePlanQaRecord.issueId.trim()
+    : null;
+  const activeDecisionHash = typeof activePlanQaRecord?.decisionHash === "string" && activePlanQaRecord.decisionHash.trim()
+    ? activePlanQaRecord.decisionHash.trim()
+    : null;
+  const activePlanQa = activePlanQaIssueId && activeDecisionHash
+    ? { issueId: activePlanQaIssueId, decisionHash: activeDecisionHash }
+    : null;
+
+  const planQaVerdicts: PlanQaVerdictForAdvice[] = [];
+  if (activePlanQa) {
+    const planQaVerdictRows = await db
+      .select({
+        planQaIssueId: missionPlanQaVerdicts.planQaIssueId,
+        verdict: missionPlanQaVerdicts.verdict,
+        diagnostics: missionPlanQaVerdicts.diagnostics,
+        decisionHash: missionPlanQaVerdicts.decisionHash,
+        sourceCommentId: missionPlanQaVerdicts.sourceCommentId,
+        updatedAt: missionPlanQaVerdicts.updatedAt,
+        createdAt: missionPlanQaVerdicts.createdAt,
+      })
+      .from(missionPlanQaVerdicts)
+      .where(and(
+        eq(missionPlanQaVerdicts.companyId, companyId),
+        eq(missionPlanQaVerdicts.missionId, missionId),
+        eq(missionPlanQaVerdicts.planQaIssueId, activePlanQa.issueId),
+        eq(missionPlanQaVerdicts.decisionHash, activePlanQa.decisionHash),
+        isNull(missionPlanQaVerdicts.sourceCommentId),
+      ))
+      .orderBy(desc(missionPlanQaVerdicts.updatedAt), desc(missionPlanQaVerdicts.createdAt))
+      .limit(20);
+
+    for (const row of planQaVerdictRows) {
+      if (row.verdict !== "pass" && row.verdict !== "request_changes") continue;
+      // Exact active issueId+decisionHash only (query already binds both; keep read-path fail closed).
+      if (row.planQaIssueId !== activePlanQa.issueId || row.decisionHash !== activePlanQa.decisionHash) continue;
+      const diagnostics = Array.isArray(row.diagnostics) ? row.diagnostics : [];
+      const reasonParts = diagnostics
+        .map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+          const record = entry as Record<string, unknown>;
+          if (typeof record.message === "string" && record.message.trim()) return record.message.trim();
+          if (typeof record.code === "string" && record.code.trim()) return record.code.trim();
+          return null;
+        })
+        .filter((part): part is string => Boolean(part));
+      planQaVerdicts.push({
+        issueId: row.planQaIssueId,
+        verdict: row.verdict,
+        reason: reasonParts.length > 0 ? reasonParts.join("; ") : null,
+        observedAt: row.updatedAt ?? row.createdAt,
+        decisionHash: row.decisionHash,
+        sourceCommentId: row.sourceCommentId,
+      });
+    }
+  }
+
   return resolveMissionRecoveryAdvice({
     missionId,
     issues: issueRows.map(toIssue),
-    comments: commentRows.map((r) => ({
-      id: r.id,
-      issueId: r.issueId,
-      body: r.body,
-      createdAt: r.createdAt,
-    })),
+    validationVerdicts,
+    planQaVerdicts,
     runs: runRows.map((r) => ({ id: r.id, issueId: r.issueId, status: r.status })),
     workProducts: workProductRows.map((r) => ({
       id: r.id,

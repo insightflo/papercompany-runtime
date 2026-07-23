@@ -1,28 +1,18 @@
 // server/src/services/missions/owner-action-unblock-handback.ts
 //
-// [파일 목적] mission_main_executor_unblock 완료 시 source(originId) 를 직접 checkout/재시도 하지
-//   않기 위한 evidence + native 분류 + 구조화 report (생성/파싱) 헬퍼. 실제 wake 은
-//   services/workflow/source-issue-native-resume.ts 의 검증된 DAG 헬퍼가 담당한다. 이 모듈은
-//   (a) source 상태/step run/failed run/live run+wake + timed_out/error/exit 신호를 모아
-//   evidence 를 만들고, (b) native outcome 으로 failureClass·recommendedNativeAction 를 분류하며,
-//   (c) Oversight 가 읽을 수 있는 구조화 report comment 를 빌드/파싱한다.
+// [파일 목적] mission_main_executor_unblock 완료 시 source 를 직접 checkout/재시도 하지 않기 위한
+//   evidence + native 분류 + display report 빌드 + system ledger 검증 헬퍼.
 // [주요 흐름]
-//   gatherUnblockSourceEvidence → facts. deriveUnblockDispatchClassification(evidence, outcome) →
-//   failureClass/recommendedNativeAction. buildUnblockHandbackReportComment → 마커 기반 구조화 report.
-//   parseUnblockHandbackReport → done closeout guard 가 report 를 "마커만" 통과시키지 않도록 검증.
-// [계약] recovery 는 오직 검증된 native workflow_resume 경로 또는 report-only. 새 endpoint · direct
-//   source checkout · source status 강제 변경 · 범용 retry framework 없음. 공식 retry/iteration/QA
-//   verdict 는 workflow layer 소유. report 마커 자체가 closeout evidence 가 아니라 — sourceIssueId
-//   일치 + 필수 필수필드 전부 갖춘 구조화 report 만이 evidence 이다.
-// [수정시 영향] LIVE_*_STATUSES / FAILED_RUN_STATUSES / failureClass 분기가 바뀌면 done guard 와
-//   Phase D stopped-execution 판정이 정렬되어야 한다(같은 live 상태 집합 사용).
+//   gatherUnblockSourceEvidence → deriveUnblockDispatchClassification → buildUnblockHandbackReportComment.
+//   done closeout 은 validateUnblockHandbackLedgerDetails / unblockIssueHasValidatedHandbackReport 만 권위.
+// [계약] recovery 는 native workflow_resume 또는 report-only. comment 본문은 closeout 권위 아님.
+// [수정시 영향] LIVE_* / FAILED_RUN / failureClass 변경 시 done guard 와 Phase D 정렬 필요.
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, not, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
   agentWakeupRequests,
   heartbeatRuns,
-  issueComments,
   issues,
   workflowStepRuns,
   missions,
@@ -38,8 +28,7 @@ const LIVE_RUN_STATUSES = ["queued", "running"] as const;
 // timed_out 포함: failed/error/cancelled/timed_out 모두 종료 실패 신호.
 const FAILED_RUN_STATUSES = ["failed", "error", "cancelled", "timed_out"] as const;
 
-// report comment 첫 줄 마커 — done closeout guard 가 report 후보를 인식하는 계약. 마커 단독은
-//   closeout 을 충족하지 않으며 parseUnblockHandbackReport 의 전체 필드 검증을 통과해야 한다.
+// Display report marker only — closeout authority is the system handback ledger, not comment text.
 export const UNBLOCK_HANDBACK_REPORT_MARKER = "[owner-action-handback-report]";
 export const UNBLOCK_HANDBACK_LEDGER_ACTION = "issue.owner_action_unblock_handback_queued";
 
@@ -304,72 +293,53 @@ export function buildUnblockHandbackReportComment(
   ].join("\n");
 }
 
-// [목적] done closeout guard 가 "마커만" 있는 임의 comment 로 closeout 되는 것을 막기 위해
-//   구조화 report 를 파싱/검증한다. 필수 필드 전부 + sourceIssueId 일치 + 알려진 enum 값이어야 인정.
-// [입력] body(comment 본문), expectedSourceIssueId(guard 의 originId).
-// [출력] valid 여부. 마커가 없거나 필수 필드 누락/외국값/source 불일치면 false.
-export function parseUnblockHandbackReport(
-  body: string,
+export type UnblockHandbackLedgerDetails = {
+  readonly sourceIssueId: string;
+  readonly failureClass: string;
+  readonly sourceLiveRunWakeState: "live" | "none";
+  readonly recommendedNativeAction: string;
+  readonly failedRunId?: string | null;
+  readonly workflowRunId?: string | null;
+  readonly workflowStepRunId?: string | null;
+  readonly stepId?: string | null;
+  readonly missionId?: string | null;
+  readonly oversightIssueId?: string | null;
+  readonly wakeupRequestId?: string | null;
+  /** Display/audit linkage only — never read back as closeout authority. */
+  readonly reportCommentId?: string | null;
+};
+
+/**
+ * Validate structured handback facts stored on the system-authored activity ledger.
+ * Comments are never authority for done closeout.
+ */
+export function validateUnblockHandbackLedgerDetails(
+  details: unknown,
   expectedSourceIssueId: string,
-): boolean {
-  if (typeof body !== "string" || !body.startsWith(UNBLOCK_HANDBACK_REPORT_MARKER)) return false;
-  const fields = new Map<string, string>();
-  for (const rawLine of body.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line === UNBLOCK_HANDBACK_REPORT_MARKER || line === "evidence:") continue;
-    const match = /^-?\s*([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(line);
-    if (!match) continue;
-    const [, key, value] = match;
-    // 동일 키가 여러 번 나오면 첫 값을 쓴다(evidence block 의 키와 충돌 않게 — 이름이 다름).
-    if (!fields.has(key)) fields.set(key, value.trim());
-  }
-  const required = [
-    "sourceIssueId",
-    "failedRunId",
-    "failureClass",
-    "sourceLiveRunWakeState",
-    "recommendedNativeAction",
-  ];
-  for (const key of required) {
-    if (!fields.has(key)) return false;
-  }
-  if (fields.get("sourceIssueId") !== expectedSourceIssueId) return false;
-  if (!UNBLOCK_FAILURE_CLASSES.has(fields.get("failureClass") ?? "")) return false;
-  if (!UNBLOCK_RECOMMENDED_NATIVE_ACTIONS.has(fields.get("recommendedNativeAction") ?? "")) return false;
-  // sourceLiveRunWakeState 는 값이 있기만 하면 되지만 과도하게 느슨한 값을 피해 enum 으로 제한.
-  const liveState = fields.get("sourceLiveRunWakeState");
-  if (liveState !== "live" && liveState !== "none") return false;
-  // evidence block 이 구조적으로 존재하는지 확인한다 — substring("evidence:") 검사는 다른 필드
-  //   값 안에 "evidence:" 가 끼어든 comment 로 우회될 수 있다. 따라서 "evidence:" 단독 헤더 라인
-  //   뒤에 최소 하나 이상의 "- key: value" 항목이 있어야 구조화 report 로 인정한다.
-  const lines = body.split("\n");
-  const evidenceStart = lines.findIndex((l) => l.trim() === "evidence:");
-  if (evidenceStart === -1) return false;
-  const hasEvidenceItem = lines.slice(evidenceStart + 1).some((l) => /^\s*-\s+[A-Za-z][A-Za-z0-9_]*\s*:/.test(l));
-  if (!hasEvidenceItem) return false;
+): details is UnblockHandbackLedgerDetails {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return false;
+  const record = details as Record<string, unknown>;
+  const sourceIssueId = typeof record.sourceIssueId === "string" ? record.sourceIssueId : null;
+  const failureClass = typeof record.failureClass === "string" ? record.failureClass : null;
+  const sourceLiveRunWakeState = record.sourceLiveRunWakeState === "live" || record.sourceLiveRunWakeState === "none"
+    ? record.sourceLiveRunWakeState
+    : null;
+  const recommendedNativeAction = typeof record.recommendedNativeAction === "string"
+    ? record.recommendedNativeAction
+    : null;
+  if (!sourceIssueId || !failureClass || !sourceLiveRunWakeState || !recommendedNativeAction) return false;
+  if (sourceIssueId !== expectedSourceIssueId) return false;
+  if (!UNBLOCK_FAILURE_CLASSES.has(failureClass)) return false;
+  if (!UNBLOCK_RECOMMENDED_NATIVE_ACTIONS.has(recommendedNativeAction)) return false;
   return true;
 }
 
-// done closeout guard 진입점: unblock 이슈의 comment 중 "검증 통과한" report 가 하나라도 있는지.
-//   expectedSourceIssueId 는 guard 의 originId(source) 여야 한다(외국 source 마커 거부).
+// done closeout guard 진입점: system-authored UNBLOCK_HANDBACK_LEDGER_ACTION details only.
+//   expectedSourceIssueId 는 guard 의 originId(source). 외국 source 거부. comment 본문은 읽지 않음.
 export async function unblockIssueHasValidatedHandbackReport(
   db: Db,
   input: { companyId: string; unblockIssueId: string; expectedSourceIssueId: string },
 ): Promise<boolean> {
-  const rows = await db
-    .select({ id: issueComments.id, body: issueComments.body })
-    .from(issueComments)
-    .where(and(
-      eq(issueComments.companyId, input.companyId),
-      eq(issueComments.issueId, input.unblockIssueId),
-    ));
-  const validReportCommentIds = new Set(
-    rows
-      .filter((row) => typeof row.body === "string" && parseUnblockHandbackReport(row.body, input.expectedSourceIssueId))
-      .map((row) => row.id),
-  );
-  if (validReportCommentIds.size === 0) return false;
-
   const ledgers = await db
     .select({ details: activityLog.details })
     .from(activityLog)
@@ -381,12 +351,7 @@ export async function unblockIssueHasValidatedHandbackReport(
       eq(activityLog.actorType, "system"),
       eq(activityLog.actorId, "owner-action-unblock-handback"),
     ));
-  return ledgers.some((ledger) => {
-    const reportCommentId = ledger.details && typeof ledger.details.reportCommentId === "string"
-      ? ledger.details.reportCommentId
-      : null;
-    return reportCommentId !== null && validReportCommentIds.has(reportCommentId);
-  });
+  return ledgers.some((ledger) => validateUnblockHandbackLedgerDetails(ledger.details, input.expectedSourceIssueId));
 }
 
 // [목적] report-only 경로에서 구조화 report 를 쓴 직후, 기존 Oversight owner work item(mission
@@ -397,7 +362,22 @@ export async function unblockIssueHasValidatedHandbackReport(
 //   oversight handback wake 다. source status / checkout 변경 없음.
 export async function handUnblockReportToOversightOwner(
   db: Db,
-  input: { companyId: string; missionId: string | null; unblockIssueId: string; reportCommentId: string },
+  input: {
+    companyId: string;
+    missionId: string | null;
+    unblockIssueId: string;
+    reportCommentId: string | null;
+    handback: {
+      sourceIssueId: string;
+      failureClass: string;
+      sourceLiveRunWakeState: "live" | "none";
+      recommendedNativeAction: string;
+      failedRunId?: string | null;
+      workflowRunId?: string | null;
+      workflowStepRunId?: string | null;
+      stepId?: string | null;
+    };
+  },
 ): Promise<string | null> {
   if (!input.missionId) return null;
   const [mission] = await db
@@ -479,8 +459,17 @@ export async function handUnblockReportToOversightOwner(
       missionId: input.missionId,
       oversightIssueId: wakeIssueId,
       wakeupRequestId: row.id,
+      // Display/audit only — closeout guard never reads this comment.
       reportCommentId: input.reportCommentId,
-    },
+      sourceIssueId: input.handback.sourceIssueId,
+      failureClass: input.handback.failureClass,
+      sourceLiveRunWakeState: input.handback.sourceLiveRunWakeState,
+      recommendedNativeAction: input.handback.recommendedNativeAction,
+      failedRunId: input.handback.failedRunId ?? null,
+      workflowRunId: input.handback.workflowRunId ?? null,
+      workflowStepRunId: input.handback.workflowStepRunId ?? null,
+      stepId: input.handback.stepId ?? null,
+    } satisfies UnblockHandbackLedgerDetails,
   });
   return row.id;
 }

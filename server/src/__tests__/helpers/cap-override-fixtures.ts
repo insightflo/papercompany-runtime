@@ -94,8 +94,10 @@ export interface Seed {
   producerStepRunId: string;
   qaStepRunId: string;
   heartbeatRunId: string;
+  ownerDecisionHeartbeatRunId: string;
   ownerActionIssueId: string;
   decisionCommentId: string;
+  ownerDecisionEventId: string;
   producerIteration: number;
   runInitialStatus: string;
   producerIssueInitialStatus: string;
@@ -117,6 +119,9 @@ export async function seedCapExhaustedRun(db: Db, overrides: SeedOpts = {}): Pro
   const heartbeatRunId = randomUUID();
   const ownerActionIssueId = randomUUID();
   const decisionCommentId = randomUUID();
+  const ownerDecisionEventId = randomUUID();
+  const ownerDecisionHeartbeatRunId = randomUUID();
+  const ownerDecisionWakeupId = randomUUID();
   const issuePrefix = "CO" + companyId.replace(/-/g, "").slice(0, 6).toUpperCase();
 
   await db.insert(companies).values({ id: companyId, name: "Cap Override Co", issuePrefix, requireBoardApprovalForNewAgents: false });
@@ -164,13 +169,13 @@ export async function seedCapExhaustedRun(db: Db, overrides: SeedOpts = {}): Pro
     description: `QA cap handoff\nqa-cap-key:${capKey}`,
     originKind: "mission_main_executor_unblock", originId: qaIssueId, assigneeAgentId: ownerAgentId, startedAt: new Date("2026-07-10T00:10:00.000Z"),
   });
-  // [authority] real owner decision comment(issue_comments) on the owner-action issue — retry_source_issue,
-  //   authored by the mission owner, post-dating the cap handoff. cap-override validates this comment by ID.
+  // [display] owner decision comment remains user-facing context; authority is the structured ledger event below.
   if (!overrides.skipDecisionComment) {
     const decisionValue = overrides.decision ?? "retry_source_issue";
+    const decisionCreatedAt = overrides.decisionCreatedAt ?? DECISION_AT;
     await db.insert(issueComments).values({
       id: decisionCommentId, companyId, issueId: ownerActionIssueId, authorAgentId: overrides.decisionAuthorAgentId ?? ownerAgentId,
-      createdAt: overrides.decisionCreatedAt ?? DECISION_AT,
+      createdAt: decisionCreatedAt,
       body: [
         "### Mission owner decision",
         `Decision: ${decisionValue}`,
@@ -180,11 +185,18 @@ export async function seedCapExhaustedRun(db: Db, overrides: SeedOpts = {}): Pro
         "Evidence: current official request_changes verdict + qa-cap-key handoff marker.",
       ].join("\n"),
     });
+    await db.insert(agentWakeupRequests).values({ id: ownerDecisionWakeupId, companyId, agentId: ownerAgentId, source: "test", status: "completed", issueId: ownerActionIssueId, reason: "test", requestKind: "workflow_resume", requestedAt: decisionCreatedAt });
+    await db.insert(heartbeatRuns).values({ id: ownerDecisionHeartbeatRunId, companyId, agentId: ownerAgentId, issueId: ownerActionIssueId, status: "succeeded", wakeupRequestId: ownerDecisionWakeupId, startedAt: decisionCreatedAt, finishedAt: decisionCreatedAt, createdAt: decisionCreatedAt });
+    await db.insert(workflowTransitionEvents).values({
+      id: ownerDecisionEventId, companyId, missionId, issueId: ownerActionIssueId, heartbeatRunId: ownerDecisionHeartbeatRunId,
+      eventType: "mission_owner_decision", layer: "mission_owner_recovery", decision: decisionValue, reason: "owner_recovery_api", reasonCode: "owner_recovery_api", createdAt: decisionCreatedAt,
+      payload: { kind: "mission_owner_decision", source: "owner_recovery_api", ownerActionIssueId, sourceIssueId: producerIssueId, commentId: decisionCommentId, decision: decisionValue, reworkTargetRef: producerIssueId },
+    });
   }
   return {
     companyId, ownerAgentId, producerAgentId, qaAgentId, missionId, workflowId, workflowRunId,
-    producerIssueId, qaIssueId, producerStepRunId, qaStepRunId, heartbeatRunId, ownerActionIssueId,
-    decisionCommentId,
+    producerIssueId, qaIssueId, producerStepRunId, qaStepRunId, heartbeatRunId, ownerDecisionHeartbeatRunId, ownerActionIssueId,
+    decisionCommentId, ownerDecisionEventId,
     producerIteration: overrides.producerIteration ?? MAX_ITER,
     runInitialStatus: overrides.runStatus ?? "failed",
     producerIssueInitialStatus: overrides.producerIssueStatus ?? "todo",
@@ -203,8 +215,8 @@ export async function reloadStepRun(db: Db, runId: string, stepId: string): Prom
 export async function auditEvents(db: Db, companyId: string) {
   return db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.eventType, "owner_cap_override_retry"))).orderBy(desc(workflowTransitionEvents.createdAt));
 }
-export function capOwnerAction(seed: Seed, decisionCommentId: string = seed.decisionCommentId) {
-  return { ownerActionIssueId: seed.ownerActionIssueId, missionId: seed.missionId, decisionCommentId };
+export function capOwnerAction(seed: Seed, decisionEventId: string = seed.ownerDecisionEventId) {
+  return { ownerActionIssueId: seed.ownerActionIssueId, missionId: seed.missionId, decisionCommentId: decisionEventId };
 }
 // [test isolation] no-spawn wake: production wakeExistingWorkflowStepIssue 를 대체해 codex spawn 없이 exact-key
 // agentWakeupRequests row(queued, requestKind=workflow_resume, run/stepRun/issue bind) 만 생성한다. test 주입 전용.
@@ -225,7 +237,7 @@ export function buildCapOverrideAuditPayload(seed: Seed, overrides: Record<strin
     kind: "owner_cap_override_retry",
     status: "pending",
     ownerActionIssueId: seed.ownerActionIssueId,
-    decisionCommentId: seed.decisionCommentId,
+    decisionCommentId: seed.ownerDecisionEventId,
     missionId: seed.missionId,
     missionOwnerAgentId: seed.ownerAgentId,
     workflowRunId: seed.workflowRunId,
@@ -241,7 +253,7 @@ export function buildCapOverrideAuditPayload(seed: Seed, overrides: Record<strin
     generation: seed.producerIteration,
     producerCleanedMetadata: {},
     dispatchEpoch: 0,
-    wakeIdempotencyKey: `cap-override-wake:${seed.decisionCommentId}`,
+    wakeIdempotencyKey: `cap-override-wake:${seed.ownerDecisionEventId}`,
     verdictHeartbeatRunId: seed.heartbeatRunId,
     producerCompletedAt: PRODUCER_COMPLETED.toISOString(),
     forwardedIssueUpdatedAt: FORWARD_APPLIED_AT.toISOString(),

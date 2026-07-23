@@ -3,9 +3,9 @@
 // [파일 목적] mission owner action 클로저들을 factory로 캡슐화 (P2).
 //   db/deps 명시 주입 → 클로저 공유 대체. missions.ts(missionService)가 호출.
 // [수정시 주의] 부작용 있음(이슈 생성/갱신/wakeup). 순수 아님.
-import { issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { activityLog, issueComments, issues, missionPlanArtifacts, missions, pluginEntities, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, asc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { HttpError, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { logActivity } from "../activity-log.js";
@@ -13,7 +13,7 @@ import { issueService } from "../issues.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService } from "../mission-plan-artifacts.js";
 import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
-import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
+import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
@@ -29,6 +29,7 @@ import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import type { MissionServiceDeps } from "../missions.js";
 import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
+import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 
 export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceDeps }) {
 
@@ -553,13 +554,12 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       .orderBy(asc(issues.createdAt), asc(issues.id));
     for (const existing of existingRows) {
       if (options.renewAfterNoActionWaiting && isTerminalIssueStatus(existing.status)) {
-        const existingComments = await db
-          .select({ body: issueComments.body })
-          .from(issueComments)
-          .where(eq(issueComments.issueId, existing.id))
-          .orderBy(asc(issueComments.createdAt), asc(issueComments.id));
-        const latestDecision = extractLatestMissionOwnerDecision(existingComments.map((comment) => comment.body));
-        if (latestDecision?.decision === "no_action_waiting") continue;
+        const latestDecision = await loadLatestMissionOwnerDecision({
+          db,
+          companyId: mission.companyId,
+          ownerActionIssueId: existing.id,
+        });
+        if (latestDecision?.decision.decision === "no_action_waiting") continue;
       }
       return existing;
     }
@@ -953,6 +953,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     assigneeAgentId: string | null;
     since: Date;
   }): Promise<Array<{ id: string; identifier: string | null; title: string }>> {
+    // Structured authority only: durable heartbeat gate activity, not comment keyword search.
     if (!input.assigneeAgentId) return [];
     const rows = await db
       .select({
@@ -961,20 +962,20 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         title: issues.title,
       })
       .from(issues)
-      .innerJoin(issueComments, eq(issueComments.issueId, issues.id))
+      .innerJoin(activityLog, and(
+        eq(activityLog.entityType, "issue"),
+        // activity_log.entity_id is text; issues.id is uuid.
+        sql`${activityLog.entityId} = ${issues.id}::text`,
+        eq(activityLog.companyId, input.companyId),
+      ))
       .where(and(
         eq(issues.companyId, input.companyId),
         eq(issues.assigneeAgentId, input.assigneeAgentId),
         isNull(issues.hiddenAt),
-        gte(issueComments.createdAt, input.since),
-        sql`(
-          ${issueComments.body} ilike '%required workflow artifact missing%'
-          or ${issueComments.body} ilike '%artifact missing%'
-          or ${issueComments.body} ilike '%블로그 파일 누락%'
-          or ${issueComments.body} ilike '%markdown 파일로 저장%'
-          or ${issueComments.body} ilike '%파일로만 저장%'
-        )`,
-      ));
+        eq(activityLog.action, "issue.artifact_work_product_missing_auto_blocked"),
+        gte(activityLog.createdAt, input.since),
+      ))
+      .orderBy(desc(activityLog.createdAt));
     const byIssueId = new Map<string, { id: string; identifier: string | null; title: string }>();
     for (const row of rows) byIssueId.set(row.id, row);
     return [...byIssueId.values()];

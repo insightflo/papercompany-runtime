@@ -4,8 +4,8 @@
 //   cap-override 의 fresh apply 경로. authority/dispatch/snapshot sibling module 을 단방향 import 하고,
 //   recovery coordinator 는 crash-window audit 만 dispatch 로 연결한다(runtime cycle 없음).
 // [계약]
-//   - authority = 실제 owner-action decision comment ID(authority module 이 fail-closed 검증).
-//   - one-shot = decision comment id. hash marker(qa-cap-key:<32-hex>) 는 company/run/producer/qa/generation bind.
+//   - authority = exact structured mission-owner decision event ID (validated fail-closed).
+//   - one-shot = decision event id. hash marker(qa-cap-key:<32-hex>) 는 company/run/producer/qa/generation bind.
 //   - current official QA request_changes verdict 만 증거. producer iteration+1, cleaned metadata, run revive,
 //     issue reopen — 단일 forward 트랜잭션(CAS + audit insert onConflictDoNothing). 이후 dispatchCapOverrideWake 가
 //     pending→dispatching(token) claim → wake → accepted-mark 한다.
@@ -29,6 +29,7 @@ const PRODUCER_CLEAR_KEYS = ["toolInvocation", "toolResult", "toolQueue", "cache
 export interface CapOverrideOwnerAction {
   ownerActionIssueId: string;
   missionId: string;
+  // Legacy wire name; the value is the structured mission-owner decision event ID.
   decisionCommentId: string;
 }
 
@@ -102,8 +103,8 @@ export async function applyOwnerCapOverrideRetry(db: Db, input: { companyId: str
   const cap = qaEdge.maxIterations!;
   if (fromIteration < cap) return report({ kind: "report_only", reason: "cap_override_under_cap", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: stepRun.stepId }, run.id, stepRun.id, stepRun.stepId);
 
-  const auditKey = `cap-override:${decision.commentId}`;
-  const wakeKey = `cap-override-wake:${decision.commentId}`;
+  const auditKey = `cap-override:${decision.eventId}`;
+  const wakeKey = `cap-override-wake:${decision.eventId}`;
   const [qaRun] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, run.id), eq(workflowStepRuns.stepId, qaStepId))).limit(1);
   if (!qaRun) return report({ kind: "report_only", reason: "cap_override_no_current_request_changes", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: stepRun.stepId }, run.id, stepRun.id, stepRun.stepId);
   const evidence = await findCurrentRequestChangesEvidence(db, companyId, qaRun, stepRun.completedAt);
@@ -124,7 +125,7 @@ export async function applyOwnerCapOverrideRetry(db: Db, input: { companyId: str
   const basePayload = {
     kind: "owner_cap_override_retry" as const,
     ownerActionIssueId: input.ownerAction.ownerActionIssueId,
-    decisionCommentId: decision.commentId,
+    decisionCommentId: decision.eventId,
     decisionCommentCreatedAt: decision.createdAt.toISOString(),
     wakeIdempotencyKey: wakeKey,
     missionId: input.ownerAction.missionId,

@@ -18,6 +18,7 @@ import {
   workflowDefinitions,
 } from "@paperclipai/db";
 import { recordLatestAuthorizedMissionOwnerPlanDecision } from "../services/mission-owner-plan-decisions.js";
+import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
 import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -27,10 +28,6 @@ import {
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skip PLAN-QA reviewer recovery tests: ${support.reason ?? "unsupported"}`);
-function decisionComment(decision: Record<string, unknown>): string {
-  return `### Mission owner plan decision\n\`\`\`json\n${JSON.stringify(decision)}\n\`\`\``;
-}
-
 describeDb("PLAN-QA reviewer recovery", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -164,13 +161,27 @@ describeDb("PLAN-QA reviewer recovery", () => {
       successCriteria: [{ criterion: "A reviewed report exists.", proof: "Registered report and QA verdict." }],
       steps: [],
     };
-    await db.insert(issueComments).values({
+    return {
       companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
+      missionId,
+      planningIssueId,
+      selectedQaAgentId,
+      replacementAgentId,
+      roleQaAgentId,
+      ownerAgentId,
+      decision,
+    };
+  }
+
+  async function submitPlan(f: Awaited<ReturnType<typeof seedFixture>>) {
+    return recordMissionOwnerPlanDecisionSubmission({
+      db,
+      companyId: f.companyId,
+      missionId: f.missionId,
+      planningIssueId: f.planningIssueId,
+      requestedBy: { actorType: "agent", actorId: f.ownerAgentId },
+      decision: f.decision,
     });
-    return { companyId, missionId, planningIssueId, selectedQaAgentId, replacementAgentId, roleQaAgentId };
   }
 
   async function activePlanState(companyId: string, missionId: string) {
@@ -189,7 +200,7 @@ describeDb("PLAN-QA reviewer recovery", () => {
   it("reselects only the unavailable QA assignee and keeps the accepted plan", async () => {
     const f = await seedFixture({ selectedQaStatus: "error" });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
+    const result = await submitPlan(f);
 
     expect(result.status).toBe("plan_qa_pending");
     const { refs, planQaIssue } = await activePlanState(f.companyId, f.missionId);
@@ -201,11 +212,7 @@ describeDb("PLAN-QA reviewer recovery", () => {
 
   it("updates the accepted plan when its QA assignee enters error while PLAN-QA is pending", async () => {
     const f = await seedFixture({ selectedQaStatus: "idle" });
-    const firstResult = await recordLatestAuthorizedMissionOwnerPlanDecision({
-      db,
-      companyId: f.companyId,
-      missionId: f.missionId,
-    });
+    const firstResult = await submitPlan(f);
     expect(firstResult.status).toBe("plan_qa_pending");
 
     const { planQaIssue: initialPlanQaIssue } = await activePlanState(f.companyId, f.missionId);
@@ -259,7 +266,7 @@ describeDb("PLAN-QA reviewer recovery", () => {
   it("uses the plan-selected runnable QA assignee instead of a separate role allowlist", async () => {
     const f = await seedFixture({ selectedQaStatus: "idle", includeRoleQa: true });
 
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
+    const result = await submitPlan(f);
 
     expect(result.status).toBe("plan_qa_pending");
     const { planQaIssue } = await activePlanState(f.companyId, f.missionId);
@@ -285,11 +292,7 @@ describeDb("PLAN-QA reviewer recovery", () => {
         selectedQaAssignee,
       });
 
-      const result = await recordLatestAuthorizedMissionOwnerPlanDecision({
-        db,
-        companyId: f.companyId,
-        missionId: f.missionId,
-      });
+      const result = await submitPlan(f);
 
       expect(result.status).toBe("plan_qa_pending");
       const { planQaIssue } = await activePlanState(f.companyId, f.missionId);

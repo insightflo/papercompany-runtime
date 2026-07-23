@@ -1,7 +1,7 @@
-import { extractMissionOwnerDecisionFromText } from "./mission-owner-recovery-events.js";
+import type { ExtractedMissionOwnerDecision } from "./mission-owner-recovery-events.js";
 import type { GovernanceThreadActor, GovernanceThreadEvent } from "./governance-thread.js";
 
-type MissionOwnerDecisionComment = {
+type LegacyMissionOwnerDecisionComment = {
   id: string;
   companyId: string;
   issueId: string;
@@ -11,17 +11,21 @@ type MissionOwnerDecisionComment = {
   createdAt: Date | string | null;
 };
 
-function commentActor(comment: MissionOwnerDecisionComment): GovernanceThreadActor {
-  if (comment.authorAgentId) {
-    return { type: "agent", id: comment.authorAgentId, authorityRole: "mission_owner" };
-  }
-  if (comment.authorUserId) {
-    return { type: "user", id: comment.authorUserId, authorityRole: "operator" };
-  }
-  return { type: "system" };
+export type MissionOwnerHumanReportDecision = {
+  companyId: string;
+  issueId: string;
+  eventId: string;
+  commentId?: string | null;
+  createdAt: Date | string | null;
+  authorAgentId: string;
+  decision: ExtractedMissionOwnerDecision;
+};
+
+function decisionActor(decision: MissionOwnerHumanReportDecision): GovernanceThreadActor {
+  return { type: "agent", id: decision.authorAgentId, authorityRole: "mission_owner" };
 }
 
-function commentTimestamp(value: Date | string | null): string {
+function decisionTimestamp(value: Date | string | null): string {
   const date = value instanceof Date ? value : new Date(value ?? 0);
   return Number.isNaN(date.getTime()) ? "1970-01-01T00:00:00.000Z" : date.toISOString();
 }
@@ -37,33 +41,51 @@ function compactDecisionText(...values: Array<string | undefined>): string {
 export function missionOwnerHumanReportEvents(input: {
   missionId: string;
   issueIds: ReadonlySet<string>;
-  comments: readonly MissionOwnerDecisionComment[];
+  decisions?: readonly MissionOwnerHumanReportDecision[];
+  // Legacy comment input remains type-compatible for callers during migration, but
+  // comments are not parsed or otherwise used as human-reporting authority.
+  comments?: readonly LegacyMissionOwnerDecisionComment[];
 }): GovernanceThreadEvent[] {
-  return input.comments.flatMap((comment) => {
-    if (!input.issueIds.has(comment.issueId)) return [];
-    const decision = extractMissionOwnerDecisionFromText(comment.body);
-    if (!decision || decision.decision === null) return [];
+  return (input.decisions ?? []).flatMap((record) => {
+    if (!input.issueIds.has(record.issueId) || !record.authorAgentId) return [];
+    const decision = record.decision;
     if (decision.decision !== "request_input" && decision.decision !== "escalate") return [];
 
     const detail = compactDecisionText(decision.reason, decision.nextAction, decision.evidence);
-    const decisionLabel = decision.decision === "request_input" ? "Human/operator input requested" : "Mission blocker escalated";
+    const decisionLabel = decision.decision === "request_input"
+      ? "Human/operator input requested"
+      : "Mission blocker escalated";
     const summary = detail
       ? `${decisionLabel}: ${detail}`
       : `${decisionLabel}; unresolved mission blocker needs human/operator decision.`;
+    // The durable transition event is the authority and primary source. A linked
+    // comment is display-only evidence, never the source of this diagnosis.
+    const sourceRef: GovernanceThreadEvent["sourceRef"] = {
+      type: "workflow_transition_event",
+      id: record.eventId,
+      table: "workflow_transition_events",
+    };
+    const evidenceRefs = [
+      { type: "log" as const, ref: record.eventId, label: "mission owner recovery decision" },
+      ...(record.commentId
+        ? [{ type: "comment" as const, ref: record.commentId, label: "display comment" }]
+        : []),
+    ];
+    const actor = decisionActor(record);
 
     return [{
-      id: `owner_diagnosis:issue_comment:${comment.id}:human-input`,
-      companyId: comment.companyId,
-      scope: { missionId: input.missionId, issueId: comment.issueId },
-      sourceRef: { type: "issue_comment", id: comment.id, table: "issue_comments" },
+      id: `owner_diagnosis:workflow_transition_event:${record.eventId}:human-input`,
+      companyId: record.companyId,
+      scope: { missionId: input.missionId, issueId: record.issueId },
+      sourceRef,
       eventType: "owner_diagnosis",
       title: decisionLabel,
       summary,
-      timestamp: commentTimestamp(comment.createdAt),
+      timestamp: decisionTimestamp(record.createdAt),
       severity: decision.decision === "escalate" ? "blocked" : "attention",
-      actor: commentActor(comment),
-      evidenceRefs: [{ type: "comment", ref: comment.id, label: "mission owner decision" }],
-      suggestedResumeTarget: { action: "request_human_input", issueId: comment.issueId },
+      ...(actor ? { actor } : {}),
+      evidenceRefs,
+      suggestedResumeTarget: { action: "request_human_input", issueId: record.issueId },
       rawAvailable: true,
     }];
   });

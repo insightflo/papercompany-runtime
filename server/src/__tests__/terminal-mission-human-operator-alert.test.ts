@@ -168,13 +168,14 @@ describe("buildTerminalMissionHumanOperatorComment (system-authored, bounded, sa
     expect(body).not.toContain("\nleak");
     expect(body).toContain("continuation=none");
 
-    // system-authored payload: actorType system (no agent attribution).
+    // [fail-closed] comment-only input is NOT authority: the builder now requires a structured record
+    //   (eventId + proven authorAgentId). The terminal system path builds its own system payload with a
+    //   transition-event decisionEventId directly — a comment body must not materialize an alert.
     const payload = buildHumanOperatorRequestPayload({
       issue,
       comment: { id: "c1", authorAgentId: null, authorUserId: null, body },
     });
-    expect(payload?.actorType).toBe("system");
-    expect(payload?.decision).toBe("escalate");
+    expect(payload).toBeNull();
   });
 
   it("rejects cancelled runs and only treats failed/timed_out as terminal failures", async () => {

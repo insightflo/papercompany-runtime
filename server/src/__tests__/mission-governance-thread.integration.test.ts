@@ -19,6 +19,7 @@ import {
   toolAuditLog,
   toolDefinitions,
   workflowDefinitions,
+  workflowTransitionEvents,
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
@@ -29,6 +30,7 @@ import {
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
 import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
+import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -57,6 +59,7 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
     await db.delete(issueApprovals);
     await db.delete(approvals);
     await db.delete(activityLog);
+    await db.delete(workflowTransitionEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issueComments);
@@ -180,6 +183,51 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
       { id: randomUUID(), companyId, agentId: ownerAgentId, source: "issue", reason: "malicious", payload: { missionId: randomUUID(), issueId: randomUUID() }, status: "queued" },
     ]);
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: ownerAgentId, issueId, status: "failed", errorCode: "adapter_failed", wakeupRequestId: wakeupId, startedAt: new Date("2026-05-20T00:04:00Z"), finishedAt: new Date("2026-05-20T00:05:00Z"), logRef: "log://run" });
+    const ownerDecisionCommentId = randomUUID();
+    const commentOnlyDecisionId = randomUUID();
+    await db.insert(issueComments).values([
+      { id: randomUUID(), companyId, issueId, authorUserId: "operator", body: "Plain comment" },
+      {
+        id: ownerDecisionCommentId,
+        companyId,
+        issueId,
+        authorAgentId: ownerAgentId,
+        body: "Browser auth remains blocked; the display comment is not an owner decision record.",
+      },
+      {
+        id: commentOnlyDecisionId,
+        companyId,
+        issueId,
+        authorAgentId: ownerAgentId,
+        body: [
+          "### Mission owner decision",
+          "Decision: request_input",
+          "Reason: This comment must not create governance authority.",
+        ].join("\n"),
+      },
+    ]);
+    const ownerDecisionRecord = await recordMissionOwnerDecision({
+      db,
+      issue: { id: issueId, companyId, missionId },
+      submission: {
+        decision: "request_input",
+        reason: "Browser auth is required.",
+        nextAction: "Human operator should reauthorize the session.",
+        evidence: "redirect to login page",
+      },
+      heartbeatRunId: runId,
+      commentId: ownerDecisionCommentId,
+    });
+    const ownerEscalationRecord = await recordMissionOwnerDecision({
+      db,
+      issue: { id: issueId, companyId, missionId },
+      submission: {
+        decision: "escalate",
+        reason: "The fallback workflow also exhausted its retries.",
+        nextAction: "Choose a manual recovery path.",
+      },
+      heartbeatRunId: runId,
+    });
     await db.insert(activityLog).values([
       { id: randomUUID(), companyId, actorType: "system", actorId: "system", action: "custom.unknown", entityType: "issue", entityId: issueId, runId, details: {} },
       {
@@ -195,6 +243,7 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
           missionId,
           issueId,
           commentId: "owner-decision-comment",
+          decisionEventId: ownerDecisionRecord.eventId,
           decision: "request_input",
           reason: "Browser auth is required.",
           nextAction: "Human operator should reauthorize the session.",
@@ -204,23 +253,6 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
       },
       { id: randomUUID(), companyId, actorType: "system", actorId: "system", action: "heartbeat.invoked", entityType: "issue", entityId: issueId, runId, details: {} },
       { id: randomUUID(), companyId: other.companyId, actorType: "system", actorId: "system", action: "custom.other", entityType: "issue", entityId: issueId, details: {} },
-    ]);
-    const ownerDecisionCommentId = randomUUID();
-    await db.insert(issueComments).values([
-      { id: randomUUID(), companyId, issueId, authorUserId: "operator", body: "Plain comment" },
-      {
-        id: ownerDecisionCommentId,
-        companyId,
-        issueId,
-        authorAgentId: ownerAgentId,
-        body: [
-          "### Mission owner decision",
-          "Decision: request_input",
-          "Reason: Browser auth is required.",
-          "Next Action: Human operator should reauthorize the session.",
-          "Evidence: redirect to login page",
-        ].join("\n"),
-      },
     ]);
 
     const pendingApprovalId = randomUUID();
@@ -269,7 +301,21 @@ describeEmbeddedPostgres("mission governance thread DB projection", () => {
     expect(events.some((event) => event.sourceRef.type === "activity_log" && event.eventType === "activity_observed" && event.summary === "custom.unknown")).toBe(true);
     expect(events.some((event) => event.sourceRef.type === "activity_log" && event.summary === "heartbeat.invoked")).toBe(false);
     expect(events.some((event) => event.sourceRef.type === "issue_comment" && event.eventType === "activity_observed")).toBe(true);
-    expect(events.some((event) => event.sourceRef.type === "issue_comment" && event.sourceRef.id === ownerDecisionCommentId && event.title === "Human/operator input requested")).toBe(true);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "owner_diagnosis",
+        sourceRef: { type: "workflow_transition_event", id: ownerDecisionRecord.eventId, table: "workflow_transition_events" },
+      }),
+      expect.objectContaining({
+        eventType: "owner_diagnosis",
+        sourceRef: { type: "workflow_transition_event", id: ownerEscalationRecord.eventId, table: "workflow_transition_events" },
+      }),
+      expect.objectContaining({
+        eventType: "activity_observed",
+        sourceRef: { type: "issue_comment", id: commentOnlyDecisionId, table: "issue_comments" },
+      }),
+    ]));
+    expect(events.some((event) => event.eventType === "owner_diagnosis" && event.sourceRef.id === commentOnlyDecisionId)).toBe(false);
     expect(events.some((event) => event.sourceRef.type === "tool_audit_log" && event.eventType === "tool_result")).toBe(true);
     expect(events.some((event) => event.sourceRef.type === "tool_audit_log" && event.sourceRef.id === crossToolAuditId)).toBe(false);
     expect(events.some((event) => event.companyId === other.companyId)).toBe(false);

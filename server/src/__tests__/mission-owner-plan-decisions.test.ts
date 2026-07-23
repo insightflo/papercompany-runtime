@@ -26,11 +26,13 @@ import {
 import {
   buildMissionOwnerPlanRevisionDraft,
   findLatestAuthorizedMissionOwnerPlanDecision,
+  hashOwnerPlanDecision,
   parseMissionOwnerPlanDecision,
   recordLatestAuthorizedMissionOwnerPlanDecision,
 } from "../services/mission-owner-plan-decisions.js";
 import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
 import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
+import { upsertMissionPlanDecisionSubmission } from "../services/missions/mission-plan-decision-ledger.js";
 import { setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
 import { issueService } from "../services/issues.js";
 import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
@@ -96,6 +98,7 @@ function planQaScorecardPassComment() {
 
 The plan is complete and well-structured. All checklist items pass.`;
 }
+
 
 describe("parseMissionOwnerPlanDecision", () => {
   it("returns null for plain comments without the exact decision heading", () => {
@@ -286,96 +289,66 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
     return { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId };
   }
 
-  it("returns the owner-agent decision from the canonical planning issue with metadata", async () => {
+  it("returns the owner-agent decision recorded on the canonical planning issue", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedMissionFixture();
-    const commentId = randomUUID();
     const decision = { ...validDecision, missionId, selectedExecutionUnits: [{ id: "owner-unit" }] };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, authorAgentId: ownerAgentId, decisionHash: "owner-hash", decision, status: "submitted" });
 
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
-
-    await expect(findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId })).resolves.toEqual({
+    const result = await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result).toMatchObject({
       ok: true,
       decision,
       planningIssueId,
       decisionIssueId: planningIssueId,
       decisionIssueOriginKind: "mission_main_executor_plan",
-      commentId,
-      commentCreatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      commentId: null,
       author: { kind: "agent", id: ownerAgentId },
       diagnostics: [],
     });
+    expect(result.ok && result.submissionId).toEqual(expect.any(String));
   });
 
-  it("accepts a board/user decision comment as full-control operator context", async () => {
+  it("accepts a board/user decision recorded on the planning issue as full-control operator context", async () => {
     const { companyId, missionId, planningIssueId } = await seedMissionFixture();
-    const commentId = randomUUID();
     const boardUserId = "board-user-1";
     const decision = { ...validDecision, missionId, selectedExecutionUnits: [{ id: "board-unit" }] };
-
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorUserId: boardUserId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, authorUserId: boardUserId, decisionHash: "board-hash", decision, status: "submitted" });
 
     await expect(findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId })).resolves.toMatchObject({
       ok: true,
       decision,
       planningIssueId,
-      commentId,
       author: { kind: "user", id: boardUserId },
     });
   });
 
-  it("ignores newer other-agent decisions and falls back to an older owner-agent decision", async () => {
+  it("ignores an unauthorized-author submission and returns the latest authorized one", async () => {
     const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedMissionFixture();
-    const unauthorizedCommentId = randomUUID();
-    const ownerCommentId = randomUUID();
     const ownerDecision = { ...validDecision, missionId, selectedExecutionUnits: [{ id: "owner-old" }] };
-
-    await db.insert(issueComments).values([
-      {
-        id: ownerCommentId,
-        companyId,
-        issueId: planningIssueId,
-        authorAgentId: ownerAgentId,
-        body: decisionComment(ownerDecision),
-        createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      },
-      {
-        id: unauthorizedCommentId,
-        companyId,
-        issueId: planningIssueId,
-        authorAgentId: otherAgentId,
-        body: decisionComment({ ...validDecision, missionId, selectedExecutionUnits: [{ id: "other-new" }] }),
-        createdAt: new Date("2026-01-02T00:00:00.000Z"),
-      },
-    ]);
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, authorAgentId: ownerAgentId, decisionHash: "owner-hash", decision: ownerDecision, status: "submitted" });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, authorAgentId: otherAgentId, decisionHash: "other-hash", decision: { ...validDecision, missionId, selectedExecutionUnits: [{ id: "other-new" }] }, status: "submitted" });
 
     const result = await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-
     expect(result).toMatchObject({
       ok: true,
       decision: ownerDecision,
       planningIssueId,
-      commentId: ownerCommentId,
       author: { kind: "agent", id: ownerAgentId },
-      diagnostics: [
-        {
-          commentId: unauthorizedCommentId,
-          code: "unauthorized_author",
-        },
-      ],
+      diagnostics: [{ code: "unauthorized_author" }],
+    });
+  });
+
+  it("ignores a decision submission bound to a stale/other planning issue and fails closed", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seedMissionFixture();
+    const stalePlanningIssueId = randomUUID();
+    // older planning issue; the current (latest) planning issue stays planningIssueId
+    await db.insert(issues).values({ id: stalePlanningIssueId, companyId, missionId, title: "Old planning", originKind: "mission_main_executor_plan", status: "done", createdAt: new Date("2020-01-01T00:00:00.000Z") });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId: stalePlanningIssueId, authorAgentId: ownerAgentId, decisionHash: "stale-planning-hash", decision: { ...validDecision, missionId, selectedExecutionUnits: [{ id: "stale-unit" }] }, status: "submitted" });
+
+    await expect(findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId })).resolves.toMatchObject({
+      ok: false,
+      reason: "no_authorized_decision",
+      planningIssueId,
     });
   });
 
@@ -474,33 +447,14 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
     });
   });
 
-  it("does not throw on an invalid latest authorized comment and falls back to an older valid one", async () => {
+  it("skips a rejected submission and falls back to an older accepted one", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedMissionFixture();
-    const invalidCommentId = randomUUID();
-    const validCommentId = randomUUID();
     const olderDecision = { ...validDecision, missionId, selectedExecutionUnits: [{ id: "older-valid" }] };
 
-    await db.insert(issueComments).values([
-      {
-        id: validCommentId,
-        companyId,
-        issueId: planningIssueId,
-        authorAgentId: ownerAgentId,
-        body: decisionComment(olderDecision),
-        createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      },
-      {
-        id: invalidCommentId,
-        companyId,
-        issueId: planningIssueId,
-        authorAgentId: ownerAgentId,
-        body: `### Mission owner plan decision
-\`\`\`json
-{ invalid json
-\`\`\``,
-        createdAt: new Date("2026-01-02T00:00:00.000Z"),
-      },
-    ]);
+    // older accepted (owner) submission
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, authorAgentId: ownerAgentId, decisionHash: "valid-hash", decision: olderDecision, status: "submitted" });
+    // newer rejected submission is ignored by the reader
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, authorAgentId: ownerAgentId, decisionHash: "rejected-hash", decision: { ...validDecision, missionId, selectedExecutionUnits: [{ id: "newer-rejected" }] }, status: "rejected", rejectionReason: "invalid_decision_shape" });
 
     const result = await findLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
 
@@ -508,15 +462,8 @@ describeEmbeddedPostgres("findLatestAuthorizedMissionOwnerPlanDecision", () => {
       ok: true,
       decision: olderDecision,
       planningIssueId,
-      commentId: validCommentId,
       author: { kind: "agent", id: ownerAgentId },
-      diagnostics: [
-        {
-          commentId: invalidCommentId,
-          code: "invalid_decision",
-          message: expect.stringContaining("Invalid Mission owner plan decision JSON"),
-        },
-      ],
+      diagnostics: [{ code: "rejected_submission" }],
     });
   });
 });
@@ -1252,21 +1199,14 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       steps: [{ id: "step-1", title: "Verify staging" }],
     };
 
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
     expect(result.status).toBe("recorded");
     if (result.status !== "recorded") return;
     expect(result.revision).toBe(2);
-    expect(result.commentId).toBe(commentId);
+    expect(result.commentId).toBeNull();
 
     // Verify the plan artifact was created
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
@@ -1281,7 +1221,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect((refs.selectedExecutionUnits as unknown[]).length).toBe(1);
     expect(refs.ownerPlanDecision).toMatchObject({
       planningIssueId,
-      commentId,
+      commentId: null,
       decisionHash: expect.any(String),
       assessment: validAssessment,
     });
@@ -1303,11 +1243,11 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       missionPlanArtifactId: activePlan!.id,
       revision: 2,
       planningIssueId,
-      commentId,
+      commentId: null,
       decisionMakerKind: "agent",
       decisionMakerId: ownerAgentId,
       decisionHash: expect.any(String),
-      idempotencyKey: expect.stringContaining(commentId),
+      idempotencyKey: expect.any(String),
     });
   });
 
@@ -1334,14 +1274,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["smoke passes"],
       steps: [],
     };
-    await db.insert(issueComments).values({
-      id: randomUUID(),
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     // drift: planning issue 를 mission owner 가 아닌 agent 에게 재할당
     await db.update(issues).set({ assigneeAgentId: otherAgentId }).where(eq(issues.id, planningIssueId));
 
@@ -1375,14 +1308,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["smoke passes"],
       steps: [],
     };
-    await db.insert(issueComments).values({
-      id: randomUUID(),
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     // owner 에게 명시 할당 → drift 없음
     await db.update(issues).set({ assigneeAgentId: ownerAgentId }).where(eq(issues.id, planningIssueId));
 
@@ -1401,7 +1327,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       selectedExecutionUnits: [{ id: `wf:${wfId}:step:smoke`, kind: "workflow_definition_step", title: "Run smoke", selectionState: "selected", reason: "R", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" } }],
       ruleRefs: [], kbRefs: [], assessment: validAssessment, requiredInputs: [], successCriteria: ["smoke passes"], steps: [],
     };
-    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision), createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     // title "Planning mission" → deterministic 없음. critique 가 invalid 추가 → 차단.
     setMissionPlanQaCritiqueHook(async () => [{ code: "missing_publish_unit", severity: "invalid", message: "critique: publish missing" }] as PlanQaDiagnostic[]);
     try {
@@ -1427,7 +1353,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       selectedExecutionUnits: [{ id: `wf:${wfId}:step:smoke`, kind: "workflow_definition_step", title: "Run smoke", selectionState: "selected", reason: "R", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" } }],
       ruleRefs: [], kbRefs: [], assessment: validAssessment, requiredInputs: [], successCriteria: [], steps: [],
     };
-    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision), createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     setMissionPlanQaCritiqueHook(async () => [{ code: "missing_audience_split", severity: "needs_clarification", message: "soft" }] as PlanQaDiagnostic[]);
     try {
       const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
@@ -1451,7 +1377,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       selectedExecutionUnits: [{ id: `wf:${wfId}:step:smoke`, kind: "workflow_definition_step", title: "Run smoke", selectionState: "selected", reason: "R", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "smoke" } }],
       ruleRefs: [], kbRefs: [], assessment: validAssessment, requiredInputs: [], successCriteria: [], steps: [],
     };
-    await db.insert(issueComments).values({ id: randomUUID(), companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision), createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("invalid");
     const rejected = await db.select().from(activityLog).where(eq(activityLog.action, "mission.plan.rejected"));
@@ -1502,14 +1428,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["QA verifies the synthesized result"],
       steps: [{ id: "qa", title: "Verify synthesized result" }],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -1579,7 +1498,12 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(actionIssue?.title).not.toContain("PAQO WBS");
     expect(actionIssue?.description).toContain("Deliverable output (use exactly this directory):");
     expect(actionIssue?.description).toContain("WorkProduct registration contract:");
-    expect(actionIssue?.description).toContain("[ARTIFACT]: <absolute path>");
+    expect(actionIssue?.description).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(actionIssue?.description).toContain("This is the only registration authority.");
+    expect(actionIssue?.description).toContain("Do not use the generic workProduct route");
+    expect(actionIssue?.description).toContain("or an `[ARTIFACT]` marker to register");
+    expect(actionIssue?.description).toContain("Comments, stdout, and artifact markers are no longer registration authority");
+    expect(actionIssue?.description).not.toMatch(/\[ARTIFACT\]:\s*<absolute path>/);
     expect(actionIssue?.description).toContain("Evidence explanation quality");
     expect(actionIssue?.description).toContain("source content -> observation -> interpretation -> conclusion");
     expect(paqoSteps[1]!.description).toContain("Evidence explanation quality");
@@ -1621,34 +1545,28 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       steps: [],
     });
 
-    await db.insert(issueComments).values({
-      id: randomUUID(),
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        missionGoal: "Research current market evidence",
-        selectedExecutionUnits: [
-          {
-            id: "unit-source-search",
-            kind: "mission_plan_unit",
-            title: "Search current external sources",
-            assigneeAgentId: ownerAgentId,
-            selectionState: "selected",
-            reason: "Need current source evidence before synthesis",
-            sourceRef: { type: "mission_plan_unit", id: "unit-source-search" },
-            dependsOn: [],
-          },
-        ],
-        ruleRefs: [],
-        kbRefs: [],
-        requiredInputs: [],
-        successCriteria: ["sources collected"],
-        steps: [],
-      }),
-      createdAt: new Date("2026-01-02T00:10:00.000Z"),
-    });
+    const researchDecision = {
+      missionId,
+      missionGoal: "Research current market evidence",
+      selectedExecutionUnits: [
+        {
+          id: "unit-source-search",
+          kind: "mission_plan_unit",
+          title: "Search current external sources",
+          assigneeAgentId: ownerAgentId,
+          selectionState: "selected",
+          reason: "Need current source evidence before synthesis",
+          sourceRef: { type: "mission_plan_unit", id: "unit-source-search" },
+          dependsOn: [],
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["sources collected"],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: researchDecision, decisionHash: hashOwnerPlanDecision(researchDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -1678,38 +1596,32 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       steps: [],
     });
 
-    await db.insert(issueComments).values({
-      id: randomUUID(),
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        missionGoal: "Evaluate tools and skills before research",
-        selectedExecutionUnits: [
-          {
-            id: "unit-tool-fit",
-            kind: "mission_plan_unit",
-            title: "Collect cited evidence",
-            assigneeAgentId: ownerAgentId,
-            selectionState: "selected",
-            reason: "PLAN selected Research Workbench and the research skill for source collection",
-            sourceRef: { type: "mission_plan_unit", id: "unit-tool-fit" },
-            toolNames: ["insightflo.research-workbench:research-search"],
-            toolArgs: { maxResults: 3 },
-            knowledgeBaseIds: ["kb-research-policy"],
-            skillRefs: ["research-helper"],
-            dependsOn: [],
-          },
-        ],
-        ruleRefs: [],
-        kbRefs: [],
-        requiredInputs: [],
-        successCriteria: ["evidence bundle ready"],
-        steps: [],
-      }),
-      createdAt: new Date("2026-01-02T00:20:00.000Z"),
-    });
+    const toolFitDecision = {
+      missionId,
+      missionGoal: "Evaluate tools and skills before research",
+      selectedExecutionUnits: [
+        {
+          id: "unit-tool-fit",
+          kind: "mission_plan_unit",
+          title: "Collect cited evidence",
+          assigneeAgentId: ownerAgentId,
+          selectionState: "selected",
+          reason: "PLAN selected Research Workbench and the research skill for source collection",
+          sourceRef: { type: "mission_plan_unit", id: "unit-tool-fit" },
+          toolNames: ["insightflo.research-workbench:research-search"],
+          toolArgs: { maxResults: 3 },
+          knowledgeBaseIds: ["kb-research-policy"],
+          skillRefs: ["research-helper"],
+          dependsOn: [],
+        },
+      ],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["evidence bundle ready"],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: toolFitDecision, decisionHash: hashOwnerPlanDecision(toolFitDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -1774,14 +1686,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         { id: "oversee", units: ["unit-owner-oversight"], dependsOn: ["unit-data"] },
       ],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T00:10:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -1848,14 +1753,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["worker ACTION completes before QA"],
       steps: [{ id: "research", title: "Research source evidence" }],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T00:30:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -1949,14 +1847,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["delegated research mission returns official workProducts"],
       steps: ["delegate research to Research Company before implementation planning"],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T00:45:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result1 = await recordThroughQaPass({ companyId, missionId });
     const result2 = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
@@ -2071,14 +1962,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["QA runs only after synthesis"],
       steps: ["Phase 1: parallel research", "Phase 2: synthesis", "Phase 3: QA"],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T01:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -2183,14 +2067,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["B waits for A"],
       steps: ["A then B"],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T01:30:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -2237,14 +2114,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       successCriteria: ["workflowRun exists"],
       steps: ["hold QA behind dependencies"],
     };
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-02T01:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
 
@@ -2338,14 +2208,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       ],
     };
 
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("invalid");
@@ -2379,28 +2242,23 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     });
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        missionGoal: "Do not dispatch to unavailable agents",
-        selectedExecutionUnits: [
-          {
-            id: "unit-error-agent",
-            kind: "mission_plan_unit",
-            title: "Should not run",
-            assigneeAgentId: errorAgentId,
-            sourceRef: { type: "mission_plan_unit", id: "unit-error-agent" },
-          },
-        ],
-        requiredInputs: [],
-        successCriteria: [],
-        steps: [],
-      }),
-      createdAt: new Date("2026-01-01T00:05:00.000Z"),
-    });
+    const errorAgentDecision = {
+      missionId,
+      missionGoal: "Do not dispatch to unavailable agents",
+      selectedExecutionUnits: [
+        {
+          id: "unit-error-agent",
+          kind: "mission_plan_unit",
+          title: "Should not run",
+          assigneeAgentId: errorAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-error-agent" },
+        },
+      ],
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: errorAgentDecision, decisionHash: hashOwnerPlanDecision(errorAgentDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("invalid");
@@ -2442,29 +2300,24 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     });
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        missionGoal: "Publish a manual without dispatching liaison agents directly",
-        selectedExecutionUnits: [
-          {
-            id: "unit-publish-manual",
-            kind: "mission_plan_unit",
-            title: "[ACTION] Publish approved manual",
-            assigneeAgentId: hermesAgentId,
-            sourceRef: { type: "mission_plan_unit", id: "unit-publish-manual" },
-            toolNames: ["manual-onboarding-publish"],
-          },
-        ],
-        requiredInputs: [],
-        successCriteria: [],
-        steps: [],
-      }),
-      createdAt: new Date("2026-01-01T00:05:00.000Z"),
-    });
+    const hermesDecision = {
+      missionId,
+      missionGoal: "Publish a manual without dispatching liaison agents directly",
+      selectedExecutionUnits: [
+        {
+          id: "unit-publish-manual",
+          kind: "mission_plan_unit",
+          title: "[ACTION] Publish approved manual",
+          assigneeAgentId: hermesAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-publish-manual" },
+          toolNames: ["manual-onboarding-publish"],
+        },
+      ],
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: hermesDecision, decisionHash: hashOwnerPlanDecision(hermesDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("invalid");
@@ -2494,28 +2347,23 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     });
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        missionGoal: "Dispatch after current run",
-        selectedExecutionUnits: [
-          {
-            id: "unit-running-agent",
-            kind: "mission_plan_unit",
-            title: "Run after current assignment",
-            assigneeAgentId: runningAgentId,
-            sourceRef: { type: "mission_plan_unit", id: "unit-running-agent" },
-          },
-        ],
-        requiredInputs: [],
-        successCriteria: [],
-        steps: [],
-      }),
-      createdAt: new Date("2026-01-01T00:05:00.000Z"),
-    });
+    const runningAgentDecision = {
+      missionId,
+      missionGoal: "Dispatch after current run",
+      selectedExecutionUnits: [
+        {
+          id: "unit-running-agent",
+          kind: "mission_plan_unit",
+          title: "Run after current assignment",
+          assigneeAgentId: runningAgentId,
+          sourceRef: { type: "mission_plan_unit", id: "unit-running-agent" },
+        },
+      ],
+      requiredInputs: [],
+      successCriteria: [],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: runningAgentDecision, decisionHash: hashOwnerPlanDecision(runningAgentDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
@@ -2535,25 +2383,20 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Assessment Workflow" });
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        selectedExecutionUnits: [
-          {
-            id: `wf:${wfId}:step:run`,
-            kind: "workflow_definition_step",
-            selectionState: "selected",
-            reason: "Required",
-            sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "run" },
-          },
-        ],
-        assessment: { ...validAssessment, assetEvaluation: "not-an-array" },
-      }),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    const malformedAssessmentDecision = {
+      missionId,
+      selectedExecutionUnits: [
+        {
+          id: `wf:${wfId}:step:run`,
+          kind: "workflow_definition_step",
+          selectionState: "selected",
+          reason: "Required",
+          sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "run" },
+        },
+      ],
+      assessment: { ...validAssessment, assetEvaluation: "not-an-array" },
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: malformedAssessmentDecision, decisionHash: hashOwnerPlanDecision(malformedAssessmentDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
@@ -2627,14 +2470,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       ],
     };
 
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordThroughQaPass({ companyId, missionId });
     expect(result.status).toBe("recorded");
@@ -2688,14 +2524,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       assessment: validAssessment,
     };
 
-    await db.insert(issueComments).values({
-      id: commentId,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     // First call should record
     const result1 = await recordThroughQaPass({ companyId, missionId });
@@ -2749,14 +2578,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       ],
     };
 
-    await db.insert(issueComments).values({
-      id: commentId1,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision1),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision1, decisionHash: hashOwnerPlanDecision(decision1 as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result1 = await recordThroughQaPass({ companyId, missionId });
     expect(result1.status).toBe("recorded");
@@ -2779,20 +2601,13 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       ],
     };
 
-    await db.insert(issueComments).values({
-      id: commentId2,
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(decision2),
-      createdAt: new Date("2026-01-02T00:00:00.000Z"),
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: decision2, decisionHash: hashOwnerPlanDecision(decision2 as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result2 = await recordThroughQaPass({ companyId, missionId });
     expect(result2.status).toBe("recorded");
     if (result2.status !== "recorded") return;
     expect(result2.revision).toBe(3);
-    expect(result2.commentId).toBe(commentId2);
+    expect(result2.commentId).toBeNull();
 
     // Verify plan history
     const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
@@ -2873,22 +2688,17 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId });
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        selectedExecutionUnits: [{
-          id: "missing-workflow-step",
-          kind: "workflow_definition_step",
-          selectionState: "selected",
-          reason: "References a workflow that is not company-scoped",
-          sourceRef: { type: "workflow_definition_step", id: randomUUID(), stepId: "run" },
-        }],
-      }),
-      createdAt: new Date("2026-01-04T00:00:00.000Z"),
-    });
+    const missingWorkflowDecision = {
+      missionId,
+      selectedExecutionUnits: [{
+        id: "missing-workflow-step",
+        kind: "workflow_definition_step",
+        selectionState: "selected",
+        reason: "References a workflow that is not company-scoped",
+        sourceRef: { type: "workflow_definition_step", id: randomUUID(), stepId: "run" },
+      }],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: missingWorkflowDecision, decisionHash: hashOwnerPlanDecision(missingWorkflowDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("invalid");
@@ -2987,14 +2797,46 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         sourceRef: { type: "workflow_definition_step", id: opts.sourceWorkflowId, stepId: "scout" },
       }],
     };
-    await db.insert(issueComments).values({ companyId: opts.companyId, issueId: opts.issueId, authorAgentId: opts.authorAgentId, body: decisionComment(decision) });
+    // Ledger-only seed (no materialization): the explicit recordLatest call in
+    // each test is the actor. Natural-language comments are never plan-decision authority.
+    await upsertMissionPlanDecisionSubmission({
+      db,
+      companyId: opts.companyId,
+      missionId: opts.missionId,
+      planningIssueId: opts.issueId,
+      decision,
+      decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]),
+      authorAgentId: opts.authorAgentId,
+      status: "submitted",
+    });
   }
 
   async function postPlanQaVerdict(opts: { companyId: string; missionId: string; verdict: "pass" | "request_changes"; authorAgentId: string; detail?: string }) {
     const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId: opts.companyId, missionId: opts.missionId });
-    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; decisionHash?: string } | undefined;
     const issueId = planQa?.issueId;
     if (!issueId) throw new Error("no active PLAN-QA issue to verdict");
+    // Structured authority only: PLAN-QA verdicts must be submitted through the
+    // dedicated structured table/API, never parsed from natural-language comments.
+    await recordMissionPlanQaVerdict({
+      db,
+      companyId: opts.companyId,
+      missionId: opts.missionId,
+      planQaIssueId: issueId,
+      decisionHash: planQa?.decisionHash ?? "",
+      verdict: opts.verdict,
+      diagnostics: opts.verdict === "request_changes" ? [{ code: "request_changes", message: opts.detail ?? "needs work" }] : [],
+      reviewedBy: { actorType: "agent", actorId: opts.authorAgentId },
+    });
+  }
+
+  // Negative-regression helper: a plain human-style comment (PASS / scorecard)
+  // that must NEVER be read as an authoritative PLAN-QA verdict (display only).
+  async function postPlanQaPlainComment(opts: { companyId: string; missionId: string; authorAgentId: string; verdict: "pass" | "request_changes"; detail?: string }) {
+    const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId: opts.companyId, missionId: opts.missionId });
+    const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
+    const issueId = planQa?.issueId;
+    if (!issueId) throw new Error("no active PLAN-QA issue to comment");
     const body = opts.verdict === "pass" ? "Plan is sound.\nPASS" : `Plan has gaps.\nREQUEST_CHANGES: ${opts.detail ?? "needs work"}`;
     await db.insert(issueComments).values({ companyId: opts.companyId, issueId, authorAgentId: opts.authorAgentId, body });
   }
@@ -3011,9 +2853,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     let result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: opts.companyId, missionId: opts.missionId });
     if (result.status === "plan_qa_pending") {
       const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId: opts.companyId, missionId: opts.missionId });
-      const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
-      if (planQa?.issueId) {
-        await db.insert(issueComments).values({ companyId: opts.companyId, issueId: planQa.issueId, authorUserId: "board-user-test", body: "Plan is sound.\nPASS" });
+      const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; decisionHash?: string } | undefined;
+      if (planQa?.issueId && planQa.decisionHash) {
+        await recordMissionPlanQaVerdict({ db, companyId: opts.companyId, missionId: opts.missionId, planQaIssueId: planQa.issueId, decisionHash: planQa.decisionHash, verdict: "pass", reviewedBy: { actorType: "user", actorId: "board-user-test" } });
       }
       result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: opts.companyId, missionId: opts.missionId });
     }
@@ -3117,14 +2959,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
       }],
     };
-    const revisedCommentCreatedAt = new Date("2027-01-01T00:02:00.000Z");
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planQaIssueId!,
-      authorAgentId: ownerAgentId,
-      body: decisionComment(revisedDecision),
-      createdAt: revisedCommentCreatedAt,
-    });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: revisedDecision, decisionHash: hashOwnerPlanDecision(revisedDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const revisedPending = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(revisedPending.status).toBe("plan_qa_pending");
@@ -3132,17 +2967,11 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const revisedPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     const revisedRefs = revisedPlan?.refs as Record<string, unknown>;
     expect(revisedPlan?.revision).toBe(3);
-    expect((revisedRefs.planQa as { issueId?: string } | undefined)?.issueId).toBe(planQaIssueId);
+    expect((revisedRefs.planQa as { issueId?: string } | undefined)?.issueId).toBeTruthy();
     expect(JSON.stringify(revisedRefs)).toContain("unit-revised");
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planQaIssueId!,
-      authorAgentId: qaAgentId,
-      body: "Plan is sound.\nPASS",
-      createdAt: new Date("2027-01-01T00:03:00.000Z"),
-    });
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });
 
     const materialized = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(materialized.status).toBe("recorded");
@@ -3228,29 +3057,11 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     ]);
   });
 
-  it("comment hook stores PLAN and scorecard-only PLAN-QA results as structured rows before workflow materialization", async () => {
+  it("PLAN-QA: natural-language scorecard/PASS comments never write mission_plan_qa_verdicts nor materialize", async () => {
     const { companyId, ownerAgentId, qaAgentId, missionId, planningIssueId, sourceWorkflowId } = await seedQaFixture();
-    const decision = {
-      ...validDecision,
-      missionId,
-      selectedExecutionUnits: [{
-        id: "unit-comment-hook",
-        kind: "workflow_definition_step",
-        title: "Run smoke",
-        reason: "source evidence",
-        selectionState: "selected",
-        sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" },
-      }],
-    };
-
-    await issueService(db).addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
-
-    const submissions = await db
-      .select()
-      .from(missionPlanDecisionSubmissions)
-      .where(eq(missionPlanDecisionSubmissions.missionId, missionId));
-    expect(submissions).toHaveLength(1);
-    expect(submissions[0]?.sourceCommentId).toBeTruthy();
+    // record the plan decision to create the pending PLAN-QA issue
+    await postDecisionComment({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, missionId, sourceWorkflowId });
+    await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
 
     const pendingPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     const pendingPlanQa = (pendingPlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
@@ -3258,23 +3069,24 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(pendingPlanQa?.issueId).toBeTruthy();
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
 
+    // natural-language scorecard + explicit PASS comments — display only, never authoritative
     await issueService(db).addComment(pendingPlanQa!.issueId!, planQaScorecardPassComment(), { agentId: qaAgentId });
+    await issueService(db).addComment(pendingPlanQa!.issueId!, "Plan is sound.\nPASS", { agentId: qaAgentId });
+
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+    expect(result.status).toBe("plan_qa_pending");
 
     const verdictRows = await db
       .select()
       .from(missionPlanQaVerdicts)
       .where(eq(missionPlanQaVerdicts.missionId, missionId));
-    expect(verdictRows).toHaveLength(1);
-    expect(verdictRows[0]?.verdict).toBe("pass");
-    expect(verdictRows[0]?.sourceCommentId).toBeTruthy();
+    expect(verdictRows).toHaveLength(0);
 
     const materializedPlan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     const materializedPlanQa = (materializedPlan?.refs as Record<string, unknown> | undefined)?.planQa as { verdict?: string; status?: string } | undefined;
-    expect(materializedPlanQa?.status).toBe("pass");
-    expect(materializedPlanQa?.verdict).toBe("pass");
-    expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
-    const runs = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.missionId, missionId));
-    expect(runs.length).toBeGreaterThan(0);
+    expect(materializedPlanQa?.status).toBe("pending");
+    expect(materializedPlanQa?.verdict).toBeUndefined();
+    expect(await countWorkflowDefinitions(companyId)).toBe(0);
   });
 
   it("plan-QA gate: does not assign or wake an existing terminal unassigned Plan QA issue during reprocess", async () => {
@@ -3364,20 +3176,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     const plan = await missionPlanArtifactService(db).getActiveMissionPlan({ companyId, missionId });
     const planQa = (plan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string } | undefined;
     expect(planQa?.issueId).toBeDefined();
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planQa!.issueId!,
-      authorAgentId: qaAgentId,
-      body: "Newer review found a blocking gap.\nREQUEST_CHANGES: add publish smoke QA",
-      createdAt: new Date("2026-01-02T00:00:00.000Z"),
-    });
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planQa!.issueId!,
-      authorAgentId: qaAgentId,
-      body: "Older optimistic review.\nPASS",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });
+    await postPlanQaVerdict({ companyId, missionId, verdict: "request_changes", authorAgentId: qaAgentId, detail: "add publish smoke QA" });
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("plan_qa_changes_requested");
@@ -3406,13 +3206,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(unauthorizedPass.status).toBe("plan_qa_pending");
     expect(await countWorkflowDefinitions(companyId)).toBe(0);
 
-    await db.insert(issueComments).values({
-      companyId,
-      issueId: planQa!.issueId!,
-      authorAgentId: qaAgentId,
-      body: "QA approves after review.\nPASS",
-      createdAt: new Date("2026-01-03T00:00:00.000Z"),
-    });
+    await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });
 
     const qaPass = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(qaPass.status).toBe("recorded");
@@ -3553,7 +3347,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "NoQA Source Workflow", stepsJson: [{ id: "run", name: "Run", dependencies: [] }] });
     await missionPlanArtifactService(db).createInitialMissionPlan({ companyId, missionId, refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
     const decision = { ...validDecision, missionId, selectedExecutionUnits: [{ id: "unit-1", kind: "workflow_definition_step", title: "Run smoke", reason: "x", sourceRef: { type: "workflow_definition_step", id: wfId, stepId: "run" } }] };
-    await db.insert(issueComments).values({ companyId, issueId: planningIssueId, authorAgentId: ownerAgentId, body: decisionComment(decision) });
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
 
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(result.status).toBe("plan_qa_pending");
@@ -3620,10 +3414,10 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       reviewedBy: { actorType: "agent", actorId: qaAgentId },
     });
 
-    // recordMissionPlanQaVerdict dual-writes a PASS comment; the issue comment hook may
-    // materialize immediately, so the explicit next tick is idempotent.
+    // With the comment-driven materialization hook removed, the structured PASS
+    // verdict materializes on this explicit next recordLatest tick.
     const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-    expect(second.status).toBe("noop");
+    expect(second.status).toBe("recorded");
     expect(await countWorkflowDefinitions(companyId)).toBeGreaterThan(0);
   });
 
@@ -3778,32 +3572,27 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     // plugin 을 등록해 tool 을 "selectable" 로 만든다. 그래야 createDefinition 이 통과하고,
     //   throw 지점이 createDefinition(tool 미등록)이 아니라 executeWorkflowRun(executor null)이 된다.
     await seedReadyResearchWorkbenchPlugin();
-    await db.insert(issueComments).values({
-      id: randomUUID(),
-      companyId,
-      issueId: planningIssueId,
-      authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId,
-        missionGoal: validDecision.missionGoal,
-        selectedExecutionUnits: [{
-          id: "unit-tool-fail",
-          kind: "mission_plan_unit",
-          title: "Collect cited evidence",
-          assigneeAgentId: ownerAgentId,
-          selectionState: "selected",
-          reason: "tool-bearing unit to force executor readiness check",
-          sourceRef: { type: "mission_plan_unit", id: "unit-tool-fail" },
-          toolNames: ["insightflo.research-workbench:research-search"],
-          dependsOn: [],
-        }],
-        ruleRefs: [],
-        kbRefs: [],
-        requiredInputs: [],
-        successCriteria: ["evidence bundle ready"],
-        steps: [],
-      }),
-    });
+    const toolFailDecision = {
+      missionId,
+      missionGoal: validDecision.missionGoal,
+      selectedExecutionUnits: [{
+        id: "unit-tool-fail",
+        kind: "mission_plan_unit",
+        title: "Collect cited evidence",
+        assigneeAgentId: ownerAgentId,
+        selectionState: "selected",
+        reason: "tool-bearing unit to force executor readiness check",
+        sourceRef: { type: "mission_plan_unit", id: "unit-tool-fail" },
+        toolNames: ["insightflo.research-workbench:research-search"],
+        dependsOn: [],
+      }],
+      ruleRefs: [],
+      kbRefs: [],
+      requiredInputs: [],
+      successCriteria: ["evidence bundle ready"],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision: toolFailDecision, decisionHash: hashOwnerPlanDecision(toolFailDecision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
     expect(first.status).toBe("plan_qa_pending");
     await postPlanQaVerdict({ companyId, missionId, verdict: "pass", authorAgentId: qaAgentId });

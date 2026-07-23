@@ -23,6 +23,7 @@ import {
 } from "@paperclipai/db";
 import { recordLatestAuthorizedMissionOwnerPlanDecision, reopenPlanningIssueForPlanChanges } from "../services/mission-owner-plan-decisions.js";
 import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
+import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
 import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -32,10 +33,6 @@ import {
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skip PLAN-QA retry handoff tests: ${support.reason ?? "unsupported"}`);
-
-function decisionComment(decision: Record<string, unknown>): string {
-  return `### Mission owner plan decision\n\`\`\`json\n${JSON.stringify(decision)}\n\`\`\``;
-}
 
 function structuralStyleDescription(extra: string): string {
   // Mirrors a structurally-rejected PLAN description: planning content, a LEGACY sentinel-less
@@ -55,11 +52,8 @@ function structuralStyleDescription(extra: string): string {
     "## Requested corrections",
     "- `plan_qa_legacy_gap`: Legacy gap that must be replaced by the latest verdict.",
     "",
-    "## Required decision comment shape",
-    "### Mission owner plan decision",
-    "```json",
-    "{}",
-    "```",
+    "## Required decision shape (structured submission)",
+    "Submit via POST /api/issues/{planningIssueId}/mission-plan-decision",
     "",
     "## Available runnable company roster",
     "- owner agent (operator, active)",
@@ -116,16 +110,22 @@ describeEP("PLAN-QA retry handoff", () => {
   }
 
   async function postDecision(f: Awaited<ReturnType<typeof seedFixture>>, unitId: string) {
-    const decision = {
+    return recordMissionOwnerPlanDecisionSubmission({
+      db,
+      companyId: f.companyId,
       missionId: f.missionId,
-      missionGoal: "Ship controlled rollout",
-      selectedExecutionUnits: [{
-        id: unitId, kind: "workflow_definition_step", title: "Run smoke", reason: "source evidence",
-        selectionState: "selected", sourceRef: { type: "workflow_definition_step", id: f.sourceWorkflowId, stepId: "scout" },
-      }],
-      ruleRefs: ["rule:security"], kbRefs: ["kb:rollout"], requiredInputs: ["stagingUrl"], successCriteria: ["smoke passes"], steps: [{ id: "step-1", title: "Verify staging" }],
-    };
-    await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.planningIssueId, authorAgentId: f.ownerAgentId, body: decisionComment(decision) });
+      planningIssueId: f.planningIssueId,
+      requestedBy: { actorType: "agent", actorId: f.ownerAgentId },
+      decision: {
+        missionId: f.missionId,
+        missionGoal: "Ship controlled rollout",
+        selectedExecutionUnits: [{
+          id: unitId, kind: "workflow_definition_step", title: "Run smoke", reason: "source evidence",
+          selectionState: "selected", sourceRef: { type: "workflow_definition_step", id: f.sourceWorkflowId, stepId: "scout" },
+        }],
+        ruleRefs: ["rule:security"], kbRefs: ["kb:rollout"], requiredInputs: ["stagingUrl"], successCriteria: ["smoke passes"], steps: [{ id: "step-1", title: "Verify staging" }],
+      },
+    });
   }
 
   async function activePlanQa(companyId: string, missionId: string) {
@@ -137,8 +137,7 @@ describeEP("PLAN-QA retry handoff", () => {
 
   it("forwards exact structured request_changes diagnostics into the reopened PLAN (sourceCommentId null)", async () => {
     const f = await seedFixture();
-    await postDecision(f, "unit-publish-distinctive");
-    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
+    const first = await postDecision(f, "unit-publish-distinctive");
     expect(first.status).toBe("plan_qa_pending");
     const planQa = await activePlanQa(f.companyId, f.missionId);
 
@@ -167,7 +166,7 @@ describeEP("PLAN-QA retry handoff", () => {
     // no generic fallback
     expect(reopened.description).not.toContain("No specific correction codes");
     // decision shape + roster preserved (not cut by the revision append)
-    expect(reopened.description).toContain("## Required decision comment shape");
+    expect(reopened.description).toContain("## Required decision shape (structured submission)");
     expect(reopened.description).toContain("## Available runnable company roster");
 
     // Ledger submission + result carry the exact diagnostic (not an empty array).
@@ -182,16 +181,14 @@ describeEP("PLAN-QA retry handoff", () => {
     ]));
   });
 
-  it("preserves diagnostics when the winning structured verdict row carries a sourceCommentId", async () => {
+  it("ignores legacy sourceCommentId PLAN-QA rows (display/audit only, no retry authority)", async () => {
     const f = await seedFixture();
-    await postDecision(f, "unit-source-comment-case");
-    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
+    const first = await postDecision(f, "unit-source-comment-case");
     expect(first.status).toBe("plan_qa_pending");
     const planQa = await activePlanQa(f.companyId, f.missionId);
     await db.update(issues).set({ description: structuralStyleDescription("") }).where(eq(issues.id, f.planningIssueId));
 
-    // A structured row WITH a sourceCommentId (e.g. persisted from a comment) that is the winner.
-    // No qualifying verdict comment exists, so the structured row must win and carry diagnostics.
+    // Legacy comment-derived ledger rows are not execution authority.
     await db.insert(missionPlanQaVerdicts).values({
       companyId: f.companyId, missionId: f.missionId, planQaIssueId: planQa.issueId!,
       decisionHash: planQa.decisionHash ?? first.decisionHash ?? "", verdict: "request_changes",
@@ -200,19 +197,14 @@ describeEP("PLAN-QA retry handoff", () => {
     });
 
     const second = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
-    expect(second.status).toBe("plan_qa_changes_requested");
-    expect(second.diagnostics).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "plan_qa_sourcecomment_gap" }),
-    ]));
-    const [reopened] = await db.select().from(issues).where(eq(issues.id, f.planningIssueId));
-    expect(reopened.description).toContain("plan_qa_sourcecomment_gap");
-    expect(reopened.description).toContain("Diagnostic from a sourceCommentId structured row");
+    expect(second.status).not.toBe("plan_qa_changes_requested");
+    const [planning] = await db.select().from(issues).where(eq(issues.id, f.planningIssueId));
+    expect(planning.description ?? "").not.toContain("plan_qa_sourcecomment_gap");
   });
 
   it("replaces a legacy structural revision baseline instead of duplicating it, preserving decision shape + roster", async () => {
     const f = await seedFixture();
-    await postDecision(f, "unit-second-attempt");
-    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
+    const first = await postDecision(f, "unit-second-attempt");
     expect(first.status).toBe("plan_qa_pending");
     const planQa = await activePlanQa(f.companyId, f.missionId);
     await db.update(issues).set({ description: structuralStyleDescription("") }).where(eq(issues.id, f.planningIssueId));
@@ -236,14 +228,13 @@ describeEP("PLAN-QA retry handoff", () => {
     expect(reopened.description).not.toContain("plan_qa_legacy_gap");
     expect(reopened.description).not.toContain("Legacy gap that must be replaced");
     // Decision shape + roster preserved.
-    expect(reopened.description).toContain("## Required decision comment shape");
+    expect(reopened.description).toContain("## Required decision shape (structured submission)");
     expect(reopened.description).toContain("## Available runnable company roster");
   });
 
   it("does not leak a foreign company's PLAN-QA verdict into this mission's retry (company-scoped read)", async () => {
     const f = await seedFixture();
-    await postDecision(f, "unit-owner-scope");
-    const first = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.missionId });
+    const first = await postDecision(f, "unit-owner-scope");
     expect(first.status).toBe("plan_qa_pending");
     const planQa = await activePlanQa(f.companyId, f.missionId);
 

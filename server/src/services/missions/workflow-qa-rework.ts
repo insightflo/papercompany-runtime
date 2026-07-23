@@ -125,12 +125,4 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
   return changed ? next : steps;
 }
 
-const REWORK_TARGET_IN_NEXT_ACTION =
-  /\b(?:revise|redo|rework|update|fix|correct|re-open|reopen)\s+(?:the\s+|issue\s+)?([A-Z][A-Z0-9_]*-\d+)\b/i;
-
-export function parseReworkTargetRefFromNextAction(nextAction: string | undefined | null): string | null {
-  if (!nextAction) return null;
-  return nextAction.match(REWORK_TARGET_IN_NEXT_ACTION)?.[1] ?? null;
-}
-
 export { isQaLikeStep } from "../workflow-step-role.js";

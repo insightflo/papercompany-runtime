@@ -1,7 +1,7 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, issueComments, issues, missions } from "@paperclipai/db";
-import { extractMissionOwnerDecisionFromText } from "../missions/mission-owner-recovery-events.js";
+import { agentWakeupRequests, issues, missions } from "@paperclipai/db";
+import { loadLatestMissionOwnerDecision } from "../missions/mission-owner-recovery-ledger.js";
 
 const ACCEPTED_QUEUE_STATUSES = new Set(["queued", "claimed", "deferred_issue_execution", "coalesced", "completed"]);
 const str = (value: unknown): string | null => typeof value === "string" ? value : null;
@@ -32,6 +32,7 @@ export async function validateOwnerDecisionComment(
   db: Db,
   companyId: string,
   input: {
+    // Legacy wire name; supervision supplies the immutable structured decision event ID.
     decisionCommentId: string;
     ownerActionIssueId: string;
     missionOwnerAgentId: string;
@@ -39,36 +40,22 @@ export async function validateOwnerDecisionComment(
     producerIssueId: string;
     producerIdentifier: string | null;
   },
-): Promise<{ commentId: string; createdAt: Date } | null> {
-  const [row] = await db.select({
-    id: issueComments.id,
-    issueId: issueComments.issueId,
-    authorAgentId: issueComments.authorAgentId,
-    body: issueComments.body,
-    createdAt: issueComments.createdAt,
-  }).from(issueComments).where(and(
-    eq(issueComments.id, input.decisionCommentId),
-    eq(issueComments.companyId, companyId),
-  )).limit(1);
-  if (!row || row.issueId !== input.ownerActionIssueId || row.authorAgentId !== input.missionOwnerAgentId) return null;
-  if (input.producerCompletedAt && row.createdAt.getTime() < input.producerCompletedAt.getTime()) return null;
+): Promise<{ commentId: string | null; eventId: string; createdAt: Date } | null> {
+  const record = await loadLatestMissionOwnerDecision({
+    db,
+    companyId,
+    ownerActionIssueId: input.ownerActionIssueId,
+  });
+  if (!record || record.eventId !== input.decisionCommentId || record.decision.decision !== "retry_source_issue") return null;
+  if (record.authorAgentId !== input.missionOwnerAgentId) return null;
+  if (input.producerCompletedAt && record.createdAt.getTime() < input.producerCompletedAt.getTime()) return null;
 
-  const latestRows = await db.select({ id: issueComments.id, body: issueComments.body })
-    .from(issueComments)
-    .where(and(eq(issueComments.companyId, companyId), eq(issueComments.issueId, input.ownerActionIssueId)))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-    .limit(32);
-  const latestRecognized = latestRows.find((candidate) => extractMissionOwnerDecisionFromText(candidate.body ?? "") !== null);
-  if (!latestRecognized || latestRecognized.id !== row.id) return null;
-
-  const parsed = extractMissionOwnerDecisionFromText(row.body ?? "");
-  if (!parsed || parsed.decision !== "retry_source_issue") return null;
-  const targetRef = (parsed.reworkTargetRef ?? parsed.sourceIssueRef ?? "").trim().toLowerCase();
+  const targetRef = (record.decision.reworkTargetRef ?? record.decision.sourceIssueRef ?? "").trim().toLowerCase();
   const producerTokens = [input.producerIssueId, input.producerIdentifier]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .map((value) => value.trim().toLowerCase());
   if (!targetRef || !producerTokens.includes(targetRef)) return null;
-  return { commentId: row.id, createdAt: row.createdAt };
+  return { commentId: record.commentId, eventId: record.eventId, createdAt: record.createdAt };
 }
 
 export async function hasCurrentCapOverrideAuthority(

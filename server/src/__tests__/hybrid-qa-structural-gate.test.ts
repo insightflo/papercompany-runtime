@@ -228,9 +228,17 @@ describe("hybrid QA — decision example is consistent and gate-free", () => {
     runnableCandidates: [],
     runnableRosterLines: [],
   });
-  // Extract the JSON block from the decision example
-  const jsonMatch = desc.match(/Mission owner plan decision\n```json\n([\s\S]*?)\n```/);
-  const example = JSON.parse(jsonMatch![1]);
+  // Extract decision example from structured submission shape after the decision-shape header.
+  const section = desc.split("## Required decision shape (structured submission)")[1] ?? "";
+  const jsonMatch = section.match(/```json\n([\s\S]*?)\n```/);
+  if (!jsonMatch?.[1]) throw new Error("missing structured decision example JSON block");
+  const envelope = JSON.parse(jsonMatch[1]) as { decision?: Record<string, unknown> };
+  const example = (envelope.decision ?? envelope) as {
+    selectedExecutionUnits: Array<{ id: string; qaType?: string; type?: string; dependsOn?: string[]; toolArgs?: Record<string, unknown> }>;
+  };
+  if (!Array.isArray(example.selectedExecutionUnits)) {
+    throw new Error(`decision example missing selectedExecutionUnits: ${jsonMatch[1].slice(0, 200)}`);
+  }
 
   it("has unique unit IDs", () => {
     const ids = example.selectedExecutionUnits.map((u: { id: string }) => u.id);

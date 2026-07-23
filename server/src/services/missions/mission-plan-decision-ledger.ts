@@ -5,7 +5,7 @@ export type MissionPlanDecisionLedgerStatus = "submitted" | "plan_qa_pending" | 
 export type MissionPlanDecisionLedgerDiagnostic = {
   readonly code?: string;
   readonly message?: string;
-  readonly commentId?: string;
+  readonly commentId?: string | null;
   readonly [key: string]: unknown;
 };
 

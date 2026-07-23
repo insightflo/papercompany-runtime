@@ -89,6 +89,8 @@ For workflow, heartbeat, queue, issue status, mission planning, and PLAN-QA path
 
 8. Keep implementation files under 300 lines.
 During development, do not let a single source, test, or support file grow past 300 lines. Split cohesive helpers, components, fixtures, or focused tests into separate files before crossing the limit. If a legacy file already exceeds 300 lines, do not make it larger unless the change is a targeted reduction or an explicitly approved exception.
+9. Never use agent-authored natural language as execution authority.
+Comments, prose, Markdown, stdout, and stderr must never decide retry, branch, completion, reopen, wakeup, escalation, approval, QA verdict, artifact registration, or next workflow step. Parsing is allowed only for machine-produced, versioned, schema-validated contracts. Human-readable comments may be generated from structured records for display, but the runtime must never read them back as authority. Execution consumers (supervision, materialization, QA gates, recovery, verdict ledgers) must read only durable structured submissions/tables submitted through dedicated write APIs; legacy comment-derived ledger rows (non-null `sourceCommentId`) are display/audit only and must be ignored. When no structured authority exists, fail closed and use the existing bounded retry/re-dispatch path; do not add parser tolerance or keyword fallbacks.
 
 ## 6. Database Change Workflow
 

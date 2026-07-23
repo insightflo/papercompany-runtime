@@ -37,7 +37,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
-import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
+import { type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
 import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
@@ -2248,31 +2248,6 @@ export function issueService(db: Db) {
         });
       } catch (err) {
         logger.warn({ err, issueId: issue.id, companyId: issue.companyId }, "failed to record human operator request");
-      }
-
-      if (
-        (issue.originKind === "mission_main_executor_plan" || issue.originKind === "mission_plan_qa") &&
-        issue.missionId
-      ) {
-        const requestedBy = actor.agentId
-          ? { actorType: "agent" as const, actorId: actor.agentId }
-          : actor.userId
-            ? { actorType: "user" as const, actorId: actor.userId }
-            : undefined;
-        try {
-          await recordLatestAuthorizedMissionOwnerPlanDecision({
-            db,
-            companyId: issue.companyId,
-            missionId: issue.missionId,
-            requestedBy,
-            enqueuePlanQaWakeup: actor.enqueuePlanQaWakeup,
-          });
-        } catch (err) {
-          logger.warn(
-            { err, issueId: issue.id, companyId: issue.companyId, missionId: issue.missionId },
-            "failed to record mission owner plan decision from issue comment",
-          );
-        }
       }
 
       return redactIssueComment(comment, currentUserRedactionOptions.enabled);

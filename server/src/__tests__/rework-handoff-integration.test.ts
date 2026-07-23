@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import {
-  agents, companies, createDb, issueComments, issueWorkProducts, issues,
+  agents, companies, createDb, heartbeatRuns, issueComments, issueWorkProducts, issues,
   missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents,
 } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
@@ -76,13 +76,32 @@ describeDb("loop-driver back-edge rework: source-to-retry handoff", () => {
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "loop-wf", stepsJson: steps });
     await db.insert(workflowRuns).values({ id: runId, companyId, workflowId: wfId, missionId, status: "running", triggeredBy: "test" });
 
-    // QA verdict comment (exact REQUEST_CHANGES feedback).
-    await db.insert(issueComments).values({ companyId, issueId: qaIssue[0]!.id, body: "REQUEST_CHANGES: table column counts are wrong in section 3." });
-
     const oldCompleted = new Date(Date.now() - 120_000);
     await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "collect", companyId, issueId: collectIssue[0]!.id, status: "completed", completedAt: oldCompleted });
     await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "produce", companyId, issueId: producerIssue[0]!.id, status: "completed", iterationIndex: 0, completedAt: new Date(Date.now() - 60_000) });
-    await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "qa-validate", companyId, issueId: qaIssue[0]!.id, status: "failed" });
+    const [qaStepRun] = await db.insert(workflowStepRuns).values({
+      workflowRunId: runId, stepId: "qa-validate", companyId, issueId: qaIssue[0]!.id, status: "failed",
+    }).returning({ id: workflowStepRuns.id });
+    // Official workflow_api verdict feedback (comments are never rework authority).
+    const qaHeartbeatId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: qaHeartbeatId, companyId, agentId, issueId: qaIssue[0]!.id, status: "succeeded",
+      startedAt: new Date(Date.now() - 30_000), finishedAt: new Date(Date.now() - 20_000),
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId, missionId, workflowRunId: runId, workflowStepRunId: qaStepRun.id, issueId: qaIssue[0]!.id,
+      heartbeatRunId: qaHeartbeatId, eventType: "workflow_validation_verdict", layer: "workflow_validation",
+      verdict: "request_changes", decision: "request_changes", reason: "workflow_api", reasonCode: "workflow_api",
+      idempotencyKey: `rework-feedback:${qaStepRun.id}`,
+      payload: {
+        kind: "workflow_validation_verdict",
+        workflowRunId: runId,
+        stepRunId: qaStepRun.id,
+        issueId: qaIssue[0]!.id,
+        verdict: "request_changes",
+        reason: "table column counts are wrong in section 3.",
+      },
+    });
 
     const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     const predsByStepId = new Map([

@@ -15,9 +15,11 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { missionService } from "../services/missions.js";
+import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -103,11 +105,24 @@ async function seedLiveQaRecovery(
     externalId: "/tmp/producer.md", title: "producer.md", status: "active", reviewState: "none",
     isPrimary: true, healthStatus: "unknown", metadata: { path: "/tmp/producer.md" },
   });
-  // owner decision on unblock → retry_source_issue(QA gate source).
-  await db.insert(issueComments).values({
-    id: randomUUID(), companyId, issueId: unblockIssueId, authorAgentId: ownerAgentId,
-    body: `### Mission owner decision\nDecision: retry_source_issue\nSource issue: ${issuePrefix}-1316\nReason: re-run QA after producer fix\nNext action: rerun validator\nEvidence: producer artifact updated`,
-    createdAt: new Date("2026-07-12T09:30:00.000Z"),
+  // Structured owner-recovery decision (comment text is never authority).
+  const ownerRunId = randomUUID();
+  await db.insert(heartbeatRuns).values({
+    id: ownerRunId, companyId, agentId: ownerAgentId, issueId: unblockIssueId, status: "succeeded",
+    startedAt: new Date("2026-07-12T09:29:00.000Z"), finishedAt: new Date("2026-07-12T09:30:00.000Z"),
+  });
+  await recordMissionOwnerDecision({
+    db,
+    issue: { id: unblockIssueId, companyId, missionId },
+    submission: {
+      decision: "retry_source_issue",
+      sourceIssueRef: `${issuePrefix}-1316`,
+      reason: "re-run QA after producer fix",
+      nextAction: "rerun validator",
+      evidence: "producer artifact updated",
+    },
+    sourceIssueId: qaGateIssueId,
+    heartbeatRunId: ownerRunId,
   });
   if (liveRecoveryTarget !== "none") {
     const issueId = liveRecoveryTarget === "qa" ? qaGateIssueId : unblockIssueId;

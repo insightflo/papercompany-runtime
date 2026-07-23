@@ -398,7 +398,7 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     expect(context.planningDossier.requiredAssessmentChecklist).toEqual(expect.arrayContaining([
       expect.stringContaining("source content -> observation -> interpretation -> conclusion"),
       expect.stringContaining("workProducts as traceability, not the proof itself"),
-      expect.stringMatching(/Markdown-only comments are behavioral notes/),
+      expect.stringMatching(/Markdown comments are display\/audit only/),
     ]));
   });
 
@@ -567,8 +567,8 @@ describeEmbeddedPostgres("mission owner planning context", () => {
     expect(context.planningIssueId).toBe(planningIssueId);
     expect(context.activePlan).toEqual({ available: false });
     expect(context.planningDossier.requiredAssessmentChecklist).toEqual(expect.arrayContaining([
-      expect.stringMatching(/structured Mission owner plan decision JSON comment/),
-      expect.stringMatching(/Markdown-only comments are behavioral notes/),
+      expect.stringMatching(/Submit a structured Mission owner plan decision via/),
+      expect.stringMatching(/Markdown comments are display\/audit only/),
     ]));
   });
 });

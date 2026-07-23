@@ -50,7 +50,6 @@ import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/de
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
 import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
-import { recordWorkflowValidationVerdictFromText } from "../services/workflow/validation-verdict-ledger.js";
 import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
 import { handleDelegatedArtifactHandback } from "../services/delegated-artifact-handback.js";
 import { completeUnblockActionWithSourceHandback } from "../services/missions/owner-action-completion.js";
@@ -1233,15 +1232,6 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       updateFields.status = "todo";
-    }
-    if (updateFields.status === "done" && typeof commentBody === "string") {
-      await recordWorkflowValidationVerdictFromText({
-        db,
-        issue: existing,
-        text: commentBody,
-        actorAgentId: actor.agentId,
-        heartbeatRunId: actor.runId,
-      });
     }
     let issue: Awaited<ReturnType<typeof svc.update>>;
     try {

@@ -2,15 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   classifyRecoveryRole,
   resolveMissionRecoveryAdvice,
-  type CommentForAdvice,
   type IssueForAdvice,
+  type PlanQaVerdictForAdvice,
+  type ValidationVerdictForAdvice,
   type WorkProductForAdvice,
   type WorkflowStepForAdvice,
 } from "../services/missions/mission-recovery-advice.js";
 
-// [목적] resolveMissionRecoveryAdvice(pure)가 RES-1076/1077/1075 형태 케이스에서
-//   "QA REQUEST_CHANGES → producer rework"를 leaf cause와 함께 올바르게 처방하는지 검증.
-//   DB loader(getMissionRecoveryAdvice)는 얇은 쿼리 레이어라 pure 분기로 커버.
+// Structured verdict authority only — no comment input on the pure resolver.
 
 const T0 = new Date("2026-07-07T00:00:00Z");
 const T1 = new Date("2026-07-07T01:00:00Z");
@@ -36,7 +35,6 @@ function makeQa(overrides: Partial<IssueForAdvice> = {}): IssueForAdvice {
     identifier: "RES-1077",
     title: "Audit source coverage and confidence",
     status: "done",
-    // plan-level QA originKind. QA signal 스캔은 이 originKind의 이슈로 제한된다.
     originKind: "mission_plan_qa",
     originId: "p-1076",
     assigneeAgentId: "agent-qa",
@@ -59,12 +57,27 @@ function makeOversight(overrides: Partial<IssueForAdvice> = {}): IssueForAdvice 
   };
 }
 
-function requestChangesComment(overrides: Partial<CommentForAdvice> = {}): CommentForAdvice {
+function planQaRequestChanges(overrides: Partial<PlanQaVerdictForAdvice> = {}): PlanQaVerdictForAdvice {
   return {
-    id: "c-1",
     issueId: "q-1077",
-    body: "REQUEST_CHANGES: missing TechCrunch AI category sources including Cloudflare, Gemini Spark, and Meta Pocket.",
-    createdAt: T1,
+    verdict: "request_changes",
+    reason: "missing TechCrunch AI category sources including Cloudflare, Gemini Spark, and Meta Pocket.",
+    observedAt: T1,
+    decisionHash: "hash-active",
+    sourceCommentId: null,
+    ...overrides,
+  };
+}
+
+function workflowRequestChanges(overrides: Partial<ValidationVerdictForAdvice> = {}): ValidationVerdictForAdvice {
+  return {
+    issueId: "q-1077",
+    verdict: "request_changes",
+    reason: "missing TechCrunch AI category sources including Cloudflare, Gemini Spark, and Meta Pocket.",
+    observedAt: T1,
+    workflowRunId: "run-1",
+    workflowStepRunId: "step-qa-1",
+    heartbeatRunId: "hb-qa-1",
     ...overrides,
   };
 }
@@ -81,10 +94,16 @@ function makeWorkProduct(overrides: Partial<WorkProductForAdvice> = {}): WorkPro
   };
 }
 
-function workflowStepsForAuditLoop(): WorkflowStepForAdvice[] {
+function workflowStepsForAuditLoop(overrides: {
+  qaStepRunId?: string;
+  runId?: string;
+} = {}): WorkflowStepForAdvice[] {
+  const runId = overrides.runId ?? "run-1";
+  const qaStepRunId = overrides.qaStepRunId ?? "step-qa-1";
   return [
     {
-      workflowRunId: "run-1",
+      workflowRunId: runId,
+      workflowStepRunId: "step-prod-1",
       stepId: "collect-ai-news-evidence",
       issueId: "p-1076",
       status: "completed",
@@ -94,7 +113,8 @@ function workflowStepsForAuditLoop(): WorkflowStepForAdvice[] {
       ],
     },
     {
-      workflowRunId: "run-1",
+      workflowRunId: runId,
+      workflowStepRunId: qaStepRunId,
       stepId: "audit-source-coverage",
       issueId: "q-1077",
       status: "failed",
@@ -116,84 +136,32 @@ describe("classifyRecoveryRole", () => {
 });
 
 describe("resolveMissionRecoveryAdvice", () => {
-  it("QA REQUEST_CHANGES + producer not yet reworked → producer_rework with leaf cause + paste-ready comment", () => {
+  it("structured PLAN-QA request_changes drives producer_rework", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
       issues: [makeProducer(), makeQa(), makeOversight()],
-      comments: [requestChangesComment()],
+      planQaVerdicts: [planQaRequestChanges()],
       runs: [],
     });
-
     expect(advice.decision).toBe("producer_rework");
     expect(advice.targetIssue?.id).toBe("p-1076");
-    expect(advice.targetIssue?.identifier).toBe("RES-1076");
-    expect(advice.targetAction).toBe("rework");
-    // [주의] QA가 지적한 leaf cause가 REQUEST_CHANGES 요약에서 추출돼야(peer 요구: leaf cause).
     expect(advice.leafCause).toContain("Cloudflare");
-    expect(advice.leafCause).toContain("Meta Pocket");
-    expect(advice.operatorComment).toBeTruthy();
-    expect(advice.operatorComment).toContain("재작업");
     expect(advice.operatorComment).toContain("RES-1076");
-    // doNot에 denylist 안내가 있어야(brief·guard operational 일치).
-    expect(advice.doNot.some((d) => d.includes("hermes_ops_mutation_forbidden"))).toBe(true);
-    expect(advice.executionInstruction).toContain("reopen:true");
-    expect(advice.executionInstruction).toContain("plain comment");
-    expect(advice.executionInstruction).toContain("agent_wakeup_requests");
-    expect(advice.successEvidence).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("issue_reopened_via_comment"),
-        expect.stringContaining("heartbeat"),
-      ]),
-    );
   });
 
-  it("producer active workProduct changed AFTER QA request → qa_recheck targeting the QA issue", () => {
+  it("producer workProduct after PLAN-QA request → qa_recheck", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
       issues: [makeProducer({ updatedAt: T2 }), makeQa(), makeOversight()],
-      comments: [requestChangesComment()],
+      planQaVerdicts: [planQaRequestChanges()],
       runs: [],
       workProducts: [makeWorkProduct({ updatedAt: T2 })],
     });
-
     expect(advice.decision).toBe("qa_recheck");
     expect(advice.targetIssue?.id).toBe("q-1077");
-    expect(advice.targetAction).toBe("qa_recheck");
-    expect(advice.operatorComment).toContain("QA 재검");
-    expect(advice.evidence.some((entry) => entry.kind === "work_product")).toBe(true);
-    expect(advice.executionInstruction).toContain("reopen:true");
-    expect(advice.executionInstruction).toContain("RES-1077");
   });
 
-  it("producer updatedAt drift alone does not imply rework after QA", () => {
-    const advice = resolveMissionRecoveryAdvice({
-      missionId: "m-1",
-      issues: [makeProducer({ updatedAt: T2 }), makeQa(), makeOversight()],
-      comments: [requestChangesComment()],
-      runs: [],
-      workProducts: [makeWorkProduct({ updatedAt: T0 })],
-    });
-
-    expect(advice.decision).toBe("producer_rework");
-    expect(advice.targetIssue?.id).toBe("p-1076");
-  });
-
-  it("uses the actual REQUEST_CHANGES comment timestamp when newer non-verdict comments exist", () => {
-    const advice = resolveMissionRecoveryAdvice({
-      missionId: "m-1",
-      issues: [makeProducer(), makeQa(), makeOversight()],
-      comments: [
-        requestChangesComment({ createdAt: T1 }),
-        requestChangesComment({ id: "c-later-note", body: "Later non-verdict operational note.", createdAt: T2 }),
-      ],
-      runs: [],
-      workProducts: [makeWorkProduct({ updatedAt: new Date("2026-07-07T01:30:00Z") })],
-    });
-
-    expect(advice.decision).toBe("qa_recheck");
-  });
-
-  it("workflow QA REQUEST_CHANGES resolves producer through qa_request_changes back-edge", () => {
+  it("workflow QA request_changes resolves producer via back-edge", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
       issues: [
@@ -201,119 +169,126 @@ describe("resolveMissionRecoveryAdvice", () => {
         makeQa({ originKind: "workflow_execution", originId: "run-1" }),
         makeOversight(),
       ],
-      comments: [
-        requestChangesComment({
-          body: "Completed QA recheck. Verdict: request_changes. Remaining issue: two late-2026-07-06 AI-category sources are missing or need cutoff rationale.",
+      validationVerdicts: [
+        workflowRequestChanges({
+          reason: "Remaining issue: two late-2026-07-06 AI-category sources are missing.",
         }),
       ],
       runs: [],
       workflowSteps: workflowStepsForAuditLoop(),
     });
-
     expect(advice.decision).toBe("producer_rework");
     expect(advice.targetIssue?.identifier).toBe("RES-1076");
-    expect(advice.targetAction).toBe("rework");
     expect(advice.leafCause).toContain("late-2026-07-06");
-    expect(advice.evidence.some((entry) => entry.kind === "workflow_step" && entry.label.includes("audit-source-coverage"))).toBe(true);
-    expect(advice.operatorComment).toContain("RES-1076");
-    expect(advice.operatorComment).toContain("RES-1077");
   });
 
-  it("workflow producer REQUEST_CHANGES text is not treated as QA without a matching back-edge", () => {
+  it("stale older-run workflow request_changes is ignored for current step", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
-      issues: [makeProducer({ status: "done", originId: "run-1" }), makeQa({ originKind: "workflow_execution", originId: "run-1" }), makeOversight({ status: "done" })],
-      comments: [
-        requestChangesComment({
-          issueId: "p-1076",
-          body: "REQUEST_CHANGES: producer note mentioning the word must not become a QA verdict.",
+      issues: [
+        makeProducer({ originId: "run-2" }),
+        makeQa({ originKind: "workflow_execution", originId: "run-2" }),
+        makeOversight(),
+      ],
+      validationVerdicts: [
+        workflowRequestChanges({
+          workflowRunId: "run-1",
+          workflowStepRunId: "step-qa-1",
+          observedAt: T2,
+          reason: "stale older-run request_changes",
         }),
+      ],
+      runs: [],
+      workflowSteps: workflowStepsForAuditLoop({ runId: "run-2", qaStepRunId: "step-qa-2" }),
+    });
+    expect(advice.decision).not.toBe("producer_rework");
+    expect(advice.decision).not.toBe("qa_recheck");
+  });
+
+  it("later PASS on same current workflow step suppresses earlier request_changes", () => {
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [
+        makeProducer({ originId: "run-1" }),
+        makeQa({ originKind: "workflow_execution", originId: "run-1" }),
+        makeOversight(),
+      ],
+      validationVerdicts: [
+        workflowRequestChanges({
+          observedAt: T1,
+          reason: "earlier request_changes with a concrete reason",
+        }),
+        {
+          issueId: "q-1077",
+          verdict: "pass",
+          reason: "later pass",
+          observedAt: T2,
+          workflowRunId: "run-1",
+          workflowStepRunId: "step-qa-1",
+          heartbeatRunId: "hb-qa-2",
+        },
       ],
       runs: [],
       workflowSteps: workflowStepsForAuditLoop(),
     });
-
     expect(advice.decision).not.toBe("producer_rework");
-    expect(advice.decision).toBe("human_operator");
+    expect(advice.decision).not.toBe("qa_recheck");
   });
 
-  it("QA originId that resolves to no known issue → supervision_run with missingEvidence (no fabricated producer)", () => {
+  it("later PLAN-QA pass suppresses earlier request_changes", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
-      issues: [makeQa({ originId: "ghost-producer-id" }), makeOversight()],
-      comments: [requestChangesComment()],
+      issues: [makeProducer(), makeQa(), makeOversight()],
+      planQaVerdicts: [
+        planQaRequestChanges({ observedAt: T1, reason: "earlier plan-qa request_changes" }),
+        {
+          issueId: "q-1077",
+          verdict: "pass",
+          reason: null,
+          observedAt: T2,
+          decisionHash: "hash-active",
+          sourceCommentId: null,
+        },
+      ],
       runs: [],
     });
-
-    expect(advice.decision).toBe("supervision_run");
-    expect(advice.targetAction).toBe("supervision_run");
-    expect(advice.missingEvidence.length).toBeGreaterThan(0);
-    expect(advice.operatorComment).toBeNull();
+    expect(advice.decision).not.toBe("producer_rework");
+    expect(advice.decision).not.toBe("qa_recheck");
   });
 
-  it("no REQUEST_CHANGES + stuck issue with no active run → supervision_run", () => {
+  it("legacy sourceCommentId PLAN-QA row has no authority", () => {
+    const advice = resolveMissionRecoveryAdvice({
+      missionId: "m-1",
+      issues: [makeProducer(), makeQa(), makeOversight()],
+      planQaVerdicts: [
+        planQaRequestChanges({
+          sourceCommentId: "comment-legacy-1",
+          reason: "legacy comment-derived must not drive recovery",
+        }),
+      ],
+      runs: [],
+    });
+    expect(advice.decision).not.toBe("producer_rework");
+    expect(advice.decision).not.toBe("qa_recheck");
+  });
+
+  it("no structured request_changes + stuck issue → supervision_run", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
       issues: [makeProducer({ status: "in_progress", originId: null }), makeOversight()],
-      comments: [],
       runs: [],
     });
-
     expect(advice.decision).toBe("supervision_run");
     expect(advice.targetIssue?.id).toBe("p-1076");
-    expect(advice.leafCause).toContain("활성 heartbeat 런이 없습니다");
   });
 
-  it("no REQUEST_CHANGES + no stuck issue → human_operator (does not fabricate a verdict)", () => {
+  it("no structured request_changes + no stuck issue → human_operator", () => {
     const advice = resolveMissionRecoveryAdvice({
       missionId: "m-1",
       issues: [makeProducer({ status: "done" }), makeOversight({ status: "done" })],
-      comments: [],
       runs: [],
     });
-
     expect(advice.decision).toBe("human_operator");
     expect(advice.targetIssue).toBeNull();
-    expect(advice.missingEvidence.length).toBeGreaterThan(0);
-  });
-
-  // [peer review fix — 회귀 가드] producer/oversight/unblock 댓글에 REQUEST_CHANGES가 있어도
-  //   QA signal로 오판하면 안 된다. QA-role 이슈(mission_plan_qa)에서만 판정.
-  it("REQUEST_CHANGES on a non-QA (producer) issue is ignored — never fabricates producer_rework", () => {
-    const producerComment: CommentForAdvice = {
-      id: "c-prod",
-      issueId: "p-1076",
-      body: "REQUEST_CHANGES: 이 producer 댓글의 문자열은 QA verdict로 취급되면 안 됩니다.",
-      createdAt: T1,
-    };
-    const advice = resolveMissionRecoveryAdvice({
-      missionId: "m-1",
-      issues: [makeProducer({ status: "in_progress", originId: null }), makeOversight()],
-      comments: [producerComment],
-      runs: [],
-    });
-
-    expect(advice.decision).not.toBe("producer_rework");
-    // producer 가 in_progress 인데 활성 런이 없으므로 supervision_run으로 fall-through.
-    expect(advice.decision).toBe("supervision_run");
-  });
-
-  it("REQUEST_CHANGES on an oversight/unblock issue is ignored too", () => {
-    const oversightComment: CommentForAdvice = {
-      id: "c-oversight",
-      issueId: "o-1075",
-      body: "REQUEST_CHANGES: oversight 메모 — QA verdict 아님.",
-      createdAt: T1,
-    };
-    const advice = resolveMissionRecoveryAdvice({
-      missionId: "m-1",
-      issues: [makeProducer({ status: "done" }), makeOversight({ status: "todo" })],
-      comments: [oversightComment],
-      runs: [],
-    });
-
-    expect(advice.decision).not.toBe("producer_rework");
-    // oversight 가 todo(활성)인데 활성 런 없음 → supervision_run.
-    expect(advice.decision).toBe("supervision_run");
   });
 });

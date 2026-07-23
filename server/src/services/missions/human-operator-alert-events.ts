@@ -1,4 +1,4 @@
-import { extractMissionOwnerDecisionFromText } from "./mission-owner-recovery-events.js";
+import type { ExtractedMissionOwnerDecision } from "./mission-owner-recovery-events.js";
 import { publishLiveEvent } from "../live-events.js";
 import type { Db } from "@paperclipai/db";
 import { activityLog } from "@paperclipai/db";
@@ -23,97 +23,69 @@ type OwnerDecisionComment = {
   body: string;
 };
 
+export type HumanOperatorStructuredDecision = ExtractedMissionOwnerDecision;
+
+export type HumanOperatorDecisionRecordMetadata = {
+  eventId: string;
+  commentId?: string | null;
+  authorAgentId: string;
+  decision?: ExtractedMissionOwnerDecision;
+};
+
 export type HumanOperatorRequestPayload = {
   missionId: string;
   issueId: string;
   sourceIssueId?: string;
-  commentId: string;
+  commentId?: string;
+  decisionEventId?: string;
   decision: "request_input" | "escalate";
   issueTitle?: string;
   issueIdentifier?: string;
   reason?: string;
   nextAction?: string;
   evidence?: string;
-  actorType: "agent" | "user" | "system";
+  actorType?: "agent" | "user" | "system";
   actorId?: string;
 };
 
-type HumanOperatorDecisionSignal = {
-  decision: "request_input" | "escalate";
-  reason?: string;
-  nextAction?: string;
-  evidence?: string;
+export type HumanOperatorRequestInput = {
+  issue: OwnerDecisionIssue;
+  // Legacy comments are accepted only to keep existing callers compiling. They are
+  // never parsed or used as decision authority.
+  comment?: OwnerDecisionComment;
+  decision?: HumanOperatorStructuredDecision;
+  // Metadata from the structured ledger record; it never supplies a decision.
+  record?: HumanOperatorDecisionRecordMetadata;
 };
 
-function firstLineAfterLabel(text: string, label: string): string | undefined {
-  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`(?:^|\\n)\\s*${escapedLabel}\\s*[:：]\\s*([^\\n]+)`, "i").exec(text);
-  return match?.[1]?.trim();
-}
-
-function extractFallbackHumanOperatorSignal(text: string): HumanOperatorDecisionSignal | null {
-  const normalized = text.toLowerCase();
-  const mentionsHumanOperator = /\bhuman[-/\s]?operator\b/.test(normalized) ||
-    /\bhuman\/operator\b/.test(normalized);
-  if (!mentionsHumanOperator) return null;
-
-  const negatesHandoff = /\b(no|not|without)\s+(human[-/\s]?operator|human\/operator|operator input)\b/.test(normalized) ||
-    /human[-/\s]?operator\s+(input\s+)?(is\s+)?not\s+(needed|required)/.test(normalized) ||
-    /필요\s*없/.test(text);
-  if (negatesHandoff) return null;
-
-  const hasHandoffSignal = /\breportsto\b/.test(normalized) ||
-    /\b(request|requires?|needed|input|handoff|authority|receiver|escalat(?:e|ed|ion))\b/.test(normalized) ||
-    /운영자|상위\s*오너|결정해야|필요|권한/.test(text);
-  if (!hasHandoffSignal) return null;
-
-  const nextAction = firstLineAfterLabel(text, "Next action") ?? firstLineAfterLabel(text, "다음 조치");
-  const evidence = firstLineAfterLabel(text, "Evidence") ?? firstLineAfterLabel(text, "누락 증거");
-  return {
-    decision: normalized.includes("escalate") ? "escalate" : "request_input",
-    reason: "Owner action comment names human operator as the handoff target.",
-    ...(nextAction ? { nextAction } : {}),
-    ...(evidence ? { evidence } : {}),
-  };
-}
-
-export function buildHumanOperatorRequestPayload(input: {
-  issue: OwnerDecisionIssue;
-  comment: OwnerDecisionComment;
-}): HumanOperatorRequestPayload | null {
+export function buildHumanOperatorRequestPayload(
+  input: HumanOperatorRequestInput,
+): HumanOperatorRequestPayload | null {
   if (!input.issue.missionId) return null;
   if (input.issue.originKind !== "mission_main_executor_unblock") return null;
 
-  const decision = extractMissionOwnerDecisionFromText(input.comment.body);
-  const decisionSignal: HumanOperatorDecisionSignal | null =
-    decision?.decision === "request_input" || decision?.decision === "escalate"
-      ? {
-          decision: decision.decision,
-          ...(decision.reason ? { reason: decision.reason } : {}),
-          ...(decision.nextAction ? { nextAction: decision.nextAction } : {}),
-          ...(decision.evidence ? { evidence: decision.evidence } : {}),
-        }
-      : decision === null
-        ? extractFallbackHumanOperatorSignal(input.comment.body)
-        : null;
-  if (!decisionSignal) return null;
+  const record = input.record;
+  const decision = input.decision ?? record?.decision;
+  if (decision?.decision !== "request_input" && decision?.decision !== "escalate") return null;
+  if (!record?.eventId || !record.authorAgentId) return null;
 
-  const actorType = input.comment.authorAgentId ? "agent" : input.comment.authorUserId ? "user" : "system";
-  const actorId = input.comment.authorAgentId ?? input.comment.authorUserId ?? undefined;
+  const commentId = record.commentId ?? undefined;
+  const decisionEventId = record.eventId;
 
   return {
     missionId: input.issue.missionId,
     issueId: input.issue.id,
     ...(input.issue.originId ? { sourceIssueId: input.issue.originId } : {}),
-    commentId: input.comment.id,
-    decision: decisionSignal.decision,
+    ...(commentId ? { commentId } : {}),
+    ...(decisionEventId ? { decisionEventId } : {}),
+    decision: decision.decision,
     ...(input.issue.title ? { issueTitle: input.issue.title } : {}),
     ...(input.issue.identifier ? { issueIdentifier: input.issue.identifier } : {}),
-    ...(decisionSignal.reason ? { reason: decisionSignal.reason } : {}),
-    ...(decisionSignal.nextAction ? { nextAction: decisionSignal.nextAction } : {}),
-    ...(decisionSignal.evidence ? { evidence: decisionSignal.evidence } : {}),
-    actorType,
-    ...(actorId ? { actorId } : {}),
+    ...(decision.reason ? { reason: decision.reason } : {}),
+    ...(decision.nextAction ? { nextAction: decision.nextAction } : {}),
+    ...(decision.evidence ? { evidence: decision.evidence } : {}),
+    actorType: "agent",
+    actorId: record.authorAgentId,
   };
 }
 
@@ -123,39 +95,49 @@ function activityDetails(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-// [finding 5] tx-safe materialize primitive. dedupe(by commentId) + activity insert. db 인자로 tx 를 받으면
-//   같은 트랜잭션에서 실행된다. live-event 발행은 하지 않는다(publishHumanOperatorRequestEvent 로 commit 후 분리).
-//   recordHumanOperatorRequestEvent 와 terminal reporting 모두 이 한 구현을 사용한다(parallel channel ❌).
-export async function materializeHumanOperatorRequestEvent(db: Db, input: {
-  issue: OwnerDecisionIssue;
-  comment: OwnerDecisionComment;
-}): Promise<{ payload: HumanOperatorRequestPayload | null; inserted: boolean }> {
-  const payload = buildHumanOperatorRequestPayload(input);
-  if (!payload) return { payload: null, inserted: false };
+// [common primitive] 이미 구성된 payload 로 tx-safe materialize. owner 구조 결정(agent) 와 terminal
+//   system report(system) 양쪽이 같은 dedupe(by decisionEventId)+insert 경로를 사용한다.
+export async function materializeHumanOperatorRequestPayload(
+  db: Db,
+  payload: HumanOperatorRequestPayload,
+  companyId: string,
+): Promise<{ payload: HumanOperatorRequestPayload; inserted: boolean }> {
+  if (!payload.issueId || !payload.decisionEventId) return { payload, inserted: false };
 
   const existingRows = await db
     .select({ id: activityLog.id, details: activityLog.details })
     .from(activityLog)
     .where(and(
-      eq(activityLog.companyId, input.issue.companyId),
+      eq(activityLog.companyId, companyId),
       eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION),
       eq(activityLog.entityType, "issue"),
-      eq(activityLog.entityId, input.issue.id),
+      eq(activityLog.entityId, payload.issueId),
     ));
-  const alreadyRecorded = existingRows.some((row) => activityDetails(row.details)?.commentId === input.comment.id);
+  const alreadyRecorded = existingRows.some((row) => (
+    activityDetails(row.details)?.decisionEventId === payload.decisionEventId
+  ));
   if (alreadyRecorded) return { payload, inserted: false };
 
   await db.insert(activityLog).values({
-    companyId: input.issue.companyId,
-    actorType: payload.actorType,
-    actorId: payload.actorId ?? payload.actorType,
+    companyId,
+    actorType: payload.actorType ?? "system",
+    actorId: payload.actorId ?? payload.actorType ?? "system",
     action: HUMAN_OPERATOR_REQUEST_ACTION,
     entityType: "issue",
-    entityId: input.issue.id,
+    entityId: payload.issueId,
     agentId: payload.actorType === "agent" ? payload.actorId ?? null : null,
     details: payload,
   });
   return { payload, inserted: true };
+}
+
+// [finding 5] tx-safe materialize for owner structured decisions. payload 는 fail-closed builder 로 구성.
+//   terminal system report 는 materializeHumanOperatorRequestPayload 를 system payload 와 직접 호출.
+export async function materializeHumanOperatorRequestEvent(db: Db, input: HumanOperatorRequestInput): Promise<{ payload: HumanOperatorRequestPayload | null; inserted: boolean }> {
+  const payload = buildHumanOperatorRequestPayload(input);
+  if (!payload || !payload.decisionEventId) return { payload: null, inserted: false };
+  const result = await materializeHumanOperatorRequestPayload(db, payload, input.issue.companyId);
+  return { payload: result.payload, inserted: result.inserted };
 }
 
 // [finding 5] post-commit publish step. materialize 가 실제로 insert 한 경우에만 호출한다.
@@ -167,10 +149,10 @@ export function publishHumanOperatorRequestEvent(companyId: string, payload: Hum
   });
 }
 
-export async function recordHumanOperatorRequestEvent(db: Db, input: {
-  issue: OwnerDecisionIssue;
-  comment: OwnerDecisionComment;
-}): Promise<HumanOperatorRequestPayload | null> {
+export async function recordHumanOperatorRequestEvent(
+  db: Db,
+  input: HumanOperatorRequestInput,
+): Promise<HumanOperatorRequestPayload | null> {
   const { payload, inserted } = await materializeHumanOperatorRequestEvent(db, input);
   if (payload && inserted) publishHumanOperatorRequestEvent(input.issue.companyId, payload);
   return payload;

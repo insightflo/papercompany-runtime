@@ -125,7 +125,7 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     const issueId = randomUUID();
     const workProductRoot = `/tmp/paperclip-artifact-comment-gate/${companyId}/produced_work`;
     const missionOutputRoot = `${workProductRoot}/missions/${missionId}`;
-    const artifactPath = `${missionOutputRoot}/runs/run-1/steps/draft/evidence.json`;
+    const artifactPath = `${missionOutputRoot}/runs/run-1/steps/draft/evidence.md`;
 
     await db.insert(companies).values({
       id: companyId,
@@ -170,16 +170,21 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     return { companyId, agentId, issueId, artifactPath, missionOutputRoot };
   }
 
-  it("auto-registers one explicit same-run comment artifact and completes the issue", async () => {
+  it("completes when a structured workProduct is registered for the claimed artifact", async () => {
     const fixture = await seedProducerIssue();
-    const sourceCommentId = randomUUID();
     executeSpy.mockImplementation(async () => {
-      await db.insert(issueComments).values({
-        id: sourceCommentId,
+      await fs.mkdir(path.dirname(fixture.artifactPath), { recursive: true });
+      await fs.writeFile(fixture.artifactPath, "# ok\n", "utf8");
+      await db.insert(issueWorkProducts).values({
         companyId: fixture.companyId,
         issueId: fixture.issueId,
-        authorAgentId: fixture.agentId,
-        body: `[ARTIFACT]: ${fixture.artifactPath}`,
+        type: "file",
+        provider: "local",
+        externalId: fixture.artifactPath,
+        title: "evidence.md",
+        status: "active",
+        isPrimary: true,
+        metadata: { path: fixture.artifactPath, autoRegisteredFrom: "structured_work_product" },
       });
       return successfulAdapterResult();
     });
@@ -189,24 +194,9 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
 
     const issue = await waitForIssueStatus(db, fixture.issueId, "done");
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
-    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, fixture.issueId));
     expect(issue?.status).toBe("done");
     expect(workProducts).toHaveLength(1);
     expect(workProducts[0]?.externalId).toBe(fixture.artifactPath);
-    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
-      autoRegisteredFrom: "issue_comment_artifact_marker",
-      path: fixture.artifactPath,
-      commentClaimedArtifactPaths: [fixture.artifactPath],
-      sourceCommentIds: [sourceCommentId],
-    }));
-    expect(activities).toContainEqual(expect.objectContaining({
-      action: "issue.work_product_auto_registered_from_comment",
-      details: expect.objectContaining({
-        autoRegisteredFrom: "issue_comment_artifact_marker",
-        commentClaimedArtifactPaths: [fixture.artifactPath],
-        sourceCommentIds: [sourceCommentId],
-      }),
-    }));
   });
 
   it("honors an active primary workProduct when an issue has more than ten registrations", async () => {
@@ -244,20 +234,22 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     expect(comments.map((comment) => comment.body).join("\n")).not.toContain("workProduct registration missing");
   });
 
-  it("auto-registers one prior claimed comment artifact only when the local file exists", async () => {
+  it("completes when a prior claimed file is registered as a structured workProduct", async () => {
     const fixture = await seedProducerIssue();
-    const sourceCommentId = randomUUID();
-    await db.insert(issueComments).values({
-      id: sourceCommentId,
-      companyId: fixture.companyId,
-      issueId: fixture.issueId,
-      authorAgentId: fixture.agentId,
-      body: `Done. Created the evidence bundle at ${fixture.artifactPath}.`,
-      createdAt: new Date(Date.now() - 60_000),
-    });
     executeSpy.mockImplementation(async () => {
       await fs.mkdir(path.dirname(fixture.artifactPath), { recursive: true });
-      await fs.writeFile(fixture.artifactPath, "{\"ok\":true}\n", "utf8");
+      await fs.writeFile(fixture.artifactPath, "# ok\n", "utf8");
+      await db.insert(issueWorkProducts).values({
+        companyId: fixture.companyId,
+        issueId: fixture.issueId,
+        type: "file",
+        provider: "local",
+        externalId: fixture.artifactPath,
+        title: "evidence.md",
+        status: "active",
+        isPrimary: true,
+        metadata: { path: fixture.artifactPath },
+      });
       return successfulAdapterResult();
     });
 
@@ -266,24 +258,9 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
 
     const issue = await waitForIssueStatus(db, fixture.issueId, "done");
     const workProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, fixture.issueId));
-    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, fixture.issueId));
     expect(issue?.status).toBe("done");
     expect(workProducts).toHaveLength(1);
     expect(workProducts[0]?.externalId).toBe(fixture.artifactPath);
-    expect(workProducts[0]?.metadata).toEqual(expect.objectContaining({
-      autoRegisteredFrom: "issue_comment_claimed_file",
-      path: fixture.artifactPath,
-      commentClaimedArtifactPaths: [fixture.artifactPath],
-      sourceCommentIds: [sourceCommentId],
-    }));
-    expect(activities).toContainEqual(expect.objectContaining({
-      action: "issue.work_product_auto_registered_from_comment",
-      details: expect.objectContaining({
-        autoRegisteredFrom: "issue_comment_claimed_file",
-        commentClaimedArtifactPaths: [fixture.artifactPath],
-        sourceCommentIds: [sourceCommentId],
-      }),
-    }));
   });
 
   it("blocks one prior claimed comment artifact when the local file is missing", async () => {
@@ -309,9 +286,9 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     expect(comments.map((comment) => comment.body).join("\n")).toContain(fixture.artifactPath);
   });
 
-  it("blocks when same-run comments expose multiple explicit artifact candidates", async () => {
+  it("blocks when no structured workProduct is registered even if comments mention multiple paths", async () => {
     const fixture = await seedProducerIssue();
-    const secondPath = fixture.artifactPath.replace("evidence.json", "appendix.json");
+    const secondPath = fixture.artifactPath.replace("evidence.md", "appendix.md");
     executeSpy.mockImplementation(async () => {
       await db.insert(issueComments).values({
         companyId: fixture.companyId,
@@ -330,6 +307,6 @@ describeEmbeddedPostgres("heartbeat artifact comment registration gate", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, fixture.issueId));
     expect(issue?.status).toBe("blocked");
     expect(workProducts).toHaveLength(0);
-    expect(comments.map((comment) => comment.body).join("\n")).toContain("### Comment artifact paths");
+    expect(comments.map((comment) => comment.body).join("\n")).toContain("workProduct registration missing");
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildToolStepRecoveryDescription } from "../services/missions/tool-step-recovery-description.js";
 
 describe("tool step recovery description", () => {
-  it("includes mission owner decision format for human operator handoff", () => {
+  it("directs recovery decisions to the structured API", () => {
     const description = buildToolStepRecoveryDescription({
       marker: "tool-step-recovery:run-1:sync-dashboard",
       missionTitle: "Daily dashboard",
@@ -20,10 +20,12 @@ describe("tool step recovery description", () => {
       },
     });
 
-    expect(description).toContain("Mission owner decision contract:");
-    expect(description).toContain("### Mission owner decision");
-    expect(description).toContain("Decision: <one of the allowed decision options>");
-    expect(description).toContain("Use `Decision: request_input` or `Decision: escalate`");
-    expect(description).toContain("Manual recovery result contract:");
+    expect(description).toContain("Mission owner decision authority:");
+    expect(description).toContain("POST /api/issues/{this owner-action issue id}/owner-recovery/decision");
+    expect(description).toContain("Optional display-only comment template");
+    expect(description).toContain("a comment cannot authorize recovery");
+    expect(description).toContain("Manual recovery evidence:");
+    expect(description).toContain("active workProduct is registered through the official workflow API");
+    expect(description).toContain("ordinary issue comments are display-only evidence");
   });
 });

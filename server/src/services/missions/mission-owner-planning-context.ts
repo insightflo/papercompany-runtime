@@ -367,7 +367,7 @@ function buildPlanningDossier(input: {
       "Assess workflow candidates, rules, KB refs, agent roster, execution sources, tools, runtime services, and file views explicitly.",
       EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE,
       "Mark each gap as info, needs_research, or blocked and resolve blocked gaps before claiming readiness.",
-      "Post a structured Mission owner plan decision JSON comment; Markdown-only comments are behavioral notes, not structured control-plane success.",
+      "Submit a structured Mission owner plan decision via `POST /api/issues/{planningIssueId}/mission-plan-decision` (`{ \"decision\": { ... } }`) from the checked-out owner run. Markdown comments are display/audit only and are not parsed as control-plane authority.",
     ],
   };
 }
