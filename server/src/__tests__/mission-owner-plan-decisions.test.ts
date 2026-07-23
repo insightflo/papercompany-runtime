@@ -1498,7 +1498,12 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(actionIssue?.title).not.toContain("PAQO WBS");
     expect(actionIssue?.description).toContain("Deliverable output (use exactly this directory):");
     expect(actionIssue?.description).toContain("WorkProduct registration contract:");
-    expect(actionIssue?.description).toContain("[ARTIFACT]: <absolute path>");
+    expect(actionIssue?.description).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(actionIssue?.description).toContain("This is the only registration authority.");
+    expect(actionIssue?.description).toContain("Do not use the generic workProduct route");
+    expect(actionIssue?.description).toContain("or an `[ARTIFACT]` marker to register");
+    expect(actionIssue?.description).toContain("Comments, stdout, and artifact markers are no longer registration authority");
+    expect(actionIssue?.description).not.toMatch(/\[ARTIFACT\]:\s*<absolute path>/);
     expect(actionIssue?.description).toContain("Evidence explanation quality");
     expect(actionIssue?.description).toContain("source content -> observation -> interpretation -> conclusion");
     expect(paqoSteps[1]!.description).toContain("Evidence explanation quality");

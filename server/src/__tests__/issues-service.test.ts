@@ -33,6 +33,7 @@ import {
 import { issueService } from "../services/issues.ts";
 import { createSrbPairSync } from "../services/srb/pair-sync.ts";
 import { setPublicUrlReadbackFetcher } from "../services/public-url-readback.ts";
+import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -2397,27 +2398,37 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
 
   it("allows done for workflow QA issues after a verdict ledger row exists", async () => {
     const seeded = await seedWorkflowValidationIssue();
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, seeded.issueId))
+      .then((rows) => rows[0]!);
+    const heartbeatRunId = randomUUID();
+    const recordedAt = new Date("2026-07-05T03:39:00.000Z");
 
-    await db.insert(workflowTransitionEvents).values({
+    // Official structured contract: checked-out heartbeat scoped to this QA issue + workflow_api verdict helper.
+    await db.insert(heartbeatRuns).values({
+      id: heartbeatRunId,
       companyId: seeded.companyId,
-      workflowRunId: seeded.workflowRunId,
-      workflowStepRunId: seeded.stepRunId,
+      agentId: issue.assigneeAgentId!,
       issueId: seeded.issueId,
-      eventType: "workflow_validation_verdict",
-      layer: "workflow_validation",
-      verdict: "pass",
-      decision: "pass",
-      reason: "test",
-      reasonCode: "test",
-      payload: {
-        kind: "workflow_validation_verdict",
-        workflowRunId: seeded.workflowRunId,
-        stepRunId: seeded.stepRunId,
-        issueId: seeded.issueId,
-        verdict: "pass",
-      },
-      createdAt: new Date("2026-07-05T03:39:00.000Z"),
+      status: "succeeded",
+      invocationSource: "automation",
+      startedAt: recordedAt,
+      finishedAt: recordedAt,
+      createdAt: recordedAt,
+      updatedAt: recordedAt,
     });
+    const ledger = await recordWorkflowValidationVerdict({
+      db,
+      issue,
+      verdict: "pass",
+      source: "workflow_api",
+      heartbeatRunId,
+      sourceText: "test",
+    });
+    expect(ledger.satisfied).toBe(true);
+    expect(ledger.verdict).toBe("pass");
 
     const updated = await svc.update(seeded.issueId, { status: "done" });
 

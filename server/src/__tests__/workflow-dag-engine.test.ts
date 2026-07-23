@@ -28,7 +28,15 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
-const heartbeatWakeup = vi.fn();
+// vi.hoisted: mock factories run during ESM import resolution, before plain consts init.
+// Production path: wakeExistingWorkflowStepIssue → queueIssueAssignmentWakeup({ heartbeat: heartbeatService(db) })
+// → heartbeat.wakeup(...). The heartbeatService mock alone does not always bind in this file's
+// import graph, so real enqueueWakeup runs (agent_runtime_state / activity_log FK cleanup failures
+// + 0 spy calls). Force the assignment-wakeup helper to use the test spy while keeping its
+// real guards/payload shape so existing wakeup assertions stay valid.
+const { heartbeatWakeup } = vi.hoisted(() => ({
+  heartbeatWakeup: vi.fn(),
+}));
 
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
@@ -36,6 +44,19 @@ vi.mock("../services/heartbeat.js", async (importOriginal) => {
     ...actual,
     heartbeatService: () => ({
       wakeup: heartbeatWakeup,
+    }),
+  };
+});
+
+vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/issue-assignment-wakeup.js")>();
+  return {
+    ...actual,
+    queueIssueAssignmentWakeup: (
+      input: Parameters<typeof actual.queueIssueAssignmentWakeup>[0],
+    ) => actual.queueIssueAssignmentWakeup({
+      ...input,
+      heartbeat: { wakeup: heartbeatWakeup },
     }),
   };
 });

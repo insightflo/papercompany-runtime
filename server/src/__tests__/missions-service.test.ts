@@ -44,6 +44,9 @@ import {
   recordMissionOwnerDecision,
   type MissionOwnerDecisionSubmission,
 } from "../services/missions/mission-owner-recovery-ledger.js";
+import { hashOwnerPlanDecision } from "../services/mission-owner-plan-decisions.js";
+import { upsertMissionPlanDecisionSubmission } from "../services/missions/mission-plan-decision-ledger.js";
+import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -451,8 +454,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]));
     expect(planningIssues).toHaveLength(2);
     const planningIssue = planningIssues.find((issue) => issue.originKind === "mission_main_executor_plan");
-    for (const expected of ["Post exactly one structured `### Mission owner plan decision` JSON comment", "use `graphWorkProductRequired: false` only for pure condition/input-check/QA units", "keep the upstream producer unit true when a downstream unit validates"]) expect(planningIssue?.description).toContain(expected);
-    expect(planningIssue?.description).toContain("\"assigneeAgentId\": \"agent-id-from-roster\"");
+    for (const expected of [
+      "POST /api/issues/{planningIssueId}/mission-plan-decision",
+      "use `graphWorkProductRequired: false` only for pure condition/input-check/QA units",
+      "keep the upstream producer unit true when a downstream unit validates",
+    ]) expect(planningIssue?.description).toContain(expected);
+    expect(planningIssue?.description).toContain("A Markdown `### Mission owner plan decision` comment is display-only");
+    expect(planningIssue?.description).not.toContain("Post exactly one structured `### Mission owner plan decision` JSON comment");
+    expect(planningIssue?.description).toContain("\"assigneeAgentId\":\"agent-id-from-roster\"");
     expect(planningIssue?.description).toContain(`Main Executor (operator) id=${ownerAgentId} [mission owner]`);
     expect(planningIssue?.description).not.toContain(errorAgentId);
     expect(planningIssue?.description).not.toContain("Unavailable Worker");
@@ -1869,31 +1878,34 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       status: "done",
       title: "[PLAN] Plan materialization recovery mission",
     }).returning();
-    await db.insert(issueComments).values({
+    // Structured authority only: seed the dedicated submission ledger without materializing.
+    // Natural-language plan-decision comments are display-only and are never execution authority.
+    const decision = {
+      missionId,
+      missionGoal: "Recover missing PAQO materialization",
+      selectedExecutionUnits: [{
+        id: "unit-recover",
+        kind: "mission_plan_unit",
+        title: "[ACTION] Recover execution",
+        assigneeAgentId: workerAgentId,
+        selectionState: "selected",
+        sourceRef: { type: "mission_plan_unit", id: "unit-recover" },
+        dependsOn: [],
+      }],
+      requiredInputs: [],
+      successCriteria: ["workflow materialized"],
+      steps: [],
+    };
+    await upsertMissionPlanDecisionSubmission({
+      db,
       companyId,
-      issueId: planningIssue!.id,
+      missionId,
+      planningIssueId: planningIssue!.id,
       authorAgentId: ownerAgentId,
-      body: [
-        "### Mission owner plan decision",
-        "```json",
-        JSON.stringify({
-          missionId,
-          missionGoal: "Recover missing PAQO materialization",
-          selectedExecutionUnits: [{
-            id: "unit-recover",
-            kind: "mission_plan_unit",
-            title: "[ACTION] Recover execution",
-            assigneeAgentId: workerAgentId,
-            selectionState: "selected",
-            sourceRef: { type: "mission_plan_unit", id: "unit-recover" },
-            dependsOn: [],
-          }],
-          requiredInputs: [],
-          successCriteria: ["workflow materialized"],
-          steps: [],
-        }),
-        "```",
-      ].join("\n"),
+      sourceCommentId: null,
+      decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]),
+      decision,
+      status: "submitted",
     });
 
     const result = await svc.runMainExecutorSupervision({
@@ -1916,13 +1928,17 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .from(missionPlanArtifacts)
       .where(eq(missionPlanArtifacts.missionId, missionId))
       .then((plans) => plans.filter((plan) => plan.status === "active"));
-    const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string } | undefined;
+    const planQa = (activePlan?.refs as Record<string, unknown> | undefined)?.planQa as { issueId?: string; status?: string; decisionHash?: string } | undefined;
     expect(planQa).toMatchObject({ issueId: expect.any(String), status: "pending" });
-    await db.insert(issueComments).values({
+    // Structured PLAN-QA PASS (comment PASS text is not authority).
+    await recordMissionPlanQaVerdict({
+      db,
       companyId,
-      issueId: planQa!.issueId!,
-      authorUserId: "board-user-test",
-      body: "Plan QA passed.\nPASS",
+      missionId,
+      planQaIssueId: planQa!.issueId!,
+      decisionHash: planQa!.decisionHash ?? hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]),
+      verdict: "pass",
+      reviewedBy: { actorType: "user", actorId: "board-user-test" },
     });
 
     const approved = await svc.runMainExecutorSupervision({
@@ -2708,7 +2724,12 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const sourceCommentRows = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
     const sourceBody = sourceCommentRows.map((comment) => comment.body).join("\n");
     expect(sourceBody).toContain("workProduct-reuse wakeup dispatched");
-    expect(sourceBody).toContain(`[ARTIFACT]: ${artifactPath}`);
+    expect(sourceBody).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(sourceBody).toContain("This is the only registration authority.");
+    expect(sourceBody).toContain(artifactPath);
+    expect(sourceBody).toContain("or an `[ARTIFACT]` marker to register");
+    expect(sourceBody).toContain("Comments, stdout, and artifact markers are no longer registration authority");
+    expect(sourceBody).not.toContain(`[ARTIFACT]: ${artifactPath}`);
     expect(sourceBody).toContain(idempotencyKey);
     const reuseEvents = await db
       .select({ id: workflowTransitionEvents.id })

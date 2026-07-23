@@ -34,7 +34,15 @@ import { resolveNativeToolStepRecoveryResult } from "../services/missions/tool-s
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
-const heartbeatWakeup = vi.fn();
+// Production path for recovery wakeups:
+// supervision / tool retry → wakeExistingWorkflowStepIssue (or assignment wake)
+// → queueIssueAssignmentWakeup({ heartbeat: heartbeatService(db) }) → heartbeat.wakeup(...).
+// heartbeatService mock alone does not always bind under this file's import graph, so real
+// enqueueWakeup runs (company_secrets / mission_agent_runtimes FK side effects). Force the
+// assignment-wakeup helper to use the test spy while keeping real guard/payload logic.
+const { heartbeatWakeup } = vi.hoisted(() => ({
+  heartbeatWakeup: vi.fn(),
+}));
 
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
@@ -42,6 +50,19 @@ vi.mock("../services/heartbeat.js", async (importOriginal) => {
     ...actual,
     heartbeatService: () => ({
       wakeup: heartbeatWakeup,
+    }),
+  };
+});
+
+vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/issue-assignment-wakeup.js")>();
+  return {
+    ...actual,
+    queueIssueAssignmentWakeup: (
+      input: Parameters<typeof actual.queueIssueAssignmentWakeup>[0],
+    ) => actual.queueIssueAssignmentWakeup({
+      ...input,
+      heartbeat: { wakeup: heartbeatWakeup },
     }),
   };
 });
