@@ -28,9 +28,9 @@
  *     재호출하지 않으므로 1 sync = (step 당) 최대 1 리셋.
  */
 
-import { desc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, issueComments, workflowStepRuns } from "@paperclipai/db";
+import { issueComments, workflowStepRuns } from "@paperclipai/db";
 import {
   conditionalEdgeHolds,
   resolveEdges,
@@ -45,6 +45,7 @@ import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rework-contract.js";
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
+import { loadWorkflowApiFeedback } from "../validation-verdict-ledger.js";
 import type { StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -58,7 +59,6 @@ interface LoopRun {
 }
 
 const TERMINAL_STEP_RUN_STATUSES = new Set(["completed", "failed", "skipped"]);
-const REQUEST_CHANGES_PATTERN = /\bREQUEST[_\s-]?CHANGES\b|request\s+changes/i;
 
 export interface ApplyBackEdgeReworkInput {
   db: Db;
@@ -85,71 +85,24 @@ export interface ApplyBackEdgeReworkResult {
   reworkedCount: number;
 }
 
-function truncateFeedback(body: string, maxLength = 4000): string {
-  return body.length <= maxLength ? body : `${body.slice(0, maxLength)}\n\n[truncated]`;
-}
-
-function extractHeartbeatFeedback(resultJson: unknown, stdoutExcerpt: string | null): string | null {
-  const result = resultJson && typeof resultJson === "object" && !Array.isArray(resultJson)
-    ? resultJson as Record<string, unknown>
-    : {};
-  const candidates = [
-    result.result,
-    result.summary,
-    result.message,
-    result.stdout,
-    stdoutExcerpt,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string") continue;
-    const trimmed = candidate.trim();
-    if (!trimmed) continue;
-    return truncateFeedback(trimmed);
-  }
-  return null;
-}
-
 async function loadQaReworkFeedback(input: {
   db: Db;
+  companyId: string;
   qaIssueId: string | null;
+  workflowRunId: string | null;
+  workflowStepRunId: string | null;
 }): Promise<string | null> {
-  if (!input.qaIssueId) return null;
-  const rows = await input.db
-    .select({ body: issueComments.body, createdAt: issueComments.createdAt })
-    .from(issueComments)
-    .where(eq(issueComments.issueId, input.qaIssueId))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-    .limit(5);
-  const requestChangeRows = rows.filter((row) => REQUEST_CHANGES_PATTERN.test(row.body));
-  const selectedRows = requestChangeRows.length > 0 ? requestChangeRows : rows.slice(0, 1);
-  if (selectedRows.length > 0) {
-    return selectedRows.map((row) => {
-      const createdAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : "unknown-time";
-      return `### QA feedback at ${createdAt}\n${truncateFeedback(row.body)}`;
-    })
-    .join("\n\n");
-  }
-
-  const runRows = await input.db
-    .select({
-      resultJson: heartbeatRuns.resultJson,
-      stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
-      finishedAt: heartbeatRuns.finishedAt,
-      createdAt: heartbeatRuns.createdAt,
-    })
-    .from(heartbeatRuns)
-    .where(eq(heartbeatRuns.issueId, input.qaIssueId))
-    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
-    .limit(5);
-  for (const run of runRows) {
-    const feedback = extractHeartbeatFeedback(run.resultJson, run.stdoutExcerpt);
-    if (!feedback) continue;
-    const observedAt = run.finishedAt ?? run.createdAt;
-    const timestamp = observedAt instanceof Date ? observedAt.toISOString() : "unknown-time";
-    return `### QA heartbeat feedback at ${timestamp}\n${feedback}`;
-  }
-
-  return null;
+  // [rework feedback authority] the request-changes rationale is read ONLY from the official
+  //   workflow_api verdict event payload bound to this QA issue's current run + step. Comments,
+  //   heartbeat result, and stdout are not parsed for feedback.
+  if (!input.qaIssueId || !input.workflowRunId || !input.workflowStepRunId) return null;
+  return loadWorkflowApiFeedback({
+    db: input.db,
+    companyId: input.companyId,
+    issueId: input.qaIssueId,
+    workflowRunId: input.workflowRunId,
+    workflowStepRunId: input.workflowStepRunId,
+  });
 }
 
 /**
@@ -232,7 +185,13 @@ export async function applyBackEdgeReworkPass(
       qaFeedbacks.push({
         qaStepId: q.edge.stepId,
         qaIssueId: q.qaRun?.issueId ?? null,
-        feedback: await loadQaReworkFeedback({ db, qaIssueId: q.qaRun?.issueId ?? null }),
+        feedback: await loadQaReworkFeedback({
+          db,
+          companyId: run.companyId,
+          qaIssueId: q.qaRun?.issueId ?? null,
+          workflowRunId: q.qaRun?.workflowRunId ?? null,
+          workflowStepRunId: q.qaRun?.id ?? null,
+        }),
       });
     }
     const reworkContract = buildWorkflowReworkContract({

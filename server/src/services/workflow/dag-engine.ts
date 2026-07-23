@@ -13,7 +13,7 @@ import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missio
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import { issueService } from "../issues.js";
-import { heartbeatService, extractExplicitArtifactPaths } from "../heartbeat.js";
+import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
@@ -53,7 +53,6 @@ import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acce
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
 import { readAttempts } from "./control-flow/verdict-store.js";
-import { extractCodexTaskCompleteMessages } from "./codex-task-output.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import {
@@ -996,24 +995,6 @@ function setLatestValidationVerdict(
   }
 }
 
-function readValidationVerdictFromHeartbeatResult(resultJson: unknown): "pass" | "request_changes" | null {
-  const result = normalizeRecord(resultJson);
-  const candidates = [
-    result.verdict,
-    result.decision,
-    result.outcome,
-    result.status,
-    result.result,
-    ...extractCodexTaskCompleteMessages(typeof result.stdout === "string" ? result.stdout : null),
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string") continue;
-    const verdict = readExplicitValidationVerdict(candidate, { allowLeadingVerdict: true });
-    if (verdict) return verdict;
-  }
-  return null;
-}
 
 function stepRunNeedsWorkflowResume(stepRun: typeof workflowStepRuns.$inferSelect): boolean {
   return stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0;
@@ -1030,19 +1011,26 @@ function isPendingReworkAwaitingCurrentIssueCompletion(
 }
 
 /**
- * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes|null) 를 heartbeat(성공) + comment
- *   에서 추출해 issueId→observation 맵으로 반환. P4 추출(DRY): syncStepRunsFromIssueState 와
- *   syncWorkflowRunState(loop-driver predFacts 빌드) 가 동일 verdict 원천을 공유. 관찰시간 최신 우선.
- *   heartbeat 성공은 explicit verdict 가 없어도 null 관측으로 오래된 REQUEST_CHANGES 를 supersede 한다.
- * [수정시 영향] syncStepRunsFromIssueState 의 기존 verdict 로딩과 byte-identical 해야(회귀 금지).
+ * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes|null) 를 durable
+ *   workflow_validation_verdict event 에서만 읽어 issueId→observation 맵으로 반환.
+ *   syncStepRunsFromIssueState 와 syncWorkflowRunState(loop-driver predFacts 빌드) 가 동일 원천을 공유.
+ * [scope fail-closed] 각 issue 의 CURRENT workflow run + step run + company exact binding 만 인정.
+ *   재사용된 issue의 과거 run/step verdict 가 현재 DAG 판정을 좌우하지 않는다(startedAt 단독 대체 ❌).
  */
+type WorkflowValidationIssueBinding = {
+  readonly companyId: string;
+  readonly workflowRunId: string;
+  readonly workflowStepRunId: string;
+};
+
 async function loadLatestValidationVerdicts(
   db: Db,
-  issueIds: string[],
+  bindings: ReadonlyMap<string, WorkflowValidationIssueBinding>,
 ): Promise<Map<string, ValidationVerdictObservation>> {
   const verdicts = new Map<string, ValidationVerdictObservation>();
-  if (issueIds.length === 0) return verdicts;
+  if (bindings.size === 0) return verdicts;
 
+  const issueIds = [...bindings.keys()];
   const issueRows = await db
     .select({
       id: issues.id,
@@ -1057,75 +1045,60 @@ async function loadLatestValidationVerdicts(
     return !minObservedAt || observedAt.getTime() >= minObservedAt.getTime();
   };
 
-  const structuredVerdictIssueIds = new Set<string>();
   const eventRows = await db
     .select({
       issueId: workflowTransitionEvents.issueId,
       verdict: workflowTransitionEvents.verdict,
       createdAt: workflowTransitionEvents.createdAt,
+      companyId: workflowTransitionEvents.companyId,
+      workflowRunId: workflowTransitionEvents.workflowRunId,
+      workflowStepRunId: workflowTransitionEvents.workflowStepRunId,
+      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
     })
     .from(workflowTransitionEvents)
     .where(and(
       inArray(workflowTransitionEvents.issueId, issueIds),
       eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      // structured authority only: ignore legacy comment/heartbeat_result derived events.
+      eq(workflowTransitionEvents.reason, "workflow_api"),
     ))
     .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id));
+  // [verdict authority] batch-resolve backing heartbeat runs and keep only those scoped (company +
+  //   issue) to their QA issue — the verdict API always runs on a checked-out run of the QA issue.
+  const heartbeatRunIds = Array.from(new Set(
+    eventRows.map((event) => event.heartbeatRunId).filter((id): id is string => typeof id === "string"),
+  ));
+  const heartbeatRunScopeById = new Map<string, { companyId: string | null; issueId: string | null }>();
+  if (heartbeatRunIds.length > 0) {
+    const runScopeRows = await db
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, issueId: heartbeatRuns.issueId })
+      .from(heartbeatRuns)
+      .where(inArray(heartbeatRuns.id, heartbeatRunIds));
+    for (const row of runScopeRows) {
+      heartbeatRunScopeById.set(row.id, { companyId: row.companyId, issueId: row.issueId });
+    }
+  }
   for (const event of eventRows) {
     const observedAt = event.createdAt ?? null;
     if (!isWithinCurrentExecutionWindow(event.issueId, observedAt)) continue;
     if (event.verdict !== "pass" && event.verdict !== "request_changes") continue;
-    if (event.issueId) structuredVerdictIssueIds.add(event.issueId);
-    setLatestValidationVerdict(verdicts, event.issueId, event.verdict, observedAt);
-  }
-
-  const runRows = await db
-    .select({
-      issueId: heartbeatRuns.issueId,
-      resultJson: heartbeatRuns.resultJson,
-      finishedAt: heartbeatRuns.finishedAt,
-      createdAt: heartbeatRuns.createdAt,
-    })
-    .from(heartbeatRuns)
-    .where(and(
-      inArray(heartbeatRuns.issueId, issueIds),
-      eq(heartbeatRuns.status, "succeeded"),
-    ))
-    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
-  for (const run of runRows) {
-    const observedAt = run.finishedAt ?? run.createdAt ?? null;
-    if (!isWithinCurrentExecutionWindow(run.issueId, observedAt)) continue;
-    const heartbeatVerdict = readValidationVerdictFromHeartbeatResult(run.resultJson);
-    if (heartbeatVerdict === null && run.issueId && structuredVerdictIssueIds.has(run.issueId)) {
+    // [scope fail-closed] exact binding to the issue's current workflow run + step run + company.
+    //   a reused issue's prior-run verdict must never drive the current DAG verdict.
+    const binding = event.issueId ? bindings.get(event.issueId) : null;
+    if (
+      !binding ||
+      event.companyId !== binding.companyId ||
+      event.workflowRunId !== binding.workflowRunId ||
+      event.workflowStepRunId !== binding.workflowStepRunId
+    ) {
       continue;
     }
-    setLatestValidationVerdict(
-      verdicts,
-      run.issueId,
-      heartbeatVerdict,
-      observedAt,
-    );
-  }
-
-  const commentRows = await db
-    .select({
-      issueId: issueComments.issueId,
-      body: issueComments.body,
-      createdAt: issueComments.createdAt,
-    })
-    .from(issueComments)
-    .where(inArray(issueComments.issueId, issueIds))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
-  for (const comment of commentRows) {
-    const observedAt = comment.createdAt ?? null;
-    if (!isWithinCurrentExecutionWindow(comment.issueId, observedAt)) continue;
-    const verdict = readExplicitValidationVerdict(comment.body);
-    if (!verdict) continue;
-    setLatestValidationVerdict(
-      verdicts,
-      comment.issueId,
-      verdict,
-      observedAt,
-    );
+    // [verdict authority] the backing heartbeat run must be a checked-out run scoped to this QA issue.
+    const runScope = event.heartbeatRunId ? heartbeatRunScopeById.get(event.heartbeatRunId) : null;
+    if (!runScope || runScope.companyId !== binding.companyId || runScope.issueId !== event.issueId) {
+      continue;
+    }
+    setLatestValidationVerdict(verdicts, event.issueId, event.verdict, observedAt);
   }
   return verdicts;
 }
@@ -1185,7 +1158,18 @@ async function syncStepRunsFromIssueState(
       });
     }));
   const validationCandidateIssueIdSet = new Set(validationCandidateIssueIds);
-  const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationCandidateIssueIds);
+  const validationBindings = new Map<string, WorkflowValidationIssueBinding>();
+  for (const stepRun of stepRuns) {
+    if (!stepRun.issueId || !validationCandidateIssueIdSet.has(stepRun.issueId)) continue;
+    const issue = issueById.get(stepRun.issueId);
+    if (!issue) continue;
+    validationBindings.set(stepRun.issueId, {
+      companyId: issue.companyId,
+      workflowRunId: stepRun.workflowRunId,
+      workflowStepRunId: stepRun.id,
+    });
+  }
+  const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationBindings);
   // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
   const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
 
@@ -1552,67 +1536,12 @@ async function createWorkflowStepIssue(input: {
     ...dependencyWorkProductEvidenceRefs,
     ...dependencyToolArtifactEvidenceRefs,
   ];
-  // [Plan B] 업스트림이 정식 workProduct 를 등록하지 않았더라도, producer 가 run output /
-  // issue description / comment 에 남긴 명시적 `[ARTIFACT]: <absolute path>` 선언을 보조
-  // evidence 로 downstream input 에 주입한다. broad filesystem scan 을 차단하기 위해 오직
-  // (1) 이 workflowRun 의 dependency issue 들, (2) 각 issue 의 description/comment/run output
-  // scope 안에서 명시된 `[ARTIFACT]:` 절대경로만 추출한다.
-  const dependenciesWithoutWorkProduct = artifactLookupIssueRows.filter(
-    (row) => (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length === 0,
-  );
-  const dependencyArtifactPathsByIssueId = new Map<string, string[]>();
-  if (dependenciesWithoutWorkProduct.length > 0) {
-    const dependencyIssueIds = dependenciesWithoutWorkProduct.map((row) => row.issueId);
-    const dependencyCommentRows = await input.db
-      .select({ issueId: issueComments.issueId, body: issueComments.body })
-      .from(issueComments)
-      .where(inArray(issueComments.issueId, dependencyIssueIds));
-    const commentsByIssueId = new Map<string, string[]>();
-    for (const comment of dependencyCommentRows) {
-      const list = commentsByIssueId.get(comment.issueId) ?? [];
-      list.push(comment.body);
-      commentsByIssueId.set(comment.issueId, list);
-    }
-    // producer run output 은 heartbeatRuns.issueId 로 찾는다. executionRunId 는 issue 가
-    // done/cancelled 등 in_progress 외 상태로 전환될 때 issueService.update 가 null 로
-    // 정리하므로 downstream 시점(= upstream 완료 후)엔 항상 비어있어 신뢰할 수 없다.
-    const dependencyRunRows = await input.db
-      .select({
-        issueId: heartbeatRuns.issueId,
-        stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
-        stderrExcerpt: heartbeatRuns.stderrExcerpt,
-        resultJson: heartbeatRuns.resultJson,
-      })
-      .from(heartbeatRuns)
-      .where(inArray(heartbeatRuns.issueId, dependencyIssueIds));
-    const runsByIssueId = new Map<string, Array<{
-      stdoutExcerpt: string | null;
-      stderrExcerpt: string | null;
-      resultJson: Record<string, unknown> | null;
-    }>>();
-    for (const run of dependencyRunRows) {
-      if (!run.issueId) continue;
-      const list = runsByIssueId.get(run.issueId) ?? [];
-      list.push({ stdoutExcerpt: run.stdoutExcerpt, stderrExcerpt: run.stderrExcerpt, resultJson: run.resultJson });
-      runsByIssueId.set(run.issueId, list);
-    }
-    for (const row of dependenciesWithoutWorkProduct) {
-      const sources: Array<string | null | undefined> = [];
-      sources.push(row.description);
-      sources.push(...(commentsByIssueId.get(row.issueId) ?? []));
-      for (const run of runsByIssueId.get(row.issueId) ?? []) {
-        sources.push(run.stdoutExcerpt, run.stderrExcerpt);
-        if (run.resultJson) sources.push(JSON.stringify(run.resultJson));
-      }
-      const artifactPaths = extractExplicitArtifactPaths(...sources);
-      if (artifactPaths.length > 0) {
-        dependencyArtifactPathsByIssueId.set(row.issueId, artifactPaths);
-      }
-    }
-  }
-  const dependencyHasWorkProductOrArtifact = (row: { issueId: string }) =>
-    (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length > 0
-    || (dependencyArtifactPathsByIssueId.get(row.issueId) ?? []).length > 0;
+  // [structured artifact authority] downstream execution recognizes dependency deliverables ONLY via
+  //   formally registered workProducts (DB) or machine-produced native tool-result metadata above.
+  //   producer-declared `[ARTIFACT]:` markers in issue descriptions/comments/run output are NOT
+  //   registration authority and must not satisfy the dependency work-product gate.
+  const dependencyHasWorkProduct = (row: { issueId: string }) =>
+    (dependencyWorkProductsByIssueId.get(row.issueId) ?? []).length > 0;
   const renderWorkProductSummary = (product: typeof dependencyWorkProductRows[number]) => {
     const artifactRef = product.url ?? product.externalId ?? (
       product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
@@ -1628,7 +1557,6 @@ async function createWorkflowStepIssue(input: {
   }) => {
     const label = row.identifier ?? row.issueId;
     const products = dependencyWorkProductsByIssueId.get(row.issueId) ?? [];
-    const artifactPaths = dependencyArtifactPathsByIssueId.get(row.issueId) ?? [];
     const lines: string[] = [
       `- ${row.stepId}: ${label} (${row.status}) — ${row.title}`,
     ];
@@ -1637,15 +1565,11 @@ async function createWorkflowStepIssue(input: {
     } else {
       lines.push("  workProducts: none registered");
     }
-    if (artifactPaths.length > 0) {
-      lines.push(`  artifactPaths (auxiliary, producer-declared \`[ARTIFACT]:\`): ${artifactPaths.join("; ")}`);
-    }
     return lines;
   };
   const dependencyIssueLines = dependencyIssueRows.flatMap((row) => {
     const label = row.identifier ?? row.issueId;
     const products = dependencyWorkProductsByIssueId.get(row.issueId) ?? [];
-    const artifactPaths = dependencyArtifactPathsByIssueId.get(row.issueId) ?? [];
     const gateProducerStepIds = gateProducerStepIdsByGateStepId.get(row.stepId) ?? [];
     const lines: string[] = [
       `- ${row.stepId}: ${label} (${row.status}) — ${row.title}`,
@@ -1656,9 +1580,6 @@ async function createWorkflowStepIssue(input: {
       lines.push(`  gate dependency passed without its own workProduct; use validated upstream workProducts below: ${gateProducerStepIds.join(", ")}`);
     } else {
       lines.push("  workProducts: none registered");
-    }
-    if (artifactPaths.length > 0) {
-      lines.push(`  artifactPaths (auxiliary, producer-declared \`[ARTIFACT]:\`): ${artifactPaths.join("; ")}`);
     }
     return lines;
   });
@@ -1674,11 +1595,11 @@ async function createWorkflowStepIssue(input: {
   const gateStepIds = new Set(gateProducerStepIdsByGateStepId.keys());
   const missingDirectDependencyWorkProductLines = dependencyIssueRows
     .filter((row) => workflowStepsById.get(row.stepId)?.graphWorkProductRequired === true)
-    .filter((row) => !dependencyHasWorkProductOrArtifact(row))
+    .filter((row) => !dependencyHasWorkProduct(row))
     .filter((row) => !gateStepIds.has(row.stepId))
     .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
   const missingGateValidatedProducerWorkProductLines = gateValidatedProducerIssueRows
-    .filter((row) => !dependencyHasWorkProductOrArtifact(row))
+    .filter((row) => !dependencyHasWorkProduct(row))
     .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
   const missingDependencyWorkProductLines = [
     ...missingDirectDependencyWorkProductLines,
@@ -1774,15 +1695,6 @@ async function createWorkflowStepIssue(input: {
     ...dependencyToolArtifactLines,
     validatedUpstreamWorkProductLines.length > 0 ? "Validated upstream workProducts:" : null,
     ...validatedUpstreamWorkProductLines,
-    dependencyArtifactPathsByIssueId.size > 0
-      ? "Auxiliary dependency artifactPaths (producer-declared via `[ARTIFACT]:`, not formally registered):"
-      : null,
-    dependencyArtifactPathsByIssueId.size > 0
-      ? "- These upstream steps did not register a workProduct, but their producer output declared `[ARTIFACT]: <absolute path>`. Use the listed artifactPaths as the dependency deliverable evidence for validation/synthesis/build/approval instead of stopping."
-      : null,
-    dependencyArtifactPathsByIssueId.size > 0
-      ? "- artifactPaths are auxiliary evidence and do not replace a formally registered workProduct. When a dependency registers a workProduct above, prefer it. Do not scan the filesystem for other paths."
-      : null,
     missingDependencyWorkProductLines.length > 0 ? "Dependency workProduct hard-stop:" : null,
     ...missingDependencyWorkProductLines,
     missingDependencyWorkProductLines.length > 0
@@ -3390,12 +3302,18 @@ export async function syncWorkflowRunState(
   // Plain legacy workflows must not pay the verdict-query cost. Load
   // authoritative validation verdicts only when conditional control flow or an
   // active issue-backed QA retry can actually consume semantic request_changes.
+  const runValidationBindings = new Map<string, WorkflowValidationIssueBinding>();
+  for (const stepRun of stepRuns) {
+    if (!stepRun.issueId) continue;
+    runValidationBindings.set(stepRun.issueId, {
+      companyId: context.run.companyId,
+      workflowRunId: stepRun.workflowRunId,
+      workflowStepRunId: stepRun.id,
+    });
+  }
   const validationVerdictsByIssueId = context.run.status !== "cancelled"
     && shouldLoadValidationVerdictsForRun(context.steps, stepRuns)
-    ? await loadLatestValidationVerdicts(
-      db,
-      stepRuns.map((stepRun) => stepRun.issueId).filter((issueId): issueId is string => Boolean(issueId)),
-    )
+    ? await loadLatestValidationVerdicts(db, runValidationBindings)
     : new Map<string, ValidationVerdictObservation>();
   // ④ revive pass — producer 가 rework/회복으로 completed 되면, failure cascade 로 controlFlowSkipped 된
   //   downstream step 이 다시 runnable 이 된다. sentinel 을 풀고 pending 으로 부활시켜 이어지는 launch 가

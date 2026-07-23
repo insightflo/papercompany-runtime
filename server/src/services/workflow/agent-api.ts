@@ -13,6 +13,8 @@ import { toIssueWorkProduct, workProductService } from "../work-products.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { workflowService } from "./engine.js";
 import { recordWorkflowValidationVerdict } from "./validation-verdict-ledger.js";
+import { reconcileRecoveredWorkflowStep } from "../missions/recovery-closeout.js";
+import { logger } from "../../middleware/logger.js";
 
 type IssueRow = typeof issues.$inferSelect;
 
@@ -263,6 +265,24 @@ export async function submitWorkflowVerdict(input: {
   }
   if (!result.satisfied) {
     throw unprocessable("Workflow verdict ledger was not recorded");
+  }
+  // [P5 recovery closeout] official QA PASS via the structured verdict API → guarded producer failed-step
+  //   closeout. reconcileRecoveredWorkflowStep reads the durable workflow_validation_verdict event itself
+  //   (no text/stdout parsing) and only mutates when evidence is current-generation; missionId-gated.
+  if (result.verdict === "pass" && input.issue.missionId) {
+    try {
+      const closeout = await reconcileRecoveredWorkflowStep(input.db, {
+        companyId: input.issue.companyId,
+        missionId: input.issue.missionId,
+        qaGateIssueId: input.issue.id,
+        source: "workflow_api_qa_pass",
+      });
+      if ("reconciled" in closeout && closeout.reconciled) {
+        await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+      }
+    } catch (err) {
+      logger.warn({ err, issueId: input.issue.id }, "recovery closeout failed after workflow verdict");
+    }
   }
   await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
   return result;

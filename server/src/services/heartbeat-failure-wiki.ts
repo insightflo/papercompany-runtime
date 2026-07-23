@@ -73,7 +73,7 @@ export function classifyWorkProductFailure(input: {
     wikiLesson: {
       pattern: "workProduct 미등록",
       cause: "run이 산출물 파일 경로를 보고했지만 issue에 공식 workProduct가 등록되지 않아 mission artifact gate가 해당 이슈를 block함.",
-      solution: "산출물 파일을 지정된 출력 디렉터리에 만들고 Workflow API로 등록한다. API를 사용할 수 없을 때만 실행 출력 끝에 `[ARTIFACT]: <절대경로>` 한 줄을 남긴다.",
+      solution: "산출물 파일을 지정된 출력 디렉터리에 만들고 Workflow API(POST /api/issues/:id/workflow/artifacts)로 등록한다. comment/stdout/[ARTIFACT] 마커는 등록 권한이 아니므로 의존하지 않는다.",
       errorCode: "workproduct_registration_missing",
     },
   };

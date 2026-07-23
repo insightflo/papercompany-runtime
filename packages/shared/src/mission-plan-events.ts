@@ -25,6 +25,9 @@ export interface WorkflowValidationVerdictPayload {
   issueId: string;
   verdict: MissionPlanQaVerdictValue;
   diagnostics?: Array<Record<string, unknown>>;
+  /** bounded request-changes rationale carried by the official workflow_api verdict submission;
+   * consumed as the rework feedback source (not parsed from comments/stdout). */
+  reason?: string;
   /** [qa-cap acceptance] 공식 request_changes verdict 의 명시적 nonblocking 분류. cap 수용 게이트가 읽는다. */
   nonblockingAcceptance?: WorkflowNonblockingAcceptance;
 }

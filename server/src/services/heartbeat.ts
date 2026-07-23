@@ -36,10 +36,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { readExplicitValidationVerdict } from "./validation-verdict.js";
-import {
-  hasWorkflowValidationCompletionLedger,
-  recordWorkflowValidationVerdictFromRun,
-} from "./workflow/validation-verdict-ledger.js";
+import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
@@ -81,7 +78,6 @@ import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-gua
 import { buildRuntimeSearchPathPermissions } from "./runtime-search-path-permissions.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
 import {
-  collectRecentIssueCommentArtifactPathCandidates,
   extractClaimedArtifactPathsFromText,
   extractExplicitArtifactPaths,
   extractExplicitArtifactUrls,
@@ -100,7 +96,6 @@ import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./m
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
-import { reconcileRecoveredWorkflowStep } from "./missions/recovery-closeout.js";
 import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
 import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
@@ -7301,30 +7296,6 @@ export function heartbeatService(db: Db) {
         isLinkedToRun &&
         successfulRunCanFinalizeIssue &&
         issue.assigneeAgentId === run.agentId;
-      const requestChangesVerdict = isSucceededHeartbeatRunStatus(run.status) ? extractRequestChangesVerdict(run) : null;
-      if (
-        isSucceededHeartbeatRunStatus(run.status) &&
-        isLinkedToRun &&
-        successfulRunCanApplyCompletionGates &&
-        issue.assigneeAgentId === run.agentId
-      ) {
-        const validationLedger = await recordWorkflowValidationVerdictFromRun({ db: tx, issue, run });
-        // [P5 recovery closeout] QA PASS 공식 ledger 기록 후 same run 의 recovered producer failed step
-        //   만 reconcile + workflow run sync(codex 계약 3). 전역 issue-done 덮어쓰기 ❌.
-        if (validationLedger?.verdict === "pass" && issue.missionId) {
-          try {
-            const closeout = await reconcileRecoveredWorkflowStep(tx as unknown as Db, {
-              companyId: issue.companyId,
-              missionId: issue.missionId,
-              qaGateIssueId: issue.id,
-              source: "heartbeat_qa_pass",
-            });
-            if ("reconciled" in closeout && closeout.reconciled) queuePostTransactionWorkflowIssueSync(issue.id);
-          } catch (err) {
-            logger.warn({ err, issueId: issue.id }, "recovery closeout failed");
-          }
-        }
-      }
       const workflowValidationCompletionLedger =
         isSucceededHeartbeatRunStatus(run.status) &&
         isLinkedToRun &&
@@ -7332,20 +7303,9 @@ export function heartbeatService(db: Db) {
         issue.assigneeAgentId === run.agentId
           ? await hasWorkflowValidationCompletionLedger({ db: tx, issue })
           : null;
-      const shouldBlockRequestChangesVerdict =
-        !!requestChangesVerdict &&
-        isLinkedToRun &&
-        !!issue.missionId &&
-        canApplyRequestChangesValidationGate(issue) &&
-        successfulRunCanApplyCompletionGates &&
-        issue.assigneeAgentId === run.agentId;
       const shouldBlockMissingWorkflowValidationVerdict =
         workflowValidationCompletionLedger?.isCandidate === true &&
         workflowValidationCompletionLedger.satisfied === false;
-      const claimedArtifactPaths =
-        isSucceededHeartbeatRunStatus(run.status) && isLinkedToRun && !!issue.missionId
-          ? extractClaimedArtifactPaths(run)
-          : [];
       const missionWorkProductPaths = issue.missionId
         ? await resolveMissionWorkProductPaths(tx, {
           companyId: issue.companyId,
@@ -7375,83 +7335,6 @@ export function heartbeatService(db: Db) {
         successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId;
 
-      if (shouldBlockRequestChangesVerdict) {
-        const now = new Date();
-        await tx
-          .update(issues)
-          .set({
-            status: "blocked",
-            checkoutRunId: null,
-            executionRunId: null,
-            executionAgentNameKey: null,
-            executionLockedAt: null,
-            completedAt: null,
-            updatedAt: now,
-          })
-          .where(eq(issues.id, issue.id));
-        await tx.insert(issueComments).values({
-          companyId: issue.companyId,
-          issueId: issue.id,
-          authorAgentId: run.agentId,
-          body: buildRequestChangesValidationGateComment({ run, verdict: requestChangesVerdict }),
-        });
-        await tx.insert(activityLog).values({
-          companyId: issue.companyId,
-          actorType: "system",
-          actorId: "heartbeat",
-          action: "issue.validation_request_changes_auto_blocked",
-          entityType: "issue",
-          entityId: issue.id,
-          agentId: run.agentId,
-          runId: run.id,
-          details: {
-            previousStatus: issue.status,
-            nextStatus: "blocked",
-            reason: "request_changes_verdict",
-            verdict: "REQUEST_CHANGES",
-          },
-        });
-        queuePostTransactionWorkflowIssueSync(issue.id);
-        // Phase 5 (plan 8.1 final QA / mission quality contract): completion QA run returned
-        // REQUEST_CHANGES → best-effort quality review item via the thin writer (no heavy service
-        // import on the heartbeat hot path; per-mission dedupe). Never blocks heartbeat on failure.
-        try {
-          const dependencyTarget = firstDependencyIssueFromDescription(issue.description);
-          const qualityMissionTitle = await tx
-            .select({ title: missions.title })
-            .from(missions)
-            .where(eq(missions.id, issue.missionId!))
-            .limit(1)
-            .then((rows) => rows[0]?.title?.trim() || `mission ${issue.missionId}`);
-          await writeQualityFinding(db, {
-            companyId: issue.companyId,
-            missionId: issue.missionId!,
-            title: `Final QA / purpose-fitness failure - ${qualityMissionTitle}`,
-            targetType: "mission_output",
-            triggerSource: "final_qa_failure",
-            targetId: issue.missionId!,
-            failureType: "plan_goal_mismatch",
-            triggerMetadata: {
-              reason: (requestChangesVerdict as { excerpt?: string } | null)?.excerpt ?? "Final QA returned REQUEST_CHANGES.",
-              sourceIssueId: issue.id,
-              sourceIssueIdentifier: issue.identifier,
-              sourceIssueTitle: issue.title,
-              sourceIssueStatus: issue.status,
-              sourceStepId: workflowStepIdFromIssueDescription(issue.description),
-              targetIssueIdentifier: dependencyTarget?.targetIssueIdentifier,
-              targetIssueTitle: dependencyTarget?.targetIssueTitle,
-              targetStepId: dependencyTarget?.targetStepId,
-              recommendedAction: "Request changes and route the affected producer step for rework; do not treat the mission's completed status as a pass for this quality finding.",
-            },
-          });
-        } catch {
-          // swallowed: heartbeat validation must not depend on the quality board.
-        }
-        return {
-          promotedRun: null,
-          postTransactionRequestChangesOwnerAction: { sourceIssue: issue, run, verdict: requestChangesVerdict },
-        };
-      }
 
       if (shouldBlockMissingWorkflowValidationVerdict) {
         const now = new Date();
@@ -7509,122 +7392,16 @@ export function heartbeatService(db: Db) {
           .where(eq(issueWorkProducts.issueId, issue.id))
           .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt))
           .limit(10);
-        const hasSatisfiedExistingWorkProductRegistration = hasSatisfiedWorkProductRegistration({
-          existingWorkProducts,
-          claimedArtifactPaths,
-          issue,
-          allowedArtifactRoot,
-        });
-        let commentArtifactPathCandidates: Awaited<ReturnType<typeof collectRecentIssueCommentArtifactPathCandidates>> = {
-          paths: [],
-          sourceCommentIds: [],
-          safeForAutoRegistration: false,
-        };
-        let autoRegisteredWorkProduct: Awaited<ReturnType<typeof autoRegisterWorkProductFromClaimedFile>> = null;
-        if (!hasSatisfiedExistingWorkProductRegistration && existingWorkProducts.length === 0) {
-          autoRegisteredWorkProduct = await autoRegisterWorkProductFromIssueDocument({
-            tx,
-            issue,
-            run,
-            claimedArtifactPaths,
-            allowedArtifactRoot,
-          }) ?? await autoRegisterWorkProductFromClaimedFile({
-            tx,
-            issue,
-            run,
-            claimedArtifactPaths,
-            allowedArtifactRoot,
-            preferClaimedArtifactPath: stepRunRequiresWorkProduct === true || hasDeliverableOutputContract(issue.description),
-          });
-        }
-        if (
-          !autoRegisteredWorkProduct &&
-          !hasSatisfiedExistingWorkProductRegistration &&
-          existingWorkProducts.length === 0 &&
-          claimedArtifactPaths.length === 0
-        ) {
-          commentArtifactPathCandidates = await collectRecentIssueCommentArtifactPathCandidates({
-            tx,
-            issueId: issue.id,
-            companyId: issue.companyId,
-            agentId: run.agentId,
-            runStartedAt: run.startedAt instanceof Date ? run.startedAt : null,
-            runCreatedAt: run.createdAt instanceof Date ? run.createdAt : null,
-            runFinishedAt: run.finishedAt instanceof Date ? run.finishedAt : null,
-            runUpdatedAt: run.updatedAt instanceof Date ? run.updatedAt : null,
-            allowedArtifactRoot,
-          });
-          if (commentArtifactPathCandidates.safeForAutoRegistration) {
-            autoRegisteredWorkProduct = await autoRegisterWorkProductFromClaimedFile({
-              tx,
-              issue,
-              run,
-              claimedArtifactPaths: commentArtifactPathCandidates.paths,
-              allowedArtifactRoot,
-              preferClaimedArtifactPath: true,
-              registrationSource: {
-                type: "issue_comment_artifact_marker",
-                commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
-                sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
-              },
-            });
-          }
-          if (!autoRegisteredWorkProduct) {
-            commentArtifactPathCandidates = await collectRecentIssueCommentArtifactPathCandidates({
-              tx,
-              issueId: issue.id,
-              companyId: issue.companyId,
-              agentId: run.agentId,
-              runStartedAt: run.startedAt instanceof Date ? run.startedAt : null,
-              runCreatedAt: run.createdAt instanceof Date ? run.createdAt : null,
-              runFinishedAt: run.finishedAt instanceof Date ? run.finishedAt : null,
-              runUpdatedAt: run.updatedAt instanceof Date ? run.updatedAt : null,
-              allowedArtifactRoot,
-              includeClaimedPaths: true,
-              includePriorComments: true,
-            });
-            if (commentArtifactPathCandidates.safeForAutoRegistration) {
-              autoRegisteredWorkProduct = await autoRegisterWorkProductFromClaimedFile({
-                tx,
-                issue,
-                run,
-                claimedArtifactPaths: commentArtifactPathCandidates.paths,
-                allowedArtifactRoot,
-                preferClaimedArtifactPath: true,
-                requireExistingLocalFile: true,
-                registrationSource: {
-                  type: "issue_comment_claimed_file",
-                  commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
-                  sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
-                },
-              });
-            }
-          }
-        }
-        if (autoRegisteredWorkProduct && issue.parentId) {
-          postTransactionDelegatedArtifactHandbacks.push({
-            childIssueId: issue.id,
-            childWorkProductId: autoRegisteredWorkProduct.id,
-            sourceRunId: run.id,
-          });
-        }
+        // [structured artifact authority] only scoped work-product DB records (registered via the
+        //   Workflow API) satisfy the completion gate. comment/stdout/[ARTIFACT] path markers must NOT
+        //   register or complete; when evidence is missing the existing bounded rework path runs.
         if (!hasSatisfiedWorkProductRegistration({
           existingWorkProducts,
-          claimedArtifactPaths,
+          claimedArtifactPaths: [],
           issue,
-          autoRegisteredWorkProduct,
           allowedArtifactRoot,
         })) {
           const now = new Date();
-          const explicitArtifactPaths = extractExplicitArtifactPaths(
-            stringifyRunResultJson(run.resultJson),
-            run.stdoutExcerpt,
-            run.stderrExcerpt,
-          );
-          const workProductFailure = classifyWorkProductFailure({
-            allowedArtifactRoot,
-            explicitArtifactPaths,
-          });
           await tx
             .update(issues)
             .set({
@@ -7643,9 +7420,7 @@ export function heartbeatService(db: Db) {
             authorAgentId: run.agentId,
             body: buildMissingWorkProductRegistrationGateComment({
               runId: run.id,
-              claimedArtifactPaths,
-              commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
-              sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
+              claimedArtifactPaths: [],
               allowedArtifactRoot,
             }),
           });
@@ -7662,19 +7437,8 @@ export function heartbeatService(db: Db) {
               previousStatus: issue.status,
               nextStatus: "blocked",
               reason: "missing_work_product_registration",
-              failureClass: workProductFailure.failureClass,
-              runClaimedArtifactPaths: claimedArtifactPaths,
-              commentClaimedArtifactPaths: commentArtifactPathCandidates.paths,
-              sourceCommentIds: commentArtifactPathCandidates.sourceCommentIds,
-              commentArtifactPathsSafeForAutoRegistration: commentArtifactPathCandidates.safeForAutoRegistration,
             },
           });
-          fireWikiRecord(wikiSvc, {
-            companyId: issue.companyId,
-            agentId: run.agentId,
-            missionId: issue.missionId ?? null,
-            ...workProductFailure.wikiLesson,
-          }, run.id);
           queuePostTransactionWorkflowIssueSync(issue.id);
           return null;
         }
@@ -7742,24 +7506,6 @@ export function heartbeatService(db: Db) {
         }
       }
 
-      if (
-        run.status === "succeeded" &&
-        isLinkedToRun &&
-        issue.originKind === "mission_main_executor_unblock" &&
-        issue.missionId
-      ) {
-        const artifactUrl = extractMissionOwnerUnblockArtifactUrl(run);
-        if (artifactUrl) {
-          const applied = await applyMissionOwnerUnblockArtifactUrlToSource({
-            tx,
-            ownerActionIssue: issue,
-            run,
-            artifactUrl,
-            now: new Date(),
-          });
-          queuePostTransactionWorkflowIssueSync(applied?.sourceIssueId);
-        }
-      }
 
       if (
         shouldAutoCompleteSuccessfulIssue &&
@@ -8116,16 +7862,36 @@ export function heartbeatService(db: Db) {
     const postTransactionRequestChangesOwnerAction = hasPostTransactionRequestChangesOwnerAction
       ? transactionRecord?.postTransactionRequestChangesOwnerAction as PostTransactionRequestChangesOwnerAction
       : null;
+    type PostTransactionMissionOwnerPlanDecision = {
+      issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">;
+      actorAgentId: string | null;
+    };
+    const hasPostTransactionMissionOwnerPlanDecision =
+      !!transactionObject && "postTransactionMissionOwnerPlanDecision" in transactionObject;
+    const postTransactionMissionOwnerPlanDecision = hasPostTransactionMissionOwnerPlanDecision
+      ? transactionRecord?.postTransactionMissionOwnerPlanDecision as PostTransactionMissionOwnerPlanDecision
+      : null;
     const hasPromotedRunField = !!transactionObject && "promotedRun" in transactionObject;
     const promotedRun = (
-      hasPromotedRunField || hasPostTransactionRequestChangesOwnerAction
+      hasPromotedRunField
+      || hasPostTransactionRequestChangesOwnerAction
+      || hasPostTransactionMissionOwnerPlanDecision
         ? transactionRecord?.promotedRun
         : transactionResult
     ) as typeof heartbeatRuns.$inferSelect | null | undefined;
 
-
     if (postTransactionRequestChangesOwnerAction) {
       await ensureMissionOwnerActionForRequestChanges(postTransactionRequestChangesOwnerAction);
+    }
+
+    if (postTransactionMissionOwnerPlanDecision) {
+      await recordMissionOwnerPlanDecisionAfterComment(
+        db,
+        postTransactionMissionOwnerPlanDecision.issue,
+        postTransactionMissionOwnerPlanDecision.actorAgentId,
+        enqueuePlanQaWakeup,
+        enqueuePlanningIssueWakeup,
+      );
     }
 
     if (postTransactionWorkflowIssueSyncIssueIds.size > 0) {
