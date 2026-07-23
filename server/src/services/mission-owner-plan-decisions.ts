@@ -2549,6 +2549,18 @@ export async function reopenPlanningIssueForPlanChanges(input: {
       });
     return updated ?? null;
   }
+  // [PLAN-QA rework serialization] issue is in_progress with a live checkout/execution
+  // run: the active run must not be disturbed (no status/lock change), but we still
+  // record the structured revision baseline so the deferred follow-up run carries the
+  // prior decision + exact diagnostics. Returning the scoped issue+assignee lets the
+  // producer enqueue a deferred wake the queue runner promotes only after the run ends.
+  const isLiveInProgress = row.status === "in_progress" && Boolean(row.checkoutRunId || row.executionRunId);
+  if (isLiveInProgress) {
+    if (reopenedDescription !== null) {
+      await input.db.update(issues).set({ description: reopenedDescription, updatedAt: new Date() }).where(and(eq(issues.companyId, input.companyId), eq(issues.missionId, input.missionId), eq(issues.id, row.id)));
+    }
+    return { id: row.id, status: row.status, assigneeAgentId: row.assigneeAgentId };
+  }
   return null;
 }
 
