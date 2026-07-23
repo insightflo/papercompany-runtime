@@ -10,17 +10,19 @@ import {
 
 describe("artifact registration instructions", () => {
   it("separates deliverable creation from workProduct registration", () => {
-    const lines = buildWorkProductRegistrationContractLines();
+    const text = buildWorkProductRegistrationContractLines().join("\n");
 
-    expect(lines.join("\n")).toContain(
+    expect(text).toContain(
       "Creating the deliverable file and registering the workProduct are separate steps.",
     );
-    expect(lines.join("\n")).toContain("[ARTIFACT]: <absolute path>");
-    expect(lines.join("\n")).toContain("If the deliverable file does not exist yet, create it");
-    expect(lines.join("\n")).toContain("If it already exists, do not regenerate it");
-    expect(lines.join("\n")).toContain("Prefer the Workflow API");
-    expect(lines.join("\n")).toContain("/workflow/artifacts");
-    expect(lines.join("\n")).toContain("Do not use the generic workProduct route");
+    expect(text).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(text).toContain("This is the only registration authority.");
+    expect(text).toContain("If the deliverable file does not exist yet, create it");
+    expect(text).toContain("If it already exists, do not regenerate it");
+    expect(text).toContain("Do not use the generic workProduct route");
+    expect(text).toContain("or an `[ARTIFACT]` marker to register");
+    expect(text).toContain("Comments, stdout, and artifact markers are no longer registration authority");
+    expect(text).not.toMatch(/\[ARTIFACT\]:\s*<absolute path>/);
   });
 
   it("points recovery runs at the existing file instead of regeneration", () => {
@@ -30,8 +32,11 @@ describe("artifact registration instructions", () => {
 
     expect(text).toContain("Required action:");
     expect(text).toContain(`The deliverable file already exists at \`${artifactPath}\``);
-    expect(text).toContain(`[ARTIFACT]: ${artifactPath}`);
     expect(text).toContain("do not regenerate it");
+    expect(text).toContain("register that exact path via the Workflow API");
+    expect(text).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(text).toContain("or an `[ARTIFACT]` marker to register");
+    expect(text).not.toContain(`[ARTIFACT]: ${artifactPath}`);
   });
 
   it("pins producer output to the assigned directory", () => {
@@ -56,6 +61,9 @@ describe("artifact registration instructions", () => {
     expect(text).toContain("source content -> observation -> interpretation -> conclusion");
     expect(text).toContain("workProducts as traceability, not the proof itself");
     expect(text).toContain("source workflow will copy those registered workProducts back");
+    expect(text).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(text).toContain("or an `[ARTIFACT]` marker");
+    expect(text).toContain("Only the Workflow API registers a work product");
   });
 
   it("includes the shared contract in missing-registration gate comments", () => {
@@ -67,7 +75,10 @@ describe("artifact registration instructions", () => {
 
     expect(text).toContain("Mission artifact gate: workProduct registration missing");
     expect(text).toContain("Creating the deliverable file and registering the workProduct are separate steps.");
-    expect(text).toContain("[ARTIFACT]: <absolute path>");
+    expect(text).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(text).toContain("or an `[ARTIFACT]` marker to register");
+    expect(text).toContain("Comments, stdout, and artifact markers are no longer registration authority");
+    expect(text).not.toMatch(/\[ARTIFACT\]:\s*<absolute path>/);
   });
 
   it("keeps assigned issue prompts explicit about create-or-register", () => {
@@ -78,6 +89,9 @@ describe("artifact registration instructions", () => {
     expect(text).toContain("workProducts as traceability, not the proof itself");
     expect(text).toContain("If the file is missing, create it");
     expect(text).toContain("if it already exists, reuse it");
-    expect(text).toContain("Register with the Workflow API first");
+    expect(text).toContain("Register the workProduct only with the Workflow API");
+    expect(text).toContain("POST /api/issues/{issueId}/workflow/artifacts");
+    expect(text).toContain("Do not rely on comments, stdout, or an `[ARTIFACT]` marker");
+    expect(text).toContain("those are not registration authority");
   });
 });
