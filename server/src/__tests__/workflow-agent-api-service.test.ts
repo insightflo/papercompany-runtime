@@ -16,6 +16,7 @@ import {
   issueWorkProducts,
   issues,
   missionPlanArtifacts,
+  missionPlanDecisionSubmissions,
   missionPlanQaVerdicts,
   missions,
   workflowDefinitions,
@@ -626,5 +627,88 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       reviewerAgentId: qaAgentId,
       sourceRunId: runId,
     });
+  });
+
+  async function seedCheckedOutPlanningIssue() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+    const sourceWorkflowId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Plan Decision API Co", issuePrefix: "PDA", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} });
+    await db.insert(workflowDefinitions).values({ id: sourceWorkflowId, companyId, name: "Plan Decision Source", stepsJson: [{ id: "scout", name: "Scout", dependencies: [] }] });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Plan decision API mission", status: "active" });
+    await db.insert(issues).values({ id: planningIssueId, companyId, missionId, title: "Mission owner planning", originKind: "mission_main_executor_plan", status: "in_progress", assigneeAgentId: ownerAgentId });
+    await db.insert(missionPlanArtifacts).values({ companyId, missionId, ownerAgentId, missionGoal: "Ship via structured API", refs: {} });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: ownerAgentId, issueId: planningIssueId, status: "running", startedAt: new Date("2026-07-22T00:00:00.000Z") });
+    await db.update(issues).set({ checkoutRunId: runId, executionRunId: runId }).where(eq(issues.id, planningIssueId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, planningIssueId));
+    return { issue, ownerAgentId, runId, missionId, companyId, sourceWorkflowId };
+  }
+
+  it("records an owner plan decision only via the structured API, never from a natural-language comment", async () => {
+    const { issue, ownerAgentId, runId, missionId, companyId, sourceWorkflowId } = await seedCheckedOutPlanningIssue();
+    const decision = {
+      missionId,
+      missionGoal: "Ship via structured API",
+      selectedExecutionUnits: [{ id: "unit-1", kind: "workflow_definition_step", title: "Run scout", reason: "source evidence", selectionState: "selected", sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" } }],
+    };
+
+    // Negative: a natural-language decision comment must NOT create a ledger row or materialize.
+    await db.insert(issueComments).values({ companyId, issueId: issue.id, authorAgentId: ownerAgentId, body: `### Mission owner plan decision\n\`\`\`json\n${JSON.stringify(decision)}\n\`\`\`` });
+    let submissions = await db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions).toHaveLength(0);
+
+    // Positive: the dedicated API records the decision from the checked-out owner run.
+    const response = await request(createApp(db, { type: "agent", source: "agent_jwt", companyId, agentId: ownerAgentId, runId }))
+      .post(`/api/issues/${issue.id}/mission-plan-decision`)
+      .send({ decision });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({ status: expect.stringMatching(/^recorded$|^plan_qa_pending$/) });
+
+    submissions = await db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions.length).toBeGreaterThanOrEqual(1);
+  });
+  async function seedMisassignedPlanningIssue() {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const nonOwnerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const planningIssueId = randomUUID();
+    const sourceWorkflowId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Plan Decision Misassigned Co", issuePrefix: "PDM", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} });
+    await db.insert(agents).values({ id: nonOwnerAgentId, companyId, name: "Misassigned Assignee", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {} });
+    await db.insert(workflowDefinitions).values({ id: sourceWorkflowId, companyId, name: "Plan Decision Misassigned Source", stepsJson: [{ id: "scout", name: "Scout", dependencies: [] }] });
+    // Mission owner is ownerAgentId, but the plan issue is misassigned to nonOwnerAgentId.
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Plan decision misassigned mission", status: "active" });
+    await db.insert(issues).values({ id: planningIssueId, companyId, missionId, title: "Misassigned planning", originKind: "mission_main_executor_plan", status: "in_progress", assigneeAgentId: nonOwnerAgentId });
+    await db.insert(missionPlanArtifacts).values({ companyId, missionId, ownerAgentId, missionGoal: "Ship via misassigned plan", refs: {} });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: nonOwnerAgentId, issueId: planningIssueId, status: "running", startedAt: new Date("2026-07-22T00:00:00.000Z") });
+    await db.update(issues).set({ checkoutRunId: runId, executionRunId: runId }).where(eq(issues.id, planningIssueId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, planningIssueId));
+    return { issue, ownerAgentId, nonOwnerAgentId, runId, missionId, companyId, sourceWorkflowId };
+  }
+
+  it("rejects a structured plan decision from a non-owner agent even when it holds the plan issue checkout", async () => {
+    const { issue, nonOwnerAgentId, runId, missionId, companyId, sourceWorkflowId } = await seedMisassignedPlanningIssue();
+    const decision = {
+      missionId,
+      missionGoal: "Ship via misassigned plan",
+      selectedExecutionUnits: [{ id: "unit-1", kind: "workflow_definition_step", title: "Run scout", reason: "source evidence", selectionState: "selected", sourceRef: { type: "workflow_definition_step", id: sourceWorkflowId, stepId: "scout" } }],
+    };
+
+    // The non-owner is the plan issue assignee and holds the checkout, so checkout/run checks
+    // pass, but it must still be rejected as not the recorded mission owner.
+    const response = await request(createApp(db, { type: "agent", source: "agent_jwt", companyId, agentId: nonOwnerAgentId, runId }))
+      .post(`/api/issues/${issue.id}/mission-plan-decision`)
+      .send({ decision });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    const submissions = await db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, missionId));
+    expect(submissions).toHaveLength(0);
   });
 });

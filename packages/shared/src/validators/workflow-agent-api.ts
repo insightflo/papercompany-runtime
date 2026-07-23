@@ -58,6 +58,9 @@ export const missionPlanQaVerdictSubmitSchema = z.object({
   verdict: z.enum(["pass", "request_changes"]),
   diagnostics: z.array(z.record(z.unknown())).optional().default([]),
 });
+export const missionOwnerPlanDecisionSubmitSchema = z.object({
+  decision: z.record(z.unknown()),
+});
 
 export const workflowIssueCompleteSchema = z.object({
   comment: z.string().trim().optional().nullable(),
@@ -66,5 +69,6 @@ export const workflowIssueCompleteSchema = z.object({
 export type WorkflowArtifactRegister = z.infer<typeof workflowArtifactRegisterSchema>;
 export type WorkflowNonblockingAcceptance = z.infer<typeof workflowNonblockingAcceptanceSchema>;
 export type MissionPlanQaVerdictSubmit = z.infer<typeof missionPlanQaVerdictSubmitSchema>;
+export type MissionOwnerPlanDecisionSubmit = z.infer<typeof missionOwnerPlanDecisionSubmitSchema>;
 export type WorkflowVerdictSubmit = z.infer<typeof workflowVerdictSubmitSchema>;
 export type WorkflowIssueComplete = z.infer<typeof workflowIssueCompleteSchema>;

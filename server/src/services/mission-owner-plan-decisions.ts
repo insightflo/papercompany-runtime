@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issueComments, issues, missionPlanArtifacts, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
@@ -29,7 +29,7 @@ import {
 } from "./missions/structural-materialization.js";
 import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
-import { readExplicitValidationVerdict, type ValidationVerdict } from "./validation-verdict.js";
+import { type ValidationVerdict } from "./validation-verdict.js";
 import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import { autofillManualOnboardingPublishResult } from "./missions/mission-plan-publish-result-autofill.js";
 import { missionPlanTemplateService } from "./missions/mission-plan-templates.js";
@@ -41,12 +41,11 @@ import {
   selectedPlanQaReviewerAgentId,
 } from "./missions/plan-qa-reviewer-selection.js";
 import {
-  PLAN_QA_VERDICT_AGENT_ROLES,
   ensurePlanQaReviewIssue,
   ensurePlanQaWakeupForIssue,
   type PlanQaWakeupHandler,
 } from "./missions/plan-qa-reviewer-assignment.js";
-import { upsertMissionPlanDecisionSubmission } from "./missions/mission-plan-decision-ledger.js";
+import { isRejectedMissionPlanDecisionSubmissionStatus, upsertMissionPlanDecisionSubmission } from "./missions/mission-plan-decision-ledger.js";
 import {
   RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES,
   describeMissionExecutionLiaisonBoundary,
@@ -99,8 +98,8 @@ export type MissionOwnerPlanDecisionAuthor =
   | { kind: "user"; id: string };
 
 export type MissionOwnerPlanDecisionCollectorDiagnostic = {
-  commentId: string;
-  code: "unauthorized_author" | "invalid_decision" | "no_decision_block";
+  commentId?: string | null;
+  code: "unauthorized_author" | "invalid_decision" | "no_decision_block" | "rejected_submission";
   message: string;
 };
 
@@ -111,7 +110,8 @@ export type LatestAuthorizedMissionOwnerPlanDecisionResult =
       planningIssueId: string;
       decisionIssueId: string;
       decisionIssueOriginKind: string | null;
-      commentId: string;
+      commentId: string | null;
+      submissionId: string | null;
       commentCreatedAt: Date | null;
       author: MissionOwnerPlanDecisionAuthor;
       diagnostics: MissionOwnerPlanDecisionCollectorDiagnostic[];
@@ -218,78 +218,59 @@ export async function findLatestAuthorizedMissionOwnerPlanDecision({
     return { ok: false, reason: "planning_issue_not_found", planningIssueId: null, diagnostics };
   }
 
-  const planQaIssues = await db
-    .select({ id: issues.id, originKind: issues.originKind })
-    .from(issues)
-    .where(and(
-      eq(issues.companyId, companyId),
-      eq(issues.missionId, missionId),
-      eq(issues.originKind, "mission_plan_qa"),
-      isNull(issues.hiddenAt),
-    ));
-  const candidateIssues = [
-    { id: planningIssue.id, originKind: "mission_main_executor_plan" },
-    ...planQaIssues,
-  ];
-  const candidateIssueIds = candidateIssues.map((issue) => issue.id);
-  const issueOriginKindById = new Map(candidateIssues.map((issue) => [issue.id, issue.originKind]));
-
-  const comments = await db
+  // [AREA: structured events] Mission owner plan decisions are authoritative
+  // ONLY when submitted through the dedicated structured submission ledger
+  // (mission_plan_decision_submissions). Natural-language comments are
+  // display-only and must never be parsed back as an execution decision.
+  const submissions = await db
     .select({
-      id: issueComments.id,
-      issueId: issueComments.issueId,
-      authorAgentId: issueComments.authorAgentId,
-      authorUserId: issueComments.authorUserId,
-      body: issueComments.body,
-      createdAt: issueComments.createdAt,
+      id: missionPlanDecisionSubmissions.id,
+      planningIssueId: missionPlanDecisionSubmissions.planningIssueId,
+      authorAgentId: missionPlanDecisionSubmissions.authorAgentId,
+      authorUserId: missionPlanDecisionSubmissions.authorUserId,
+      sourceCommentId: missionPlanDecisionSubmissions.sourceCommentId,
+      decision: missionPlanDecisionSubmissions.decision,
+      status: missionPlanDecisionSubmissions.status,
+      createdAt: missionPlanDecisionSubmissions.createdAt,
     })
-    .from(issueComments)
-    .where(and(eq(issueComments.companyId, companyId), inArray(issueComments.issueId, candidateIssueIds)))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
+    .from(missionPlanDecisionSubmissions)
+    .where(and(
+      eq(missionPlanDecisionSubmissions.companyId, companyId),
+      eq(missionPlanDecisionSubmissions.missionId, missionId),
+      eq(missionPlanDecisionSubmissions.planningIssueId, planningIssue.id),
+      isNull(missionPlanDecisionSubmissions.sourceCommentId),
+    ))
+    .orderBy(desc(missionPlanDecisionSubmissions.createdAt), desc(missionPlanDecisionSubmissions.id));
 
-  for (const comment of comments) {
+  for (const submission of submissions) {
+    if (isRejectedMissionPlanDecisionSubmissionStatus(submission.status)) {
+      pushDiagnostic({
+        code: "rejected_submission",
+        message: "Mission owner plan decision submission was ignored because it was rejected",
+      });
+      continue;
+    }
     const author = getAuthorizedDecisionAuthor({
-      authorAgentId: comment.authorAgentId,
-      authorUserId: comment.authorUserId,
+      authorAgentId: submission.authorAgentId,
+      authorUserId: submission.authorUserId,
       ownerAgentId: mission.ownerAgentId,
     });
-
     if (!author) {
       pushDiagnostic({
-        commentId: comment.id,
         code: "unauthorized_author",
-        message: "Mission owner plan decision comment was ignored because the author is not authorized",
+        message: "Mission owner plan decision submission was ignored because the author is not authorized",
       });
       continue;
     }
-
-    const parsed = parseMissionOwnerPlanDecision(comment.body);
-    if (!parsed) {
-      pushDiagnostic({
-        commentId: comment.id,
-        code: "no_decision_block",
-        message: "Mission owner plan decision comment was ignored because it did not contain a decision block",
-      });
-      continue;
-    }
-
-    if (!parsed.ok) {
-      pushDiagnostic({
-        commentId: comment.id,
-        code: "invalid_decision",
-        message: parsed.error.message,
-      });
-      continue;
-    }
-
     return {
       ok: true,
-      decision: parsed.decision,
-      planningIssueId: planningIssue.id,
-      decisionIssueId: comment.issueId,
-      decisionIssueOriginKind: issueOriginKindById.get(comment.issueId) ?? null,
-      commentId: comment.id,
-      commentCreatedAt: comment.createdAt ?? null,
+      decision: submission.decision as MissionOwnerPlanDecisionPayload,
+      planningIssueId: submission.planningIssueId ?? planningIssue.id,
+      decisionIssueId: submission.planningIssueId ?? planningIssue.id,
+      decisionIssueOriginKind: "mission_main_executor_plan",
+      commentId: submission.sourceCommentId ?? null,
+      submissionId: submission.id,
+      commentCreatedAt: submission.createdAt ?? null,
       author,
       diagnostics,
     };
@@ -408,7 +389,7 @@ export type BuildMissionOwnerPlanRevisionDraftInput = {
   decision: MissionOwnerPlanDecisionPayload;
   expectedMissionId: string;
   planningIssueId: string;
-  commentId: string;
+  commentId: string | null;
 };
 
 export type PlanRevisionDraft = {
@@ -421,7 +402,7 @@ export type PlanRevisionDraft = {
     kbRefs: (string | Record<string, unknown>)[];
     ownerPlanDecision: {
       planningIssueId: string;
-      commentId: string;
+      commentId: string | null;
       decisionHash?: string;
       assessment?: MissionOwnerPlanAssessment;
     };
@@ -873,7 +854,7 @@ export type PlanningIssueWakeupHandler = (input: {
 export type RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic = {
   code: string;
   message: string;
-  commentId?: string;
+  commentId?: string | null;
 };
 
 export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
@@ -882,14 +863,14 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
       missionPlanArtifact: MissionPlanArtifact;
       revision: number;
       planningIssueId: string;
-      commentId: string;
+      commentId: string | null;
       decisionHash: string;
       diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
     }
   | {
       status: "plan_qa_pending";
       planningIssueId: string | null;
-      commentId?: string;
+      commentId?: string | null;
       decisionHash: string;
       planQaIssueId: string;
       diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
@@ -897,7 +878,7 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
   | {
       status: "plan_qa_changes_requested";
       planningIssueId: string | null;
-      commentId?: string;
+      commentId?: string | null;
       decisionHash: string;
       planQaIssueId: string;
       diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
@@ -906,7 +887,7 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
       status: "noop";
       reason: string;
       planningIssueId: string | null;
-      commentId?: string;
+      commentId?: string | null;
       decisionHash?: string;
       diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
     }
@@ -914,7 +895,7 @@ export type RecordLatestAuthorizedMissionOwnerPlanDecisionResult =
       status: "invalid";
       reason: string;
       planningIssueId: string | null;
-      commentId?: string;
+      commentId?: string | null;
       decisionHash?: string;
       diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[];
     };
@@ -937,7 +918,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
         planningIssueId: preParsedDecision.planningIssueId,
         decisionIssueId: preParsedDecision.planningIssueId,
         decisionIssueOriginKind: "structured_submission",
-        commentId: preParsedDecision.commentId ?? "structured-submission",
+        commentId: preParsedDecision.commentId ?? null,
+        submissionId: null,
         commentCreatedAt: null,
         author: {
           kind: requestedBy?.actorType === "agent" ? "agent" as const : "user" as const,
@@ -2420,7 +2402,7 @@ type PlanQaStructuredVerdict = { verdict: ValidationVerdict; diagnostics: Array<
 function coercePlanQaDiagnostics(raw: unknown): Array<Record<string, unknown>> {
   return Array.isArray(raw) ? raw.filter((entry): entry is Record<string, unknown> => isPlainObject(entry)) : [];
 }
-function toPlanDecisionDiagnostic(diagnostic: Record<string, unknown>, commentId?: string): RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic {
+function toPlanDecisionDiagnostic(diagnostic: Record<string, unknown>, commentId?: string | null): RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic {
   const code = typeof diagnostic.code === "string" && diagnostic.code.trim() ? diagnostic.code.trim() : "plan_qa_request_changes";
   const message = typeof diagnostic.message === "string" && diagnostic.message.trim() ? diagnostic.message.trim() : "Plan QA requested changes.";
   return commentId ? { code, message, commentId } : { code, message };
@@ -2435,230 +2417,39 @@ async function readPlanQaVerdict(input: {
   decisionHash?: string | null;
   afterCreatedAt?: Date | null;
 }): Promise<PlanQaStructuredVerdict | null> {
-  // [AREA: structured events / Task 4] Prefer the newest authorized verdict signal.
-  // Structured rows are the durable source, but a later authorized PLAN-QA comment must
-  // supersede an older row so unblock/re-review loops cannot strand the plan on stale data.
-  const structuredConditions = [
+  // [AREA: structured events] PLAN-QA verdicts are authoritative ONLY when
+  // submitted through the dedicated structured table/API. Natural-language
+  // comments (PASS / scorecard) are display-only and must never be parsed back
+  // as an execution decision. Missing structured evidence fails closed (null).
+  const conditions = [
     eq(missionPlanQaVerdicts.companyId, input.companyId),
     eq(missionPlanQaVerdicts.planQaIssueId, input.planQaIssueId),
   ];
+  // Only dedicated-API / structured submission rows are authoritative. Legacy
+  // comment-derived verdict rows (sourceCommentId non-null) are display/audit
+  // only and must never be read back as an execution decision.
+  conditions.push(isNull(missionPlanQaVerdicts.sourceCommentId));
   if (input.decisionHash) {
-    structuredConditions.push(eq(missionPlanQaVerdicts.decisionHash, input.decisionHash));
+    conditions.push(eq(missionPlanQaVerdicts.decisionHash, input.decisionHash));
   }
   const [structuredVerdict] = await input.db
     .select({
       verdict: missionPlanQaVerdicts.verdict,
-      sourceCommentId: missionPlanQaVerdicts.sourceCommentId,
-      createdAt: missionPlanQaVerdicts.createdAt,
-      updatedAt: missionPlanQaVerdicts.updatedAt,
       diagnostics: missionPlanQaVerdicts.diagnostics,
     })
     .from(missionPlanQaVerdicts)
-    .where(and(...structuredConditions))
+    .where(and(...conditions))
     .orderBy(desc(missionPlanQaVerdicts.updatedAt), desc(missionPlanQaVerdicts.createdAt), desc(missionPlanQaVerdicts.id))
     .limit(1);
-  const structuredVerdictValue = normalizePlanQaVerdict(structuredVerdict?.verdict);
-  const structuredDiagnostics = coercePlanQaDiagnostics(structuredVerdict?.diagnostics);
-  if (structuredVerdictValue && !structuredVerdict?.sourceCommentId) {
-    return { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics };
-  }
-
-  // fallback: comment-based read (기존 로직 유지 — legacy parser)
-  const [planQaIssue] = await input.db
-    .select({ assigneeAgentId: issues.assigneeAgentId })
-    .from(issues)
-    .where(and(
-      eq(issues.companyId, input.companyId),
-      eq(issues.id, input.planQaIssueId),
-      eq(issues.originKind, "mission_plan_qa"),
-      isNull(issues.hiddenAt),
-    ))
-    .limit(1);
-  if (!planQaIssue) return structuredVerdictValue ? { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics } : null;
-
-  const commentConditions = [
-    eq(issueComments.companyId, input.companyId),
-    eq(issueComments.issueId, input.planQaIssueId),
-  ];
-  if (input.afterCreatedAt) {
-    commentConditions.push(sql`${issueComments.createdAt} >= ${input.afterCreatedAt.toISOString()}`);
-  }
-
-  const rows = await input.db
-    .select({
-      id: issueComments.id,
-      authorAgentId: issueComments.authorAgentId,
-      authorUserId: issueComments.authorUserId,
-      body: issueComments.body,
-      createdAt: issueComments.createdAt,
-    })
-    .from(issueComments)
-    .where(and(...commentConditions))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id));
-
-  const verdictRows = rows
-    .map((row) => ({ row, verdict: readPlanQaCommentVerdict(row.body) }))
-    .filter((entry): entry is { row: typeof rows[number]; verdict: ValidationVerdict } => entry.verdict !== null);
-  const authorAgentIds = Array.from(new Set(verdictRows.map((entry) => entry.row.authorAgentId).filter((id): id is string => typeof id === "string" && id.length > 0)));
-  const agentRows = authorAgentIds.length > 0
-    ? await input.db
-      .select({ id: agents.id, role: agents.role, status: agents.status })
-      .from(agents)
-      .where(and(eq(agents.companyId, input.companyId), inArray(agents.id, authorAgentIds)))
-    : [];
-  const agentById = new Map(agentRows.map((row) => [row.id, row]));
-
-  for (const { row, verdict } of verdictRows) {
-    if (structuredPlanQaVerdictSupersedesComment(row.createdAt, structuredVerdictValue, structuredVerdict?.updatedAt ?? structuredVerdict?.createdAt ?? null)) {
-      return structuredVerdictValue ? { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics } : null;
-    }
-
-    if (typeof row.authorUserId === "string" && row.authorUserId.trim().length > 0) {
-      await persistCommentDerivedPlanQaVerdict({
-        db: input.db,
-        companyId: input.companyId,
-        missionId: input.missionId,
-        missionPlanArtifactId: input.missionPlanArtifactId,
-        planQaIssueId: input.planQaIssueId,
-        reviewerAgentId: null,
-        reviewerUserId: row.authorUserId,
-        sourceCommentId: row.id,
-        decisionHash: input.decisionHash,
-        verdict,
-      });
-      return { verdict, diagnostics: [] };
-    }
-
-    const authorAgentId = row.authorAgentId;
-    if (!authorAgentId) continue;
-    if (planQaIssue.assigneeAgentId && authorAgentId === planQaIssue.assigneeAgentId) {
-      await persistCommentDerivedPlanQaVerdict({
-        db: input.db,
-        companyId: input.companyId,
-        missionId: input.missionId,
-        missionPlanArtifactId: input.missionPlanArtifactId,
-        planQaIssueId: input.planQaIssueId,
-        reviewerAgentId: authorAgentId,
-        reviewerUserId: null,
-        sourceCommentId: row.id,
-        decisionHash: input.decisionHash,
-        verdict,
-      });
-      return { verdict, diagnostics: [] };
-    }
-
-    const authorAgent = agentById.get(authorAgentId);
-    if (
-      authorAgent
-      && PLAN_QA_VERDICT_AGENT_ROLES.has(authorAgent.role)
-      && RUNNABLE_PLAN_ASSIGNEE_STATUSES.has(authorAgent.status)
-    ) {
-      await persistCommentDerivedPlanQaVerdict({
-        db: input.db,
-        companyId: input.companyId,
-        missionId: input.missionId,
-        missionPlanArtifactId: input.missionPlanArtifactId,
-        planQaIssueId: input.planQaIssueId,
-        reviewerAgentId: authorAgentId,
-        reviewerUserId: null,
-        sourceCommentId: row.id,
-        decisionHash: input.decisionHash,
-        verdict,
-      });
-      return { verdict, diagnostics: [] };
-    }
-  }
-
-  return structuredVerdictValue ? { verdict: structuredVerdictValue, diagnostics: structuredDiagnostics } : null;
-}
-
-function readPlanQaCommentVerdict(body: string): ValidationVerdict | null {
-  return readExplicitValidationVerdict(body) ?? readPlanQaScorecardVerdict(body);
+  const verdictValue = normalizePlanQaVerdict(structuredVerdict?.verdict);
+  if (!verdictValue) return null;
+  return { verdict: verdictValue, diagnostics: coercePlanQaDiagnostics(structuredVerdict?.diagnostics) };
 }
 
 function normalizePlanQaVerdict(verdict: unknown): ValidationVerdict | null {
   return verdict === "pass" || verdict === "request_changes" ? verdict : null;
 }
 
-function structuredPlanQaVerdictSupersedesComment(
-  commentCreatedAt: Date,
-  structuredVerdict: ValidationVerdict | null,
-  structuredObservedAt: Date | null,
-): structuredVerdict is ValidationVerdict {
-  return Boolean(structuredVerdict && structuredObservedAt && structuredObservedAt.getTime() >= commentCreatedAt.getTime());
-}
-
-function readPlanQaScorecardVerdict(body: string): ValidationVerdict | null {
-  if (!/plan\s+qa\s+verdict/iu.test(body) || !/scorecard/iu.test(body)) {
-    return null;
-  }
-
-  const scoreValues: number[] = [];
-  for (const line of body.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("|")) continue;
-    const cells = trimmed
-      .split("|")
-      .map((cell) => cell.trim())
-      .filter((cell) => cell.length > 0);
-    if (cells.length < 4) continue;
-    if (/^area$/iu.test(cells[0]!) || /^-+$/u.test(cells[0]!)) continue;
-    const score = /^(0|1|2)$/u.exec(cells[1]!);
-    if (!score?.[1]) continue;
-    scoreValues.push(Number(score[1]));
-  }
-
-  if (scoreValues.length < 4) return null;
-  return scoreValues.every((score) => score === 2) ? "pass" : "request_changes";
-}
-
-async function persistCommentDerivedPlanQaVerdict(input: {
-  db: Db;
-  companyId: string;
-  missionId: string;
-  missionPlanArtifactId?: string | null;
-  planQaIssueId: string;
-  reviewerAgentId: string | null;
-  reviewerUserId: string | null;
-  sourceCommentId: string;
-  decisionHash?: string | null;
-  verdict: ValidationVerdict;
-}): Promise<void> {
-  if (!input.decisionHash) return;
-  const now = new Date();
-  await input.db
-    .insert(missionPlanQaVerdicts)
-    .values({
-      companyId: input.companyId,
-      missionId: input.missionId,
-      missionPlanArtifactId: input.missionPlanArtifactId ?? null,
-      planQaIssueId: input.planQaIssueId,
-      reviewerAgentId: input.reviewerAgentId,
-      reviewerUserId: input.reviewerUserId,
-      sourceCommentId: input.sourceCommentId,
-      decisionHash: input.decisionHash,
-      verdict: input.verdict,
-      diagnostics: [],
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [
-        missionPlanQaVerdicts.companyId,
-        missionPlanQaVerdicts.planQaIssueId,
-        missionPlanQaVerdicts.decisionHash,
-      ],
-      set: {
-        missionPlanArtifactId: input.missionPlanArtifactId ?? null,
-        reviewerAgentId: input.reviewerAgentId,
-        reviewerUserId: input.reviewerUserId,
-        sourceCommentId: input.sourceCommentId,
-        verdict: input.verdict,
-        diagnostics: [],
-        updatedAt: now,
-      },
-      setWhere: isNotNull(missionPlanQaVerdicts.sourceCommentId),
-    });
-}
 
 async function updatePlanQaRef(input: {
   db: Db;
@@ -2808,7 +2599,7 @@ function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decision
   };
 }
 
-function hashOwnerPlanDecision(decision: MissionOwnerPlanDecisionPayload): string {
+export function hashOwnerPlanDecision(decision: MissionOwnerPlanDecisionPayload): string {
   return createHash("sha256").update(stableStringify(decision)).digest("hex");
 }
 

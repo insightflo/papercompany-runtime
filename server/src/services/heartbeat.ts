@@ -93,7 +93,7 @@ import { buildMaintenanceDecisionContext } from "./maintenance/decision-context.
 import { logMaintenanceDecisionEvaluated } from "./maintenance/decision-audit.js";
 import { missionPlanArtifactService } from "./mission-plan-artifacts.js";
 import { missionService } from "./missions.js";
-import { recordLatestAuthorizedMissionOwnerPlanDecision, type PlanQaWakeupHandler, type PlanningIssueWakeupHandler } from "./mission-owner-plan-decisions.js";
+import { type PlanQaWakeupHandler, type PlanningIssueWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { blockMissionPlanQaCompletionWithoutLedger, hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
@@ -2818,34 +2818,6 @@ function normalizeEscapedMissionOwnerPlanDecisionMarkdown(text: string): string 
     .replace(/\\\\/g, "\\");
 }
 
-async function recordMissionOwnerPlanDecisionAfterComment(
-  db: Db,
-  issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">,
-  actorAgentId: string | null,
-  enqueuePlanQaWakeup?: PlanQaWakeupHandler,
-  enqueuePlanningIssueWakeup?: PlanningIssueWakeupHandler,
-) {
-  if (
-    issue.originKind !== "mission_main_executor_plan" &&
-    issue.originKind !== "mission_plan_qa"
-  ) return;
-  if (!issue.missionId) return;
-  try {
-    await recordLatestAuthorizedMissionOwnerPlanDecision({
-      db,
-      companyId: issue.companyId,
-      missionId: issue.missionId,
-      requestedBy: actorAgentId ? { actorType: "agent", actorId: actorAgentId } : undefined,
-      enqueuePlanQaWakeup,
-      enqueuePlanningIssueWakeup,
-    });
-  } catch (err) {
-    logger.warn(
-      { err, issueId: issue.id, companyId: issue.companyId, missionId: issue.missionId },
-      "failed to record mission owner plan decision after heartbeat issue comment",
-    );
-  }
-}
 
 function buildFailedIssueRunAutoBlockedComment(input: {
   run: typeof heartbeatRuns.$inferSelect;
@@ -7766,7 +7738,6 @@ export function heartbeatService(db: Db) {
           queuePostTransactionWorkflowIssueSync(issue.id);
           return {
             promotedRun: null,
-            postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
           };
         }
       }
@@ -7840,7 +7811,6 @@ export function heartbeatService(db: Db) {
         queuePostTransactionUnblockCompletion({ issueId: issue.id, companyId: issue.companyId, agentId: run.agentId });
         return {
           promotedRun: null,
-          postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
         };
       }
 
@@ -7894,7 +7864,6 @@ export function heartbeatService(db: Db) {
         queuePostTransactionWorkflowIssueSync(issue.id);
         return {
           promotedRun: null,
-          postTransactionMissionOwnerPlanDecision: { issue, actorAgentId: run.agentId },
         };
       }
 
@@ -8140,17 +8109,8 @@ export function heartbeatService(db: Db) {
     const transactionObject =
       !!transactionResult && typeof transactionResult === "object" ? transactionResult : null;
     const transactionRecord = transactionObject as Record<string, unknown> | null;
-    type PostTransactionMissionOwnerPlanDecision = {
-      issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">;
-      actorAgentId: string | null;
-    };
     type PostTransactionRequestChangesOwnerAction =
       Parameters<typeof ensureMissionOwnerActionForRequestChanges>[0];
-    const hasPostTransactionMissionOwnerPlanDecision =
-      !!transactionObject && "postTransactionMissionOwnerPlanDecision" in transactionObject;
-    const postTransactionMissionOwnerPlanDecision = hasPostTransactionMissionOwnerPlanDecision
-      ? transactionRecord?.postTransactionMissionOwnerPlanDecision as PostTransactionMissionOwnerPlanDecision
-      : null;
     const hasPostTransactionRequestChangesOwnerAction =
       !!transactionObject && "postTransactionRequestChangesOwnerAction" in transactionObject;
     const postTransactionRequestChangesOwnerAction = hasPostTransactionRequestChangesOwnerAction
@@ -8158,20 +8118,11 @@ export function heartbeatService(db: Db) {
       : null;
     const hasPromotedRunField = !!transactionObject && "promotedRun" in transactionObject;
     const promotedRun = (
-      hasPromotedRunField || hasPostTransactionMissionOwnerPlanDecision || hasPostTransactionRequestChangesOwnerAction
+      hasPromotedRunField || hasPostTransactionRequestChangesOwnerAction
         ? transactionRecord?.promotedRun
         : transactionResult
     ) as typeof heartbeatRuns.$inferSelect | null | undefined;
 
-    if (postTransactionMissionOwnerPlanDecision) {
-      await recordMissionOwnerPlanDecisionAfterComment(
-        db,
-        postTransactionMissionOwnerPlanDecision.issue,
-        postTransactionMissionOwnerPlanDecision.actorAgentId,
-        enqueuePlanQaWakeup,
-        enqueuePlanningIssueWakeup,
-      );
-    }
 
     if (postTransactionRequestChangesOwnerAction) {
       await ensureMissionOwnerActionForRequestChanges(postTransactionRequestChangesOwnerAction);

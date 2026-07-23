@@ -1,13 +1,15 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, issues } from "@paperclipai/db";
+import { heartbeatRuns, issues, missions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import {
   missionPlanQaVerdictSubmitSchema,
+  missionOwnerPlanDecisionSubmitSchema,
   workflowArtifactRegisterSchema,
   workflowIssueCompleteSchema,
   workflowVerdictSubmitSchema,
   type MissionPlanQaVerdictSubmit,
+  type MissionOwnerPlanDecisionSubmit,
   type WorkflowArtifactRegister,
   type WorkflowIssueComplete,
   type WorkflowVerdictSubmit,
@@ -21,6 +23,7 @@ import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { logActivity } from "../services/activity-log.js";
 import { submitMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-agent-api.js";
+import { submitMissionOwnerPlanDecision } from "../services/missions/mission-plan-decision-agent-api.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import {
   completeWorkflowIssue,
@@ -128,6 +131,31 @@ async function authorizeMissionPlanQaApi(req: Request, db: Db, issue: Awaited<Re
   return actor;
 }
 
+async function authorizeMissionOwnerPlanDecisionApi(req: Request, db: Db, issue: Awaited<ReturnType<typeof loadIssue>>) {
+  assertCompanyAccess(req, issue.companyId);
+  if (issue.originKind !== "mission_main_executor_plan") {
+    throw conflict("Mission owner plan decision API can only be used for mission_main_executor_plan issues");
+  }
+  if (req.actor.type !== "agent") throw forbidden("Mission owner plan decision API requires an authenticated agent");
+  const actor = getActorInfo(req);
+  if (!actor.agentId) throw forbidden("Agent authentication required");
+  if (!actor.runId) throw unauthorized("Agent run id required");
+  await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
+  // Fail closed unless the caller is the recorded mission owner. A misassigned plan issue
+  // must not let a non-owner checkout holder submit a structured plan decision as authority.
+  const missionId = issue.missionId;
+  if (!missionId) throw forbidden("Mission owner plan decision API requires a mission-scoped issue");
+  const [mission] = await db
+    .select({ ownerAgentId: missions.ownerAgentId })
+    .from(missions)
+    .where(and(eq(missions.id, missionId), eq(missions.companyId, issue.companyId)));
+  if (!mission) throw forbidden("Mission owner plan decision API could not resolve the mission");
+  if (mission.ownerAgentId !== actor.agentId) {
+    throw forbidden("Mission owner plan decision API may only be used by the mission owner");
+  }
+  return actor;
+}
+
 export function workflowAgentApiRoutes(db: Db) {
   const router = Router();
   const heartbeat = heartbeatService(db);
@@ -219,6 +247,35 @@ export function workflowAgentApiRoutes(db: Db) {
       },
     });
     res.json(verdict);
+  });
+
+  router.post("/issues/:id/mission-plan-decision", hermesOpsMutationGuard("mission.plan_decision.submit"), validate(missionOwnerPlanDecisionSubmitSchema), async (req, res) => {
+    const issue = await loadIssue(db, routeParam(req.params.id, "id"));
+    const actor = await authorizeMissionOwnerPlanDecisionApi(req, db, issue);
+    const data: MissionOwnerPlanDecisionSubmit = req.body;
+    const result = await submitMissionOwnerPlanDecision({
+      db,
+      issue,
+      actor: { actorType: "agent", actorId: actor.agentId ?? actor.actorId, runId: actor.runId },
+      decision: data.decision,
+      enqueuePlanQaWakeup,
+    });
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.mission_plan_decision_submitted",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        planDecisionStatus: result.status,
+        decisionHash: "decisionHash" in result ? result.decisionHash : null,
+      },
+    });
+    res.json(result);
   });
 
   router.post("/issues/:id/workflow/complete", hermesOpsMutationGuard("workflow.complete"), validate(workflowIssueCompleteSchema), async (req, res) => {

@@ -2132,99 +2132,39 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
     await svc.addComment(input.planningIssueId, "Re-check PLAN-QA gate after review.", { agentId: input.ownerAgentId });
   }
 
-  it("records an authorized owner planning decision comment as the active mission plan and audit activity", async () => {
-    const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+  it("does not ingest an authorized owner planning decision comment as a mission plan (display-only)", async () => {
+    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
     const decision = validDecision(missionId, workflowDefinitionId);
 
     const comment = await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
-    await passPlanQaAndNudgePlanningIssue({ companyId, missionId, planningIssueId, ownerAgentId });
 
     expect(comment).toEqual(expect.objectContaining({ issueId: planningIssueId, authorAgentId: ownerAgentId }));
-    const plans = await activePlans(missionId);
-    expect(plans).toHaveLength(1);
-    expect(plans[0]).toEqual(expect.objectContaining({
-      companyId,
-      missionId,
-      revision: 1,
-      missionGoal: "Ship controlled rollout",
-      requiredInputs: ["stagingUrl"],
-      successCriteria: ["smoke passes"],
-      steps: [{ id: "step-1", title: "Verify staging" }],
-    }));
-    expect(plans[0]!.refs).toMatchObject({
-      selectedExecutionUnits: decision.selectedExecutionUnits,
-      ownerPlanDecision: {
-        planningIssueId,
-        commentId: comment.id,
-        decisionHash: expect.any(String),
-      },
-      paqoWorkflow: {
-        workflowDefinitionId: expect.any(String),
-        workflowRunId: expect.any(String),
-        workflowName: "PAQO WBS: Ship controlled rollout",
-        dependencyModel: "workflow_dag_intra_mission",
-      },
-    });
-
-    const paqoDefinitions = await db
-      .select()
-      .from(workflowDefinitions)
-      .where(eq(workflowDefinitions.name, "PAQO WBS: Ship controlled rollout"));
-    expect(paqoDefinitions).toHaveLength(1);
-    const paqoRuns = await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, paqoDefinitions[0]!.id));
-    expect(paqoRuns).toHaveLength(1);
-    expect(paqoRuns[0]).toMatchObject({ companyId, missionId, status: "running" });
-    const paqoStepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, paqoRuns[0]!.id));
-    expect(paqoStepRuns).toHaveLength(2);
-    const qaStepRun = paqoStepRuns.find((stepRun) => stepRun.stepId.startsWith("qa-"));
-    expect(qaStepRun).toMatchObject({ issueId: null, status: "pending" });
-
-    const activities = await recordedActivities();
-    expect(activities).toHaveLength(1);
-    expect(activities[0]).toEqual(expect.objectContaining({
-      companyId,
-      actorType: "agent",
-      actorId: ownerAgentId,
-      agentId: ownerAgentId,
-      entityType: "mission",
-      entityId: missionId,
-    }));
-    expect(activities[0]!.details).toMatchObject({
-      missionPlanArtifactId: plans[0]!.id,
-      revision: 1,
-      planningIssueId,
-      commentId: comment.id,
-      decisionMakerKind: "agent",
-      decisionMakerId: ownerAgentId,
-      decisionHash: expect.any(String),
-      idempotencyKey: expect.stringContaining(comment.id),
-    });
+    // Natural-language decision comments are display/audit only; the runtime must
+    // never read them back as plan-decision authority (no plan, no activity).
+    expect(await activePlans(missionId)).toHaveLength(0);
+    expect(await recordedActivities()).toHaveLength(0);
   });
 
-  it("does not duplicate a revision or activity when the same planning decision is posted again", async () => {
-    const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+  it("does not record a revision or activity when the same planning decision comment is posted again", async () => {
+    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
     const decision = validDecision(missionId, workflowDefinitionId);
 
     await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
-    await passPlanQaAndNudgePlanningIssue({ companyId, missionId, planningIssueId, ownerAgentId });
     await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
 
-    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
-    expect(plans).toHaveLength(1);
-    expect(await recordedActivities()).toHaveLength(1);
+    expect(await activePlans(missionId)).toHaveLength(0);
+    expect(await recordedActivities()).toHaveLength(0);
   });
 
-  it("does not duplicate a revision or activity when a later planning comment repeats the same latest decision", async () => {
-    const { companyId, ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
+  it("does not record a revision or activity from a later planning comment repeating the latest decision", async () => {
+    const { ownerAgentId, missionId, planningIssueId, workflowDefinitionId } = await seedPlanningFixture();
     const decision = validDecision(missionId, workflowDefinitionId);
 
     await svc.addComment(planningIssueId, decisionComment(decision), { agentId: ownerAgentId });
-    await passPlanQaAndNudgePlanningIssue({ companyId, missionId, planningIssueId, ownerAgentId });
     await svc.addComment(planningIssueId, "Acknowledged; proceed with that plan.", { agentId: ownerAgentId });
 
-    const plans = await db.select().from(missionPlanArtifacts).where(eq(missionPlanArtifacts.missionId, missionId));
-    expect(plans).toHaveLength(1);
-    expect(await recordedActivities()).toHaveLength(1);
+    expect(await activePlans(missionId)).toHaveLength(0);
+    expect(await recordedActivities()).toHaveLength(0);
   });
 
   it("ignores decision-looking comments on non-planning issues", async () => {
