@@ -13,6 +13,7 @@ import {
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueComments,
   issueWorkProducts,
   issues,
   missionAgentRuntimes,
@@ -34,6 +35,27 @@ vi.mock("../services/heartbeat.js", async (importOriginal) => {
     ...actual,
     heartbeatService: () => ({
       wakeup: heartbeatWakeup,
+    }),
+  };
+});
+
+// Production path: executeWorkflowRun / syncWorkflowRunForIssue →
+// wakeExistingWorkflowStepIssue / applyIssueCreatedSideEffects →
+// queueIssueAssignmentWakeup({ heartbeat: heartbeatService(db) }) → heartbeat.wakeup(...).
+// The heartbeatService mock alone does not always bind in this file's import graph, so the real
+// wakeup runs enqueueWakeup → startNextQueuedRunForAgent → detached executeRun(), which inserts
+// heartbeat_runs/heartbeat_run_events/mission_agent_runtimes/company_skills and races afterEach
+// FK cleanup. Force the assignment-wakeup helper to use the test spy while keeping its real
+// guards/payload shape so the three workProduct assertions stay valid.
+vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/issue-assignment-wakeup.js")>();
+  return {
+    ...actual,
+    queueIssueAssignmentWakeup: (
+      input: Parameters<typeof actual.queueIssueAssignmentWakeup>[0],
+    ) => actual.queueIssueAssignmentWakeup({
+      ...input,
+      heartbeat: { wakeup: heartbeatWakeup },
     }),
   };
 });
@@ -72,8 +94,6 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
 
   afterEach(async () => {
     heartbeatWakeup.mockReset();
-    // Allow async heartbeat side-effects to settle before FK-sensitive deletes.
-    await new Promise((resolve) => setTimeout(resolve, 200));
     await db.delete(heartbeatRunEvents);
     await db.delete(agentTaskSessions);
     await db.delete(missionAgentRuntimes);
@@ -86,6 +106,8 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
+    // Dual-written display comments must clear before issues (FK).
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agentRuntimeState);
