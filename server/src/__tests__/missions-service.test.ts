@@ -29,6 +29,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -39,6 +40,10 @@ import { extractReassignTargetAgentId } from "../services/missions/mission-owner
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { completeWorkflowToolStepFromResult, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
+import {
+  recordMissionOwnerDecision,
+  type MissionOwnerDecisionSubmission,
+} from "../services/missions/mission-owner-recovery-ledger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -140,6 +145,35 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await tempDb?.cleanup();
   });
 
+  async function recordOwnerDecision(input: {
+    companyId: string;
+    missionId: string;
+    ownerActionIssueId: string;
+    ownerAgentId: string;
+    sourceIssueId: string;
+    submission: MissionOwnerDecisionSubmission;
+  }) {
+    const now = new Date();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: input.companyId,
+      agentId: input.ownerAgentId,
+      issueId: input.ownerActionIssueId,
+      status: "succeeded",
+      startedAt: now,
+      finishedAt: now,
+    }).returning({ id: heartbeatRuns.id });
+    return recordMissionOwnerDecision({
+      db,
+      issue: {
+        id: input.ownerActionIssueId,
+        companyId: input.companyId,
+        missionId: input.missionId,
+      },
+      submission: input.submission,
+      sourceIssueId: input.sourceIssueId,
+      heartbeatRunId: run!.id,
+    });
+  }
   it("creates a mission with the owner as a valid mission agent", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -871,11 +905,11 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]) {
       expect(description).toContain(decision);
     }
-    expect(description).toContain("### Mission owner decision");
-    expect(description).toContain("Optional structured decision labels for logs/UI hints only; do not treat them as the primary control path:");
-    expect(description).toContain("Decision: <one of the allowed decision options>");
-    expect(description).toContain("Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.");
-    expect(description).toContain("Governance evidence: latest evidence unavailable for this owner action template.");
+    expect(description).toContain("Decision authority (REQUIRED control path): submit your decision through the structured API, not a comment:");
+    expect(description).toContain("POST /api/issues/{this owner-action issue id}/owner-recovery/decision");
+    expect(description).toContain("Optional display-only comment template");
+    expect(description).toContain("Comments (including any 'Decision:' block below) are DISPLAY-ONLY and can no longer drive recovery");
+    expect(description).toContain("Source issue remains assigned to the original executor unless the structured decision is reassign_source_issue.");
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
       mission: expect.objectContaining({ id: missionId, ownerAgentId }),
@@ -1097,6 +1131,20 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         "Evidence: Source issue comment and mission owner review.",
       ].join("\n"),
     });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: unblockIssue!.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "The owner confirmed the blocker is transient and the source executor should retry later.",
+        nextAction: "Re-dispatch source issue after explicit approval.",
+        evidence: "Source issue comment and mission owner review.",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000) });
 
@@ -1158,6 +1206,20 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         "Next action: Retry the source issue without reassignment.",
         "Evidence: Owner reviewed blocker details.",
       ].join("\n"),
+    });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: unblockIssue.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "Owner confirmed the blocker has cleared.",
+        nextAction: "Retry the source issue without reassignment.",
+        evidence: "Owner reviewed blocker details.",
+      },
     });
 
     const readOnlyResult = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000) });
@@ -1225,6 +1287,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(unblockIssue).toBeTruthy();
     expect(unblockIssue!.originId).toBe(qaIssueId);
     // grace window(20min) 을 넘기기 위해 unblock issue 의 createdAt 을 과거로 세팅(AUTO default 유도).
+    //   이 케이스는 structured owner decision 이 없을 때의 grace-default AUTO 경로 회귀 — ledger 기록 없음.
     await db.update(issues).set({ createdAt: new Date("2026-06-18T07:00:00.000Z") }).where(eq(issues.id, unblockIssue!.id));
 
     // 2차 supervision (applyOwnerDecisionActions + grace 초과) → AUTO retry_source_issue 발화.
@@ -1291,6 +1354,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: blockedIssue.id, status: "done", title: "Retry QA source too early" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry anyway"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "retry anyway",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
 
@@ -1324,6 +1399,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry and wake once"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: unblockIssue.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "retry and wake once",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue`;
@@ -1407,6 +1494,19 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         "Reason: Hermes is a liaison and must not directly execute the publish issue.",
         `Next action: Reassign ${sourceIssue.identifier} to Synthesis Editor ${synthesisAgentId} and wake it.`,
       ].join("\n"),
+    });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: sourceIssue.id,
+      submission: {
+        decision: "reassign_source_issue",
+        sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        reason: "Hermes is a liaison and must not directly execute the publish issue.",
+        nextAction: `Target agent: ${synthesisAgentId}`,
+      },
     });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
@@ -1500,6 +1600,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       issueId: ownerAction.id,
       authorAgentId: ownerAgentId,
       body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry with latest QA summary"].join("\n"),
+    });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: sourceIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        reason: "retry with latest QA summary",
+      },
     });
 
     await svc.runMainExecutorSupervision({
@@ -1597,6 +1709,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       authorAgentId: ownerAgentId,
       body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry with full source context"].join("\n"),
     });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: sourceIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        reason: "retry with full source context",
+      },
+    });
 
     await svc.runMainExecutorSupervision({
       missionId,
@@ -1660,6 +1784,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry via workflow wake"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: unblockIssue.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "retry via workflow wake",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue`;
@@ -2484,6 +2620,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title: "Retry stale todo source" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry stale todo after failed execution"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: sourceIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        reason: "retry stale todo after failed execution",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-05-31T01:00:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:retry_source_issue`;
@@ -2562,6 +2710,11 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(sourceBody).toContain("workProduct-reuse wakeup dispatched");
     expect(sourceBody).toContain(`[ARTIFACT]: ${artifactPath}`);
     expect(sourceBody).toContain(idempotencyKey);
+    const reuseEvents = await db
+      .select({ id: workflowTransitionEvents.id })
+      .from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.idempotencyKey, idempotencyKey));
+    expect(reuseEvents).toHaveLength(1);
 
     // idempotent: a second sweep must NOT dispatch another reuse wake
     await svc.runActiveMissionOwnerSupervision({ companyId, staleAfterMinutes: 1, now: new Date("2026-06-25T01:05:00.000Z") });
@@ -2621,6 +2774,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const sourceIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Previously applied source" });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title: "Retry applied without dispatch" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: retry once then dispatch later"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: sourceIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        reason: "retry once then dispatch later",
+      },
+    });
 
     const first = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-05-31T01:00:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: false });
     expect(first.appliedActions).toEqual(expect.arrayContaining([
@@ -2661,6 +2826,30 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(heartbeatRuns).values({ id: succeededRunId, companyId, agentId: validatorAgentId, issueId: sourceIssue.id, status: "succeeded", startedAt: new Date("2026-06-02T08:00:00.000Z"), finishedAt: new Date("2026-06-02T08:10:00.000Z"), exitCode: 0 });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title: "Retry validator after corrected PNG" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: corrected child PNG is ready; run validator again"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: sourceIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        reason: "corrected child PNG is ready; run validator again",
+      },
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId,
+      missionId,
+      issueId: ownerAction.id,
+      eventType: "mission_owner_retry_apply",
+      layer: "mission_owner_recovery",
+      decision: "retry_source_issue",
+      reason: "owner_recovery_api",
+      reasonCode: "owner_recovery_api",
+      idempotencyKey: `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:retry_source_issue:apply`,
+      payload: { sourceIssueId: sourceIssue.id },
+    });
     await db.insert(issueComments).values({
       companyId,
       issueId: sourceIssue.id,
@@ -2725,6 +2914,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(agentWakeupRequests).values({ companyId, agentId: workerAgentId, source: "automation", status: "queued", issueId: unblockIssue.originId!, requestedAt: new Date() });
     await issueService(db).update(unblockIssue.id, { status: "done" });
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry once"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: unblockIssue.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "retry once",
+      },
+    });
 
     const first = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     const second = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 30 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
@@ -2798,6 +2999,31 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
         ].join("\n"),
       },
     ]);
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: qaIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: qaIssue.identifier ?? qaIssue.id,
+        reworkTargetRef: producerIssue.identifier ?? producerIssue.id,
+        reason: "producer must provide signal-analysis evidence before QA can complete.",
+      },
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId,
+      missionId,
+      issueId: ownerAction.id,
+      eventType: "mission_owner_retry_wakeup",
+      layer: "mission_owner_recovery",
+      decision: "retry_source_issue",
+      reason: "owner_recovery_api",
+      reasonCode: "owner_recovery_api",
+      idempotencyKey: `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${producerIssue.id}:retry_source_issue`,
+      payload: { sourceIssueId: producerIssue.id },
+    });
 
     const svc = missionService(db, { onOwnerActionCreated });
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-07-06T08:00:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
@@ -2854,6 +3080,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     // [owner-action contract] 이 테스트는 source assignee 없는 케이스 자체가 목적이므로 guard를 우회해 fixture done 처리.
     await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, unblockIssue.id));
     await db.insert(issueComments).values({ companyId, issueId: unblockIssue.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${blockedIssue.identifier}`, "Reason: retry unassigned source"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: unblockIssue.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "retry unassigned source",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
@@ -2885,10 +3123,34 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     for (const [sourceIssue, title] of [[terminalIssue, "Terminal owner action"], [crossMissionIssue, "Cross mission owner action"], [hiddenIssue, "Hidden owner action"]] as const) {
       const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: sourceIssue.id, status: "done", title });
       await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${sourceIssue.identifier}`, "Reason: should not mutate"].join("\n") });
+      await recordOwnerDecision({
+        companyId,
+        missionId,
+        ownerActionIssueId: ownerAction.id,
+        ownerAgentId,
+        sourceIssueId: sourceIssue.id,
+        submission: {
+          decision: "retry_source_issue",
+          sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+          reason: "should not mutate",
+        },
+      });
     }
     const missingSourceId = randomUUID();
     const missingOwnerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: missingSourceId, status: "done", title: "Missing owner action" });
     await db.insert(issueComments).values({ companyId, issueId: missingOwnerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: retry_source_issue", `Source issue: ${missingSourceId}`, "Reason: should not mutate missing source"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: missingOwnerAction.id,
+      ownerAgentId,
+      sourceIssueId: missingSourceId,
+      submission: {
+        decision: "retry_source_issue",
+        sourceIssueRef: missingSourceId,
+        reason: "should not mutate missing source",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     expect(result.appliedActions).toEqual([]);
@@ -2912,6 +3174,18 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked source" });
     const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: blockedIssue.id, status: "done", title: "Replan owner action" });
     await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: replan_mission", `Source issue: ${blockedIssue.identifier}`, "Reason: plan must change"].join("\n") });
+    await recordOwnerDecision({
+      companyId,
+      missionId,
+      ownerActionIssueId: ownerAction.id,
+      ownerAgentId,
+      sourceIssueId: blockedIssue.id,
+      submission: {
+        decision: "replan_mission",
+        sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
+        reason: "plan must change",
+      },
+    });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
     expect(result.appliedActions).toEqual([]);
@@ -3091,7 +3365,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     await db.insert(companies).values({
       id: companyId,
-      name: "Invalid Owner Decision Company",
+      name: "Invalid owner-decision comment is display-only",
       issuePrefix: `IO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
@@ -3131,7 +3405,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000) });
-    expect(result.findings).toEqual(expect.arrayContaining([
+    expect(result.findings).not.toEqual(expect.arrayContaining([
       expect.stringContaining("owner_action_decision_invalid"),
     ]));
     expect(result.recommendations).not.toEqual(expect.arrayContaining([
@@ -3241,15 +3515,11 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
     expect(result.findings).toEqual(expect.arrayContaining([
       expect.stringContaining("owner_unblock_action_blocked"),
+    ]));
+    expect(result.findings).not.toEqual(expect.arrayContaining([
       expect.stringContaining("artifact_recovery_available"),
     ]));
     expect(result.recommendations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: "materialize_artifact_from_comment",
-        issueId: blockedIssue.id,
-        reason: expect.stringContaining("comment body"),
-        safeToAutoApply: false,
-      }),
       expect.objectContaining({
         type: "request_replan",
         issueId: unblockIssue!.id,
@@ -3644,13 +3914,14 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 30, now: new Date("2026-05-31T02:00:00.000Z") });
-    const renewedOwnerActions = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock"));
-    expect(renewedOwnerActions).toHaveLength(2);
-    expect(renewedOwnerActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: ownerActionIssues[0]!.id, status: "done", originId: sourceIssue.id }),
-      expect.objectContaining({ status: "todo", originId: sourceIssue.id, parentId: sourceIssue.id, title: expect.stringContaining("Collect Tech Scout Top25") }),
-    ]));
-    expect(onOwnerActionCreated).toHaveBeenCalledTimes(2);
+    const commentOnlyOwnerActions = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_unblock"));
+    expect(commentOnlyOwnerActions).toHaveLength(1);
+    expect(commentOnlyOwnerActions[0]).toEqual(expect.objectContaining({
+      id: ownerActionIssues[0]!.id,
+      status: "done",
+      originId: sourceIssue.id,
+    }));
+    expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
   });
 
   it("restores terminal mission oversight when the mission is still active", async () => {

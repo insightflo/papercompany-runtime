@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +17,7 @@ import {
   missions,
   workflowDefinitions,
   workflowRuns,
+  workflowTransitionEvents,
   workflowStepRuns,
 } from "@paperclipai/db";
 import {
@@ -29,6 +31,7 @@ import {
 } from "./helpers/tool-recovery-scenario.js";
 import { missionService } from "../services/missions.js";
 import { resolveNativeToolStepRecoveryResult } from "../services/missions/tool-step-recovery-result.js";
+import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
 const heartbeatWakeup = vi.fn();
@@ -53,24 +56,8 @@ if (!embeddedPostgresSupport.supported) {
 }
 
 describe("resolveNativeToolStepRecoveryResult", () => {
-  it("ignores stale success evidence when a newer native retry boundary exists", () => {
-    const result = resolveNativeToolStepRecoveryResult({
-      comments: [
-        [
-          "### Native tool step recovery result",
-          "Status: success",
-          "Exit code: 0",
-          "[ARTIFACT]: /tmp/recovered.json",
-        ].join("\n"),
-        "### Native tool step retry applied",
-      ],
-      artifactExists: () => true,
-    });
 
-    expect(result).toBeNull();
-  });
-
-  it("uses the latest success evidence after a native retry boundary", () => {
+  it("rejects comment success claims — structured completion is required (fail-closed)", () => {
     const result = resolveNativeToolStepRecoveryResult({
       comments: [
         "### Native tool step retry failed",
@@ -84,24 +71,11 @@ describe("resolveNativeToolStepRecoveryResult", () => {
       artifactExists: () => true,
     });
 
-    expect(result).toEqual({ artifactPath: "/tmp/recovered-again.json" });
-  });
-
-  it("rejects success claims when the artifact path does not exist", () => {
-    const result = resolveNativeToolStepRecoveryResult({
-      comments: [
-        [
-          "### Native tool step recovery result",
-          "Status: success",
-          "Exit code: 0",
-          "[ARTIFACT]: /tmp/missing-recovered.json",
-        ].join("\n"),
-      ],
-      artifactExists: () => false,
-    });
-
+    // NL success/comment claims are no longer authority — a failed step completes only via the
+    // structured /workflow/complete or registered workProduct path.
     expect(result).toBeNull();
   });
+
 });
 
 describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => {
@@ -124,6 +98,7 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
     await db.delete(activityLog);
     await db.delete(issueWorkProducts);
     await db.delete(issueComments);
+    await db.delete(workflowTransitionEvents);
     await db.delete(workflowStepRuns);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -161,53 +136,102 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
       applyOwnerDecisionActions: true,
     });
   }
-
-  it("applies completed owner-action recovery evidence through the workflow tool result path", async () => {
-    const scenario = await seedRecoveryScenario({ artifactExists: true });
-    const result = await missionService(db).runActiveMissionOwnerSupervision({
+  async function submitRecoverArtifactDecision(scenario: ToolRecoveryScenario) {
+    const [recoveryIssue] = await db
+      .select({ missionId: issues.missionId, originId: issues.originId })
+      .from(issues)
+      .where(eq(issues.id, scenario.recoveryIssueId))
+      .limit(1);
+    if (!recoveryIssue?.missionId) throw new Error("recovery scenario is missing mission scope");
+    const [mission] = await db
+      .select({ ownerAgentId: missions.ownerAgentId })
+      .from(missions)
+      .where(eq(missions.id, recoveryIssue.missionId))
+      .limit(1);
+    if (!mission) throw new Error("recovery scenario is missing mission owner");
+    const heartbeatRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: heartbeatRunId,
       companyId: scenario.companyId,
-      staleAfterMinutes: 1,
-      now: new Date("2026-07-06T05:07:00.000Z"),
-      applyOwnerDecisionActions: true,
+      agentId: mission.ownerAgentId,
+      issueId: scenario.recoveryIssueId,
+      status: "succeeded",
+      startedAt: new Date("2026-07-06T05:00:00.000Z"),
+      finishedAt: new Date("2026-07-06T05:01:00.000Z"),
+      createdAt: new Date("2026-07-06T05:01:00.000Z"),
     });
+    await recordMissionOwnerDecision({
+      db,
+      issue: { id: scenario.recoveryIssueId, companyId: scenario.companyId, missionId: recoveryIssue.missionId },
+      submission: { decision: "recover_artifact", sourceIssueRef: scenario.recoveryIssueId },
+      sourceIssueId: recoveryIssue.originId,
+      heartbeatRunId,
+    });
+  }
 
-    expect(result.missions[0]?.findings).toEqual(expect.arrayContaining([
-      expect.stringContaining("tool_step_recovery_result_applied"),
-    ]));
+  async function registerWorkflowArtifact(scenario: ToolRecoveryScenario) {
+    const workProductId = randomUUID();
+    await db.insert(issueWorkProducts).values({
+      id: workProductId,
+      companyId: scenario.companyId,
+      issueId: scenario.recoveryIssueId,
+      type: "file",
+      provider: "local",
+      title: "Recovered stockflow",
+      externalId: scenario.artifactPath,
+      status: "active",
+      isPrimary: true,
+      metadata: { path: scenario.artifactPath },
+    });
+    await db.insert(activityLog).values({
+      companyId: scenario.companyId,
+      actorType: "agent",
+      actorId: "workflow-agent-api",
+      action: "issue.workflow_artifact_registered",
+      entityType: "issue",
+      entityId: scenario.recoveryIssueId,
+      details: { workProductId },
+    });
+  }
+
+  it("does not authorize a comment-only recovery claim when an active workProduct exists", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: true });
+    await registerWorkflowArtifact(scenario);
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+
+    const result = await runSupervision(scenario.companyId);
+
     expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: "native_tool_step_recovery_result",
-        ownerActionIssueId: scenario.recoveryIssueId,
-        workflowRunId: scenario.workflowRunId,
-        stepId: "collect-us-stockflow",
-        stepRunId: scenario.stepRunId,
-        artifactPath: scenario.artifactPath,
-      }),
+      expect.objectContaining({ type: "native_tool_step_retry", stepRunId: scenario.stepRunId }),
     ]));
+    expect(result.missions[0]?.appliedActions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_recovery_result" }),
+    ]));
+  });
+  it("completes a failed tool step from a structured recover_artifact decision and Workflow API workProduct", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: true });
+    await submitRecoverArtifactDecision(scenario);
+    await registerWorkflowArtifact(scenario);
 
-    const { stepRuns, run, commentText } = await loadToolRecoveryScenarioRows(db, scenario);
-    const stepAfter = stepRuns.find((stepRun) => stepRun.id === scenario.stepRunId);
-    const downstreamStep = stepRuns.find((stepRun) => stepRun.id === scenario.downstreamStepRunId);
-    expect(stepAfter).toEqual(expect.objectContaining({
-      status: "completed",
-      lastDispatchErrorAt: null,
-      lastDispatchErrorSummary: null,
-    }));
-    expect(stepAfter?.metadata).toEqual(expect.objectContaining({
-      toolResult: expect.objectContaining({
-        success: true,
-        stdout: `Mission owner recovery artifact: ${scenario.artifactPath}`,
-        exitCode: 0,
-        recoveredBy: "owner-action",
-      }),
-    }));
-    expect(downstreamStep).toEqual(expect.objectContaining({
-      status: "pending",
-    }));
-    expect(downstreamStep?.issueId).toEqual(expect.any(String));
-    expect(run).toEqual(expect.objectContaining({ status: "running" }));
-    expect(commentText).toContain("native-tool-step-recovery-result-applied");
-    expect(commentText).not.toContain("native-tool-step-retry-applied");
+    const result = await runSupervision(scenario.companyId);
+    const { stepRuns } = await loadToolRecoveryScenarioRows(db, scenario);
+
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_recovery_result", artifactPath: scenario.artifactPath }),
+    ]));
+    expect(stepRuns.find((stepRun) => stepRun.id === scenario.stepRunId)?.status).toBe("completed");
+  });
+
+  it("retries when the structured recover_artifact decision has no official workProduct", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: false });
+    await submitRecoverArtifactDecision(scenario);
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+
+    const result = await runSupervision(scenario.companyId);
+
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_retry", stepRunId: scenario.stepRunId }),
+    ]));
   });
 
   it("does not overwrite completed tool results when terminal recovery is requested", async () => {
@@ -250,7 +274,7 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
       }),
     ]));
 
-    const { stepRuns, run, commentText } = await loadToolRecoveryScenarioRows(db, scenario);
+    const { stepRuns, run } = await loadToolRecoveryScenarioRows(db, scenario);
     const retriedStep = stepRuns.find((stepRun) => stepRun.id === scenario.stepRunId);
     const downstreamStep = stepRuns.find((stepRun) => stepRun.id === scenario.downstreamStepRunId);
     expect(retriedStep).toEqual(expect.objectContaining({
@@ -264,7 +288,5 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
       completedAt: null,
     }));
     expect(run).toEqual(expect.objectContaining({ status: "running" }));
-    expect(commentText).toContain("native-tool-step-retry-applied");
-    expect(commentText).not.toContain("native-tool-step-recovery-result-applied");
   });
 });

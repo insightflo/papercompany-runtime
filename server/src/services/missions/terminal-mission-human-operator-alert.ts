@@ -18,8 +18,9 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
 import {
-  materializeHumanOperatorRequestEvent,
+  materializeHumanOperatorRequestPayload,
   publishHumanOperatorRequestEvent,
+  type HumanOperatorRequestPayload,
 } from "./human-operator-alert-events.js";
 import {
   missionWorkflowContinuationRemains,
@@ -278,16 +279,24 @@ export async function emitTerminalMissionHumanOperatorReport(
         body,
       })
       .returning();
-
-    // 기존 channel 재사용: materialize primitive 가 dedupe+activity insert 를 같은 tx 에서 수행.
-    const materialized = await materializeHumanOperatorRequestEvent(tx as unknown as Db, {
-      issue: input.issue,
-      comment: { id: comment.id, authorAgentId: null, authorUserId: null, body: comment.body },
-    });
-    if (!materialized.payload) {
-      // payload 불가 → hard fail → tx rollback → claim 도 무효 → 다음 supervision 이 원인 수정 후 재시도.
-      throw new Error("terminal-mission-human-operator-payload-unbuildable");
-    }
+    void comment;
+    // [structured system authority] comment 를 parse 하지 않는다. claimed terminal transition event 의
+    //   id 를 decisionEventId 로 사용해 bounded system payload(escalate, actorType=system)를 구성하고,
+    //   공통 materialize-by-payload primitive 로 같은 tx 에서 dedupe+activity insert 한다. owner-decision
+    //   builder 는 agent 전용이라 terminal system 경로는 직접 payload 를 구성한다(fail-closed 회피).
+    const terminalPayload: HumanOperatorRequestPayload = {
+      missionId: input.expectedMissionId,
+      issueId: input.issue.id,
+      ...(input.issue.originId ? { sourceIssueId: input.issue.originId } : {}),
+      decisionEventId: claimed[0]!.id,
+      decision: "escalate",
+      ...(input.issue.title ? { issueTitle: input.issue.title } : {}),
+      ...(input.issue.identifier ? { issueIdentifier: input.issue.identifier } : {}),
+      reason: body.slice(0, 2000),
+      actorType: "system",
+      actorId: "system",
+    };
+    const materialized = await materializeHumanOperatorRequestPayload(tx as unknown as Db, terminalPayload, input.expectedCompanyId);
 
     return { emitted: true as const, reason: "terminal-mission human operator request recorded", payload: materialized.payload };
   });

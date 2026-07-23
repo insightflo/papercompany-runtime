@@ -41,7 +41,7 @@ describeEP("dispatchSourceIssueNativeResume cap-override applied + crash-window 
     expect(producer.status).toBe("pending"); expect(producer.iterationIndex).toBe(MAX_ITER + 1); expect(producer.completedAt).toBeNull();
     const [issue] = await db.select().from(issues).where(eq(issues.id, s.producerIssueId));
     expect(["todo", "in_progress"]).toContain(issue.status); expect(issue.completedAt).toBeNull();
-    const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.requestKind, "workflow_resume"), eq(agentWakeupRequests.idempotencyKey, `cap-override-wake:${s.decisionCommentId}`)));
+    const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.requestKind, "workflow_resume"), eq(agentWakeupRequests.idempotencyKey, `cap-override-wake:${s.ownerDecisionEventId}`)));
     expect(wakes).toHaveLength(1);
     const events = await auditEvents(db, s.companyId);
     expect(events).toHaveLength(1);
@@ -49,7 +49,7 @@ describeEP("dispatchSourceIssueNativeResume cap-override applied + crash-window 
     expect(payload).toEqual(expect.objectContaining({
       status: "accepted",
       ownerActionIssueId: s.ownerActionIssueId,
-      decisionCommentId: s.decisionCommentId,
+      decisionCommentId: s.ownerDecisionEventId,
       decisionCommentCreatedAt: new Date("2026-07-10T00:20:00.000Z").toISOString(),
       workflowRunId: s.workflowRunId,
       producerIssueId: s.producerIssueId,
@@ -65,8 +65,8 @@ describeEP("dispatchSourceIssueNativeResume cap-override applied + crash-window 
   it("DUPLICATE: prior accepted audit (full identity) + accepted wake → already_applied, no second wake/audit", async () => {
     const s = await seed();
     const wakeId = randomUUID();
-    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId: s.companyId, agentId: s.producerAgentId, source: "test", status: "queued", workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, requestKind: "workflow_resume", idempotencyKey: `cap-override-wake:${s.decisionCommentId}` });
-    await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:${s.decisionCommentId}`, payload: buildCapOverrideAuditPayload(s, { status: "accepted", acceptedWakeupRequestId: wakeId }) });
+    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId: s.companyId, agentId: s.producerAgentId, source: "test", status: "queued", workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, requestKind: "workflow_resume", idempotencyKey: `cap-override-wake:${s.ownerDecisionEventId}` });
+    await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:${s.ownerDecisionEventId}`, payload: buildCapOverrideAuditPayload(s, { status: "accepted", acceptedWakeupRequestId: wakeId }) });
     const outcome = await call(s);
     expect(outcome.kind).toBe("cap_override_already_applied");
     expect(await auditEvents(db, s.companyId)).toHaveLength(1);
@@ -78,7 +78,7 @@ describeEP("dispatchSourceIssueNativeResume cap-override applied + crash-window 
     await db.update(workflowRuns).set({ status: "running", completedAt: null }).where(eq(workflowRuns.id, s.workflowRunId));
     await db.update(workflowStepRuns).set({ status: "pending", iterationIndex: MAX_ITER + 1, startedAt: null, completedAt: null, lastDispatchAttemptAt: null, lastDispatchAcceptedAt: null, lastDispatchErrorAt: null, lastDispatchErrorSummary: null, lastDispatchRequestId: null, metadata: {} }).where(eq(workflowStepRuns.id, s.producerStepRunId));
     await db.update(issues).set({ status: "todo", completedAt: null, updatedAt: FORWARD_APPLIED_AT }).where(eq(issues.id, s.producerIssueId));
-    await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:${s.decisionCommentId}`, payload: buildCapOverrideAuditPayload(s, { status: "pending" }) });
+    await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:${s.ownerDecisionEventId}`, payload: buildCapOverrideAuditPayload(s, { status: "pending" }) });
     const outcome = await call(s);
     expect(outcome.kind).toBe("cap_override_applied");
     const events = await auditEvents(db, s.companyId);
@@ -122,12 +122,18 @@ describeEP("dispatchSourceIssueNativeResume cap-override applied + crash-window 
     if (outcome.kind === "cap_override_applied") expect(outcome.cap).toBe(1);
   });
 
-  it("allows a later generation via a NEW owner decision comment targeting the producer", async () => {
+  it("allows a later generation via a new structured owner decision targeting the producer", async () => {
     const s = await seed({ producerIteration: 2 });
     await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:old-decision`, payload: { generation: 1 } });
     const newCommentId = randomUUID();
+    const newEventId = randomUUID();
     await db.insert(issueComments).values({ id: newCommentId, companyId: s.companyId, issueId: s.ownerActionIssueId, authorAgentId: s.ownerAgentId, createdAt: new Date("2026-07-10T00:30:00.000Z"), body: `### Mission owner decision\nDecision: retry_source_issue\nSource issue: ${s.producerIssueId}\nReason: new generation retry.` });
-    const outcome = await dispatchSourceIssueNativeResume(db, { companyId: s.companyId, issueId: s.producerIssueId, allowBlockedIssue: true, ownerAction: capOwnerAction(s, newCommentId), wakeFn: testWake(db) });
+    await db.insert(workflowTransitionEvents).values({
+      id: newEventId, companyId: s.companyId, missionId: s.missionId, issueId: s.ownerActionIssueId, heartbeatRunId: s.ownerDecisionHeartbeatRunId,
+      eventType: "mission_owner_decision", layer: "mission_owner_recovery", decision: "retry_source_issue", reason: "owner_recovery_api", reasonCode: "owner_recovery_api", createdAt: new Date("2026-07-10T00:30:00.000Z"),
+      payload: { kind: "mission_owner_decision", source: "owner_recovery_api", ownerActionIssueId: s.ownerActionIssueId, sourceIssueId: s.producerIssueId, commentId: newCommentId, decision: "retry_source_issue", reworkTargetRef: s.producerIssueId },
+    });
+    const outcome = await dispatchSourceIssueNativeResume(db, { companyId: s.companyId, issueId: s.producerIssueId, allowBlockedIssue: true, ownerAction: capOwnerAction(s, newEventId), wakeFn: testWake(db) });
     expect(outcome.kind).toBe("cap_override_applied");
   });
 

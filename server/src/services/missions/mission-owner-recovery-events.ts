@@ -64,7 +64,7 @@ export function parseMissionOwnerActionMarker(description: string | null | undef
 
 export function buildMissionOwnerDecisionFormat(): string {
   return [
-    "Required output format:",
+    "Optional display-only comment template (the API submission is authoritative):",
     "### Mission owner decision",
     "Decision: <one of the allowed decision options>",
     "Source issue: <source issue identifier or id>",

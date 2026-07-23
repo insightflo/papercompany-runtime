@@ -8,11 +8,13 @@ import {
   workflowArtifactRegisterSchema,
   workflowIssueCompleteSchema,
   workflowVerdictSubmitSchema,
+  missionOwnerDecisionSubmitSchema,
   type MissionPlanQaVerdictSubmit,
   type MissionOwnerPlanDecisionSubmit,
   type WorkflowArtifactRegister,
   type WorkflowIssueComplete,
   type WorkflowVerdictSubmit,
+  type MissionOwnerDecisionSubmit,
 } from "@paperclipai/shared/validators/workflow-agent-api";
 import { validate } from "../middleware/validate.js";
 import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
@@ -24,6 +26,7 @@ import { heartbeatService } from "../services/heartbeat.js";
 import { logActivity } from "../services/activity-log.js";
 import { submitMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-agent-api.js";
 import { submitMissionOwnerPlanDecision } from "../services/missions/mission-plan-decision-agent-api.js";
+import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import {
   completeWorkflowIssue,
@@ -305,6 +308,29 @@ export function workflowAgentApiRoutes(db: Db) {
       details: { identifier: updated.identifier },
     });
     res.json(updated);
+  });
+  router.post("/issues/:id/owner-recovery/decision", hermesOpsMutationGuard("owner_recovery.decision.submit"), validate(missionOwnerDecisionSubmitSchema), async (req, res) => {
+    const issue = await loadIssue(db, routeParam(req.params.id, "id"));
+    assertCompanyAccess(req, issue.companyId);
+    const actor = getActorInfo(req);
+    const data: MissionOwnerDecisionSubmit = req.body;
+    const recorded = await submitMissionOwnerDecision({ db, issueId: issue.id, actor, data });
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.owner_recovery_decision_submitted",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        decision: recorded.submission.decision,
+        decisionEventId: recorded.eventId,
+      },
+    });
+    res.status(201).json({ eventId: recorded.eventId, createdAt: recorded.createdAt, decision: recorded.submission.decision });
   });
 
   return router;

@@ -17,9 +17,10 @@ import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
 import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
 import type { MissionServiceDeps } from "../missions.js";
-import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey, extractMissionOwnerDecisionFromText, hasMissionOwnerDecisionAppliedMarker, hasMissionOwnerDecisionWakeupDispatchedMarker, hasStaleSourceIssueWakeupDispatchedMarker, hasWorkProductReuseWakeDispatchedMarker } from "./mission-owner-recovery-events.js";
+import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey } from "./mission-owner-recovery-events.js";
+import { hasStructuredSourceRecoveryDecision, loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
-import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestMissionOwnerDecision, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied, SOURCE_RETRY_WORK_PRODUCT_MAX, type SourceRetryWorkProduct } from "./mission-owner-recovery-comments.js";
+import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied, SOURCE_RETRY_WORK_PRODUCT_MAX, type SourceRetryWorkProduct } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
@@ -27,8 +28,8 @@ import { buildMissionPlanningDescription } from "./mission-planning-description.
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
-import { activePlanRecoveryGateReason, asRecord, asRecordArray, buildNativeToolStepRetryAppliedMarker, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, hasDiagnosisSignal, hasNativeToolStepRetryAppliedMarker, hasRecoverableArtifactComment, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
-import { buildNativeToolStepRecoveryResultAppliedMarker, hasNativeToolStepRecoveryResultAppliedMarker, resolveNativeToolStepRecoveryResult } from "./tool-step-recovery-result.js";
+import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
+import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
 import { issueLessToolRecoveryOwnsFailure } from "./tool-step-recovery-authority.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue, type MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
@@ -50,18 +51,15 @@ import { loadTerminalValidationVerdicts } from "./terminal-mission-workflow-cont
 import { selectTerminalWorkflowAuthoritySource } from "./terminal-mission-authority-source.js";
 export { selectTerminalWorkflowAuthoritySource };
 
-// [D cap-override authority] owner-action issue 의 latest recognized decision(createdAt,id DESC 첫 parsed)
-//   만 권위. 그 decision 이 retry_source_issue 일 때만 ID 전달. newer replan/escalate/invalid decision 이
-//   먼저면 stale retry 를 건너뛰지 않고 null → cap-override wake 금지.
+// [D cap-override authority] owner-action issue 의 latest STRUCTURED mission-owner decision 만 권위.
+//   자연어 comment parsing 은 제거됨 — loadLatestMissionOwnerDecision 만 결정을 인정한다.
+//   decision 이 retry_source_issue 일 때만 durable eventId 를 전달 → cap-override wake/audit 는
+//   commentId 대신 이 eventId 를 권위 식별자로 사용한다. newer replan/escalate/invalid structured
+//   decision 이 먼저면 null → cap-override wake 금지.
 async function resolveOwnerRetryDecisionCommentId(db: Db, companyId: string, ownerActionIssueId: string): Promise<string | null> {
-  const rows = await db.select({ id: issueComments.id, body: issueComments.body })
-    .from(issueComments)
-    .where(and(eq(issueComments.companyId, companyId), eq(issueComments.issueId, ownerActionIssueId)))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-    .limit(32);
-  const latest = rows.find((row) => extractMissionOwnerDecisionFromText(row.body ?? "") !== null);
-  if (!latest) return null;
-  return extractMissionOwnerDecisionFromText(latest.body ?? "")?.decision === "retry_source_issue" ? latest.id : null;
+  const record = await loadLatestMissionOwnerDecision({ db, companyId, ownerActionIssueId });
+  if (!record || record.decision.decision !== "retry_source_issue") return null;
+  return record.eventId;
 }
 // [integration blocker] dispatchSourceIssueNativeResume 의 cap-override 진입 조건과 동일: source issue 의
 //   최신 step run 의 run 이 failed 이고 step 이 completed. 이면 supervision 이 producer issue 를 먼저 reopen
@@ -181,6 +179,41 @@ async function loadActiveWorkProductUpdatedAt(db: Db, companyId: string, issueId
     .limit(1)
     .then((rows) => rows[0] ?? null);
   return row?.updatedAt ?? null;
+}
+async function hasRecoveryIdempotency(db: Db, companyId: string, idempotencyKey: string): Promise<boolean> {
+  const [event, wakeup] = await Promise.all([
+    db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.idempotencyKey, idempotencyKey),
+    )).limit(1).then((rows) => rows[0] ?? null),
+    db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+    )).limit(1).then((rows) => rows[0] ?? null),
+  ]);
+  return Boolean(event || wakeup);
+}
+
+async function recordRecoveryAction(input: {
+  readonly db: Db; readonly companyId: string; readonly missionId: string; readonly issueId: string;
+  readonly idempotencyKey: string; readonly eventType: string; readonly decision: string; readonly resultStatus: string;
+  readonly sourceIssueId?: string; readonly workflowRunId?: string; readonly workflowStepRunId?: string; readonly stepId?: string;
+}): Promise<void> {
+  await input.db.insert(workflowTransitionEvents).values({
+    companyId: input.companyId, missionId: input.missionId, issueId: input.issueId,
+    workflowRunId: input.workflowRunId ?? null, workflowStepRunId: input.workflowStepRunId ?? null,
+    eventType: input.eventType, layer: "mission_owner_recovery", decision: input.decision,
+    fromStatus: input.eventType === "mission_owner_tool_step_retry" ? "failed" : null,
+    toStatus: input.resultStatus, reason: "owner_recovery_api", reasonCode: "owner_recovery_api",
+    idempotencyKey: input.idempotencyKey,
+    payload: {
+      kind: input.eventType, ownerActionIssueId: input.issueId, resultStatus: input.resultStatus,
+      ...(input.sourceIssueId ? { sourceIssueId: input.sourceIssueId } : {}),
+      ...(input.workflowRunId ? { workflowRunId: input.workflowRunId } : {}),
+      ...(input.workflowStepRunId ? { workflowStepRunId: input.workflowStepRunId } : {}),
+      ...(input.stepId ? { stepId: input.stepId } : {}),
+    },
+  }).onConflictDoNothing();
 }
 // [final QA / mission validation owner recovery] retry 가 깨울 source issue 의 active workProduct 를
 //   company+mission+source-issue scope 로 명시적으로 읽는다(issueWorkProducts.companyId + issueId 와
@@ -557,7 +590,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         const rosterFingerprint = candidateRosterFingerprint(candidates);
         const candidateRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
         const markerText = `mission-owner-plan-submission-rejected:${mission.id}:${planIssue.id}:prompt-${REJECTED_PLAN_RECOVERY_PROMPT_REVISION}:roster-${rosterFingerprint}`;
-        const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
+        const retryAllowed = !await hasRecoveryIdempotency(db, mission.companyId, markerText);
         if (missionHasActiveHeartbeat) return null;
         const rejectedMissionIssueIds = missionIssues.map((issue) => issue.id);
         const rejectedWakeupScope = rejectedMissionIssueIds.length > 0
@@ -573,7 +606,6 @@ export function createSupervision({ db, deps, ownerActions }: {
           ))
           .limit(1);
         if (rejectedActiveWakeup) return null;
-        const retryAllowed = !planIssueComments.some((comment) => comment.includes(markerText));
         const latestTerminalRun = (heartbeatRunsByIssueId.get(planIssue.id) ?? [])
           .filter((run) => run.status === "succeeded" || run.status === "failed" || run.status === "timed_out")
           .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
@@ -629,8 +661,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       if (hasPlanQaIssue) return null;
 
       const markerText = `mission-owner-plan-submission-missing:${mission.id}:${planIssue.id}:${succeededRun.id}`;
-      const planIssueComments = commentsByIssueId.get(planIssue.id) ?? [];
-      if (planIssueComments.some((comment) => comment.includes(markerText))) return null;
+      if (await hasRecoveryIdempotency(db, mission.companyId, markerText)) return null;
 
       return {
         kind: "missing",
@@ -696,10 +727,9 @@ export function createSupervision({ db, deps, ownerActions }: {
     const tryDispatchWorkProductReuseWake = async (input: {
       sourceIssue: MissionSupervisionIssue;
       sourceLabel: string;
-      sourceComments: string[];
     }): Promise<void> => {
       if (!deps.onWorkProductReuseWakeRequested) return;
-      const { sourceIssue, sourceLabel, sourceComments } = input;
+      const { sourceIssue, sourceLabel } = input;
       const producerAgentId = sourceIssue.assigneeAgentId;
       if (!producerAgentId) return;
 
@@ -786,8 +816,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         sourceIssueId: sourceIssue.id,
         artifactPath,
       });
-      const markerInput = { missionId: mission.id, sourceIssueId: sourceIssue.id, artifactPath, idempotencyKey };
-      if (hasWorkProductReuseWakeDispatchedMarker(sourceComments, markerInput)) return;
+      if (await hasRecoveryIdempotency(db, mission.companyId, idempotencyKey)) return;
 
       // (6) 발송: 재사용 지시 댓글 + producer wake (app.ts 가 heartbeat.wakeup 으로 연결,
       //     findExistingWorkflowResumeWake 로 중복 wake 방지)
@@ -816,6 +845,20 @@ export function createSupervision({ db, deps, ownerActions }: {
           stalledRun: stalledRun,
           idempotencyKey,
           wakeCommentId: wakeComment.id,
+        });
+        await recordRecoveryAction({
+          db,
+          companyId: mission.companyId,
+          missionId: mission.id,
+          issueId: sourceIssue.id,
+          sourceIssueId: sourceIssue.id,
+          workflowRunId: producerStepRow.run.id,
+          workflowStepRunId: producerStepRow.stepRun.id,
+          stepId: producerStepRow.stepRun.stepId,
+          idempotencyKey,
+          eventType: "mission_workproduct_reuse_wakeup",
+          decision: "recover_artifact",
+          resultStatus: sourceIssue.status,
         });
         findings.push(`workproduct_reuse_wakeup_dispatched: ${sourceLabel} blocked graphWorkProductRequired producer has no registered workProduct, but deliverable ${artifactPath} exists and recovery ${stalledRecoveryIssue.id} stalled (run ${stalledRun.id} ${stalledRun.status}); dispatched reuse wake to agent ${producerAgentId}`);
         appliedActions.push({
@@ -900,16 +943,10 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
         if (latestFailedRun && !issueLive) {
           const idempotencyKey = `mission-stale-source-wakeup:${mission.id}:${issue.id}:${latestFailedRun.id}`;
-          const markerInput = {
-            missionId: mission.id,
-            sourceIssueId: issue.id,
-            failedRunId: latestFailedRun.id,
-            idempotencyKey,
-          };
+          const alreadyDispatched = await hasRecoveryIdempotency(db, mission.companyId, idempotencyKey);
           let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchStaleSourceIssueWakeups ? "skipped_no_assignee" : "not_requested";
           let wakeCommentId: string | undefined;
-          const alreadyDispatched = hasStaleSourceIssueWakeupDispatchedMarker(comments, markerInput);
-          const hasSourceDiagnosis = hasDiagnosisSignal(...comments);
+          const hasSourceDiagnosis = await hasStructuredSourceRecoveryDecision({ db, companyId: mission.companyId, sourceIssueId: issue.id });
           // [P3 주의] stale-source 경로의 issue.originId 는 보통 workflow run id(QA issue id 아님)라
           //   resolveQaGateIssueId 가 no-op. 정확한 QA gate derive 가 필요하므로 이 삽입점은 제거
           //   (잘못된 차단 방지). QA recovery ownership 차단은 retry case(unblock issue, originId=source)에서 처리.
@@ -1103,159 +1140,150 @@ export function createSupervision({ db, deps, ownerActions }: {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
       }
       if (issue.originKind === "mission_main_executor_unblock") {
-        const toolRecovery = parseToolStepRecoveryMarker(issue.description);
-        if (toolRecovery) {
-          const canonicalIssue = findCanonicalToolStepRecoveryIssue({ marker: toolRecovery, missionIssues });
+        const recoveryMarker = parseToolStepRecoveryMarker(issue.description);
+        if (recoveryMarker) {
+          const canonicalIssue = findCanonicalToolStepRecoveryIssue({
+            marker: recoveryMarker,
+            missionIssues,
+          });
           if (canonicalIssue && canonicalIssue.id !== issue.id) {
             const closed = input.applyOwnerDecisionActions
               ? await ownerActions.closeDuplicateToolStepRecoveryIssue({
                   issue,
                   mission,
                   canonicalIssue,
-                  runId: toolRecovery.runId,
-                  stepId: toolRecovery.stepId,
+                  runId: recoveryMarker.runId,
+                  stepId: recoveryMarker.stepId,
                 })
               : false;
             findings.push(closed
-              ? `tool_step_recovery_duplicate_closed: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${toolRecovery.runId} step=${toolRecovery.stepId}`
-              : `tool_step_recovery_duplicate_ignored: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+              ? `tool_step_recovery_duplicate_closed: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${recoveryMarker.runId} step=${recoveryMarker.stepId}`
+              : `tool_step_recovery_duplicate_ignored: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${recoveryMarker.runId} step=${recoveryMarker.stepId}`);
             continue;
           }
         }
-        // [수정시 영향] tool-step recovery 자동 retry 게이트. 이전엔 issue.status
-        // === "done"(owner 가 수동으로 recovery issue 를 닫은 뒤) 일 때만 자동 retry 가
-        // 동작했는데, owner 가 heartbeat 비활성/wakeOnDemand 로 recovery action 을
-        // 고르지 않으면 issue 가 "done" 이 되지 않아 영원히 stall 했다(6h+ 사례).
-        // status 조건을 제거하고 toolRecovery + applyOwnerDecisionActions 만으로 자동
-        // retry 를 돌린다. 안전장치는 기존 그대로: hasNativeToolStepRetryAppliedMarker
-        // 로 1회 cap, retry 실패 시 reopenAppliedToolStepRecoveryIfRetryFailed 가 issue
-        // 를 다시 열어 owner 에게 넘긴다.
+        const toolRecoveryCandidates = stepRows.filter((row) =>
+          row.stepRun.status === "failed" && issueLessToolRecoveryOwnsFailure(row),
+        );
+        const toolRecovery = issue.originId === oversightIssue.id && toolRecoveryCandidates.length === 1
+          ? toolRecoveryCandidates[0]!
+          : null;
         if (toolRecovery && input.applyOwnerDecisionActions) {
-          const markerInput = {
-            ownerActionIssueId: issue.id,
-            workflowRunId: toolRecovery.runId,
-            stepId: toolRecovery.stepId,
-          };
-          const currentToolStepRow = stepRows.find((row) =>
-            row.run.id === toolRecovery.runId && row.stepRun.stepId === toolRecovery.stepId
-          );
-          if (hasNativeToolStepRecoveryResultAppliedMarker(comments, markerInput)) {
-            findings.push(`tool_step_recovery_result_already_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
-          } else {
-            const recoveryResult = resolveNativeToolStepRecoveryResult({ comments });
-            if (recoveryResult && currentToolStepRow?.stepRun.status === "failed") {
-              const result = await completeWorkflowToolStepFromResult(db, {
-                companyId: mission.companyId,
+          const currentToolStepRow = toolRecovery;
+          const retryIdempotencyKey = `mission-native-tool-step-retry:${mission.id}:${issue.id}:${toolRecovery.run.id}:${toolRecovery.stepRun.stepId}`;
+          const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) ?? null : null;
+          const authorizedRecovery = await loadAuthorizedNativeToolStepRecovery({
+            db,
+            companyId: mission.companyId,
+            missionId: mission.id,
+            missionOwnerAgentId: mission.ownerAgentId,
+            ownerActionIssue: issue,
+            sourceIssue,
+          });
+          if (currentToolStepRow.stepRun.status === "failed" && authorizedRecovery) {
+            const result = await completeWorkflowToolStepFromResult(db, {
+              companyId: mission.companyId,
+              stepRunId: currentToolStepRow.stepRun.id,
+              workflowRunId: toolRecovery.run.id,
+              stepId: toolRecovery.stepRun.stepId,
+              success: true,
+              stdout: `Recovered from registered workProduct ${authorizedRecovery.workProductId}`,
+              artifactPath: authorizedRecovery.artifactPath,
+              allowTerminalRecovery: true,
+            });
+            if (result) {
+              findings.push(`tool_step_recovery_result_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} artifact=${authorizedRecovery.artifactPath}`);
+              appliedActions.push({
+                type: "native_tool_step_recovery_result",
+                missionId: mission.id,
+                ownerActionIssueId: issue.id,
+                workflowRunId: toolRecovery.run.id,
+                stepId: toolRecovery.stepRun.stepId,
                 stepRunId: currentToolStepRow.stepRun.id,
-                workflowRunId: toolRecovery.runId,
-                stepId: toolRecovery.stepId,
-                success: true,
-                stdout: `Mission owner recovery artifact: ${recoveryResult.artifactPath}`,
-                exitCode: 0,
-                allowTerminalRecovery: true,
+                artifactPath: authorizedRecovery.artifactPath,
+                resultStatus: result.status,
               });
-              if (result) {
-                findings.push(`tool_step_recovery_result_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} artifact=${recoveryResult.artifactPath} result=${result.status}`);
-                await issueService(db).addComment(
-                  issue.id,
-                  [
-                    "### Native tool step recovery result applied",
-                    buildNativeToolStepRecoveryResultAppliedMarker(markerInput),
-                    `Workflow run: ${toolRecovery.runId}`,
-                    `Step: ${toolRecovery.stepId}`,
-                    `Step run: ${currentToolStepRow.stepRun.id}`,
-                    `Artifact: ${recoveryResult.artifactPath}`,
-                    `Result status: ${result.status}`,
-                  ].join("\n"),
-                  { agentId: mission.ownerAgentId },
-                );
-                appliedActions.push({
-                  type: "native_tool_step_recovery_result",
-                  missionId: mission.id,
-                  ownerActionIssueId: issue.id,
-                  workflowRunId: toolRecovery.runId,
-                  stepId: toolRecovery.stepId,
-                  stepRunId: currentToolStepRow.stepRun.id,
-                  artifactPath: recoveryResult.artifactPath,
-                  resultStatus: result.status,
-                });
-                continue;
-              }
-              findings.push(`tool_step_recovery_result_complete_not_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
-            } else if (recoveryResult && currentToolStepRow) {
-              findings.push(`tool_step_recovery_result_not_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} current_status=${currentToolStepRow.stepRun.status}`);
               continue;
             }
           }
-          if (hasNativeToolStepRetryAppliedMarker(comments, markerInput)) {
-            if (currentToolStepRow?.stepRun.status === "failed") {
+          if (currentToolStepRow.stepRun.status === "failed" && !authorizedRecovery) {
+            findings.push(`tool_step_recovery_result_missing_evidence: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}; latest structured recover_artifact decision targeting the current/source scope and an official Workflow API workProduct are required`);
+          }
+          if (await hasRecoveryIdempotency(db, mission.companyId, retryIdempotencyKey)) {
+            if (currentToolStepRow.stepRun.status === "failed") {
               const reopened = await ownerActions.reopenAppliedToolStepRecoveryIfRetryFailed({
                 issue,
                 mission,
-                runId: toolRecovery.runId,
-                stepId: toolRecovery.stepId,
+                runId: toolRecovery.run.id,
+                stepId: toolRecovery.stepRun.stepId,
                 stepRun: currentToolStepRow.stepRun,
               });
               findings.push(reopened
-                ? `tool_step_recovery_retry_failed_reopened: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`
-                : `tool_step_recovery_retry_failed: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
-            } else {
-              findings.push(`tool_step_recovery_already_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId}`);
+                ? `tool_step_recovery_retry_failed_reopened: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}`
+                : `tool_step_recovery_retry_failed: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}`);
             }
           } else {
             const retryResult = await retryIssueLessToolWorkflowStep(db, {
               companyId: mission.companyId,
-              runId: toolRecovery.runId,
-              stepId: toolRecovery.stepId,
+              runId: toolRecovery.run.id,
+              stepId: toolRecovery.stepRun.stepId,
             });
             if (!retryResult) {
-              findings.push(`tool_step_recovery_not_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} is not a retryable unified-engine issue-less tool step`);
+              findings.push(`tool_step_recovery_not_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} is not a retryable unified-engine issue-less tool step`);
             } else {
-              findings.push(`tool_step_recovery_applied: ${label} run=${toolRecovery.runId} step=${toolRecovery.stepId} result=${retryResult.result.status}`);
-              await issueService(db).addComment(
-                issue.id,
-                [
-                  "### Native tool step retry applied",
-                  buildNativeToolStepRetryAppliedMarker(markerInput),
-                  `Workflow run: ${toolRecovery.runId}`,
-                  `Step: ${toolRecovery.stepId}`,
-                  `Step run: ${retryResult.stepRunId}`,
-                  `Result status: ${retryResult.result.status}`,
-                ].join("\n"),
-                { agentId: mission.ownerAgentId },
-              );
+              await recordRecoveryAction({
+                db,
+                companyId: mission.companyId,
+                missionId: mission.id,
+                issueId: issue.id,
+                workflowRunId: toolRecovery.run.id,
+                workflowStepRunId: retryResult.stepRunId,
+                stepId: toolRecovery.stepRun.stepId,
+                idempotencyKey: retryIdempotencyKey,
+                eventType: "mission_owner_tool_step_retry",
+                decision: "retry_source_issue",
+                resultStatus: retryResult.result.status,
+              });
+              findings.push(`tool_step_recovery_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} result=${retryResult.result.status}`);
               appliedActions.push({
                 type: "native_tool_step_retry",
                 missionId: mission.id,
                 ownerActionIssueId: issue.id,
-                workflowRunId: toolRecovery.runId,
-                stepId: toolRecovery.stepId,
+                workflowRunId: toolRecovery.run.id,
+                stepId: toolRecovery.stepRun.stepId,
                 stepRunId: retryResult.stepRunId,
                 resultStatus: retryResult.result.status,
               });
             }
           }
         }
-        let ownerDecision = extractLatestMissionOwnerDecision(comments);
-        // [P6 hybrid guard] AUTO(owner 미결정 grace default) rework 인지, 그리고 이 미션이 native loop(back-edge) 를
+        // [structured authority] 자연어 comment parsing 제거 — loadLatestMissionOwnerDecision 만 권위.
+        //   [P6 hybrid guard] AUTO(owner 미결정 grace default) rework 인지, 그리고 이 미션이 native loop(back-edge) 를
         //   가지는지 — 둘 다 참이면 P4 loop-driver 가 QA-reject producer rework 를 이미 담당하므로 supervision 중복 skip.
+        const decisionRecord = await loadLatestMissionOwnerDecision({
+          db,
+          companyId: mission.companyId,
+          ownerActionIssueId: issue.id,
+        });
+        let ownerDecision = decisionRecord
+          && decisionRecord.missionId === mission.id
+          && decisionRecord.authorAgentId === mission.ownerAgentId
+          ? decisionRecord.decision
+          : null;
         let autoDefaulted = false;
         let missionHasNativeLoop = false;
-        if (ownerDecision?.decision === null) {
-          findings.push(`owner_action_decision_invalid: ${label} has unsupported decision=${ownerDecision.invalidDecision} — ${issue.title}`);
-          ownerDecision = null;
-        } else if (!ownerDecision) {
+        if (!ownerDecision) {
           // [Patch 2 cap-exhausted] QA rework cap oversight issues must NOT be grace-defaulted.
-          //   Wait for explicit owner decision — no auto-retry, no grace-default.
+          //   Wait for explicit structured owner decision — no auto-retry, no grace-default.
           if (isQaReworkCapOversightIssue(issue.description)) {
-            findings.push(`qa_rework_cap_oversight_pending_decision: ${label} — explicit owner decision required, no grace-default`);
+            findings.push(`qa_rework_cap_oversight_pending_decision: ${label} — explicit structured owner decision required, no grace-default`);
             continue;
           }
           // [grace window] owner 가 recovery action 을 고르지 않은 채 오래되면 자동으로
           // retry_source_issue default 로 적용한다. owner 가 heartbeat 비활성/wakeOnDemand
-          // 로 decision comment 를 안 쓰면 mission 이 무한 stall(6h+ 사례) 하므로, grace 가
+          // 로 structured decision 을 안 쓰면 mission 이 무한 stall 하므로, grace 가
           // 지나면 source issue 가 있을 때만 자동 retry. 이후 재실패 시 기존 reopen 경로가
-          // 다시 owner 에게 넘긴다. side_effect 는 source retry 가 멱등 가정하에 안전.
+          // 다시 owner 에게 넘긴다.
           if (input.applyOwnerDecisionActions && issue.originId) {
             const ageMs = Date.now() - new Date(issue.createdAt).getTime();
             const GRACE_MS = 20 * 60 * 1000;
@@ -1313,6 +1341,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   return target && target.missionId === mission.id && !target.hiddenAt ? target.id : null;
                 };
                 sourceIssueId = resolveOwnerIssueRef(ownerReworkRef);
+                // AUTO grace default 의 sourceIssueRef 는 origin(QA) 이므로 producer rework 해석을 막지 않도록 skip.
                 if (!sourceIssueId && !autoDefaulted) {
                   sourceIssueId = resolveOwnerIssueRef(ownerDecision.sourceIssueRef);
                 }
@@ -1425,18 +1454,23 @@ export function createSupervision({ db, deps, ownerActions }: {
                 const sourceRuns = heartbeatRunsByIssueId.get(sourceCandidate.id) ?? [];
                 const sourceHasActiveHeartbeat = sourceRuns.some((run) => run.status === "queued" || run.status === "running");
                 const sourceHasFailedRun = sourceRuns.some((run) => run.status === "failed" || run.status === "timed_out" || run.error || run.errorCode || (run.exitCode != null && run.exitCode !== 0));
-                const sourceCorrectionEvidence = ownerActions.buildCorrectedArtifactValidatorRetryEvidence({
-                  sourceIssue: sourceCandidate,
-                  sourceLabel: sourceCandidateLabel,
-                  missionIssues,
-                  commentsByIssueId,
-                });
-                const sourceHasCompletedCorrectionEvidence = Boolean(sourceCorrectionEvidence);
+                const sourceHasCompletedCorrectionEvidence = Boolean(
+                  await loadActiveWorkProductUpdatedAt(db, mission.companyId, sourceCandidate.id),
+                );
                 const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
-                const markerInput = { ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id, decision: "retry_source_issue" as const };
+                const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
+                  missionId: mission.id,
+                  ownerActionIssueId: issue.id,
+                  sourceIssueId: sourceCandidate.id,
+                });
+                const retryApplyIdempotencyKey = `${idempotencyKey}:apply`;
+                const [retryWakeupRecorded, retryApplyRecorded] = await Promise.all([
+                  hasRecoveryIdempotency(db, mission.companyId, idempotencyKey),
+                  hasRecoveryIdempotency(db, mission.companyId, retryApplyIdempotencyKey),
+                ]);
                 const sourceIsRetryableStaleQueue = (sourceCandidate.status === "todo" || sourceCandidate.status === "backlog")
                   && !sourceHasActiveHeartbeat
-                  && (sourceHasFailedRun || sourceHasCompletedCorrectionEvidence || hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput));
+                  && (sourceHasFailedRun || sourceHasCompletedCorrectionEvidence || retryWakeupRecorded || retryApplyRecorded);
                 if (!isProducerRework && sourceCandidate.status !== "blocked" && !sourceIsRetryableStaleQueue) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is status=${sourceCandidate.status}, not blocked, or not a stale queue with failure, correction, or prior retry evidence` }));
                   break;
@@ -1450,19 +1484,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   ...comments,
                   issue.description,
                 ]);
-                const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
-                  missionId: mission.id,
-                  ownerActionIssueId: issue.id,
-                  sourceIssueId: sourceCandidate.id,
-                });
-                const wakeupMarkerInput = {
-                  missionId: mission.id,
-                  ownerActionIssueId: issue.id,
-                  sourceIssueId: sourceCandidate.id,
-                  decision: "retry_source_issue" as const,
-                  idempotencyKey,
-                };
-                if (hasMissionOwnerDecisionAppliedMarker(sourceComments, markerInput)) {
+                if (retryWakeupRecorded) {
                   const blockedOriginIssue = issue.originId && issue.originId !== sourceCandidate.id
                     ? missionIssueById.get(issue.originId) ?? null
                     : null;
@@ -1501,7 +1523,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                       findings.push(`owner_action_retry_unresolved_waiting: ${label} retry_source_issue source=${sourceCandidateLabel} already applied; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked but wakeup=${pendingWakeup.id} is still queued/claimed`);
                       break;
                     }
-                    if (comments.some((comment) => comment.includes(retryUnresolvedMarker))) {
+                    if (await hasRecoveryIdempotency(db, mission.companyId, retryUnresolvedMarker)) {
                       findings.push(`owner_action_retry_unresolved_already_escalated: ${label} retry_source_issue source=${sourceCandidateLabel} terminal=${sourceCandidate.status}; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked`);
                       break;
                     }
@@ -1538,6 +1560,17 @@ export function createSupervision({ db, deps, ownerActions }: {
                       findings.push(`owner_action_retry_unresolved_wakeup_failed: ${label} owner wakeup callback failed — ${message}`);
                       ownerWakeupStatus = "failed";
                     }
+                    await recordRecoveryAction({
+                      db,
+                      companyId: mission.companyId,
+                      missionId: mission.id,
+                      issueId: issue.id,
+                      sourceIssueId: sourceCandidate.id,
+                      idempotencyKey: retryUnresolvedMarker,
+                      eventType: "mission_owner_retry_unresolved",
+                      decision: "retry_source_issue",
+                      resultStatus: ownerWakeupStatus,
+                    });
                     findings.push(`owner_action_retry_unresolved_escalated: ${label} retry_source_issue source=${sourceCandidateLabel} terminal=${sourceCandidate.status}; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked; owner action reopened`);
                     appliedActions.push({
                       type: "owner_decision_retry_unresolved",
@@ -1550,24 +1583,21 @@ export function createSupervision({ db, deps, ownerActions }: {
                     });
                     break;
                   }
-                  if (input.dispatchOwnerDecisionWakeups && !hasMissionOwnerDecisionWakeupDispatchedMarker(sourceComments, wakeupMarkerInput)) {
+                  if (input.dispatchOwnerDecisionWakeups && !retryWakeupRecorded) {
                     let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = "skipped_no_assignee";
                     if (!sourceCandidate.assigneeAgentId) {
                       findings.push(`owner_action_wakeup_skipped: ${sourceCandidateLabel} source issue has no assignee; wakeup dispatch skipped`);
                     } else if (deps.onOwnerDecisionRetrySourceIssueApplied) {
                       try {
-                        const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
-                          ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
-                          : null;
-                        const requestChangesContextComment = !wakeEvidenceComment && requestChangesSummary && !sourceComments.some((comment) => comment.includes("Latest REQUEST_CHANGES summary:") && comment.includes(requestChangesSummary))
-                          ? await issueService(db).addComment(sourceCandidate.id, buildRetrySourceIssueRequestChangesContextComment({
-                              ownerActionIssueId: issue.id,
-                              ownerActionLabel: label,
-                              sourceIssueId: sourceCandidate.id,
-                              sourceLabel: sourceCandidateLabel,
-                              requestChangesSummary,
-                            }), { agentId: mission.ownerAgentId })
-                          : null;
+                        if (requestChangesSummary && !sourceComments.some((comment) => comment.includes("Latest REQUEST_CHANGES summary:") && comment.includes(requestChangesSummary))) {
+                          await issueService(db).addComment(sourceCandidate.id, buildRetrySourceIssueRequestChangesContextComment({
+                            ownerActionIssueId: issue.id,
+                            ownerActionLabel: label,
+                            sourceIssueId: sourceCandidate.id,
+                            sourceLabel: sourceCandidateLabel,
+                            requestChangesSummary,
+                          }), { agentId: mission.ownerAgentId });
+                        }
                         const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
                           mission,
                           ownerActionIssue: issue,
@@ -1591,6 +1621,17 @@ export function createSupervision({ db, deps, ownerActions }: {
                           }),
                           { agentId: mission.ownerAgentId },
                         );
+                        await recordRecoveryAction({
+                          db,
+                          companyId: mission.companyId,
+                          missionId: mission.id,
+                          issueId: issue.id,
+                          sourceIssueId: sourceCandidate.id,
+                          idempotencyKey,
+                          eventType: "mission_owner_retry_wakeup",
+                          decision: "retry_source_issue",
+                          resultStatus: wakeupDispatchStatus,
+                        });
                       } catch (err) {
                         const message = err instanceof Error ? err.message : String(err);
                         findings.push(`owner_action_wakeup_failed: ${sourceCandidateLabel} retry_source_issue wakeup callback failed — ${message}`);
@@ -1671,15 +1712,23 @@ export function createSupervision({ db, deps, ownerActions }: {
                   }),
                   { agentId: mission.ownerAgentId },
                 );
+                await recordRecoveryAction({
+                  db,
+                  companyId: mission.companyId,
+                  missionId: mission.id,
+                  issueId: issue.id,
+                  sourceIssueId: sourceCandidate.id,
+                  idempotencyKey: retryApplyIdempotencyKey,
+                  eventType: "mission_owner_retry_apply",
+                  decision: "retry_source_issue",
+                  resultStatus: shouldReopenToTodo ? "todo" : sourceCandidate.status,
+                });
                 if (input.dispatchOwnerDecisionWakeups) {
                   if (!sourceCandidate.assigneeAgentId) {
                     findings.push(`owner_action_wakeup_skipped: ${sourceCandidateLabel} source issue has no assignee; wakeup dispatch skipped`);
                     wakeupDispatchStatus = "skipped_no_assignee";
                   } else if (deps.onOwnerDecisionRetrySourceIssueApplied) {
                     try {
-                      const wakeEvidenceComment = sourceCorrectionEvidence && !sourceComments.some((comment) => comment.includes("### Validator retry evidence") && comment.includes(sourceCorrectionEvidence.childIssueId))
-                        ? await issueService(db).addComment(sourceCandidate.id, sourceCorrectionEvidence.comment, { agentId: mission.ownerAgentId })
-                        : null;
                       const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
                         mission,
                         ownerActionIssue: issue,
@@ -1703,6 +1752,30 @@ export function createSupervision({ db, deps, ownerActions }: {
                         }),
                         { agentId: mission.ownerAgentId },
                       );
+                      const validatorEvidence = ownerActions.buildCorrectedArtifactValidatorRetryEvidence({
+                        sourceIssue: sourceCandidate,
+                        sourceLabel: sourceCandidateLabel,
+                        missionIssues,
+                        commentsByIssueId,
+                      });
+                      if (validatorEvidence) {
+                        await issueService(db).addComment(
+                          sourceCandidate.id,
+                          validatorEvidence.comment,
+                          { agentId: mission.ownerAgentId },
+                        );
+                      }
+                      await recordRecoveryAction({
+                        db,
+                        companyId: mission.companyId,
+                        missionId: mission.id,
+                        issueId: issue.id,
+                        sourceIssueId: sourceCandidate.id,
+                        idempotencyKey,
+                        eventType: "mission_owner_retry_wakeup",
+                        decision: "retry_source_issue",
+                        resultStatus: wakeupDispatchStatus,
+                      });
                     } catch (err) {
                       const message = err instanceof Error ? err.message : String(err);
                       findings.push(`owner_action_wakeup_failed: ${sourceCandidateLabel} retry_source_issue wakeup callback failed — ${message}`);
@@ -1821,9 +1894,6 @@ export function createSupervision({ db, deps, ownerActions }: {
       if (issue.status === "blocked" && issue.originKind === "mission_main_executor_unblock") {
         const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) : null;
         const sourceLabel = sourceIssue ? (sourceIssue.identifier ?? sourceIssue.id) : (issue.originId ?? "unknown-source");
-        const ownerActionBody = comments.join("\n");
-        const sourceComments = sourceIssue ? (commentsByIssueId.get(sourceIssue.id) ?? []) : [];
-        const sourceBody = sourceComments.join("\n");
         findings.push(`owner_unblock_action_blocked: ${label} is a mission owner unblock action for ${sourceLabel} but is itself blocked — ${issue.title}`);
         addRecommendation({
           type: "request_replan",
@@ -1832,16 +1902,6 @@ export function createSupervision({ db, deps, ownerActions }: {
           reason: `Owner unblock action ${label} is self-blocked; owner should choose a recovery decision instead of blocking the recovery issue`,
           safeToAutoApply: false,
         });
-        if (sourceIssue && hasRecoverableArtifactComment(sourceBody, ownerActionBody, sourceIssue.description ?? "", issue.description ?? "")) {
-          findings.push(`artifact_recovery_available: ${sourceLabel} has required artifact missing signal and candidate markdown content in comments; materialize the canonical file before retrying — ${sourceIssue.title}`);
-          addRecommendation({
-            type: "materialize_artifact_from_comment",
-            missionId: mission.id,
-            issueId: sourceIssue.id,
-            reason: `Required artifact for ${sourceLabel} appears recoverable from comment body; materialize the canonical markdown file, then retry/reconcile the workflow step`,
-            safeToAutoApply: false,
-          });
-        }
         // [terminal-mission Human Operator report — review correction] recovery issue 자체가 terminal
         //   failed/timed_out run 으로 blocked 되었을 때, mission 전체의 권위 continuation 신호를 평가해
         //   "정말 종단"이면 structured owner-decision comment + recordHumanOperatorRequestEvent channel 로
@@ -1897,7 +1957,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           addRecommendation({ type: "escalate_blocked", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs owner escalation or impossible-completion report`, safeToAutoApply: false });
         }
         if (!missionHasActiveHeartbeat) {
-          await tryDispatchWorkProductReuseWake({ sourceIssue: issue, sourceLabel: label, sourceComments: comments });
+          await tryDispatchWorkProductReuseWake({ sourceIssue: issue, sourceLabel: label });
         }
       }
     }
@@ -2040,8 +2100,8 @@ export function createSupervision({ db, deps, ownerActions }: {
         continue;
       }
       const marker = `workflow-failure:${row.run.id}:${row.stepRun.stepId}`;
-      const stepIssueComments = row.stepRun.issueId ? (commentsByIssueId.get(row.stepRun.issueId) ?? []).join("\n") : "";
-      const hasDiagnosis = oversightBodies.includes(marker) || hasDiagnosisSignal(stepIssueComments);
+      // [structured-only] oversight marker(기계 마커)만 진단 신호. 자연어 keyword 추론은 제거(fail-closed).
+      const hasDiagnosis = oversightBodies.includes(marker);
       if (!hasDiagnosis) {
         findings.push(`failed_step_without_diagnosis: run=${row.run.id} step=${row.stepRun.stepId}`);
         addRecommendation({
@@ -2086,8 +2146,8 @@ export function createSupervision({ db, deps, ownerActions }: {
       if (!(unit.kind === "plugin_workflow_run" || unit.kind === "plugin_workflow_step_run")) continue;
       if (!(unit.status === "failed" || unit.status === "timed_out")) continue;
       const marker = `unit-failure:${unit.sourceRef.type}:${unit.sourceRef.id}`;
-      const linkedIssueComments = unit.issueId ? (commentsByIssueId.get(unit.issueId) ?? []).join("\n") : "";
-      const hasDiagnosis = oversightBodies.includes(marker) || hasDiagnosisSignal(linkedIssueComments);
+      // [structured-only] oversight marker(기계 마커)만 진단 신호. 자연어 keyword 추론은 제거(fail-closed).
+      const hasDiagnosis = oversightBodies.includes(marker);
       if (hasDiagnosis) continue;
       findings.push(`failed_unit_without_diagnosis: source=${unit.sourceRef.type} id=${unit.sourceRef.id} status=${unit.status}${unit.stepId ? ` step=${unit.stepId}` : ""}`);
       addRecommendation({
@@ -2363,6 +2423,19 @@ export function createSupervision({ db, deps, ownerActions }: {
           resultStatus = "wakeup_failed";
         }
       }
+      await recordRecoveryAction({
+        db,
+        companyId: mission.companyId,
+        missionId: mission.id,
+        issueId: planIssue.id,
+        sourceIssueId: planIssue.id,
+        idempotencyKey,
+        eventType: planSubmissionMissingCandidate.kind === "rejected"
+          ? "mission_owner_plan_submission_rejected"
+          : "mission_owner_plan_submission_missing",
+        decision: "replan_mission",
+        resultStatus,
+      });
 
       if (planSubmissionMissingCandidate.kind === "rejected") {
         appliedActions.push({

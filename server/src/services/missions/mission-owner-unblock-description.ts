@@ -85,12 +85,16 @@ export function buildMissionOwnerUnblockDescription(
       currentSituation: `Source issue ${sourceLabel} is ${blockedIssue.status}; original assignee is ${blockedIssue.assigneeAgentId ?? "unassigned"}.`,
     }),
     "",
-    "Optional structured decision labels for logs/UI hints only; do not treat them as the primary control path:",
+    "Decision authority (REQUIRED control path): submit your decision through the structured API, not a comment:",
+    `POST /api/issues/{this owner-action issue id}/owner-recovery/decision`,
+    "Body schema: { decision: <one of the allowed options>, sourceIssueRef?, reworkTargetRef?, reason?, nextAction?, evidence? }",
+    "Allowed decision options:",
     ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => `- ${decision}`),
+    "The API records the authoritative structured decision bound to this company/mission/owner-action/source scope. Comments (including any 'Decision:' block below) are DISPLAY-ONLY and can no longer drive recovery — a comment alone changes nothing.",
     "",
     buildMissionOwnerDecisionFormat(),
     "",
-    "Source issue remains assigned to the original executor unless this comment explicitly chooses reassign_source_issue.",
+    "Source issue remains assigned to the original executor unless the structured decision is reassign_source_issue.",
     governanceEvidence.length > 0
       ? ["Governance evidence:", ...governanceEvidence.map((line) => `- ${line}`)].join("\n")
       : "Governance evidence: latest evidence unavailable for this owner action template.",

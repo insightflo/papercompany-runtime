@@ -72,3 +72,27 @@ export type MissionPlanQaVerdictSubmit = z.infer<typeof missionPlanQaVerdictSubm
 export type MissionOwnerPlanDecisionSubmit = z.infer<typeof missionOwnerPlanDecisionSubmitSchema>;
 export type WorkflowVerdictSubmit = z.infer<typeof workflowVerdictSubmitSchema>;
 export type WorkflowIssueComplete = z.infer<typeof workflowIssueCompleteSchema>;
+export const missionOwnerDecisionOptionSchema = z.enum([
+  "request_input",
+  "retry_source_issue",
+  "reassign_source_issue",
+  "replan_mission",
+  "escalate",
+  "report_impossible",
+  "recover_artifact",
+  "no_action_waiting",
+]);
+
+// [structured authority] mission-owner recovery 결정의 유일한 실행 권위 제출 형태.
+//   자연어 comment 는 더 이상 권위가 아니다 — 오직 이 구조 제출만 결정을 영속화한다.
+export const missionOwnerDecisionSubmitSchema = z.object({
+  decision: missionOwnerDecisionOptionSchema,
+  sourceIssueRef: z.string().trim().optional().nullable(),
+  reworkTargetRef: z.string().trim().optional().nullable(),
+  reason: z.string().trim().max(2000).optional().nullable(),
+  nextAction: z.string().trim().max(2000).optional().nullable(),
+  evidence: z.string().trim().max(4000).optional().nullable(),
+});
+
+export type MissionOwnerDecisionOption = z.infer<typeof missionOwnerDecisionOptionSchema>;
+export type MissionOwnerDecisionSubmit = z.infer<typeof missionOwnerDecisionSubmitSchema>;

@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agentWakeupRequests, agents, heartbeatRuns, issueComments, issues, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { agentWakeupRequests, agents, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 
 const executeSpy = vi.fn();
@@ -43,13 +43,13 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     await db.update(workflowStepRuns).set({ status: "pending", iterationIndex: MAX_ITER + 1, startedAt: null, completedAt: null, lastDispatchAttemptAt: null, lastDispatchAcceptedAt: null, lastDispatchErrorAt: null, lastDispatchErrorSummary: null, lastDispatchRequestId: null, metadata: {} }).where(eq(workflowStepRuns.id, s.producerStepRunId));
     await db.update(issues).set({ status: "todo", completedAt: null, updatedAt: FORWARD_APPLIED_AT }).where(eq(issues.id, s.producerIssueId));
     const payload = buildCapOverrideAuditPayload(s, overrides);
-    const [audit] = await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:${s.decisionCommentId}`, payload }).returning({ id: workflowTransitionEvents.id });
+    const [audit] = await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, eventType: "owner_cap_override_retry", layer: "workflow_validation", idempotencyKey: `cap-override:${s.ownerDecisionEventId}`, payload }).returning({ id: workflowTransitionEvents.id });
     return { s, auditId: audit!.id, payload };
   }
 
   const call = (s: Awaited<ReturnType<typeof seedCapExhaustedRun>>, wakeFn = testWake(db), overrides: Partial<{ issueId: string; ownerActionIssueId: string; missionId: string }> = {}) => dispatchSourceIssueNativeResume(db, {
     companyId: s.companyId, issueId: overrides.issueId ?? s.producerIssueId, allowBlockedIssue: true,
-    ownerAction: { ownerActionIssueId: overrides.ownerActionIssueId ?? s.ownerActionIssueId, missionId: overrides.missionId ?? s.missionId, decisionCommentId: s.decisionCommentId },
+    ownerAction: { ownerActionIssueId: overrides.ownerActionIssueId ?? s.ownerActionIssueId, missionId: overrides.missionId ?? s.missionId, decisionCommentId: s.ownerDecisionEventId },
     wakeFn,
   });
   const callProduction = (s: Awaited<ReturnType<typeof seedCapExhaustedRun>>) => dispatchSourceIssueNativeResume(db, {
@@ -60,7 +60,7 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
   });
 
   async function exactWakes(s: Awaited<ReturnType<typeof seedCapExhaustedRun>>) {
-    return db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, s.companyId), eq(agentWakeupRequests.idempotencyKey, `cap-override-wake:${s.decisionCommentId}`), eq(agentWakeupRequests.requestKind, "workflow_resume"), eq(agentWakeupRequests.workflowRunId, s.workflowRunId), eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.issueId, s.producerIssueId)));
+    return db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, s.companyId), eq(agentWakeupRequests.idempotencyKey, `cap-override-wake:${s.ownerDecisionEventId}`), eq(agentWakeupRequests.requestKind, "workflow_resume"), eq(agentWakeupRequests.workflowRunId, s.workflowRunId), eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.issueId, s.producerIssueId)));
   }
 
   async function expectAuthorityRollback(s: Awaited<ReturnType<typeof seedCapExhaustedRun>>, reason: string) {
@@ -71,7 +71,7 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     expect(issue!.completedAt).not.toBeNull();
     expect(await exactWakes(s)).toHaveLength(0);
     expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.issueId, s.producerIssueId), inArray(heartbeatRuns.status, ["queued", "running"])))).toHaveLength(0);
-    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.decisionCommentId}`));
+    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.ownerDecisionEventId}`));
     expect(audit!.payload).toEqual(expect.objectContaining({ status: "rolled_back", rollbackReason: reason }));
   }
 
@@ -113,7 +113,7 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
   it("B/sup1: same key/wakeId but wrong requestKind is not accepted proof", async () => {
     const wakeId = randomUUID();
     const { s } = await seedPending({ status: "accepted", acceptedWakeupRequestId: wakeId });
-    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId: s.companyId, agentId: s.producerAgentId, source: "test", status: "queued", requestKind: "other", workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, idempotencyKey: `cap-override-wake:${s.decisionCommentId}` });
+    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId: s.companyId, agentId: s.producerAgentId, source: "test", status: "queued", requestKind: "other", workflowRunId: s.workflowRunId, workflowStepRunId: s.producerStepRunId, issueId: s.producerIssueId, idempotencyKey: `cap-override-wake:${s.ownerDecisionEventId}` });
     expect((await call(s)).kind).toBe("report_only");
   });
 
@@ -124,13 +124,17 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     const result = await call(s, async () => { wakeCalls += 1; return true; });
     expect(result.kind).toBe("report_only");
     expect(wakeCalls).toBe(0);
-    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.decisionCommentId}`));
+    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.ownerDecisionEventId}`));
     expect((audit!.payload as Record<string, unknown>).status).toBe("pending");
   });
 
-  it("newer replan after pending audit atomically restores the prior non-runnable state", async () => {
+  it("newer structured replan after pending audit atomically restores the prior non-runnable state", async () => {
     const { s } = await seedPending({}, { producerIssueStatus: "done" });
-    await db.insert(issueComments).values({ companyId: s.companyId, issueId: s.ownerActionIssueId, authorAgentId: s.ownerAgentId, createdAt: new Date("2026-07-10T00:40:00.000Z"), body: `### Mission owner decision\nDecision: replan_mission\nSource issue: ${s.producerIssueId}\nReason: supersede retry.` });
+    await db.insert(workflowTransitionEvents).values({
+      companyId: s.companyId, missionId: s.missionId, issueId: s.ownerActionIssueId, heartbeatRunId: s.ownerDecisionHeartbeatRunId,
+      eventType: "mission_owner_decision", layer: "mission_owner_recovery", decision: "replan_mission", reason: "owner_recovery_api", reasonCode: "owner_recovery_api", createdAt: new Date("2026-07-10T00:40:00.000Z"),
+      payload: { kind: "mission_owner_decision", source: "owner_recovery_api", ownerActionIssueId: s.ownerActionIssueId, sourceIssueId: s.producerIssueId, decision: "replan_mission" },
+    });
     let wakeCalls = 0;
     const result = await call(s, async () => { wakeCalls += 1; return true; });
     expect(result.kind).toBe("report_only");
@@ -190,8 +194,8 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
       return { ...successfulAdapterResult(), exitCode: 1, errorMessage: "intentional production-path stop" };
     });
     const first = dispatchCapOverrideWake(db, {
-      companyId: s.companyId, auditId, auditIdempotencyKey: `cap-override:${s.decisionCommentId}`,
-      payload, wakeKey: `cap-override-wake:${s.decisionCommentId}`,
+      companyId: s.companyId, auditId, auditIdempotencyKey: `cap-override:${s.ownerDecisionEventId}`,
+      payload, wakeKey: `cap-override-wake:${s.ownerDecisionEventId}`,
       allowBlockedIssue: true, mode: "recover",
       afterClaim: async () => { claimed(); await resumeA; },
     });
@@ -249,7 +253,7 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     expect(await reloadStepRun(db, s.workflowRunId, PRODUCER)).toEqual(expect.objectContaining({ status: "completed", iterationIndex: MAX_ITER }));
     const [issue] = await db.select().from(issues).where(eq(issues.id, s.producerIssueId));
     expect(issue).toEqual(expect.objectContaining({ status: "done" }));
-    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.decisionCommentId}`));
+    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.ownerDecisionEventId}`));
     expect(audit!.payload).toEqual(expect.objectContaining({ status: "rolled_back", rollbackReason: "wake_not_accepted" }));
   });
   it("missing step lookup after claim releases lease to pending", async () => {
@@ -259,7 +263,7 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     const result = await call(s, async () => { wakeCalls += 1; return true; });
     expect(result.kind).toBe("report_only");
     expect(wakeCalls).toBe(0);
-    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.decisionCommentId}`));
+    const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.ownerDecisionEventId}`));
     expect((audit!.payload as Record<string, unknown>).status).toBe("pending");
   });
 });

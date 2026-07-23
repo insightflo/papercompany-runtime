@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildHumanOperatorRequestPayload,
   HUMAN_OPERATOR_REQUEST_ACTION,
+  materializeHumanOperatorRequestPayload,
   recordHumanOperatorRequestEvent,
 } from "../services/missions/human-operator-alert-events.js";
-import { buildTerminalMissionHumanOperatorComment } from "../services/missions/terminal-mission-human-operator-alert.js";
 
 vi.mock("../services/live-events.js", () => ({
   publishLiveEvent: vi.fn((event) => event),
@@ -33,11 +33,24 @@ const requestInputComment = {
   ].join("\n"),
 };
 
+const requestInputDecision = {
+  decision: "request_input" as const,
+  reason: "Browser auth is required.",
+  nextAction: "Human operator should reauthorize the session.",
+  evidence: "redirect to login page",
+};
+
+const requestInputRecord = {
+  eventId: "decision-event-1",
+  commentId: "comment-1",
+  authorAgentId: "owner-agent-1",
+};
+
 describe("human operator alert events", () => {
-  it("builds a human request payload from owner unblock request_input comments", () => {
+  it("builds a human request payload from a structured owner decision record", () => {
     const payload = buildHumanOperatorRequestPayload({
       issue: ownerIssue,
-      comment: requestInputComment,
+      record: { ...requestInputRecord, decision: requestInputDecision },
     });
 
     expect(payload).toMatchObject({
@@ -45,6 +58,7 @@ describe("human operator alert events", () => {
       issueId: "owner-issue-1",
       sourceIssueId: "source-issue-1",
       commentId: "comment-1",
+      decisionEventId: "decision-event-1",
       decision: "request_input",
       issueIdentifier: "RES-100",
       actorType: "agent",
@@ -53,17 +67,24 @@ describe("human operator alert events", () => {
     expect(payload?.reason).toContain("Browser auth");
     expect(payload?.nextAction).toContain("reauthorize");
   });
+  it("fails closed when a structured decision has no proven record author", () => {
+    expect(buildHumanOperatorRequestPayload({
+      issue: ownerIssue,
+      decision: requestInputDecision,
+    })).toBeNull();
+  });
 
   it("ignores non-owner-unblock issues", () => {
     const payload = buildHumanOperatorRequestPayload({
       issue: { ...ownerIssue, originKind: "mission_plan_qa" },
-      comment: requestInputComment,
+      decision: requestInputDecision,
+      record: requestInputRecord,
     });
 
     expect(payload).toBeNull();
   });
 
-  it("builds a human request payload from explicit natural-language operator handoff", () => {
+  it("does not infer a request from a human operator reportsTo comment", () => {
     const payload = buildHumanOperatorRequestPayload({
       issue: ownerIssue,
       comment: {
@@ -78,31 +99,17 @@ describe("human operator alert events", () => {
       },
     });
 
-    expect(payload).toMatchObject({
-      missionId: "mission-1",
-      issueId: "owner-issue-1",
-      commentId: "comment-human-handoff",
-      decision: "request_input",
-      reason: "Owner action comment names human operator as the handoff target.",
-    });
-    expect(payload?.nextAction).toContain("운영자 또는 상위 오너");
-  });
-
-  it("does not infer a request when human operator handoff is negated", () => {
-    const payload = buildHumanOperatorRequestPayload({
-      issue: ownerIssue,
-      comment: {
-        id: "comment-negated",
-        authorAgentId: "owner-agent-1",
-        authorUserId: null,
-        body: "No human operator input is required; retry is safe.",
-      },
-    });
-
     expect(payload).toBeNull();
   });
 
-  it("records and publishes the dedicated live event once per comment", async () => {
+  it("does not parse a formatted decision comment without a structured decision", () => {
+    expect(buildHumanOperatorRequestPayload({
+      issue: ownerIssue,
+      comment: requestInputComment,
+    })).toBeNull();
+  });
+
+  it("records and publishes the dedicated live event once per structured decision", async () => {
     const liveEvents = await import("../services/live-events.js");
     const rows: Array<{ id: string; details: Record<string, unknown> }> = [];
     const db = {
@@ -122,11 +129,13 @@ describe("human operator alert events", () => {
 
     const payload = await recordHumanOperatorRequestEvent(db as never, {
       issue: ownerIssue,
-      comment: requestInputComment,
+      decision: requestInputDecision,
+      record: requestInputRecord,
     });
     const duplicate = await recordHumanOperatorRequestEvent(db as never, {
       issue: ownerIssue,
-      comment: requestInputComment,
+      decision: requestInputDecision,
+      record: requestInputRecord,
     });
 
     expect(payload?.decision).toBe("request_input");
@@ -139,37 +148,38 @@ describe("human operator alert events", () => {
     }));
     expect(liveEvents.publishLiveEvent).toHaveBeenCalledTimes(1);
   });
-
-  it("routes the terminal-mission report comment through the same escalate payload path", () => {
-    const body = buildTerminalMissionHumanOperatorComment({
-      issueId: ownerIssue.id,
-      issueIdentifier: ownerIssue.identifier,
-      missionTitle: "Terminal failure mission",
-      sourceIssueIdentifier: "RES-42",
-      failedRuns: [{ id: "run-1", status: "timed_out", errorCode: "execution_stale_timeout" }],
-    });
-
-    // evidence must be bounded and must never carry raw stderr / JSON / secrets
-    expect(body).not.toContain("stderr");
-    expect(body).not.toContain("{");
-    expect(body).not.toContain("SECRET");
-    expect(body).toContain("Decision: escalate");
-
-    const payload = buildHumanOperatorRequestPayload({
-      issue: ownerIssue,
-      comment: { id: "terminal-report-comment", authorAgentId: null, authorUserId: null, body },
-    });
-
-    expect(payload).toMatchObject({
+  it("persists a terminal system report with its exact workflow transition event id", async () => {
+    const rows: Array<{ id: string; details: Record<string, unknown> }> = [];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => Promise.resolve(rows),
+        }),
+      }),
+      insert: () => ({
+        values: (value: { details: Record<string, unknown> }) => {
+          rows.push({ id: `activity-${rows.length + 1}`, details: value.details });
+          return Promise.resolve();
+        },
+      }),
+    };
+    const terminalPayload = {
       missionId: "mission-1",
       issueId: "owner-issue-1",
-      sourceIssueId: "source-issue-1",
-      commentId: "terminal-report-comment",
-      decision: "escalate",
-      actorType: "system",
-    });
-    expect(payload?.reason).toContain("cannot continue automatically");
-    expect(payload?.evidence).toContain("continuation=none");
-    expect(payload?.evidence).toContain("timed_out");
+      decisionEventId: "terminal-transition-event-1",
+      decision: "escalate" as const,
+      reason: "Automatic continuation is exhausted.",
+      actorType: "system" as const,
+      actorId: "system",
+    };
+
+    const recorded = await materializeHumanOperatorRequestPayload(db as never, terminalPayload, "company-1");
+    const duplicate = await materializeHumanOperatorRequestPayload(db as never, terminalPayload, "company-1");
+
+    expect(recorded).toMatchObject({ inserted: true, payload: { decisionEventId: "terminal-transition-event-1" } });
+    expect(duplicate).toMatchObject({ inserted: false, payload: { decisionEventId: "terminal-transition-event-1" } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.details.decisionEventId).toBe("terminal-transition-event-1");
   });
+
 });

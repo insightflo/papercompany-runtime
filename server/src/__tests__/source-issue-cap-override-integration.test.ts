@@ -6,7 +6,7 @@
 //   잔재가 남지 않는다(supervision 이 cap-override candidate 에서 선재 reopen 하지 않기 때문).
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agentWakeupRequests, issueComments, issues } from "@paperclipai/db";
+import { agentWakeupRequests, issues, workflowTransitionEvents } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 import { dispatchSourceIssueNativeResume } from "../services/workflow/source-issue-native-resume.js";
 import { missionService } from "../services/missions.js";
@@ -45,7 +45,7 @@ describeEP("owner decision comment → supervision → native cap-override (real
     return svc.runMainExecutorSupervision({ missionId, now, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
   }
 
-  it("SUCCESS: real owner retry_source_issue comment drives supervision → cap-override (iter+1, run running, step pending, exact wake row, issue todo)", async () => {
+  it("SUCCESS: structured owner retry_source_issue drives supervision → cap-override (iter+1, run running, step pending, exact wake row, issue todo)", async () => {
     const s = await seedCapExhaustedRun(db);
     await runSupervision(s.missionId, s.companyId, new Date("2026-07-10T00:25:00.000Z"));
 
@@ -59,11 +59,11 @@ describeEP("owner decision comment → supervision → native cap-override (real
     // the real heartbeat may then promote todo→in_progress — both prove the producer is runnable post-override.
     expect(["todo", "in_progress"]).toContain(issue.status);
     expect(issue.completedAt).toBeNull();
-    const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.requestKind, "workflow_resume"), eq(agentWakeupRequests.idempotencyKey, `cap-override-wake:${s.decisionCommentId}`)));
+    const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.requestKind, "workflow_resume"), eq(agentWakeupRequests.idempotencyKey, `cap-override-wake:${s.ownerDecisionEventId}`)));
     expect(wakes).toHaveLength(1);
     const events = await auditEvents(db, s.companyId);
     expect(events).toHaveLength(1);
-    expect(events[0]!.idempotencyKey).toBe(`cap-override:${s.decisionCommentId}`);
+    expect(events[0]!.idempotencyKey).toBe(`cap-override:${s.ownerDecisionEventId}`);
     expect((events[0]!.payload as Record<string, unknown>).status).toBe("accepted");
   });
 
@@ -80,14 +80,12 @@ describeEP("owner decision comment → supervision → native cap-override (real
     expect(await auditEvents(db, s.companyId)).toHaveLength(0);
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.workflowStepRunId, s.producerStepRunId), eq(agentWakeupRequests.requestKind, "workflow_resume")))).toHaveLength(0);
   });
-  it("D resolver: newer recognized replan supersedes retry; supervision does not pass stale retry decision or wake producer", async () => {
+  it("D resolver: newer structured replan supersedes retry; supervision does not pass stale retry decision or wake producer", async () => {
     const s = await seedCapExhaustedRun(db);
-    await db.insert(issueComments).values({
-      companyId: s.companyId,
-      issueId: s.ownerActionIssueId,
-      authorAgentId: s.ownerAgentId,
-      createdAt: new Date("2026-07-10T00:40:00.000Z"),
-      body: `### Mission owner decision\nDecision: replan_mission\nSource issue: ${s.producerIssueId}\nReason: supersede retry.`,
+    await db.insert(workflowTransitionEvents).values({
+      companyId: s.companyId, missionId: s.missionId, issueId: s.ownerActionIssueId, heartbeatRunId: s.ownerDecisionHeartbeatRunId,
+      eventType: "mission_owner_decision", layer: "mission_owner_recovery", decision: "replan_mission", reason: "owner_recovery_api", reasonCode: "owner_recovery_api", createdAt: new Date("2026-07-10T00:40:00.000Z"),
+      payload: { kind: "mission_owner_decision", source: "owner_recovery_api", ownerActionIssueId: s.ownerActionIssueId, sourceIssueId: s.producerIssueId, decision: "replan_mission" },
     });
     await runSupervision(s.missionId, s.companyId, new Date("2026-07-10T00:45:00.000Z"));
     expect((await reloadRun(db, s.workflowRunId)).status).toBe("failed");

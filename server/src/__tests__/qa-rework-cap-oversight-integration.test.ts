@@ -1,12 +1,12 @@
 // [ scope ] This test verifies EXACT TARGET RESOLUTION ONLY — that the cap-oversight
-//   description carries the producer issue ID as `Rework target` and that supervision's
-//   retry_source_issue decision parser resolves it to the producer, not the oversight issue.
+//   description carries the producer issue ID as `Rework target` and that supervision
+//   resolves the structured retry_source_issue decision to the producer, not the oversight issue.
 //   It does NOT assert actual beyond-cap retry execution success (real callback + iteration/
 //   run/queue/rollback). That end-to-end verification is deferred to final integration where
 //   the real heartbeat callback and workflow engine participate.
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDb, issueComments, issues, missions } from "@paperclipai/db";
+import { createDb, heartbeatRuns, issues, missions } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -15,7 +15,7 @@ import {
   ensureQaReworkCapOversightIssue,
   isQaReworkCapOversightIssue,
 } from "../services/missions/qa-rework-cap-oversight.js";
-import { extractMissionOwnerDecisionFromText } from "../services/missions/mission-owner-recovery-events.js";
+import { loadLatestMissionOwnerDecision, recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import { createOwnerActions } from "../services/missions/owner-actions.js";
 import { missionService } from "../services/missions.js";
 import {
@@ -92,22 +92,32 @@ describeEP("QA cap oversight producer retry target resolution (scope: target onl
     expect(isQaReworkCapOversightIssue(capResult!.issue.description)).toBe(true);
     expect(capResult!.issue.description).toContain(`Rework target: ${seed.producerIssueId}`);
 
-    // Parser extracts reworkTargetRef = producerIssueId.
-    const decisionText = [
-      "### Mission owner decision",
-      "Decision: retry_source_issue",
-      `Rework target: ${seed.producerIssueId}`,
-      "Reason: owner override beyond cap",
-    ].join("\n");
-    const parsed = extractMissionOwnerDecisionFromText(decisionText);
-    expect(parsed?.decision).toBe("retry_source_issue");
-    expect(parsed?.reworkTargetRef).toBe(seed.producerIssueId);
-
-    // Post the decision and run supervision — verify the retry CALLBACK targets the producer.
-    await db.insert(issueComments).values({
-      companyId: base.companyId, issueId: capResult!.issue.id, authorAgentId: base.agentId,
-      body: decisionText,
+    const [ownerDecisionRun] = await db.insert(heartbeatRuns).values({
+      companyId: base.companyId,
+      agentId: base.agentId,
+      issueId: capResult!.issue.id,
+      status: "succeeded",
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    }).returning({ id: heartbeatRuns.id });
+    // The structured event carries the exact producer source issue as Rework target.
+    await recordMissionOwnerDecision({
+      db,
+      issue: { id: capResult!.issue.id, companyId: base.companyId, missionId: base.missionId },
+      submission: {
+        decision: "retry_source_issue",
+        reworkTargetRef: seed.producerIssueId,
+        reason: "owner override beyond cap",
+      },
+      heartbeatRunId: ownerDecisionRun!.id,
     });
+    const decision = await loadLatestMissionOwnerDecision({
+      db,
+      companyId: base.companyId,
+      ownerActionIssueId: capResult!.issue.id,
+    });
+    expect(decision?.decision.decision).toBe("retry_source_issue");
+    expect(decision?.decision.reworkTargetRef).toBe(seed.producerIssueId);
     const retryWake = vi.fn().mockResolvedValue({ status: "dispatched" });
     const svc = missionService(db, {
       onOwnerActionCreated: async () => ({ id: "noop" }),

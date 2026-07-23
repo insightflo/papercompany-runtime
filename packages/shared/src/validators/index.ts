@@ -353,6 +353,10 @@ export {
   type WorkflowNonblockingAcceptance,
   type WorkflowVerdictSubmit,
   type WorkflowIssueComplete,
+  missionOwnerDecisionOptionSchema,
+  missionOwnerDecisionSubmitSchema,
+  type MissionOwnerDecisionOption,
+  type MissionOwnerDecisionSubmit,
 } from "./workflow-agent-api.js";
 
 export {

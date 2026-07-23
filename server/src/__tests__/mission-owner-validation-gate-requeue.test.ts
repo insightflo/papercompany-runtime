@@ -20,6 +20,7 @@ import {
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { missionService } from "../services/missions.js";
+import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -118,11 +119,32 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
       createdAt: input.heartbeatFinishedAt,
     });
   }
+  // Display-only comment remains for UI/history fixtures; execution authority is the structured ledger.
   await db.insert(issueComments).values({
     companyId: ids.companyId,
     issueId: ids.ownerActionId,
     authorAgentId: ids.ownerAgentId,
     body: ["### Mission owner decision", "Decision: retry_source_issue", "Source issue: RES-884", "Reason: approval is blocked; retry after artifact revision"].join("\n"),
+  });
+  const ownerRunFinishedAt = new Date("2026-07-04T01:25:00.000Z");
+  const [ownerHeartbeatRun] = await db.insert(heartbeatRuns).values({
+    companyId: ids.companyId,
+    agentId: ids.ownerAgentId,
+    issueId: ids.ownerActionId,
+    status: "succeeded",
+    startedAt: ownerRunFinishedAt,
+    finishedAt: ownerRunFinishedAt,
+  }).returning({ id: heartbeatRuns.id });
+  await recordMissionOwnerDecision({
+    db,
+    issue: { id: ids.ownerActionId, companyId: ids.companyId, missionId: ids.missionId },
+    submission: {
+      decision: "retry_source_issue",
+      sourceIssueRef: "RES-884",
+      reason: "approval is blocked; retry after artifact revision",
+    },
+    sourceIssueId: ids.approvalIssueId,
+    heartbeatRunId: ownerHeartbeatRun!.id,
   });
   if (input.verdictBody !== null) {
     await db.insert(issueComments).values({

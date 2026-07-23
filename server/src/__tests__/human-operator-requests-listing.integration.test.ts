@@ -88,7 +88,7 @@ describePg("listCompanyHumanOperatorRequests source routing", () => {
         missionId,
         issueId: ownerIssueId,
         sourceIssueId,
-        commentId: randomUUID(),
+        decisionEventId: randomUUID(),
         decision: "escalate",
         reason: "preview_url workProduct missing",
         actorType: "agent",
@@ -172,7 +172,7 @@ describePg("listCompanyHumanOperatorRequests source routing", () => {
       details: {
         missionId,
         issueId: ownerIssueId,
-        commentId: randomUUID(),
+        decisionEventId: randomUUID(),
         decision: "request_input",
         actorType: "agent",
         actorId: agentId,

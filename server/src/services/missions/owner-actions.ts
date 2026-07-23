@@ -13,7 +13,7 @@ import { issueService } from "../issues.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService } from "../mission-plan-artifacts.js";
 import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
-import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, extractLatestMissionOwnerDecision, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
+import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
@@ -29,6 +29,7 @@ import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
 import type { MissionServiceDeps } from "../missions.js";
 import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
+import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 
 export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceDeps }) {
 
@@ -553,13 +554,12 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       .orderBy(asc(issues.createdAt), asc(issues.id));
     for (const existing of existingRows) {
       if (options.renewAfterNoActionWaiting && isTerminalIssueStatus(existing.status)) {
-        const existingComments = await db
-          .select({ body: issueComments.body })
-          .from(issueComments)
-          .where(eq(issueComments.issueId, existing.id))
-          .orderBy(asc(issueComments.createdAt), asc(issueComments.id));
-        const latestDecision = extractLatestMissionOwnerDecision(existingComments.map((comment) => comment.body));
-        if (latestDecision?.decision === "no_action_waiting") continue;
+        const latestDecision = await loadLatestMissionOwnerDecision({
+          db,
+          companyId: mission.companyId,
+          ownerActionIssueId: existing.id,
+        });
+        if (latestDecision?.decision.decision === "no_action_waiting") continue;
       }
       return existing;
     }

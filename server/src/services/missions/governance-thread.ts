@@ -19,6 +19,7 @@ import { and, eq, inArray, or } from "drizzle-orm";
 import type { MissionExecutionUnit, MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listMissionExecutionSourceSnapshots, normalizeMissionExecutionStatus } from "./mission-execution-sources.js";
 import { missionOwnerHumanReportEvents } from "./mission-owner-human-report-events.js";
+import { loadMissionOwnerDecisions } from "./mission-owner-recovery-ledger.js";
 
 export type GovernanceThreadEventType =
   | "status_changed"
@@ -56,7 +57,8 @@ export type GovernanceThreadSourceType =
   | "mission_plan_artifact"
   | "approval"
   | "approval_comment"
-  | "issue_approval";
+  | "issue_approval"
+  | "workflow_transition_event";
 
 export type GovernanceThreadSourceRef = {
   type: GovernanceThreadSourceType;
@@ -141,6 +143,7 @@ const SOURCE_PRIORITY: Record<GovernanceThreadSourceType, number> = {
   plugin_workflow_step_run: 13,
   heartbeat_run: 20,
   agent_wakeup_request: 21,
+  workflow_transition_event: 22,
   approval: 30,
   issue_approval: 31,
   approval_comment: 32,
@@ -665,11 +668,27 @@ export async function listMissionGovernanceThread(
   }
 
   if (issueIdList.length > 0) {
-    const scopedIssueComments = await db.select().from(issueComments).where(and(eq(issueComments.companyId, input.companyId), inArray(issueComments.issueId, issueIdList)));
+    const [scopedIssueComments, ownerDecisionRecords] = await Promise.all([
+      db.select().from(issueComments).where(and(eq(issueComments.companyId, input.companyId), inArray(issueComments.issueId, issueIdList))),
+      loadMissionOwnerDecisions({
+        db,
+        companyId: input.companyId,
+        missionId: input.missionId,
+        issueIds,
+      }),
+    ]);
     events.push(...missionOwnerHumanReportEvents({
       missionId: input.missionId,
       issueIds,
-      comments: scopedIssueComments,
+      decisions: ownerDecisionRecords.map((record) => ({
+        companyId: input.companyId,
+        issueId: record.ownerActionIssueId,
+        eventId: record.eventId,
+        commentId: record.commentId,
+        createdAt: record.createdAt,
+        authorAgentId: record.authorAgentId,
+        decision: record.decision,
+      })),
     }));
     for (const comment of scopedIssueComments) {
       events.push({
