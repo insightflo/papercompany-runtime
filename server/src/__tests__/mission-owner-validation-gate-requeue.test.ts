@@ -45,10 +45,56 @@ async function insertAgent(db: Db, input: { id: string; companyId: string; name:
   });
 }
 
+/** Official workflow_api verdict: same-company/same-QA-issue heartbeat + exact run/step binding. */
+async function insertOfficialQaVerdict(db: Db, input: {
+  companyId: string;
+  missionId: string;
+  workflowRunId: string;
+  workflowStepRunId: string;
+  qaIssueId: string;
+  qaAgentId: string;
+  verdict: "pass" | "request_changes";
+  createdAt: Date;
+}) {
+  const [qaHeartbeat] = await db.insert(heartbeatRuns).values({
+    companyId: input.companyId,
+    agentId: input.qaAgentId,
+    issueId: input.qaIssueId,
+    status: "succeeded",
+    startedAt: input.createdAt,
+    finishedAt: input.createdAt,
+  }).returning({ id: heartbeatRuns.id });
+  await db.insert(workflowTransitionEvents).values({
+    companyId: input.companyId,
+    missionId: input.missionId,
+    workflowRunId: input.workflowRunId,
+    workflowStepRunId: input.workflowStepRunId,
+    issueId: input.qaIssueId,
+    heartbeatRunId: qaHeartbeat!.id,
+    eventType: "workflow_validation_verdict",
+    layer: "workflow_validation",
+    verdict: input.verdict,
+    decision: input.verdict,
+    reason: "workflow_api",
+    reasonCode: "workflow_api",
+    idempotencyKey: `validation-gate-requeue:${input.workflowStepRunId}:${input.verdict}:${input.createdAt.toISOString()}`,
+    payload: {
+      kind: "workflow_validation_verdict",
+      workflowRunId: input.workflowRunId,
+      stepRunId: input.workflowStepRunId,
+      issueId: input.qaIssueId,
+      verdict: input.verdict,
+    },
+    createdAt: input.createdAt,
+  });
+  return qaHeartbeat!.id;
+}
+
 async function seedApprovalWithReadabilityGate(db: Db, input: {
   productUpdatedAt: Date;
   verdictCreatedAt: Date;
-  verdictBody?: string | null;
+  /** Display-only QA comment body; never execution authority. null = no comment. */
+  displayVerdictComment?: string | null;
   heartbeatFinishedAt?: Date;
 }) {
   const ids = {
@@ -109,6 +155,7 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
     updatedAt: input.productUpdatedAt,
   });
   if (input.heartbeatFinishedAt) {
+    // Non-authoritative succeeded QA heartbeat (no structured verdict event).
     await db.insert(heartbeatRuns).values({
       companyId: ids.companyId,
       agentId: ids.qaAgentId,
@@ -119,7 +166,7 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
       createdAt: input.heartbeatFinishedAt,
     });
   }
-  // Display-only comment remains for UI/history fixtures; execution authority is the structured ledger.
+  // Display-only owner decision comment; structured ledger is recorded below.
   await db.insert(issueComments).values({
     companyId: ids.companyId,
     issueId: ids.ownerActionId,
@@ -146,12 +193,12 @@ async function seedApprovalWithReadabilityGate(db: Db, input: {
     sourceIssueId: ids.approvalIssueId,
     heartbeatRunId: ownerHeartbeatRun!.id,
   });
-  if (input.verdictBody !== null) {
+  if (input.displayVerdictComment !== null && input.displayVerdictComment !== undefined) {
     await db.insert(issueComments).values({
       companyId: ids.companyId,
       issueId: ids.qaIssueId,
       authorAgentId: ids.qaAgentId,
-      body: input.verdictBody ?? "REQUEST_CHANGES: add a glossary before approval.",
+      body: input.displayVerdictComment,
       createdAt: input.verdictCreatedAt,
     });
   }
@@ -209,6 +256,7 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
     const ids = await seedApprovalWithReadabilityGate(db, {
       productUpdatedAt: new Date("2026-07-04T01:20:00.000Z"),
       verdictCreatedAt: new Date("2026-07-04T01:10:00.000Z"),
+      displayVerdictComment: "REQUEST_CHANGES: add a glossary before approval.",
     });
     const { result, wakeups } = await runSupervision(db, ids.missionId);
 
@@ -224,23 +272,20 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
     expect(result.appliedActions).toContainEqual(expect.objectContaining({ sourceIssueId: ids.qaIssueId, resultStatus: "todo" }));
   });
 
-  it("keeps an official REQUEST_CHANGES verdict authoritative over a PASS comment", async () => {
+  it("keeps an official structured REQUEST_CHANGES authoritative over a PASS comment", async () => {
     const ids = await seedApprovalWithReadabilityGate(db, {
       productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
       verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
-      verdictBody: "PASS",
+      displayVerdictComment: "PASS",
     });
-    await db.insert(workflowTransitionEvents).values({
+    await insertOfficialQaVerdict(db, {
       companyId: ids.companyId,
       missionId: ids.missionId,
       workflowRunId: ids.workflowRunId,
       workflowStepRunId: ids.qaStepRunId,
-      issueId: ids.qaIssueId,
-      eventType: "workflow_validation_verdict",
-      layer: "workflow_validation",
+      qaIssueId: ids.qaIssueId,
+      qaAgentId: ids.qaAgentId,
       verdict: "request_changes",
-      decision: "request_changes",
-      reason: "workflow_api",
       createdAt: new Date("2026-07-04T01:19:00.000Z"),
     });
     const { result, wakeups } = await runSupervision(db, ids.missionId);
@@ -249,6 +294,7 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
     const [approvalIssue] = await db.select().from(issues).where(eq(issues.id, ids.approvalIssueId));
     const approvalComments = await db.select().from(issueComments).where(eq(issueComments.issueId, ids.approvalIssueId));
 
+    // Fresh structured RC blocks approval retry (does not requeue; waits for PASS or producer rework).
     expect(wakeups).toEqual([]);
     expect(qaIssue).toEqual(expect.objectContaining({ status: "done" }));
     expect(approvalIssue).toEqual(expect.objectContaining({ status: "blocked" }));
@@ -257,63 +303,65 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
     expect(result.appliedActions.some((action) => action.type === "owner_decision_retry_source_issue")).toBe(false);
   });
 
-  it("blocks approval retry without requeueing QA after a fresh succeeded QA heartbeat with no explicit PASS", async () => {
+  it("requeues QA when only a PASS comment exists (comment is not authority)", async () => {
     const ids = await seedApprovalWithReadabilityGate(db, {
       productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
       verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
-      verdictBody: null,
+      displayVerdictComment: "PASS",
+    });
+    const { result, wakeups } = await runSupervision(db, ids.missionId);
+
+    const [qaIssue] = await db.select().from(issues).where(eq(issues.id, ids.qaIssueId));
+    const [approvalIssue] = await db.select().from(issues).where(eq(issues.id, ids.approvalIssueId));
+
+    expect(wakeups).toEqual([{ sourceIssueId: ids.qaIssueId, targetAgentId: ids.qaAgentId }]);
+    expect(qaIssue).toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
+    expect(approvalIssue).toEqual(expect.objectContaining({ status: "blocked" }));
+    expect(result.findings.join("\n")).toContain("owner_action_validation_gate_not_passed");
+    expect(result.appliedActions).toContainEqual(expect.objectContaining({ sourceIssueId: ids.qaIssueId, resultStatus: "todo" }));
+  });
+
+  it("requeues QA after a succeeded QA heartbeat with no structured verdict", async () => {
+    const ids = await seedApprovalWithReadabilityGate(db, {
+      productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
+      verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
+      displayVerdictComment: null,
       heartbeatFinishedAt: new Date("2026-07-04T01:20:00.000Z"),
     });
     const { result, wakeups } = await runSupervision(db, ids.missionId);
 
     const [qaIssue] = await db.select().from(issues).where(eq(issues.id, ids.qaIssueId));
-    const approvalComments = await db.select().from(issueComments).where(eq(issueComments.issueId, ids.approvalIssueId));
+    const [approvalIssue] = await db.select().from(issues).where(eq(issues.id, ids.approvalIssueId));
 
-    expect(wakeups).toEqual([]);
-    expect(qaIssue).toEqual(expect.objectContaining({ status: "done" }));
-    expect(approvalComments.map((comment) => comment.body).join("\n")).toContain("Mission owner retry blocked by validation gate");
-    expect(result.appliedActions.some((action) => action.type === "owner_decision_retry_source_issue")).toBe(false);
+    expect(wakeups).toEqual([{ sourceIssueId: ids.qaIssueId, targetAgentId: ids.qaAgentId }]);
+    expect(qaIssue).toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
+    expect(approvalIssue).toEqual(expect.objectContaining({ status: "blocked" }));
+    expect(result.findings.join("\n")).toContain("owner_action_validation_gate_not_passed");
+    expect(result.appliedActions).toContainEqual(expect.objectContaining({ sourceIssueId: ids.qaIssueId, resultStatus: "todo" }));
   });
 
-  it("allows the original approval retry when the upstream QA gate has a current PASS", async () => {
+  it("allows the approval retry from an official structured PASS ledger event", async () => {
     const ids = await seedApprovalWithReadabilityGate(db, {
       productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
       verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
-      verdictBody: "PASS",
+      displayVerdictComment: null,
     });
-    const { result, wakeups } = await runSupervision(db, ids.missionId);
+    await insertOfficialQaVerdict(db, {
+      companyId: ids.companyId,
+      missionId: ids.missionId,
+      workflowRunId: ids.workflowRunId,
+      workflowStepRunId: ids.qaStepRunId,
+      qaIssueId: ids.qaIssueId,
+      qaAgentId: ids.qaAgentId,
+      verdict: "pass",
+      createdAt: new Date("2026-07-04T01:20:00.000Z"),
+    });
 
+    const { result, wakeups } = await runSupervision(db, ids.missionId);
     const [approvalIssue] = await db.select().from(issues).where(eq(issues.id, ids.approvalIssueId));
 
     expect(wakeups).toEqual([{ sourceIssueId: ids.approvalIssueId, targetAgentId: ids.approvalAgentId }]);
     expect(approvalIssue).toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
     expect(result.appliedActions).toContainEqual(expect.objectContaining({ sourceIssueId: ids.approvalIssueId, resultStatus: "todo" }));
-  });
-
-  it("allows the approval retry from an official ledger PASS", async () => {
-    const ids = await seedApprovalWithReadabilityGate(db, {
-      productUpdatedAt: new Date("2026-07-04T01:10:00.000Z"),
-      verdictCreatedAt: new Date("2026-07-04T01:20:00.000Z"),
-      verdictBody: null,
-    });
-    await db.insert(workflowTransitionEvents).values({
-      companyId: ids.companyId,
-      missionId: ids.missionId,
-      workflowRunId: ids.workflowRunId,
-      workflowStepRunId: ids.qaStepRunId,
-      issueId: ids.qaIssueId,
-      eventType: "workflow_validation_verdict",
-      layer: "workflow_validation",
-      verdict: "pass",
-      decision: "pass",
-      reason: "workflow_api",
-      createdAt: new Date("2026-07-04T01:20:00.000Z"),
-    });
-
-    const { wakeups } = await runSupervision(db, ids.missionId);
-    const [approvalIssue] = await db.select().from(issues).where(eq(issues.id, ids.approvalIssueId));
-
-    expect(wakeups).toEqual([{ sourceIssueId: ids.approvalIssueId, targetAgentId: ids.approvalAgentId }]);
-    expect(approvalIssue).toEqual(expect.objectContaining({ status: "todo", completedAt: null }));
   });
 });

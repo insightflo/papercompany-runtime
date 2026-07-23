@@ -27,6 +27,7 @@ export type MissionOwnerDecisionSubmission = {
   readonly decision: MissionOwnerDecisionOption;
   readonly sourceIssueRef?: string;
   readonly reworkTargetRef?: string;
+  readonly targetAgentId?: string;
   readonly reason?: string;
   readonly nextAction?: string;
   readonly evidence?: string;
@@ -52,10 +53,13 @@ type OwnerActionIssue = {
   readonly missionId: string | null;
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function normalizeSubmission(raw: {
   decision: string;
   sourceIssueRef?: string | null;
   reworkTargetRef?: string | null;
+  targetAgentId?: string | null;
   reason?: string | null;
   nextAction?: string | null;
   evidence?: string | null;
@@ -65,10 +69,13 @@ function normalizeSubmission(raw: {
     const normalized = typeof value === "string" ? value.trim() : "";
     return normalized ? normalized : undefined;
   };
+  const targetAgentId = trimmed(raw.targetAgentId);
+  if (targetAgentId && !UUID_RE.test(targetAgentId)) return null;
   return {
     decision: raw.decision as MissionOwnerDecisionOption,
     ...(trimmed(raw.sourceIssueRef) ? { sourceIssueRef: trimmed(raw.sourceIssueRef) } : {}),
     ...(trimmed(raw.reworkTargetRef) ? { reworkTargetRef: trimmed(raw.reworkTargetRef) } : {}),
+    ...(targetAgentId ? { targetAgentId } : {}),
     ...(trimmed(raw.reason) ? { reason: trimmed(raw.reason) } : {}),
     ...(trimmed(raw.nextAction) ? { nextAction: trimmed(raw.nextAction) } : {}),
     ...(trimmed(raw.evidence) ? { evidence: trimmed(raw.evidence) } : {}),
@@ -79,6 +86,7 @@ function submissionToDecision(submission: MissionOwnerDecisionSubmission): Extra
   const decision: ExtractedMissionOwnerDecision = { decision: submission.decision };
   if (submission.sourceIssueRef) decision.sourceIssueRef = submission.sourceIssueRef;
   if (submission.reworkTargetRef) decision.reworkTargetRef = submission.reworkTargetRef;
+  if (submission.targetAgentId) decision.targetAgentId = submission.targetAgentId;
   if (submission.reason) decision.reason = submission.reason;
   if (submission.nextAction) decision.nextAction = submission.nextAction;
   if (submission.evidence) decision.evidence = submission.evidence;
@@ -90,6 +98,7 @@ function decisionPayloadFingerprint(submission: MissionOwnerDecisionSubmission):
     submission.decision,
     submission.sourceIssueRef ?? null,
     submission.reworkTargetRef ?? null,
+    submission.targetAgentId ?? null,
     submission.reason ?? null,
     submission.nextAction ?? null,
     submission.evidence ?? null,
@@ -133,6 +142,7 @@ export async function recordMissionOwnerDecision(input: {
     decision: input.submission.decision,
     ...(input.submission.sourceIssueRef ? { sourceIssueRef: input.submission.sourceIssueRef } : {}),
     ...(input.submission.reworkTargetRef ? { reworkTargetRef: input.submission.reworkTargetRef } : {}),
+    ...(input.submission.targetAgentId ? { targetAgentId: input.submission.targetAgentId } : {}),
     ...(input.submission.reason ? { reason: input.submission.reason } : {}),
     ...(input.submission.nextAction ? { nextAction: input.submission.nextAction } : {}),
     ...(input.submission.evidence ? { evidence: input.submission.evidence } : {}),
@@ -239,6 +249,7 @@ export async function loadLatestMissionOwnerDecision(input: {
       decision: typeof payload.decision === "string" ? payload.decision : "",
       sourceIssueRef: typeof payload.sourceIssueRef === "string" ? payload.sourceIssueRef : null,
       reworkTargetRef: typeof payload.reworkTargetRef === "string" ? payload.reworkTargetRef : null,
+      targetAgentId: typeof payload.targetAgentId === "string" ? payload.targetAgentId : null,
       reason: typeof payload.reason === "string" ? payload.reason : null,
       nextAction: typeof payload.nextAction === "string" ? payload.nextAction : null,
       evidence: typeof payload.evidence === "string" ? payload.evidence : null,
@@ -272,6 +283,7 @@ function rowToDecisionRecord(row: {
     decision: typeof payload.decision === "string" ? payload.decision : "",
     sourceIssueRef: typeof payload.sourceIssueRef === "string" ? payload.sourceIssueRef : null,
     reworkTargetRef: typeof payload.reworkTargetRef === "string" ? payload.reworkTargetRef : null,
+    targetAgentId: typeof payload.targetAgentId === "string" ? payload.targetAgentId : null,
     reason: typeof payload.reason === "string" ? payload.reason : null,
     nextAction: typeof payload.nextAction === "string" ? payload.nextAction : null,
     evidence: typeof payload.evidence === "string" ? payload.evidence : null,

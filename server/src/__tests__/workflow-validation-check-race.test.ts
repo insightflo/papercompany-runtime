@@ -14,6 +14,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -51,12 +52,14 @@ describeEmbeddedPostgres("workflow validation check race", () => {
   afterEach(async () => {
     heartbeatWakeup.mockReset();
     await db.delete(activityLog);
+    await db.delete(workflowTransitionEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
-    await db.delete(issueComments);
     await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
+    // production may dual-write display comments during sync; clear before issues.
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missions);
     await db.delete(agents);
@@ -67,19 +70,46 @@ describeEmbeddedPostgres("workflow validation check race", () => {
     await tempDb?.cleanup();
   });
 
-  async function addQaVerdictComment(
-    issueId: string,
-    companyId: string,
-    qaAgentId: string,
-    verdict: "REQUEST_CHANGES" | "PASS",
-    createdAt: string,
-  ) {
-    await db.insert(issueComments).values({
-      companyId,
-      issueId,
-      authorAgentId: qaAgentId,
-      body: `## QA verdict\n${verdict}\n\nEvidence checked.`,
-      createdAt: new Date(createdAt),
+  async function recordOfficialQaVerdict(input: {
+    issueId: string;
+    companyId: string;
+    qaAgentId: string;
+    workflowRunId: string;
+    workflowStepRunId: string;
+    verdict: "request_changes" | "pass";
+    createdAt: string;
+  }) {
+    const heartbeatRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: heartbeatRunId,
+      companyId: input.companyId,
+      agentId: input.qaAgentId,
+      issueId: input.issueId,
+      status: "succeeded",
+      startedAt: new Date(input.createdAt),
+      finishedAt: new Date(input.createdAt),
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId: input.companyId,
+      workflowRunId: input.workflowRunId,
+      workflowStepRunId: input.workflowStepRunId,
+      issueId: input.issueId,
+      heartbeatRunId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict: input.verdict,
+      decision: input.verdict,
+      reason: "workflow_api",
+      reasonCode: "workflow_api",
+      idempotencyKey: `race-verdict:${input.workflowStepRunId}:${input.verdict}:${input.createdAt}`,
+      payload: {
+        kind: "workflow_validation_verdict",
+        workflowRunId: input.workflowRunId,
+        stepRunId: input.workflowStepRunId,
+        issueId: input.issueId,
+        verdict: input.verdict,
+      },
+      createdAt: new Date(input.createdAt),
     });
   }
 
@@ -215,7 +245,17 @@ describeEmbeddedPostgres("workflow validation check race", () => {
     expect(rows.find((row) => row.stepId === "draft-beginner-report-outline")).toMatchObject({ status: "pending", issueId: null });
     expect(heartbeatWakeup).not.toHaveBeenCalled();
 
-    await addQaVerdictComment(auditIssueId, companyId, auditAgentId, "REQUEST_CHANGES", "2026-07-06T00:24:13.083Z");
+    const auditStepRunId = rows.find((row) => row.stepId === "audit-source-coverage")?.id;
+    if (!auditStepRunId) throw new Error("missing audit step run");
+    await recordOfficialQaVerdict({
+      issueId: auditIssueId,
+      companyId,
+      qaAgentId: auditAgentId,
+      workflowRunId: runId,
+      workflowStepRunId: auditStepRunId,
+      verdict: "request_changes",
+      createdAt: "2026-07-06T00:24:13.083Z",
+    });
     await syncWorkflowRunForIssue(db, auditIssueId);
     rows = await stepRuns(runId);
     expect(rows.find((row) => row.stepId === "collect-ai-news-evidence")).toMatchObject({ status: "pending", iterationIndex: 1 });
@@ -252,7 +292,18 @@ describeEmbeddedPostgres("workflow validation check race", () => {
     expect(rows.find((row) => row.stepId === "draft-beginner-report-outline")).toMatchObject({ status: "pending", issueId: null });
 
     heartbeatWakeup.mockClear();
-    await addQaVerdictComment(auditIssueId, companyId, auditAgentId, "PASS", "2026-07-06T00:40:00.000Z");
+    rows = await stepRuns(runId);
+    const reopenedAuditStepRunId = rows.find((row) => row.stepId === "audit-source-coverage")?.id;
+    if (!reopenedAuditStepRunId) throw new Error("missing reopened audit step run");
+    await recordOfficialQaVerdict({
+      issueId: auditIssueId,
+      companyId,
+      qaAgentId: auditAgentId,
+      workflowRunId: runId,
+      workflowStepRunId: reopenedAuditStepRunId,
+      verdict: "pass",
+      createdAt: "2026-07-06T00:40:00.000Z",
+    });
     await db.update(issues).set({
       status: "done",
       startedAt: new Date("2026-07-06T00:39:00.000Z"),

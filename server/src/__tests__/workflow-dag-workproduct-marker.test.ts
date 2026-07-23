@@ -3,13 +3,19 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentRuntimeState,
+  agentTaskSessions,
   agentWakeupRequests,
   agents,
   companies,
+  companySecrets,
+  companySkills,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueWorkProducts,
   issues,
+  missionAgentRuntimes,
   missions,
   workflowDefinitions,
   workflowRuns,
@@ -66,8 +72,15 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
 
   afterEach(async () => {
     heartbeatWakeup.mockReset();
+    // Allow async heartbeat side-effects to settle before FK-sensitive deletes.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await db.delete(heartbeatRunEvents);
+    await db.delete(agentTaskSessions);
+    await db.delete(missionAgentRuntimes);
     await db.delete(activityLog);
+    await db.update(issues).set({ checkoutRunId: null, executionRunId: null });
     await db.delete(heartbeatRuns);
+    await db.delete(heartbeatRunEvents);
     await db.delete(agentWakeupRequests);
     await db.delete(issueWorkProducts);
     await db.delete(workflowStepRuns);
@@ -75,6 +88,9 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
     await db.delete(workflowDefinitions);
     await db.delete(issues);
     await db.delete(missions);
+    await db.delete(agentRuntimeState);
+    await db.delete(companySkills);
+    await db.delete(companySecrets);
     await db.delete(agents);
     await db.delete(companies);
   });

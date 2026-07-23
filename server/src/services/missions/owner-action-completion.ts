@@ -136,6 +136,16 @@ export async function completeUnblockActionWithSourceHandback(
       missionId: source.missionId ?? unblock.missionId,
       unblockIssueId: unblock.id,
       reportCommentId: reportComment.id,
+      handback: {
+        sourceIssueId: source.id,
+        failureClass: classification.failureClass,
+        sourceLiveRunWakeState: evidence.liveRunId || evidence.liveWakeupRequestId ? "live" : "none",
+        recommendedNativeAction: classification.recommendedNativeAction,
+        failedRunId: evidence.failedRunId,
+        workflowRunId: evidence.workflowRunId,
+        workflowStepRunId: evidence.workflowStepRunId,
+        stepId: evidence.stepId,
+      },
     });
     if (!oversightWakeupRequestId) {
       throw conflict("Report-only unblock handback did not enter the live Oversight execution queue");

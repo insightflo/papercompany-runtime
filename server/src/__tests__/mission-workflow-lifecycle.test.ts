@@ -3,12 +3,14 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
   missions,
   workflowDefinitions,
   workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -116,7 +118,6 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
     });
 
     const result = await executeWorkflowRun(db, workflowRunId);
-    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
     const [storedMission] = await db
       .select({ status: missions.status, startedAt: missions.startedAt, completedAt: missions.completedAt })
       .from(missions)
@@ -134,6 +135,14 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
         eq(activityLog.entityType, "mission"),
         eq(activityLog.entityId, missionId),
       ));
+    const stepRuns = await db
+      .select({ stepId: workflowStepRuns.stepId, issueId: workflowStepRuns.issueId, status: workflowStepRuns.status })
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, workflowRunId));
+    const wakeups = await db
+      .select({ agentId: agentWakeupRequests.agentId, reason: agentWakeupRequests.reason, issueId: agentWakeupRequests.issueId })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
 
     expect(result.status).toBe("running");
     expect(storedRun?.status).toBe("running");
@@ -142,6 +151,12 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       startedAt: storedRun?.startedAt,
       completedAt: null,
     });
+    // Durable launch evidence: first agent step is issued and a same-company assignee wakeup exists.
+    // (heartbeatService.wakeup may be mocked or go through durable queue paths; assert durable records.)
+    expect(stepRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "work", issueId: expect.any(String) }),
+    ]));
+    expect(wakeups.some((row) => row.agentId === agentId && row.issueId != null)).toBe(true);
     expect(lifecycleActivities).toHaveLength(1);
     expect(lifecycleActivities[0]).toMatchObject({
       companyId,

@@ -89,9 +89,20 @@ export const missionOwnerDecisionSubmitSchema = z.object({
   decision: missionOwnerDecisionOptionSchema,
   sourceIssueRef: z.string().trim().optional().nullable(),
   reworkTargetRef: z.string().trim().optional().nullable(),
+  // Typed reassignment target — free-text nextAction/reason/evidence UUID scraping is not authority.
+  targetAgentId: z.string().uuid().optional().nullable(),
   reason: z.string().trim().max(2000).optional().nullable(),
   nextAction: z.string().trim().max(2000).optional().nullable(),
   evidence: z.string().trim().max(4000).optional().nullable(),
+}).superRefine((value, ctx) => {
+  // reassign_source_issue requires a same-company agent UUID; other decisions leave it optional.
+  if (value.decision !== "reassign_source_issue") return;
+  if (typeof value.targetAgentId === "string" && value.targetAgentId.length > 0) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["targetAgentId"],
+    message: "targetAgentId is required when decision is reassign_source_issue",
+  });
 });
 
 export type MissionOwnerDecisionOption = z.infer<typeof missionOwnerDecisionOptionSchema>;

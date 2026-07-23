@@ -164,9 +164,9 @@ describe("mission owner recovery comments", () => {
     expect(description).toContain("Oversight is not the recovery decision-maker.");
     expect(description).toContain("Do not depend on normalized decision labels as the primary control path");
     expect(description).toContain("Main executor role:");
-    expect(description).toContain("Optional structured decision labels for logs/UI hints only");
+    expect(description).toContain("Decision authority (REQUIRED control path): submit your decision through the structured API, not a comment:");
+    expect(description).toContain("owner-recovery/decision");
     expect(description).toContain("- retry_source_issue");
-    expect(description).toContain("- blocker evidence");
 
     expect(isTerminalIssueStatus("done")).toBe(true);
     expect(isTerminalIssueStatus("cancelled")).toBe(true);

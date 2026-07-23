@@ -100,10 +100,11 @@ import { buildMissingWorkProductRegistrationGateComment } from "./work-products/
 import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
 import {
-  extractMissionOwnerDecisionFromText,
   MISSION_OWNER_DECISION_OPTIONS,
   parseMissionOwnerActionMarker,
+  type ExtractedMissionOwnerDecision,
 } from "./missions/mission-owner-recovery-events.js";
+import { loadLatestMissionOwnerDecision } from "./missions/mission-owner-recovery-ledger.js";
 import { isMissionExecutionLiaisonAgent } from "./missions/agent-role-boundaries.js";
 import { syncSrbSourceIssueStatus } from "./srb/source-status-sync.js";
 import {
@@ -1574,7 +1575,7 @@ export type MissionOwnerTaskContext = {
     status: string;
     assigneeAgentId: string | null;
   } | null;
-  latestOwnerActionDecision: ReturnType<typeof extractMissionOwnerDecisionFromText>;
+  latestOwnerActionDecision: ExtractedMissionOwnerDecision | null;
   governanceEvidence: string;
   allowedDecisionOptions: string[];
   requiredDecisionFormat: string[];
@@ -1625,15 +1626,13 @@ async function resolveMissionOwnerTaskContext(input: {
         .then((rows) => rows[0] ?? null)
     : null;
 
-  const latestDecisionComment = await db
-    .select({ body: issueComments.body })
-    .from(issueComments)
-    .where(and(eq(issueComments.issueId, issue.id), eq(issueComments.companyId, companyId)))
-    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-    .limit(5);
-  const latestOwnerActionDecision = latestDecisionComment
-    .map((comment) => extractMissionOwnerDecisionFromText(comment.body))
-    .find((decision) => decision !== null) ?? extractMissionOwnerDecisionFromText(issue.description ?? "");
+  // Structured recovery ledger only — comment/description decision prose is display-only.
+  const structuredDecision = await loadLatestMissionOwnerDecision({
+    db,
+    companyId,
+    ownerActionIssueId: issue.id,
+  });
+  const latestOwnerActionDecision = structuredDecision?.decision ?? null;
 
   return {
     available: true,
@@ -1665,12 +1664,10 @@ async function resolveMissionOwnerTaskContext(input: {
     governanceEvidence: "Governance evidence: unavailable in this context builder",
     allowedDecisionOptions: [...MISSION_OWNER_DECISION_OPTIONS],
     requiredDecisionFormat: [
-      "### Mission owner decision",
-      "Decision:",
-      "Source issue:",
-      "Reason:",
-      "Next action:",
-      "Evidence:",
+      "Submit structured Mission owner decision via the dedicated recovery API / ledger (owner_recovery_api).",
+      "Comments and Markdown decision blocks are display-only and are not control-plane authority.",
+      "Decision options:",
+      ...MISSION_OWNER_DECISION_OPTIONS.map((option) => `- ${option}`),
     ],
   };
 }
@@ -7862,36 +7859,18 @@ export function heartbeatService(db: Db) {
     const postTransactionRequestChangesOwnerAction = hasPostTransactionRequestChangesOwnerAction
       ? transactionRecord?.postTransactionRequestChangesOwnerAction as PostTransactionRequestChangesOwnerAction
       : null;
-    type PostTransactionMissionOwnerPlanDecision = {
-      issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "originKind">;
-      actorAgentId: string | null;
-    };
-    const hasPostTransactionMissionOwnerPlanDecision =
-      !!transactionObject && "postTransactionMissionOwnerPlanDecision" in transactionObject;
-    const postTransactionMissionOwnerPlanDecision = hasPostTransactionMissionOwnerPlanDecision
-      ? transactionRecord?.postTransactionMissionOwnerPlanDecision as PostTransactionMissionOwnerPlanDecision
-      : null;
+    // [structured plan-decision authority] comment-driven postTransactionMissionOwnerPlanDecision
+    //   / recordMissionOwnerPlanDecisionAfterComment was intentionally removed (655e889). Do not
+    //   restore NL comment parsing as plan-decision control-plane authority.
     const hasPromotedRunField = !!transactionObject && "promotedRun" in transactionObject;
     const promotedRun = (
-      hasPromotedRunField
-      || hasPostTransactionRequestChangesOwnerAction
-      || hasPostTransactionMissionOwnerPlanDecision
+      hasPromotedRunField || hasPostTransactionRequestChangesOwnerAction
         ? transactionRecord?.promotedRun
         : transactionResult
     ) as typeof heartbeatRuns.$inferSelect | null | undefined;
 
     if (postTransactionRequestChangesOwnerAction) {
       await ensureMissionOwnerActionForRequestChanges(postTransactionRequestChangesOwnerAction);
-    }
-
-    if (postTransactionMissionOwnerPlanDecision) {
-      await recordMissionOwnerPlanDecisionAfterComment(
-        db,
-        postTransactionMissionOwnerPlanDecision.issue,
-        postTransactionMissionOwnerPlanDecision.actorAgentId,
-        enqueuePlanQaWakeup,
-        enqueuePlanningIssueWakeup,
-      );
     }
 
     if (postTransactionWorkflowIssueSyncIssueIds.size > 0) {

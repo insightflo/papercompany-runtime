@@ -105,7 +105,7 @@ describeEP("mission-owner recovery structured ledger (hardened)", () => {
 
     await recordMissionOwnerDecision({
       db: s.db, issue: { id: s.ownerActionIssueId, companyId: s.companyId, missionId: s.missionId },
-      submission: { decision: "reassign_source_issue", nextAction: `Target agent: ${s.otherAgentId}` },
+      submission: { decision: "reassign_source_issue", targetAgentId: s.otherAgentId, nextAction: `Target agent: ${s.otherAgentId}` },
       sourceIssueId: s.producerIssueId, heartbeatRunId: s.heartbeatRunId,
     });
     const reassigned = await applyReassignSourceIssueDecision(input);

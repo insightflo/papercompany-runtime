@@ -11,7 +11,6 @@ import type { MissionExecutionUnit } from "./mission-execution-sources.js";
 import type { MissionSupervisionPlanArtifact, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 export {
   isQaLikeStep,
-  parseReworkTargetRefFromNextAction,
   QA_REWORK_DEFAULT_MAX_ITERATIONS,
   resolveProducerStepIdFromDag,
   synthesizeQaReworkBackEdge,
@@ -59,19 +58,6 @@ export function unitRequiresGovernedAction(unit: JsonRecord): boolean {
 export function isApprovalRuleMode(mode: unknown): boolean {
   const normalized = normalizedPlanStatus(mode);
   return normalized === "approval_gate" || normalized === "hard_gate";
-}
-
-export function hasDiagnosisSignal(...bodies: string[]): boolean {
-  const body = bodies.join("\n").toLowerCase();
-  return body.includes("diagnos")
-    || body.includes("root cause")
-    || body.includes("replan")
-    || body.includes("re-plan")
-    || body.includes("recover")
-    || body.includes("escalat")
-    || body.includes("impossible")
-    || body.includes("failure:")
-    || body.includes("failed_unit_without_diagnosis");
 }
 
 export function jsonArrayLength(value: unknown): number {
@@ -145,24 +131,6 @@ export function activePlanRecoveryGateReason(
   }
 
   return null;
-}
-
-export function hasArtifactMissingSignal(...bodies: string[]): boolean {
-  const body = bodies.join("\n").toLowerCase();
-  return body.includes("required workflow artifact missing")
-    || body.includes("required source artifact is missing")
-    || body.includes("artifact missing")
-    || body.includes("블로그 파일 누락")
-    || body.includes("markdown 파일로 저장")
-    || body.includes("파일로만 저장");
-}
-
-export function hasRecoverableArtifactComment(...bodies: string[]): boolean {
-  const body = bodies.join("\n");
-  const lower = body.toLowerCase();
-  return hasArtifactMissingSignal(body)
-    && (lower.includes(".md") || lower.includes("markdown"))
-    && /^#{1,3}\s+\S+/m.test(body);
 }
 
 export function parseToolStepRecoveryMarker(description: string | null): { runId: string; stepId: string } | null {

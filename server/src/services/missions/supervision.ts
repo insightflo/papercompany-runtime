@@ -28,7 +28,7 @@ import { buildMissionPlanningDescription } from "./mission-planning-description.
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
-import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, hasArtifactMissingSignal, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseReworkTargetRefFromNextAction, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
+import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
 import { issueLessToolRecoveryOwnsFailure } from "./tool-step-recovery-authority.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
@@ -1333,7 +1333,8 @@ export function createSupervision({ db, deps, ownerActions }: {
                     }
                   }
                 }
-                const ownerReworkRef = ownerDecision.reworkTargetRef ?? parseReworkTargetRefFromNextAction(ownerDecision.nextAction);
+                // Structured fields only — nextAction free text is never producer-target authority.
+                const ownerReworkRef = ownerDecision.reworkTargetRef ?? null;
                 let sourceIssueId: string | null = null;
                 const resolveOwnerIssueRef = (ref: string | null | undefined) => {
                   if (!ref) return null;
@@ -1928,31 +1929,35 @@ export function createSupervision({ db, deps, ownerActions }: {
         !qaCapSourceIssueIds.has(issue.id)
       ) {
         await ownerActions.ensureMainExecutorUnblockIssue(mission, issue);
-        const body = comments.join("\n").toLowerCase();
-        if (hasArtifactMissingSignal(body)) {
-          const recurringIssues = await ownerActions.listRecurringArtifactMissingIssueRefs({
-            companyId: mission.companyId,
-            assigneeAgentId: issue.assigneeAgentId,
-            since: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
+        // Structured authority only: durable gate activity + recovery ledger. Comment keywords
+        // (artifact missing / replan / escalate prose) are display-only and never suppress or
+        // authorize recommendations.
+        const recurringIssues = await ownerActions.listRecurringArtifactMissingIssueRefs({
+          companyId: mission.companyId,
+          assigneeAgentId: issue.assigneeAgentId,
+          since: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
+        });
+        if (recurringIssues.some((row) => row.id === issue.id) && recurringIssues.length >= 2) {
+          const issueRefs = recurringIssues
+            .map((row) => row.identifier ?? row.id)
+            .sort()
+            .join(", ");
+          findings.push(`recurring_artifact_missing: ${label} repeats required artifact/file materialization failure for assignee across ${recurringIssues.length} recent issues (${issueRefs}) — ${issue.title}`);
+          addRecommendation({
+            type: "request_replan",
+            missionId: mission.id,
+            issueId: issue.id,
+            reason: `Recurring artifact-missing failure detected for ${label}; owner should update the workflow/agent instructions and evidence contract before retrying`,
+            safeToAutoApply: false,
           });
-          if (recurringIssues.length >= 2) {
-            const issueRefs = recurringIssues
-              .map((row) => row.identifier ?? row.id)
-              .sort()
-              .join(", ");
-            findings.push(`recurring_artifact_missing: ${label} repeats required artifact/file materialization failure for assignee across ${recurringIssues.length} recent issues (${issueRefs}) — ${issue.title}`);
-            addRecommendation({
-              type: "request_replan",
-              missionId: mission.id,
-              issueId: issue.id,
-              reason: `Recurring artifact-missing failure detected for ${label}; owner should update the workflow/agent instructions and evidence contract before retrying`,
-              safeToAutoApply: false,
-            });
-          }
         }
-        const hasReplanSignal = body.includes("replan") || body.includes("re-plan") || body.includes("recover") || body.includes("escalat") || body.includes("impossible") || body.includes("blocked_without_replan");
-        if (!hasReplanSignal) {
-          findings.push(`blocked_without_replan: ${label} blocked without recovery/replan/escalation comment — ${issue.title}`);
+        const hasStructuredRecovery = await hasStructuredSourceRecoveryDecision({
+          db,
+          companyId: mission.companyId,
+          sourceIssueId: issue.id,
+        });
+        if (!hasStructuredRecovery) {
+          findings.push(`blocked_without_replan: ${label} blocked without structured recovery decision — ${issue.title}`);
           addRecommendation({ type: "request_replan", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs recovery/replan evidence`, safeToAutoApply: false });
           addRecommendation({ type: "escalate_blocked", missionId: mission.id, issueId: issue.id, reason: `Blocked issue ${label} needs owner escalation or impossible-completion report`, safeToAutoApply: false });
         }

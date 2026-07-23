@@ -563,6 +563,76 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
     await expect(svc2.update(unblock.id, { status: "done" })).rejects.toThrow(/Cannot complete this owner-action/);
   });
 
+  it("guard REJECTS a valid-looking comment when system ledger details are missing structured handback facts", async () => {
+    const { source, unblock } = await seedSourceWithStepRun();
+    const svc2 = issueService(db);
+    const comment = await svc2.addComment(unblock.id, validReportBody(source.id), { userId: "guard-test" });
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "system",
+      actorId: "owner-action-unblock-handback",
+      action: "issue.owner_action_unblock_handback_queued",
+      entityType: "issue",
+      entityId: unblock.id,
+      details: {
+        // Legacy incomplete ledger: only display linkage, no structured facts.
+        reportCommentId: comment.id,
+      },
+    });
+    await expect(svc2.update(unblock.id, { status: "done" })).rejects.toThrow(/Cannot complete this owner-action/);
+  });
+
+  it("guard REJECTS structured ledger with foreign sourceIssueId even when comment is perfect", async () => {
+    const { source, unblock } = await seedSourceWithStepRun();
+    const svc2 = issueService(db);
+    const comment = await svc2.addComment(unblock.id, validReportBody(source.id), { userId: "guard-test" });
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "system",
+      actorId: "owner-action-unblock-handback",
+      action: "issue.owner_action_unblock_handback_queued",
+      entityType: "issue",
+      entityId: unblock.id,
+      details: {
+        reportCommentId: comment.id,
+        sourceIssueId: randomUUID(),
+        failureClass: "blocked_no_native_step",
+        sourceLiveRunWakeState: "none",
+        recommendedNativeAction: "report_only",
+        failedRunId: null,
+      },
+    });
+    await expect(svc2.update(unblock.id, { status: "done" })).rejects.toThrow(/Cannot complete this owner-action/);
+  });
+
+  it("guard ACCEPTS done from system ledger structured facts without reading the comment body", async () => {
+    const { source, unblock } = await seedSourceWithStepRun();
+    const svc2 = issueService(db);
+    // Malicious/display comment must not matter — ledger is sole authority.
+    await svc2.addComment(unblock.id, "not a handback report", { userId: "guard-test" });
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "system",
+      actorId: "owner-action-unblock-handback",
+      action: "issue.owner_action_unblock_handback_queued",
+      entityType: "issue",
+      entityId: unblock.id,
+      details: {
+        reportCommentId: null,
+        sourceIssueId: source.id,
+        failureClass: "blocked_no_native_step",
+        sourceLiveRunWakeState: "none",
+        recommendedNativeAction: "report_only",
+        failedRunId: null,
+        workflowRunId: null,
+        workflowStepRunId: null,
+        stepId: null,
+      },
+    });
+    const updated = await svc2.update(unblock.id, { status: "done" });
+    expect(updated?.status).toBe("done");
+  });
+
   // [Phase 2 route] POST /issues/:id/owner-action/complete-with-handback
   function buildApp() {
     const app = express();

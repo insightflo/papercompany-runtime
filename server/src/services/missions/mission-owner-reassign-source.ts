@@ -21,42 +21,18 @@ import {
   type MissionOwnerSupervisionAppliedAction,
 } from "./supervision-types.js";
 
-const UUID_SOURCE = String.raw`[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`;
-const UUID_PATTERN = new RegExp(String.raw`\b${UUID_SOURCE}\b`, "giu");
-const TARGET_AGENT_PATTERN = new RegExp(String.raw`(?:^|\n)\s*(?:target\s+agent|target\s+assignee|assignee\s+agent|new\s+assignee)\s*:\s*[^\n]*?\b(${UUID_SOURCE})\b`, "iu");
-const TO_AGENT_PATTERN = new RegExp(String.raw`\bto\s+[^\n]*?\bagent\b[^\n]*?\b(${UUID_SOURCE})\b`, "iu");
-const AGENT_LABEL_PATTERN = new RegExp(String.raw`\bagent\b[^\n]*?\b(${UUID_SOURCE})\b`, "iu");
-
-export type ReassignSourceIssueDecisionText = {
+type ReassignSourceIssueDecision = {
+  readonly decision: "reassign_source_issue";
+  readonly targetAgentId?: string;
   readonly nextAction?: string;
   readonly reason?: string;
   readonly evidence?: string;
-};
-
-type ReassignSourceIssueDecision = ReassignSourceIssueDecisionText & {
-  readonly decision: "reassign_source_issue";
 };
 
 type ReassignSourceIssueResult = {
   readonly findings: string[];
   readonly appliedAction?: MissionOwnerSupervisionAppliedAction;
 };
-
-export function extractReassignTargetAgentId(input: ReassignSourceIssueDecisionText): string | null {
-  const fields = [input.nextAction, input.reason, input.evidence].filter((field): field is string => Boolean(field));
-  const targetPatterns = [TARGET_AGENT_PATTERN, TO_AGENT_PATTERN, AGENT_LABEL_PATTERN];
-  for (const field of fields) {
-    for (const pattern of targetPatterns) {
-      const targetAgentId = field.match(pattern)?.[1] ?? null;
-      if (targetAgentId) return targetAgentId;
-    }
-  }
-  for (const field of fields) {
-    const matches = Array.from(field.matchAll(UUID_PATTERN), (match) => match[0]);
-    if (matches.length === 1) return matches[0] ?? null;
-  }
-  return null;
-}
 
 export function buildReassignSourceIssueComment(input: {
   readonly ownerActionIssueId: string;
@@ -134,9 +110,12 @@ export async function applyReassignSourceIssueDecision(input: {
     structuredDecision.authorAgentId !== input.mission.ownerAgentId
   ) return fail("a current structured owner-recovery reassign_source_issue decision is required");
 
-  const targetAgentId = extractReassignTargetAgentId(structuredDecision.decision);
+  const targetAgentId =
+    typeof structuredDecision.decision.targetAgentId === "string" && structuredDecision.decision.targetAgentId.trim()
+      ? structuredDecision.decision.targetAgentId.trim()
+      : null;
   if (!targetAgentId) {
-    return fail("reassign_source_issue did not include an unambiguous target agent UUID; use a Target agent line when multiple UUIDs are present");
+    return fail("reassign_source_issue requires structured targetAgentId (UUID); free-text nextAction/reason/evidence is not assignment authority");
   }
 
   const targetAgent = await input.db

@@ -36,7 +36,6 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
-import { extractReassignTargetAgentId } from "../services/missions/mission-owner-reassign-source.js";
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { completeWorkflowToolStepFromResult, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
@@ -96,18 +95,6 @@ describe("mission owner decision parser", () => {
     });
   });
 
-  it("extracts reassign target agents without mistaking source UUIDs for targets", () => {
-    const sourceIssueId = randomUUID();
-    const targetAgentId = randomUUID();
-    const unrelatedId = randomUUID();
-
-    expect(extractReassignTargetAgentId({
-      nextAction: `Reassign source issue ${sourceIssueId} to agent ${targetAgentId}.`,
-    })).toBe(targetAgentId);
-    expect(extractReassignTargetAgentId({
-      nextAction: `Reassign source issue ${sourceIssueId}; evidence run ${unrelatedId}.`,
-    })).toBeNull();
-  });
 });
 
 describeEmbeddedPostgres("mission service mission-linked subresources", () => {
@@ -918,7 +905,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(description).toContain("POST /api/issues/{this owner-action issue id}/owner-recovery/decision");
     expect(description).toContain("Optional display-only comment template");
     expect(description).toContain("Comments (including any 'Decision:' block below) are DISPLAY-ONLY and can no longer drive recovery");
-    expect(description).toContain("Source issue remains assigned to the original executor unless the structured decision is reassign_source_issue.");
+    expect(description).toContain("Source issue remains assigned to the original executor unless the structured decision is reassign_source_issue with targetAgentId.");
+    expect(description).toContain("targetAgentId is REQUIRED");
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
       mission: expect.objectContaining({ id: missionId, ownerAgentId }),
@@ -1513,6 +1501,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       submission: {
         decision: "reassign_source_issue",
         sourceIssueRef: sourceIssue.identifier ?? sourceIssue.id,
+        targetAgentId: synthesisAgentId,
         reason: "Hermes is a liaison and must not directly execute the publish issue.",
         nextAction: `Target agent: ${synthesisAgentId}`,
       },
@@ -3605,6 +3594,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       status: "blocked",
       title: "[gazua-morning] 2026-05-18 일간 블로그 markdown 작성",
     });
+    // Display-only missing-artifact comment must not authorize recurring-replan by itself.
     await db.insert(issueComments).values({
       companyId,
       issueId: previousIssue.id,
@@ -3622,6 +3612,28 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       issueId: currentIssue.id,
       body: "### Required workflow artifact missing\n- Required artifact: reports/blog/202605/Public_Market_Report_2026-05-20.md",
     });
+    // Structured gate activity is the only authority for recurring artifact-missing detection.
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        action: "issue.artifact_work_product_missing_auto_blocked",
+        entityType: "issue",
+        entityId: previousIssue.id,
+        details: { reason: "missing_work_product_registration" },
+        createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      },
+      {
+        companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        action: "issue.artifact_work_product_missing_auto_blocked",
+        entityType: "issue",
+        entityId: currentIssue.id,
+        details: { reason: "missing_work_product_registration" },
+      },
+    ]);
 
     const result = await missionService(db).runMainExecutorSupervision({
       missionId,

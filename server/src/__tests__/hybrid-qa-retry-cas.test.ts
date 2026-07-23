@@ -184,11 +184,22 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
     const [qaRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     if (!qaRun.issueId) throw new Error("Expected issue-backed QA step run");
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-07-22T12:00:00.000Z"), updatedAt: new Date("2026-07-22T12:00:00.000Z") }).where(eq(issues.id, qaRun.issueId));
+    const heartbeatRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: heartbeatRunId,
+      companyId,
+      agentId,
+      issueId: qaRun.issueId,
+      status: "succeeded",
+      startedAt: new Date("2026-07-22T12:00:00.000Z"),
+      finishedAt: new Date("2026-07-22T12:00:01.000Z"),
+    });
     await db.insert(workflowTransitionEvents).values({
       companyId,
       workflowRunId: runId,
       workflowStepRunId: qaRun.id,
       issueId: qaRun.issueId,
+      heartbeatRunId,
       eventType: "workflow_validation_verdict",
       layer: "workflow_validation",
       verdict: "request_changes",

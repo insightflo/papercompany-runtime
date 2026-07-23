@@ -35,10 +35,13 @@ function toSubmission(data: MissionOwnerDecisionSubmit): MissionOwnerDecisionSub
   if (!MISSION_OWNER_DECISION_OPTIONS.includes(data.decision)) {
     throw conflict(`Unsupported mission owner decision: ${data.decision}`);
   }
+  const targetAgentId = trimmed(data.targetAgentId);
   return {
     decision: data.decision,
     ...(trimmed(data.sourceIssueRef) ? { sourceIssueRef: trimmed(data.sourceIssueRef) } : {}),
     ...(trimmed(data.reworkTargetRef) ? { reworkTargetRef: trimmed(data.reworkTargetRef) } : {}),
+    // Structured reassignment authority only — free-text nextAction/reason never supplies the assignee.
+    ...(targetAgentId ? { targetAgentId } : {}),
     ...(trimmed(data.reason) ? { reason: trimmed(data.reason) } : {}),
     ...(trimmed(data.nextAction) ? { nextAction: trimmed(data.nextAction) } : {}),
     ...(trimmed(data.evidence) ? { evidence: trimmed(data.evidence) } : {}),

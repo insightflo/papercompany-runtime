@@ -6,14 +6,20 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentRuntimeState,
+  agentTaskSessions,
   agentWakeupRequests,
   agents,
   companies,
+  companySecrets,
+  companySkills,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issueWorkProducts,
   issues,
+  missionAgentRuntimes,
   missions,
   workflowDefinitions,
   workflowRuns,
@@ -56,9 +62,17 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
 
   afterEach(async () => {
     heartbeatWakeup.mockClear();
+    // Allow async heartbeat side-effects to settle before FK-sensitive deletes.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await db.delete(heartbeatRunEvents);
+    await db.delete(agentTaskSessions);
+    await db.delete(missionAgentRuntimes);
     await db.delete(workflowTransitionEvents);
     await db.delete(activityLog);
+    await db.update(issues).set({ checkoutRunId: null, executionRunId: null });
     await db.delete(heartbeatRuns);
+    // Straggler run events can appear while runs are torn down.
+    await db.delete(heartbeatRunEvents);
     await db.delete(agentWakeupRequests);
     await db.delete(issueWorkProducts);
     await db.delete(workflowStepRuns);
@@ -67,6 +81,9 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(missions);
+    await db.delete(agentRuntimeState);
+    await db.delete(companySkills);
+    await db.delete(companySecrets);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -181,7 +198,8 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
 
     expect(ifRun).toMatchObject({ status: "completed", issueId: null });
     expect(ifRun.metadata).toMatchObject({ controlNodeResult: { nodeType: "if", outcome: "condition_true" } });
-    expect(selectedRun).toMatchObject({ status: "pending" });
+    // Selected branch is issued and launched (running) on the true edge; false Complete stays skipped.
+    expect(selectedRun).toMatchObject({ status: "running" });
     expect(selectedRun.issueId).toBeTruthy();
     expect(completeRun).toMatchObject({ status: "skipped", issueId: null });
 

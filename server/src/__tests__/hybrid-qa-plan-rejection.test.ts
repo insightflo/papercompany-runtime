@@ -2,14 +2,14 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  agentToolGrants, agents, companies, createDb, issues, issueComments, missions, toolDefinitions,
+  agentToolGrants, agents, companies, createDb, issues, missions, toolDefinitions,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { recordLatestAuthorizedMissionOwnerPlanDecision } from "../services/mission-owner-plan-decisions.js";
 import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
+import { recordMissionOwnerPlanDecisionSubmission } from "../services/missions/mission-plan-decision-submissions.js";
 import { STRUCTURAL_VALIDATION_CAPABILITY } from "../services/workflow/control-flow/structural-gate-readiness.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -34,10 +34,6 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
     db = createDb(tempDb.connectionString);
   }, 60_000);
   afterAll(async () => { await tempDb?.cleanup(); });
-
-  function decisionComment(decision: Record<string, unknown>): string {
-    return `### Mission owner plan decision\n\`\`\`json\n${JSON.stringify(decision)}\n\`\`\``;
-  }
 
   // Seeds a company whose plans pass source-ref + placement validation: the
   // owner agent is active and is granted both a capability-bearing tool and a
@@ -86,13 +82,22 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
   }
 
   async function postDecision(companyId: string, planningIssueId: string, ownerAgentId: string, missionId: string, units: Record<string, unknown>[]) {
-    await db.insert(issueComments).values({
-      companyId, issueId: planningIssueId, authorAgentId: ownerAgentId,
-      body: decisionComment({
-        missionId, missionGoal: "Validate structural gating",
+    return recordMissionOwnerPlanDecisionSubmission({
+      db,
+      companyId,
+      missionId,
+      planningIssueId,
+      requestedBy: { actorType: "agent", actorId: ownerAgentId },
+      decision: {
+        missionId,
+        missionGoal: "Validate structural gating",
         selectedExecutionUnits: units,
-        ruleRefs: [], kbRefs: [], requiredInputs: [], successCriteria: [], steps: [],
-      }),
+        ruleRefs: [],
+        kbRefs: [],
+        requiredInputs: [],
+        successCriteria: [],
+        steps: [],
+      },
     });
   }
 
@@ -116,11 +121,9 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
   it("rejects a gate tool lacking the capability before PLAN-QA side effects", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId, noCapToolName } = await seed();
     const before = await countCompanyIssues(companyId);
-    await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
+    const result = await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
       producerUnit(ownerAgentId), gateUnit(ownerAgentId, noCapToolName),
     ]);
-
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
 
     expect(result.status).toBe("invalid");
     if (result.status !== "invalid") throw new Error("expected invalid");
@@ -132,15 +135,13 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
 
   it("rejects bad gate topology (QA omits a related gate) before PLAN-QA side effects", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId, capToolName } = await seed();
-    await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
+    const result = await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
       producerUnit(ownerAgentId),
       gateUnit(ownerAgentId, capToolName),
       { id: "unit-qa-1", kind: "mission_plan_unit", title: "[QA] Semantic review",
         assigneeAgentId: ownerAgentId, selectionState: "selected",
         sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" }, dependsOn: ["unit-source-1"] },
     ]);
-
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
 
     expect(result.status).toBe("invalid");
     if (result.status !== "invalid") throw new Error("expected invalid");
@@ -149,7 +150,7 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
 
   it("a valid structural plan still proceeds (no over-rejection)", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId, capToolName } = await seed();
-    await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
+    const result = await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
       producerUnit(ownerAgentId),
       gateUnit(ownerAgentId, capToolName),
       { id: "unit-qa-1", kind: "mission_plan_unit", title: "[QA] Semantic review",
@@ -157,8 +158,6 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
         sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" },
         dependsOn: ["unit-source-1", "unit-gate-1"] },
     ]);
-
-    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
 
     expect(result.status).not.toBe("invalid");
   });

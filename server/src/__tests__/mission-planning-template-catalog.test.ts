@@ -30,7 +30,8 @@ describe("mission planning template catalog", () => {
       runnableRosterLines: ["- owner"],
     });
     expect(output).toContain("/api/companies/company-1/mission-plan-templates/11111111-1111-4111-8111-111111111111");
-    expect(output).toContain('"selectedPlanTemplateIds": []');
+    expect(output).toContain("selectedPlanTemplateIds");
+    expect(output).toContain("explicit empty array when no case template applies");
     expect(output).not.toContain(catalog[0]!.instructions);
   });
 

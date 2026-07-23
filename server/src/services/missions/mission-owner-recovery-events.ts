@@ -79,6 +79,7 @@ export type ExtractedMissionOwnerDecision = {
   decision: MissionOwnerDecisionOption;
   sourceIssueRef?: string;
   reworkTargetRef?: string;
+  targetAgentId?: string;
   reason?: string;
   nextAction?: string;
   evidence?: string;
@@ -87,6 +88,7 @@ export type ExtractedMissionOwnerDecision = {
   invalidDecision: string;
   sourceIssueRef?: string;
   reworkTargetRef?: string;
+  targetAgentId?: string;
   reason?: string;
   nextAction?: string;
   evidence?: string;

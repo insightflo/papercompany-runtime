@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, heartbeatRuns, issues, missions, workflowTransitionEvents } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, heartbeatRuns, issueComments, issues, missions, workflowTransitionEvents } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { missionOwnerDecisionSubmitSchema } from "@paperclipai/shared";
 import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
+import { loadLatestMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
+import { applyReassignSourceIssueDecision } from "../services/missions/mission-owner-reassign-source.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -27,6 +30,8 @@ describeEP("mission owner recovery decision API source scope", () => {
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(workflowTransitionEvents);
+    await db.delete(issueComments);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(missions);
@@ -37,6 +42,7 @@ describeEP("mission owner recovery decision API source scope", () => {
   async function seedOwnerAction() {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
+    const otherAgentId = randomUUID();
     const missionId = randomUUID();
     const sourceIssueId = randomUUID();
     const ownerActionIssueId = randomUUID();
@@ -47,20 +53,41 @@ describeEP("mission owner recovery decision API source scope", () => {
       issuePrefix: `OR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
-    await db.insert(agents).values({
-      id: ownerAgentId,
-      companyId,
-      name: "Mission owner",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "Mission owner",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: otherAgentId,
+        companyId,
+        name: "Target executor",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Recovery mission", status: "active" });
     await db.insert(issues).values([
-      { id: sourceIssueId, companyId, missionId, title: "Scoped source", status: "blocked", originKind: "workflow_execution" },
+      {
+        id: sourceIssueId,
+        companyId,
+        missionId,
+        title: "Scoped source",
+        status: "blocked",
+        originKind: "workflow_execution",
+        assigneeAgentId: ownerAgentId,
+      },
       {
         id: ownerActionIssueId,
         companyId,
@@ -74,7 +101,7 @@ describeEP("mission owner recovery decision API source scope", () => {
     ]);
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: ownerAgentId, issueId: ownerActionIssueId, status: "running" });
     await db.update(issues).set({ checkoutRunId: runId }).where(eq(issues.id, ownerActionIssueId));
-    return { companyId, ownerAgentId, missionId, ownerActionIssueId, runId };
+    return { companyId, ownerAgentId, otherAgentId, missionId, sourceIssueId, ownerActionIssueId, runId };
   }
 
   async function submit(seed: Awaited<ReturnType<typeof seedOwnerAction>>) {
@@ -130,5 +157,71 @@ describeEP("mission owner recovery decision API source scope", () => {
       (request.details as Record<string, unknown>).decisionEventId === revised.eventId
       && (request.details as Record<string, unknown>).reason === "Need the production credential."
     ))).toBe(true);
+  });
+
+  it("API-to-ledger: targetAgentId is required for reassign and drives reassignment", async () => {
+    const seed = await seedOwnerAction();
+    const actor = {
+      actorType: "agent" as const,
+      actorId: seed.ownerAgentId,
+      agentId: seed.ownerAgentId,
+      runId: seed.runId,
+    };
+
+    // Schema rejects reassign without targetAgentId even when nextAction names a UUID.
+    expect(missionOwnerDecisionSubmitSchema.safeParse({
+      decision: "reassign_source_issue",
+      nextAction: `Target agent: ${seed.otherAgentId}`,
+      reason: "prose only",
+    }).success).toBe(false);
+    expect(missionOwnerDecisionSubmitSchema.safeParse({
+      decision: "retry_source_issue",
+      nextAction: "retry without reassignment",
+    }).success).toBe(true);
+
+    const withTarget = await submitMissionOwnerDecision({
+      db,
+      issueId: seed.ownerActionIssueId,
+      actor,
+      data: missionOwnerDecisionSubmitSchema.parse({
+        decision: "reassign_source_issue",
+        targetAgentId: seed.otherAgentId,
+        nextAction: `Target agent: ${seed.otherAgentId}`,
+        reason: "structured target required",
+      }),
+    });
+    expect(withTarget.submission.targetAgentId).toBe(seed.otherAgentId);
+
+    const ledger = await loadLatestMissionOwnerDecision({
+      db,
+      companyId: seed.companyId,
+      ownerActionIssueId: seed.ownerActionIssueId,
+    });
+    expect(ledger?.decision.targetAgentId).toBe(seed.otherAgentId);
+    expect(ledger?.eventId).toBe(withTarget.eventId);
+
+    const [mission, sourceIssue, ownerActionIssue] = await Promise.all([
+      db.select().from(missions).where(eq(missions.id, seed.missionId)).then((rows) => rows[0]!),
+      db.select().from(issues).where(eq(issues.id, seed.sourceIssueId)).then((rows) => rows[0]!),
+      db.select().from(issues).where(eq(issues.id, seed.ownerActionIssueId)).then((rows) => rows[0]!),
+    ]);
+    const applied = await applyReassignSourceIssueDecision({
+      db,
+      mission,
+      ownerActionIssue,
+      ownerActionLabel: "Owner unblock",
+      ownerDecision: { decision: "reassign_source_issue", nextAction: `Target agent: ${seed.otherAgentId}` },
+      sourceIssue,
+      sourceLabel: "Scoped source",
+      sourceComments: [],
+      sourceHasActiveHeartbeat: false,
+      sourcePlanGateReason: null,
+      now: new Date("2026-07-23T00:00:00.000Z"),
+      dispatchWakeup: false,
+    });
+    expect(applied.findings).toEqual([]);
+    expect(applied.appliedAction?.targetAgentId).toBe(seed.otherAgentId);
+    const [updatedSource] = await db.select().from(issues).where(eq(issues.id, seed.sourceIssueId));
+    expect(updatedSource?.assigneeAgentId).toBe(seed.otherAgentId);
   });
 });
