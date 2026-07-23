@@ -191,12 +191,17 @@ export function renderEvidenceExplanationQaLines(): string[] {
 
 export const VERIFICATION_BEFORE_COMPLETION_MARKER = "## Verification Before Completion";
 
-export function renderVerificationBeforeCompletionGateLines(): string[] {
+export function renderVerificationBeforeCompletionGateLines(
+  options: { intermediateQa?: boolean } = {},
+): string[] {
+  const claimLine = options.intermediateQa
+    ? "- Identify only the claims this step must judge: its direct dependency workProducts and this step's own acceptance criteria. Do not require proof of outputs owned by a future publish or verification step, even if the mission goal mentions final publication."
+    : "- Identify every completion claim from the mission goal, success criteria, dependency workProducts, delivery manifests, and final user-visible or machine-consumed output contract.";
   return [
     VERIFICATION_BEFORE_COMPLETION_MARKER,
     "",
     "No PASS is allowed without fresh evidence gathered in this QA run.",
-    "- Identify every completion claim from the mission goal, success criteria, dependency workProducts, delivery manifests, and final user-visible or machine-consumed output contract.",
+    claimLine,
     "- For each claim, name the proof surface and probe: browser/API/CLI/database/file/hash/content check, as appropriate to the declared output path.",
     "- Run the probe now. Do not rely on upstream agent reports, issue status, registered workProducts, or earlier QA comments as completion proof.",
     "- Read the full result: exit code, HTTP status, response body/HTML marker, database row, file metadata, object key, hash, or other objective output.",
