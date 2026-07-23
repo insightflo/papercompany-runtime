@@ -5271,12 +5271,17 @@ export function heartbeatService(db: Db) {
             companyId: issues.companyId,
             projectId: issues.projectId,
             missionId: issues.missionId,
+            originKind: issues.originKind,
             status: issues.status,
           })
           .from(issues)
           .where(and(eq(issues.id, promotedIssueId), eq(issues.companyId, agent.companyId)))
           .then((rows) => rows[0] ?? null)
         : null;
+      const isPlanReworkPromotion =
+        promotedReason === "mission_owner_plan_rework_requested" &&
+        promotedIssue?.originKind === "mission_main_executor_plan";
+
 
       if (promotedIssueId && !promotedIssue) {
         await tx
@@ -5295,8 +5300,11 @@ export function heartbeatService(db: Db) {
       if (
         promotedIssue &&
         PROMOTED_REJECT_ISSUE_STATUSES.has(promotedIssue.status) &&
-        !(isWorkflowStepResume && promotedIssue.status === "done")
+        !(isWorkflowStepResume && promotedIssue.status === "done") &&
+        !(isPlanReworkPromotion && promotedIssue.status === "done")
+
       ) {
+
         await tx
           .update(agentWakeupRequests)
           .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`, updatedAt: new Date() })
@@ -5430,7 +5438,8 @@ export function heartbeatService(db: Db) {
         .where(eq(agentWakeupRequests.id, request.id));
 
       if (promotedIssue) {
-        const issueStartStatuses = isWorkflowStepResume
+        const issueStartStatuses = (isWorkflowStepResume || isPlanReworkPromotion)
+
           ? [...ISSUE_RUN_START_STATUSES, "done"]
           : ISSUE_RUN_START_STATUSES;
         const startedIssue = await tx
@@ -8303,6 +8312,56 @@ export function heartbeatService(db: Db) {
         }
 
         if (activeExecutionRun) {
+          // [PLAN-QA rework serialization] mission_owner_plan_rework_requested must not
+          // coalesce into the active same-agent run and must not use deferred_issue_execution.
+          // Persist one queued agent_wakeup_requests row (runId=null) so the queue runner
+          // owns promotion after the active run ends. Dedupe by the exact idempotency key
+          // (mission-owner-plan-rework:{issueId}:{decisionHash}) so distinct decisionHash
+          // requests are never silently merged. Store the full enriched context snapshot so
+          // the promoted follow-up retains forceFreshSession, missionId, issueId, wakeReason,
+          // planQaIssueId, and decisionHash.
+          if (reason === "mission_owner_plan_rework_requested" && opts.idempotencyKey) {
+            const planReworkQueuedPayload = {
+              ...(payload ?? {}),
+              issueId,
+              [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
+            };
+            const existingQueuedPlanRework = await tx
+              .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount })
+              .from(agentWakeupRequests)
+              .where(and(
+                eq(agentWakeupRequests.companyId, agent.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                eq(agentWakeupRequests.status, "queued"),
+                eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+                sql`${agentWakeupRequests.runId} is null`,
+              ))
+              .orderBy(asc(agentWakeupRequests.requestedAt))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+            if (existingQueuedPlanRework) {
+              await tx
+                .update(agentWakeupRequests)
+                .set({ payload: planReworkQueuedPayload, coalescedCount: (existingQueuedPlanRework.coalescedCount ?? 0) + 1, updatedAt: new Date() })
+                .where(eq(agentWakeupRequests.id, existingQueuedPlanRework.id));
+            } else {
+              await tx.insert(agentWakeupRequests).values({
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason,
+                payload: planReworkQueuedPayload,
+                ...typedQueueColumns,
+                status: "queued",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey,
+              });
+            }
+            return { kind: "deferred" as const };
+          }
+
           const executionAgent = await tx
             .select({ name: agents.name })
             .from(agents)
