@@ -775,7 +775,7 @@ async function writeQaRubricMarkdown(input: {
     : [];
   const verificationGateLines = input.renderedStepDescription?.includes(VERIFICATION_BEFORE_COMPLETION_MARKER)
     ? []
-    : renderVerificationBeforeCompletionGateLines();
+    : renderVerificationBeforeCompletionGateLines({ intermediateQa: true });
   const body = [
     "# QA grading rubric",
     "",

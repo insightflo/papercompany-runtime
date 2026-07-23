@@ -1513,7 +1513,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     // [Verification Before Completion] QA verdict must be based on fresh claim/evidence checks.
     expect(rubric).toContain("Verification Before Completion");
     expect(rubric).toContain("fresh evidence");
-    expect(rubric).toContain("Identify every completion claim");
+    expect(rubric).toContain("direct dependency workProducts");
+    expect(rubric).not.toContain("Identify every completion claim");
+    expect(rubric).not.toContain("final user-visible or machine-consumed output contract");
     expect(rubric).toContain("notVerified");
   });
 
@@ -1662,6 +1664,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(deliveryRubric).toContain("Delivery Verification");
     expect(deliveryRubric).toContain("final consumer path");
     expect(deliveryRubric).toContain("HTTP 200");
+    expect(deliveryRubric).toContain("Identify every completion claim");
 
     await recordWorkflowVerdictForIssue(deliveryRun.issueId!, "pass", "2026-06-28T00:40:00.000Z");
     await issueService(db).update(deliveryRun.issueId!, { status: "done" });
