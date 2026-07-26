@@ -26,7 +26,7 @@ const EVIDENCE_ISSUE_ORIGIN = "quality_evidence_request";
 const CORRECTION_ISSUE_ORIGIN = "quality_correction_request";
 const IMPROVEMENT_ISSUE_ORIGIN = "quality_evaluator_improvement";
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
-const CLOSED_REVIEW_ITEM_STATUSES = new Set(["resolved_pass", "resolved_fail", "dismissed", "closed", "evaluator_promoted", "evaluator_rejected"]);
+const CLOSED_REVIEW_ITEM_STATUSES = new Set(["resolved_pass", "resolved_fail", "dismissed", "closed", "evaluator_promoted", "evaluator_replay_queued", "evaluator_rejected"]);
 const UNRESOLVED_EVIDENCE_STATUSES = new Set(["missing", "failed", "stale", "insufficient"]);
 const REQUIRED_FAILURE_TYPES = [
   "content_missing_core_concept",

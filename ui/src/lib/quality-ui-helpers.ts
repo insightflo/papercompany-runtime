@@ -28,7 +28,7 @@ export function isSmokeSignal(input: { triggerMetadata?: Record<string, unknown>
   return input.triggerMetadata?.smokeTest === true || /smoke|a1-smoke|codex-a1-smoke/i.test(input.title);
 }
 
-const CLOSED_STATUSES = new Set(["resolved_pass", "resolved_fail", "dismissed", "closed", "evaluator_promoted", "evaluator_rejected"]);
+const CLOSED_STATUSES = new Set(["resolved_pass", "resolved_fail", "dismissed", "closed", "evaluator_promoted", "evaluator_replay_queued", "evaluator_rejected"]);
 
 export function isClosedStatus(status: string): boolean {
   return CLOSED_STATUSES.has(status);

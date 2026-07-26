@@ -58,6 +58,7 @@ describe("quality-ui-helpers", () => {
   it("isClosedStatus covers resolved/dismissed/evaluator terminal states", () => {
     expect(isClosedStatus("resolved_pass")).toBe(true);
     expect(isClosedStatus("evaluator_promoted")).toBe(true);
+    expect(isClosedStatus("evaluator_replay_queued")).toBe(true);
     expect(isClosedStatus("awaiting_review")).toBe(false);
   });
 

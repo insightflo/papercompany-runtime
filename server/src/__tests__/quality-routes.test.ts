@@ -443,6 +443,15 @@ describeEmbeddedPostgres("quality routes", () => {
 
     const promote = await request(app).post(`/api/quality/review-items/${reviewItemId}/promote-anchor`).send({ verdictId: verdict.id, title: "QA false pass anchor" });
     expect(promote.status).toBe(201);
+    // Promote seeds evaluator candidate + queued replay and marks the review item
+    // evaluator_replay_queued (closed/awaiting replay). The summary header must not
+    // count a replay-queued item as an open review item.
+    const [promotedReviewItem] = await db.select().from(qualityReviewItems).where(eq(qualityReviewItems.id, reviewItemId));
+    expect(promotedReviewItem.status).toBe("evaluator_replay_queued");
+
+    const summary = await request(app).get(`/api/companies/${companyId}/quality/summary`);
+    expect(summary.status).toBe(200);
+    expect(summary.body.openReviewItems).toBe(0);
 
     const [version] = await db.select().from(evaluatorVersions);
     expect(version.status).toBe("candidate");
