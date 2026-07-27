@@ -86,6 +86,9 @@ export function buildStepInputManifest(input: {
     .filter((key) => key !== "paperclipStepInputManifest")
     .sort();
   const allowedSearchScopes = normalizeMissionSearchScopes(runtimeSearchPaths.allowedSearchScopes);
+  const broadScanRepoAllowed = typeof runtimeSearchPaths.broadScanRepoAllowed === "boolean"
+    ? runtimeSearchPaths.broadScanRepoAllowed
+    : missionSearchScopesAllowRepo(allowedSearchScopes);
 
   const workspaceSource = readString(workspace.source) || null;
   const workspaceId = readString(workspace.workspaceId) || null;
@@ -98,14 +101,14 @@ export function buildStepInputManifest(input: {
     projectId: readString(context.projectId) || null,
     allowedContextKeys,
     guardrails: {
-      broadScanAllowed: missionSearchScopesAllowRepo(allowedSearchScopes),
+      broadScanAllowed: broadScanRepoAllowed,
       allowedSearchScopes,
     },
     inputs: {
       missionSearch: {
         available: allowedSearchScopes.length > 0,
         allowedScopes: allowedSearchScopes,
-        guidance: buildMissionSearchGuidance(allowedSearchScopes),
+        guidance: buildMissionSearchGuidance(allowedSearchScopes, { broadScanRepoAllowed }),
       },
       qualityAssurance: {
         available: readString(runtimeSearchPaths.qaType).length > 0,

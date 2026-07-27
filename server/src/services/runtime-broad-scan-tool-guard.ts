@@ -51,7 +51,7 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   const workingDirectory = workingDirectoryChanged
     ? null
     : declaredWorkingDirectory;
-  const repoSearchRoot = missionSearchScopesAllowRepo(runtimeSearchPaths.allowedSearchScopes) && !workingDirectoryChanged
+  const repoSearchRoot = runtimeSearchPaths.broadScanRepoAllowed && !workingDirectoryChanged
     ? declaredWorkingDirectory
     : null;
   for (const segment of splitRuntimeShellSegments(normalized)) {
@@ -98,6 +98,9 @@ function readRuntimeSearchPaths(value: unknown) {
     )
     : [];
   const allowedSearchScopes = normalizeMissionSearchScopes(permissions?.allowedSearchScopes);
+  const broadScanRepoAllowed = typeof permissions?.broadScanRepoAllowed === "boolean"
+    ? permissions.broadScanRepoAllowed
+    : missionSearchScopesAllowRepo(allowedSearchScopes);
   return {
     declared: permissions?.version === 1,
     workingDirectory: typeof workingDirectory === "string" && workingDirectory.trim().length > 0
@@ -109,6 +112,7 @@ function readRuntimeSearchPaths(value: unknown) {
     dependencyFiles,
     dependencyDirectories,
     allowedSearchScopes,
+    broadScanRepoAllowed,
   };
 }
 

@@ -81,6 +81,7 @@ function readPermissionsFromContext(contextSnapshot: unknown): RuntimeSearchPath
     dependencyFiles: Array.isArray(raw.dependencyFiles) ? raw.dependencyFiles.filter((v): v is string => typeof v === "string") : [],
     dependencyDirectories: Array.isArray(raw.dependencyDirectories) ? raw.dependencyDirectories.filter((v): v is string => typeof v === "string") : [],
     allowedSearchScopes: Array.isArray(raw.allowedSearchScopes) ? raw.allowedSearchScopes.filter((v): v is string => typeof v === "string") : [],
+    broadScanRepoAllowed: typeof raw.broadScanRepoAllowed === "boolean" ? raw.broadScanRepoAllowed : false,
     qaType: readString(raw.qaType) ?? null,
     qaInputScope: readString(raw.qaInputScope) ?? null,
   };
