@@ -11,6 +11,7 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   activityLog,
+  companies,
   heartbeatRunEvents,
   heartbeatRuns,
   workflowTransitionEvents,
@@ -5517,6 +5518,12 @@ export function heartbeatService(db: Db) {
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
+    const defaultLanguage = await db
+      .select({ defaultLanguage: companies.defaultLanguage })
+      .from(companies)
+      .where(eq(companies.id, agent.companyId))
+      .then((rows) => rows[0]?.defaultLanguage ?? "en");
+    context.paperclipUserFacingLanguage = defaultLanguage;
     applyPaperclipApiContext(context);
     const taskKey = deriveTaskKey(context, null);
     // Mission session branch: when missionId is present, session is keyed by

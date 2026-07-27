@@ -19,6 +19,7 @@ function makeCompany(overrides: Partial<Company>): Company {
     logoAssetId: null,
     logoUrl: null,
     workProductRoot: null,
+    defaultLanguage: "en",
     timezone: null,
     createdAt: new Date(),
     updatedAt: new Date(),

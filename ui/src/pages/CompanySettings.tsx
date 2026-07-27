@@ -1,5 +1,6 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { CompanyDefaultLanguage } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
@@ -37,6 +38,7 @@ export function CompanySettings() {
   const [timezone, setTimezone] = useState("");
   const [logoUrl, setLogoUrl] = useState("");
   const [workProductRoot, setWorkProductRoot] = useState("");
+  const [defaultLanguage, setDefaultLanguage] = useState<CompanyDefaultLanguage>("en");
 
   // Sync local state from selected company
   useEffect(() => {
@@ -47,6 +49,7 @@ export function CompanySettings() {
     setTimezone(selectedCompany.timezone ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
     setWorkProductRoot((selectedCompany as { workProductRoot?: string | null }).workProductRoot ?? "");
+    setDefaultLanguage(selectedCompany.defaultLanguage);
   }, [selectedCompany]);
 
   const [inviteError, setInviteError] = useState<string | null>(null);
@@ -60,7 +63,8 @@ export function CompanySettings() {
       description !== (selectedCompany.description ?? "") ||
       brandColor !== (selectedCompany.brandColor ?? "") ||
       timezone !== (selectedCompany.timezone ?? "") ||
-      workProductRoot !== (selectedCompany.workProductRoot ?? ""));
+      workProductRoot !== (selectedCompany.workProductRoot ?? "") ||
+      defaultLanguage !== selectedCompany.defaultLanguage);
 
   const generalMutation = useMutation({
     mutationFn: (data: {
@@ -69,6 +73,7 @@ export function CompanySettings() {
       brandColor: string | null;
       timezone: string | null;
       workProductRoot: string | null;
+      defaultLanguage: CompanyDefaultLanguage;
     }) => companiesApi.update(selectedCompanyId!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
@@ -221,7 +226,8 @@ export function CompanySettings() {
       description: description.trim() || null,
       brandColor: brandColor || null,
       timezone: timezone.trim() || null,
-      workProductRoot: workProductRoot.trim() || null
+      workProductRoot: workProductRoot.trim() || null,
+      defaultLanguage
     });
   }
 
@@ -269,6 +275,19 @@ export function CompanySettings() {
               placeholder="e.g. Asia/Seoul"
               onChange={(e) => setTimezone(e.target.value)}
             />
+          </Field>
+          <Field
+            label="Default user-facing language"
+            hint="Agent-written descriptions, comments, and operator summaries use this language. Tools, code, IDs, JSON, and other internal execution data stay in English."
+          >
+            <select
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              value={defaultLanguage}
+              onChange={(event) => setDefaultLanguage(event.target.value as CompanyDefaultLanguage)}
+            >
+              <option value="en">English</option>
+              <option value="ko">한국어</option>
+            </select>
           </Field>
           <Field
             label="Papercompany local work folder"

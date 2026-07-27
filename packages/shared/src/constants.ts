@@ -1,6 +1,10 @@
 export const COMPANY_STATUSES = ["active", "paused", "archived"] as const;
 export type CompanyStatus = (typeof COMPANY_STATUSES)[number];
 
+export const COMPANY_DEFAULT_LANGUAGES = ["en", "ko"] as const;
+export type CompanyDefaultLanguage = (typeof COMPANY_DEFAULT_LANGUAGES)[number];
+export const DEFAULT_COMPANY_LANGUAGE: CompanyDefaultLanguage = "en";
+
 export const DEPLOYMENT_MODES = ["local_trusted", "authenticated"] as const;
 export type DeploymentMode = (typeof DEPLOYMENT_MODES)[number];
 

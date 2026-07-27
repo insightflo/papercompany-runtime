@@ -229,6 +229,7 @@ Human auth tables (`users`, `sessions`, and provider-specific auth artifacts) ar
 - `description` text null
 - `status` enum: `active | paused | archived`
 - `work_product_root` text null
+- `default_language` text not null default `en` (`en | ko` in the V1 board setting)
 
 Invariant: every business record belongs to exactly one company.
 
@@ -238,6 +239,7 @@ Work product output invariant:
 - Mission workflow steps receive a system output contract rooted at `work_product_root/missions/:missionId`.
 - If `work_product_root` is not set, the runtime falls back to the primary project workspace `cwd/produced_work`.
 - Mission artifact gates only accept registered file workProducts inside the mission output root.
+- Agent-authored descriptions, comments, and operator-facing summaries use `default_language`; tool calls, code, identifiers, JSON, and other machine-facing execution data remain English.
 
 ## 7.2 `agents`
 

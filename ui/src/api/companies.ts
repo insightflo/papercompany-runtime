@@ -7,6 +7,7 @@ import type {
   CompanyPortabilityPreviewRequest,
   CompanyPortabilityPreviewResult,
   UpdateCompanyBranding,
+  CompanyDefaultLanguage,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -20,6 +21,7 @@ export const companiesApi = {
     name: string;
     description?: string | null;
     budgetMonthlyCents?: number;
+    defaultLanguage?: CompanyDefaultLanguage;
   }) =>
     api.post<Company>("/companies", data),
   update: (
@@ -27,7 +29,7 @@ export const companiesApi = {
     data: Partial<
       Pick<
         Company,
-        "name" | "description" | "status" | "budgetMonthlyCents" | "requireBoardApprovalForNewAgents" | "brandColor" | "logoAssetId" | "workProductRoot"
+        "name" | "description" | "status" | "budgetMonthlyCents" | "requireBoardApprovalForNewAgents" | "brandColor" | "logoAssetId" | "workProductRoot" | "defaultLanguage"
       >
     >,
   ) => api.patch<Company>(`/companies/${companyId}`, data),

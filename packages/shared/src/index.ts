@@ -1,5 +1,7 @@
 export {
   COMPANY_STATUSES,
+  COMPANY_DEFAULT_LANGUAGES,
+  DEFAULT_COMPANY_LANGUAGE,
   DEPLOYMENT_MODES,
   DEPLOYMENT_EXPOSURES,
   AUTH_BASE_URL_MODES,
@@ -75,6 +77,7 @@ export {
   PLUGIN_EVENT_TYPES,
   PLUGIN_BRIDGE_ERROR_CODES,
   type CompanyStatus,
+  type CompanyDefaultLanguage,
   type DeploymentMode,
   type DeploymentExposure,
   type AuthBaseUrlMode,

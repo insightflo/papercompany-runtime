@@ -449,6 +449,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const missionWorkingNote = asRecord(manifestInputs?.missionWorkingNote);
   const missionOwnerPlanningContext = asRecord(manifestInputs?.missionOwnerPlanningContext);
   const missionSearch = asRecord(manifestInputs?.missionSearch);
+  const userFacingLanguage = asString(context.paperclipUserFacingLanguage);
   const missionSearchScopes = Array.isArray(missionSearch?.allowedScopes)
     ? missionSearch.allowedScopes.filter((scope): scope is string => typeof scope === "string")
     : [];
@@ -627,6 +628,9 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const instructionInjectionLine = asString(instructionInjection?.mode)
     ? `- Agent instructions injection: ${asString(instructionInjection?.mode)}${asString(instructionInjection?.contentHash) ? ` (${asString(instructionInjection?.contentHash)})` : ""}.`
     : null;
+  const userFacingLanguageLine = userFacingLanguage
+    ? `- User-facing language: write issue descriptions, comments, and operator-facing summaries in ${userFacingLanguage}. Keep tool calls, code, identifiers, JSON, and other machine-facing control-plane data in English.`
+    : null;
 
   const handoffSummary = handoff
     ? joinPromptSections([
@@ -645,6 +649,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
     ...reworkHeaderLines,
     missionSearchPointer,
+    userFacingLanguageLine,
     taskKey ? `- Task key: ${taskKey}` : null,
     issueId ? `- Issue: ${issueId}` : null,
     projectId ? `- Project: ${projectId}` : null,
