@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { buildPaperclipRuntimeBrief } from "@paperclipai/adapter-utils";
 
 describe("buildPaperclipRuntimeBrief", () => {
+  it("separates the configured user-facing language from English machine-facing execution", () => {
+    const brief = buildPaperclipRuntimeBrief({ paperclipUserFacingLanguage: "ko" });
+
+    expect(brief).toContain("write issue descriptions, comments, and operator-facing summaries in ko");
+    expect(brief).toContain("tool calls, code, identifiers, JSON, and other machine-facing control-plane data in English");
+  });
+
   it("surfaces exact workflow tool-call contract and recent controller comments", () => {
     const brief = buildPaperclipRuntimeBrief({
       paperclipWorkflowStepToolContract: {

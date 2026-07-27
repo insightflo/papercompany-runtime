@@ -48,6 +48,7 @@ export function companyService(db: Db) {
     brandColor: companies.brandColor,
     timezone: companies.timezone,
     workProductRoot: companies.workProductRoot,
+    defaultLanguage: companies.defaultLanguage,
     logoAssetId: companyLogos.assetId,
     createdAt: companies.createdAt,
     updatedAt: companies.updatedAt,

@@ -59,6 +59,7 @@ function createCompany() {
     brandColor: "#123456",
     logoAssetId: "11111111-1111-4111-8111-111111111111",
     logoUrl: "/api/assets/11111111-1111-4111-8111-111111111111/content",
+    defaultLanguage: "en",
     createdAt: now,
     updatedAt: now,
   };
@@ -191,6 +192,45 @@ describe("PATCH /api/companies/:companyId/branding", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("Validation error");
+    expect(mockCompanyService.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("PATCH /api/companies/:companyId default language", () => {
+  beforeEach(() => {
+    mockCompanyService.update.mockReset();
+    mockLogActivity.mockReset();
+  });
+
+  it("allows a board operator to set the user-facing language", async () => {
+    mockCompanyService.update.mockResolvedValue({ ...createCompany(), defaultLanguage: "ko" });
+    const app = createApp({
+      type: "board",
+      userId: "user-1",
+      source: "local_implicit",
+    });
+
+    const res = await request(app)
+      .patch("/api/companies/company-1")
+      .send({ defaultLanguage: "ko" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.defaultLanguage).toBe("ko");
+    expect(mockCompanyService.update).toHaveBeenCalledWith("company-1", { defaultLanguage: "ko" });
+  });
+
+  it("rejects unsupported user-facing languages", async () => {
+    const app = createApp({
+      type: "board",
+      userId: "user-1",
+      source: "local_implicit",
+    });
+
+    const res = await request(app)
+      .patch("/api/companies/company-1")
+      .send({ defaultLanguage: "fr" });
+
+    expect(res.status).toBe(400);
     expect(mockCompanyService.update).not.toHaveBeenCalled();
   });
 });

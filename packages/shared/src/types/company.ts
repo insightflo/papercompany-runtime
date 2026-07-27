@@ -1,4 +1,4 @@
-import type { CompanyStatus, PauseReason } from "../constants.js";
+import type { CompanyDefaultLanguage, CompanyStatus, PauseReason } from "../constants.js";
 
 export interface Company {
   id: string;
@@ -17,6 +17,7 @@ export interface Company {
   logoUrl: string | null;
   timezone: string | null;
   workProductRoot: string | null;
+  defaultLanguage: CompanyDefaultLanguage;
   createdAt: Date;
   updatedAt: Date;
 }
