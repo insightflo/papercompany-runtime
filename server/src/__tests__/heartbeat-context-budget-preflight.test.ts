@@ -185,6 +185,10 @@ async function deleteAgentsAfterLateIssueSideEffects(db: ReturnType<typeof creat
     await cleanupHeartbeatRunRecords(db);
     await db.delete(agentWakeupRequests);
     try {
+      // Late heartbeat side-effects can recreate agent_runtime_state (agentId FK
+      // pins agents). Re-delete before every agents delete/retry, mirroring
+      // agentWakeupRequests above, so a recreated row cannot block cleanup.
+      await db.delete(agentRuntimeState);
       await db.delete(agents);
       return;
     } catch (error) {
