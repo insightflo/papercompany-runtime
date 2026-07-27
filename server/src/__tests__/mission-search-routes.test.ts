@@ -130,6 +130,19 @@ describe("POST /api/agents/me/mission-search", () => {
     expect(res.body.allowedScopes).toEqual(["workProduct", "missionOutput"]);
   });
 
+  it("accepts repo scope under run-bound auth when the run allows repo (PLAN-like)", async () => {
+    // A PLAN run resolves allowedSearchScopes=["repo"] server-side; the route
+    // must accept scope=repo (not 403) while still requiring agent-owned auth.
+    const runRow = makeRunRow(["repo"]);
+    const res = await request(createApp({ runRow }))
+      .post("/api/agents/me/mission-search")
+      .send({ scope: "repo", query: "PAPERCLIP_MISSION_SEARCH_PROBE", runContext });
+
+    expect(res.status).toBe(200);
+    expect(res.body.allowed).toBe(true);
+    expect(res.body.scope).toBe("repo");
+  });
+
   it("returns 403 when the caller is a different agent", async () => {
     const res = await request(
       createApp({

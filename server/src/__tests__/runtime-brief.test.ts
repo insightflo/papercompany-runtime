@@ -68,7 +68,7 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Use generic-cli-executor with toolName=daily-tech-scout");
   });
 
-  it("emits the callable missionSearch curl recipe when missionSearch guidance is present", () => {
+  it("renders a prominent missionSearch availability/scopes pointer to the Paperclip skill, not a competing curl recipe", () => {
     const brief = buildPaperclipRuntimeBrief({
       paperclipStepInputManifest: {
         version: 1,
@@ -91,13 +91,17 @@ describe("buildPaperclipRuntimeBrief", () => {
       },
     });
 
-    // The exact callable curl reaches the agent prompt.
-    expect(brief).toContain("missionSearch API (server-enforced scoped discovery)");
-    expect(brief).not.toContain("missionSearch tool");
-    expect(brief).toContain("$PAPERCLIP_API_BASE_URL/agents/me/mission-search");
-    expect(brief).toContain("Bearer $PAPERCLIP_API_KEY");
-    expect(brief).toContain('"$PAPERCLIP_AGENT_ID"');
-    // Scope-aware guardrail line replaces the generic broad-scan text.
+    // Prominent availability + allowed scopes, shown per-run.
+    expect(brief).toContain("Mission Search");
+    // Per-run availability/scopes sit at the top of the brief, before the main task/instruction body.
+    expect(brief.indexOf("Mission Search")).toBeLessThan(brief.indexOf("Task key:"));
+    expect(brief).toContain("Available scopes this run: workProduct, missionOutput");
+    // Points to the Paperclip runtime skill for the canonical request.
+    expect(brief).toContain("Paperclip runtime skill");
+    // The brief must NOT duplicate a competing standalone curl recipe.
+    expect(brief).not.toContain("$PAPERCLIP_API_BASE_URL/agents/me/mission-search");
+    expect(brief).not.toContain("missionSearch API (callable): curl");
+    // Scope-aware guardrail line still describes the broad-scan policy.
     expect(brief).toContain("allowed mission search scopes: workProduct, missionOutput");
     expect(brief).not.toContain("Stay within the manifest-provided context");
   });

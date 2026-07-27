@@ -123,6 +123,66 @@ describe("mission search scopes", () => {
     expect(guidance).not.toContain("curl -sS");
   });
 
+  it("blocks direct broad scans when the repo scope is server-side-only (PLAN-like)", () => {
+    // PLAN issues get `repo` in allowedSearchScopes so the missionSearch API
+    // accepts repo discovery, but broadScanRepoAllowed=false keeps direct
+    // pathless rg/find blocked. The repo scope must not silently enable raw scans.
+    const context = {
+      paperclipRuntimeSearchPaths: {
+        version: 1,
+        workingDirectory: "/repo",
+        outputDirectory: null,
+        dependencyFiles: [],
+        dependencyDirectories: [],
+        allowedSearchScopes: ["repo"],
+        broadScanRepoAllowed: false,
+      },
+      paperclipStepInputManifest: {
+        version: 1,
+        guardrails: { broadScanAllowed: false, allowedSearchScopes: ["repo"] },
+      },
+    };
+
+    // git ls-files and the directory walkers (find/tree/ls -R) are broad scans gated
+    // by the repo broad-scan allowance; PLAN keeps them blocked even though the
+    // missionSearch API accepts a repo scope for this run.
+    expect(evaluateCodexCommand("git ls-files", context).blocked).toBe(true);
+    expect(evaluateCodexCommand("find -type f -name '*.ts'", context).blocked).toBe(true);
+    expect(evaluateCodexCommand("tree", context).blocked).toBe(true);
+    expect(evaluateCodexCommand("ls -R", context).blocked).toBe(true);
+    // An explicit root target is always blocked, independent of scope.
+    expect(evaluateCodexCommand("rg -n TODO .", context).blocked).toBe(true);
+  });
+
+  it("advertises repo scope via missionSearch but keeps raw scans blocked when broadScanRepoAllowed is false", () => {
+    const guidance = buildMissionSearchGuidance(["repo"], { broadScanRepoAllowed: false }).join("\n");
+
+    // repo is still an allowed missionSearch scope (callable recipe kept)...
+    expect(guidance).toContain("repo");
+    expect(guidance).toContain("missionSearch API (callable): curl");
+    // ...but raw scans are explicitly blocked for this run.
+    expect(guidance).toContain("use the missionSearch API instead");
+    expect(guidance).not.toContain("repo broad-scan allowed");
+  });
+
+  it("reports broadScanAllowed false for a PLAN-like repo-only server-side scope in the manifest", () => {
+    const manifest = buildStepInputManifest({
+      taskKey: "issue-plan-1",
+      context: {
+        issueId: "issue-plan-1",
+        paperclipRuntimeSearchPaths: {
+          allowedSearchScopes: ["repo"],
+          broadScanRepoAllowed: false,
+        },
+      },
+    });
+
+    expect(manifest.guardrails.allowedSearchScopes).toEqual(["repo"]);
+    expect(manifest.guardrails.broadScanAllowed).toBe(false);
+    expect(manifest.inputs.missionSearch.available).toBe(true);
+    expect(manifest.inputs.missionSearch.allowedScopes).toEqual(["repo"]);
+  });
+
   it("stores allowedSearchScopes on workflow execution cards", () => {
     const card = buildWorkflowIssueExecutionCard({
       title: "Develop feature",

@@ -9,7 +9,7 @@ import {
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { defaultMissionSearchScopes, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
+import { defaultMissionSearchScopes, missionSearchScopesAllowRepo, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
 import { resolveWorkProductLocalFilePath } from "./work-products.js";
 
 export type RuntimeSearchPathPermissions = {
@@ -19,6 +19,7 @@ export type RuntimeSearchPathPermissions = {
   dependencyFiles: string[];
   dependencyDirectories: string[];
   allowedSearchScopes: string[];
+  broadScanRepoAllowed: boolean;
   qaType: string | null;
   qaInputScope: string | null;
 };
@@ -36,6 +37,7 @@ export async function buildRuntimeSearchPathPermissions(input: {
     dependencyFiles: [],
     dependencyDirectories: [],
     allowedSearchScopes: defaultMissionSearchScopes(),
+    broadScanRepoAllowed: false,
     qaType: null,
     qaInputScope: null,
   };
@@ -52,7 +54,22 @@ export async function buildRuntimeSearchPathPermissions(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (!card) {
-    return buildMissionRecoverySearchPermissions(input, permissions);
+    const noCardIssue = await input.db
+      .select({ missionId: issues.missionId, originKind: issues.originKind })
+      .from(issues)
+      .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (noCardIssue?.originKind === "mission_main_executor_plan") {
+      // PLAN owns no execution card (it plans; it does not run a workflow step).
+      // Grant the minimum server-side missionSearch repo-discovery scope so planning
+      // can explore the repository through the authenticated API. Direct broad shell
+      // scans stay blocked (broadScanRepoAllowed=false) — repo discovery is server-side only.
+      permissions.allowedSearchScopes = ["repo"];
+      permissions.broadScanRepoAllowed = false;
+      return permissions;
+    }
+    return buildMissionRecoverySearchPermissions(input, permissions, noCardIssue);
   }
 
   permissions.qaType = card.cardJson.workflow?.qaType ?? null;
@@ -63,6 +80,7 @@ export async function buildRuntimeSearchPathPermissions(input: {
   if (permissions.allowedSearchScopes.length === 0) {
     permissions.allowedSearchScopes = defaultMissionSearchScopes();
   }
+  permissions.broadScanRepoAllowed = missionSearchScopesAllowRepo(normalizeMissionSearchScopes(permissions.allowedSearchScopes));
 
   const outputDirectory = card.cardJson.requiredOutputs.workProduct.outputDir;
   permissions.outputDirectory = typeof outputDirectory === "string" && path.isAbsolute(outputDirectory)
@@ -145,16 +163,12 @@ export async function buildRuntimeSearchPathPermissions(input: {
 async function buildMissionRecoverySearchPermissions(
   input: { db: Db; companyId: string; issueId: string; workingDirectory: string },
   permissions: RuntimeSearchPathPermissions,
+  issueRow: { missionId: string | null; originKind: string | null } | null,
 ): Promise<RuntimeSearchPathPermissions | null> {
-  const recoveryIssue = await input.db
-    .select({ missionId: issues.missionId, originKind: issues.originKind })
-    .from(issues)
-    .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (recoveryIssue?.originKind !== "mission_main_executor_unblock" || !recoveryIssue.missionId) {
+  if (issueRow?.originKind !== "mission_main_executor_unblock" || !issueRow.missionId) {
     return null;
   }
+  const recoveryMissionId = issueRow.missionId;
 
   const products = await input.db
     .select({
@@ -168,7 +182,7 @@ async function buildMissionRecoverySearchPermissions(
     .where(and(
       eq(issueWorkProducts.companyId, input.companyId),
       eq(issues.companyId, input.companyId),
-      eq(issues.missionId, recoveryIssue.missionId),
+      eq(issues.missionId, recoveryMissionId),
       not(eq(issueWorkProducts.status, "archived")),
     ))
     .orderBy(asc(issueWorkProducts.createdAt), asc(issueWorkProducts.id));

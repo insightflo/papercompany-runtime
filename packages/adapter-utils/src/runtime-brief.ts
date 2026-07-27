@@ -452,9 +452,6 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const missionSearchScopes = Array.isArray(missionSearch?.allowedScopes)
     ? missionSearch.allowedScopes.filter((scope): scope is string => typeof scope === "string")
     : [];
-  const missionSearchGuidance = Array.isArray(missionSearch?.guidance)
-    ? missionSearch.guidance.filter((line): line is string => typeof line === "string")
-    : [];
   const guardrails = asRecord(manifest?.guardrails);
 
   const workspaceLine =
@@ -614,8 +611,12 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       : guardrails?.broadScanAllowed === false
         ? `- Broad scans: disallowed (allowed mission search scopes: ${missionSearchScopes.length > 0 ? missionSearchScopes.join(", ") : "none"}). Use missionSearch instead of pathless rg/find.`
         : null;
-  const missionSearchLines = missionSearchGuidance.length > 0
-    ? joinPromptSections(["missionSearch API (server-enforced scoped discovery):", ...missionSearchGuidance])
+  const missionSearchPointer = missionSearchScopes.length > 0
+    ? joinPromptSections([
+        "Mission Search (server-side scoped discovery — use BEFORE any raw scan):",
+        `- Available scopes this run: ${missionSearchScopes.join(", ")}.`,
+        `- Canonical request, auth, and scope rules live in the Paperclip runtime skill (missionSearch); do not hand-roll a competing curl recipe here.`,
+      ])
     : null;
   const issueExecutionCardLines = issueExecutionCard
     ? buildIssueExecutionCardBriefLines({
@@ -643,6 +644,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       : null,
     // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
     ...reworkHeaderLines,
+    missionSearchPointer,
     taskKey ? `- Task key: ${taskKey}` : null,
     issueId ? `- Issue: ${issueId}` : null,
     projectId ? `- Project: ${projectId}` : null,
@@ -677,7 +679,6 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     hermesChatLine,
     fileViewsLine,
     guardrailLine,
-    missionSearchLines,
     ...issueExecutionCardLines,
     instructionInjectionLine,
     handoffSummary,

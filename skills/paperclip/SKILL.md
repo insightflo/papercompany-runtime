@@ -347,6 +347,27 @@ GET /api/companies/{companyId}/issues?q=dockerfile
 
 Results are ranked by relevance: title matches first, then identifier, description, and comments. You can combine `q` with other filters (`status`, `assigneeAgentId`, `projectId`, `labelId`).
 
+## Mission Search (repo/discovery before raw scans)
+
+Mission Search is the server-side, scope-enforced discovery API. Use it BEFORE running any raw `rg`/`find`/`git ls-files` over the workspace — pathless broad scans are blocked by the runtime guard unless the server grants a repo broad-scan scope for this run.
+
+The runtime brief states your allowed Mission Search scopes for this run (for example `workProduct`, `missionOutput`, `repo`, `logs`, `config`). Only those scopes are honored; any scope not listed is rejected with `403`. Mission-planning runs (`mission_main_executor_plan`) get a server-side `repo` scope so planning can discover the repository through this API — but that does NOT unlock direct shell-wide scans; reach the repo through the request below.
+
+Canonical request (reuses the injected `$PAPERCLIP_*` env vars and the same `Authorization: Bearer $PAPERCLIP_API_KEY` as every other Paperclip call):
+
+```bash
+curl -sS -X POST "$PAPERCLIP_API_URL/api/agents/me/mission-search" \
+  -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"scope\":\"repo\",\"query\":\"\",\"runContext\":{\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"runId\":\"$PAPERCLIP_RUN_ID\",\"companyId\":\"$PAPERCLIP_COMPANY_ID\"}}"
+```
+
+- `scope`: one of the allowed scopes for this run.
+- `query`: omit or send `""` to list every entry for the scope (discovery); send a single name fragment to locate a file; multiple space-separated fragments are matched as OR (any match returned).
+- `runContext` must match your own run (`agentId`/`runId`/`companyId`). The server rejects other agents' runs with `403`/`404`.
+
+This is the only supported way to do repository-wide discovery during a heartbeat. Do not add an MCP server, a native provider tool, or a standalone plugin for Mission Search — it is part of the shared Paperclip runtime-skill + authenticated HTTP API model.
+
 ## Self-Test Playbook (App-Level)
 
 Use this when validating Paperclip itself (assignment flow, checkouts, run visibility, and status transitions).
