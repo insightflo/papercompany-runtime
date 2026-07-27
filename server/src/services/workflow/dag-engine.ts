@@ -2672,6 +2672,15 @@ export async function processQueuedWorkflowToolStepRuns(
       result.skippedCount += 1;
       continue;
     }
+    // [when:always / edge gate] A queued issue-less tool row can outlive a non-terminal predecessor, so
+    //   re-check classifyStepActivation against current step-run states and skip (not fail) to re-dispatch.
+    const activationPreds = buildPredFactsMap(steps, buildStepRunMap(
+      await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, row.run.id)),
+    ));
+    if (!classifyStepActivation(step, activationPreds).runnable) {
+      result.skippedCount += 1;
+      continue;
+    }
 
     const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
     const requestId = readMetadataString(invocation.requestId) ?? readMetadataString(row.stepRun.lastDispatchRequestId);
