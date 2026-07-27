@@ -70,6 +70,55 @@ describe("native control nodes in the workflow graph", () => {
   });
 });
 
+describe("StepDraft.extra conditional dependencies", () => {
+  it("renders the condition_false edge to a Complete node from extra.conditionalDependencies", () => {
+    const drafts = jsonToSteps([
+      { id: "if-1", title: "IF", type: "if" },
+      {
+        id: "complete-1",
+        title: "Done",
+        type: "complete",
+        conditionalDependencies: [{ stepId: "if-1", when: "condition_false" }],
+      },
+    ]);
+    expect(drafts.find((step) => step.id === "complete-1")?.extra.conditionalDependencies).toEqual([
+      { stepId: "if-1", when: "condition_false" },
+    ]);
+    const graph = buildWorkflowGraphModel(drafts);
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "if-1->complete-1:condition_false",
+        source: "if-1",
+        target: "complete-1",
+        when: "condition_false",
+        label: "false",
+      }),
+    ]));
+  });
+
+  it("dedupes by stepId+when and excludes back-edges", () => {
+    const drafts = jsonToSteps([
+      { id: "if-1", title: "IF", type: "if" },
+      { id: "agent-1", title: "Agent", type: "agent" },
+      {
+        id: "target",
+        title: "Target",
+        type: "agent",
+        conditionalDependencies: [
+          { stepId: "if-1", when: "condition_true" },
+          { stepId: "if-1", when: "condition_true" },
+          { stepId: "if-1", when: "condition_false" },
+          { stepId: "agent-1", when: "qa_request_changes", isBackEdge: true },
+        ],
+      },
+    ]);
+    const graph = buildWorkflowGraphModel(drafts);
+    const conditionalEdges = graph.edges.filter((edge) => edge.source === "if-1" && edge.target === "target");
+    expect(conditionalEdges.map((edge) => edge.when).sort()).toEqual(["condition_false", "condition_true"]);
+    expect(graph.edges.some((edge) => edge.source === "agent-1" && edge.target === "target")).toBe(false);
+  });
+});
+
 describe("workflow graph retry settings", () => {
   it("reads default maxRetries as 2 when onFailure is retry", () => {
     const graph = buildWorkflowGraphModel([

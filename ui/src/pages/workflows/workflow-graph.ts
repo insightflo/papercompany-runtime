@@ -1218,13 +1218,28 @@ function readGraphEdgeMetadata(step: WorkflowGraphStep, sourceId: string): Workf
 }
 
 function readForwardConditionalDependencies(step: WorkflowGraphStep): Array<{ stepId: string; when: string }> {
-  if (!Array.isArray(step.conditionalDependencies)) return [];
-  return step.conditionalDependencies.flatMap((edge) => {
-    if (!edge || edge.isBackEdge === true) return [];
-    const stepId = typeof edge.stepId === "string" ? edge.stepId.trim() : "";
-    const when = typeof edge.when === "string" ? edge.when.trim() : "success";
-    return stepId ? [{ stepId, when }] : [];
-  });
+  const sources: unknown[] = [];
+  if (Array.isArray(step.conditionalDependencies)) sources.push(...step.conditionalDependencies);
+  const extra = step.extra;
+  if (extra && typeof extra === "object" && !Array.isArray(extra)) {
+    const extraEdges = (extra as Record<string, unknown>).conditionalDependencies;
+    if (Array.isArray(extraEdges)) sources.push(...extraEdges);
+  }
+  const seen = new Set<string>();
+  const result: Array<{ stepId: string; when: string }> = [];
+  for (const edge of sources) {
+    if (!edge || typeof edge !== "object" || Array.isArray(edge)) continue;
+    const value = edge as Record<string, unknown>;
+    if (value.isBackEdge === true) continue;
+    const stepId = typeof value.stepId === "string" ? value.stepId.trim() : "";
+    const when = typeof value.when === "string" ? value.when.trim() : "success";
+    if (!stepId) continue;
+    const key = `${stepId}|${when}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ stepId, when });
+  }
+  return result;
 }
 
 function conditionalGraphEdgeMetadata(when: string): WorkflowGraphEdgeMetadata {

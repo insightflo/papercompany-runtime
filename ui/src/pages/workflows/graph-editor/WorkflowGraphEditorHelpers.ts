@@ -25,3 +25,19 @@ export function graphEdgeMetadataFor(step: StepDraft | null, sourceId: string): 
     condition: typeof metadata?.condition === "string" ? metadata.condition : "",
   };
 }
+
+/**
+ * Returns the next selected-edge id after removing the edge between
+ * `sourceId` and `targetId`. Conditional edges use a colon-suffixed id
+ * (`source->target:when`), so both the plain and colon-suffixed forms are
+ * cleared. Other selections are preserved.
+ */
+export function nextSelectedEdgeIdAfterDisconnect(
+  edgeId: string | null,
+  sourceId: string,
+  targetId: string,
+): string | null {
+  if (!edgeId) return edgeId;
+  const removedBase = `${sourceId}->${targetId}`;
+  return edgeId === removedBase || edgeId.startsWith(`${removedBase}:`) ? null : edgeId;
+}

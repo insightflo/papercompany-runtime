@@ -37,7 +37,7 @@ import {
   isGraphPathSelectionAction,
 } from "./workflowGraphActionHelpers.js";
 import { createWorkflowGraphStructureActions } from "./workflowGraphStructureActions.js";
-import { isEditableKeyboardTarget } from "./WorkflowGraphEditorHelpers.js";
+import { isEditableKeyboardTarget, nextSelectedEdgeIdAfterDisconnect } from "./WorkflowGraphEditorHelpers.js";
 
 type SetState<T> = React.Dispatch<React.SetStateAction<T>>;
 
@@ -146,7 +146,7 @@ export function useWorkflowGraphActions({
 
   function disconnect(sourceId: string, targetId: string, when?: string): void {
     setGraphError("");
-    setSelectedEdgeId((edgeId) => edgeId === `${sourceId}->${targetId}` ? null : edgeId);
+    setSelectedEdgeId((edgeId) => nextSelectedEdgeIdAfterDisconnect(edgeId, sourceId, targetId));
     onChange(disconnectWorkflowSteps(steps, sourceId, targetId, when));
   }
 

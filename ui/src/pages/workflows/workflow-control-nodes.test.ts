@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { jsonToSteps } from "./step-draft-serialization.js";
 import {
   connectWorkflowSteps,
+  disconnectWorkflowSteps,
   removeWorkflowControlNodeReferences,
   renameWorkflowControlNodeReferences,
 } from "./workflow-control-nodes.js";
@@ -55,6 +56,29 @@ describe("workflow control-node connections", () => {
       { sourceStepId: "false-target", when: "success" },
       "true-target",
     )).toThrow(/Complete/);
+  });
+
+  it("persists removal of a condition_false edge to a Complete node", () => {
+    let steps = baseDrafts();
+    steps = connectWorkflowSteps(steps, { sourceStepId: "if-1", when: "condition_false" }, "false-target");
+    const before = steps.find((step) => step.id === "false-target")?.extra.conditionalDependencies;
+    expect(before).toEqual([{ stepId: "if-1", when: "condition_false" }]);
+
+    steps = disconnectWorkflowSteps(steps, "if-1", "false-target", "condition_false");
+    const after = steps.find((step) => step.id === "false-target")?.extra.conditionalDependencies;
+    expect(after).toBeUndefined();
+  });
+
+  it("preserves sibling conditional edges when one condition is disconnected", () => {
+    let steps = baseDrafts();
+    steps = connectWorkflowSteps(steps, { sourceStepId: "if-1", when: "condition_true" }, "true-target");
+    steps = connectWorkflowSteps(steps, { sourceStepId: "if-1", when: "condition_false" }, "false-target");
+    steps = disconnectWorkflowSteps(steps, "if-1", "false-target", "condition_false");
+
+    expect(steps.find((step) => step.id === "false-target")?.extra.conditionalDependencies).toBeUndefined();
+    expect(steps.find((step) => step.id === "true-target")?.extra.conditionalDependencies).toEqual([
+      { stepId: "if-1", when: "condition_true" },
+    ]);
   });
 
   it("renames and removes condition-source references safely", () => {
