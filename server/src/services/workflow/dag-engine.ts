@@ -3338,12 +3338,14 @@ export async function syncWorkflowRunState(
     && shouldLoadValidationVerdictsForRun(context.steps, stepRuns)
     ? await loadLatestValidationVerdicts(db, runValidationBindings)
     : new Map<string, ValidationVerdictObservation>();
-  // ④ revive pass — producer 가 rework/회복으로 completed 되면, failure cascade 로 controlFlowSkipped 된
-  //   downstream step 이 다시 runnable 이 된다. sentinel 을 풀고 pending 으로 부활시켜 이어지는 launch 가
-  //   다시 잡게 한다. IF false-branch 로 skip 된 step 은 classifyStepActivation 이 runnable=false 를 주어
-  //   부활하지 않는다(flap 회피). 무조건 skipped→pending 하는 resetUnlaunchedTerminalStepRuns 의 flap(가즈아
-  //   hang)과 달리, pred 가 completed 되어 진짜 runnable 일 때만 부활(PLAN P4 이월 항목 마감).
-  if (hasConditionalEdges && context.run.status !== "cancelled") {
+  // ④ revive pass — 선행이 회복(rework/재시도 completed) 되어 failure cascade 로 controlFlowSkipped 된
+  //   downstream step 이 다시 runnable 이 되면 sentinel 을 풀고 pending 으로 부활시켜 이어지는 launch 가
+  //   다시 잡게 한다. plain(legacy dependsOn) 워크플로도 포함한다 — deadlock-reconciler 가 남긴 stale skip 은
+  //   선행 완료 후 반드시 재평가되어야 회복된 run 이 정상 종료된다(조건부-edge 전용 게이트 제거).
+  //   IF false-branch / 여전히 failed 인 선행은 classifyStepActivation 이 runnable=false 를 주어 부활하지
+  //   않는다(legitimate-skip/flap 회피). resetUnlaunchedTerminalStepRuns 은 controlFlowSkipped 를 제외하므로
+  //   이 pass 가 유일한 정확한 부활 경로(무조건 skipped→pending flap 없음).
+  if (context.run.status !== "cancelled") {
     const reviveRunMap = buildStepRunMap(stepRuns);
     const revivePredsByStepId = buildPredFactsMap(context.steps, reviveRunMap, validationVerdictsByIssueId);
     let revivedAny = false;
