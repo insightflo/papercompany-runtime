@@ -177,4 +177,58 @@ describe("mission owner recovery comments", () => {
       reason: "source already terminal",
     })).toBe("owner_action_decision_not_applied: OWN-1 retry_source_issue source=SRC-1 — source already terminal");
   });
+  it("localizes user-visible prose to Korean while leaving control fields English", () => {
+    const koDescription = buildMissionOwnerUnblockDescription(
+      { id: "mission-1", title: "Mission" },
+      {
+        id: "source-1",
+        identifier: "SRC-1",
+        title: "Blocked source",
+        status: "blocked",
+        assigneeAgentId: "worker-1",
+      },
+      { language: "ko" },
+    );
+    // Prose is localized...
+    expect(koDescription).toContain("오버사이트로부터 미션 오너 신호");
+    expect(koDescription).toContain("이 오너 액션 템플릿에서는 사용할 수 없습니다.");
+    // ...but machine-readable markers, field labels, decision codes and API paths stay English.
+    expect(koDescription).toContain("<!-- mission-owner-action:");
+    expect(koDescription).toContain("Source issue identifier: SRC-1");
+    expect(koDescription).toContain("POST /api/issues/{this owner-action issue id}/owner-recovery/decision");
+    expect(koDescription).toContain("- retry_source_issue");
+    expect(koDescription).not.toContain("Mission-owner signal from oversight");
+
+    const koRetry = buildRetrySourceIssueComment({
+      ownerActionIssueId: "owner-1",
+      ownerActionLabel: "OWN-1",
+      sourceIssueId: "source-1",
+      sourceLabel: "SRC-1",
+      requestChangesSummary: "REQUEST_CHANGES: distinctive feedback",
+      activeWorkProducts: [
+        { title: "Note", type: "local_file", provider: "local_file", url: null, externalId: null, metadata: null },
+      ],
+      language: "ko",
+    });
+    expect(koRetry).toContain("### 미션 오너 재시도 요청");
+    expect(koRetry).toContain("이 소스 이슈의 활성 워크프로덕트 (1개 표시):");
+    expect(koRetry).toContain("Decision: retry_source_issue");
+    expect(koRetry).toContain("Owner-action issue: OWN-1 (owner-1)");
+    expect(koRetry).not.toContain("### Mission owner retry requested");
+    // Machine-consumed label "Latest REQUEST_CHANGES summary:" must stay exactly
+    // English even in ko output because supervision.ts dedup matches it verbatim.
+    expect(koRetry).toContain("Latest REQUEST_CHANGES summary:");
+    expect(koRetry).not.toContain("최신 REQUEST_CHANGES 요약:");
+    expect(koRetry).toContain("REQUEST_CHANGES: distinctive feedback");
+
+    // English default still produces the original strings when no language is supplied.
+    const enRetry = buildRetrySourceIssueComment({
+      ownerActionIssueId: "owner-1",
+      ownerActionLabel: "OWN-1",
+      sourceIssueId: "source-1",
+      sourceLabel: "SRC-1",
+    });
+    expect(enRetry).toContain("### Mission owner retry requested");
+    expect(enRetry).toContain("Owner requested source issue retry.");
+  });
 });
