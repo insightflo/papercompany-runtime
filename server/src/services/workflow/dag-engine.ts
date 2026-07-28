@@ -158,6 +158,13 @@ export interface WorkflowStep {
    * heartbeat missing-workProduct gate가 적용된다.
    */
   graphWorkProductRequired?: boolean;
+  /**
+   * 이 step이 adapter에게 tool auto-approve(예: hermes_local --yolo)를 요구하는지(compile-time 계약).
+   * normalizeWorkflowStepsForExecution 이 명시 true(literal)만 true로 정규화한다(string/number/alias 거부).
+   * true면 createWorkflowStepIssue 가 issue 의 assigneeAdapterOverrides.adapterConfig.autoApproveTools=true 를
+   * 주입하고, heartbeat 가 이를 runtime adapter config 에 merge한다(Hermes 는 autoApproveTools→--yolo 매핑).
+   */
+  autoApproveTools?: boolean;
   graphRetryDelaySeconds?: number;
   graphRetryBackoff?: "fixed" | "linear" | "exponential";
   graphRetryJitter?: boolean;
@@ -191,6 +198,7 @@ type PersistedWorkflowStep = WorkflowStep & {
   graphCacheTtlSeconds?: unknown;
   graphDeleteAfterUse?: unknown;
   graphWorkProductRequired?: unknown;
+  autoApproveTools?: unknown;
   workProductRequired?: unknown;
   requiresWorkProduct?: unknown;
 };
@@ -387,6 +395,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
     })
       ? false
       : readWorkProductRequirementMarker(step) === true;
+    const autoApproveTools = step.autoApproveTools === true ? true : undefined;
     return {
       ...step,
       id,
@@ -399,6 +408,7 @@ export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowS
       // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
       conditionalDependencies,
       graphWorkProductRequired,
+      autoApproveTools,
     };
   });
 }
@@ -1757,6 +1767,7 @@ async function createWorkflowStepIssue(input: {
     }
   }
 
+  const autoApproveTools = input.step.autoApproveTools === true;
   const createdIssue = await issueSvc.create(input.run.companyId, {
     title,
     description,
@@ -1767,6 +1778,9 @@ async function createWorkflowStepIssue(input: {
     originKind: "workflow_execution",
     originId: input.run.id,
     originRunId: input.run.id,
+    ...(autoApproveTools
+      ? { assigneeAdapterOverrides: { adapterConfig: { autoApproveTools: true } } }
+      : {}),
   });
 
   const executionCardRow = await upsertWorkflowIssueExecutionCard({

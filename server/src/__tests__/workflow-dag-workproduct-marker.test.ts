@@ -81,6 +81,7 @@ type StepDef = {
   graphWorkProductRequired?: boolean;
   workProductRequired?: boolean;
   requiresWorkProduct?: boolean;
+  autoApproveTools?: unknown;
 };
 
 describeEmbeddedPostgres("workflow workProduct dependency marker contract", () => {
@@ -349,5 +350,30 @@ describeEmbeddedPostgres("workflow workProduct dependency marker contract", () =
     expect(description).toContain("workProducts:");
     expect(description).not.toContain("Dependency workProduct hard-stop:");
     expect(description).not.toContain("has no registered dependency workProduct.");
+  });
+  it("injects assigneeAdapterOverrides autoApproveTools=true only for literal true steps", async () => {
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const agentId = randomUUID();
+    const upstream = await executeRun({
+      companyId,
+      companyName: "AutoApprove Marker",
+      missionId: randomUUID(),
+      workflowId: randomUUID(),
+      runId,
+      agents: [{ id: agentId, name: "Auto Agent", role: "operator" }],
+      steps: [
+        { id: "yolo-step", name: "Auto-approve run", agentId, dependencies: [], autoApproveTools: true },
+        { id: "plain-step", name: "Normal run", agentId, dependencies: [] },
+        { id: "string-step", name: "Legacy string", agentId, dependencies: [], autoApproveTools: "true" },
+      ],
+    });
+
+    expect(upstream["yolo-step"]?.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { autoApproveTools: true },
+    });
+    expect(upstream["plain-step"]?.assigneeAdapterOverrides).toBeNull();
+    // Malformed string is normalized to undefined at the step, so no override is injected.
+    expect(upstream["string-step"]?.assigneeAdapterOverrides).toBeNull();
   });
 });
