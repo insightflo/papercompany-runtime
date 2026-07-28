@@ -30,6 +30,7 @@ import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOw
 import { isTerminalMissionStatus } from "./shared-types.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
+import { loadCompanySystemLanguage } from "./system-language.js";
 import { issueLessToolRecoveryOwnsFailure } from "./tool-step-recovery-authority.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
 import { buildMissionSupervisionContext, type MissionSupervisionHeartbeatRun, type MissionSupervisionIssue, type MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
@@ -299,13 +300,12 @@ export function createSupervision({ db, deps, ownerActions }: {
       governanceThread,
       activePlan,
     } = context;
-
+    const supervisionLanguage = await loadCompanySystemLanguage(db, mission.companyId);
     const governanceReasonSuffix = governanceThreadReasonSuffix(governanceThread?.summary);
     const governanceEvidenceLines = formatGovernanceThreadEvidenceLines(governanceThread?.summary);
     const enrichRecommendationReason = (reason: string): string => governanceReasonSuffix
       ? `${reason}; governance thread: ${governanceReasonSuffix}`
       : reason;
-
     let oversightIssue = await ownerActions.findMainExecutorIssue(mission.id, "mission_main_executor_oversight");
     if (!oversightIssue) {
       await ownerActions.ensureMissionExecutionPlan({ companyId: mission.companyId, missionId: mission.id });
@@ -319,7 +319,6 @@ export function createSupervision({ db, deps, ownerActions }: {
     if (!oversightIssue) {
       return { missionId: mission.id, oversightIssueId: null, findings: [], recommendations: [], appliedActions: [], ownerActionExplanations: [], commented: false };
     }
-
     const now = input.now ?? new Date();
     const staleAfterMs = Math.max(1, input.staleAfterMinutes ?? 120) * 60 * 1000;
 
@@ -1710,6 +1709,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                     sourceInstruction: sourceCandidate.description,
                     sourceTitle: sourceCandidate.title,
                     activeWorkProducts: activeSourceWorkProducts,
+                    language: supervisionLanguage,
                   }),
                   { agentId: mission.ownerAgentId },
                 );

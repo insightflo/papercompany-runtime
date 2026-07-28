@@ -30,7 +30,7 @@ import { isTerminalMissionStatus } from "./shared-types.js";
 import type { MissionServiceDeps } from "../missions.js";
 import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
-
+import { loadCompanySystemLanguage } from "./system-language.js";
 export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceDeps }) {
 
   const activeWorkflowRunStatuses = new Set(["pending", "queued", "running", "in_progress"]);
@@ -572,12 +572,14 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       logger.warn({ err: error, missionId: mission.id, blockedIssueId: blockedIssue.id }, "Failed to build mission execution digest for owner unblock issue");
       missionExecutionDigest = ["Mission execution digest could not be built; inspect workflow runs, step runs, work products, and source issue comments manually."];
     }
+    const ownerActionLanguage = await loadCompanySystemLanguage(db, mission.companyId);
     const unblockParentId = blockedIssue.parentId ? undefined : blockedIssue.id;
     const unblockIssue = await createMissionOwnerActionIssue(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
       description: buildMissionOwnerUnblockDescription(mission, blockedIssue, {
         governanceEvidence: options.governanceEvidence,
         missionExecutionDigest,
+        language: ownerActionLanguage,
       }),
       missionId: mission.id,
       originKind: "mission_main_executor_unblock",
@@ -587,7 +589,6 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       status: "todo",
       title: `[Unblock] ${blockedLabel}: ${blockedIssue.title}`,
     });
-
     if (options.notifyOwner !== false && deps.onOwnerActionCreated) {
       void Promise.resolve(deps.onOwnerActionCreated({
         mission,
@@ -598,7 +599,6 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         logger.warn({ err, missionId: mission.id, issueId: unblockIssue.id }, "failed to notify owner about mission unblock action");
       });
     }
-
     return unblockIssue;
   }
 

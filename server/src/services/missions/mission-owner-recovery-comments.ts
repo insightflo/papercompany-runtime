@@ -9,9 +9,8 @@ import {
 import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
 import { buildExistingArtifactRegistrationActionLines } from "../work-products/artifact-registration-instructions.js";
 import { metadataDigestPath } from "./mission-execution-digest.js";
-
+import { prose, type SystemLanguage } from "./system-language.js";
 export { buildMainExecutorBrief, buildMissionOwnerUnblockDescription } from "./mission-owner-unblock-description.js";
-
 export function buildRetrySourceIssueWakeupResultComment(input: {
   status: MissionOwnerDecisionWakeupDispatchStatus;
   missionId: string;
@@ -221,8 +220,10 @@ export function buildRetrySourceIssueComment(input: {
   sourceTitle?: string | null;
   sourceInstruction?: string | null;
   activeWorkProducts?: readonly SourceRetryWorkProduct[];
+  language?: SystemLanguage;
 }) {
   const titleTrim = input.sourceTitle?.trim() || null;
+  const language = input.language ?? "en";
   const trimmedInstruction = input.sourceInstruction?.trim() ? trimSourceInstruction(input.sourceInstruction) : null;
   const instructionBlock = [
     titleTrim ? `Title: ${titleTrim}` : null,
@@ -230,16 +231,16 @@ export function buildRetrySourceIssueComment(input: {
   ].filter((line): line is string => line !== null).join("\n\n");
   const products = (input.activeWorkProducts ?? []).slice(0, SOURCE_RETRY_WORK_PRODUCT_MAX);
   return [
-    "### Mission owner retry requested",
+    prose(language, "retry_comment_heading"),
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     "Decision: retry_source_issue",
-    "Action: record the recovery reason and request native workflow resume; the queue runner owns the source issue state transition.",
-    `Reason: ${input.decisionReason ?? "Owner requested source issue retry."}`,
+    prose(language, "retry_comment_action_line"),
+    `Reason: ${input.decisionReason ?? prose(language, "retry_comment_default_reason")}`,
     instructionBlock
       ? [
           "",
-          "Original source issue instruction:",
+          prose(language, "retry_comment_instruction_label"),
           "```text",
           instructionBlock,
           "```",
@@ -248,7 +249,7 @@ export function buildRetrySourceIssueComment(input: {
     products.length > 0
       ? [
           "",
-          `Active workProducts on this source issue (showing ${products.length}):`,
+          prose(language, "retry_comment_workproducts_label", { count: products.length }),
           ...products.map(formatSourceRetryWorkProductLine),
         ].join("\n")
       : null,
@@ -263,7 +264,6 @@ export function buildRetrySourceIssueComment(input: {
       : null,
   ].filter((line): line is string => line !== null).join("\n");
 }
-
 export function buildRetrySourceIssueRequestChangesContextComment(input: {
   ownerActionIssueId: string;
   ownerActionLabel: string;

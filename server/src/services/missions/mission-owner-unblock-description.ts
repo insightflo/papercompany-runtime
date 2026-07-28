@@ -3,6 +3,7 @@ import {
   buildMissionOwnerActionMarker,
   buildMissionOwnerDecisionFormat,
 } from "./mission-owner-recovery-events.js";
+import { prose, type SystemLanguage } from "./system-language.js";
 
 type MissionOwnerDescriptionMission = {
   id: string;
@@ -50,8 +51,9 @@ export function buildMainExecutorBrief(input: {
 export function buildMissionOwnerUnblockDescription(
   mission: MissionOwnerDescriptionMission,
   blockedIssue: MissionOwnerDescriptionIssue,
-  options: { governanceEvidence?: string[]; missionExecutionDigest?: string[] } = {},
+  options: { governanceEvidence?: string[]; missionExecutionDigest?: string[]; language?: SystemLanguage } = {},
 ): string {
+  const language = options.language ?? "en";
   const sourceLabel = blockedIssue.identifier ?? blockedIssue.id;
   const missionExecutionDigest = (options.missionExecutionDigest ?? [])
     .map((line) => line.trim())
@@ -66,7 +68,7 @@ export function buildMissionOwnerUnblockDescription(
       actionType: "unblock",
       status: "decision_required",
     }),
-    "Mission-owner signal from oversight. This is a wakeup plus basic state/evidence; the main executor must judge and act to complete the mission.",
+    prose(language, "owner_unblock_signal_intro"),
     "",
     `Mission id: ${mission.id}`,
     `Mission title: ${mission.title}`,
@@ -78,7 +80,7 @@ export function buildMissionOwnerUnblockDescription(
     "",
     missionExecutionDigest.length > 0
       ? ["Mission execution digest:", ...missionExecutionDigest.map((line) => `- ${line}`)].join("\n")
-      : "Mission execution digest: unavailable for this owner action template.",
+      : prose(language, "owner_unblock_digest_unavailable"),
     "",
     buildMainExecutorBrief({
       missionGoal: mission.title,
@@ -95,9 +97,9 @@ export function buildMissionOwnerUnblockDescription(
     "",
     buildMissionOwnerDecisionFormat(),
     "",
-    "Source issue remains assigned to the original executor unless the structured decision is reassign_source_issue with targetAgentId.",
+    prose(language, "owner_unblock_source_assignment_note"),
     governanceEvidence.length > 0
       ? ["Governance evidence:", ...governanceEvidence.map((line) => `- ${line}`)].join("\n")
-      : "Governance evidence: latest evidence unavailable for this owner action template.",
+      : prose(language, "owner_unblock_governance_unavailable"),
   ].join("\n");
 }
