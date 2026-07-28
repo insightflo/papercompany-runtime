@@ -72,6 +72,7 @@ import {
   setWorkflowToolStepReadinessChecker,
   setWorkflowToolStepExecutor,
   syncWorkflowRunForIssue,
+  syncWorkflowRunState,
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { loadWorkflowApiFeedback } from "../services/workflow/validation-verdict-ledger.js";
@@ -519,6 +520,87 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("control-plane-deadlock");
     expect(comments[0]?.body).toContain("unreachable");
+  });
+  describe("revive stale controlFlowSkipped after predecessor recovery (plain dependsOn)", () => {
+    async function seedStaleSkipRun(normalizeGovStatus: "completed" | "failed"): Promise<string> {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const workflowId = randomUUID();
+      const runId = randomUUID();
+      heartbeatWakeup.mockResolvedValue({ id: "queued-revive-skip" });
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Revive Skip Company",
+        issuePrefix: `RS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Revive Skip Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      // Plain dependsOn only — no conditional edge. select-targets requires three normalize steps.
+      await db.insert(workflowDefinitions).values({
+        id: workflowId,
+        companyId,
+        name: "merge-candidates",
+        stepsJson: [
+          { id: "n-gov", name: "Normalize Government Iris", type: "agent", agentId, dependencies: [] },
+          { id: "n-a", name: "Normalize A", type: "agent", agentId, dependencies: [] },
+          { id: "n-b", name: "Normalize B", type: "agent", agentId, dependencies: [] },
+          { id: "select-targets", name: "Select Targets", type: "agent", agentId, dependencies: ["n-gov", "n-a", "n-b"] },
+        ],
+      });
+      await db.insert(workflowRuns).values({
+        id: runId,
+        workflowId,
+        companyId,
+        status: "running",
+        triggeredBy: "schedule",
+        startedAt: new Date(),
+        completedAt: null,
+      });
+      const now = new Date();
+      // Stale state left when select-targets was force-skipped at first failure (deadlock-reconciler
+      // sentinel) while n-gov later either recovered (completed) or stayed failed.
+      await db.insert(workflowStepRuns).values([
+        {
+          workflowRunId: runId,
+          stepId: "n-gov",
+          status: normalizeGovStatus,
+          startedAt: normalizeGovStatus === "failed" ? now : null,
+          completedAt: normalizeGovStatus === "completed" ? now : null,
+        },
+        { workflowRunId: runId, stepId: "n-a", status: "completed", completedAt: now },
+        { workflowRunId: runId, stepId: "n-b", status: "completed", completedAt: now },
+        { workflowRunId: runId, stepId: "select-targets", status: "skipped", completedAt: now, metadata: { controlFlowSkipped: true } },
+      ]);
+      return runId;
+    }
+
+    it("re-evaluates a stale controlFlowSkipped step once its plain dependencies recover to completed", async () => {
+      const runId = await seedStaleSkipRun("completed");
+      await syncWorkflowRunState(db, runId);
+      const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+      const select = rows.find((row) => row.stepId === "select-targets")!;
+      // Revived: no longer skipped (now pending/created for launch).
+      expect(select.status).toBe("pending");
+    });
+
+    it("keeps a controlFlowSkipped step skipped while a plain dependency is still failed", async () => {
+      const runId = await seedStaleSkipRun("failed");
+      await syncWorkflowRunState(db, runId);
+      const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
+      const select = rows.find((row) => row.stepId === "select-targets")!;
+      // Legitimate skip preserved: predecessor still failed, activation not runnable.
+      expect(select.status).toBe("skipped");
+    });
   });
 
   it("deadlock fast-path: does NOT converge a PARALLEL dag when an independent branch is still runnable (only the failed branch's downstream is unreachable)", async () => {
