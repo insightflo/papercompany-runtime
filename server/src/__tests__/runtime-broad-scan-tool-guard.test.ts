@@ -40,7 +40,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "find .",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.',
     });
   });
 
@@ -130,7 +130,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "rg with a root target",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg with a root target". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg with a root target". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.',
     });
   });
 
@@ -291,7 +291,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "rg with a root target",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "rg with a root target". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "rg with a root target". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.',
     });
   });
 
@@ -378,7 +378,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "git ls-files",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "git ls-files". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "git ls-files". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.',
     });
   });
 
@@ -418,7 +418,7 @@ describe("evaluateRuntimeBroadScanToolGuard", () => {
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "grep -R without path",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "grep -R without path". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "grep -R without path". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.',
     });
   });
 
@@ -508,7 +508,7 @@ done'`,
     expect(result).toEqual({
       blocked: true,
       matchedCommand: "find .",
-      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.',
+      reason: 'Step Input Manifest blocked runtime broad scan command: "find .". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.',
     });
   });
 

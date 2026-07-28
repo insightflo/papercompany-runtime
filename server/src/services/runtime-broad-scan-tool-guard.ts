@@ -69,7 +69,7 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
     return {
       blocked: true,
       matchedCommand: matched,
-      reason: `Step Input Manifest blocked runtime broad scan command: "${matched}". Use missionSearch/scoped search and retry with declared file paths or an allowed repo scope.`,
+      reason: `Step Input Manifest blocked runtime broad scan command: "${matched}". Recover BEFORE retrying a broad command: call missionSearch (POST /api/agents/me/mission-search) or read a declared workProduct/dependency path first; only then retry a scan with a specific declared file path or an allowed repo broad-scan scope.`,
     };
   }
 
