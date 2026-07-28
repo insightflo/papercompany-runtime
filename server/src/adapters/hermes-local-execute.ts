@@ -55,6 +55,7 @@ const VALID_PROVIDERS = [
   "xiaomi",
   "mimo",
   "xiaomi-mimo",
+  "xai-oauth",
 ];
 
 function cfgString(value: unknown) {

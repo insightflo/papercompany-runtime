@@ -98,6 +98,17 @@ describe("hermes local execution config", () => {
       expect.arrayContaining(["-m", "mimo-v2.5-pro", "--provider", "xiaomi"]),
     );
   });
+  it("passes xAI OAuth provider through to Hermes CLI", () => {
+    const args = buildHermesChatArgs({
+      prompt: "Do the work",
+      model: "grok-4",
+      provider: "xai-oauth",
+    });
+
+    expect(args).toEqual(
+      expect.arrayContaining(["-m", "grok-4", "--provider", "xai-oauth"]),
+    );
+  });
 
   it("passes image attachments and tool auto-approval flags through to Hermes CLI", () => {
     const args = buildHermesChatArgs({
