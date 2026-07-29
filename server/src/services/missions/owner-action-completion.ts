@@ -28,6 +28,8 @@ import {
   handUnblockReportToOversightOwner,
   type UnblockDispatchKind,
 } from "./owner-action-unblock-handback.js";
+import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
+import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
 
 export interface CompleteUnblockHandbackResult {
   wakeupRequestId: string | null;
@@ -92,6 +94,43 @@ export async function completeUnblockActionWithSourceHandback(
       .limit(1);
     if (mission && (mission.status === "completed" || mission.status === "cancelled")) {
       throw conflict("Cannot complete handback for a source issue in a terminal (completed/cancelled) mission");
+    }
+  }
+  const ownerDecision = await loadLatestMissionOwnerDecision({
+    db,
+    companyId: input.companyId,
+    ownerActionIssueId: unblock.id,
+  });
+  // recover_artifact may only use the generic handback after the structured decision and official
+  // Workflow API registration jointly prove the artifact. Missing or cross-scope evidence is a no-op.
+  if (ownerDecision?.decision.decision === "recover_artifact") {
+    const handbackMissionId = source.missionId ?? unblock.missionId;
+    const missionRow = handbackMissionId
+      ? await db
+          .select({ ownerAgentId: missions.ownerAgentId })
+          .from(missions)
+          .where(and(eq(missions.id, handbackMissionId), eq(missions.companyId, input.companyId)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+      : null;
+    const authorizedRecovery = handbackMissionId && missionRow?.ownerAgentId
+      ? await loadAuthorizedNativeToolStepRecovery({
+          db,
+          companyId: input.companyId,
+          missionId: handbackMissionId,
+          missionOwnerAgentId: missionRow.ownerAgentId,
+          ownerActionIssue: { id: unblock.id, identifier: unblock.identifier ?? null, originId: unblock.originId },
+          sourceIssue: { id: source.id, identifier: source.identifier ?? null },
+        })
+      : null;
+    if (!authorizedRecovery) {
+      return {
+        wakeupRequestId: null,
+        dispatchKind: "report_only",
+        sourceIssueId: source.id,
+        nativeOutcome: null,
+        oversightWakeupRequestId: null,
+      };
     }
   }
 
