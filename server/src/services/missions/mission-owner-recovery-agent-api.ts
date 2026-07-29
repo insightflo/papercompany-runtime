@@ -19,6 +19,7 @@ import {
   materializeHumanOperatorRequestEvent,
   publishHumanOperatorRequestEvent,
 } from "./human-operator-alert-events.js";
+import { completeUnblockActionWithSourceHandback } from "./owner-action-completion.js";
 
 export type OwnerRecoveryApiActor = {
   readonly actorType: "agent" | "user";
@@ -83,7 +84,10 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
   if (!sourceIssueId) {
     throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
   }
-  const [sourceIssue] = await db.select({ missionId: issues.missionId })
+  const [sourceIssue] = await db.select({
+    missionId: issues.missionId,
+    originKind: issues.originKind,
+  })
     .from(issues)
     .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
     .limit(1);
@@ -91,7 +95,12 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
   }
   await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
-  return { issue, ownerAgentId: mission.ownerAgentId, sourceIssueId };
+  return {
+    issue,
+    ownerAgentId: mission.ownerAgentId,
+    sourceIssueId,
+    sourceIssueOriginKind: sourceIssue.originKind,
+  };
 }
 
 export async function submitMissionOwnerDecision(input: {
@@ -102,7 +111,7 @@ export async function submitMissionOwnerDecision(input: {
 }): Promise<RecordedMissionOwnerDecision> {
   const auth = await authorizeOwnerRecoveryApi(input.db, input.issueId, input.actor);
   if (!auth) throw conflict("Owner-recovery decision API can only be used for mission-owner unblock issues");
-  const { issue, ownerAgentId, sourceIssueId } = auth;
+  const { issue, ownerAgentId, sourceIssueId, sourceIssueOriginKind } = auth;
   const submission = toSubmission(input.data);
   const needsHumanAlert = submission.decision === "request_input" || submission.decision === "escalate";
 
@@ -132,6 +141,18 @@ export async function submitMissionOwnerDecision(input: {
   });
   if (humanInserted && humanPayload) {
     publishHumanOperatorRequestEvent(issue.companyId, humanPayload);
+  }
+  // This is the point where INF-181 had both durable authorities but no handback. Issue-less tool
+  // recovery remains owned by supervision; only a workflow-backed source resumes here.
+  if (
+    submission.decision === "recover_artifact"
+    && sourceIssueOriginKind === "workflow_execution"
+  ) {
+    await completeUnblockActionWithSourceHandback(input.db, {
+      unblockIssueId: issue.id,
+      companyId: issue.companyId,
+      actor: { agentId: input.actor.agentId },
+    });
   }
   return recorded;
 }
