@@ -576,7 +576,13 @@ export function parseHermesOutput(stdout: string, stderr: string) {
   }
 
   const costMatch = combined.match(COST_REGEX);
-  if (costMatch?.[1]) result.costUsd = Number.parseFloat(costMatch[1]);
+  // [주의] "cost." 같은 일반 산문이 COST_REGEX 의 `[\d.]+` 에 잡혀 "." 가 캡처될 수 있다.
+  //   parseFloat(".") === NaN 이므로, 유한 숫자 USD 값일 때만 채택한다. 그 외에는
+  //   costUsd 를 설정하지 않아(=undefined) downstream bigint/round 경로에 NaN 이 닿지 않는다.
+  const parsedCost = costMatch?.[1] ? Number.parseFloat(costMatch[1]) : undefined;
+  if (parsedCost !== undefined && Number.isFinite(parsedCost)) {
+    result.costUsd = parsedCost;
+  }
 
   if (stderr.trim()) {
     const errorLines = stderr
