@@ -1702,6 +1702,10 @@ function normalizeBilledCostCents(costUsd: number | null | undefined, billingTyp
   if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
   return Math.max(0, Math.round(costUsd * 100));
 }
+function missionRuntimeCostCents(costUsd: number | null | undefined): number | null {
+  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return null;
+  return Math.round(costUsd * 100);
+}
 
 async function resolveLedgerScopeForRun(
   db: Db,
@@ -6946,7 +6950,7 @@ export function heartbeatService(db: Db) {
             summaryText,
             inputTokens: normalizedUsage?.inputTokens ?? null,
             outputTokens: normalizedUsage?.outputTokens ?? null,
-            costCents: adapterResult.costUsd == null ? null : Math.round(adapterResult.costUsd * 100),
+            costCents: missionRuntimeCostCents(adapterResult.costUsd),
           });
           await completeMissionAgentRuntimeRun(db, {
             runtimeId: missionAgentRuntimeForRun.runtime.id,
@@ -6954,7 +6958,7 @@ export function heartbeatService(db: Db) {
             sessionId: persistedSessionIdAfter,
             inputTokens: normalizedUsage?.inputTokens ?? null,
             outputTokens: normalizedUsage?.outputTokens ?? null,
-            costCents: adapterResult.costUsd == null ? null : Math.round(adapterResult.costUsd * 100),
+            costCents: missionRuntimeCostCents(adapterResult.costUsd),
             error: outcome === "succeeded" ? null : adapterResult.errorMessage ?? status,
           });
         }
