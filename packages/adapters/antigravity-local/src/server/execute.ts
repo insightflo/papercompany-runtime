@@ -21,6 +21,7 @@ import {
   parseObject,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
+import { resolveAntigravitySkillPrompt } from "./skills.js";
 
 export interface BuildAntigravityArgsInput {
   cwd: string;
@@ -197,6 +198,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const prompt = joinPromptSections([
     instructionsPrefix.trim(),
+    await resolveAntigravitySkillPrompt(config),
     renderTemplate(promptTemplate, { agent, runtime, context, config }),
     buildPaperclipRuntimeBrief({ agent, runtime, context }),
   ]);
