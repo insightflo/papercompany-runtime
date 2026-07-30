@@ -6,6 +6,8 @@ import { activityService } from "../services/activity.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { issueService } from "../services/index.js";
 import { sanitizeRecord } from "../redaction.js";
+import { operatorDecisionRoutes } from "./operator-decisions.js";
+import { startOperatorDecisionRuntime } from "../services/operator-decision-runtime.js";
 
 const createActivitySchema = z.object({
   actorType: z.enum(["agent", "user", "system"]).optional().default("system"),
@@ -21,6 +23,8 @@ export function activityRoutes(db: Db) {
   const router = Router();
   const svc = activityService(db);
   const issueSvc = issueService(db);
+  router.use(operatorDecisionRoutes(db));
+  if (process.env.NODE_ENV !== "test") startOperatorDecisionRuntime(db);
 
   async function resolveIssueByRef(rawId: string) {
     if (/^[A-Z]+-\d+$/i.test(rawId)) {
