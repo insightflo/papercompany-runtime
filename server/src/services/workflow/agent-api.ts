@@ -12,6 +12,7 @@ import { issueService } from "../issues.js";
 import { toIssueWorkProduct, workProductService } from "../work-products.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { workflowService } from "./engine.js";
+import { canonicalLocalArtifactTitle, reconcileExistingLocalArtifactTitle } from "./local-artifact-title.js";
 import { recordWorkflowValidationVerdict } from "./validation-verdict-ledger.js";
 import { reconcileRecoveredWorkflowStep } from "../missions/recovery-closeout.js";
 import { logger } from "../../middleware/logger.js";
@@ -63,10 +64,6 @@ function isPreviewUrlRegister(data: WorkflowArtifactRegister): data is WorkflowP
 
 function isLocalArtifactRegister(data: WorkflowArtifactRegister): data is WorkflowLocalArtifactRegister {
   return "path" in data;
-}
-
-function artifactTitle(input: WorkflowLocalArtifactRegister): string {
-  return input.title?.trim() || path.basename(input.path.trim()) || "Workflow artifact";
 }
 
 function parsePreviewUrl(value: string) {
@@ -212,7 +209,7 @@ export async function registerWorkflowArtifact(input: {
   await assertWorkflowArtifactPath({ db: input.db, issue: input.issue, artifactPath, delegation: input.delegation });
 
   const existing = await findExistingWorkflowArtifact({ db: input.db, issue: input.issue, artifactPath });
-  if (existing) return existing;
+  if (existing) return reconcileExistingLocalArtifactTitle(input.db, existing, artifactPath);
 
   const product = await workProductService(input.db).createForIssue(input.issue.id, input.issue.companyId, {
     projectId: input.issue.projectId ?? null,
@@ -221,7 +218,7 @@ export async function registerWorkflowArtifact(input: {
     type: input.data.type,
     provider: "local_file",
     externalId: artifactPath,
-    title: artifactTitle(input.data),
+    title: canonicalLocalArtifactTitle(artifactPath),
     url: null,
     status: "active",
     reviewState: "none",
