@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "../lib/router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ExternalLink, RefreshCw, UserRoundCheck } from "lucide-react";
@@ -96,6 +96,7 @@ export function HumanOperator() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const [focusAfterSuccess, setFocusAfterSuccess] = useState(false);
 
   useEffect(() => setBreadcrumbs([{ label: "Human Operator" }]), [setBreadcrumbs]);
 
@@ -118,6 +119,15 @@ export function HumanOperator() {
     refetchInterval: 30_000,
   });
 
+  useEffect(() => {
+    if (!focusAfterSuccess) return;
+    const frame = requestAnimationFrame(() => {
+      focusOperatorDecisionSuccessTarget();
+      setFocusAfterSuccess(false);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusAfterSuccess, pendingQuery.data, attentionQuery.data, requestsQuery.data]);
+
   if (!selectedCompanyId) {
     return <EmptyState icon={UserRoundCheck} message="Select a company to view human operator requests." />;
   }
@@ -139,7 +149,7 @@ export function HumanOperator() {
       queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId!) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.activity(selectedCompanyId!) }),
     ]);
-    requestAnimationFrame(() => focusOperatorDecisionSuccessTarget());
+    setFocusAfterSuccess(true);
   }
 
   async function resolveDecision(id: string, input: ResolveOperatorDecisionInput) {
