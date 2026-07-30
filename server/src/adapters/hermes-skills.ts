@@ -93,14 +93,16 @@ export async function syncHermesSkills(
     ...desiredSkills,
     ...availableEntries.filter((entry) => entry.required).map((entry) => entry.key),
   ]);
+  const env = readConfigEnv(ctx.config);
   const resolution = resolveProviderSkillsDir({
     adapterType: "hermes-local",
     workDir: resolveHermesWorkDir(ctx.config),
-    env: readConfigEnv(ctx.config),
+    env,
   });
   const skillsHome = resolution.skillsDir;
+  const hasExplicitHermesHome = asString(env.HERMES_HOME) !== null;
 
-  if (skillsHome) {
+  if (skillsHome && hasExplicitHermesHome) {
     const installed = await readInstalledSkillTargets(skillsHome);
     const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));
     for (const [name, installedEntry] of installed.entries()) {
@@ -119,7 +121,7 @@ export async function syncHermesSkills(
   await materializeProviderSkills({
     adapterType: "hermes-local",
     workDir: resolveHermesWorkDir(ctx.config),
-    env: readConfigEnv(ctx.config),
+    env,
     entries: await Promise.all(
       availableEntries
         .filter((entry) => desiredSet.has(entry.key))
