@@ -158,7 +158,10 @@ export const createOperatorDecisionSchema = createShape.superRefine((input, ctx)
 export const operatorDecisionResolveInputSchema = z.object({
   actionId: normalized(1, 80, stableIdPattern),
   selectedOptionIds: z.array(normalized(1, 80, stableIdPattern)).max(50),
-  comment: z.string().max(2_000).nullable(),
+  comment: z.union([
+    z.null(),
+    z.string().transform((value) => value.normalize("NFC").replace(/^\s+|\s+$/g, "")).pipe(z.string().max(2_000)),
+  ]),
 }).strict();
 export const cancelOperatorDecisionSchema = strictEmptyObject;
 export const retryOperatorDecisionContinuationSchema = strictEmptyObject;

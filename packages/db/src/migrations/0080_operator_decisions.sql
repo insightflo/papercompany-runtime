@@ -57,7 +57,7 @@ CREATE TABLE "operator_decision_continuations" (
   "lease_owner" text,
   "lease_expires_at" timestamptz,
   "target_agent_id" uuid REFERENCES "agents"("id") ON DELETE SET NULL,
-  "wakeup_request_id" uuid REFERENCES "agent_wakeup_requests"("id") ON DELETE SET NULL,
+  "wakeup_request_id" uuid REFERENCES "agent_wakeup_requests"("id") ON DELETE RESTRICT,
   "idempotency_key" text,
   "error_code" text,
   "error_summary" text,

@@ -22,7 +22,7 @@ export const operatorDecisionContinuations = pgTable(
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
-    wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id, { onDelete: "set null" }),
+    wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id, { onDelete: "restrict" }),
     idempotencyKey: text("idempotency_key"),
     errorCode: text("error_code"),
     errorSummary: text("error_summary"),
