@@ -23,6 +23,8 @@ export function buildWorkProductRegistrationContractLines(input: {
     "WorkProduct registration contract:",
     "- Creating the deliverable file and registering the workProduct are separate steps. A file that only exists on disk, in a comment, or in run output is not registered.",
     "- Register the deliverable with the Workflow API: `POST /api/issues/{issueId}/workflow/artifacts` after creating or reusing the file and before completing the issue. This is the only registration authority.",
+    "- Register with a single direct `curl --json` call using a literal inline JSON payload, e.g. `curl -sS --json '{\"path\":\"/abs/path/to/topic-decision.json\",\"type\":\"document\"}' \"$PAPERCLIP_API_URL/api/issues/{issueId}/workflow/artifacts\" -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" -H \"X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID\"`. The server sets a local-file title to the path basename; omit the `title` field.",
+    "- Do NOT build the JSON payload with Python (urllib/json.dumps), Node, a shell heredoc (`<<'EOF'`), or a temp file. Those payload builders trigger an interactive command approval that auto-denies after ~60s in unattended hermes_local runs; a direct `curl --json` with a literal payload is the approved structured registration path and runs without that approval.",
     input.artifactPath
       ? `- The deliverable file already exists at \`${input.artifactPath}\`; do not regenerate it. Reuse that file and register that exact path via the Workflow API.`
       : "- If the deliverable file does not exist yet, create it in the assigned output directory. If it already exists, do not regenerate it; register the existing file via the Workflow API.",

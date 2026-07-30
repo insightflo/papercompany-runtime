@@ -25,6 +25,22 @@ describe("artifact registration instructions", () => {
     expect(text).not.toMatch(/\[ARTIFACT\]:\s*<absolute path>/);
   });
 
+  it("tells agents to register with a direct curl --json and forbids payload builders", () => {
+    const text = buildWorkProductRegistrationContractLines().join("\n");
+
+    // Direct curl --json with a literal inline payload is the approved structured path.
+    expect(text).toContain("curl --json");
+    expect(text).toContain("$PAPERCLIP_API_URL/api/issues/{issueId}/workflow/artifacts");
+    expect(text).toContain("Authorization: Bearer $PAPERCLIP_API_KEY");
+    expect(text).toContain("X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID");
+    // Local-file title is server-controlled (basename); the recipe must not send a title.
+    expect(text).toContain("omit the `title` field");
+    // Payload builders that trigger the 60s approval are forbidden.
+    expect(text).toContain("Do NOT build the JSON payload with Python");
+    expect(text).toContain("a shell heredoc");
+    expect(text).toContain("auto-denies after ~60s");
+  });
+
   it("points recovery runs at the existing file instead of regeneration", () => {
     const artifactPath = "/srv/papercompany/projects/research-company/produced_work/missions/m1/report.md";
     const lines = buildExistingArtifactRegistrationActionLines({ artifactPath });

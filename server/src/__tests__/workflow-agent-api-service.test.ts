@@ -362,21 +362,24 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     const artifactPath = path.join(dir, "report.md");
     await writeFile(artifactPath, "# Report\n", "utf8");
 
+    // A client-friendly title is canonicalized to the path basename by the server.
     const product = await registerWorkflowArtifact({
       db,
       issue,
       actor,
-      data: { path: artifactPath, title: "report.md", type: "document", isPrimary: true },
+      data: { path: artifactPath, title: "Quarterly Report", type: "document", isPrimary: true },
     });
+    expect(product).toMatchObject({ provider: "local_file", title: "report.md", type: "document", isPrimary: true });
+    // Manually stale the title; a same-path duplicate registration must repair it to the basename.
+    await db.update(issueWorkProducts).set({ title: "stale wrong title" }).where(eq(issueWorkProducts.id, product.id));
     const duplicate = await registerWorkflowArtifact({
       db,
       issue,
       actor,
-      data: { path: artifactPath, title: "report.md", type: "document", isPrimary: true },
+      data: { path: artifactPath, type: "document", isPrimary: true },
     });
-
-    expect(product).toMatchObject({ provider: "local_file", title: "report.md", type: "document", isPrimary: true });
     expect(duplicate.id).toBe(product.id);
+    expect(duplicate.title).toBe("report.md");
     const rows = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issue.id));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.metadata).toMatchObject({ path: artifactPath, registeredVia: "workflow_api" });
@@ -398,17 +401,12 @@ describeEmbeddedPostgres("workflow agent API service", () => {
         isPrimary: true,
       },
     });
+    // Second call omits title; the first friendly title must survive (no basename canonicalization for preview_url).
     const duplicate = await registerWorkflowArtifact({
       db,
       issue,
       actor,
-      data: {
-        type: "preview_url",
-        url: publicUrl,
-        title: "260707-llm-document-search",
-        contentMarker: "260707-llm-document-search",
-        isPrimary: true,
-      },
+      data: { type: "preview_url", url: publicUrl, isPrimary: true },
     });
 
     expect(product).toMatchObject({
@@ -419,6 +417,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       isPrimary: true,
     });
     expect(duplicate.id).toBe(product.id);
+    expect(duplicate.title).toBe("260707-llm-document-search");
     const rows = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issue.id));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.metadata).toMatchObject({
