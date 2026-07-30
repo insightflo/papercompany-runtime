@@ -1,0 +1,195 @@
+name: Deploy Approved GitHub Repository Bridge to A1
+
+on:
+  repository_dispatch:
+    types:
+      - papercompany-deploy-a1-approved
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: deploy-a1-papercompany-${{ github.event.client_payload.approvalId }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event.client_payload.repository == 'insightflo/papercompany-plugins' &&
+      github.event.client_payload.branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      A1_SSH_HOST: ${{ secrets.A1_SSH_HOST }}
+      A1_SSH_USER: ${{ secrets.A1_SSH_USER }}
+      A1_SSH_PRIVATE_KEY: ${{ secrets.A1_SSH_PRIVATE_KEY }}
+      A1_SSH_KNOWN_HOSTS: ${{ secrets.A1_SSH_KNOWN_HOSTS }}
+      A1_SSH_PORT: ${{ vars.A1_SSH_PORT || '22' }}
+
+    steps:
+      - name: Check out approved deployment runner
+        uses: actions/checkout@v4
+
+      - name: Validate approved plugin revision
+        env:
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          APPROVAL_ID: ${{ github.event.client_payload.approvalId }}
+        run: |
+          if ! [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected a lowercase 40-character plugin commit SHA"
+            exit 1
+          fi
+          if ! [[ "$APPROVAL_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            echo "::error::Expected a deployment approval UUID"
+            exit 1
+          fi
+
+      - name: Check deployment secrets
+        run: |
+          missing=0
+          for name in A1_SSH_HOST A1_SSH_USER A1_SSH_PRIVATE_KEY A1_SSH_KNOWN_HOSTS; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Prepare SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$A1_SSH_PRIVATE_KEY" > ~/.ssh/a1_deploy_key
+          chmod 600 ~/.ssh/a1_deploy_key
+          printf '%s\n' "$A1_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Copy approval verifier to A1
+        run: |
+          scp -P "$A1_SSH_PORT" \
+            -i ~/.ssh/a1_deploy_key \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            scripts/deploy-github-repository-bridge-a1.sh \
+            "$A1_SSH_USER@$A1_SSH_HOST:/tmp/papercompany-deploy-github-repository-bridge-a1.sh"
+
+      - name: Verify approval on A1 before claiming it
+        env:
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          APPROVAL_ID: ${{ github.event.client_payload.approvalId }}
+        run: |
+          remote_env=(
+            "A1_PLUGIN_DEPLOY_EXPECTED_SHA=$TARGET_SHA"
+            "A1_PLUGIN_DEPLOY_APPROVAL_ID=$APPROVAL_ID"
+            "A1_PLUGIN_DEPLOY_VERIFY_ONLY=true"
+          )
+
+          printf -v remote_command '%q ' env "${remote_env[@]}" bash /tmp/papercompany-deploy-github-repository-bridge-a1.sh
+          ssh -p "$A1_SSH_PORT" \
+            -i ~/.ssh/a1_deploy_key \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "$A1_SSH_USER@$A1_SSH_HOST" \
+            "$remote_command"
+
+      - name: Claim the one-time deployment approval
+        id: claim
+        env:
+          APPROVAL_ID: ${{ github.event.client_payload.approvalId }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          environment_name="papercompany-approval-$APPROVAL_ID"
+          api_url="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          headers=(
+            -H "Authorization: Bearer $GITHUB_TOKEN"
+            -H 'Accept: application/vnd.github+json'
+            -H 'X-GitHub-Api-Version: 2022-11-28'
+          )
+
+          existing_deployment_id="$(curl -fsS "${headers[@]}" \
+            "$api_url/deployments?environment=$environment_name&per_page=1" \
+            | jq -r '.[0].id // empty')"
+          if [ -n "$existing_deployment_id" ]; then
+            existing_state="$(curl -fsS "${headers[@]}" \
+              "$api_url/deployments/$existing_deployment_id/statuses?per_page=1" \
+              | jq -r '.[0].state // empty')"
+            if [ "$existing_state" = "success" ]; then
+              echo "approved deployment was already completed; not replaying it"
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Approval has already been claimed (deployment=$existing_deployment_id, state=${existing_state:-unknown})"
+            exit 1
+          fi
+
+          deployment="$(jq -n \
+            --arg environment "$environment_name" \
+            --arg approval_id "$APPROVAL_ID" \
+            --arg plugin_sha "$TARGET_SHA" \
+            --arg runtime_sha "$GITHUB_SHA" \
+            '{ref: $runtime_sha, environment: $environment, auto_merge: false, required_contexts: [], transient_environment: true, description: "Papercompany-approved GitHub Repository Bridge deployment", payload: {approvalId: $approval_id, pluginSha: $plugin_sha}}')"
+          deployment_response="$(curl -fsS -X POST "${headers[@]}" \
+            -H 'Content-Type: application/json' \
+            "$api_url/deployments" \
+            --data "$deployment")"
+          deployment_id="$(jq -er '.id' <<<"$deployment_response")"
+          curl -fsS -X POST "${headers[@]}" \
+            -H 'Content-Type: application/json' \
+            "$api_url/deployments/$deployment_id/statuses" \
+            --data '{"state":"in_progress","description":"Approved plugin deployment claimed by A1 runner"}' \
+            >/dev/null
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy approved plugin revision on A1
+        if: steps.claim.outputs.should_deploy == 'true'
+        env:
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
+          APPROVAL_ID: ${{ github.event.client_payload.approvalId }}
+        run: |
+          remote_env=(
+            "A1_PLUGIN_DEPLOY_EXPECTED_SHA=$TARGET_SHA"
+            "A1_PLUGIN_DEPLOY_APPROVAL_ID=$APPROVAL_ID"
+          )
+
+          printf -v remote_command '%q ' env "${remote_env[@]}" bash /tmp/papercompany-deploy-github-repository-bridge-a1.sh
+          ssh -p "$A1_SSH_PORT" \
+            -i ~/.ssh/a1_deploy_key \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "$A1_SSH_USER@$A1_SSH_HOST" \
+            "$remote_command"
+
+      - name: Record deployment success
+        if: steps.claim.outputs.should_deploy == 'true' && success()
+        env:
+          DEPLOYMENT_ID: ${{ steps.claim.outputs.deployment_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H 'Content-Type: application/json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            --data '{"state":"success","description":"Approved GitHub Repository Bridge deployment completed"}' \
+            >/dev/null
+
+      - name: Record deployment failure
+        if: always() && steps.claim.outputs.should_deploy == 'true' && failure()
+        env:
+          DEPLOYMENT_ID: ${{ steps.claim.outputs.deployment_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H 'Content-Type: application/json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            --data '{"state":"failure","description":"Approved GitHub Repository Bridge deployment failed; a new approval is required"}' \
+            >/dev/null
