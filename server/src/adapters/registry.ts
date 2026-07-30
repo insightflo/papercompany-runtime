@@ -2,6 +2,8 @@ import type { ServerAdapterModule } from "./types.js";
 import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
 import {
   execute as antigravityExecute,
+  listAntigravitySkills,
+  syncAntigravitySkills,
   testEnvironment as antigravityTestEnvironment,
 } from "@paperclipai/adapter-antigravity-local/server";
 import { agentConfigurationDoc as antigravityAgentConfigurationDoc, models as antigravityModels } from "@paperclipai/adapter-antigravity-local";
@@ -91,6 +93,8 @@ const antigravityLocalAdapter: ServerAdapterModule = {
   type: "antigravity_local",
   execute: antigravityExecute,
   testEnvironment: antigravityTestEnvironment,
+  listSkills: listAntigravitySkills,
+  syncSkills: syncAntigravitySkills,
   sessionManagement: getAdapterSessionManagement("antigravity_local") ?? undefined,
   models: antigravityModels,
   supportsLocalAgentJwt: true,

@@ -33,6 +33,11 @@ Core fields:
 - extraArgs (string[], optional): additional CLI flags inserted before --print
 - env (object, optional): KEY=VALUE environment variables
 
+Skills:
+- Papercompany skill selections are supplied as on-demand run context.
+- For a matching task, Antigravity reads the selected skill's SKILL.md from its managed source path.
+- This does not write to Antigravity's shared global skills directory, so one agent's selection cannot change another agent's skills.
+
 Operational notes:
 - Flags are placed before --print because agy treats args after --print as prompt text.
 - Paperclip always passes --add-dir <cwd> so file/tool actions use the intended workspace.
