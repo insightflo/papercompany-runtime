@@ -11,6 +11,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { EmptyState } from "../components/EmptyState";
 import { ActivityRow } from "../components/ActivityRow";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { OperatorDecisionActivity } from "../components/OperatorDecisionActivity";
 import {
   Select,
   SelectContent,
@@ -125,13 +126,15 @@ export function Activity() {
       {filtered && filtered.length > 0 && (
         <div className="border border-border divide-y divide-border">
           {filtered.map((event) => (
-            <ActivityRow
-              key={event.id}
-              event={event}
-              agentMap={agentMap}
-              entityNameMap={entityNameMap}
-              entityTitleMap={entityTitleMap}
-            />
+            event.action.startsWith("operator_decision.")
+              ? <OperatorDecisionActivity key={event.id} event={event} />
+              : <ActivityRow
+                  key={event.id}
+                  event={event}
+                  agentMap={agentMap}
+                  entityNameMap={entityNameMap}
+                  entityTitleMap={entityTitleMap}
+                />
           ))}
         </div>
       )}
