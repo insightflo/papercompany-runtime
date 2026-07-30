@@ -56,6 +56,16 @@ function HumanOperatorRow({ request }: { request: MissionHumanOperatorRequest })
 function humanize(value: string | null) {
   return value ? value.replace(/_/g, " ") : "unknown continuation error";
 }
+export function isContinuationRetryEligible(decision: OperatorDecisionView) {
+  const continuation = decision.continuation;
+  if (!continuation || continuation.manualRetryCount >= continuation.maxManualRetries) return false;
+  if (continuation.state === "exhausted") return true;
+  if (continuation.state === "blocked") {
+    return continuation.errorCode === "issue_unassigned" || continuation.errorCode === "issue_terminal";
+  }
+  return ["skipped", "failed", "cancelled", "timed_out", "assignee_changed"]
+    .includes(continuation.effectiveStatus);
+}
 
 function ContinuationAttention({
   decision,
@@ -65,8 +75,21 @@ function ContinuationAttention({
   onRetry: (decision: OperatorDecisionView) => Promise<void>;
 }) {
   const continuation = decision.continuation!;
-  const retryable = continuation.manualRetryCount < continuation.maxManualRetries &&
-    continuation.errorCode !== "issue_missing";
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const retryable = isContinuationRetryEligible(decision);
+
+  async function retry() {
+    setRetryError(null);
+    setIsRetrying(true);
+    try {
+      await onRetry(decision);
+    } catch (error) {
+      setRetryError(error instanceof Error ? error.message : "Failed to retry this continuation.");
+    } finally {
+      setIsRetrying(false);
+    }
+  }
   return (
     <li className="border border-destructive/40 bg-card p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -77,9 +100,12 @@ function ContinuationAttention({
             {continuation.effectiveStatus} · generation {continuation.generation} · attempt {continuation.attemptCount}
           </p>
         </div>
-        <Button type="button" variant="outline" size="sm" disabled={!retryable} onClick={() => void onRetry(decision)}>
-          Retry continuation
-        </Button>
+        <div className="space-y-1">
+          <Button type="button" variant="outline" size="sm" disabled={!retryable || isRetrying} onClick={() => void retry()}>
+            {isRetrying ? "Retrying…" : "Retry continuation"}
+          </Button>
+          {retryError && <p role="alert" className="text-xs text-destructive">{retryError}</p>}
+        </div>
       </div>
     </li>
   );

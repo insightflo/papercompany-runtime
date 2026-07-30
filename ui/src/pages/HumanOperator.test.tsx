@@ -3,7 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
-import { focusOperatorDecisionSuccessTarget, HumanOperator } from "./HumanOperator";
+import {
+  focusOperatorDecisionSuccessTarget,
+  HumanOperator,
+  isContinuationRetryEligible,
+} from "./HumanOperator";
 
 const pending: OperatorDecisionView = {
   id: "pending-1", companyId: "company-1", schemaVersion: 1, requestKey: "pending", status: "pending",
@@ -74,6 +78,22 @@ describe("HumanOperator", () => {
     expect(html).toContain("2 actionable");
     expect(html).toContain("Retry continuation");
     expect(html).toContain("issue unassigned");
+  });
+
+  it("only enables retries for server-eligible continuation states", () => {
+    expect(isContinuationRetryEligible(attention)).toBe(true);
+    expect(isContinuationRetryEligible({
+      ...attention,
+      continuation: { ...attention.continuation!, state: "pending", effectiveStatus: "pending", errorCode: "dispatch_delayed" },
+    })).toBe(false);
+    expect(isContinuationRetryEligible({
+      ...attention,
+      continuation: { ...attention.continuation!, state: "blocked", errorCode: "issue_missing" },
+    })).toBe(false);
+    expect(isContinuationRetryEligible({
+      ...attention,
+      continuation: { ...attention.continuation!, state: "accepted", effectiveStatus: "failed", errorCode: "heartbeat_failed" },
+    })).toBe(true);
   });
 
   it("moves success focus to next pending, attention, then empty heading", () => {
