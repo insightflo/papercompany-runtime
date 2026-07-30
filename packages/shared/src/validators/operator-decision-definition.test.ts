@@ -145,4 +145,3 @@ describe("operator decision definition", () => {
     expect(operatorDecisionListQuerySchema.safeParse({ unknown: "x" }).success).toBe(false);
   });
 });
-
