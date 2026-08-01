@@ -409,14 +409,25 @@ describe("heartbeat context budget preflight", () => {
     delete process.env.PAPERCLIP_AGENT_JWT_AUDIENCE;
     // Drain/stop in-flight heartbeat work before deleting rows so residual adapter.execute
     // and secret materialization cannot pollute the next test (Hermes Ops spy / company_secrets FK).
-    const idleDeadline = Date.now() + 2_000;
+    // We also wait for terminal runs' fire-and-forget post-processing to settle: executeRun
+    // continues writing DB rows (comments, events, runtime, handoff) AFTER setting terminal
+    // status. Polling queued/running alone misses this window. We wait until no runs have been
+    // updated in the last 500ms, then hold one more settle window before row deletion.
+    const idleDeadline = Date.now() + 5_000;
+    let settleSince: number | null = null;
     while (Date.now() < idleDeadline) {
       const activeRuns = await db
-        .select({ id: heartbeatRuns.id })
+        .select({ id: heartbeatRuns.id, updatedAt: heartbeatRuns.updatedAt })
         .from(heartbeatRuns)
         .where(inArray(heartbeatRuns.status, ["queued", "running"]))
         .limit(1);
-      if (activeRuns.length === 0) break;
+      if (activeRuns.length === 0) {
+        const recentMs = Date.now() - (settleSince ?? Date.now());
+        if (recentMs >= 500) break;
+        if (settleSince === null) settleSince = Date.now();
+      } else {
+        settleSince = null;
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     await db
