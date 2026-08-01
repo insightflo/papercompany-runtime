@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   agents, companies, createDb, missions, workflowDefinitions, workflowRuns,
@@ -76,7 +76,10 @@ describeEP("hybrid QA — structural CAS loss leaves no orphan ledger row", () =
 
   async function countGateVerdictRows(): Promise<number> {
     const rows = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRunId));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRunId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     return rows.length;
   }
 
@@ -141,7 +144,10 @@ describeEP("hybrid QA — structural CAS loss leaves no orphan ledger row", () =
 
     expect(result.casWon).toBe(true);
     const rows = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, freshGate.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, freshGate.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(rows).toHaveLength(1); // exactly one — no pre-tx duplicate
   });
 

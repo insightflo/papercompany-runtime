@@ -16,6 +16,11 @@ import {
   type WorkflowRetryMetadata,
   type WorkflowRetryAttemptSummary,
 } from "./retry-policy.js";
+import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
+import {
+  appendWorkflowAuthorityTransition,
+  supersedeWorkflowDelegationsForGeneration,
+} from "./authority/transitions.js";
 
 export type ScheduleWorkflowStepRetryResult =
   | { result: "scheduled"; stepRunId: string; retryNumber: number; delaySeconds: number; nextEligibleAt: string }
@@ -39,6 +44,8 @@ export interface ScheduleWorkflowStepRetryInput {
   observedMetadataSnapshot: Record<string, unknown>;
   /** Error summary from the failed attempt (bounded/sanitized). */
   errorSummary: string | null;
+  /** Exact execution generation observed during retry classification. */
+  observedExecutionGeneration?: number;
 }
 const RETRY_EVENT_TYPE = "workflow_step_retry_scheduled";
 const RETRY_EVENT_LAYER = "workflow_retry";
@@ -99,6 +106,8 @@ export async function scheduleWorkflowStepRetry(
 ): Promise<ScheduleWorkflowStepRetryResult> {
   const idempotencyKey = `workflow-step-retry:${input.stepRunId}:${input.retryNumber}`;
   const now = new Date();
+  const finalizationV1Enabled = await isHeartbeatFinalizationV1Enabled(db);
+  const observedExecutionGeneration = input.observedExecutionGeneration ?? 0;
 
   try {
     return await db.transaction(async (tx) => {
@@ -153,6 +162,9 @@ export async function scheduleWorkflowStepRetry(
         casConditions.push(isNull(workflowStepRuns.lastDispatchRequestId));
       }
       casConditions.push(eq(workflowStepRuns.metadata, input.observedMetadataSnapshot));
+      if (finalizationV1Enabled) {
+        casConditions.push(eq(workflowStepRuns.executionGeneration, observedExecutionGeneration));
+      }
 
       const updated = await tx
         .update(workflowStepRuns)
@@ -167,6 +179,15 @@ export async function scheduleWorkflowStepRetry(
           lastDispatchErrorAt: null,
           lastDispatchErrorSummary: null,
           metadata: metadataPatch,
+          ...(finalizationV1Enabled
+            ? {
+                executionGeneration: sql`${workflowStepRuns.executionGeneration} + 1`,
+                dispatchOwnerWakeupRequestId: null,
+                dispatchOwnerHeartbeatRunId: null,
+                evidenceReadyAt: null,
+                dispatchReadyAt: null,
+              }
+            : {}),
         })
         .where(and(...casConditions))
         .returning({ id: workflowStepRuns.id });
@@ -174,6 +195,29 @@ export async function scheduleWorkflowStepRetry(
       // CAS lost — throw the sentinel to roll back the event insert.
       if (updated.length === 0) {
         throw new Error(RETRY_CAS_LOST_SENTINEL);
+      }
+      if (finalizationV1Enabled) {
+        await supersedeWorkflowDelegationsForGeneration(tx, {
+          workflowRunId: input.workflowRunId,
+          workflowStepRunId: input.stepRunId,
+          executionGeneration: observedExecutionGeneration,
+          now,
+        });
+        await appendWorkflowAuthorityTransition(tx, {
+          companyId: input.companyId,
+          workflowRunId: input.workflowRunId,
+          workflowStepRunId: input.stepRunId,
+          executionGeneration: observedExecutionGeneration + 1,
+          reason: "workflow_step_retry_generation_advanced",
+          idempotencyKey: `authority-generation-retry:${input.stepRunId}:${observedExecutionGeneration}:${observedExecutionGeneration + 1}`,
+          payload: {
+            version: 1,
+            transition: "generation_advanced",
+            oldGeneration: observedExecutionGeneration,
+            newGeneration: observedExecutionGeneration + 1,
+            retryNumber: input.retryNumber,
+          },
+        });
       }
 
       // Step 3: reopen the workflow run as running — CAS allowlist

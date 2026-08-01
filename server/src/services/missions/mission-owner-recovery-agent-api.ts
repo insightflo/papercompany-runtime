@@ -152,6 +152,7 @@ export async function submitMissionOwnerDecision(input: {
       unblockIssueId: issue.id,
       companyId: issue.companyId,
       actor: { agentId: input.actor.agentId },
+      workflowSyncSource: "mission_owner_recovery",
     });
   }
   return recorded;

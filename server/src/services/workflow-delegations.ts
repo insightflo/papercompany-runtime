@@ -16,6 +16,7 @@ import { heartbeatService } from "./heartbeat.js";
 import type { WorkflowStep } from "./workflow/dag-engine.js";
 import { completeWorkflowToolStepFromResult } from "./workflow/dag-engine.js";
 import { buildDelegatedWorkProductContractLines } from "./work-products/artifact-registration-instructions.js";
+import { recordWorkflowStepStatusTransition } from "./workflow/workflow-sync-source.js";
 
 export const WORKFLOW_DELEGATION_TOOL_NAME = "delegate_to_company";
 
@@ -115,15 +116,39 @@ export async function startDelegatedWorkflowStep(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (existingDelegation) {
-    await input.db
+    const delegatedStatus = existingDelegation.status === "failed"
+      ? "failed"
+      : existingDelegation.status === "completed"
+        ? "completed"
+        : "running";
+    const [updatedStepRun] = await input.db
       .update(workflowStepRuns)
       .set({
         issueId: existingDelegation.sourceIssueId,
-        status: existingDelegation.status === "failed" ? "failed" : existingDelegation.status === "completed" ? "completed" : "running",
+        status: delegatedStatus,
         startedAt: input.stepRun.startedAt ?? input.now,
         completedAt: existingDelegation.completedAt ?? null,
       })
-      .where(eq(workflowStepRuns.id, input.stepRun.id));
+      .where(eq(workflowStepRuns.id, input.stepRun.id))
+      .returning({
+        id: workflowStepRuns.id,
+        transitionVersion: workflowStepRuns.statusTransitionVersion,
+      });
+    if (updatedStepRun) {
+      await recordWorkflowStepStatusTransition(input.db, {
+        companyId: input.run.companyId,
+        missionId: input.run.missionId,
+        workflowRunId: input.run.id,
+        workflowStepRunId: input.stepRun.id,
+        issueId: existingDelegation.sourceIssueId,
+        fromStatus: input.stepRun.status,
+        toStatus: delegatedStatus,
+        source: "workflow_delegation",
+        transitionVersion: updatedStepRun.transitionVersion > input.stepRun.statusTransitionVersion
+          ? updatedStepRun.transitionVersion
+          : null,
+      });
+    }
     return true;
   }
 

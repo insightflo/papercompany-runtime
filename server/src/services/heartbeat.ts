@@ -127,6 +127,16 @@ import {
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { isHeartbeatFinalizationV1Enabled } from "./heartbeat-finalization/flag.js";
+import {
+  acknowledgeHeartbeatRunBeforeAdapter,
+  claimQueuedHeartbeatRun,
+  recordHeartbeatTerminalOutcomeShadow,
+} from "./heartbeat-finalization/shadow-writes.js";
+import { maybeTransferHeartbeatAuthorityToChild } from "./heartbeat-finalization/authority-transfer.js";
+import { resolveWorkflowExecutionGeneration } from "./heartbeat-finalization/workflow-link.js";
+import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
+import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -1388,7 +1398,7 @@ function extractMissionOwnerUnblockArtifactUrl(run: Pick<typeof heartbeatRuns.$i
 }
 
 async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
-  tx: Pick<Db, "select" | "insert" | "update">;
+  tx: Pick<Db, "select" | "insert" | "update" | "transaction">;
   ownerActionIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "originKind" | "originId">;
   run: typeof heartbeatRuns.$inferSelect;
   artifactUrl: string;
@@ -1509,6 +1519,8 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
     db: input.tx,
     issueId: sourceIssue.id,
     completedAt: sourceIssue.completedAt ?? input.now,
+    source: "heartbeat_promotion",
+    heartbeatRunId: input.run.id,
   });
 
   await input.tx.insert(issueComments).values({
@@ -3985,6 +3997,7 @@ export function heartbeatService(db: Db) {
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
+    if (updated) await recordHeartbeatTerminalOutcomeShadow(db, updated);
 
     if (updated) {
       publishLiveEvent({
@@ -4006,6 +4019,7 @@ export function heartbeatService(db: Db) {
 
     // [Task 6C] queue_run_completed event for terminal status
     if (updated) await recordHeartbeatRunTerminalTransitionEvent(db, updated);
+    if (updated) await maybeRecordTerminalFinalization(db, updated, new Date());
 
     return updated;
   }
@@ -4273,6 +4287,13 @@ export function heartbeatService(db: Db) {
           updatedAt: now,
         })
         .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+      await maybeTransferHeartbeatAuthorityToChild(tx, {
+        parent: run,
+        childRunId: retryRun.id,
+        childWakeupRequestId: wakeupRequest.id,
+        now,
+        reason: "process_lost_retry",
+      });
 
       if (issueId) {
         await tx
@@ -4420,6 +4441,13 @@ export function heartbeatService(db: Db) {
           updatedAt: now,
         })
         .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+      await maybeTransferHeartbeatAuthorityToChild(tx, {
+        parent: run,
+        childRunId: fallbackRun.id,
+        childWakeupRequestId: wakeupRequest.id,
+        now,
+        reason: "adapter_fallback",
+      });
 
       if (issueId) {
         await tx
@@ -4476,10 +4504,11 @@ export function heartbeatService(db: Db) {
   }
 
   async function countRunningRunsForAgent(agentId: string) {
+    const activeClause = await lifecycleActiveClause(db);
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running")));
+      .where(and(eq(heartbeatRuns.agentId, agentId), activeClause));
     return Number(count ?? 0);
   }
 
@@ -4522,16 +4551,7 @@ export function heartbeatService(db: Db) {
     }
 
     const claimedAt = new Date();
-    const claimed = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "running",
-        startedAt: run.startedAt ?? claimedAt,
-        updatedAt: claimedAt,
-      })
-      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    const claimed = await claimQueuedHeartbeatRun(db, run, claimedAt);
     if (!claimed) return null;
 
     // [Task 6C] queue_run_started event (queued→running transition)
@@ -5014,6 +5034,7 @@ export function heartbeatService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) continue;
+      await recordHeartbeatTerminalOutcomeShadow(db, updated);
 
       publishLiveEvent({
         companyId: updated.companyId,
@@ -5031,6 +5052,7 @@ export function heartbeatService(db: Db) {
         },
       });
       await recordHeartbeatRunTerminalTransitionEvent(db, updated);
+      await maybeRecordTerminalFinalization(db, updated, now);
       await setWakeupStatus(updated.wakeupRequestId, issueTerminalStatus === "succeeded" ? "completed" : issueTerminalStatus, {
         finishedAt: now,
         error,
@@ -5364,12 +5386,13 @@ export function heartbeatService(db: Db) {
         promotedIssue?.missionId ??
         null;
       if (missionIdForWake) {
+        const inFlightClause = await lifecycleInFlightClause(tx as unknown as Parameters<typeof lifecycleInFlightClause>[0]);
         const existingMissionRun = await tx
           .select({ id: heartbeatRuns.id })
           .from(heartbeatRuns)
           .where(and(
             eq(heartbeatRuns.agentId, agent.id),
-            sql`heartbeat_runs.status in ('queued','running')`,
+            inFlightClause,
             sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForWake}`,
           ))
           .limit(1);
@@ -6576,6 +6599,12 @@ export function heartbeatService(db: Db) {
           logger.warn({ err, missionId, agentId: agent.id }, "failed to mark mission runtime bootstrap injected");
         });
       }
+      const acknowledged = await acknowledgeHeartbeatRunBeforeAdapter(db, run, new Date());
+      if (!acknowledged) {
+        logger.warn({ runId: run.id }, "heartbeat owner capability acknowledgement lost");
+        return;
+      }
+      run = acknowledged;
 
       const adapterResult = await adapter.execute({
         runId: run.id,
@@ -6776,10 +6805,13 @@ export function heartbeatService(db: Db) {
           issueContext.assigneeAgentId === agent.id
         ) {
           try {
-            const autoBlockedIssue = await issuesSvc.update(issueId, { status: "blocked" });
+            const autoBlockedIssue = await issuesSvc.update(issueId, {
+              status: "blocked",
+              workflowSyncSource: "heartbeat_codex_autoblock",
+            });
             if (autoBlockedIssue) {
               const { workflowService } = await import("./workflow/engine.js");
-              await workflowService.syncRunStatusForIssue(db, autoBlockedIssue.id);
+              await workflowService.syncRunStatusForIssue(db, autoBlockedIssue.id, "heartbeat_codex_autoblock");
               await syncSrbSourceIssueStatus({
                 db,
                 issueId: autoBlockedIssue.id,
@@ -7597,6 +7629,13 @@ export function heartbeatService(db: Db) {
             updatedAt: now,
           })
           .where(eq(issues.id, issue.id));
+        await completeLinkedWorkflowStepRunsForIssue({
+          db: tx,
+          issueId: issue.id,
+          completedAt: now,
+          source: "heartbeat_promotion",
+          heartbeatRunId: run.id,
+        });
         await tx.insert(issueComments).values({
           companyId: issue.companyId,
           issueId: issue.id,
@@ -7896,7 +7935,7 @@ export function heartbeatService(db: Db) {
     if (postTransactionWorkflowIssueSyncIssueIds.size > 0) {
       const { workflowService } = await import("./workflow/engine.js");
       for (const issueId of postTransactionWorkflowIssueSyncIssueIds) {
-        await workflowService.syncRunStatusForIssue(db, issueId);
+        await workflowService.syncRunStatusForIssue(db, issueId, "heartbeat_promotion");
       }
     }
 
@@ -7910,6 +7949,7 @@ export function heartbeatService(db: Db) {
           unblockIssueId: entry.issueId,
           companyId: entry.companyId,
           actor: { agentId: entry.agentId },
+          workflowSyncSource: "heartbeat_promotion",
         }).catch((err: unknown) => {
           logger.warn({ err, issueId: entry.issueId }, "failed to close mission_main_executor_unblock via handback guard");
         });
@@ -8047,6 +8087,18 @@ export function heartbeatService(db: Db) {
             .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
             .then((rows) => rows[0]?.missionId ?? null)
         : null);
+    const finalizationV1Enabled = await isHeartbeatFinalizationV1Enabled(db);
+    const workflowRunIdForWake = readNonEmptyString(enrichedContextSnapshot.workflowRunId)
+      ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowRunId"] as string)
+      ?? null;
+    const workflowStepRunIdForWake = readNonEmptyString(enrichedContextSnapshot.workflowStepRunId)
+      ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowStepRunId"] as string)
+      ?? null;
+    const workflowExecutionGeneration = await resolveWorkflowExecutionGeneration(db, {
+      enabled: finalizationV1Enabled,
+      workflowRunId: workflowRunIdForWake,
+      workflowStepRunId: workflowStepRunIdForWake,
+    });
     // [AREA: structured-events Task 1D] typed queue context derived from payload/contextSnapshot.
     // 모든 agent_wakeup_requests insert 경로에 mirror. payload 원본은 변경하지 않는다(호환성).
     const typedQueueColumns = {
@@ -8056,10 +8108,9 @@ export function heartbeatService(db: Db) {
         ?? source,
       issueId: issueId ?? null,
       missionId: (missionIdForWake ?? readNonEmptyString(enrichedContextSnapshot.missionId)) ?? null,
-      workflowRunId: (readNonEmptyString(enrichedContextSnapshot.workflowRunId)
-        ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowRunId"] as string)) ?? null,
-      workflowStepRunId: (readNonEmptyString(enrichedContextSnapshot.workflowStepRunId)
-        ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowStepRunId"] as string)) ?? null,
+      workflowRunId: workflowRunIdForWake,
+      workflowStepRunId: workflowStepRunIdForWake,
+      ...(workflowExecutionGeneration !== null ? { workflowExecutionGeneration } : {}),
     };
     const queuePausedAgentWakeup = async () => {
       let wakeupRequestId: string | null = null;
@@ -8498,13 +8549,14 @@ export function heartbeatService(db: Db) {
         // startNextQueuedRunForAgent 가 실제 heartbeat run 으로 승격한다.
         const missionIdForDedup = readNonEmptyString(enrichedContextSnapshot.missionId);
         if (missionIdForDedup) {
+          const inFlightClause = await lifecycleInFlightClause(tx as unknown as Parameters<typeof lifecycleInFlightClause>[0]);
           const existingMissionRun = await tx
             .select({ id: heartbeatRuns.id })
             .from(heartbeatRuns)
             .where(
               and(
                 eq(heartbeatRuns.agentId, agentId),
-                sql`heartbeat_runs.status in ('queued','running')`,
+                inFlightClause,
                 sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForDedup}`,
               ),
             )
@@ -9274,15 +9326,11 @@ export function heartbeatService(db: Db) {
     cancelBudgetScopeWork,
 
     getActiveRunForAgent: async (agentId: string) => {
+      const activeClause = await lifecycleActiveClause(db);
       const [run] = await db
         .select()
         .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.agentId, agentId),
-            eq(heartbeatRuns.status, "running"),
-          ),
-        )
+        .where(and(eq(heartbeatRuns.agentId, agentId), activeClause))
         .orderBy(desc(heartbeatRuns.startedAt))
         .limit(1);
       return run ?? null;

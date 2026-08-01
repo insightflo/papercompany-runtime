@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 import { reconcileWorkflow } from "./reconciler.js";
+import { recoverTerminalUnsettledRuns } from "../heartbeat-finalization/recovery.js";
 
 export interface NativeWorkflowReconcilerLogger {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -73,6 +74,11 @@ export function createNativeWorkflowReconciler(
         || result.orphanStepsCleaned > 0
       ) {
         log.info({ timeoutMinutes, ...result }, "Native workflow reconciler cleaned up workflow state");
+      }
+      // Phase 2 shadow recovery: replay settlement for terminal-but-unsettled v1 runs.
+      const recoveredSettlements = await recoverTerminalUnsettledRuns(options.db, now);
+      if (recoveredSettlements > 0) {
+        log.info({ timeoutMinutes, recoveredSettlements }, "Native workflow reconciler recovered terminal-unsettled finalizations");
       }
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);

@@ -194,7 +194,7 @@ export async function registerWorkflowArtifact(input: {
     if (!product) {
       throw unprocessable("Workflow preview_url workProduct could not be registered");
     }
-    await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+    await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
     return product;
   }
 
@@ -236,7 +236,7 @@ export async function registerWorkflowArtifact(input: {
   if (!product) {
     throw unprocessable("Workflow artifact path must point to an existing local file");
   }
-  await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+  await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
   return product;
 }
 
@@ -275,13 +275,13 @@ export async function submitWorkflowVerdict(input: {
         source: "workflow_api_qa_pass",
       });
       if ("reconciled" in closeout && closeout.reconciled) {
-        await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+        await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
       }
     } catch (err) {
       logger.warn({ err, issueId: input.issue.id }, "recovery closeout failed after workflow verdict");
     }
   }
-  await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+  await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
   return result;
 }
 
@@ -340,8 +340,11 @@ export async function completeWorkflowIssue(input: {
       userId: input.actor.actorType === "user" ? input.actor.actorId : undefined,
     });
   }
-  const updated = await svc.update(input.issue.id, { status: "done" });
+  const updated = await svc.update(input.issue.id, {
+    status: "done",
+    workflowSyncSource: "workflow_agent_api",
+  });
   if (!updated) throw notFound("Issue not found");
-  await workflowService.syncRunStatusForIssue(input.db, input.issue.id);
+  await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
   return updated;
 }

@@ -26,6 +26,7 @@ import { resumeWorkflowRun } from "./workflow-store.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
 import { findAcceptedWorkflowResumeWakeForStep, findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
+import { restoreFailedSourceIssueWorkflowState } from "./source-issue-failed-state-restore.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts LIVE_WAKEUP_STATUSES 와 동일 집합.
 //   이슈가 이 상태의 wake 나 queued/running heartbeat 를 가지면 중복 dispatch 금지.
@@ -264,8 +265,7 @@ export async function dispatchSourceIssueNativeResume(
   const revivedFailedRun = run.status === "failed";
   const restoreFailedState = async () => {
     if (!revivedFailedRun) return;
-    await db.update(workflowRuns).set({ status: "failed", startedAt: run.startedAt, completedAt: run.completedAt }).where(eq(workflowRuns.id, run.id));
-    await db.update(workflowStepRuns).set({ status: "failed", completedAt: stepRun.completedAt }).where(eq(workflowStepRuns.id, stepRun.id));
+    await restoreFailedSourceIssueWorkflowState(db, run, stepRun);
   };
   if (revivedFailedRun) {
     if (stepRun.status !== "failed") {

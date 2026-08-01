@@ -50,6 +50,13 @@ export interface PredFacts {
    * agent/tool step 에선 절대 신뢰하지 않는다(fail-closed → 양 분기 모두 비활성).
    */
   controlOutcome?: "condition_true" | "condition_false";
+  /**
+   * Phase 3 enforcement (flag-gated). When false, a terminal predecessor is treated
+   * as waiting (not ready to activate successors). Builders set this from
+   * workflow_step_runs.dispatch_ready_at when enableHeartbeatFinalizationV1 is ON;
+   * when OFF or unset, defaults to true (legacy behavior — terminal = ready).
+   */
+  dispatchReady?: boolean;
 }
 
 /**
@@ -181,7 +188,7 @@ export function classifyStepActivation(
   let hardRequiredFailed = false;
   for (const edge of edges) {
     const pred = predsByStepId.get(edge.stepId);
-    if (!pred || !TERMINAL_PRED_STATUSES.has(pred.status)) {
+    if (!pred || !TERMINAL_PRED_STATUSES.has(pred.status) || pred.dispatchReady === false) {
       // 선행이 아직 terminal 아님 — 이 step 은 지금 결정할 수 없다.
       waiting = true;
       continue;

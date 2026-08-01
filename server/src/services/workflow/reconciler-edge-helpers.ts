@@ -11,6 +11,8 @@ export function buildStepRunMap(
 export function buildPredFactsMap(
   steps: WorkflowStep[],
   stepRunMap: Map<string, (typeof workflowStepRuns.$inferSelect)>,
+  _validationVerdicts?: unknown,
+  v1EnforcementEnabled?: boolean,
 ): Map<string, PredFacts> {
   const facts = new Map<string, PredFacts>();
   for (const step of steps) {
@@ -20,6 +22,7 @@ export function buildPredFactsMap(
       isQaGate: false,
       verdict: null,
       verdictChecked: false,
+      ...(v1EnforcementEnabled ? { dispatchReady: run?.dispatchReadyAt != null } : {}),
     });
   }
   return facts;

@@ -164,6 +164,7 @@ export async function applyWorkflowStepRetryPass(input: {
         observedLastDispatchRequestId: failedRun.lastDispatchRequestId,
         observedMetadataSnapshot: record(failedRun.metadata),
         errorSummary,
+        observedExecutionGeneration: failedRun.executionGeneration,
       });
       if (result.result === "scheduled") metadataChanged = true;
       continue;

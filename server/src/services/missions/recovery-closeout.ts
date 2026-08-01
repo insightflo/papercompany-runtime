@@ -19,6 +19,7 @@ import {
   workflowTransitionEvents,
 } from "@paperclipai/db";
 import { resolveProducerStepIdFromDag } from "./workflow-qa-rework.js";
+import { recordWorkflowStepStatusTransition } from "../workflow/workflow-sync-source.js";
 
 export const RECOVERY_CLOSEOUT_MARKER_KEY = "recoveryCloseout";
 const ACTIVE_WORK_PRODUCT_STATUS = "active";
@@ -209,12 +210,26 @@ export async function reconcileRecoveredWorkflowStep(
     .update(workflowStepRuns)
     .set({ status: "completed", metadata: updatedMetadata, completedAt: new Date() })
     .where(and(eq(workflowStepRuns.id, failedStep.id), eq(workflowStepRuns.status, "failed")))
-    .returning({ id: workflowStepRuns.id });
+    .returning({
+      id: workflowStepRuns.id,
+      transitionVersion: workflowStepRuns.statusTransitionVersion,
+    });
 
   if (updated.length === 0) {
     return { skipped: true, reason: "already_completed" };
   }
 
+  await recordWorkflowStepStatusTransition(db, {
+    companyId: input.companyId,
+    missionId: input.missionId,
+    workflowRunId,
+    workflowStepRunId: failedStep.id,
+    issueId: producerIssueId,
+    fromStatus: failedStep.status,
+    toStatus: "completed",
+    source: "workflow_agent_api",
+    transitionVersion: updated[0]!.transitionVersion,
+  });
   // audit log — 실제 변경된 한 step 에만. actorType=system/actorId=recovery-closeout 명시.
   await db.insert(activityLog).values({
     companyId: input.companyId,

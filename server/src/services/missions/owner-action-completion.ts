@@ -30,6 +30,7 @@ import {
 } from "./owner-action-unblock-handback.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
+import type { WorkflowSyncSource } from "../workflow/workflow-sync-source.js";
 
 export interface CompleteUnblockHandbackResult {
   wakeupRequestId: string | null;
@@ -46,6 +47,7 @@ export async function completeUnblockActionWithSourceHandback(
     unblockIssueId: string;
     companyId: string;
     actor: { agentId?: string | null; userId?: string | null };
+    workflowSyncSource?: WorkflowSyncSource;
   },
 ): Promise<CompleteUnblockHandbackResult> {
   const svc = issueService(db);
@@ -66,7 +68,7 @@ export async function completeUnblockActionWithSourceHandback(
   const sourceIssueId = unblock.originId;
   // source가 없으면 그냥 done(guard도 originId null로 early return).
   if (!sourceIssueId) {
-    await svc.update(unblock.id, { status: "done" });
+    await svc.update(unblock.id, { status: "done", workflowSyncSource: input.workflowSyncSource });
     return { wakeupRequestId: null, dispatchKind: "report_only", sourceIssueId: null, nativeOutcome: null, oversightWakeupRequestId: null };
   }
 
@@ -81,7 +83,7 @@ export async function completeUnblockActionWithSourceHandback(
   // source가 이미 회복(blocked 아님)이면 handback 불필요 — 이전 동작 유지하며 done(terminal
   //   mission check 보다 먼저, recovered source 는 handback 대상이 아니므로).
   if (source.status !== "blocked") {
-    await svc.update(unblock.id, { status: "done" });
+    await svc.update(unblock.id, { status: "done", workflowSyncSource: input.workflowSyncSource });
     return { wakeupRequestId: null, dispatchKind: "report_only", sourceIssueId: source.id, nativeOutcome: null, oversightWakeupRequestId: null };
   }
 
@@ -211,7 +213,7 @@ export async function completeUnblockActionWithSourceHandback(
   }
 
   // done 표시 — guard 가 (a) source 회복 (b) source live wake (c) 검증된 구조화 report 중 하나로 통과.
-  await svc.update(unblock.id, { status: "done" });
+  await svc.update(unblock.id, { status: "done", workflowSyncSource: input.workflowSyncSource });
   return {
     wakeupRequestId: dispatchedWakeupRequestId,
     dispatchKind,

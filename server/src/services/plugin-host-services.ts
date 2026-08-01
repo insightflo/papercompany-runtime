@@ -587,7 +587,7 @@ export function buildHostServices(
     if (!inCompany(existing, companyId)) return;
     if (existing.status === nextStatus || existing.status === "done" || existing.status === "cancelled") return;
 
-    const issue = (await issues.update(issueId, { status: nextStatus } as any)) as Issue;
+    const issue = (await issues.update(issueId, { status: nextStatus, workflowSyncSource: "plugin_host" } as any)) as Issue;
     if (!issue) return;
 
     await syncSrbSourceIssueStatus({
@@ -595,7 +595,7 @@ export function buildHostServices(
       issueId: issue.id,
       status: issue.status,
     });
-    await workflowService.syncRunStatusForIssue(db, issue.id);
+    await workflowService.syncRunStatusForIssue(db, issue.id, "plugin_host");
     await applyIssueUpdatedSideEffects({
       db,
       heartbeat,
@@ -914,7 +914,10 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const existing = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
-        const issue = (await issues.update(params.issueId, params.patch as any)) as Issue;
+        const issue = (await issues.update(
+          params.issueId,
+          { ...params.patch, workflowSyncSource: "plugin_host" } as any,
+        )) as Issue;
         if (issue) {
           if (issue.status !== existing.status) {
             await syncSrbSourceIssueStatus({
@@ -923,7 +926,7 @@ export function buildHostServices(
               status: issue.status,
             });
           }
-          await workflowService.syncRunStatusForIssue(db, issue.id);
+          await workflowService.syncRunStatusForIssue(db, issue.id, "plugin_host");
           await applyIssueUpdatedSideEffects({
             db,
             heartbeat,

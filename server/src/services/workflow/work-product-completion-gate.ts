@@ -5,8 +5,9 @@ import { unprocessable } from "../../errors.js";
 import { resolveWorkProductRequirement } from "../issue-execution-cards/gate-contract.js";
 import { cardDescriptionDrift, getIssueExecutionCard } from "../issue-execution-cards/store.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./issue-step-closeout.js";
+import type { WorkflowSyncSource } from "./workflow-sync-source.js";
 
-type WorkflowIssueWorkProductDb = Pick<Db, "select" | "update" | "insert">;
+type WorkflowIssueWorkProductDb = Pick<Db, "select" | "update" | "insert" | "transaction">;
 type IssueRow = typeof issues.$inferSelect;
 type StepRunRow = Pick<typeof workflowStepRuns.$inferSelect, "id" | "stepId" | "metadata">;
 
@@ -125,11 +126,13 @@ export async function completeWorkflowIssueStepRunsAfterDone(input: {
   readonly db: WorkflowIssueWorkProductDb;
   readonly issue: IssueRow;
   readonly completedAt: Date;
+  readonly source?: WorkflowSyncSource;
 }): Promise<string[]> {
   if (input.issue.originKind !== "workflow_execution") return [];
   return completeLinkedWorkflowStepRunsForIssue({
     db: input.db,
     issueId: input.issue.id,
     completedAt: input.completedAt,
+    source: input.source,
   });
 }
