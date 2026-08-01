@@ -403,10 +403,6 @@ describe("heartbeat context budget preflight", () => {
     dataDir = started.dataDir;
     process.env.PAPERCLIP_HOME = path.join(dataDir, "paperclip-home");
     process.env.PAPERCLIP_INSTANCE_ID = "heartbeat-test";
-    // Enable finalization v1 so heartbeat lifecycle tracks terminal-but-unsettled
-    // runs. This makes teardown races from fire-and-forget post-terminal writes
-    // visible to the drain loop instead of racing row deletion.
-    await db.insert(instanceSettings).values({ singletonKey: "default", experimental: { enableHeartbeatFinalizationV1: true } }).onConflictDoNothing();
   }, 60_000);
 
   afterEach(async () => {
