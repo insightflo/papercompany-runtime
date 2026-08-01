@@ -1,6 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRunFinalizations, heartbeatRuns } from "@paperclipai/db";
+import { heartbeatRunFinalizations, heartbeatRuns, workflowStepRuns } from "@paperclipai/db";
 import { appendWorkflowAuthorityTransition } from "../workflow/authority/transitions.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import type { HeartbeatRun } from "./owner-capability.js";
@@ -92,6 +92,18 @@ export async function settleRunIfReady(
     .then((rows) => rows[0] ?? null);
 
   if (settled) {
+    // Item 1: atomically set dispatch_ready_at on the linked workflow step run.
+    // This is the authority signal that the predecessor is evidence-ready AND
+    // owner-settled, allowing the successor to dispatch via classifyStepActivation.
+    if (run.workflowStepRunId) {
+      await db.update(workflowStepRuns)
+        .set({ dispatchReadyAt: now })
+        .where(and(
+          eq(workflowStepRuns.id, run.workflowStepRunId),
+          isNull(workflowStepRuns.dispatchReadyAt),
+        ))
+        .catch(() => undefined);
+    }
     await appendWorkflowAuthorityTransition(db, {
       companyId: run.companyId,
       workflowStepRunId: run.workflowStepRunId,
