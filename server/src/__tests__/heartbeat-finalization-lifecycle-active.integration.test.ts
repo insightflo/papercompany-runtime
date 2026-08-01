@@ -27,7 +27,7 @@ async function activeCount(db: ReturnType<typeof createDb>, agentId: string): Pr
   return Number(n ?? 0);
 }
 
-describeEP("heartbeat finalization lifecycle-active clause (flag-gated)", () => {
+describeEP("heartbeat finalization lifecycle-active clause (shadow phase)", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let companyId: string;
@@ -51,7 +51,7 @@ describeEP("heartbeat finalization lifecycle-active clause (flag-gated)", () => 
       { id: randomUUID(), companyId, agentId, invocationSource: "on_demand", status: "succeeded", finalizationVersion: 0, settledAt: null },
     ] as never);
   });
-  afterAll(() => { tempDb = null; });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); tempDb = null; });
 
   async function setFlag(on: boolean): Promise<void> {
     await db.delete(instanceSettings);
@@ -63,9 +63,10 @@ describeEP("heartbeat finalization lifecycle-active clause (flag-gated)", () => 
     expect(await activeCount(db, agentId)).toBe(1);
   });
 
-  it("flag ON: counts running + terminal-but-unsettled v1 (settled_at null), excluding settled and legacy", async () => {
+  it("shadow phase: lifecycle always counts only status='running' regardless of flag", async () => {
     await setFlag(true);
-    // running(1) + succeeded-unsettled-v1(1) = 2; settled-v1 and legacy-v0 excluded
-    expect(await activeCount(db, agentId)).toBe(2);
+    // Shadow phase: settled_at tracking does NOT alter slot admission.
+    // Only status='running' counts, even with flag ON.
+    expect(await activeCount(db, agentId)).toBe(1);
   });
 });
