@@ -4,8 +4,9 @@ import { heartbeatRunFinalizations, heartbeatRuns } from "@paperclipai/db";
 import { appendWorkflowAuthorityTransition } from "../workflow/authority/transitions.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import type { HeartbeatRun } from "./owner-capability.js";
-import { allRequiredStages, STAGE_CLASS } from "./stage-classifier.js";
-import { loadStages, setStageState } from "./finalization-state.js";
+import { allRequiredStages, Q_STAGE, STAGE_CLASS } from "./stage-classifier.js";
+import { ensureFinalization, loadStages, recordStage, setStageState } from "./finalization-state.js";
+import { observeQuiescenceProof } from "./quiescence-probe.js";
 
 
 export type SettlementOutcome = "settled" | "not_ready" | "blocked_noncompensable";
@@ -123,4 +124,58 @@ export async function markQuiescenceStageDeadLetter(
   now: Date,
 ): Promise<void> {
   await setStageState(db, stepId, "dead_letter", now);
+}
+
+
+/**
+ * Full settlement pipeline for a terminal v1 run: observe quiescence → record Q
+ * stages if proven → record C stages (optimistic — the terminal path commits them)
+ * → settle. Used by the shadow terminal hook so a normal-termination run settles
+ * in one pass instead of waiting for the 5-min recovery replay.
+ */
+export async function attemptFullSettlement(
+  db: SettleDb,
+  run: HeartbeatRun,
+  now: Date,
+): Promise<SettlementOutcome> {
+  if (!(await isHeartbeatFinalizationV1Enabled(db))) return "not_ready";
+  if (run.finalizationVersion !== 1) return "not_ready";
+
+  const fin = await ensureFinalization(db, run, now);
+
+  // Observe quiescence and record Q stages if positively proven.
+  const proof = await observeQuiescenceProof(db, run);
+  if (proof) {
+    for (const kind of [Q_STAGE.executorQuiescence, Q_STAGE.workspaceOperationsSettled, Q_STAGE.runtimeServicesStopped, Q_STAGE.missionRuntimeIdle]) {
+      await recordStage(db, {
+        companyId: run.companyId,
+        runId: run.id,
+        finalizationId: fin.id,
+        stageClass: STAGE_CLASS.quiescence,
+        stageKind: kind,
+        idempotencyKey: `settle-q:${kind}:${run.id}`,
+        state: "done",
+        payload: { source: "attempt_full_settlement", proof },
+      }).catch(() => undefined);
+    }
+  }
+
+  // Record applicable C stages as done — the terminal hook fires after the adapter
+  // completed; mandatory business side-effects are committed by the terminal path.
+  const stages = allRequiredStages(run);
+  for (const stage of stages) {
+    if (stage.stageClass === STAGE_CLASS.compensable) {
+      await recordStage(db, {
+        companyId: run.companyId,
+        runId: run.id,
+        finalizationId: fin.id,
+        stageClass: STAGE_CLASS.compensable,
+        stageKind: stage.kind,
+        idempotencyKey: `settle-c:${stage.kind}:${run.id}`,
+        state: "done",
+      }).catch(() => undefined);
+    }
+  }
+
+  return settleRunIfReady(db, run, now);
 }
