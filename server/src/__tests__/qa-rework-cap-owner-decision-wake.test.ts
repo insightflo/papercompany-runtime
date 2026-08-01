@@ -62,7 +62,7 @@ describeEP("QA cap owner decision wake suppression", () => {
     db = createDb(tempDb.connectionString);
   }, 60_000);
   afterEach(async () => { await cleanQaCapFixture(db); });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it.each(MISSION_OWNER_DECISION_OPTIONS)(
     "wakes a truly undecided todo action, then does not re-wake after structured %s",

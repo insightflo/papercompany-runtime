@@ -37,7 +37,7 @@ describeEP("hybrid QA — gate CAS idempotency", () => {
     await db.delete(workflowDefinitions);
   });
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("first sync resets stale gate; second sync does NOT reset again (generation marker match)", async () => {
     const wfId = randomUUID();

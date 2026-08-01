@@ -74,7 +74,7 @@ describeEP("P4 oversight wakeup promote integration", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-oversight-promote-"); db = createDb(tempDb.connectionString); }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("QA-gate ownerAction + live recovery → request completed + noop event + heartbeat run 0", async () => {
     const seed_ = await seed(db, true);

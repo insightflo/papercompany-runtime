@@ -25,7 +25,7 @@ describeDb("operator decision read service", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("operator-decisions-read-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => tempDb?.cleanup());
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   beforeEach(async () => {
     await db.delete(operatorDecisionContinuations);

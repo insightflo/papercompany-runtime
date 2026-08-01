@@ -126,7 +126,7 @@ describeEP("qa-cap acceptance pass", () => {
     await db.delete(agents);
     await db.delete(companies);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function runPass(seed: Awaited<ReturnType<typeof seedScenario>>, allowCap: boolean, observedAt: Date, qaOverride?: Partial<EdgeBearingStep>) {
     return applyCapAcceptancePass({

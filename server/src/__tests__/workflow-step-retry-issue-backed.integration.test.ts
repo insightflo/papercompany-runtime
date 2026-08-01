@@ -31,7 +31,7 @@ describeEP("issue-backed agent step retry end-to-end", () => {
   // No afterEach cleanup — each test uses unique UUIDs and the ephemeral DB
   // is destroyed in afterAll. Deep FK chains from activity_log/heartbeat_runs
   // make per-test deletion unreliable.
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function setupAgentStep(maxRetries: number | undefined, onFailure = "retry") {
     const agentId = randomUUID();

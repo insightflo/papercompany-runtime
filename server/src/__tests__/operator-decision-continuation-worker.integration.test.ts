@@ -36,7 +36,7 @@ describeDb("operator decision continuation worker", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("operator-decision-worker-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => tempDb?.cleanup());
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
   beforeEach(async () => {
     await db.delete(activityLog);
     await db.delete(operatorDecisionContinuations);

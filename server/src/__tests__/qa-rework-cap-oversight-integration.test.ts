@@ -42,7 +42,7 @@ describeEP("QA cap oversight producer retry target resolution (scope: target onl
     db = createDb(tempDb.connectionString);
   }, 60_000);
   afterEach(async () => { await cleanQaCapFixture(db); });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("description carries Rework target and retry dispatches to the producer issue", async () => {
     const base = await seedQaCapBase(db);

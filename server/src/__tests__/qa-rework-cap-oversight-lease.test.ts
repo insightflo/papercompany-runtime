@@ -94,7 +94,7 @@ describeEP("QA cap oversight lease/fencing CAS", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("qa-cap-lease-"); db = createDb(tempDb.connectionString); }, 60_000);
   afterEach(async () => { await cleanQaCapFixture(db); });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("fresh lease: B returns null while A is paused inside createIssue", async () => {
     const { base, exhaustion, mission, oversight } = await setupScenario(db, "qa-fresh");

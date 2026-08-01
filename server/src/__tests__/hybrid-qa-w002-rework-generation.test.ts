@@ -37,7 +37,7 @@ describeEP("hybrid QA — W002 rework exact producerToken + downstream semantic 
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   // Seed a P->G->QA chain and return ids. ids use short suffixes for stability.
   async function seedChain(opts: {

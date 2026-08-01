@@ -44,7 +44,7 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
     await db.insert(companies).values({ id: companyId, name: "RetryCo", status: "active" });
   }, 60_000);
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
   afterEach(async () => {
     setWorkflowToolStepExecutor(null);
     await db.delete(workflowTransitionEvents);

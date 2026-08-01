@@ -60,7 +60,7 @@ describeEP("QA rework cap oversight detection", () => {
     db = createDb(tempDb.connectionString);
   }, 60_000);
   afterEach(async () => { await cleanQaCapFixture(db); });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("requires current official workflow_api request_changes bound to the exact QA step run", async () => {
     const base = await seedQaCapBase(db);

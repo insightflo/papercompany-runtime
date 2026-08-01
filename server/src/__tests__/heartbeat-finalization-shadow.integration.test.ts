@@ -78,7 +78,7 @@ describeEP("heartbeat finalization v1 shadow writers", () => {
     }).where(eq(workflowStepRuns.id, stepRunId));
     await db.update(instanceSettings).set({ experimental: { enableHeartbeatFinalizationV1: true } });
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("binds and acknowledges a typed owner, advances retry generation, transfers both epochs, and preserves the first outcome", async () => {
     const wakeupId = randomUUID();

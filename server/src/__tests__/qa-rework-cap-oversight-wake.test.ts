@@ -52,7 +52,7 @@ describeEP("QA cap oversight wake liveness", () => {
     db = createDb(tempDb.connectionString);
   }, 60_000);
   afterEach(async () => { await cleanQaCapFixture(db); });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("queued request status is live", async () => {
     const base = await seedQaCapBase(db);

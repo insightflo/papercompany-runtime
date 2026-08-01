@@ -41,7 +41,7 @@ describeEP("workflow step retry branch authority", () => {
     await db.delete(workflowDefinitions);
   });
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function retryEvents(workflowRunId: string) {
     return db.select().from(workflowTransitionEvents).where(and(

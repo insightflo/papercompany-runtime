@@ -143,7 +143,7 @@ describeEmbeddedPostgres("RES-1315: oversight observe-only while QA recovery is 
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-res1315-regression-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("does not reopen the producer and dispatches no producer retry wakeup while QA recovery is live", async () => {
     const seed = await seedLiveQaRecovery(db);

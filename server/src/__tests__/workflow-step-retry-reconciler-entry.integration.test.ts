@@ -29,7 +29,7 @@ describeEP("reconcileWorkflow entry point releases due delayed retries", () => {
     await db.insert(companies).values({ id: companyId, name: "ReconEntryCo", status: "active" });
   }, 60_000);
   afterEach(() => { setWorkflowToolStepExecutor(null); });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("reconcileWorkflow releases a due delayed issue-less tool retry", async () => {
     const stepId = `tool-${randomUUID().slice(0, 6)}`;
@@ -104,7 +104,7 @@ describeEP("generic runnable-step wakeup reconciler skips workflowRetry", () => 
     companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "WakeSkipCo", status: "active" });
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("skips a due waiting workflowRetry step before assignee resolution", async () => {
     const agentId = randomUUID();

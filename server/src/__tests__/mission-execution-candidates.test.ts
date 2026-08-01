@@ -25,7 +25,7 @@ describeEP("mission-execution-candidates", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-candidates-"); db = createDb(tempDb.connectionString); }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function seed() {
     const companyId = randomUUID();

@@ -34,7 +34,7 @@ describeEP("workflow step retry scheduler", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("resets failed step to pending and increments retryCount", async () => {
     const stepId = `tool-${randomUUID().slice(0, 6)}`;

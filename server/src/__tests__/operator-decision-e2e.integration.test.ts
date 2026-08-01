@@ -31,7 +31,7 @@ describeDb("Inflo Operator Decision end-to-end", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("operator-decision-inflo-e2e-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => tempDb?.cleanup());
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
   beforeEach(async () => {
     await db.delete(activityLog);
     await db.delete(operatorDecisionContinuations);

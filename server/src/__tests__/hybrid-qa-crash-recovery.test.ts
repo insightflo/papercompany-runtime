@@ -53,7 +53,7 @@ describeEP("hybrid QA — crash recovery", () => {
     await db.delete(workflowDefinitions);
   });
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("resets stale terminal gate when producer has recompleted after rework", async () => {
     const wfId = randomUUID();

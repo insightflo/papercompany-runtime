@@ -145,7 +145,7 @@ describeDb("loadProducerOwnReworkContext (source-to-retry handoff)", () => {
     });
   }, 60_000);
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("returns the producer issue's own original instruction and active workProducts", async () => {
     const ctx = await loadProducerOwnReworkContext({ db, companyId: companyA, producerIssueId: producerIssueA });
@@ -234,7 +234,7 @@ describeDb("loadProducerDependencyArtifacts (upstream stays separate)", () => {
     stepRunMap = new Map<string, StepRun>([["collect", sr]]);
   }, 60_000);
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("returns upstream dependency artifacts as a separate section", async () => {
     const dep = await loadProducerDependencyArtifacts({
