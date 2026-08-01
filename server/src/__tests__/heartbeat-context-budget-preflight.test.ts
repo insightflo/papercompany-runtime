@@ -403,6 +403,7 @@ describe("heartbeat context budget preflight", () => {
     dataDir = started.dataDir;
     process.env.PAPERCLIP_HOME = path.join(dataDir, "paperclip-home");
     process.env.PAPERCLIP_INSTANCE_ID = "heartbeat-test";
+    await db.insert(instanceSettings).values({ singletonKey: "default", experimental: { enableHeartbeatFinalizationV1: true } }).onConflictDoNothing();
   }, 60_000);
 
   afterEach(async () => {
