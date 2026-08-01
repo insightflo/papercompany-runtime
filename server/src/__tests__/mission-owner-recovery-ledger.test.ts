@@ -25,7 +25,7 @@ if (!support.supported) console.warn(`skip owner-recovery-ledger tests: ${suppor
 
 let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("owner-recovery-ledger-"); }, 60_000);
-afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
+afterAll(async () => { await tempDb?.cleanup(); });
 
 type Seed = {
   db: ReturnType<typeof createDb>;
