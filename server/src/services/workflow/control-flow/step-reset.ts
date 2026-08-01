@@ -19,12 +19,17 @@
  *     으로 부활시키지 못해 회복 불가(P2 이월).
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowStepRuns } from "@paperclipai/db";
 import { logActivity } from "../../activity-log.js";
 import { appendAttempt } from "./verdict-store.js";
 import type { StepIterationAttempt } from "./types.js";
+import { isHeartbeatFinalizationV1Enabled } from "../../heartbeat-finalization/flag.js";
+import {
+  appendWorkflowAuthorityTransition,
+  supersedeWorkflowDelegationsForGeneration,
+} from "../authority/transitions.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 
@@ -76,16 +81,64 @@ export async function resetStepRunForRework(
   // P2 이월: skip sentinel 제거 — back-edge 로 회복되는 step 이 flap 없이 재실행되게.
   delete metadata.controlFlowSkipped;
 
-  await db
-    .update(workflowStepRuns)
-    .set({
-      status: "pending",
-      startedAt: null,
-      completedAt: null,
-      iterationIndex: nextIterationIndex,
-      metadata,
-    })
-    .where(eq(workflowStepRuns.id, stepRun.id));
+  const finalizationV1Enabled = await isHeartbeatFinalizationV1Enabled(db);
+  if (finalizationV1Enabled) {
+    await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(workflowStepRuns)
+        .set({
+          status: "pending",
+          startedAt: null,
+          completedAt: null,
+          iterationIndex: nextIterationIndex,
+          metadata,
+          executionGeneration: sql`${workflowStepRuns.executionGeneration} + 1`,
+          dispatchOwnerWakeupRequestId: null,
+          dispatchOwnerHeartbeatRunId: null,
+          evidenceReadyAt: null,
+          dispatchReadyAt: null,
+        })
+        .where(and(
+          eq(workflowStepRuns.id, stepRun.id),
+          eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
+        ))
+        .returning({ id: workflowStepRuns.id });
+      if (updated.length === 0) throw new Error("workflow rework generation CAS lost");
+      await supersedeWorkflowDelegationsForGeneration(tx, {
+        workflowRunId: stepRun.workflowRunId,
+        workflowStepRunId: stepRun.id,
+        executionGeneration: stepRun.executionGeneration,
+        now,
+      });
+      await appendWorkflowAuthorityTransition(tx, {
+        companyId,
+        workflowRunId: stepRun.workflowRunId,
+        workflowStepRunId: stepRun.id,
+        issueId: stepRun.issueId,
+        executionGeneration: stepRun.executionGeneration + 1,
+        reason: reason ?? "back_edge_qa_request_changes",
+        idempotencyKey: `authority-generation-rework:${stepRun.id}:${stepRun.executionGeneration}:${stepRun.executionGeneration + 1}`,
+        payload: {
+          version: 1,
+          transition: "generation_advanced",
+          oldGeneration: stepRun.executionGeneration,
+          newGeneration: stepRun.executionGeneration + 1,
+          iterationIndex: nextIterationIndex,
+        },
+      });
+    });
+  } else {
+    await db
+      .update(workflowStepRuns)
+      .set({
+        status: "pending",
+        startedAt: null,
+        completedAt: null,
+        iterationIndex: nextIterationIndex,
+        metadata,
+      })
+      .where(eq(workflowStepRuns.id, stepRun.id));
+  }
 
   await logActivity(db, {
     companyId,

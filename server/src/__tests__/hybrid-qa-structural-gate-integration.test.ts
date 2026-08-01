@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -151,7 +151,10 @@ describeEP("hybrid QA — structural gate integration", () => {
 
     // Official verdict should be in transition events (issueId=null, issue-less)
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRun.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe("workflow_validation_verdict");
     expect(events[0].verdict).toBe("request_changes");
@@ -180,7 +183,10 @@ describeEP("hybrid QA — structural gate integration", () => {
 
     // No verdict event
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRun.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(0);
   });
 
@@ -199,7 +205,10 @@ describeEP("hybrid QA — structural gate integration", () => {
     expect(updated.lastDispatchErrorSummary).toBe("structural_gate_contract_failure");
 
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRun.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(0);
   });
 
@@ -217,7 +226,10 @@ describeEP("hybrid QA — structural gate integration", () => {
     expect(updated.status).toBe("completed");
 
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRun.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(1);
     expect(events[0].verdict).toBe("pass");
   });
@@ -240,7 +252,10 @@ describeEP("hybrid QA — structural gate integration", () => {
     });
 
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRun.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(1);
   });
 
@@ -300,7 +315,10 @@ describeEP("hybrid QA — structural gate integration", () => {
     // If the ledger write had failed, the function would have thrown
     // and the step would not be completed — this proves fail-closed ordering.
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRun.id));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(1);
     expect(events[0].verdict).toBe("pass");
     const [updated] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, gateRun.id));

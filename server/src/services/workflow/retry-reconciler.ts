@@ -120,7 +120,7 @@ export async function reconcileDueWorkflowStepRetries(
 
   for (const [runId, dueCandidates] of dueByRunId) {
     try {
-      await syncWorkflowRunState(db, runId);
+      await syncWorkflowRunState(db, runId, "workflow_retry");
       const currentRows = await db.select({
         stepRunId: workflowStepRuns.id,
         workflowRunId: workflowStepRuns.workflowRunId,

@@ -650,7 +650,7 @@ export function workflowRoutes(db: Db) {
     if (!existing || !canAccessRecord(req, existing.companyId)) {
       throw notFound("Issue not found");
     }
-    const issue = await svc.update(issueId, { status: "done" });
+    const issue = await svc.update(issueId, { status: "done", workflowSyncSource: "workflows_route" });
     if (!issue) throw notFound("Issue not found");
     const actor = actorForActivity(req);
     await logActivity(db, {
@@ -669,7 +669,7 @@ export function workflowRoutes(db: Db) {
         _previous: { status: existing.status },
       },
     });
-    const run = await workflowService.syncRunStatusForIssue(db, issue.id);
+    const run = await workflowService.syncRunStatusForIssue(db, issue.id, "workflows_route");
     res.json({ issue: serializeValue(issue), run: serializeValue(run) });
   });
 

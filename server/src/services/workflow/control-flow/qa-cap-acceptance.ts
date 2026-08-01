@@ -23,6 +23,7 @@ import {
 } from "./edge-condition.js";
 import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { loadLatestNonblockingAcceptance } from "../validation-verdict-ledger.js";
+import { recordWorkflowStepStatusTransition } from "../workflow-sync-source.js";
 import { isStructuralGateStep, type StructuralGateStep } from "./structural-gate.js";
 import { isDeliveryReadbackStep } from "../delivery-verification-gate.js";
 import {
@@ -233,8 +234,23 @@ export async function applyCapAcceptancePass(input: ApplyCapAcceptanceInput): Pr
           });
           const res = await tx.update(workflowStepRuns)
             .set({ status: "completed", completedAt: now, metadata: meta })
-            .where(and(...casConds)).returning({ id: workflowStepRuns.id });
+            .where(and(...casConds)).returning({
+              id: workflowStepRuns.id,
+              transitionVersion: workflowStepRuns.statusTransitionVersion,
+            });
           if (res.length === 0) throw new Error(CAP_CAS_LOST);
+          await recordWorkflowStepStatusTransition(tx, {
+            companyId: run.companyId,
+            missionId: run.missionId,
+            workflowRunId: run.id,
+            workflowStepRunId: q.qaRun.id,
+            issueId: q.qaRun.issueId,
+            heartbeatRunId: q.heartbeatRunId,
+            fromStatus: q.qaRun.status,
+            toStatus: "completed",
+            source: "workflow_qa_cap_acceptance",
+            transitionVersion: res[0]!.transitionVersion,
+          });
         }
         // producer metadata: bounded acceptance record (status NOT mutated; CAS on completed).
         const pMeta = readMeta(pRun.metadata);

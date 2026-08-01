@@ -45,6 +45,7 @@ import type {
   WorkflowStepExecutionContract,
 } from "./types.js";
 import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
+import type { WorkflowSyncSource } from "./workflow-sync-source.js";
 
 type WorkflowStepLike = WorkflowStep & {
   title?: unknown;
@@ -538,8 +539,12 @@ export const workflowService = {
   /**
    * Synchronize a workflow run after one of its execution issues changed state.
    */
-  async syncRunStatusForIssue(db: Db, issueId: string): Promise<WorkflowExecutionResult | null> {
-    return syncWorkflowRunForIssue(db, issueId);
+  async syncRunStatusForIssue(
+    db: Db,
+    issueId: string,
+    source: WorkflowSyncSource = "workflow_sync",
+  ): Promise<WorkflowExecutionResult | null> {
+    return syncWorkflowRunForIssue(db, issueId, source);
   },
 };
 

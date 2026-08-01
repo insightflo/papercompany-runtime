@@ -49,6 +49,8 @@ import {
   assertWorkflowIssueWorkProductReadyForDone,
   completeWorkflowIssueStepRunsAfterDone,
 } from "./workflow/work-product-completion-gate.js";
+import type { WorkflowSyncSource } from "./workflow/workflow-sync-source.js";
+import { isHeartbeatFinalizationV1Enabled } from "./heartbeat-finalization/flag.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -958,12 +960,22 @@ export function issueService(db: Db) {
 
   async function isTerminalOrMissingHeartbeatRun(runId: string) {
     const run = await db
-      .select({ status: heartbeatRuns.status })
+      .select({
+        status: heartbeatRuns.status,
+        finalizationVersion: heartbeatRuns.finalizationVersion,
+        settledAt: heartbeatRuns.settledAt,
+      })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     if (!run) return true;
-    return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
+    if (!TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+    // Flag-gated: a v1 terminal-but-unsettled run is NOT stale — it is still
+    // finalizing and its checkout/execution must not be adopted by another run.
+    if (await isHeartbeatFinalizationV1Enabled(db) && run.finalizationVersion === 1 && run.settledAt === null) {
+      return false;
+    }
+    return true;
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -1516,7 +1528,13 @@ export function issueService(db: Db) {
       return await createIssueRecord(dbOrTx, companyId, data, isolatedWorkspacesEnabled);
     },
 
-    update: async (id: string, data: Partial<typeof issues.$inferInsert> & { labelIds?: string[] }) => {
+    update: async (
+      id: string,
+      data: Partial<typeof issues.$inferInsert> & {
+        labelIds?: string[];
+        workflowSyncSource?: WorkflowSyncSource;
+      },
+    ) => {
       const existing = await db
         .select()
         .from(issues)
@@ -1524,7 +1542,11 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
 
-      const { labelIds: nextLabelIds, ...issueData } = data;
+      const {
+        labelIds: nextLabelIds,
+        workflowSyncSource = "issues_service",
+        ...issueData
+      } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -1660,6 +1682,7 @@ export function issueService(db: Db) {
             db: tx,
             issue: updated,
             completedAt: updated.completedAt ?? new Date(),
+            source: workflowSyncSource,
           });
         }
         if (nextLabelIds !== undefined) {
@@ -1719,7 +1742,7 @@ export function issueService(db: Db) {
       if (updatedIssue && issueData.status && issueData.status !== existing.status) {
         try {
           const { workflowService } = await import("./workflow/engine.js");
-          await workflowService.syncRunStatusForIssue(db, updatedIssue.id);
+          await workflowService.syncRunStatusForIssue(db, updatedIssue.id, workflowSyncSource);
         } catch (err) {
           logger.warn(
             { err, issueId: updatedIssue.id, status: issueData.status },

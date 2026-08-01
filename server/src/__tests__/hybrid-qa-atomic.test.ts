@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   companies, createDb, workflowDefinitions, workflowRuns,
@@ -84,7 +84,10 @@ describeEP("hybrid QA — atomic structural callback", () => {
 
     // Only ONE ledger row should exist (the stale callback's insert was rolled back)
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRunId));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRunId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(1);
     expect(events[0].verdict).toBe("pass"); // original, not the stale request_changes
   });
@@ -109,7 +112,10 @@ describeEP("hybrid QA — atomic structural callback", () => {
 
     // Only the original PASS verdict exists
     const events = await db.select().from(workflowTransitionEvents)
-      .where(eq(workflowTransitionEvents.workflowStepRunId, gateRunId));
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, gateRunId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
     expect(events).toHaveLength(1);
     expect(events[0].verdict).toBe("pass");
     expect(events[0].reason).toBe("all checks passed");

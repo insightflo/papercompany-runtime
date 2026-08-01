@@ -5,6 +5,7 @@ export interface InstanceGeneralSettings {
 export interface InstanceExperimentalSettings {
   enableIsolatedWorkspaces: boolean;
   autoRestartDevServerWhenIdle: boolean;
+  enableHeartbeatFinalizationV1: boolean;
 }
 
 export interface InstanceSettings {

@@ -385,7 +385,10 @@ describe("buildHostServices issues", () => {
       },
     });
 
-    expect(mocks.issueUpdate).toHaveBeenCalledWith("issue-4", { status: "blocked" });
+    expect(mocks.issueUpdate).toHaveBeenCalledWith("issue-4", {
+      status: "blocked",
+      workflowSyncSource: "plugin_host",
+    });
     expect(mocks.syncSrbSourceIssueStatus).toHaveBeenCalledWith({
       db: expect.anything(),
       issueId: "issue-4",

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { type AnyPgColumn, pgTable, uuid, text, timestamp, jsonb, index, integer, bigint, boolean } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -18,6 +19,22 @@ export const heartbeatRuns = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     error: text("error"),
     wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id),
+    workflowStepRunId: uuid("workflow_step_run_id"),
+    workflowExecutionGeneration: integer("workflow_execution_generation"),
+    executionScopeKind: text("execution_scope_kind"),
+    executionEpoch: integer("execution_epoch"),
+    executionToken: uuid("execution_token"),
+    executorOwnerId: text("executor_owner_id"),
+    executorOwnerLeaseEpoch: integer("executor_owner_lease_epoch"),
+    executorOwnerLeaseToken: uuid("executor_owner_lease_token"),
+    executorOwnerLeaseExpiresAt: timestamp("executor_owner_lease_expires_at", { withTimezone: true }),
+    executorOwnerAcknowledgedAt: timestamp("executor_owner_acknowledged_at", { withTimezone: true }),
+    executorOwnerReleasedAt: timestamp("executor_owner_released_at", { withTimezone: true }),
+    terminalOutcome: text("terminal_outcome"),
+    terminalDecidedAt: timestamp("terminal_decided_at", { withTimezone: true }),
+    terminalDecisionSource: text("terminal_decision_source"),
+    finalizationVersion: integer("finalization_version").notNull().default(0),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
     exitCode: integer("exit_code"),
     signal: text("signal"),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
@@ -54,5 +71,13 @@ export const heartbeatRuns = pgTable(
       table.issueId,
       table.createdAt,
     ),
+    workflowStepGenerationIdx: index("heartbeat_runs_workflow_step_generation_idx").on(
+      table.companyId,
+      table.workflowStepRunId,
+      table.workflowExecutionGeneration,
+    ),
+    unsettledFinalizationIdx: index("heartbeat_runs_unsettled_finalization_idx")
+      .on(table.companyId, table.finalizationVersion)
+      .where(sql`${table.finalizationVersion} > 0 and ${table.settledAt} is null`),
   }),
 );

@@ -154,3 +154,6 @@ A change is done when all are true:
 2. Typecheck, tests, and build pass
 3. Contracts are synced across db/shared/server/ui
 4. Docs updated when behavior or commands change
+## 11. Completion Explanation (im-human)
+
+Whenever a work item concludes, summarize the result using the `im-human` skill (agent interpreter mode): rewrite the technical outcome into beginner-readable Korean, following the im-human answer format (one-line summary, verified vs. unverified, glossed jargon, next check). This applies to the final answer shown to the user only; leave code blocks, CLI commands, tool output, and error logs untouched. Do not invent facts not present in the work performed. Toggle off only when the user explicitly asks for the raw technical form or says "에이전트 통역 OFF".

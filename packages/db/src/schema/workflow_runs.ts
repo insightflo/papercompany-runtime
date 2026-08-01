@@ -22,6 +22,7 @@ export const workflowRuns = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id),
     missionId: uuid("mission_id").references(() => missions.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
+    dispatchAuthorityVersion: integer("dispatch_authority_version").notNull().default(0),
     originalStatus: text("original_status"),
     triggeredBy: text("triggered_by").notNull(),
     triggerSource: text("trigger_source"),

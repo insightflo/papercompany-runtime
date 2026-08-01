@@ -21,6 +21,13 @@ export const workflowStepRuns = pgTable(
     originalStatus: text("original_status"),
     agentName: text("agent_name"),
     retryCount: integer("retry_count").notNull().default(0),
+    statusTransitionVersion: integer("status_transition_version").notNull().default(0),
+    dispatchAuthorityKind: text("dispatch_authority_kind").notNull().default("legacy"),
+    executionGeneration: integer("execution_generation").notNull().default(0),
+    dispatchOwnerWakeupRequestId: uuid("dispatch_owner_wakeup_request_id"),
+    dispatchOwnerHeartbeatRunId: uuid("dispatch_owner_heartbeat_run_id"),
+    evidenceReadyAt: timestamp("evidence_ready_at", { withTimezone: true }),
+    dispatchReadyAt: timestamp("dispatch_ready_at", { withTimezone: true }),
     // control-flow loop 의 iteration 카운터(가즈아 무한 loop 방지 cap). retry_count 와 의미가 다름(DTO).
     iterationIndex: integer("iteration_index").notNull().default(0),
     sessionId: text("session_id"),
@@ -39,6 +46,12 @@ export const workflowStepRuns = pgTable(
     issueIdIdx: index("idx_workflow_step_runs_issue_id").on(table.issueId),
     legacyPluginStepEntityIdIdx: index("idx_workflow_step_runs_legacy_plugin_step_entity_id").on(
       table.legacyPluginStepEntityId,
+    ),
+    dispatchOwnerWakeupRequestIdIdx: index("workflow_step_runs_dispatch_owner_wakeup_request_id_idx").on(
+      table.dispatchOwnerWakeupRequestId,
+    ),
+    dispatchOwnerHeartbeatRunIdIdx: index("workflow_step_runs_dispatch_owner_heartbeat_run_id_idx").on(
+      table.dispatchOwnerHeartbeatRunId,
     ),
   }),
 );

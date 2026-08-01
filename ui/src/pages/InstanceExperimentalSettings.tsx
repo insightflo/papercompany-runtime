@@ -24,7 +24,11 @@ export function InstanceExperimentalSettings() {
   });
 
   const toggleMutation = useMutation({
-    mutationFn: async (patch: { enableIsolatedWorkspaces?: boolean; autoRestartDevServerWhenIdle?: boolean }) =>
+    mutationFn: async (patch: {
+      enableIsolatedWorkspaces?: boolean;
+      autoRestartDevServerWhenIdle?: boolean;
+      enableHeartbeatFinalizationV1?: boolean;
+    }) =>
       instanceSettingsApi.updateExperimental(patch),
     onSuccess: async () => {
       setActionError(null);
@@ -54,6 +58,7 @@ export function InstanceExperimentalSettings() {
 
   const enableIsolatedWorkspaces = experimentalQuery.data?.enableIsolatedWorkspaces === true;
   const autoRestartDevServerWhenIdle = experimentalQuery.data?.autoRestartDevServerWhenIdle === true;
+  const enableHeartbeatFinalizationV1 = experimentalQuery.data?.enableHeartbeatFinalizationV1 === true;
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -127,6 +132,33 @@ export function InstanceExperimentalSettings() {
               className={cn(
                 "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
                 autoRestartDevServerWhenIdle ? "translate-x-4.5" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </section>
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Heartbeat Finalization V1 Shadow Writes</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Record experimental heartbeat authority, generation, lease, and outcome fields without changing runtime behavior.
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Toggle heartbeat finalization v1 shadow writes"
+            disabled={toggleMutation.isPending}
+            className={cn(
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+              enableHeartbeatFinalizationV1 ? "bg-green-600" : "bg-muted",
+            )}
+            onClick={() => toggleMutation.mutate({ enableHeartbeatFinalizationV1: !enableHeartbeatFinalizationV1 })}
+          >
+            <span
+              className={cn(
+                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+                enableHeartbeatFinalizationV1 ? "translate-x-4.5" : "translate-x-0.5",
               )}
             />
           </button>
