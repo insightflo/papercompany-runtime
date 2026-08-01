@@ -275,7 +275,7 @@ describeEmbeddedPostgres("mission plan artifact service", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function seedMission() {

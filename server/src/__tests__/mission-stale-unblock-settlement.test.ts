@@ -35,7 +35,7 @@ describeEmbeddedPostgres("mission stale unblock settlement", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("completes a finished workflow mission when a blocked unblock action only references a done source", async () => {

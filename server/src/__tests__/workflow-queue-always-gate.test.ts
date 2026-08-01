@@ -87,7 +87,7 @@ describeEP("queue dispatch gates when:always issue-less tool step on predecessor
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("does not dispatch the queued downstream step while inspection is still running", async () => {

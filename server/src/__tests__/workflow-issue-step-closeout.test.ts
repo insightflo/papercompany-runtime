@@ -49,7 +49,7 @@ describeEmbeddedPostgres("workflow issue step closeout", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function seedLinkedWorkflowIssue(input?: {

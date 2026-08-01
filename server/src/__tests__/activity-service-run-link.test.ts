@@ -39,7 +39,7 @@ describeEmbeddedPostgres("activityService.runsForIssue", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("returns a run via heartbeatRuns.issueId even when contextSnapshot has no issueId", async () => {

@@ -39,7 +39,7 @@ describeEP("workflow step retry scheduler metadata CAS", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("returns already_changed when metadata changed after the observed snapshot", async () => {

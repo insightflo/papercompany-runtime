@@ -38,7 +38,7 @@ describeEP("workflow step retry recovery guard", () => {
 
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("keeps dispatching retry metadata while a live deferred wake exists, then allows one retry after it settles", async () => {

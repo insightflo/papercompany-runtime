@@ -30,7 +30,7 @@ describeEP("workflow retry wake evidence", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("requires exact company issue run step and idempotency key, and only treats coalesced as live with a linked queued/running run", async () => {

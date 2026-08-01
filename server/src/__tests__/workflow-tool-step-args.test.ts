@@ -40,7 +40,7 @@ describeEmbeddedPostgres("workflow tool step args", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("resolves an ancestor step workProduct path and sibling assets directory", async () => {

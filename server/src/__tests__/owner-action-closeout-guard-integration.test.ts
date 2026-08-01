@@ -50,7 +50,7 @@ describeEmbeddedPostgres("owner-action closeout guard (mission_main_executor_unb
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function insertUnblockWithSource(sourceStatus: string) {

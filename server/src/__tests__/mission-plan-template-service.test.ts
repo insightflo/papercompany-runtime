@@ -22,7 +22,7 @@ describeDb("mission plan template service", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function seedCompany(name: string) {

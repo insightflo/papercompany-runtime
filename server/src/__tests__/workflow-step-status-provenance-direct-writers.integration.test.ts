@@ -35,7 +35,7 @@ describeEP("workflow step-status provenance direct writers", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("records recovery closeout's failed-to-completed physical flip", async () => {

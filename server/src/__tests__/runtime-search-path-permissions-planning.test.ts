@@ -33,7 +33,7 @@ describeEmbeddedPostgres("mission planning search permissions", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("grants PLAN issues the minimum server-side repo discovery scope with broad scans blocked", async () => {

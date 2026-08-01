@@ -61,7 +61,7 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("creates a structured execution card and passes its hash to the wakeup context", async () => {

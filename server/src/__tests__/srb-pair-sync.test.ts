@@ -46,7 +46,7 @@ describeEmbeddedPostgres("SRB pair sync", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("persists the pair before initial blocked sync on local mirror creation", async () => {

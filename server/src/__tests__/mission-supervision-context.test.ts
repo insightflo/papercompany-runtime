@@ -43,7 +43,7 @@ describeEmbeddedPostgres("mission supervision context", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("includes a read-only compact governance thread with latest events and open decisions", async () => {

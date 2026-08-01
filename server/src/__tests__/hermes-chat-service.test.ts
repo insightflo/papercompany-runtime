@@ -67,7 +67,7 @@ describeEmbeddedPostgres("Hermes chat operations agent bootstrap", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("does not create a Hermes Ops agent while creating a chat session", async () => {

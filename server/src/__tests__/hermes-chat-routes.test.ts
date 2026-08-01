@@ -90,7 +90,7 @@ describeEmbeddedPostgres("Hermes chat routes", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function insertCompany() {

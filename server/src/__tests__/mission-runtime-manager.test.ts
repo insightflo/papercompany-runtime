@@ -126,7 +126,7 @@ describeEmbeddedPostgres("mission runtime manager db guards", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function seedMission(status: "planning" | "active" | "paused" | "completed" | "cancelled") {

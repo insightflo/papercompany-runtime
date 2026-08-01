@@ -76,7 +76,7 @@ describeEmbeddedPostgres("QA rework closeout guard helpers", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("isWorkflowReworkRun: true only for a run whose contextSnapshot carries a workflow_qa_rework contract", async () => {

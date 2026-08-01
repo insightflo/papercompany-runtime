@@ -64,7 +64,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     await db.delete(issues);
   });
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function seedWorkflowWithStructuralGate() {

@@ -31,7 +31,7 @@ describeEmbeddedPostgres("stopped-execution liveness excludes live run/wake stat
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   // active mission + in_progress workflow source + failed(terminal) heartbeat run 을 세팅하고

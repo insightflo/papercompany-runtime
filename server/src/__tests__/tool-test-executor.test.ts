@@ -263,7 +263,7 @@ describeBuiltinDb("tool test executor (builtin reuse)", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("runs a builtin tool through the real core executor and returns success", async () => {

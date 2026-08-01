@@ -68,7 +68,7 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("claims a scheduled slot atomically so duplicate scheduler ticks create only one run", async () => {

@@ -87,7 +87,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function seedWorkflowIssue(input: { stepId: string; stepType?: string; title: string; workProductRoot?: string }) {

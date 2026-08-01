@@ -22,7 +22,7 @@ describeDb("company default mission plan templates", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("creates every new company with exactly four enabled defaults", async () => {

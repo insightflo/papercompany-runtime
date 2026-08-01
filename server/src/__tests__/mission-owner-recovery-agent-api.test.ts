@@ -18,7 +18,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  await tempDb?.cleanup();
+  await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
 });
 
 describeEP("mission owner recovery decision API source scope", () => {

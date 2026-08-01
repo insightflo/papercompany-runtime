@@ -48,6 +48,7 @@ describeEP("hybrid QA — structural gate readiness enforcement", () => {
   });
   afterAll(async () => {
     setWorkflowToolStepExecutor(null);
+    await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
   });
 

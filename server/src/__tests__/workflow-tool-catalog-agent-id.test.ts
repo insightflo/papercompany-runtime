@@ -46,7 +46,7 @@ describeEmbeddedPostgres("workflow tool catalog agent id boundaries", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   async function createCompany(companyId = randomUUID()) {

@@ -130,7 +130,7 @@ describeEmbeddedPostgres("workflow native scheduler candidate readback", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
   });
 
   it("reads active due workflows from native tables with company timezone fallback", async () => {
