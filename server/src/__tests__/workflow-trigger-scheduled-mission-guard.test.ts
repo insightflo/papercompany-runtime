@@ -111,7 +111,7 @@ describeEmbeddedPostgres("workflow trigger scheduled mission guard", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("rejects an implicit manual/agent run when the cron run already owns that workflow-date mission", async () => {

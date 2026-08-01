@@ -119,7 +119,7 @@ describeEmbeddedPostgres("mission runtime queue readback (Task 6C/6D)", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
     delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
     delete process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS;
     delete process.env.PAPERCLIP_AGENT_JWT_ISSUER;

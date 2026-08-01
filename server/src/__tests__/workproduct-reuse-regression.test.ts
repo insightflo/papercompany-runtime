@@ -91,7 +91,7 @@ describeEP("RES-1318 workproduct-reuse bounded registration", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeEach(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-wp-reuse-"); db = createDb(tempDb.connectionString); }, 60_000);
   afterEach(async () => { await tempDb?.cleanup(); });
-  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); for (const r of tmpRoots) fs.rmSync(r, { recursive: true, force: true }); });
+  afterAll(async () => { await tempDb?.cleanup(); for (const r of tmpRoots) fs.rmSync(r, { recursive: true, force: true }); });
 
   async function run(mode: Mode) {
     const s = await seed(db, mode);

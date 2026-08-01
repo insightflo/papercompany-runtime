@@ -249,7 +249,7 @@ describeEmbeddedPostgres("mission owner validation gate requeue", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("requeues an upstream QA gate instead of waking a blocked approval issue without a fresh PASS", async () => {

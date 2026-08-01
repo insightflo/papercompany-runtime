@@ -35,7 +35,7 @@ describeEmbeddedPostgres("mission recovery search permissions", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("exposes active local workProducts from the same mission to owner recovery issues", async () => {

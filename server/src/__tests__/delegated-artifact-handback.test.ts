@@ -37,7 +37,7 @@ describeEmbeddedPostgres("delegated artifact handback", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("wakes the parent workflow issue when a child issue has the active artifact", async () => {

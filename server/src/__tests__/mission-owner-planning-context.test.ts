@@ -64,7 +64,7 @@ describeEmbeddedPostgres("mission owner planning context", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function countTable(table: Parameters<typeof db.select>[0] extends never ? never : any) {

@@ -79,7 +79,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("returns issues an agent participated in across the supported signals", async () => {
@@ -660,7 +660,7 @@ describeEmbeddedPostgres("issueService assertCheckoutOwner malformed same-run lo
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function createManualOnboardingActionFixture() {
@@ -2009,7 +2009,7 @@ describeEmbeddedPostgres("issueService.addComment mission owner planning ingesti
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function seedPlanningFixture() {
@@ -2250,7 +2250,7 @@ describeEmbeddedPostgres("issueService workflow validation verdict ledger gate",
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function seedWorkflowValidationIssue(overrides: {

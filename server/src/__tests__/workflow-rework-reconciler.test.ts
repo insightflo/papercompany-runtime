@@ -44,7 +44,7 @@ describeEmbeddedPostgres("workflow rework reconciler liveness", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("recovers a failed rework iteration when no heartbeat or wakeup is live", async () => {

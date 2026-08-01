@@ -56,7 +56,7 @@ describeDb("workflow agent artifact storage", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("mirrors the local working file before registering the workflow workProduct", async () => {

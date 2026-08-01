@@ -413,7 +413,7 @@ describeEmbeddedPostgres("mission execution source snapshots with real query pre
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function seedCompanyWithMission(label: string) {

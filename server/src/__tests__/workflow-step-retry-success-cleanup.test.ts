@@ -36,7 +36,7 @@ describeEP("workflow step retry success cleanup", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("already-completed issue-backed step clears stale live retry state while preserving history", async () => {

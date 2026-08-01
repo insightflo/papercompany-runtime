@@ -87,7 +87,7 @@ describeEP("PLAN-QA retry handoff", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function seedFixture() {

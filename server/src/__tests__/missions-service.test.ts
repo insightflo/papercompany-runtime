@@ -132,7 +132,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function recordOwnerDecision(input: {

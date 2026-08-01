@@ -50,7 +50,7 @@ describeEmbeddedPostgres("rejected PLAN recovery", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function seedRejectedPlan() {

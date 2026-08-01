@@ -35,7 +35,7 @@ describeEP("workflow step retry reconciler accounting", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("counts released retries only when a due waiting retry actually transitions", async () => {

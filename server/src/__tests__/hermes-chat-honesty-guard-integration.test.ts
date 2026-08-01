@@ -56,7 +56,7 @@ describeEmbeddedPostgres("applyRunHonestyCaveat (activity_log exact proof)", () 
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("appends caveat when the agent's comment was logged under a DIFFERENT run (no false-positive proof)", async () => {

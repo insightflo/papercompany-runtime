@@ -40,7 +40,7 @@ describeDb("company work-product storage service", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function addCompany() {

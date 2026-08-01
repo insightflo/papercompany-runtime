@@ -36,7 +36,7 @@ describeDb("accessService.canUser - group-aware permission resolution", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function setupCompany(): Promise<string> {

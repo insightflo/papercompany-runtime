@@ -49,7 +49,7 @@ describeEmbeddedPostgres("workflow tool catalog", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("returns core agent tool grants by agent id, agent name, and tool name", async () => {

@@ -68,7 +68,7 @@ describeEmbeddedPostgres("native workflow scheduler active smoke", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("creates exactly one native scheduled run for the same due slot across repeated active ticks", async () => {

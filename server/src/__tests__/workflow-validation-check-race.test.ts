@@ -67,7 +67,7 @@ describeEmbeddedPostgres("workflow validation check race", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function recordOfficialQaVerdict(input: {

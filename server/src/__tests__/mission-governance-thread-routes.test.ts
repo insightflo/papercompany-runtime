@@ -73,7 +73,7 @@ describeEmbeddedPostgres("mission governance thread route", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function seedCompany(marker: string) {

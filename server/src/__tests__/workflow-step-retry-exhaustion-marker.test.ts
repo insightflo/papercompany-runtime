@@ -34,7 +34,7 @@ describeEP("workflow step retry exhaustion markers", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   it("clears a stale exhaustion marker when scheduling a new retry", async () => {

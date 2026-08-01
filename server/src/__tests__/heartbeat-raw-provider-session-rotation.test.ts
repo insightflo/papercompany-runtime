@@ -61,7 +61,7 @@ describeEmbeddedPostgres("heartbeat raw provider session rotation", () => {
 	});
 
 	afterAll(async () => {
-		await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+		await tempDb?.cleanup();
 	});
 
 	it("starts a fresh raw provider session when a mission resumes on a different workflow step issue", async () => {

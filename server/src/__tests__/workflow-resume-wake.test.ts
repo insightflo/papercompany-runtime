@@ -68,7 +68,7 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function insertWake(over: Partial<typeof agentWakeupRequests.$inferInsert> & { status: string; runId?: string | null }) {

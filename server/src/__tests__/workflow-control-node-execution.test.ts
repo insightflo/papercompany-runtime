@@ -89,7 +89,7 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
     await rm(artifactRoot, { recursive: true, force: true });
   });
 

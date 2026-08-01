@@ -42,7 +42,7 @@ describeEP("workflow step retry queue race", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await db.$client.end({ timeout: 5 }); await tempDb?.cleanup();
+    await tempDb?.cleanup();
   });
 
   async function step(stepRunId: string) {
