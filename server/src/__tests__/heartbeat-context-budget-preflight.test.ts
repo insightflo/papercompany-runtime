@@ -41,6 +41,8 @@ import {
   workflowStepRuns,
   workspaceRuntimeServices,
   instanceSettings,
+  heartbeatRunFinalizations,
+  heartbeatRunFinalizationSteps,
 } from "@paperclipai/db";
 
 const executeSpy = vi.fn();
@@ -171,6 +173,9 @@ async function cleanupHeartbeatRunRecords(db: ReturnType<typeof createDb>) {
     await db.delete(heartbeatRunEvents);
     await db.delete(activityLog);
     await db.delete(agentTaskSessions);
+    // finalization tables reference heartbeat_runs via FK — delete before runs.
+    await db.delete(heartbeatRunFinalizationSteps);
+    await db.delete(heartbeatRunFinalizations);
     try {
       await db.delete(heartbeatRuns);
       return;
@@ -398,6 +403,10 @@ describe("heartbeat context budget preflight", () => {
     dataDir = started.dataDir;
     process.env.PAPERCLIP_HOME = path.join(dataDir, "paperclip-home");
     process.env.PAPERCLIP_INSTANCE_ID = "heartbeat-test";
+    // Enable finalization v1 so heartbeat lifecycle tracks terminal-but-unsettled
+    // runs. This makes teardown races from fire-and-forget post-terminal writes
+    // visible to the drain loop instead of racing row deletion.
+    await db.insert(instanceSettings).values({ singletonKey: "default", experimental: { enableHeartbeatFinalizationV1: true } }).onConflictDoNothing();
   }, 60_000);
 
   afterEach(async () => {
