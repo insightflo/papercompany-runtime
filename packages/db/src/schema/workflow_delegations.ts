@@ -1,4 +1,5 @@
 import {
+  integer,
   index,
   jsonb,
   pgTable,
@@ -19,6 +20,7 @@ export const workflowDelegations = pgTable(
     sourceCompanyId: uuid("source_company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     sourceWorkflowRunId: uuid("source_workflow_run_id").notNull().references(() => workflowRuns.id, { onDelete: "cascade" }),
     sourceWorkflowStepRunId: uuid("source_workflow_step_run_id").notNull().references(() => workflowStepRuns.id, { onDelete: "cascade" }),
+    sourceExecutionGeneration: integer("source_execution_generation"),
     sourceIssueId: uuid("source_issue_id").references(() => issues.id, { onDelete: "set null" }),
     targetCompanyId: uuid("target_company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     targetIssueId: uuid("target_issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
@@ -33,5 +35,11 @@ export const workflowDelegations = pgTable(
     targetIssueUniqueIdx: uniqueIndex("workflow_delegations_target_issue_uq").on(table.targetIssueId),
     sourceCompanyStatusIdx: index("workflow_delegations_source_company_status_idx").on(table.sourceCompanyId, table.status),
     targetCompanyIssueIdx: index("workflow_delegations_target_company_issue_idx").on(table.targetCompanyId, table.targetIssueId),
+    sourceGenerationStatusIdx: index("workflow_delegations_source_generation_status_idx").on(
+      table.sourceWorkflowRunId,
+      table.sourceWorkflowStepRunId,
+      table.sourceExecutionGeneration,
+      table.status,
+    ),
   }),
 );

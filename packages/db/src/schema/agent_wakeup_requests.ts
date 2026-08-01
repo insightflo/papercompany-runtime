@@ -30,6 +30,7 @@ export const agentWakeupRequests = pgTable(
     missionId: uuid("mission_id"),
     workflowRunId: uuid("workflow_run_id"),
     workflowStepRunId: uuid("workflow_step_run_id"),
+    workflowExecutionGeneration: integer("workflow_execution_generation"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -55,5 +56,9 @@ export const agentWakeupRequests = pgTable(
     operatorDecisionIdempotencyUq: uniqueIndex("agent_wakeup_requests_operator_decision_idempotency_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} like 'operator-decision-wake:%'`),
+    workflowStepGenerationIdx: index("agent_wakeup_requests_workflow_step_generation_idx").on(
+      table.workflowStepRunId,
+      table.workflowExecutionGeneration,
+    ),
   }),
 );

@@ -801,7 +801,7 @@ export function pluginRoutes(
         return true;
       }
 
-      const issue = await svc.update(issueId, { status: "done" });
+      const issue = await svc.update(issueId, { status: "done", workflowSyncSource: "plugins_route" });
       if (!issue) {
         res.status(404).json({ error: "Issue not found" });
         return true;
@@ -823,7 +823,7 @@ export function pluginRoutes(
           _previous: { status: existing.status },
         },
       });
-      const run = await workflowService.syncRunStatusForIssue(db, issue.id);
+      const run = await workflowService.syncRunStatusForIssue(db, issue.id, "plugins_route");
       res.json({ data: { issue, run } });
       return true;
     }

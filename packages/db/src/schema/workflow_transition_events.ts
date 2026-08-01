@@ -1,4 +1,4 @@
-import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { agentWakeupRequests } from "./agent_wakeup_requests.js";
 import { companies } from "./companies.js";
@@ -19,6 +19,10 @@ export const workflowTransitionEvents = pgTable(
     issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
     wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id, { onDelete: "set null" }),
     heartbeatRunId: uuid("heartbeat_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
+    executionGeneration: integer("execution_generation"),
+    dispatchOwnerHeartbeatRunId: uuid("dispatch_owner_heartbeat_run_id"),
+    executorOwnerId: text("executor_owner_id"),
+    finalizationVersion: integer("finalization_version"),
     eventType: text("event_type").notNull(),
     layer: text("layer").notNull(),
     fromStatus: text("from_status"),
@@ -43,6 +47,11 @@ export const workflowTransitionEvents = pgTable(
       .on(table.heartbeatRunId, table.eventType),
     correlationIdx: index("workflow_transition_events_correlation_idx")
       .on(table.companyId, table.correlationId, table.createdAt),
+    workflowStepGenerationIdx: index("workflow_transition_events_step_generation_idx").on(
+      table.workflowStepRunId,
+      table.executionGeneration,
+      table.createdAt,
+    ),
     // [Task 1D Step 5] partial unique index for event idempotency — prevents duplicate
     // transition events with the same (company_id, idempotency_key) when key is non-null.
     idempotencyKeyUq: uniqueIndex("workflow_transition_events_idempotency_uq")

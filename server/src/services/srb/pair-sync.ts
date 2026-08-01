@@ -220,7 +220,10 @@ export function createSrbPairSync(
         const mirrorIssue = await issueSvc.getById(pair.mirrorIssueId);
         if (!mirrorIssue) continue;
         if (mirrorIssue.status !== nextMirrorStatus) {
-          const updatedMirrorIssue = await issueSvc.update(pair.mirrorIssueId, { status: nextMirrorStatus });
+          const updatedMirrorIssue = await issueSvc.update(pair.mirrorIssueId, {
+            status: nextMirrorStatus,
+            workflowSyncSource: "srb_pair_sync",
+          });
           if (updatedMirrorIssue) {
             const decision = buildMaintenanceDecisionContext({
               issue: {
@@ -258,7 +261,7 @@ export function createSrbPairSync(
               });
             }
             const { workflowService } = await import("../workflow/engine.js");
-            await workflowService.syncRunStatusForIssue(db, updatedMirrorIssue.id);
+            await workflowService.syncRunStatusForIssue(db, updatedMirrorIssue.id, "srb_pair_sync");
           }
         }
 

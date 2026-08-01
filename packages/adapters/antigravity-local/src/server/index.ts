@@ -1,4 +1,10 @@
-export { execute, buildAntigravityArgs, extractLatestAntigravityResponse, readConversationIdForCwdFromCache } from "./execute.js";
+export {
+  execute,
+  buildAntigravityArgs,
+  extractLatestAntigravityResponse,
+  readConversationIdForCwdFromCache,
+} from "./execute.js";
+export { listAntigravitySkills, syncAntigravitySkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 

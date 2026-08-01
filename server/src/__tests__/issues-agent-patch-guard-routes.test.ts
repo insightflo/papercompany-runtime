@@ -135,7 +135,10 @@ describe("issue routes agent patch guard", () => {
       .send({ status: "done", comment: "fixed" });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, {
+      status: "done",
+      workflowSyncSource: "issues_route",
+    });
     expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).toHaveBeenCalledWith({
       issueId: issue.id,
       companyId: issue.companyId,
@@ -195,7 +198,10 @@ describe("issue routes agent patch guard", () => {
     expect(res.status).toBe(422);
     expect(res.body.error).toContain("mission_plan_qa");
     expect(mockRecordWorkflowValidationVerdictFromText).not.toHaveBeenCalled();
-    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, {
+      status: "done",
+      workflowSyncSource: "issues_route",
+    });
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).not.toHaveBeenCalled();
   });
@@ -224,7 +230,10 @@ describe("issue routes agent patch guard", () => {
       .send({ status: "done", comment: "PASS" });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "done" });
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, {
+      status: "done",
+      workflowSyncSource: "issues_route",
+    });
     expect(mockIssueService.addComment).toHaveBeenCalled();
     expect(mockHeartbeatService.finalizeLinkedRunsForIssueStatus).toHaveBeenCalledWith({
       issueId: issue.id,

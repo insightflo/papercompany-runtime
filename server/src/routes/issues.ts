@@ -1235,7 +1235,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     let issue: Awaited<ReturnType<typeof svc.update>>;
     try {
-      issue = await svc.update(id, updateFields);
+      issue = await svc.update(id, { ...updateFields, workflowSyncSource: "issues_route" });
     } catch (err) {
       if (err instanceof HttpError && err.status === 422) {
         logger.warn(
@@ -1277,7 +1277,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       });
     }
     await routinesSvc.syncRunStatusForIssue(issue.id);
-    await workflowsSvc.syncRunStatusForIssue(db, issue.id);
+    await workflowsSvc.syncRunStatusForIssue(db, issue.id, "issues_route");
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>
@@ -1539,7 +1539,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
-    await workflowsSvc.syncRunStatusForIssue(db, updated.id);
+    await workflowsSvc.syncRunStatusForIssue(db, updated.id, "issues_route");
 
     await logActivity(db, {
       companyId: issue.companyId,
@@ -1598,7 +1598,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    await workflowsSvc.syncRunStatusForIssue(db, released.id);
+    await workflowsSvc.syncRunStatusForIssue(db, released.id, "issues_route");
 
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -1691,7 +1691,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     let currentIssue = issue;
 
     if (reopenRequested && isClosed) {
-      const reopenedIssue = await svc.update(id, { status: "todo" });
+      const reopenedIssue = await svc.update(id, { status: "todo", workflowSyncSource: "issues_route" });
       if (!reopenedIssue) {
         res.status(404).json({ error: "Issue not found" });
         return;
@@ -2101,6 +2101,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       unblockIssueId: id,
       companyId: issue.companyId,
       actor: { agentId: req.actor.agentId ?? null, userId: req.actor.userId ?? null },
+      workflowSyncSource: "issues_route",
     });
 
     const updated = await svc.getById(id);
@@ -2115,7 +2116,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       });
     }
     await routinesSvc.syncRunStatusForIssue(id);
-    await workflowsSvc.syncRunStatusForIssue(db, id);
+    await workflowsSvc.syncRunStatusForIssue(db, id, "issues_route");
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>
         logger.warn({ err, runId: actor.runId }, "failed to clear detached run warning after owner-action completion"));

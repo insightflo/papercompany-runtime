@@ -2473,7 +2473,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         stepIdsByRunId.set(runId, list);
       }
       for (const [runId, stepIds] of stepIdsByRunId) {
-        const result = await syncWorkflowRunState(db, runId);
+        const result = await syncWorkflowRunState(db, runId, "mission_supervision");
         appliedActions.push({
           type: "dispatch_missing_step",
           missionId: mission.id,

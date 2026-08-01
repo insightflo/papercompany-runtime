@@ -12,11 +12,19 @@ import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
+import {
+  normalizeWorkflowSyncSource,
+  recordWorkflowStepStatusTransition,
+  recordWorkflowStepStatusTransitions,
+  type WorkflowSyncSource,
+} from "./workflow-sync-source.js";
+import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
+import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
 import { activatePlanningMissionForWorkflowRun } from "../missions/mission-workflow-lifecycle.js";
@@ -2143,6 +2151,7 @@ function buildPredFactsMap(
   steps: WorkflowStep[],
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
   validationVerdictsByIssueId?: Map<string, ValidationVerdictObservation>,
+  v1EnforcementEnabled?: boolean,
 ): Map<string, PredFacts> {
   const facts = new Map<string, PredFacts>();
   for (const step of steps) {
@@ -2162,6 +2171,10 @@ function buildPredFactsMap(
       // IF control node outcome: 오직 completed 된 IF step 의 검증된 controlNodeResult 에서만 유도.
       // agent/tool/잘못된 metadata/누락 시 undefined → condition_true/false edge 양쪽 모두 비활성(fail-closed).
       ...deriveIfControlOutcome(step, run),
+      // Phase 3 enforcement: when v1EnforcementEnabled, set dispatchReady from
+      // the step-run's dispatch_ready_at (evidence + settlement). When disabled,
+      // omit (undefined → treated as true → legacy behavior).
+      ...(v1EnforcementEnabled ? { dispatchReady: run?.dispatchReadyAt != null } : {}),
     });
   }
   return facts;
@@ -2173,12 +2186,13 @@ function findRunnableSteps(
   options: {
     launchedStepIds?: Set<string>;
     validationVerdictsByIssueId?: Map<string, ValidationVerdictObservation>;
+    v1EnforcementEnabled?: boolean;
   } = {},
 ): WorkflowStep[] {
   // [IF/loop] edge-aware 활성화 게이트. classifyStepActivation 은 legacy dependencies[] 에 대해
   // 기존 `dependencies.every(completed)` 와 byte-identical 이므로 legacy 회귀가 없고, conditional edge 가
   // 있는 step 만 when 평가(failure/always 발화 또는 waiting)로 분기된다.
-  const predsByStepId = buildPredFactsMap(steps, stepRunMap, options.validationVerdictsByIssueId);
+  const predsByStepId = buildPredFactsMap(steps, stepRunMap, options.validationVerdictsByIssueId, options.v1EnforcementEnabled);
   return steps.filter((step) => {
     if (options.launchedStepIds && !options.launchedStepIds.has(step.id)) return false;
     if (step.triggerOn === "escalation") return false;
@@ -2473,6 +2487,10 @@ async function failToolStepRunWithDispatchError(input: {
   toolName: string;
   args: unknown;
   error: string;
+  provenance?: {
+    run: Pick<typeof workflowRuns.$inferSelect, "id" | "companyId" | "missionId">;
+    source: WorkflowSyncSource;
+  };
 }): Promise<void> {
   const metadata: Record<string, unknown> = {
     ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
@@ -2486,7 +2504,7 @@ async function failToolStepRunWithDispatchError(input: {
   };
   delete metadata.concurrencyBlocked;
 
-  await input.db
+  const [updated] = await input.db
     .update(workflowStepRuns)
     .set({
       status: "failed",
@@ -2498,7 +2516,26 @@ async function failToolStepRunWithDispatchError(input: {
       lastDispatchRequestId: input.requestId,
       metadata,
     })
-    .where(eq(workflowStepRuns.id, input.stepRun.id));
+    .where(eq(workflowStepRuns.id, input.stepRun.id))
+    .returning({
+      id: workflowStepRuns.id,
+      transitionVersion: workflowStepRuns.statusTransitionVersion,
+    });
+  if (updated && input.provenance) {
+    await recordWorkflowStepStatusTransition(input.db, {
+      companyId: input.provenance.run.companyId,
+      missionId: input.provenance.run.missionId,
+      workflowRunId: input.provenance.run.id,
+      workflowStepRunId: input.stepRun.id,
+      issueId: input.stepRun.issueId,
+      fromStatus: input.stepRun.status,
+      toStatus: "failed",
+      source: input.provenance.source,
+      transitionVersion: updated.transitionVersion > input.stepRun.statusTransitionVersion
+        ? updated.transitionVersion
+        : null,
+    });
+  }
 }
 
 async function startIssueLessToolStepRun(input: {
@@ -2717,8 +2754,9 @@ export async function processQueuedWorkflowToolStepRuns(
         toolName,
         args,
         error: "Workflow tool step queue entry is missing a dispatch request id.",
+        provenance: { run: row.run, source: "workflow_tool_queue" },
       });
-      await syncWorkflowRunState(db, row.run.id);
+      await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
       result.failedCount += 1;
       continue;
     }
@@ -2784,8 +2822,9 @@ export async function processQueuedWorkflowToolStepRuns(
             toolName,
             args,
             error: "Workflow delegation tool step could not be started.",
+            provenance: { run: row.run, source: "workflow_tool_queue" },
           });
-          await syncWorkflowRunState(db, row.run.id);
+          await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
           result.failedCount += 1;
         } else {
           result.executedCount += 1;
@@ -2803,8 +2842,9 @@ export async function processQueuedWorkflowToolStepRuns(
           toolName,
           args,
           error: "Workflow tool step executor is not configured.",
+          provenance: { run: row.run, source: "workflow_tool_queue" },
         });
-        await syncWorkflowRunState(db, row.run.id);
+        await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
         result.failedCount += 1;
         continue;
       }
@@ -2835,8 +2875,9 @@ export async function processQueuedWorkflowToolStepRuns(
           toolName,
           args,
           error: "Workflow tool step executor rejected the queued request.",
+          provenance: { run: row.run, source: "workflow_tool_queue" },
         });
-        await syncWorkflowRunState(db, row.run.id);
+        await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
         result.failedCount += 1;
         continue;
       }
@@ -2851,8 +2892,9 @@ export async function processQueuedWorkflowToolStepRuns(
         toolName,
         args,
         error: error instanceof Error ? error.message : String(error),
+        provenance: { run: row.run, source: "workflow_tool_queue" },
       });
-      await syncWorkflowRunState(db, row.run.id);
+      await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
       result.failedCount += 1;
     }
   }
@@ -3006,7 +3048,8 @@ export async function completeWorkflowToolStepFromResult(
     const atomic = await atomicStructuralCompletion({
       db, step: stepForGuard, success: input.success, data: input.data,
       companyId: row.run.companyId, workflowRunId: row.run.id,
-      workflowStepRunId: row.stepRun.id, missionId: row.run.missionId, requestId: toolRequestId!,
+      workflowStepRunId: row.stepRun.id, missionId: row.run.missionId, issueId: row.stepRun.issueId, requestId: toolRequestId!,
+      source: "workflow_tool_result",
       observedStatus: row.stepRun.status,
       observedIterationIndex: row.stepRun.iterationIndex ?? null,
       observedRequestId: row.stepRun.lastDispatchRequestId,
@@ -3019,13 +3062,14 @@ export async function completeWorkflowToolStepFromResult(
       },
     });
     if (!atomic.casWon) return getWorkflowExecutionResultSnapshot(db, row.run.id);
-    return syncWorkflowRunState(db, row.run.id);
+    return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
   }
 
   // Non-structural path (unchanged): reuse the pure completion plan.
   const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
-  await db.update(workflowStepRuns).set({
-    status: effectiveSuccess ? "completed" : "failed",
+  const nextStatus = effectiveSuccess ? "completed" : "failed";
+  const [updatedStepRun] = await db.update(workflowStepRuns).set({
+    status: nextStatus,
     startedAt: row.stepRun.startedAt ?? now, completedAt: now,
     lastDispatchErrorAt: effectiveSuccess ? null : now,
     lastDispatchErrorSummary: effectiveSuccess ? null
@@ -3033,15 +3077,40 @@ export async function completeWorkflowToolStepFromResult(
       : structuralContractFailure ? "structural_gate_contract_failure"
       : (input.error ?? input.stderr ?? null),
     metadata: resultMetadata,
-  }).where(eq(workflowStepRuns.id, row.stepRun.id));
+  }).where(eq(workflowStepRuns.id, row.stepRun.id)).returning({
+    id: workflowStepRuns.id,
+    transitionVersion: workflowStepRuns.statusTransitionVersion,
+  });
+  if (updatedStepRun) {
+    await recordWorkflowStepStatusTransition(db, {
+      companyId: row.run.companyId,
+      missionId: row.run.missionId,
+      workflowRunId: row.run.id,
+      workflowStepRunId: row.stepRun.id,
+      issueId: row.stepRun.issueId,
+      fromStatus: row.stepRun.status,
+      toStatus: nextStatus,
+      source: "workflow_tool_result",
+      transitionVersion: updatedStepRun.transitionVersion > row.stepRun.statusTransitionVersion
+        ? updatedStepRun.transitionVersion
+        : null,
+    });
+  }
 
-  return syncWorkflowRunState(db, row.run.id);
+  return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
 }
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
   input: { companyId: string; runId: string; stepId: string },
 ): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
-  return retryIssueLessToolWorkflowStepInternal({ db, ...input, loadWorkflowExecutionContext, isIssueLessToolStep, resetUnlaunchedTerminalStepRuns, syncWorkflowRunState });
+  return retryIssueLessToolWorkflowStepInternal({
+    db,
+    ...input,
+    loadWorkflowExecutionContext,
+    isIssueLessToolStep,
+    resetUnlaunchedTerminalStepRuns,
+    syncWorkflowRunState: (syncDb, runId) => syncWorkflowRunState(syncDb, runId, "workflow_retry"),
+  });
 }
 
 async function finalizeWorkflowRunState(
@@ -3118,44 +3187,6 @@ async function cancelOutstandingWorkflowIssues(
     ));
 }
 
-async function syncCancelledWorkflowRunState(
-  db: Db,
-  runId: string,
-): Promise<void> {
-  await cancelOutstandingWorkflowIssues(db, runId);
-
-  let stepRuns = await db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, runId));
-
-  if (stepRuns.length === 0) {
-    return;
-  }
-
-  stepRuns = await syncStepRunsFromIssueState(db, stepRuns);
-
-  const now = new Date();
-  for (const stepRun of stepRuns) {
-    if (WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status)) continue;
-
-    const patch: Partial<typeof workflowStepRuns.$inferInsert> = {
-      completedAt: stepRun.completedAt ?? now,
-    };
-
-    if (stepRun.issueId) {
-      patch.status = "failed";
-      patch.startedAt = stepRun.startedAt ?? now;
-    } else {
-      patch.status = "skipped";
-    }
-
-    await db
-      .update(workflowStepRuns)
-      .set(patch)
-      .where(eq(workflowStepRuns.id, stepRun.id));
-  }
-}
 
 export async function cancelWorkflowRunWithCleanup(
   db: Db,
@@ -3179,7 +3210,12 @@ export async function cancelWorkflowRunWithCleanup(
     return false;
   }
 
-  await syncCancelledWorkflowRunState(db, runId);
+  await cancelOutstandingWorkflowIssues(db, runId);
+  await syncCancelledWorkflowRunState({
+    db,
+    run: updatedRun,
+    syncStepRunsFromIssueState,
+  });
   if (updatedRun.missionId) {
     await stopMissionRuntimesForMission(db, {
       companyId: updatedRun.companyId,
@@ -3305,10 +3341,14 @@ async function applyConditionalSkipPropagation(input: {
 export async function syncWorkflowRunState(
   db: Db,
   runId: string,
+  source: WorkflowSyncSource = "workflow_sync",
 ): Promise<WorkflowExecutionResult> {
+  const normalizedSource = normalizeWorkflowSyncSource(source);
   const context = await loadWorkflowExecutionContext(db, runId);
   let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
+  const priorStatusByStepRunId = new Map(stepRuns.map((stepRun) => [stepRun.id, stepRun.status]));
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
+  const v1Enforcement = await isHeartbeatFinalizationV1Enabled(db);
 
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
   if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
@@ -3444,6 +3484,7 @@ export async function syncWorkflowRunState(
       const runnableSteps = sortWorkflowStepsByPriority(findRunnableSteps(context.steps, stepRunMap, {
         launchedStepIds: dynamicLaunchStepIds,
         validationVerdictsByIssueId,
+        v1EnforcementEnabled: await isHeartbeatFinalizationV1Enabled(db),
       }));
       if (runnableSteps.length === 0) break;
 
@@ -3568,6 +3609,14 @@ export async function syncWorkflowRunState(
   }
 
   const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns);
+  await recordWorkflowStepStatusTransitions(db, {
+    companyId: context.run.companyId,
+    missionId: context.run.missionId,
+    workflowRunId: context.run.id,
+    source: normalizedSource,
+    priorStatusByStepRunId,
+    stepRuns,
+  });
 
   return {
     runId,
@@ -3591,7 +3640,9 @@ export async function syncWorkflowRunState(
 export async function syncWorkflowRunForIssue(
   db: Db,
   issueId: string,
+  source: WorkflowSyncSource = "workflow_sync",
 ): Promise<WorkflowExecutionResult | null> {
+  const normalizedSource = normalizeWorkflowSyncSource(source);
   const issue = await db
     .select({
       originKind: issues.originKind,
@@ -3603,7 +3654,7 @@ export async function syncWorkflowRunForIssue(
     .then((rows) => rows[0] ?? null);
 
   if (issue?.originKind === "workflow_execution" && issue.originRunId) {
-    return syncWorkflowRunState(db, issue.originRunId);
+    return syncWorkflowRunState(db, issue.originRunId, normalizedSource);
   }
 
   const linkedStepRun = await db
@@ -3617,7 +3668,7 @@ export async function syncWorkflowRunForIssue(
     return null;
   }
 
-  return syncWorkflowRunState(db, linkedStepRun.workflowRunId);
+  return syncWorkflowRunState(db, linkedStepRun.workflowRunId, normalizedSource);
 }
 
 /**
@@ -3676,7 +3727,7 @@ export async function executeWorkflowRun(
       startedAt: startedRun.startedAt,
     });
   });
-  return syncWorkflowRunState(db, runId);
+  return syncWorkflowRunState(db, runId, "workflow_execution");
 }
 
 // NOTE: stuck-run 정리(reconcile)는 services/workflow/reconciler.ts 의

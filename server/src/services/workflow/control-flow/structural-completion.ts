@@ -14,6 +14,10 @@ import {
   type StructuralGateVerdict,
 } from "./structural-gate-ledger.js";
 import type { StructuralGateProducerToken } from "./structural-gate.js";
+import {
+  recordWorkflowStepStatusTransition,
+  type WorkflowSyncSource,
+} from "../workflow-sync-source.js";
 
 export { isStructuralGateStep, parseStructuralGateVerdict };
 
@@ -99,6 +103,8 @@ export async function atomicStructuralCompletion(input: {
   workflowRunId: string;
   workflowStepRunId: string;
   missionId?: string | null;
+  issueId?: string | null;
+  source?: WorkflowSyncSource;
   requestId: string; // required non-empty for structural gates
   /** Observed step run state for CAS */
   observedStatus: string;
@@ -119,7 +125,7 @@ export async function atomicStructuralCompletion(input: {
 }): Promise<AtomicStructuralResult> {
   const {
     db, step, success, data, companyId, workflowRunId,
-    workflowStepRunId, missionId, requestId,
+    workflowStepRunId, missionId, issueId, source, requestId,
     observedStatus, observedIterationIndex, observedRequestId, observedCompletedAt, producerToken,
     patch,
   } = input;
@@ -179,7 +185,10 @@ export async function atomicStructuralCompletion(input: {
         : completion.structuralContractFailure ? "structural_gate_contract_failure"
         : patch.fallbackFailureSummary,
       metadata: patch.metadata,
-    }).where(and(...casConditions)).returning({ id: workflowStepRuns.id });
+    }).where(and(...casConditions)).returning({
+      id: workflowStepRuns.id,
+      transitionVersion: workflowStepRuns.statusTransitionVersion,
+    });
 
     if (casResult.length === 0) {
       // CAS lost — a newer row exists. Throwing rolls back the ledger insert
@@ -187,6 +196,17 @@ export async function atomicStructuralCompletion(input: {
       casWon = false;
       throw new Error("STRUCTURAL_CAS_LOST");
     }
+    await recordWorkflowStepStatusTransition(tx, {
+      companyId,
+      missionId,
+      workflowRunId,
+      workflowStepRunId,
+      issueId,
+      fromStatus: observedStatus,
+      toStatus: completion.effectiveSuccess ? "completed" : "failed",
+      source,
+      transitionVersion: casResult[0]!.transitionVersion,
+    });
   }).catch((err) => {
     // Only swallow the expected CAS-lost signal
     if (err instanceof Error && err.message === "STRUCTURAL_CAS_LOST") return;

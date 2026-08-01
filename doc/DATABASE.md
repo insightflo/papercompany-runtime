@@ -168,3 +168,16 @@ Inline secret migration command:
 ```sh
 pnpm secrets:migrate-inline-env --apply
 ```
+## Workflow step-status provenance (observability)
+
+`workflow_transition_events` rows with `event_type='workflow_step_status_transition'`, `layer='workflow_sync'`, and `reason_code=<caller source>` are appended whenever a `workflow_step_runs.status` physically changes to a terminal value (`completed`/`failed`/`skipped`). The recorder is savepoint-isolated so an observability insert failure can never roll back the authoritative transaction. Idempotency key: `wf-step-status:<stepRunId>:<toStatus>:<statusTransitionVersion>` (the trigger-maintained `workflow_step_runs.status_transition_version` monotonic column dedupes concurrent/different-source observers to exactly one row per physical transition). The originating caller source is threaded into the first mutation/sync (e.g. `issues_service`, `plugin_host`, `heartbeat_promotion`, `workflow_retry`). See `doc/runbooks/workflow-step-status-provenance.md` for the attribution query. These rows are audit/observability only and are never execution authority.
+
+## Heartbeat finalization v1 (lifecycle completion) — feature-flagged, shadow
+
+`heartbeat_runs.settled_at` is the durable heartbeat lifecycle-completion signal, distinct from the result/display `status`. It is written only after a run's non-compensable quiescence/runtime-release stages are positively observed and mandatory business side-effects are done or equivalently failed. The v1 writers are gated by the experimental instance setting `enableHeartbeatFinalizationV1` (default OFF); with the flag off, legacy behavior is unchanged and `settled_at` is never written by v1 code.
+
+Relevant `heartbeat_runs` columns: `execution_epoch`, `execution_token`, `executor_owner_*` (lease/ack/release), `terminal_outcome`/`terminal_decided_at`/`terminal_decision_source` (first-wins), `finalization_version` (0=legacy, 1=v1), `settled_at`, `execution_scope_kind`, `workflow_step_run_id`/`workflow_execution_generation` (typed workflow link). Generation is also persisted on `agent_wakeup_requests` and `workflow_step_runs` (`execution_generation`) so a stale queued wake cannot bind a newer generation; `workflow_delegations.source_execution_generation` scopes delegation callbacks.
+
+New tables: `heartbeat_run_finalizations` (finalization parent: immutable outcome, finalizer lease/fence), `heartbeat_run_finalization_steps` (Q/C/O stage records, unique `(company_id, heartbeat_run_id, stage_kind, idempotency_key)`), `workflow_resync_jobs`, `agent_queue_admission_jobs` (durable post-settlement work with `pending|leased|completed|dead_letter` lifecycle, lease/fence, `SKIP LOCKED` claiming).
+
+Stage classes: **Q** (non-compensable — exact revoked-owner quiescence, process/provider absence, run-owned `workspace_operations` non-running, `workspace_runtime_services` stopped, bound `mission_agent_runtimes` not busy; positive observation only; a dead-lettered Q stage permanently blocks settlement as `blocked_noncompensable`), **C** (compensable business side-effects; may be satisfied by an equivalent structured failure), **O** (optional; may dead-letter). Enforcement (successor dispatch and workflow finalization gated on evidence-ready AND owner-settled) lands in a later phase; until then these columns are written in shadow and unread.

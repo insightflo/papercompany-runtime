@@ -12,6 +12,7 @@ import { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
 import { reconcileRunnableWorkflowStepWakeups } from "./runnable-step-wakeups-reconciler.js";
 import { reconcileDueWorkflowStepRetries, isStepRunAwaitingRetry } from "./retry-reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
+import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
 
 export { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
 export {
@@ -143,7 +144,7 @@ export async function reconcileStuckWorkflowRuns(
         const now = new Date();
         for (const step of pendingSteps) {
           const metadata = normalizeMetadata(step.metadata);
-          await db
+          const [updated] = await db
             .update(workflowStepRuns)
             .set({
               status: "skipped",
@@ -153,7 +154,26 @@ export async function reconcileStuckWorkflowRuns(
                 failureCascadeSkipped: true,
               },
             })
-            .where(eq(workflowStepRuns.id, step.id));
+            .where(eq(workflowStepRuns.id, step.id))
+            .returning({
+              id: workflowStepRuns.id,
+              transitionVersion: workflowStepRuns.statusTransitionVersion,
+            });
+          if (updated) {
+            await recordWorkflowStepStatusTransition(db, {
+              companyId: run.companyId,
+              missionId: run.missionId,
+              workflowRunId: run.id,
+              workflowStepRunId: step.id,
+              issueId: step.issueId,
+              fromStatus: step.status,
+              toStatus: "skipped",
+              source: "workflow_reconciler",
+              transitionVersion: updated.transitionVersion > step.statusTransitionVersion
+                ? updated.transitionVersion
+                : null,
+            });
+          }
         }
       }
 

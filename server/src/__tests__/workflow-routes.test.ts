@@ -743,7 +743,10 @@ describe("workflow routes", () => {
     const res = await request(createApp()).post(`/api/issues/${ISSUE_ID}/workflow/manual-complete`).send({});
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(ISSUE_ID, { status: "done" });
+    expect(mockIssueService.update).toHaveBeenCalledWith(ISSUE_ID, {
+      status: "done",
+      workflowSyncSource: "workflows_route",
+    });
     expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: "issue.updated",
       entityType: "issue",

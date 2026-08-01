@@ -1,5 +1,6 @@
 import {
   boolean,
+  integer,
   index,
   jsonb,
   pgTable,
@@ -37,6 +38,7 @@ export const issueWorkProducts = pgTable(
     summary: text("summary"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     createdByRunId: uuid("created_by_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
+    sourceExecutionGeneration: integer("source_execution_generation"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -59,6 +61,10 @@ export const issueWorkProducts = pgTable(
     companyUpdatedIdx: index("issue_work_products_company_updated_idx").on(
       table.companyId,
       table.updatedAt,
+    ),
+    createdByRunGenerationIdx: index("issue_work_products_created_by_run_generation_idx").on(
+      table.createdByRunId,
+      table.sourceExecutionGeneration,
     ),
   }),
 );

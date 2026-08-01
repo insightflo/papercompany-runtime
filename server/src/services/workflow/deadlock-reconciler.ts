@@ -11,6 +11,8 @@ import {
 import { buildPredFactsMap, buildStepRunMap } from "./reconciler-edge-helpers.js";
 import type { ReconciliationResult } from "./reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
+import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
+import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 
 const DEADLOCK_COMMENT_MARKER = "control-plane-deadlock";
 
@@ -57,7 +59,8 @@ export async function reconcileDeadlockedWorkflowRuns(
 
       const steps = buildWorkflowExecutionSteps(definition);
       const stepById = new Map(steps.map((step) => [step.id, step]));
-      const predsByStepId = buildPredFactsMap(steps, buildStepRunMap(runSteps));
+      const v1Enforcement = await isHeartbeatFinalizationV1Enabled(db);
+      const predsByStepId = buildPredFactsMap(steps, buildStepRunMap(runSteps), undefined, v1Enforcement);
       const hasConditionalEdges = workflowHasConditionalEdges(steps);
       const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition({
         name: definition.name,
@@ -82,10 +85,29 @@ export async function reconcileDeadlockedWorkflowRuns(
       const now = new Date();
       for (const step of pending) {
         const priorMetadata = (step.metadata as Record<string, unknown> | null) ?? {};
-        await db
+        const [updated] = await db
           .update(workflowStepRuns)
           .set({ status: "skipped", completedAt: now, metadata: { ...priorMetadata, controlFlowSkipped: true } })
-          .where(eq(workflowStepRuns.id, step.id));
+          .where(eq(workflowStepRuns.id, step.id))
+          .returning({
+            id: workflowStepRuns.id,
+            transitionVersion: workflowStepRuns.statusTransitionVersion,
+          });
+        if (updated) {
+          await recordWorkflowStepStatusTransition(db, {
+            companyId: run.companyId,
+            missionId: run.missionId,
+            workflowRunId: run.id,
+            workflowStepRunId: step.id,
+            issueId: step.issueId,
+            fromStatus: step.status,
+            toStatus: "skipped",
+            source: "workflow_deadlock_reconciler",
+            transitionVersion: updated.transitionVersion > step.statusTransitionVersion
+              ? updated.transitionVersion
+              : null,
+          });
+        }
         if (step.issueId) {
           await blockIssueOnDeadlock(db, {
             issueId: step.issueId,
