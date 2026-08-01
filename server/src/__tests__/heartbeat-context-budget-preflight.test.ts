@@ -40,6 +40,7 @@ import {
   workflowRuns,
   workflowStepRuns,
   workspaceRuntimeServices,
+  instanceSettings,
 } from "@paperclipai/db";
 
 const executeSpy = vi.fn();
@@ -397,6 +398,9 @@ describe("heartbeat context budget preflight", () => {
     dataDir = started.dataDir;
     process.env.PAPERCLIP_HOME = path.join(dataDir, "paperclip-home");
     process.env.PAPERCLIP_INSTANCE_ID = "heartbeat-test";
+    // Enable finalization v1 so heartbeat lifecycle treats terminal-but-unsettled
+    // runs as still active, preventing teardown races from late fire-and-forget writes.
+    await db.insert(instanceSettings).values({ singletonKey: "default", experimental: { enableHeartbeatFinalizationV1: true } }).onConflictDoNothing();
   }, 60_000);
 
   afterEach(async () => {
