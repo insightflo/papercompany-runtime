@@ -34,7 +34,7 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("publish-autofill-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function seed() {
     const companyId = randomUUID();

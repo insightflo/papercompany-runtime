@@ -72,7 +72,7 @@ describeEP("hybrid QA — structural CAS loss leaves no orphan ledger row", () =
       payload: { kind: "structural_gate_verdict", requestId: requestR1, verdict: "pass" },
     });
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function countGateVerdictRows(): Promise<number> {
     const rows = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)

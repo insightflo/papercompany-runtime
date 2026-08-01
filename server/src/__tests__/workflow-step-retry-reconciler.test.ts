@@ -36,7 +36,7 @@ describeEP("workflow step retry reconciler", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("future retry is not released by reconciler", async () => {
     const stepId = `tool-${randomUUID().slice(0, 6)}`;
@@ -208,7 +208,7 @@ describeEP("Human Operator interlock with retries", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("pending retry step keeps workflow run running", async () => {
     const stepId = `tool-${randomUUID().slice(0, 6)}`;

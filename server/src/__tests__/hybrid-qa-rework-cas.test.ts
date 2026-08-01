@@ -33,7 +33,7 @@ describeEP("hybrid QA — rework-pass CAS losing-race", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("gate CAS: same completed status+iteration, different requestId → no reset", async () => {
     const wfId = randomUUID();

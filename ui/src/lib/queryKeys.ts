@@ -103,6 +103,11 @@ export const queryKeys = {
     comments: (approvalId: string) => ["approvals", "comments", approvalId] as const,
     issues: (approvalId: string) => ["approvals", "issues", approvalId] as const,
   },
+  operatorDecisions: {
+    list: (companyId: string, view: "pending" | "attention" | "history") =>
+      ["operator-decisions", companyId, view] as const,
+    detail: (decisionId: string) => ["operator-decisions", "detail", decisionId] as const,
+  },
   access: {
     joinRequests: (companyId: string, status: string = "pending_approval") =>
       ["access", "join-requests", companyId, status] as const,

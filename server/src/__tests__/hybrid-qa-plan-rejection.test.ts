@@ -33,7 +33,7 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
     tempDb = await startEmbeddedPostgresTestDatabase("hybrid-qa-plan-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   // Seeds a company whose plans pass source-ref + placement validation: the
   // owner agent is active and is granted both a capability-bearing tool and a

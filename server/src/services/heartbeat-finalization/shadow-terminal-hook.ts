@@ -5,6 +5,9 @@ import { ensureFinalization } from "./finalization-state.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import { decideHeartbeatTerminalOutcomeFirstWins, releaseExecutorOwnerCapability } from "./owner-capability.js";
 import { settleRunIfReady } from "./settlement.js";
+import { observeQuiescenceProof } from "./quiescence-probe.js";
+import { STAGE_CLASS, Q_STAGE } from "./stage-classifier.js";
+import { recordStage } from "./finalization-state.js";
 import type { HeartbeatRun } from "./owner-capability.js";
 
 
@@ -55,6 +58,26 @@ export async function maybeRecordTerminalFinalization(
     }
     // Re-read after release so settlement sees executorOwnerReleasedAt set.
     const [released] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
+    // Observe quiescence and record Q stages if proven, so settlement can complete
+    // immediately on normal termination instead of waiting for the recovery lane.
+    if (released && released.finalizationVersion === 1) {
+      const fin = await ensureFinalization(db, released, now);
+      const proof = await observeQuiescenceProof(db, released);
+      if (proof) {
+        for (const kind of [Q_STAGE.executorQuiescence, Q_STAGE.workspaceOperationsSettled, Q_STAGE.runtimeServicesStopped, Q_STAGE.missionRuntimeIdle]) {
+          await recordStage(db, {
+            companyId: released.companyId,
+            runId: released.id,
+            finalizationId: fin.id,
+            stageClass: STAGE_CLASS.quiescence,
+            stageKind: kind,
+            idempotencyKey: `terminal-hook-q:${kind}:${released.id}`,
+            state: "done",
+            payload: { source: "terminal_hook", proof },
+          }).catch(() => undefined);
+        }
+      }
+    }
     // Settlement here is best-effort shadow bookkeeping; the recovery lane
     // (terminal-but-unsettled replay) re-attempts for runs that settle later.
     await settleRunIfReady(db, released ?? fresh, now);

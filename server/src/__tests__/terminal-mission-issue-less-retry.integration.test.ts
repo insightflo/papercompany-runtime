@@ -123,7 +123,7 @@ describeEP("issue-less workflow retry exhaustion Human Operator reporting", () =
     await db.delete(companies);
   });
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("uses deterministic mission authority, emits one report, and stays idempotent", async () => {
     const seed = await seedIssueLessExhaustion(db);

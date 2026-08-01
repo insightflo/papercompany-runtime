@@ -30,6 +30,7 @@ import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { heartbeatsApi } from "../api/heartbeats";
 import { missionsApi } from "../api/missions";
+import { operatorDecisionsApi } from "../api/operator-decisions";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { useInboxBadge } from "../hooks/useInboxBadge";
@@ -37,6 +38,7 @@ import { useAfterInitialPaint } from "../hooks/useAfterInitialPaint";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { CORE_INTEGRATED_PLUGIN_KEYS } from "@/plugins/core-integrated";
+import { humanOperatorBadgeCount } from "./human-operator-badge-count";
 
 interface SidebarProps {
   onOpenHermes?: () => void;
@@ -64,7 +66,18 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
     enabled: !!deferredCompanyId,
     refetchInterval: 30_000,
   });
-  const humanOperatorRequestCount = humanOperatorRequests?.length ?? 0;
+  const { data: pendingOperatorDecisions } = useQuery({
+    queryKey: deferredCompanyId
+      ? queryKeys.operatorDecisions.list(deferredCompanyId, "pending")
+      : ["operator-decisions", "pending"],
+    queryFn: () => operatorDecisionsApi.list(deferredCompanyId!, "pending"),
+    enabled: !!deferredCompanyId,
+    refetchInterval: 30_000,
+  });
+  const humanOperatorRequestCount = humanOperatorBadgeCount(
+    humanOperatorRequests?.length,
+    pendingOperatorDecisions?.data.length,
+  );
 
   function openSearch() {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));

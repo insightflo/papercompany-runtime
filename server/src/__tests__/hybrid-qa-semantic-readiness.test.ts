@@ -25,7 +25,7 @@ describeEP("hybrid QA — semantic structural evidence", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("hybrid-qa-semantic-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function fixture(options: { currentRequest?: string; eventRequest?: string; tokenOffsetMs?: number; includeEvent?: boolean } = {}) {
     const companyId = randomUUID();

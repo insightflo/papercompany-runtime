@@ -117,7 +117,7 @@ describeDb("remote workflow artifact storage", () => {
     while (directories.length) rmSync(directories.pop()!, { recursive: true, force: true });
   });
 
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("mirrors an HTTP tool artifact after keeping its local workflow path", async () => {
     const companyId = randomUUID(); const agentId = randomUUID(); const runId = randomUUID();

@@ -33,7 +33,7 @@ describeEP("hybrid QA — atomic structural callback", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function seedGate(opts?: { requestId?: string; status?: string }) {
     const wfId = randomUUID();

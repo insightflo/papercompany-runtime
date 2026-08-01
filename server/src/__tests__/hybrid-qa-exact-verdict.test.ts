@@ -33,7 +33,7 @@ describeEP("hybrid QA — exact-current verdict ordering", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("stale reqA verdict (newer timestamp) does not affect current reqB gate behavior", async () => {
     const wfId = randomUUID();

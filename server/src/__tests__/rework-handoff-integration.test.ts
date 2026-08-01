@@ -44,7 +44,7 @@ describeDb("loop-driver back-edge rework: source-to-retry handoff", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-rework-loop-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("persists producer instruction, own products, QA feedback, and separate upstream artifacts", async () => {
     const companyId = randomUUID();
@@ -157,7 +157,7 @@ describeDb("structural-gate rework: source-to-retry handoff", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-rework-gate-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("persists producer instruction, own products, gate feedback, and separate upstream artifacts", async () => {
     const companyId = randomUUID();

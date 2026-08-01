@@ -39,7 +39,7 @@ describeEP("issue-less tool step retry through DAG sync", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
   });
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("failed issue-less tool step with onFailure retry schedules retry and re-dispatches", async () => {
     const stepId = `tool-${randomUUID().slice(0, 6)}`;

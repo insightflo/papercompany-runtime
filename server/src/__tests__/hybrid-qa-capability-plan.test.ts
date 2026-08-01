@@ -134,7 +134,7 @@ describeEP("hybrid QA — declared plan readiness (pre-PLAN, registered-tool)", 
       status: "idle", adapterType: "process", adapterConfig: {},
     });
   }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function seedTool(opts: { name: string; capabilities?: string[]; enabled?: boolean; grant?: boolean }) {
     const toolId = randomUUID();

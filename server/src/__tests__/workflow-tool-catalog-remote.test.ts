@@ -27,7 +27,7 @@ describeDb("remote workflow tool catalog", () => {
     await db.delete(agents);
     await db.delete(companies);
   });
-  afterAll(async () => tempDb?.cleanup());
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function seedAgent(companyName: string) {
     const companyId = randomUUID();

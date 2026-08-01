@@ -27,7 +27,7 @@ describeEP("P4 shouldNoOpOversightWakeup: origin QA gate discrimination", () => 
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-oversight-noop-"); db = createDb(tempDb.connectionString); }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   async function seedMission(originIsQaGate: boolean, withLive = true) {
     const companyId = randomUUID();

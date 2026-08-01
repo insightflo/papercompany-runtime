@@ -103,7 +103,7 @@ describeEP("RES-1317 validation-gate-requeue ownership gate", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-vg-requeue-"); db = createDb(tempDb.connectionString); }, 60_000);
-  afterAll(async () => { await tempDb?.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("live QA recovery → no gate reset/wakeup (observe-only)", async () => {
     const s = await seed(db, "live");

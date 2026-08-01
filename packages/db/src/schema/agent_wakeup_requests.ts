@@ -53,6 +53,9 @@ export const agentWakeupRequests = pgTable(
     capOverrideLiveIdempotencyUq: uniqueIndex("agent_wakeup_requests_cap_override_live_idempotency_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} like 'cap-override-wake:%' and ${table.status} in ('queued', 'claimed', 'deferred_issue_execution', 'coalesced', 'completed')`),
+    operatorDecisionIdempotencyUq: uniqueIndex("agent_wakeup_requests_operator_decision_idempotency_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} like 'operator-decision-wake:%'`),
     workflowStepGenerationIdx: index("agent_wakeup_requests_workflow_step_generation_idx").on(
       table.workflowStepRunId,
       table.workflowExecutionGeneration,
