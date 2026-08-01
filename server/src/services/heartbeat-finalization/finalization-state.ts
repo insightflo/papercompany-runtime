@@ -27,12 +27,8 @@ export async function ensureFinalization(
   run: HeartbeatRun,
   now: Date,
 ): Promise<typeof heartbeatRunFinalizations.$inferSelect> {
-  const existing = await db
-    .select()
-    .from(heartbeatRunFinalizations)
-    .where(eq(heartbeatRunFinalizations.heartbeatRunId, run.id))
-    .then((rows) => rows[0] ?? null);
-  if (existing) return existing;
+  // Blocker 3 fix: conflict-safe insert — the unique constraint on heartbeat_run_id
+  // ensures only one parent per run even under concurrent terminal hooks.
   const [created] = await db
     .insert(heartbeatRunFinalizations)
     .values({
@@ -45,9 +41,17 @@ export async function ensureFinalization(
       finalizationVersion: run.finalizationVersion ?? 1,
       state: "pending",
     })
+    .onConflictDoNothing({ target: heartbeatRunFinalizations.heartbeatRunId })
     .returning();
-  if (!created) throw new Error("finalization parent insert returned no row");
-  return created;
+  if (created) return created;
+  // Conflict: a concurrent writer created the parent. Return the existing row.
+  const existing = await db
+    .select()
+    .from(heartbeatRunFinalizations)
+    .where(eq(heartbeatRunFinalizations.heartbeatRunId, run.id))
+    .then((rows) => rows[0] ?? null);
+  if (!existing) throw new Error("finalization parent not found after conflict-safe insert");
+  return existing;
 }
 
 /**

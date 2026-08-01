@@ -3,7 +3,7 @@ import { heartbeatRuns } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { ensureFinalization } from "./finalization-state.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
-import { decideHeartbeatTerminalOutcomeFirstWins } from "./owner-capability.js";
+import { decideHeartbeatTerminalOutcomeFirstWins, releaseExecutorOwnerCapability } from "./owner-capability.js";
 import { settleRunIfReady } from "./settlement.js";
 import type { HeartbeatRun } from "./owner-capability.js";
 
@@ -47,10 +47,17 @@ export async function maybeRecordTerminalFinalization(
     await decideHeartbeatTerminalOutcomeFirstWins(db, { run: fresh, outcome, source: `heartbeat_terminal:${updatedRun.status}`, now });
     // Re-read so the finalization parent reflects the first-wins terminal outcome just written.
     const [decided] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
-    if (decided) await ensureFinalization(db, decided, now);
+    if (decided) {
+      await ensureFinalization(db, decided, now);
+      // Blocker 1 fix: release the executor owner capability so the quiescence probe
+      // sees executorOwnerReleasedAt != null and the run can settle on normal termination.
+      await releaseExecutorOwnerCapability(db, decided, now);
+    }
+    // Re-read after release so settlement sees executorOwnerReleasedAt set.
+    const [released] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
     // Settlement here is best-effort shadow bookkeeping; the recovery lane
     // (terminal-but-unsettled replay) re-attempts for runs that settle later.
-    await settleRunIfReady(db, fresh, now);
+    await settleRunIfReady(db, released ?? fresh, now);
   } catch {
     // Shadow-only: never propagate. The real terminal flow has already committed.
   }

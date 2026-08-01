@@ -256,3 +256,37 @@ export async function decideHeartbeatTerminalOutcomeFirstWins(
   });
 }
 
+/**
+ * Releases the executor owner capability by CAS-writing executorOwnerReleasedAt.
+ * Called after the terminal outcome is decided so the quiescence probe sees the
+ * run as released. Returns false if the capability was already released or the
+ * CAS failed (stale writer). Idempotent: a second call on an already-released
+ * run returns false (no-op, not an error).
+ */
+export async function releaseExecutorOwnerCapability(
+  db: Db,
+  run: HeartbeatRun,
+  now: Date,
+): Promise<boolean> {
+  if (
+    run.finalizationVersion !== 1 || run.executionEpoch === null || !run.executionToken ||
+    !run.executorOwnerId || run.executorOwnerLeaseEpoch === null || !run.executorOwnerLeaseToken
+  ) return false;
+  const result = await db
+    .update(heartbeatRuns)
+    .set({ executorOwnerReleasedAt: now, updatedAt: now })
+    .where(and(
+      eq(heartbeatRuns.id, run.id),
+      eq(heartbeatRuns.finalizationVersion, 1),
+      eq(heartbeatRuns.executionEpoch, run.executionEpoch),
+      eq(heartbeatRuns.executionToken, run.executionToken),
+      eq(heartbeatRuns.executorOwnerId, run.executorOwnerId),
+      eq(heartbeatRuns.executorOwnerLeaseEpoch, run.executorOwnerLeaseEpoch),
+      eq(heartbeatRuns.executorOwnerLeaseToken, run.executorOwnerLeaseToken),
+      isNull(heartbeatRuns.executorOwnerReleasedAt),
+    ))
+    .returning({ id: heartbeatRuns.id })
+    .then((rows) => rows.length > 0);
+  return result;
+}
+

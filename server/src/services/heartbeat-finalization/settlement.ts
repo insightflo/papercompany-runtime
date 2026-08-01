@@ -36,19 +36,28 @@ export async function settleRunIfReady(
 
   const required = allRequiredStages(run);
   const stages = await loadStages(db, run.id);
-  const byKind = new Map(stages.map((s) => [s.stageKind, s.state]));
+  // Blocker 2 fix: aggregate ALL rows per stageKind, fail-closed.
+  // The unique index includes idempotency_key, so multiple rows for the same
+  // stageKind (e.g. done + dead_letter from different idempotency keys) can coexist.
+  // A Map (last-wins) would miss a dead_letter if a done row follows it.
+  const stagesByKind = new Map<string, string[]>();
+  for (const s of stages) {
+    const arr = stagesByKind.get(s.stageKind);
+    if (arr) arr.push(s.state);
+    else stagesByKind.set(s.stageKind, [s.state]);
+  }
 
   let blockedNonCompensable = false;
   for (const stage of required) {
-    const state = byKind.get(stage.kind);
+    const states = stagesByKind.get(stage.kind) ?? [];
     if (stage.stageClass === STAGE_CLASS.quiescence) {
-      if (state === "dead_letter") {
+      if (states.includes("dead_letter")) {
         blockedNonCompensable = true; // non-compensable dead-end: never settles
         continue;
       }
-      if (state !== "done") return "not_ready"; // positive observation required
+      if (!states.includes("done")) return "not_ready"; // positive observation required
     } else if (stage.stageClass === STAGE_CLASS.compensable) {
-      if (state !== "done" && state !== "equivalent_failed") return "not_ready";
+      if (!states.includes("done") && !states.includes("equivalent_failed")) return "not_ready";
     }
     // optional (O): never blocks
   }

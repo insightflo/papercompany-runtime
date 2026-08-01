@@ -1,4 +1,4 @@
-import { index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
@@ -27,6 +27,7 @@ export const heartbeatRunFinalizations = pgTable(
   },
   (table) => ({
     heartbeatRunIdIdx: index("heartbeat_run_finalizations_heartbeat_run_id_idx").on(table.heartbeatRunId),
+    heartbeatRunIdUq: uniqueIndex("heartbeat_run_finalizations_heartbeat_run_id_uniq").on(table.heartbeatRunId),
     claimIdx: index("heartbeat_run_finalizations_claim_idx")
       .on(table.companyId, table.state, table.finalizerLeaseExpiresAt)
       .where(sql`${table.state} in ('pending', 'leased')`),
