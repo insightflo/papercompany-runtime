@@ -3484,7 +3484,7 @@ export async function syncWorkflowRunState(
       const runnableSteps = sortWorkflowStepsByPriority(findRunnableSteps(context.steps, stepRunMap, {
         launchedStepIds: dynamicLaunchStepIds,
         validationVerdictsByIssueId,
-        v1EnforcementEnabled: await isHeartbeatFinalizationV1Enabled(db),
+        v1EnforcementEnabled: false,
       }));
       if (runnableSteps.length === 0) break;
 
