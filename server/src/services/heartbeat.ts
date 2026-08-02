@@ -134,8 +134,10 @@ import {
   recordHeartbeatTerminalOutcomeShadow,
 } from "./heartbeat-finalization/shadow-writes.js";
 import { maybeTransferHeartbeatAuthorityToChild } from "./heartbeat-finalization/authority-transfer.js";
-import { resolveWorkflowExecutionGeneration } from "./heartbeat-finalization/workflow-link.js";
+import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
+import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
+import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import {
   hasSessionCompactionThresholds,
@@ -5199,9 +5201,10 @@ export function heartbeatService(db: Db) {
       if (claimedRuns.length === 0) return [];
 
       for (const claimedRun of claimedRuns) {
-        void executeRun(claimedRun.id).catch((err) => {
+        const execution = executeRun(claimedRun.id).catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
         });
+        trackHeartbeatExecution(db, execution);
       }
       return claimedRuns;
     });
@@ -7192,6 +7195,18 @@ export function heartbeatService(db: Db) {
         } finally {
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           activeRunExecutions.delete(run.id);
+          const terminalRun = await getRun(run.id).catch(() => null);
+          if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
+            await settleHeartbeatAfterExecution(db, terminalRun, new Date()).catch((settlementErr) => {
+              logger.warn({ err: settlementErr, runId: run.id }, "failed to settle heartbeat after execution cleanup");
+            });
+            // The earlier status finalization intentionally keeps an unsettled v1 run in the slot.
+            // Recompute after cleanup so settlement releases it; not_ready remains occupied by design.
+            await finalizeAgentStatus(
+              run.agentId,
+              terminalRun.status as "succeeded" | "failed" | "cancelled" | "timed_out",
+            ).catch(() => undefined);
+          }
           await startNextQueuedRunForAgent(run.agentId);
         }
   }
@@ -8088,17 +8103,24 @@ export function heartbeatService(db: Db) {
             .then((rows) => rows[0]?.missionId ?? null)
         : null);
     const finalizationV1Enabled = await isHeartbeatFinalizationV1Enabled(db);
-    const workflowRunIdForWake = readNonEmptyString(enrichedContextSnapshot.workflowRunId)
+    const requestedWorkflowRunId = readNonEmptyString(enrichedContextSnapshot.workflowRunId)
       ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowRunId"] as string)
       ?? null;
-    const workflowStepRunIdForWake = readNonEmptyString(enrichedContextSnapshot.workflowStepRunId)
+    const requestedWorkflowStepRunId = readNonEmptyString(enrichedContextSnapshot.workflowStepRunId)
       ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowStepRunId"] as string)
       ?? null;
-    const workflowExecutionGeneration = await resolveWorkflowExecutionGeneration(db, {
+    const workflowLink = await resolveWorkflowExecutionLink(db, {
       enabled: finalizationV1Enabled,
-      workflowRunId: workflowRunIdForWake,
-      workflowStepRunId: workflowStepRunIdForWake,
+      companyId: agent.companyId,
+      issueId: issueId ?? null,
+      workflowRunId: requestedWorkflowRunId,
+      workflowStepRunId: requestedWorkflowStepRunId,
     });
+    const workflowRunIdForWake = workflowLink.workflowRunId;
+    const workflowStepRunIdForWake = workflowLink.workflowStepRunId;
+    const workflowExecutionGeneration = workflowLink.generation;
+    if (workflowRunIdForWake) enrichedContextSnapshot.workflowRunId = workflowRunIdForWake;
+    if (workflowStepRunIdForWake) enrichedContextSnapshot.workflowStepRunId = workflowStepRunIdForWake;
     // [AREA: structured-events Task 1D] typed queue context derived from payload/contextSnapshot.
     // 모든 agent_wakeup_requests insert 경로에 mirror. payload 원본은 변경하지 않는다(호환성).
     const typedQueueColumns = {

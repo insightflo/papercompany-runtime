@@ -10,12 +10,14 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { attemptFullSettlement } from "../services/heartbeat-finalization/settlement.js";
+import { syncWorkflowAfterHeartbeatSettlement } from "../services/heartbeat-finalization/post-execution.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -53,7 +55,10 @@ describeEP("dispatch_ready_at set on settle", () => {
     });
     await db.insert(instanceSettings).values({ singletonKey: "default", general: {}, experimental: { enableHeartbeatFinalizationV1: true } } as never);
   });
-  afterAll(() => { tempDb = null; });
+  afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
+    await tempDb?.cleanup();
+  });
 
   it("attemptFullSettlement sets dispatch_ready_at on the linked workflow_step_run", async () => {
     const runId = randomUUID();
@@ -77,6 +82,19 @@ describeEP("dispatch_ready_at set on settle", () => {
     // dispatch_ready_at set on the linked workflow step run
     const stepRun = await db.select({ dispatchReadyAt: workflowStepRuns.dispatchReadyAt }).from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)).then((r) => r[0]!);
     expect(stepRun.dispatchReadyAt).not.toBeNull();
+
+    const transition = await db.select({ reason: workflowTransitionEvents.reason })
+      .from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.heartbeatRunId, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(transition?.reason).toBe("heartbeat_settled");
+
+    await syncWorkflowAfterHeartbeatSettlement(db, run!);
+    const syncedWorkflowRun = await db.select({ status: workflowRuns.status })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, workflowRunId))
+      .then((rows) => rows[0] ?? null);
+    expect(syncedWorkflowRun?.status).toBe("completed");
   });
 
   it("dispatch_ready_at is idempotent — second settle does not change it", async () => {
@@ -103,5 +121,74 @@ describeEP("dispatch_ready_at set on settle", () => {
 
     const after2 = await db.select({ dispatchReadyAt: workflowStepRuns.dispatchReadyAt }).from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)).then((r) => r[0]!);
     expect(after2.dispatchReadyAt).toEqual(after1.dispatchReadyAt);
+  });
+
+  it("does not settle when the linked workflow step cannot receive dispatch_ready_at", async () => {
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId, agentId, invocationSource: "on_demand", status: "succeeded",
+      finalizationVersion: 1, executionEpoch: 0, executionToken: randomUUID(),
+      executorOwnerId: "default", executorOwnerLeaseEpoch: 1, executorOwnerLeaseToken: randomUUID(),
+      executorOwnerReleasedAt: new Date(), processPid: null,
+      workflowStepRunId: randomUUID(), workflowExecutionGeneration: 0,
+    } as never);
+
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    await expect(attemptFullSettlement(db, run!, new Date())).rejects.toThrow();
+
+    const row = await db.select({ settledAt: heartbeatRuns.settledAt })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0]!);
+    expect(row.settledAt).toBeNull();
+  });
+
+  it("does not settle a workflow step owned by another company", async () => {
+    const otherCompanyId = randomUUID();
+    const otherWorkflowRunId = randomUUID();
+    const otherStepRunId = randomUUID();
+    const otherWorkflowDefId = randomUUID();
+    await db.insert(companies).values({
+      id: otherCompanyId,
+      name: "Other DispatchCo",
+      issuePrefix: `OD${otherCompanyId.slice(0, 4)}`.toUpperCase(),
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: otherWorkflowDefId,
+      companyId: otherCompanyId,
+      name: "Other dispatch wf",
+      stepsJson: [{ id: "step" }],
+    });
+    await db.insert(workflowRuns).values({
+      id: otherWorkflowRunId,
+      companyId: otherCompanyId,
+      workflowId: otherWorkflowDefId,
+      status: "running",
+      triggeredBy: "test",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: otherStepRunId,
+      workflowRunId: otherWorkflowRunId,
+      stepId: "step",
+      status: "completed",
+      metadata: {},
+    });
+
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId, agentId, invocationSource: "on_demand", status: "succeeded",
+      finalizationVersion: 1, executionEpoch: 0, executionToken: randomUUID(),
+      executorOwnerId: "default", executorOwnerLeaseEpoch: 1, executorOwnerLeaseToken: randomUUID(),
+      executorOwnerReleasedAt: new Date(), processPid: null,
+      workflowStepRunId: otherStepRunId, workflowExecutionGeneration: 0,
+    } as never);
+
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    await expect(attemptFullSettlement(db, run!, new Date())).rejects.toThrow();
+    const [settledRun] = await db.select({ settledAt: heartbeatRuns.settledAt })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(settledRun?.settledAt).toBeNull();
   });
 });

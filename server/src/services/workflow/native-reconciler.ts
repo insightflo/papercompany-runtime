@@ -75,7 +75,7 @@ export function createNativeWorkflowReconciler(
       ) {
         log.info({ timeoutMinutes, ...result }, "Native workflow reconciler cleaned up workflow state");
       }
-      // Phase 2 shadow recovery: replay settlement for terminal-but-unsettled v1 runs.
+      // Phase 3 recovery: replay settlement for terminal-but-unsettled v1 runs.
       const recoveredSettlements = await recoverTerminalUnsettledRuns(options.db, now);
       if (recoveredSettlements > 0) {
         log.info({ timeoutMinutes, recoveredSettlements }, "Native workflow reconciler recovered terminal-unsettled finalizations");

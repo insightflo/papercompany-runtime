@@ -2,8 +2,8 @@ import type { Db } from "@paperclipai/db";
 import { heartbeatRuns } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
+import { ensureFinalization } from "./finalization-state.js";
 import { decideHeartbeatTerminalOutcomeFirstWins, releaseExecutorOwnerCapability } from "./owner-capability.js";
-import { attemptFullSettlement } from "./settlement.js";
 import type { HeartbeatRun } from "./owner-capability.js";
 
 
@@ -15,15 +15,15 @@ const TERMINAL_OUTCOME: Record<string, "succeeded" | "failed" | "cancelled" | "t
 };
 
 /**
- * Phase 2 shadow routing (plan section 9). A SINGLE defensive choke point invoked
- * from setRunStatus whenever a run transitions to a terminal status. SHADOW-ONLY:
+ * Terminal routing choke point invoked from setRunStatus whenever a run transitions
+ * to a terminal status:
  *
  * - feature-flagged (enableHeartbeatFinalizationV1); OFF => immediate no-op.
  * - only acts on finalizationVersion=1 runs (v1 claimed runs); legacy runs untouched.
- * - the entire body is wrapped so a shadow failure can NEVER alter the real terminal
+ * - the entire body is wrapped so a finalization failure can NEVER alter the real terminal
  *   outcome, live event, transition event, promotion, or recovery behavior.
- * - records the finalization parent, first-wins terminal outcome, and attempts
- *   settlement. No reader consumes settled_at yet (Phase 3 enforces).
+ * - records the finalization parent and first-wins terminal outcome, then releases
+ *   owner authority. Settlement runs only after executeRun cleanup completes.
  *
  * This covers success/inner-catch/outer-catch/cancel/timeout/process_lost/
  * stale_queued/issue-done-child-kill uniformly via the terminal-writer choke point.
@@ -39,7 +39,7 @@ export async function maybeRecordTerminalFinalization(
     const outcome = TERMINAL_OUTCOME[updatedRun.status];
     if (!outcome) return;
 
-    // Re-read so the probe/settlement see the latest committed row state.
+    // Re-read so finalization sees the latest committed row state.
     const [fresh] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
     if (!fresh || fresh.finalizationVersion !== 1) return;
 
@@ -47,17 +47,12 @@ export async function maybeRecordTerminalFinalization(
     // Re-read so the finalization parent reflects the first-wins terminal outcome just written.
     const [decided] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
     if (decided) {
+      await ensureFinalization(db, decided, now);
       // Release the executor owner capability so the quiescence probe sees
       // executorOwnerReleasedAt != null and the run can settle.
       await releaseExecutorOwnerCapability(db, decided, now);
     }
-    // Re-read after release so settlement sees executorOwnerReleasedAt set.
-    const [released] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
-    // Full settlement pipeline: observe quiescence → record Q/C stages → settle.
-    // This completes settlement in one pass for normal-termination runs so
-    // settled_at is set and lifecycleActiveClause no longer counts the run as active.
-    await attemptFullSettlement(db, released ?? fresh, now);
   } catch {
-    // Shadow-only: never propagate. The real terminal flow has already committed.
+    // Never propagate. The real terminal flow has already committed.
   }
 }

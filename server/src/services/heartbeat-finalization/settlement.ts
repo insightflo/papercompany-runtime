@@ -1,6 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRunFinalizations, heartbeatRuns, workflowStepRuns } from "@paperclipai/db";
+import { heartbeatRunFinalizations, heartbeatRuns, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { appendWorkflowAuthorityTransition } from "../workflow/authority/transitions.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import type { HeartbeatRun } from "./owner-capability.js";
@@ -10,11 +10,11 @@ import { observeQuiescenceProof } from "./quiescence-probe.js";
 
 
 export type SettlementOutcome = "settled" | "not_ready" | "blocked_noncompensable";
-type SettleDb = Pick<Db, "select" | "update" | "insert">;
+type SettleDb = Pick<Db, "select" | "update" | "insert" | "transaction">;
 
 /**
- * Settlement gate (plan sections 5 & Q1). SHADOW-ONLY: writes heartbeat_runs.settled_at
- * but no reader consumes it yet (Phase 2/3 wire+enforce). Invariants enforced here:
+ * Settlement gate (plan sections 5 & Q1). Phase 3 readers consume settled_at and
+ * dispatch_ready_at to admit the next workflow step. Invariants enforced here:
  *
  * 1. Class-Q (non-compensable) stages require a positively-observed `done` step.
  *    A Q stage that is `dead_letter` permanently blocks settlement: the finalization
@@ -80,31 +80,61 @@ export async function settleRunIfReady(
   }
 
   // All Q positively observed and all C done/equivalent-failed: settle (first-wins CAS).
-  const settled = await db
-    .update(heartbeatRuns)
-    .set({ settledAt: now, updatedAt: now })
-    .where(and(
-      eq(heartbeatRuns.id, run.id),
-      eq(heartbeatRuns.finalizationVersion, 1),
-      isNull(heartbeatRuns.settledAt),
-    ))
-    .returning({ id: heartbeatRuns.id })
-    .then((rows) => rows[0] ?? null);
+  // settled_at and dispatch_ready_at are one authority transition: if the linked
+  // workflow step cannot receive dispatch readiness, the transaction rolls back
+  // settled_at as well so the recovery lane can safely retry.
+  const settled = await db.transaction(async (tx) => {
+    const row = await tx
+      .update(heartbeatRuns)
+      .set({ settledAt: now, updatedAt: now })
+      .where(and(
+        eq(heartbeatRuns.id, run.id),
+        eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.finalizationVersion, 1),
+        isNull(heartbeatRuns.settledAt),
+      ))
+      .returning({ id: heartbeatRuns.id })
+      .then((rows) => rows[0] ?? null);
 
-  if (settled) {
-    // Item 1: atomically set dispatch_ready_at on the linked workflow step run.
-    // This is the authority signal that the predecessor is evidence-ready AND
-    // owner-settled, allowing the successor to dispatch via classifyStepActivation.
+    if (!row) return null;
+
     if (run.workflowStepRunId) {
-      await db.update(workflowStepRuns)
-        .set({ dispatchReadyAt: now })
+      if (run.workflowExecutionGeneration === null) {
+        throw new Error(`Cannot settle heartbeat ${run.id}: linked workflow execution generation is missing`);
+      }
+      const stepRun = await tx
+        .select({ id: workflowStepRuns.id, dispatchReadyAt: workflowStepRuns.dispatchReadyAt })
+        .from(workflowStepRuns)
+        .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId))
         .where(and(
           eq(workflowStepRuns.id, run.workflowStepRunId),
-          isNull(workflowStepRuns.dispatchReadyAt),
+          eq(workflowStepRuns.executionGeneration, run.workflowExecutionGeneration),
+          eq(workflowRuns.companyId, run.companyId),
         ))
-        .catch(() => undefined);
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!stepRun) {
+        throw new Error(`Cannot settle heartbeat ${run.id}: linked workflow step run ${run.workflowStepRunId} was not found`);
+      }
+
+      if (!stepRun.dispatchReadyAt) {
+        const ready = await tx
+          .update(workflowStepRuns)
+          .set({ dispatchReadyAt: now })
+          .where(and(
+            eq(workflowStepRuns.id, run.workflowStepRunId),
+            eq(workflowStepRuns.executionGeneration, run.workflowExecutionGeneration),
+            isNull(workflowStepRuns.dispatchReadyAt),
+          ))
+          .returning({ id: workflowStepRuns.id })
+          .then((rows) => rows[0] ?? null);
+        if (!ready) {
+          throw new Error(`Cannot settle heartbeat ${run.id}: dispatch readiness CAS failed for ${run.workflowStepRunId}`);
+        }
+      }
     }
-    await appendWorkflowAuthorityTransition(db, {
+
+    await appendWorkflowAuthorityTransition(tx, {
       companyId: run.companyId,
       workflowStepRunId: run.workflowStepRunId,
       issueId: run.issueId,
@@ -120,8 +150,9 @@ export async function settleRunIfReady(
         executionEpoch: run.executionEpoch,
         terminalOutcome: run.terminalOutcome,
       },
-    }).catch(() => undefined);
-  }
+    });
+    return row;
+  });
   return settled ? "settled" : "not_ready";
 }
 
@@ -141,9 +172,9 @@ export async function markQuiescenceStageDeadLetter(
 
 /**
  * Full settlement pipeline for a terminal v1 run: observe quiescence → record Q
- * stages if proven → record C stages (optimistic — the terminal path commits them)
- * → settle. Used by the shadow terminal hook so a normal-termination run settles
- * in one pass instead of waiting for the 5-min recovery replay.
+ * stages if proven → record C stages whose executeRun path has completed → settle.
+ * Call this only after executeRun has finished its business side-effects and runtime
+ * cleanup. The earlier terminal-status hook records outcome/owner release only.
  */
 export async function attemptFullSettlement(
   db: SettleDb,
@@ -172,8 +203,8 @@ export async function attemptFullSettlement(
     }
   }
 
-  // Record applicable C stages as done — the terminal hook fires after the adapter
-  // completed; mandatory business side-effects are committed by the terminal path.
+  // The caller runs after executeRun's business side-effects and runtime cleanup,
+  // so applicable compensable stages have completed on this normal execution path.
   const stages = allRequiredStages(run);
   for (const stage of stages) {
     if (stage.stageClass === STAGE_CLASS.compensable) {
