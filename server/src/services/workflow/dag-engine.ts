@@ -3065,12 +3065,17 @@ export async function completeWorkflowToolStepFromResult(
     return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
   }
 
-  // Non-structural path (unchanged): reuse the pure completion plan.
+  // Non-structural path: reuse the pure completion plan.
+  // When finalization v1 is enabled, tool steps must also set dispatch_ready_at
+  // so that v1Enforcement-enabled edge-condition evaluation admits downstream steps.
+  // Heartbeat-backed steps get this via settlement.ts; tool steps bypass heartbeat
+  // entirely, so we set it here on successful completion (only if not already set).
   const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
   const nextStatus = effectiveSuccess ? "completed" : "failed";
   const [updatedStepRun] = await db.update(workflowStepRuns).set({
     status: nextStatus,
     startedAt: row.stepRun.startedAt ?? now, completedAt: now,
+    dispatchReadyAt: effectiveSuccess && !row.stepRun.dispatchReadyAt ? now : undefined,
     lastDispatchErrorAt: effectiveSuccess ? null : now,
     lastDispatchErrorSummary: effectiveSuccess ? null
       : structuralGateRejected ? "structural_gate_request_changes"
