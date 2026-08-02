@@ -49,6 +49,7 @@ import { getUIAdapter } from "../adapters";
 import { getCustomModelCandidate } from "../lib/model-dropdown";
 import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
 import { AntigravityLocalAdvancedFields } from "../adapters/antigravity-local/config-fields";
+import { CommandCodeLocalAdvancedFields } from "../adapters/commandcode-local/config-fields";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { ChoosePathButton } from "./PathInstructionsModal";
 import { OpenCodeLogoIcon } from "./OpenCodeLogoIcon";
@@ -702,6 +703,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       nextValues.dangerouslySkipPermissions = true;
                     } else if (t === "commandcode_local") {
                       nextValues.model = "";
+                      nextValues.dangerouslySkipPermissions = false;
                     }
                     set!(nextValues);
                   } else {
@@ -1006,6 +1008,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               )}
               {adapterType === "antigravity_local" && (
                 <AntigravityLocalAdvancedFields {...adapterFieldProps} />
+              )}
+              {adapterType === "commandcode_local" && (
+                <CommandCodeLocalAdvancedFields {...adapterFieldProps} />
               )}
 
               <Field label="Extra args (comma-separated)" hint={help.extraArgs}>

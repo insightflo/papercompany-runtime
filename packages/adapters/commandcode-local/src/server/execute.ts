@@ -9,25 +9,26 @@ import {
 } from "@paperclipai/adapter-utils";
 import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
 import {
+  asBoolean,
   asNumber,
   asString,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
-import type { CommandCodeResultSubtype, ParsedCommandCodeOutput } from "./parse.js";
+import type { ParsedCommandCodeOutput } from "./parse.js";
 import { isCommandCodeUnknownSessionError, parseCommandCodeJsonl } from "./parse.js";
 import {
+  buildCommandCodePermissionArgs,
   buildCommandCodeRunEnv,
   resolveEffectiveCwd,
   resolveExtraArgs,
   sanitizeCommandCodeExtraArgs,
 } from "./env.js";
+import { classifyOutcome, resolveErrorMessage, type Outcome } from "./outcome.js";
 
 const DEFAULT_HEARTBEAT_PROMPT =
   "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work. Follow the Paperclip heartbeat procedure exactly. For assignments, use GET /api/agents/me/inbox-lite first. Fall back only to the company issues endpoint filtered by assigneeAgentId with statuses todo,in_progress,blocked. Do not improvise alternate issue query parameters such as status=open, assigneeId, or agentId. If no assignments are returned, exit the heartbeat.";
-
-const MAX_TURNS_CAP_EXIT_CODE = 8;
 
 type RunProc = {
   exitCode: number | null;
@@ -36,14 +37,6 @@ type RunProc = {
   stdout: string;
   stderr: string;
 };
-
-type OutcomeKind = "success" | "error" | "max_turns" | "missing_result";
-
-interface Outcome {
-  kind: OutcomeKind;
-  isFailure: boolean;
-  errorCode: string | null;
-}
 
 function firstNonEmptyLine(text: string): string {
   return (
@@ -63,29 +56,6 @@ function resolveCommandCodeBiller(env: Record<string, string>, provider: string 
   return inferOpenAiCompatibleBiller(env, null) ?? provider ?? "commandcode";
 }
 
-/**
- * The always-last result line is the only execution-outcome authority.
- * - subtype "error" fails even when the OS exit code is 0.
- * - subtype "max_turns" (or documented exit 8) is represented via errorCode.
- * - a process that exits 0 with NO result line is a fail-closed failure.
- */
-function classifyOutcome(parsed: ParsedCommandCodeOutput, exitCode: number | null): Outcome {
-  const nonzeroExit = exitCode === null || exitCode !== 0;
-  if (parsed.subtype === "error") {
-    return { kind: "error", isFailure: true, errorCode: null };
-  }
-  if (parsed.subtype === "max_turns" || exitCode === MAX_TURNS_CAP_EXIT_CODE) {
-    return { kind: "max_turns", isFailure: false, errorCode: "commandcode_max_turns" };
-  }
-  if (parsed.subtype === "success") {
-    // A success frame with a non-max-turns nonzero/null exit (auth, permission,
-    // rate limit, ...) must NOT succeed.
-    return { kind: "success", isFailure: nonzeroExit || parsed.errors.length > 0, errorCode: null };
-  }
-  // No result line: fail closed regardless of exit code.
-  return { kind: "missing_result", isFailure: true, errorCode: "commandcode_missing_result" };
-}
-
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
 
@@ -96,6 +66,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const maxTurns = asNumber(config.maxTurns, 0);
   const timeoutSec = asNumber(config.timeoutSec, 0);
   const graceSec = asNumber(config.graceSec, 20);
+  const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, false);
 
   const sanitized = sanitizeCommandCodeExtraArgs(resolveExtraArgs(config));
   if (sanitized.dropped.length > 0) {
@@ -189,8 +160,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (sessionResumeId) args.push("--resume", sessionResumeId);
     args.push(
       "--skip-onboarding",
-      "--permission-mode",
-      "auto-accept",
+      ...buildCommandCodePermissionArgs(dangerouslySkipPermissions),
       "--trust",
       "--output-format",
       "json",
@@ -261,27 +231,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const stderrLine = firstNonEmptyLine(proc.stderr);
     const rawExitCode = proc.exitCode;
     const parsedError = parsed.errors[0] ?? null;
-    // A logical failure (error subtype or missing result) with OS exit 0 must
-    // not present contradictory exit metadata; synthesize exit 1 (OpenCode parity).
+    // A logical failure (error subtype, missing result, or permission denial)
+    // with OS exit 0 must not present contradictory exit metadata; synthesize
+    // exit 1 (OpenCode parity).
     const logicalFailureNoExit = outcome.isFailure && (rawExitCode === null || rawExitCode === 0);
     const reportedExitCode = logicalFailureNoExit ? 1 : rawExitCode;
-
-    let errorMessage: string | null;
-    switch (outcome.kind) {
-      case "error":
-        errorMessage = parsedError || stderrLine || `Command Code run failed (exit ${rawExitCode ?? -1})`;
-        break;
-      case "max_turns":
-        errorMessage = "Command Code reached the --max-turns cap before completing; partial response returned.";
-        break;
-      case "missing_result":
-        errorMessage = `Command Code exited (code ${rawExitCode ?? -1}) without a final result line; treating the run as failed.`;
-        break;
-      default:
-        errorMessage = outcome.isFailure
-          ? (parsedError || stderrLine || `Command Code reported success but the process exited abnormally (code ${rawExitCode ?? -1}).`)
-          : null;
-    }
+    const errorMessage = resolveErrorMessage(outcome, {
+      parsedError,
+      stderrLine,
+      rawExitCode,
+    });
 
     return {
       exitCode: reportedExitCode,

@@ -39,6 +39,7 @@ Core fields:
 - maxTurns (number, optional): passes --max-turns when > 0; unset by default
 - env (object, optional): KEY=VALUE environment variables
 - extraArgs (string[], optional): extra CLI flags inserted before -p (reserved output/automation/model/max-turns/resume/session flags are dropped to protect enforced behavior)
+- dangerouslySkipPermissions (boolean, optional): when true, launch with --yolo and omit --permission-mode; when false/absent (safe default) use --permission-mode auto-accept
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds (0 = no hard timeout)
@@ -48,7 +49,8 @@ Automation flags (always applied):
 - -p <prompt>          non-interactive print mode
 - --output-format json NDJSON event stream + final result line
 - --skip-onboarding    skip taste onboarding for automated runs
-- --permission-mode auto-accept  accept tool actions automatically
+- --permission-mode auto-accept  accept tool actions automatically (safe default; used unless dangerouslySkipPermissions is set)
+- --yolo               passed instead of --permission-mode when dangerouslySkipPermissions is true; full skip of permission prompts
 - --trust              auto-trust the project (skip permission prompt)
 - --no-auto-update     avoid background self-updates during a managed run
 
@@ -69,8 +71,10 @@ Parsing:
 - The final result line is the ONLY execution-outcome authority. subtype "error"
   fails the run even at OS exit 0; subtype "max_turns" (or exit code 8) is a
   distinct max-turns outcome; a process that exits 0 with no result line fails
-  closed. Free-form assistant text is surfaced as a summary but is never
-  execution authority.
+  closed. A result with stopReason "permission_denied" is treated as a failure
+  (errorCode commandcode_permission_denied) even when the subtype is "success",
+  because the run did not actually complete the requested work. Free-form
+  assistant text is surfaced as a summary but is never execution authority.
 - Only machine-produced JSON lines are interpreted. Unknown nested AgentEvent
   types are forward-compatible and ignored; recognized ones (tool_queued,
   tool_running, tool_completed, tool_errored, text_delta, run_start) are surfaced.

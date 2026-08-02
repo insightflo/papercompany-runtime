@@ -115,6 +115,19 @@ export function resolveExtraArgs(config: Record<string, unknown>): string[] {
 }
 
 /**
+ * Build the Command Code permission flags for a run.
+ *
+ * `--permission-mode auto-accept` is the safe default that accepts tool actions
+ * automatically. When `dangerouslySkipPermissions` is set, the adapter passes
+ * `--yolo` (full skip) instead and never sets the permission-mode, so the two
+ * never combine into a contradictory invocation. Both flags stay reserved in
+ * sanitizeCommandCodeExtraArgs so operator extraArgs can never override them.
+ */
+export function buildCommandCodePermissionArgs(dangerouslySkipPermissions: boolean): string[] {
+  return dangerouslySkipPermissions ? ["--yolo"] : ["--permission-mode", "auto-accept"];
+}
+
+/**
  * Reserved Command Code flags that extraArgs must never override: enforced
  * output, automation/permissions, model/effort, max-turns, resume, and the
  * prompt itself. Value-taking flags consume their following arg.
