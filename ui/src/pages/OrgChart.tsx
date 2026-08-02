@@ -122,6 +122,7 @@ const adapterLabels: Record<string, string> = {
   antigravity_local: "Antigravity",
   gemini_local: "Gemini",
   opencode_local: "OpenCode",
+  commandcode_local: "Command Code",
   cursor: "Cursor",
   openclaw_gateway: "OpenClaw Gateway",
   process: "Process",

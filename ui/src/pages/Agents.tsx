@@ -27,6 +27,7 @@ const adapterLabels: Record<string, string> = {
   gemini_local: "Gemini",
   opencode_local: "OpenCode",
   hermes_local: "Hermes",
+  commandcode_local: "Command Code",
   cursor: "Cursor",
   openclaw_gateway: "OpenClaw Gateway",
   process: "Process",

@@ -315,7 +315,58 @@ Codex emits JSONL events. Parse line-by-line and extract:
 
 Codex JSONL currently may not include cost; store token usage and leave cost null/unknown unless available.
 
-## 7.3 Common local adapter process handling
+## 7.3 `commandcode-local`
+
+Runs the local Command Code (`cmd` v1.7.0) CLI headlessly.
+
+### Config
+
+```json
+{
+  "command": "cmd",
+  "cwd": "/absolute/or/relative/path",
+  "instructionsFilePath": "/absolute/path/to/AGENTS.md",
+  "promptTemplate": "You are agent {{agent.id}} ...",
+  "model": "optional-model-id (from `cmd --list-models`)",
+  "effort": "low|medium|high",
+  "maxTurns": 0,
+  "env": {"KEY": "VALUE"},
+  "extraArgs": [],
+  "timeoutSec": 0,
+  "graceSec": 20
+}
+```
+
+### Invocation
+
+- Base command: `cmd -p <prompt> --output-format json --skip-onboarding --permission-mode auto-accept --trust --no-auto-update`
+- Model/effort: add `--model <id>` and `--effort <level>` when configured
+- Turn cap: add `--max-turns <n>` when `maxTurns > 0` (cmd exits `8` on cap hit)
+- Resume: add `--resume <sessionId>` when runtime state has a session ID for the same cwd; `--continue` is intentionally not used because it is process-global and ambiguous for managed multi-agent runs
+
+### Output parsing
+
+Command Code `-p --output-format json` emits a documented NDJSON stream: one
+`{"type":"event","event":{...AgentEvent...}}` frame per progress event and one
+always-last `{"type":"result","subtype":"success|error|max_turns",...}` line.
+The outer `event`/`result` contract is documented and authoritative; only
+unknown nested `AgentEvent` types are forward-compatible and ignored. The final
+`result` line is the only execution-outcome authority:
+
+1. `subtype: "error"` fails the run even when the OS exit code is `0`.
+2. `subtype: "max_turns"` (and exit code `8`) is represented as a distinct
+   max-turns outcome with the partial `finalText` preserved.
+3. A process that exits `0` with no `result` line fails closed.
+4. `result.usage` totals (`inputTokens`, `outputTokens`, `cacheReadTokens`,
+   `cacheWriteTokens`) are authoritative and replace provisional event usage.
+5. `sessionId`/`stopReason`/`error` are optional per the documented contract.
+
+Session continuity uses `--resume <id>` with stale-session detection; on a
+stale retry the adapter preserves any new session id and clears only when the
+retry produced no new session.
+
+
+## 7.4 Common local adapter process handling
 
 Both local adapters must:
 

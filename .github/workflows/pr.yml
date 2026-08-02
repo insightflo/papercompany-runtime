@@ -109,6 +109,9 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+
+      - name: Install dependencies from the CI-refreshed lockfile
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck
@@ -147,6 +150,9 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+
+      - name: Install dependencies from the CI-refreshed lockfile
         run: pnpm install --frozen-lockfile
 
       - name: Build
