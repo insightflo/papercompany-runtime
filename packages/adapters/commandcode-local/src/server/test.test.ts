@@ -6,9 +6,14 @@ import { testEnvironment } from "./test.js";
 
 async function writeFakeCmd(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
+const fs = require("node:fs");
 if (process.argv.includes("--list-models")) {
   console.log("deepseek/deepseek-v4-pro  DeepSeek V4 Pro");
   process.exit(0);
+}
+const capturePath = process.env.COMMANDCODE_TEST_CAPTURE_PATH;
+if (capturePath) {
+  fs.writeFileSync(capturePath, JSON.stringify(process.argv.slice(2)), "utf8");
 }
 const mode = process.env.COMMANDCODE_TEST_MODE;
 if (mode === "missing_result") {
@@ -23,6 +28,17 @@ if (mode === "empty_error") {
     durationMs: 1,
     finalText: "hello",
     error: "",
+  }));
+  process.exit(0);
+}
+if (mode === "success") {
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    stopReason: "end_turn",
+    usage: { inputTokens: 1, outputTokens: 1 },
+    durationMs: 1,
+    finalText: "hello",
   }));
   process.exit(0);
 }
@@ -67,5 +83,36 @@ describe("commandcode_local environment diagnostics", () => {
     expect(result.status).toBe("fail");
     expect(result.checks.some((check) => check.code === "commandcode_hello_probe_passed")).toBe(false);
     expect(result.checks.some((check) => check.code === "commandcode_hello_probe_failed")).toBe(true);
+  });
+
+  it("uses --yolo for the hello probe when dangerouslySkipPermissions is enabled", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "commandcode-env-yolo-"));
+    const cwd = path.join(root, "workspace");
+    const command = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(cwd, { recursive: true });
+    await writeFakeCmd(command);
+    try {
+      const result = await testEnvironment({
+        companyId: "company-1",
+        adapterType: "commandcode_local",
+        config: {
+          command,
+          cwd,
+          model: "deepseek/deepseek-v4-pro",
+          dangerouslySkipPermissions: true,
+          env: {
+            COMMANDCODE_TEST_MODE: "success",
+            COMMANDCODE_TEST_CAPTURE_PATH: capturePath,
+          },
+        },
+      });
+      const argv = JSON.parse(await fs.readFile(capturePath, "utf8")) as string[];
+      expect(result.status).toBe("pass");
+      expect(argv).toContain("--yolo");
+      expect(argv).not.toContain("--permission-mode");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });

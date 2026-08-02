@@ -72,6 +72,9 @@ export function buildCommandCodeLocalConfig(v: CreateConfigValues): Record<strin
   if (Object.keys(env).length > 0) ac.env = env;
   if (v.command) ac.command = v.command;
   if (v.fallbackCommand) ac.fallbackCommand = v.fallbackCommand;
+  // Safe default (false) preserves --permission-mode auto-accept; true launches
+  // with --yolo. Written explicitly so the field round-trips in the UI edit form.
+  ac.dangerouslySkipPermissions = Boolean(v.dangerouslySkipPermissions);
   // CreateConfigValues.extraArgs is the comma-separated UI string; execute expects string[].
   if (v.extraArgs) ac.extraArgs = parseCommaArgs(v.extraArgs);
 

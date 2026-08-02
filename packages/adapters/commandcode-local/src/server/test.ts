@@ -4,6 +4,7 @@ import type {
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
 import {
+  asBoolean,
   asString,
   asStringArray,
   ensureAbsoluteDirectory,
@@ -13,7 +14,7 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { discoverCommandCodeModelsCached } from "./models.js";
-import { sanitizeCommandCodeExtraArgs } from "./env.js";
+import { buildCommandCodePermissionArgs, sanitizeCommandCodeExtraArgs } from "./env.js";
 import { parseCommandCodeJsonl } from "./parse.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
@@ -148,6 +149,7 @@ export async function testEnvironment(
   // Hello probe — exercises a real -p run. This performs a model call, so it is
   // the strongest signal that auth, model, and permissions are all wired up.
   if (canProbe && configuredModel) {
+    const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, false);
     const extraArgs = sanitizeCommandCodeExtraArgs(asStringArray(config.extraArgs)).args;
     const args = [
       "-p",
@@ -155,8 +157,7 @@ export async function testEnvironment(
       "--output-format",
       "json",
       "--skip-onboarding",
-      "--permission-mode",
-      "auto-accept",
+      ...buildCommandCodePermissionArgs(dangerouslySkipPermissions),
       "--trust",
       "--no-auto-update",
       "--model",

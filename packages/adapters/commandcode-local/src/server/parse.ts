@@ -5,6 +5,8 @@ export type CommandCodeResultSubtype = "success" | "error" | "max_turns";
 export interface ParsedCommandCodeOutput {
   sessionId: string | null;
   subtype: CommandCodeResultSubtype | null;
+  /** Stop reason from the result line (e.g. "end_turn", "permission_denied"). */
+  stopReason: string | null;
   /** Authoritative final answer from the always-last result line. */
   finalMessage: string | null;
   messages: string[];
@@ -86,6 +88,7 @@ export function parseCommandCodeJsonl(stdout: string): ParsedCommandCodeOutput {
   const result: ParsedCommandCodeOutput = {
     sessionId: null,
     subtype: null,
+    stopReason: null,
     finalMessage: null,
     messages: [],
     errors: [],
@@ -114,6 +117,8 @@ export function parseCommandCodeJsonl(stdout: string): ParsedCommandCodeOutput {
       }
       const sid = asString(frame.sessionId, "");
       if (sid) result.sessionId = sid;
+      const stopReason = asString(frame.stopReason, "");
+      if (stopReason) result.stopReason = stopReason;
       const finalText = asString(frame.finalText, "");
       if (finalText) {
         result.finalMessage = finalText;

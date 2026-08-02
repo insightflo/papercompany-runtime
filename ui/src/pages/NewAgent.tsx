@@ -60,6 +60,7 @@ function createValuesForAdapterType(
     nextValues.model = "";
   } else if (adapterType === "commandcode_local") {
     nextValues.model = "";
+    nextValues.dangerouslySkipPermissions = false;
   }
   return nextValues;
 }

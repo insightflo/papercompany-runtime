@@ -3,55 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execute } from "./execute.js";
-
-interface FakeCmdOptions {
-  /** NDJSON lines to print to stdout. */
-  lines?: string[];
-  /** Process exit code. */
-  exitCode?: number;
-}
-
-async function writeFakeCmd(commandPath: string, options: FakeCmdOptions = {}): Promise<void> {
-  const lines = options.lines ?? [];
-  const exitCode = options.exitCode ?? 0;
-  const script = `#!/usr/bin/env node
-const fs = require('node:fs');
-const argv = process.argv.slice(2);
-const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
-if (capturePath) {
-  fs.writeFileSync(capturePath, JSON.stringify({ argv }, null, 2), 'utf8');
-}
-const lines = ${JSON.stringify(lines)};
-for (const line of lines) {
-  console.log(line);
-}
-process.exit(${exitCode});
-`;
-  await fs.writeFile(commandPath, script, "utf8");
-  await fs.chmod(commandPath, 0o755);
-}
-
-function buildCtx(
-  config: Record<string, unknown>,
-  opts: { command: string; cwd: string; capture: string; runtime?: Record<string, unknown> },
-) {
-  return {
-    runId: "run-1",
-    agent: { id: "agent-1", companyId: "company-1", name: "Cmd Coder", adapterType: "commandcode_local", adapterConfig: {} },
-    runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null, ...(opts.runtime ?? {}) },
-    config: { command: opts.command, cwd: opts.cwd, env: { PAPERCLIP_TEST_CAPTURE_PATH: opts.capture }, promptTemplate: "do the work", ...config },
-    context: {},
-    authToken: undefined,
-    onLog: async () => {},
-    onMeta: async () => {},
-  };
-}
-
-type CapturePayload = { argv: string[] };
-
-function resultFrame(extra: Record<string, unknown>): string {
-  return JSON.stringify({ type: "result", ...extra });
-}
+import {
+  buildCtx,
+  resultFrame,
+  writeFakeCmd,
+  type CapturePayload,
+} from "./execute-fixtures.js";
 
 describe("commandcode execute", () => {
   it("constructs the headless command with json output and automation flags", async () => {
@@ -89,6 +46,63 @@ describe("commandcode execute", () => {
       const result = await execute(buildCtx({ command: customBin }, { command: "/__should_not_run__", cwd: workspace, capture: capturePath }));
       expect(result.errorMessage).toBeNull();
       expect(JSON.parse(await fs.readFile(capturePath, "utf8"))).toBeDefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("launches with --yolo and omits --permission-mode when dangerouslySkipPermissions is true", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cmd-exec-yolo-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCmd(commandPath, { lines: [resultFrame({ subtype: "success", finalText: "done", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 })] });
+    try {
+      await execute(buildCtx({ dangerouslySkipPermissions: true }, { command: commandPath, cwd: workspace, capture: capturePath }));
+      const argv = (JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload).argv;
+      expect(argv).toContain("--yolo");
+      expect(argv).not.toContain("--permission-mode");
+      expect(argv.filter((a) => a === "--permission-mode").length).toBe(0);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the safe --permission-mode auto-accept default and never adds --yolo when absent", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cmd-exec-safedefault-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCmd(commandPath, { lines: [resultFrame({ subtype: "success", finalText: "done", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 })] });
+    try {
+      await execute(buildCtx({}, { command: commandPath, cwd: workspace, capture: capturePath }));
+      const argv = (JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload).argv;
+      expect(argv).toContain("--permission-mode");
+      expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("auto-accept");
+      expect(argv).not.toContain("--yolo");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies stopReason permission_denied as a failure even with subtype success and exit 0", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cmd-exec-permdenied-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCmd(commandPath, {
+      lines: [resultFrame({ subtype: "success", stopReason: "permission_denied", finalText: "", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 })],
+      exitCode: 0,
+    });
+    try {
+      const result = await execute(buildCtx({}, { command: commandPath, cwd: workspace, capture: capturePath }));
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("commandcode_permission_denied");
+      expect(result.errorMessage).toBeTruthy();
+      expect(result.errorMessage).toContain("permission");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

@@ -47,4 +47,13 @@ describe("buildCommandCodeLocalConfig", () => {
     const ac = buildCommandCodeLocalConfig(baseValues({ args: "--legacy" }));
     expect(ac).not.toHaveProperty("args");
   });
+
+  it("round-trips dangerouslySkipPermissions as an explicit boolean", () => {
+    expect(buildCommandCodeLocalConfig(baseValues({ dangerouslySkipPermissions: true }))).toMatchObject({
+      dangerouslySkipPermissions: true,
+    });
+    expect(buildCommandCodeLocalConfig(baseValues({ dangerouslySkipPermissions: false }))).toMatchObject({
+      dangerouslySkipPermissions: false,
+    });
+  });
 });

@@ -1,5 +1,5 @@
 import type { AdapterConfigFieldsProps } from "../types";
-import { Field, DraftInput } from "../../components/agent-config-primitives";
+import { Field, ToggleField, DraftInput } from "../../components/agent-config-primitives";
 import { ChoosePathButton } from "../../components/PathInstructionsModal";
 
 const inputClass =
@@ -42,5 +42,35 @@ export function CommandCodeLocalConfigFields({
         <ChoosePathButton />
       </div>
     </Field>
+  );
+}
+
+export function CommandCodeLocalAdvancedFields({
+  isCreate,
+  values,
+  set,
+  config,
+  eff,
+  mark,
+}: AdapterConfigFieldsProps) {
+  return (
+    <ToggleField
+      label="Skip permissions"
+      hint="Run Command Code with --yolo (skip all permission prompts) instead of the safe --permission-mode auto-accept default. Required for unattended runs that need unrestricted tool actions."
+      checked={
+        isCreate
+          ? values!.dangerouslySkipPermissions
+          : eff(
+              "adapterConfig",
+              "dangerouslySkipPermissions",
+              config.dangerouslySkipPermissions === true,
+            )
+      }
+      onChange={(v) =>
+        isCreate
+          ? set!({ dangerouslySkipPermissions: v })
+          : mark("adapterConfig", "dangerouslySkipPermissions", v)
+      }
+    />
   );
 }

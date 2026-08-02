@@ -89,6 +89,30 @@ describe("parseCommandCodeJsonl - result contract", () => {
   });
 });
 
+describe("parseCommandCodeJsonl - stopReason", () => {
+  it("captures the result stopReason field", () => {
+    const parsed = parseCommandCodeJsonl(
+      result({ subtype: "success", stopReason: "end_turn", finalText: "ok", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 }),
+    );
+    expect(parsed.stopReason).toBe("end_turn");
+  });
+
+  it("keeps stopReason null when the result line omits it", () => {
+    const parsed = parseCommandCodeJsonl(
+      result({ subtype: "success", finalText: "ok", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 }),
+    );
+    expect(parsed.stopReason).toBeNull();
+  });
+
+  it("captures permission_denied stopReason even with subtype success", () => {
+    const parsed = parseCommandCodeJsonl(
+      result({ subtype: "success", stopReason: "permission_denied", finalText: "", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 }),
+    );
+    expect(parsed.subtype).toBe("success");
+    expect(parsed.stopReason).toBe("permission_denied");
+  });
+});
+
 describe("parseCommandCodeJsonl - nested AgentEvents", () => {
   it("captures sessionId from run_start (defensive; result is authoritative)", () => {
     const parsed = parseCommandCodeJsonl([event("run_start", { sessionId: "early-id" })].join("\n"));
