@@ -316,6 +316,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     adapterType === "opencode_local" ||
     adapterType === "hermes_local" ||
     adapterType === "antigravity_local" ||
+    adapterType === "commandcode_local" ||
     adapterType === "cursor";
   const supportsAdapterFallback =
     adapterType === "claude_local" ||
@@ -699,6 +700,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     } else if (t === "antigravity_local") {
                       nextValues.model = "auto";
                       nextValues.dangerouslySkipPermissions = true;
+                    } else if (t === "commandcode_local") {
+                      nextValues.model = "";
                     }
                     set!(nextValues);
                   } else {
@@ -836,6 +839,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                             ? "hermes"
                         : adapterType === "antigravity_local"
                           ? "agy"
+                        : adapterType === "commandcode_local"
+                          ? "cmd"
                           : "claude"
                   }
                 />

@@ -77,6 +77,15 @@ import {
   agentConfigurationDoc as piAgentConfigurationDoc,
 } from "@paperclipai/adapter-pi-local";
 import {
+  execute as commandCodeExecute,
+  testEnvironment as commandCodeTestEnvironment,
+  sessionCodec as commandCodeSessionCodec,
+  listCommandCodeModels,
+} from "@paperclipai/adapter-commandcode-local/server";
+import {
+  agentConfigurationDoc as commandCodeAgentConfigurationDoc,
+} from "@paperclipai/adapter-commandcode-local";
+import {
   testEnvironment as hermesTestEnvironment,
   sessionCodec as hermesSessionCodec,
 } from "hermes-paperclip-adapter/server";
@@ -195,6 +204,17 @@ const piLocalAdapter: ServerAdapterModule = {
   supportsLocalAgentJwt: true,
   agentConfigurationDoc: piAgentConfigurationDoc,
 };
+const commandCodeLocalAdapter: ServerAdapterModule = {
+  type: "commandcode_local",
+  execute: commandCodeExecute,
+  testEnvironment: commandCodeTestEnvironment,
+  sessionCodec: commandCodeSessionCodec,
+  sessionManagement: getAdapterSessionManagement("commandcode_local") ?? undefined,
+  models: [],
+  listModels: listCommandCodeModels,
+  supportsLocalAgentJwt: true,
+  agentConfigurationDoc: commandCodeAgentConfigurationDoc,
+};
 
 const hermesLocalAdapter: ServerAdapterModule = {
   type: "hermes_local",
@@ -217,6 +237,7 @@ const adaptersByType = new Map<string, ServerAdapterModule>(
     antigravityLocalAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,
+    commandCodeLocalAdapter,
     cursorLocalAdapter,
     geminiLocalAdapter,
     openclawGatewayAdapter,

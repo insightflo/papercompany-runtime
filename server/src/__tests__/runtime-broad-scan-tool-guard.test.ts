@@ -545,4 +545,70 @@ done'`,
 
     expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
   });
+  it("blocks a repo-wide discovery command in a commandcode nested tool_queued shell_command event", () => {
+    const line = JSON.stringify({
+      type: "event",
+      event: { type: "tool_queued", toolCallId: "tu-1", toolName: "shell_command", input: { command: "find . -type f" } },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "commandcode_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          taskKey: null,
+          issueId: null,
+          projectId: null,
+          allowedContextKeys: [],
+          guardrails: { broadScanAllowed: false },
+          inputs: {
+            workspace: { available: true, source: "agent_home", workspaceId: null, projectId: null },
+            workspaceHints: { available: false, count: 0 },
+            runtimeServiceIntents: { available: false, count: 0 },
+            runtimeServices: { available: false, count: 0, primaryUrl: null },
+            fileViews: { available: false, count: 0, source: null },
+            sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
+          },
+        },
+      },
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.matchedCommand).toBe("find .");
+  });
+
+  it("does not extract a command from a commandcode non-shell tool_queued event", () => {
+    const line = JSON.stringify({
+      type: "event",
+      event: { type: "tool_queued", toolCallId: "tu-2", toolName: "read_file", input: { file_path: "/tmp/x" } },
+    });
+
+    const result = evaluateRuntimeBroadScanToolGuard({
+      adapterType: "commandcode_local",
+      line,
+      ts: new Date().toISOString(),
+      context: {
+        paperclipStepInputManifest: {
+          version: 1,
+          taskKey: null,
+          issueId: null,
+          projectId: null,
+          allowedContextKeys: [],
+          guardrails: { broadScanAllowed: false },
+          inputs: {
+            workspace: { available: true, source: "agent_home", workspaceId: null, projectId: null },
+            workspaceHints: { available: false, count: 0 },
+            runtimeServiceIntents: { available: false, count: 0 },
+            runtimeServices: { available: false, count: 0, primaryUrl: null },
+            fileViews: { available: false, count: 0, source: null },
+            sessionHandoff: { available: false, previousSessionId: null, rotationReason: null },
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({ blocked: false, matchedCommand: null, reason: null });
+  });
 });

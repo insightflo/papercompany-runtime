@@ -16,6 +16,7 @@ COPY packages/adapter-utils/package.json packages/adapter-utils/
 COPY packages/adapters/antigravity-local/package.json packages/adapters/antigravity-local/
 COPY packages/adapters/claude-local/package.json packages/adapters/claude-local/
 COPY packages/adapters/codex-local/package.json packages/adapters/codex-local/
+COPY packages/adapters/commandcode-local/package.json packages/adapters/commandcode-local/
 COPY packages/adapters/cursor-local/package.json packages/adapters/cursor-local/
 COPY packages/adapters/gemini-local/package.json packages/adapters/gemini-local/
 COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/

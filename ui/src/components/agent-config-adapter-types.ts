@@ -4,6 +4,7 @@ const ENABLED_ADAPTER_TYPES = new Set([
   "antigravity_local",
   "gemini_local",
   "opencode_local",
+  "commandcode_local",
   "hermes_local",
   "cursor",
 ]);

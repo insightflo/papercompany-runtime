@@ -37,6 +37,7 @@ const SUPPORTED_ADVANCED_ADAPTER_TYPES = new Set<CreateConfigValues["adapterType
   "opencode_local",
   "hermes_local",
   "cursor",
+  "commandcode_local",
   "openclaw_gateway",
 ]);
 
@@ -56,6 +57,8 @@ function createValuesForAdapterType(
   } else if (adapterType === "cursor") {
     nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
   } else if (adapterType === "opencode_local") {
+    nextValues.model = "";
+  } else if (adapterType === "commandcode_local") {
     nextValues.model = "";
   }
   return nextValues;

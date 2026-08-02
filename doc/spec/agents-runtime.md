@@ -36,10 +36,11 @@ Common choices:
 
 - `claude_local`: runs your local `claude` CLI
 - `codex_local`: runs your local `codex` CLI
+- `commandcode_local`: runs your local Command Code (`cmd`) CLI
 - `process`: generic shell command adapter
 - `http`: calls an external HTTP endpoint
 
-For `claude_local` and `codex_local`, papercompany assumes the CLI is already installed and authenticated on the host machine.
+For `claude_local`, `codex_local`, and `commandcode_local`, papercompany assumes the CLI is already installed and authenticated on the host machine.
 
 ## 3.2 Runtime behavior
 

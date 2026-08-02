@@ -54,6 +54,16 @@ export function extractRuntimeCommand(adapterType: string, line: string) {
     if (toolName !== "bash" && toolName !== "shell") return null;
     return asString(parseObject(parsed.args)?.command, "") || null;
   }
+  if (adapterType === "commandcode_local") {
+    // Outer frame {"type":"event","event":{...}}; the command lives in a nested
+    // tool_queued AgentEvent whose toolName is shell_command (real CLI name).
+    if (asString(parsed.type, "") !== "event") return null;
+    const event = parseObject(parsed.event);
+    if (!event || asString(event.type, "") !== "tool_queued") return null;
+    const toolName = asString(event.toolName, "");
+    if (toolName !== "shell_command" && toolName !== "bash" && toolName !== "shell") return null;
+    return asString(parseObject(event.input)?.command, "") || null;
+  }
 
   return null;
 }

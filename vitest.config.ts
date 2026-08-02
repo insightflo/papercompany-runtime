@@ -10,6 +10,7 @@ export default defineConfig({
       "packages/adapters/opencode-local",
       "packages/adapters/antigravity-local",
       "packages/adapters/pi-local",
+      "packages/adapters/commandcode-local",
       "server",
       "ui",
       "cli",
