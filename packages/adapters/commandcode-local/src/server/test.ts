@@ -178,7 +178,7 @@ export async function testEnvironment(
 
       if (probe.timedOut) {
         checks.push({ code: "commandcode_hello_probe_timed_out", level: "warn", message: "Command Code hello probe timed out." });
-      } else if ((probe.exitCode ?? 1) === 0 && parsed.errors.length === 0) {
+      } else if ((probe.exitCode ?? 1) === 0 && parsed.subtype === "success" && parsed.errors.length === 0) {
         const summary = (parsed.finalMessage || parsed.messages.join(" ")).trim();
         const hasHello = /\bhello\b/i.test(summary);
         checks.push({
