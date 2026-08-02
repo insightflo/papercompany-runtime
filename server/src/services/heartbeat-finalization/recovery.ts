@@ -5,27 +5,25 @@ import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import { ensureFinalization, recordStage } from "./finalization-state.js";
 import { observeQuiescenceProof } from "./quiescence-probe.js";
 import { settleRunIfReady } from "./settlement.js";
+import { syncWorkflowAfterHeartbeatSettlement } from "./post-execution.js";
 import { STAGE_CLASS, Q_STAGE } from "./stage-classifier.js";
-
-type RecoveryDb = Pick<Db, "select" | "update" | "insert">;
 
 const DEFAULT_GRACE_MS = 5 * 60 * 1000;
 const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"];
 
 /**
- * Phase 2 recovery (plan section 5, M1/N3): replays settlement for v1 runs that
+ * Phase 3 recovery (plan section 5, M1/N3): replays settlement for v1 runs that
  * reached terminal status but were not settled (crash window between setRunStatus
  * and settlement). After a fixed grace, re-attempts the full settlement pipeline:
  * ensureFinalization -> observe quiescence -> record Q stages if proven -> settle.
  *
- * SHADOW-ONLY (flag-gated): with the flag OFF, this is a no-op. With the flag ON,
- * it attempts settlement for unsettled v1 runs but does not change any reader or
- * enforcement behavior (settled_at is still unread until Phase 3).
+ * FLAG-GATED: with the flag OFF, this is a no-op. With the flag ON, a recovered
+ * settlement makes the run lifecycle-inactive and its linked workflow step dispatch-ready.
  *
  * Returns the number of runs processed.
  */
 export async function recoverTerminalUnsettledRuns(
-  db: RecoveryDb,
+  db: Db,
   now: Date = new Date(),
   graceMs: number = DEFAULT_GRACE_MS,
 ): Promise<number> {
@@ -74,7 +72,10 @@ export async function recoverTerminalUnsettledRuns(
         }
       }
 
-      await settleRunIfReady(db, run, now);
+      const settlement = await settleRunIfReady(db, run, now);
+      if (settlement === "settled") {
+        await syncWorkflowAfterHeartbeatSettlement(db, run);
+      }
       processed += 1;
     } catch {
       // Recovery is best-effort; individual failures are retried on the next tick.

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentWakeupRequests,
@@ -17,6 +17,27 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+vi.mock("../adapters/index.js", () => ({
+  getServerAdapter: vi.fn(() => ({
+    supportsLocalAgentJwt: false,
+    execute: vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      usage: null,
+      provider: "test",
+      model: "test-model",
+      resultJson: null,
+      runtimeServices: [],
+    })),
+  })),
+  runningProcesses: new Map(),
+}));
+
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
+import { heartbeatService } from "../services/heartbeat.js";
 import { syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 import { readWorkflowRetryMetadata } from "../services/workflow/retry-policy.js";
 
@@ -38,8 +59,15 @@ describeEP("workflow step retry recovery guard", () => {
 
 
   afterAll(async () => {
+    const heartbeat = heartbeatService(db);
+    const testAgents = await db.select({ id: agents.id }).from(agents).where(eq(agents.companyId, companyId));
+    for (const agent of testAgents) {
+      await heartbeat.cancelActiveForAgent(agent.id);
+    }
+    await waitForHeartbeatExecutionsToDrain(db);
+    await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
-  });
+  }, 60_000);
 
   it("keeps dispatching retry metadata while a live deferred wake exists, then allows one retry after it settles", async () => {
     const workerAgentId = randomUUID();
