@@ -159,6 +159,10 @@ export const agentsApi = {
     api.get<AdapterModel[]>(
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/models`,
     ),
+  adapterModelEfforts: (companyId: string, type: string, model: string) =>
+    api.get<string[]>(
+      `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/model-efforts?model=${encodeURIComponent(model)}`,
+    ),
   testEnvironment: (
     companyId: string,
     type: string,

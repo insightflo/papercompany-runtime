@@ -32,10 +32,12 @@ describe("parseCommandCodeModelsOutput", () => {
     ]);
   });
 
-  it("uses the description as the label and falls back to the id", () => {
+  it("uses the model id as the label (not the prose description)", () => {
     const models = parseCommandCodeModelsOutput(SAMPLE_MODELS_OUTPUT);
     const kimi = models.find((m) => m.id === "moonshotai/kimi-k2.5");
-    expect(kimi?.label).toBe("multimodal frontend coding");
+    expect(kimi?.label).toBe("moonshotai/kimi-k2.5");
+    const deepseek = models.find((m) => m.id === "deepseek/deepseek-v4-pro");
+    expect(deepseek?.label).toBe("deepseek/deepseek-v4-pro");
     const noDesc = parseCommandCodeModelsOutput("foo/bar\n");
     expect(noDesc[0]?.label).toBe("foo/bar");
   });

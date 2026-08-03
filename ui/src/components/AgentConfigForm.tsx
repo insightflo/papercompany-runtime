@@ -56,6 +56,8 @@ import { OpenCodeLogoIcon } from "./OpenCodeLogoIcon";
 import { ReportsToPicker } from "./ReportsToPicker";
 import { shouldShowLegacyWorkingDirectoryField } from "../lib/legacy-agent-config";
 import { isAdapterTypeEnabled } from "./agent-config-adapter-types";
+import { useAdapterModelEfforts } from "../hooks/useAdapterModelEfforts";
+import { buildCommandCodeEffortOptions, shouldResetCommandCodeEffort } from "../lib/commandcode-efforts";
 
 /* ---- Create mode values ---- */
 
@@ -509,6 +511,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     mark("adapterConfig", "fallback", Object.keys(next).length > 0 ? next : undefined);
   }
 
+  const { data: commandCodeEfforts, isSuccess: commandCodeEffortsLoaded } = useAdapterModelEfforts(
+    selectedCompanyId,
+    adapterType,
+    currentModelId,
+  );
   const thinkingEffortKey =
     adapterType === "codex_local"
       ? "modelReasoningEffort"
@@ -518,13 +525,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           ? "variant"
           : "effort";
   const thinkingEffortOptions =
-    adapterType === "codex_local"
-      ? codexThinkingEffortOptions
-      : adapterType === "cursor"
-        ? cursorModeOptions
-        : adapterType === "opencode_local"
-          ? openCodeThinkingEffortOptions
-          : claudeThinkingEffortOptions;
+    adapterType === "commandcode_local"
+      ? buildCommandCodeEffortOptions(commandCodeEfforts ?? [])
+      : adapterType === "codex_local"
+        ? codexThinkingEffortOptions
+        : adapterType === "cursor"
+          ? cursorModeOptions
+          : adapterType === "opencode_local"
+            ? openCodeThinkingEffortOptions
+            : claudeThinkingEffortOptions;
   const currentThinkingEffort = isCreate
     ? val!.thinkingEffort
     : adapterType === "codex_local"
@@ -539,6 +548,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         ? eff("adapterConfig", "variant", String(config.variant ?? ""))
       : eff("adapterConfig", "effort", String(config.effort ?? ""));
   const showThinkingEffort = adapterType !== "gemini_local";
+  // When the Command Code model changes, a previously-selected effort may no
+  // longer be supported by the new model. Reset to Auto ONLY after the effort
+  // list has been successfully loaded — never while loading, to avoid clearing
+  // a valid selection before the query resolves.
+  useEffect(() => {
+    if (adapterType !== "commandcode_local") return;
+    if (!shouldResetCommandCodeEffort(currentThinkingEffort, commandCodeEfforts, commandCodeEffortsLoaded)) return;
+    if (isCreate) {
+      set!({ thinkingEffort: "" });
+    } else {
+      mark("adapterConfig", "effort", undefined);
+    }
+  }, [adapterType, currentThinkingEffort, commandCodeEfforts, commandCodeEffortsLoaded, isCreate]);
   const codexSearchEnabled = adapterType === "codex_local"
     ? (isCreate ? Boolean(val!.search) : eff("adapterConfig", "search", Boolean(config.search)))
     : false;

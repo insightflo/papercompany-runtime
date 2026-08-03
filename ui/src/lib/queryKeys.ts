@@ -39,6 +39,8 @@ export const queryKeys = {
     configRevisions: (agentId: string) => ["agents", "config-revisions", agentId] as const,
     adapterModels: (companyId: string, adapterType: string) =>
       ["agents", companyId, "adapter-models", adapterType] as const,
+    adapterModelEfforts: (companyId: string, adapterType: string, model: string) =>
+      ["agents", companyId, "adapter-model-efforts", adapterType, model] as const,
   },
   issues: {
     list: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>

@@ -10,7 +10,7 @@ const MODELS_CACHE_TTL_MS = 60_000;
  */
 const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/;
 
-function firstNonEmptyLine(text: string): string {
+export function firstNonEmptyLine(text: string): string {
   return (
     text
       .split(/\r?\n/)
@@ -25,23 +25,22 @@ export function parseCommandCodeModelsOutput(stdout: string): AdapterModel[] {
     const line = rawLine.trim();
     if (!line) continue;
     // Command Code separates the model id from its description with 2+ spaces.
+    // The description prose (e.g. "hybrid-attention long-context reasoning") is
+    // NOT used as the label — the model id itself is the display name, so the UI
+    // shows exactly what `cmd --model` accepts.
     const parts = line.split(/\s{2,}/);
     let id: string;
-    let label: string;
     if (parts.length >= 2) {
       id = parts[0].trim();
-      label = parts.slice(1).join(" ").trim() || id;
     } else if (/[/-]|\d/.test(line)) {
-      // Defensive: a bare model id with no description column. Real output always
-      // includes descriptions, so this only matters for atypical listings. The
-      // digit/slash/hyphen requirement rejects provider section headers.
+      // Defensive: a bare model id with no description column. The digit/slash/
+      // hyphen requirement rejects provider section headers like "Anthropic".
       id = line;
-      label = line;
     } else {
       continue;
     }
     if (!MODEL_ID_RE.test(id)) continue;
-    parsed.push({ id, label });
+    parsed.push({ id, label: id });
   }
   return parsed;
 }
@@ -84,7 +83,7 @@ function hashValue(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function discoveryCacheKey(command: string, cwd: string, env: Record<string, string>) {
+export function discoveryCacheKey(command: string, cwd: string, env: Record<string, string>) {
   const envKey = Object.entries(env)
     .filter(([key]) => !isVolatileEnvKey(key))
     .sort(([a], [b]) => a.localeCompare(b))
@@ -99,7 +98,7 @@ function pruneExpiredDiscoveryCache(now: number) {
   }
 }
 
-function normalizeEnv(input: unknown): Record<string, string> {
+export function normalizeEnv(input: unknown): Record<string, string> {
   const envInput =
     typeof input === "object" && input !== null && !Array.isArray(input)
       ? (input as Record<string, unknown>)

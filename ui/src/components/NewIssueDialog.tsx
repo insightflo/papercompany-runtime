@@ -52,6 +52,8 @@ import { issueStatusText, issueStatusTextDefault, priorityColor, priorityColorDe
 import { MarkdownEditor, type MarkdownEditorRef, type MentionOption } from "./MarkdownEditor";
 import { AgentIcon } from "./AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
+import { useAdapterModelEfforts } from "../hooks/useAdapterModelEfforts";
+import { buildCommandCodeEffortOptions, shouldResetCommandCodeEffort } from "../lib/commandcode-efforts";
 
 const DRAFT_KEY = "paperclip:issue-draft";
 const DEBOUNCE_MS = 800;
@@ -91,7 +93,7 @@ type StagedIssueFile = {
   title?: string | null;
 };
 
-const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local"]);
+const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local", "commandcode_local"]);
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 
 const ISSUE_THINKING_EFFORT_OPTIONS = {
@@ -136,10 +138,8 @@ function buildAssigneeAdapterOverrides(input: {
       adapterConfig.modelReasoningEffort = input.thinkingEffortOverride;
     } else if (adapterType === "opencode_local") {
       adapterConfig.variant = input.thinkingEffortOverride;
-    } else if (adapterType === "claude_local") {
+    } else if (adapterType === "claude_local" || adapterType === "commandcode_local") {
       adapterConfig.effort = input.thinkingEffortOverride;
-    } else if (adapterType === "opencode_local") {
-      adapterConfig.variant = input.thinkingEffortOverride;
     }
   }
   if (adapterType === "claude_local" && input.chrome) {
@@ -398,6 +398,12 @@ export function NewIssueDialog() {
     queryFn: () => agentsApi.adapterModels(effectiveCompanyId!, assigneeAdapterType!),
     enabled: Boolean(effectiveCompanyId) && newIssueOpen && supportsAssigneeOverrides,
   });
+  const { data: assigneeCommandCodeEfforts, isSuccess: assigneeCommandCodeEffortsLoaded } =
+    useAdapterModelEfforts(
+      effectiveCompanyId,
+      assigneeAdapterType,
+      assigneeModelOverride,
+    );
 
   const createIssue = useMutation({
     mutationFn: async ({
@@ -576,6 +582,24 @@ export function NewIssueDialog() {
       return;
     }
 
+    // Command Code effort levels are dynamic per-model. Only reset after the
+    // effort list has been successfully loaded AND a model override is selected
+    // (the query is disabled when no model is chosen, so a stale draft effort
+    // is preserved until the user picks a model).
+    if (assigneeAdapterType === "commandcode_local") {
+      if (
+        assigneeModelOverride &&
+        shouldResetCommandCodeEffort(
+          assigneeThinkingEffort,
+          assigneeCommandCodeEfforts,
+          assigneeCommandCodeEffortsLoaded,
+        )
+      ) {
+        setAssigneeThinkingEffort("");
+      }
+      return;
+    }
+
     const validThinkingValues =
       assigneeAdapterType === "codex_local"
         ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
@@ -585,7 +609,7 @@ export function NewIssueDialog() {
     if (!validThinkingValues.some((option) => option.value === assigneeThinkingEffort)) {
       setAssigneeThinkingEffort("");
     }
-  }, [supportsAssigneeOverrides, assigneeAdapterType, assigneeThinkingEffort]);
+  }, [supportsAssigneeOverrides, assigneeAdapterType, assigneeThinkingEffort, assigneeCommandCodeEfforts, assigneeCommandCodeEffortsLoaded, assigneeModelOverride]);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -784,13 +808,20 @@ export function NewIssueDialog() {
         ? "Codex options"
         : assigneeAdapterType === "opencode_local"
           ? "OpenCode options"
-        : "Agent options";
+          : assigneeAdapterType === "commandcode_local"
+            ? "Command Code options"
+          : "Agent options";
   const thinkingEffortOptions =
-    assigneeAdapterType === "codex_local"
-      ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
-      : assigneeAdapterType === "opencode_local"
-        ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
-      : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
+    assigneeAdapterType === "commandcode_local"
+      ? buildCommandCodeEffortOptions(assigneeCommandCodeEfforts ?? []).map((o) => ({
+          value: o.id,
+          label: o.label,
+        }))
+      : assigneeAdapterType === "codex_local"
+        ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
+        : assigneeAdapterType === "opencode_local"
+          ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
+        : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
   const assigneeOptions = useMemo<InlineEntityOption[]>(
     () => [
