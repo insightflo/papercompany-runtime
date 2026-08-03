@@ -15,6 +15,8 @@ import {
   companySkills,
   createDb,
   heartbeatRunEvents,
+  heartbeatRunFinalizations,
+  heartbeatRunFinalizationSteps,
   heartbeatRuns,
   instanceSettings,
   issueComments,
@@ -76,6 +78,8 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     await db.delete(workflowTransitionEvents);
     await db.delete(activityLog);
     await db.update(issues).set({ checkoutRunId: null, executionRunId: null });
+    await db.delete(heartbeatRunFinalizationSteps);
+    await db.delete(heartbeatRunFinalizations);
     await db.delete(heartbeatRuns);
     // Straggler run events can appear while runs are torn down.
     await db.delete(heartbeatRunEvents);
