@@ -1316,6 +1316,14 @@ async function syncStepRunsFromIssueState(
     } else if (desiredStatus === "completed") {
       patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
       patch.completedAt = issue.completedAt ?? now;
+      // When finalization v1 is active, issue-backed steps also need
+      // dispatch_ready_at set so downstream edge-condition evaluation admits
+      // successors. Heartbeat-linked steps get this via settlement.ts, but
+      // steps that complete via issue status sync (e.g. workflow_agent_api)
+      // bypass settlement entirely.
+      if (!stepRun.dispatchReadyAt) {
+        patch.dispatchReadyAt = now;
+      }
       const cleanedRetryMetadata = stripRetryTrackingOnSuccess(stepRun.metadata);
       if (cleanedRetryMetadata) {
         patch.metadata = cleanedRetryMetadata;
