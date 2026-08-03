@@ -9,6 +9,9 @@ import {
   heartbeatRuns,
   instanceSettings,
   issues,
+  workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -205,6 +208,42 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
       5 * 60 * 1000,
     );
     expect(processed).toBeGreaterThan(0);
+
+    const [recovered] = await db
+      .select({ settledAt: heartbeatRuns.settledAt })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, run.id));
+    expect(recovered?.settledAt).not.toBeNull();
+  });
+
+  it("recovers an old CommandCode permission failure that still occupies capacity", async () => {
+    const finishedAt = new Date("2026-03-19T00:00:00.000Z");
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const workflowStepRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: workflowId, companyId, name: "Recovery workflow", stepsJson: [{ id: "step" }],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId, companyId, workflowId, status: "running", triggeredBy: "test",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: workflowStepRunId, workflowRunId, stepId: "step", status: "completed", metadata: {},
+    });
+    const run = await seedRun(db, companyId, agentId, {
+      status: "failed",
+      errorCode: "commandcode_permission_denied",
+      terminalOutcome: "failed",
+      terminalDecisionSource: "heartbeat_status:failed:commandcode_permission_denied",
+      executionScopeKind: "workflow_step",
+      workflowStepRunId,
+      workflowExecutionGeneration: 0,
+      finishedAt,
+      updatedAt: finishedAt,
+      settledAt: null,
+    });
+
+    await recoverTerminalUnsettledRuns(db, new Date("2026-03-19T00:10:00.000Z"), 5 * 60 * 1000);
 
     const [recovered] = await db
       .select({ settledAt: heartbeatRuns.settledAt })
