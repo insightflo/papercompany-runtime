@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
@@ -17,6 +18,7 @@ import { ensureFinalization, recordStage } from "../services/heartbeat-finalizat
 import { observeQuiescenceProof } from "../services/heartbeat-finalization/quiescence-probe.js";
 import { settleRunIfReady } from "../services/heartbeat-finalization/settlement.js";
 import { STAGE_CLASS, Q_STAGE, C_STAGE } from "../services/heartbeat-finalization/stage-classifier.js";
+import { heartbeatService } from "../services/heartbeat.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -136,5 +138,51 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
     const proof2 = await observeQuiescenceProof(db, reloaded);
     expect(proof2).not.toBeNull();
     expect(proof2!.checks[Q_STAGE.executorQuiescence]).toBe(true);
+  });
+
+  it("settles a stale queued v1 run so it no longer occupies agent capacity", async () => {
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const staleAt = new Date("2026-03-19T00:00:00.000Z");
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: {},
+      status: "queued",
+      runId,
+      requestedAt: staleAt,
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId,
+      executionScopeKind: "legacy",
+      finalizationVersion: 1,
+      executionEpoch: 0,
+      executionToken: randomUUID(),
+      executorOwnerId: "default",
+      executorOwnerLeaseEpoch: 1,
+      executorOwnerLeaseToken: randomUUID(),
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    } as never);
+
+    const result = await heartbeatService(db).reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).toContain(runId);
+
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("stale_queued");
+    expect(run?.settledAt).not.toBeNull();
   });
 });

@@ -4950,8 +4950,19 @@ export function heartbeatService(db: Db) {
             payload: { queuedStaleThresholdMs },
           });
           await releaseIssueExecutionAndPromote(failedRun);
+
+          // A stale queued run never enters executeRun, so its normal finally block
+          // cannot settle finalization v1. Re-read after the terminal hook releases
+          // ownership, then settle here so it does not occupy the agent slot forever.
+          const terminalRun = await getRun(failedRun.id);
+          if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
+            await settleHeartbeatAfterExecution(db, terminalRun, now).catch((settlementErr) => {
+              logger.warn({ err: settlementErr, runId: terminalRun.id }, "failed to settle stale queued heartbeat");
+            });
+          }
         }
         await finalizeAgentStatus(run.agentId, "failed");
+        await startNextQueuedRunForAgent(run.agentId);
         reaped.push(run.id);
       }
     }
