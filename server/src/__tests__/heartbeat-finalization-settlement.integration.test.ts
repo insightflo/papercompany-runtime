@@ -9,6 +9,8 @@ import {
   heartbeatRuns,
   instanceSettings,
   issues,
+  missionAgentRuntimes,
+  missions,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -221,11 +223,15 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
     const workflowId = randomUUID();
     const workflowRunId = randomUUID();
     const workflowStepRunId = randomUUID();
+    const missionId = randomUUID();
+    await db.insert(missions).values({
+      id: missionId, companyId, ownerAgentId: agentId, title: "Permission recovery mission", status: "active",
+    });
     await db.insert(workflowDefinitions).values({
       id: workflowId, companyId, name: "Recovery workflow", stepsJson: [{ id: "step" }],
     });
     await db.insert(workflowRuns).values({
-      id: workflowRunId, companyId, workflowId, status: "running", triggeredBy: "test",
+      id: workflowRunId, companyId, workflowId, missionId, status: "running", triggeredBy: "test",
     });
     await db.insert(workflowStepRuns).values({
       id: workflowStepRunId, workflowRunId, stepId: "step", status: "completed", metadata: {},
@@ -241,6 +247,16 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
       finishedAt,
       updatedAt: finishedAt,
       settledAt: null,
+    });
+    await db.insert(missionAgentRuntimes).values({
+      companyId,
+      missionId,
+      agentId,
+      adapterType: "codex_local",
+      runtimeKey: `test:${missionId}:${agentId}`,
+      status: "crashed",
+      lastRunId: run.id,
+      stoppedAt: null,
     });
 
     await recoverTerminalUnsettledRuns(db, new Date("2026-03-19T00:10:00.000Z"), 5 * 60 * 1000);
