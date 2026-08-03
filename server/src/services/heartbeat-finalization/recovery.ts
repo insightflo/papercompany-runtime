@@ -54,9 +54,9 @@ export async function recoverTerminalUnsettledRuns(
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, candidate.id));
       if (!run || run.finalizationVersion !== 1 || run.settledAt) continue;
 
-      // The stale-queued reaper already completed issue/workflow promotion before
-      // terminalizing the run. Older runs missed only the full settlement call.
-      if (run.errorCode === "stale_queued") {
+      // These failure paths complete issue/workflow promotion before terminalizing
+      // the run. Older runs missed only the full settlement call.
+      if (run.errorCode === "stale_queued" || run.errorCode === "commandcode_permission_denied") {
         const settlement = await attemptFullSettlement(db, run, now);
         if (settlement === "settled") {
           await syncWorkflowAfterHeartbeatSettlement(db, run);
