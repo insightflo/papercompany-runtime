@@ -44,7 +44,8 @@ import {
 } from "../services/index.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
-import { findServerAdapter, listAdapterModels } from "../adapters/index.js";
+import { findServerAdapter, listAdapterModels, listAdapterModelEfforts } from "../adapters/index.js";
+import { logger } from "../middleware/logger.js";
 import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
@@ -662,6 +663,28 @@ export function agentRoutes(db: Db) {
     const type = req.params.type as string;
     const models = await listAdapterModels(type);
     res.json(models);
+  });
+
+  router.get("/companies/:companyId/adapters/:type/model-efforts", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const type = req.params.type as string;
+    const model = typeof req.query.model === "string" ? req.query.model.trim() : "";
+    if (!model) {
+      res.status(400).json({ error: "Missing required query parameter: model" });
+      return;
+    }
+    try {
+      const efforts = await listAdapterModelEfforts(type, model);
+      res.json(efforts);
+    } catch (err) {
+      // Discovery failure (missing cmd, auth error, format change) — surface as
+      // 502 so the UI query enters an error state and preserves any existing
+      // effort selection rather than treating it as "no efforts supported".
+      const message = err instanceof Error ? err.message : "Model effort discovery failed.";
+      logger.warn({ companyId, type, model, err: message }, "adapter model-efforts discovery failed");
+      res.status(502).json({ error: message });
+    }
   });
 
   router.post(

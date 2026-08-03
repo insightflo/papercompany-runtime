@@ -81,6 +81,7 @@ import {
   testEnvironment as commandCodeTestEnvironment,
   sessionCodec as commandCodeSessionCodec,
   listCommandCodeModels,
+  discoverCommandCodeModelEffortsCached,
 } from "@paperclipai/adapter-commandcode-local/server";
 import {
   agentConfigurationDoc as commandCodeAgentConfigurationDoc,
@@ -212,6 +213,7 @@ const commandCodeLocalAdapter: ServerAdapterModule = {
   sessionManagement: getAdapterSessionManagement("commandcode_local") ?? undefined,
   models: [],
   listModels: listCommandCodeModels,
+  listModelEfforts: discoverCommandCodeModelEffortsCached,
   supportsLocalAgentJwt: true,
   agentConfigurationDoc: commandCodeAgentConfigurationDoc,
 };
@@ -264,6 +266,12 @@ export async function listAdapterModels(type: string): Promise<{ id: string; lab
     if (discovered.length > 0) return discovered;
   }
   return adapter.models ?? [];
+}
+
+export async function listAdapterModelEfforts(type: string, modelId: string): Promise<string[]> {
+  const adapter = adaptersByType.get(type);
+  if (!adapter?.listModelEfforts) return [];
+  return adapter.listModelEfforts(modelId);
 }
 
 export function listServerAdapters(): ServerAdapterModule[] {

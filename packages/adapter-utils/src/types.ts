@@ -282,6 +282,12 @@ export interface ServerAdapterModule {
   supportsLocalAgentJwt?: boolean;
   models?: AdapterModel[];
   listModels?: () => Promise<AdapterModel[]>;
+  /**
+   * Optional: discover the reasoning-effort levels a specific model supports
+   * (e.g. ["low","medium","high","max"]). Adapters that cannot determine this
+   * per-model may omit it; callers fall back to their own static list.
+   */
+  listModelEfforts?: (modelId: string) => Promise<string[]>;
   agentConfigurationDoc?: string;
   /**
    * Optional lifecycle hook when an agent is approved/hired (join-request or hire_agent approval).

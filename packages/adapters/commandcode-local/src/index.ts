@@ -4,7 +4,7 @@ export const label = "Command Code (local)";
 export const models: Array<{ id: string; label: string }> = [];
 
 /**
- * Command Code v1.7.0 exposes a wide model catalog via `cmd --list-models`, so
+ * Command Code exposes a wide model catalog via `cmd --list-models`, so
  * no static model list is shipped here. The server registry discovers models at
  * runtime through `discoverCommandCodeModels`. This default is only a fallback
  * suggestion for operators who have not selected a model yet.
@@ -17,7 +17,7 @@ export const agentConfigurationDoc = `# commandcode_local agent configuration
 
 Adapter: commandcode_local
 
-Runs Command Code (\`cmd\` v1.7.0) locally as the agent runtime.
+Runs Command Code (\`cmd\`) locally as the agent runtime.
 
 Use when:
 - You want Paperclip to run the Command Code CLI headlessly on this machine
@@ -35,7 +35,7 @@ Core fields:
 - instructionsFilePath (string, optional): markdown instructions file resolved from the effective cwd and injected into the run prompt
 - promptTemplate (string, optional): user prompt template sent via -p
 - model (string, optional): passed to --model; an id from \`cmd --list-models\` (e.g. moonshotai/kimi-k2.5)
-- effort (string, optional): reasoning effort passed to --effort (low, medium, high)
+- effort (string, optional): reasoning effort passed to --effort; valid levels are model-specific (e.g. low, medium, high, xhigh, max). Omit to let the model use its own default.
 - maxTurns (number, optional): passes --max-turns when > 0; unset by default
 - env (object, optional): KEY=VALUE environment variables
 - extraArgs (string[], optional): extra CLI flags inserted before -p (reserved output/automation/model/max-turns/resume/session flags are dropped to protect enforced behavior)

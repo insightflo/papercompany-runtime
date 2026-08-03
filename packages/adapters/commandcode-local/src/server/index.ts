@@ -48,3 +48,11 @@ export {
   parseCommandCodeModelsOutput,
   resetCommandCodeModelsCacheForTests,
 } from "./models.js";
+export {
+  listCommandCodeModelEfforts,
+  discoverCommandCodeModelEfforts,
+  discoverCommandCodeModelEffortsCached,
+  parseCommandCodeEffortsProbe,
+  isRecognizedEffortProbeOutput,
+  resetCommandCodeEffortsCacheForTests,
+} from "./efforts.js";
