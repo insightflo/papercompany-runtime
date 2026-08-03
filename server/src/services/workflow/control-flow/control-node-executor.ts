@@ -120,6 +120,7 @@ export async function executeWorkflowControlNode(input: {
       .set({
         status: "completed",
         completedAt,
+        dispatchReadyAt: completedAt,
         lastDispatchErrorAt: null,
         lastDispatchErrorSummary: null,
         metadata,

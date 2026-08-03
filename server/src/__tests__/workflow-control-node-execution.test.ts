@@ -16,6 +16,7 @@ import {
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
+  instanceSettings,
   issueComments,
   issueWorkProducts,
   issues,
@@ -58,6 +59,11 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-control-node-");
     db = createDb(tempDb.connectionString);
     artifactRoot = await mkdtemp(path.join(tmpdir(), "paperclip-control-node-artifacts-"));
+    await db.insert(instanceSettings).values({
+      singletonKey: "default",
+      general: {},
+      experimental: { enableHeartbeatFinalizationV1: true },
+    } as never);
   }, 60_000);
 
   afterEach(async () => {
@@ -197,6 +203,7 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     const completeRun = seeded.stepRuns.find((row) => row.stepId === "complete-empty")!;
 
     expect(ifRun).toMatchObject({ status: "completed", issueId: null });
+    expect(ifRun.dispatchReadyAt).not.toBeNull();
     expect(ifRun.metadata).toMatchObject({ controlNodeResult: { nodeType: "if", outcome: "condition_true" } });
     // Selected branch is issued and launched (running) on the true edge; false Complete stays skipped.
     expect(selectedRun).toMatchObject({ status: "running" });
@@ -214,9 +221,11 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     const seeded = await seedRun("empty");
     const byStep = new Map(seeded.stepRuns.map((row) => [row.stepId, row]));
     expect(byStep.get("if-decision")).toMatchObject({ status: "completed", issueId: null });
+    expect(byStep.get("if-decision")?.dispatchReadyAt).not.toBeNull();
     expect(byStep.get("if-decision")?.metadata).toMatchObject({ controlNodeResult: { outcome: "condition_false" } });
     expect(byStep.get("selected-work")).toMatchObject({ status: "skipped", issueId: null });
     expect(byStep.get("complete-empty")).toMatchObject({ status: "completed", issueId: null });
+    expect(byStep.get("complete-empty")?.dispatchReadyAt).not.toBeNull();
     expect(byStep.get("complete-empty")?.metadata).toMatchObject({ controlNodeResult: { nodeType: "complete", outcome: "completed", reason: "No processing target" } });
     expect(seeded.result?.status).toBe("completed");
     const controlRunIds = [byStep.get("if-decision")!.id, byStep.get("complete-empty")!.id];
