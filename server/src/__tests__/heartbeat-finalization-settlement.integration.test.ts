@@ -19,6 +19,7 @@ import { observeQuiescenceProof } from "../services/heartbeat-finalization/quies
 import { settleRunIfReady } from "../services/heartbeat-finalization/settlement.js";
 import { STAGE_CLASS, Q_STAGE, C_STAGE } from "../services/heartbeat-finalization/stage-classifier.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { recoverTerminalUnsettledRuns } from "../services/heartbeat-finalization/recovery.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -184,5 +185,31 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
     expect(run?.status).toBe("failed");
     expect(run?.errorCode).toBe("stale_queued");
     expect(run?.settledAt).not.toBeNull();
+  });
+
+  it("recovers stale queued v1 runs that became terminal before the fix", async () => {
+    const finishedAt = new Date("2026-03-19T00:00:00.000Z");
+    const run = await seedRun(db, companyId, agentId, {
+      status: "failed",
+      errorCode: "stale_queued",
+      terminalOutcome: "failed",
+      terminalDecisionSource: "heartbeat_terminal:failed",
+      finishedAt,
+      updatedAt: finishedAt,
+      settledAt: null,
+    });
+
+    const processed = await recoverTerminalUnsettledRuns(
+      db,
+      new Date("2026-03-19T00:10:00.000Z"),
+      5 * 60 * 1000,
+    );
+    expect(processed).toBeGreaterThan(0);
+
+    const [recovered] = await db
+      .select({ settledAt: heartbeatRuns.settledAt })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, run.id));
+    expect(recovered?.settledAt).not.toBeNull();
   });
 });

@@ -1,10 +1,10 @@
-import { and, eq, isNull, lt, inArray, sql } from "drizzle-orm";
+import { and, eq, isNull, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns, heartbeatRunFinalizations } from "@paperclipai/db";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import { ensureFinalization, recordStage } from "./finalization-state.js";
 import { observeQuiescenceProof } from "./quiescence-probe.js";
-import { settleRunIfReady } from "./settlement.js";
+import { attemptFullSettlement, settleRunIfReady } from "./settlement.js";
 import { syncWorkflowAfterHeartbeatSettlement } from "./post-execution.js";
 import { STAGE_CLASS, Q_STAGE } from "./stage-classifier.js";
 
@@ -30,6 +30,7 @@ export async function recoverTerminalUnsettledRuns(
   if (!(await isHeartbeatFinalizationV1Enabled(db))) return 0;
 
   const cutoff = new Date(now.getTime() - graceMs);
+  const cutoffIso = cutoff.toISOString();
   const candidates = await db
     .select({
       id: heartbeatRuns.id,
@@ -43,7 +44,7 @@ export async function recoverTerminalUnsettledRuns(
       inArray(heartbeatRuns.status, TERMINAL_STATUSES),
       eq(heartbeatRuns.finalizationVersion, 1),
       isNull(heartbeatRuns.settledAt),
-      lt(sql`COALESCE(${heartbeatRuns.finishedAt}, ${heartbeatRuns.updatedAt})`, cutoff),
+      sql`COALESCE(${heartbeatRuns.finishedAt}, ${heartbeatRuns.updatedAt}) < ${cutoffIso}`,
     ))
     .limit(50);
 
@@ -52,6 +53,17 @@ export async function recoverTerminalUnsettledRuns(
     try {
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, candidate.id));
       if (!run || run.finalizationVersion !== 1 || run.settledAt) continue;
+
+      // The stale-queued reaper already completed issue/workflow promotion before
+      // terminalizing the run. Older runs missed only the full settlement call.
+      if (run.errorCode === "stale_queued") {
+        const settlement = await attemptFullSettlement(db, run, now);
+        if (settlement === "settled") {
+          await syncWorkflowAfterHeartbeatSettlement(db, run);
+        }
+        processed += 1;
+        continue;
+      }
 
       const fin = await ensureFinalization(db, run, now);
 
