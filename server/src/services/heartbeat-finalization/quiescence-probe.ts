@@ -1,4 +1,4 @@
-import { and, count, eq, isNull, ne } from "drizzle-orm";
+import { and, count, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns, missionAgentRuntimes, workspaceOperations, workspaceRuntimeServices } from "@paperclipai/db";
 import type { HeartbeatRun } from "./owner-capability.js";
@@ -47,7 +47,7 @@ async function missionRuntimeNotBusy(db: ProbeDb, run: HeartbeatRun): Promise<bo
     .from(missionAgentRuntimes)
     .where(and(
       eq(missionAgentRuntimes.lastRunId, run.id),
-      ne(missionAgentRuntimes.status, "idle"),
+      inArray(missionAgentRuntimes.status, ["starting", "ready", "busy", "stopping"]),
       isNull(missionAgentRuntimes.stoppedAt),
     ));
   return Number(n ?? 0) === 0;
