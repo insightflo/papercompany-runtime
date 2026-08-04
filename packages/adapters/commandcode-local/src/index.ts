@@ -33,6 +33,7 @@ Core fields:
 - command (string, optional): executable to invoke; defaults to "cmd"
 - cwd (string, optional): default absolute working directory fallback (created if missing when possible)
 - instructionsFilePath (string, optional): markdown instructions file resolved from the effective cwd and injected into the run prompt
+- Papercompany-selected skills are synchronized into ".commandcode/skills" under the effective cwd, which Command Code discovers natively
 - promptTemplate (string, optional): user prompt template sent via -p
 - model (string, optional): passed to --model; an id from \`cmd --list-models\` (e.g. moonshotai/kimi-k2.5)
 - effort (string, optional): reasoning effort passed to --effort; valid levels are model-specific (e.g. low, medium, high, xhigh, max). Omit to let the model use its own default.

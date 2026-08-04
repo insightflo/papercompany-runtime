@@ -80,6 +80,8 @@ import {
   execute as commandCodeExecute,
   testEnvironment as commandCodeTestEnvironment,
   sessionCodec as commandCodeSessionCodec,
+  listCommandCodeSkills,
+  syncCommandCodeSkills,
   listCommandCodeModels,
   discoverCommandCodeModelEffortsCached,
 } from "@paperclipai/adapter-commandcode-local/server";
@@ -209,6 +211,8 @@ const commandCodeLocalAdapter: ServerAdapterModule = {
   type: "commandcode_local",
   execute: commandCodeExecute,
   testEnvironment: commandCodeTestEnvironment,
+  listSkills: listCommandCodeSkills,
+  syncSkills: syncCommandCodeSkills,
   sessionCodec: commandCodeSessionCodec,
   sessionManagement: getAdapterSessionManagement("commandcode_local") ?? undefined,
   models: [],
