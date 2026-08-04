@@ -41,6 +41,7 @@ const PHASE_A_PROVIDER_DIRS: Record<string, (workDir: string, env: Record<string
   "gemini-local": (workDir) => ({ skillsDir: joinPath(workDir, ".gemini", "skills") }),
   "opencode-local": (workDir) => ({ skillsDir: joinPath(workDir, ".config", "opencode", "skills") }),
   "cursor-local": (workDir) => ({ skillsDir: joinPath(workDir, ".cursor", "skills") }),
+  "commandcode-local": (workDir) => ({ skillsDir: joinPath(workDir, ".commandcode", "skills") }),
   "hermes": (workDir, env) => {
     const hermesHome = env.HERMES_HOME?.trim();
     if (hermesHome) return { skillsDir: joinPath(hermesHome, "skills") };
