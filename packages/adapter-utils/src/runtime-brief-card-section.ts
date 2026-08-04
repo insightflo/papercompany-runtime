@@ -117,8 +117,8 @@ export function buildIssueExecutionCardBriefLines(input: {
 
   const toolNames = asStringArray(toolContract?.requiredToolNames, ARRAY_CAP);
   const knowledgeNames = asStringArray(toolContract?.requiredKnowledgeNames, ARRAY_CAP);
-  if (toolNames.length > 0) lines.push(`- Required tools: ${joinList(toolNames)}`);
-  if (knowledgeNames.length > 0) lines.push(`- Required knowledge: ${joinList(knowledgeNames)}`);
+  if (toolNames.length > 0) lines.push(`- Available tools: ${joinList(toolNames)} — use them only when the task needs them; they are not mandatory.`);
+  if (knowledgeNames.length > 0) lines.push(`- Available knowledge: ${joinList(knowledgeNames)}`);
 
   const evidenceLines: string[] = [];
   for (const rawRef of evidenceRefs) {

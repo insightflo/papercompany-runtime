@@ -54,8 +54,8 @@ describe("buildPaperclipRuntimeBrief issue execution card", () => {
     expect(brief).toContain("Workflow: step=sector-rotation, run=run-abc; dependsOn=collect");
     expect(brief).toContain("QA type: security; inputScope=dependency_work_products");
     expect(brief).toContain("Use only declared dependency workProduct paths; do not scan the workspace");
-    expect(brief).toContain("Required tools: manual-onboarding-publish");
-    expect(brief).toContain("Required knowledge: sector-rotation-rubric");
+    expect(brief).toContain("Available tools: manual-onboarding-publish — use them only when the task needs them; they are not mandatory.");
+    expect(brief).toContain("Available knowledge: sector-rotation-rubric");
     expect(brief).toContain("Evidence: step output: /runs/out/sector-rotation");
     expect(brief).toContain("Agent instructions injection: compact (instructionhash123)");
   });
