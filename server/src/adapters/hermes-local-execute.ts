@@ -43,20 +43,6 @@ const DEFAULT_TIMEOUT_SEC = 600;
 const DEFAULT_GRACE_SEC = 10;
 const DEFAULT_IDLE_TIMEOUT_SEC = 0;
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
-const VALID_PROVIDERS = [
-  "auto",
-  "openrouter",
-  "nous",
-  "openai-codex",
-  "zai",
-  "kimi-coding",
-  "minimax",
-  "minimax-cn",
-  "xiaomi",
-  "mimo",
-  "xiaomi-mimo",
-  "xai-oauth",
-];
 
 function cfgString(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -99,8 +85,7 @@ export function buildHermesChatArgs(input: {
   if (input.quiet === true) args.push("-Q");
 
   args.push("-m", input.model);
-  if (input.provider && VALID_PROVIDERS.includes(input.provider))
-    args.push("--provider", input.provider);
+  if (input.provider) args.push("--provider", input.provider);
   for (const imagePath of input.imagePaths ?? []) {
     args.push("--image", imagePath);
   }
