@@ -204,6 +204,11 @@ export async function discoverOpenCodeModels(input: {
     throw new Error(detail ? `\`opencode models\` failed: ${detail}` : "`opencode models` failed.");
   }
 
+  // [TEMP DEBUG] discovery stdout 캡처 — 원인 파악 후 제거 예정
+  console.warn(
+    `[opencode-models-debug] discovery stdout (${result.stdout.length} chars, exit=${result.exitCode}):\n${result.stdout.slice(0, 4000)}`,
+  );
+
   return sortModels(parseModelsOutput(result.stdout));
 }
 
