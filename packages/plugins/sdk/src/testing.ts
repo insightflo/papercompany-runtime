@@ -502,6 +502,18 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         ) {
           throw new Error(`Agent is not invokable in its current state: ${agent!.status}`);
         }
+        const issueId = opts.context?.issueId;
+        if (issueId) {
+          const issue = issues.get(issueId);
+          if (!isInCompany(issue, cid)) throw new Error(`Issue not found: ${issueId}`);
+        }
+        const commentId = opts.context?.commentId;
+        if (commentId) {
+          const comments = issueComments.get(issueId ?? "") ?? [];
+          if (!comments.some((comment) => comment.id === commentId)) {
+            throw new Error(`Comment not found for issue: ${commentId}`);
+          }
+        }
         return { runId: randomUUID() };
       },
       sessions: {

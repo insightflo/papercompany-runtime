@@ -658,8 +658,18 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("agents.resume", { agentId, companyId });
         },
 
-        async invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string }) {
-          return callHost("agents.invoke", { agentId, companyId, prompt: opts.prompt, reason: opts.reason });
+        async invoke(agentId: string, companyId: string, opts: {
+          prompt: string;
+          reason?: string;
+          context?: { issueId?: string; commentId?: string; taskKey?: string };
+        }) {
+          return callHost("agents.invoke", {
+            agentId,
+            companyId,
+            prompt: opts.prompt,
+            reason: opts.reason,
+            context: opts.context,
+          });
         },
 
         sessions: {

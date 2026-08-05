@@ -1,5 +1,5 @@
 import type { Db } from "@paperclipai/db";
-import { pluginLogs, agentTaskSessions as agentTaskSessionsTable } from "@paperclipai/db";
+import { pluginLogs, agentTaskSessions as agentTaskSessionsTable, issueComments } from "@paperclipai/db";
 import { eq, and, like, desc } from "drizzle-orm";
 import type {
   HostServices,
@@ -1044,11 +1044,51 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
+
+        const contextIssueId = params.context?.issueId?.trim() || null;
+        const contextCommentId = params.context?.commentId?.trim() || null;
+        const contextTaskKey = params.context?.taskKey?.trim() || null;
+
+        if (contextIssueId) {
+          const issue = await issues.getById(contextIssueId);
+          requireInCompany("Issue", issue, companyId);
+        }
+        if (contextCommentId) {
+          if (!contextIssueId) {
+            throw new Error("commentId requires issueId in agents.invoke context");
+          }
+          const comment = await db
+            .select({
+              id: issueComments.id,
+              issueId: issueComments.issueId,
+              companyId: issueComments.companyId,
+            })
+            .from(issueComments)
+            .where(and(
+              eq(issueComments.id, contextCommentId),
+              eq(issueComments.issueId, contextIssueId),
+              eq(issueComments.companyId, companyId),
+            ))
+            .then((rows) => rows[0] ?? null);
+          if (!comment) {
+            throw new Error("Comment not found for the supplied issue");
+          }
+        }
+
         const run = await heartbeat.wakeup(params.agentId, {
           source: "automation",
           triggerDetail: "system",
-          reason: params.reason ?? null,
-          payload: { prompt: params.prompt },
+          reason: params.reason ?? "plugin_agent_invoke",
+          payload: {
+            prompt: params.prompt,
+            ...(contextIssueId ? { issueId: contextIssueId } : {}),
+            ...(contextCommentId ? { commentId: contextCommentId } : {}),
+          },
+          contextSnapshot: {
+            ...(contextIssueId ? { issueId: contextIssueId, taskId: contextIssueId } : {}),
+            ...(contextTaskKey ? { taskKey: contextTaskKey } : {}),
+            ...(contextCommentId ? { commentId: contextCommentId, wakeCommentId: contextCommentId } : {}),
+          },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
         });
