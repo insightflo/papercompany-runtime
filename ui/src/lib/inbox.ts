@@ -237,12 +237,28 @@ export function shouldShowInboxSection({
   if (tab === "unread") return showOnUnread;
   return showOnAll;
 }
+export function shouldShowHeartbeatLoadMoreSection(
+  workItemsCount: number,
+  attentionHasMore: boolean,
+  tab: InboxTab,
+  showFailedRunsCategory: boolean,
+): boolean {
+  return workItemsCount > 0 || (attentionHasMore && (tab !== "all" || showFailedRunsCategory));
+}
+
+export function isHeartbeatPageScopeCurrent(
+  current: { companyId?: string | null; agentId?: string | null },
+  expected: { companyId?: string | null; agentId?: string | null },
+): boolean {
+  return current.companyId === expected.companyId && current.agentId === expected.agentId;
+}
 
 export function computeInboxBadgeData({
   approvals,
   joinRequests,
   dashboard,
-  heartbeatRuns,
+  heartbeatRuns = [],
+  failedRuns: failedRunsOverride,
   issues = [],
   unreadIssues,
   dismissed,
@@ -250,7 +266,9 @@ export function computeInboxBadgeData({
   approvals: Approval[];
   joinRequests: JoinRequest[];
   dashboard: DashboardSummary | undefined;
-  heartbeatRuns: HeartbeatRun[];
+  heartbeatRuns?: HeartbeatRun[];
+  /** Pre-computed, already dismissed-filtered failed-run count (bounded attention path). */
+  failedRuns?: number;
   issues?: Issue[];
   unreadIssues: Issue[];
   dismissed: Set<string>;
@@ -258,9 +276,11 @@ export function computeInboxBadgeData({
   const actionableApprovals = approvals.filter((approval) =>
     ACTIONABLE_APPROVAL_STATUSES.has(approval.status),
   ).length;
-  const failedRuns = getUnresolvedLatestFailedRunsByAgent(heartbeatRuns, issues).filter(
-    (run) => !dismissed.has(`run:${run.id}`),
-  ).length;
+  const failedRuns =
+    failedRunsOverride ??
+    getUnresolvedLatestFailedRunsByAgent(heartbeatRuns, issues).filter(
+      (run) => !dismissed.has(`run:${run.id}`),
+    ).length;
   const unreadTouchedIssues = unreadIssues.length;
   const agentErrorCount = dashboard?.agents.error ?? 0;
   const monthBudgetCents = dashboard?.costs.monthBudgetCents ?? 0;

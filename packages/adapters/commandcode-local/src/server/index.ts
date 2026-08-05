@@ -39,6 +39,7 @@ export const sessionCodec: AdapterSessionCodec = {
 };
 
 export { execute } from "./execute.js";
+export { listCommandCodeSkills, syncCommandCodeSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export { parseCommandCodeJsonl, isCommandCodeUnknownSessionError } from "./parse.js";
 export {

@@ -1,4 +1,4 @@
-import type { HeartbeatRun } from "@paperclipai/shared";
+import type { HeartbeatRunDailyStat } from "@paperclipai/shared";
 
 /* ---- Utilities ---- */
 
@@ -58,19 +58,32 @@ export function ChartCard({ title, subtitle, children }: { title: string; subtit
 
 /* ---- Chart Components ---- */
 
-export function RunActivityChart({ runs }: { runs: HeartbeatRun[] }) {
-  const days = getLast14Days();
+export interface RunActivityDayGroup {
+  succeeded: number;
+  failed: number;
+  other: number;
+}
 
-  const grouped = new Map<string, { succeeded: number; failed: number; other: number }>();
+/** Group daily stats into chart buckets. cancelled is folded into "other". */
+export function groupRunsForActivityChart(
+  runs: HeartbeatRunDailyStat[],
+  days: string[],
+): Map<string, RunActivityDayGroup> {
+  const grouped = new Map<string, RunActivityDayGroup>();
   for (const day of days) grouped.set(day, { succeeded: 0, failed: 0, other: 0 });
   for (const run of runs) {
-    const day = new Date(run.createdAt).toISOString().slice(0, 10);
-    const entry = grouped.get(day);
+    const entry = grouped.get(run.day);
     if (!entry) continue;
-    if (run.status === "succeeded") entry.succeeded++;
-    else if (run.status === "failed" || run.status === "timed_out") entry.failed++;
-    else entry.other++;
+    entry.succeeded += run.succeeded;
+    entry.failed += run.failed + run.timedOut;
+    entry.other += run.other + run.cancelled;
   }
+  return grouped;
+}
+
+export function RunActivityChart({ runs }: { runs: HeartbeatRunDailyStat[] }) {
+  const days = getLast14Days();
+  const grouped = groupRunsForActivityChart(runs, days);
 
   const maxValue = Math.max(...Array.from(grouped.values()).map(v => v.succeeded + v.failed + v.other), 1);
   const hasData = Array.from(grouped.values()).some(v => v.succeeded + v.failed + v.other > 0);
@@ -224,16 +237,15 @@ export function IssueStatusChart({ issues }: { issues: { status: string; created
   );
 }
 
-export function SuccessRateChart({ runs }: { runs: HeartbeatRun[] }) {
+export function SuccessRateChart({ runs }: { runs: HeartbeatRunDailyStat[] }) {
   const days = getLast14Days();
   const grouped = new Map<string, { succeeded: number; total: number }>();
   for (const day of days) grouped.set(day, { succeeded: 0, total: 0 });
   for (const run of runs) {
-    const day = new Date(run.createdAt).toISOString().slice(0, 10);
-    const entry = grouped.get(day);
+    const entry = grouped.get(run.day);
     if (!entry) continue;
-    entry.total++;
-    if (run.status === "succeeded") entry.succeeded++;
+    entry.succeeded += run.succeeded;
+    entry.total += run.total;
   }
 
   const hasData = Array.from(grouped.values()).some(v => v.total > 0);

@@ -36,7 +36,7 @@ describe("resolveProviderSkillsDir", () => {
       resolveProviderSkillsDir({ adapterType: "codex-local", workDir, env: { CODEX_HOME: codexHome } })
         .skillsDir,
     ).toBe(path.join(codexHome, "skills"));
-    expect(resolveProviderSkillsDir({ adapterType: "codex-local", workDir }).skillsDir).toBe(
+    expect(resolveProviderSkillsDir({ adapterType: "codex-local", workDir, env: {} }).skillsDir).toBe(
       path.join(workDir, ".codex", "skills"),
     );
     expect(resolveProviderSkillsDir({ adapterType: "gemini-local", workDir }).skillsDir).toBe(
@@ -47,6 +47,9 @@ describe("resolveProviderSkillsDir", () => {
     );
     expect(resolveProviderSkillsDir({ adapterType: "cursor-local", workDir }).skillsDir).toBe(
       path.join(workDir, ".cursor", "skills"),
+    );
+    expect(resolveProviderSkillsDir({ adapterType: "commandcode_local", workDir }).skillsDir).toBe(
+      path.join(workDir, ".commandcode", "skills"),
     );
     expect(
       resolveProviderSkillsDir({ adapterType: "hermes", workDir, env: { HERMES_HOME: hermesHome } }).skillsDir,
