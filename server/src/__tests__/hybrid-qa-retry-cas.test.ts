@@ -49,6 +49,7 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
     setWorkflowToolStepExecutor(null);
     await db.delete(workflowTransitionEvents);
     await db.delete(issueComments);
+    await db.update(activityLog).set({ runId: null });
     await db.delete(activityLog);
     await db.delete(workflowStepRuns);
     await db.delete(heartbeatRunEvents);
