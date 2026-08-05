@@ -4732,7 +4732,7 @@ export function heartbeatService(db: Db) {
           }
         }
         if (activeExecutionTimeoutMs <= 0) continue;
-        const refTime = run.startedAt ? new Date(run.startedAt).getTime() : new Date(run.updatedAt).getTime();
+        const refTime = new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < activeExecutionTimeoutMs) continue;
 
         if (trackedProcess) {
