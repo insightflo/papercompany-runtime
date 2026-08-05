@@ -19,161 +19,330 @@
       "url": "https://github.com/insightflo/papercompany-runtime"
     }
   ],
+  "redirects": [
+    {
+      "source": "/start/what-is-paperclip",
+      "destination": "/start/what-is-papercompany"
+    },
+    {
+      "source": "/ko/start/what-is-paperclip",
+      "destination": "/ko/start/what-is-papercompany"
+    }
+  ],
   "navigation": {
     "languages": [
-      { "language": "en", "href": "" },
-      { "language": "ko", "href": "ko" }
-    ],
-    "tabs": [
       {
-        "tab": "Get Started",
-        "groups": [
+        "language": "en",
+        "tabs": [
           {
-            "group": "Introduction",
-            "pages": [
-              "start/what-is-papercompany",
-              "start/quickstart",
-              "start/core-concepts",
-              "start/architecture",
-              "agents-runtime"
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "Guides",
-        "groups": [
-          {
-            "group": "Board Operator",
-            "pages": [
-              "guides/board-operator/dashboard",
-              "guides/board-operator/creating-a-company",
-              "guides/board-operator/managing-agents",
-              "guides/board-operator/org-structure",
-              "guides/board-operator/managing-tasks",
-              "guides/board-operator/mission-planning",
-              "guides/board-operator/delegation",
-              "guides/board-operator/importing-and-exporting",
-              "guides/board-operator/approvals",
-              "guides/board-operator/costs-and-budgets",
-              "guides/board-operator/activity-log"
+            "tab": "Get Started",
+            "groups": [
+              {
+                "group": "Introduction",
+                "pages": [
+                  "start/what-is-papercompany",
+                  "start/quickstart",
+                  "start/core-concepts",
+                  "start/architecture",
+                  "agents-runtime"
+                ]
+              }
             ]
           },
           {
-            "group": "Agent Developer",
-            "pages": [
-              "guides/agent-developer/how-agents-work",
-              "guides/agent-developer/heartbeat-protocol",
-              "guides/agent-developer/mission-workflow-runtime",
-              "guides/agent-developer/writing-a-skill",
-              "guides/agent-developer/task-workflow",
-              "guides/agent-developer/comments-and-communication",
-              "guides/agent-developer/handling-approvals",
-              "guides/agent-developer/cost-reporting"
+            "tab": "Guides",
+            "groups": [
+              {
+                "group": "Board Operator",
+                "pages": [
+                  "guides/board-operator/dashboard",
+                  "guides/board-operator/creating-a-company",
+                  "guides/board-operator/managing-agents",
+                  "guides/board-operator/org-structure",
+                  "guides/board-operator/managing-tasks",
+                  "guides/board-operator/mission-planning",
+                  "guides/board-operator/delegation",
+                  "guides/board-operator/importing-and-exporting",
+                  "guides/board-operator/approvals",
+                  "guides/board-operator/costs-and-budgets",
+                  "guides/board-operator/activity-log"
+                ]
+              },
+              {
+                "group": "Agent Developer",
+                "pages": [
+                  "guides/agent-developer/how-agents-work",
+                  "guides/agent-developer/heartbeat-protocol",
+                  "guides/agent-developer/mission-workflow-runtime",
+                  "guides/agent-developer/writing-a-skill",
+                  "guides/agent-developer/task-workflow",
+                  "guides/agent-developer/comments-and-communication",
+                  "guides/agent-developer/handling-approvals",
+                  "guides/agent-developer/cost-reporting"
+                ]
+              },
+              {
+                "group": "Integrations",
+                "pages": [
+                  "guides/openclaw-docker-setup"
+                ]
+              }
             ]
           },
           {
-            "group": "Integrations",
-            "pages": [
-              "guides/openclaw-docker-setup"
+            "tab": "Deploy",
+            "groups": [
+              {
+                "group": "Deployment",
+                "pages": [
+                  "deploy/overview",
+                  "deploy/local-development",
+                  "deploy/tailscale-private-access",
+                  "deploy/docker",
+                  "deploy/deployment-modes",
+                  "deploy/database",
+                  "deploy/secrets",
+                  "deploy/storage",
+                  "deploy/environment-variables",
+                  "deploy/a1-github-actions"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Adapters",
+            "groups": [
+              {
+                "group": "Agent Adapters",
+                "pages": [
+                  "adapters/overview",
+                  "adapters/claude-local",
+                  "adapters/codex-local",
+                  "adapters/gemini-local",
+                  "adapters/commandcode-local",
+                  "adapters/cursor-local",
+                  "adapters/pi-local",
+                  "adapters/antigravity-local",
+                  "adapters/hermes-local",
+                  "adapters/openclaw-gateway",
+                  "adapters/process",
+                  "adapters/http",
+                  "adapters/creating-an-adapter"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "API Reference",
+            "groups": [
+              {
+                "group": "REST API",
+                "pages": [
+                  "api/overview",
+                  "api/authentication",
+                  "api/companies",
+                  "api/agents",
+                  "api/issues",
+                  "api/approvals",
+                  "api/goals-and-projects",
+                  "api/costs",
+                  "api/secrets",
+                  "api/activity",
+                  "api/dashboard",
+                  "api/routines",
+                  "api/missions",
+                  "api/workflows",
+                  "api/quality",
+                  "api/tool-definitions",
+                  "api/company-skills",
+                  "api/plugins",
+                  "api/instance-settings",
+                  "api/scheduler",
+                  "api/hermes-chat",
+                  "api/company-instructions",
+                  "api/data-storage",
+                  "api/access",
+                  "api/worktree",
+                  "api/channel-config",
+                  "api/execution-workspaces",
+                  "api/agent-wiki",
+                  "api/sidebar-badges",
+                  "api/mission-plan-templates",
+                  "api/metrics-health"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI",
+            "groups": [
+              {
+                "group": "CLI Reference",
+                "pages": [
+                  "cli/overview",
+                  "cli/setup-commands",
+                  "cli/control-plane-commands",
+                  "cli/advanced-commands"
+                ]
+              }
             ]
           }
         ]
       },
       {
-        "tab": "Deploy",
-        "groups": [
+        "language": "ko",
+        "tabs": [
           {
-            "group": "Deployment",
-            "pages": [
-              "deploy/overview",
-              "deploy/local-development",
-              "deploy/tailscale-private-access",
-              "deploy/docker",
-              "deploy/deployment-modes",
-              "deploy/database",
-              "deploy/secrets",
-              "deploy/storage",
-              "deploy/environment-variables",
-              "deploy/a1-github-actions"
+            "tab": "Get Started",
+            "groups": [
+              {
+                "group": "Introduction",
+                "pages": [
+                  "ko/start/what-is-papercompany",
+                  "ko/start/quickstart",
+                  "ko/start/core-concepts",
+                  "ko/start/architecture",
+                  "ko/agents-runtime"
+                ]
+              }
             ]
-          }
-        ]
-      },
-      {
-        "tab": "Adapters",
-        "groups": [
+          },
           {
-            "group": "Agent Adapters",
-            "pages": [
-              "adapters/overview",
-              "adapters/claude-local",
-              "adapters/codex-local",
-              "adapters/gemini-local",
-              "adapters/commandcode-local",
-              "adapters/cursor-local",
-              "adapters/pi-local",
-              "adapters/antigravity-local",
-              "adapters/hermes-local",
-              "adapters/openclaw-gateway",
-              "adapters/process",
-              "adapters/http",
-              "adapters/creating-an-adapter"
+            "tab": "Guides",
+            "groups": [
+              {
+                "group": "Board Operator",
+                "pages": [
+                  "ko/guides/board-operator/dashboard",
+                  "ko/guides/board-operator/creating-a-company",
+                  "ko/guides/board-operator/managing-agents",
+                  "ko/guides/board-operator/org-structure",
+                  "ko/guides/board-operator/managing-tasks",
+                  "ko/guides/board-operator/mission-planning",
+                  "ko/guides/board-operator/delegation",
+                  "ko/guides/board-operator/importing-and-exporting",
+                  "ko/guides/board-operator/approvals",
+                  "ko/guides/board-operator/costs-and-budgets",
+                  "ko/guides/board-operator/activity-log"
+                ]
+              },
+              {
+                "group": "Agent Developer",
+                "pages": [
+                  "ko/guides/agent-developer/how-agents-work",
+                  "ko/guides/agent-developer/heartbeat-protocol",
+                  "ko/guides/agent-developer/mission-workflow-runtime",
+                  "ko/guides/agent-developer/writing-a-skill",
+                  "ko/guides/agent-developer/task-workflow",
+                  "ko/guides/agent-developer/comments-and-communication",
+                  "ko/guides/agent-developer/handling-approvals",
+                  "ko/guides/agent-developer/cost-reporting"
+                ]
+              },
+              {
+                "group": "Integrations",
+                "pages": [
+                  "ko/guides/openclaw-docker-setup"
+                ]
+              }
             ]
-          }
-        ]
-      },
-      {
-        "tab": "API Reference",
-        "groups": [
+          },
           {
-            "group": "REST API",
-            "pages": [
-              "api/overview",
-              "api/authentication",
-              "api/companies",
-              "api/agents",
-              "api/issues",
-              "api/approvals",
-              "api/goals-and-projects",
-              "api/costs",
-              "api/secrets",
-              "api/activity",
-              "api/dashboard",
-              "api/routines",
-              "api/missions",
-              "api/workflows",
-              "api/quality",
-              "api/tool-definitions",
-              "api/company-skills",
-              "api/plugins",
-              "api/instance-settings",
-              "api/scheduler",
-              "api/hermes-chat",
-              "api/company-instructions",
-              "api/data-storage",
-              "api/access",
-              "api/worktree",
-              "api/channel-config",
-              "api/execution-workspaces",
-              "api/agent-wiki",
-              "api/sidebar-badges",
-              "api/mission-plan-templates",
-              "api/metrics-health"
+            "tab": "Deploy",
+            "groups": [
+              {
+                "group": "Deployment",
+                "pages": [
+                  "ko/deploy/overview",
+                  "ko/deploy/local-development",
+                  "ko/deploy/tailscale-private-access",
+                  "ko/deploy/docker",
+                  "ko/deploy/deployment-modes",
+                  "ko/deploy/database",
+                  "ko/deploy/secrets",
+                  "ko/deploy/storage",
+                  "ko/deploy/environment-variables",
+                  "ko/deploy/a1-github-actions"
+                ]
+              }
             ]
-          }
-        ]
-      },
-      {
-        "tab": "CLI",
-        "groups": [
+          },
           {
-            "group": "CLI Reference",
-            "pages": [
-              "cli/overview",
-              "cli/setup-commands",
-              "cli/control-plane-commands",
-              "cli/advanced-commands"
+            "tab": "Adapters",
+            "groups": [
+              {
+                "group": "Agent Adapters",
+                "pages": [
+                  "ko/adapters/overview",
+                  "ko/adapters/claude-local",
+                  "ko/adapters/codex-local",
+                  "ko/adapters/gemini-local",
+                  "ko/adapters/commandcode-local",
+                  "ko/adapters/cursor-local",
+                  "ko/adapters/pi-local",
+                  "ko/adapters/antigravity-local",
+                  "ko/adapters/hermes-local",
+                  "ko/adapters/openclaw-gateway",
+                  "ko/adapters/process",
+                  "ko/adapters/http",
+                  "ko/adapters/creating-an-adapter"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "API Reference",
+            "groups": [
+              {
+                "group": "REST API",
+                "pages": [
+                  "ko/api/overview",
+                  "ko/api/authentication",
+                  "ko/api/companies",
+                  "ko/api/agents",
+                  "ko/api/issues",
+                  "ko/api/approvals",
+                  "ko/api/goals-and-projects",
+                  "ko/api/costs",
+                  "ko/api/secrets",
+                  "ko/api/activity",
+                  "ko/api/dashboard",
+                  "ko/api/routines",
+                  "ko/api/missions",
+                  "ko/api/workflows",
+                  "ko/api/quality",
+                  "ko/api/tool-definitions",
+                  "ko/api/company-skills",
+                  "ko/api/plugins",
+                  "ko/api/instance-settings",
+                  "ko/api/scheduler",
+                  "ko/api/hermes-chat",
+                  "ko/api/company-instructions",
+                  "ko/api/data-storage",
+                  "ko/api/access",
+                  "ko/api/worktree",
+                  "ko/api/channel-config",
+                  "ko/api/execution-workspaces",
+                  "ko/api/agent-wiki",
+                  "ko/api/sidebar-badges",
+                  "ko/api/mission-plan-templates",
+                  "ko/api/metrics-health"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI",
+            "groups": [
+              {
+                "group": "CLI Reference",
+                "pages": [
+                  "ko/cli/overview",
+                  "ko/cli/setup-commands",
+                  "ko/cli/control-plane-commands",
+                  "ko/cli/advanced-commands"
+                ]
+              }
             ]
           }
         ]

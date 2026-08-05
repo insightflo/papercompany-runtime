@@ -86,7 +86,7 @@ Store prior attempt summaries in `metadata.workflowRetryAttempts`, capped to the
 ## Task 0: Refresh after terminal reporting lands and lock the regression baseline
 
 **Files:**
-- Modify only if landed code moved: `docs/superpowers/plans/2026-07-21-workflow-max-retries-activation.md`
+- Modify only if landed code moved: `doc/plans/2026-07-21-workflow-max-retries-activation.md`
 - Test: `server/src/__tests__/workflow-step-retry-issue-less.integration.test.ts`
 
 - [x] Refresh this plan from current main after the terminal-reporting landing and record any moved paths before adding code.
