@@ -13,6 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
   <a href="https://github.com/insightflo/papercompany-runtime"><img src="https://img.shields.io/badge/repo-papercompany--runtime-18181b" alt="papercompany-runtime" /></a>
   <a href="https://discord.gg/m4HZY7xNG3"><img src="https://img.shields.io/discord/000000000?label=discord" alt="Discord" /></a>
+  <a href="README.ko.md"><img src="https://img.shields.io/badge/lang-한국어-important" alt="한국어" /></a>
 </p>
 
 <br/>

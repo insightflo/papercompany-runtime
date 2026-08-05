@@ -20,6 +20,10 @@
     }
   ],
   "navigation": {
+    "languages": [
+      { "language": "en", "href": "" },
+      { "language": "ko", "href": "ko" }
+    ],
     "tabs": [
       {
         "tab": "Get Started",
