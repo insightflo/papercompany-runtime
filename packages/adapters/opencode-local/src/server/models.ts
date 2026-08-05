@@ -204,10 +204,16 @@ export async function discoverOpenCodeModels(input: {
     throw new Error(detail ? `\`opencode models\` failed: ${detail}` : "`opencode models` failed.");
   }
 
-  // [TEMP DEBUG] discovery stdout 캡처 — 원인 파악 후 제거 예정
-  console.warn(
-    `[opencode-models-debug] discovery stdout (${result.stdout.length} chars, exit=${result.exitCode}):\n${result.stdout.slice(0, 4000)}`,
-  );
+  // [TEMP DEBUG] discovery stdout 캡처 — 원인 파악 후 제거 예정 (파일 직접 기록)
+  try {
+    const fs = await import("node:fs");
+    fs.appendFileSync(
+      "/tmp/opencode-discovery.log",
+      `[${new Date().toISOString()}] cwd=${cwd} exit=${result.exitCode} len=${result.stdout.length}\n${result.stdout.slice(0, 8000)}\n---END---\n`,
+    );
+  } catch {
+    // non-fatal
+  }
 
   return sortModels(parseModelsOutput(result.stdout));
 }
