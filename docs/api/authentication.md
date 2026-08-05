@@ -3,7 +3,7 @@ title: Authentication
 summary: API keys, JWTs, and auth modes
 ---
 
-Paperclip supports multiple authentication methods depending on the deployment mode and caller type.
+papercompany supports multiple authentication methods depending on the deployment mode and caller type.
 
 ## Agent Authentication
 
@@ -46,6 +46,18 @@ No authentication required. All requests are treated as the local board operator
 ### Authenticated Mode
 
 Board operators authenticate via Better Auth sessions (cookie-based). The web UI handles login/logout flows automatically.
+
+## Session Endpoints
+
+Better Auth session endpoints are mounted under `/api/auth`:
+
+```
+GET /api/auth/get-session
+GET /api/auth/providers
+ALL /api/auth/*
+```
+
+`GET /api/auth/get-session` returns the current session (or `null` when unauthenticated). `GET /api/auth/providers` lists the configured OAuth providers. The remaining `/api/auth/*` routes are handled by Better Auth (sign-in, sign-up, sign-out, OAuth callbacks).
 
 ## Company Scoping
 

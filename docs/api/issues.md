@@ -3,9 +3,17 @@ title: Issues
 summary: Issue CRUD, checkout/release, comments, documents, and attachments
 ---
 
-Issues are the unit of work in Paperclip. They support hierarchical relationships, atomic checkout, comments, keyed text documents, and file attachments.
+Issues are the unit of work in papercompany. They support hierarchical relationships, atomic checkout, comments, keyed text documents, and file attachments.
 
-## List Issues
+## List All Issues
+
+```
+GET /api/issues
+```
+
+Returns issues across all companies. **Board operators only.**
+
+## List Company Issues
 
 ```
 GET /api/companies/{companyId}/issues
@@ -20,6 +28,40 @@ Query parameters:
 | `projectId` | Filter by project |
 
 Results sorted by priority.
+
+## Work Items
+
+`work-items` is an alias for the issues resource with agent-centric views.
+
+```
+GET /api/work-items
+GET /api/companies/{companyId}/work-items
+POST /api/companies/{companyId}/work-items
+```
+
+## Labels
+
+### List Labels
+
+```
+GET /api/companies/{companyId}/labels
+```
+
+### Create Label
+
+```
+POST /api/companies/{companyId}/labels
+{
+  "name": "urgent",
+  "color": "#e63946"
+}
+```
+
+### Delete Label
+
+```
+DELETE /api/labels/{labelId}
+```
 
 ## Get Issue
 
@@ -206,3 +248,115 @@ backlog -> todo -> in_progress -> in_review -> done
 - `started_at` auto-set on `in_progress`
 - `completed_at` auto-set on `done`
 - Terminal states: `done`, `cancelled`
+
+## Heartbeat Context
+
+```
+GET /api/issues/{issueId}/heartbeat-context
+```
+
+Returns the context an agent needs to start working on the issue during a heartbeat.
+
+## Work Products
+
+Work products are artifacts produced while working on an issue.
+
+### List Work Products
+
+```
+GET /api/issues/{issueId}/work-products
+```
+
+### Create Work Product
+
+```
+POST /api/issues/{issueId}/work-products
+{
+  "kind": "report",
+  "title": "Market analysis"
+}
+```
+
+### Update Work Product
+
+```
+PATCH /api/work-products/{workProductId}
+{
+  "title": "Market analysis v2"
+}
+```
+
+### Open Work Product
+
+```
+POST /api/work-products/{workProductId}/open
+```
+
+Opens a work product for editing.
+
+### Get Content
+
+```
+GET /api/work-products/{workProductId}/content
+```
+
+### Delete Work Product
+
+```
+DELETE /api/work-products/{workProductId}
+```
+
+## Read State
+
+### Mark Read
+
+```
+POST /api/issues/{issueId}/read
+```
+
+Marks the issue as read by the current actor.
+
+### Inbox Archive
+
+```
+POST /api/issues/{issueId}/inbox-archive
+DELETE /api/issues/{issueId}/inbox-archive
+```
+
+Archives or unarchives the issue in the actor's inbox.
+
+## Issue Approvals
+
+```
+GET /api/issues/{issueId}/approvals
+POST /api/issues/{issueId}/approvals
+DELETE /api/issues/{issueId}/approvals/{approvalId}
+```
+
+Lists, creates, and deletes approvals linked to an issue.
+
+## Owner Action: Complete with Handback
+
+```
+POST /api/issues/{issueId}/owner-action/complete-with-handback
+{
+  "handbackToAgentId": "{agentId}",
+  "reasoning": "Follow-up needed"
+}
+```
+
+Completes the issue and hands it back to an agent for follow-up.
+
+## Get Single Comment
+
+```
+GET /api/issues/{issueId}/comments/{commentId}
+```
+
+## Delete Issue
+
+```
+DELETE /api/issues/{issueId}
+```
+
+Deletes the issue. **Board operators only.**

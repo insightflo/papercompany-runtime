@@ -61,7 +61,7 @@ Adapters are responsible for making skills discoverable to their agent runtime. 
 
 ## Improving Skills From Evidence
 
-Paperclip agents should treat skills as trainable operating assets, but not as unchecked self-editing memory. Use the SkillOpt-lite self-improvement loop when repeated work shows that a skill, rule, KB entry, workflow, or role harness should change. The default patch shape is a bounded add/delete/replace proposal, not a broad rewrite.
+papercompany agents should treat skills as trainable operating assets, but not as unchecked self-editing memory. Use the SkillOpt-lite self-improvement loop when repeated work shows that a skill, rule, KB entry, workflow, or role harness should change. The default patch shape is a bounded add/delete/replace proposal, not a broad rewrite.
 
 ### Inputs
 

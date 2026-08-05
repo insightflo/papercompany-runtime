@@ -45,7 +45,84 @@ GET /api/companies/{companyId}/costs/by-project
 
 Returns per-project cost breakdown for the current month.
 
+## Costs by Agent Model
+
+```
+GET /api/companies/{companyId}/costs/by-agent-model
+```
+
+## Costs by Provider
+
+```
+GET /api/companies/{companyId}/costs/by-provider
+```
+
+## Costs by Biller
+
+```
+GET /api/companies/{companyId}/costs/by-biller
+```
+
+## Finance Events
+
+```
+POST /api/companies/{companyId}/finance-events
+{
+  "kind": "expense",
+  "amountCents": 5000,
+  "description": "External tool subscription"
+}
+```
+
+Records an external finance event (non-token spend).
+
+## Finance Summary
+
+```
+GET /api/companies/{companyId}/costs/finance-summary
+```
+
+## Finance by Biller
+
+```
+GET /api/companies/{companyId}/costs/finance-by-biller
+```
+
+## Finance by Kind
+
+```
+GET /api/companies/{companyId}/costs/finance-by-kind
+```
+
+## Finance Events
+
+```
+GET /api/companies/{companyId}/costs/finance-events
+```
+
+## Window Spend
+
+```
+GET /api/companies/{companyId}/costs/window-spend
+```
+
+Returns spend for the current billing window.
+
+## Quota Windows
+
+```
+GET /api/companies/{companyId}/costs/quota-windows
+```
+
+Lists quota windows and their utilization.
+
 ## Budget Management
+
+### Budget Overview
+
+```
+GET /api/companies/{companyId}/budgets/overview
+```
 
 ### Set Company Budget
 
@@ -60,6 +137,45 @@ PATCH /api/companies/{companyId}
 PATCH /api/agents/{agentId}
 { "budgetMonthlyCents": 5000 }
 ```
+
+### Update Company Budgets
+
+```
+PATCH /api/companies/{companyId}/budgets
+{
+  "monthlyBudgetCents": 200000
+}
+```
+
+### Update Agent Budgets
+
+```
+PATCH /api/agents/{agentId}/budgets
+{
+  "monthlyBudgetCents": 8000
+}
+```
+
+### Create Budget Policy
+
+```
+POST /api/companies/{companyId}/budgets/policies
+{
+  "kind": "hard_stop",
+  "thresholdCents": 500000
+}
+```
+
+### Resolve Budget Incident
+
+```
+POST /api/companies/{companyId}/budget-incidents/{incidentId}/resolve
+{
+  "resolution": "increased_budget"
+}
+```
+
+Resolves a budget enforcement incident.
 
 ## Budget Enforcement
 

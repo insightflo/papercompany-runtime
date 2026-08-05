@@ -44,3 +44,51 @@ All mutations are recorded:
 - Company configuration changes
 
 The activity log is append-only and immutable.
+
+## Record Activity
+
+```
+POST /api/companies/{companyId}/activity
+{
+  "action": "note",
+  "entityType": "company",
+  "entityId": "{companyId}",
+  "details": { "note": "Manual operator note" }
+}
+```
+
+Records a manual activity entry.
+
+## Issue Activity
+
+```
+GET /api/issues/{issueId}/activity
+```
+
+Returns the activity log for a single issue.
+
+## Issue Runs
+
+```
+GET /api/issues/{issueId}/runs
+```
+
+Lists runs associated with the issue.
+
+## Heartbeat Run Issues
+
+```
+GET /api/heartbeat-runs/{runId}/issues
+```
+
+Lists issues touched by a heartbeat run.
+
+## Operator Decisions
+
+Operator decision routes are mounted under the activity router:
+
+```
+GET /api/companies/{companyId}/operator-decisions
+```
+
+Lists operator decisions (recovery decisions, owner actions) for the company.

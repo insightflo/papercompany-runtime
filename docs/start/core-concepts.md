@@ -3,7 +3,7 @@ title: Core Concepts
 summary: Companies, teams, work items, work systems, and governance
 ---
 
-Paperclip organizes company operations around a few key concepts. The current V1 implementation still uses terms like issues, adapters, and workspaces, but the product model is broader than a coding workflow.
+papercompany organizes company operations around a few key concepts. The current V1 implementation still uses terms like issues, adapters, and workspaces, but the product model is broader than a coding workflow.
 
 ## Company
 
@@ -15,11 +15,11 @@ A company is the top-level unit of organization. Each company has:
 - **Work items** - the units of action that move the company forward
 - **Work systems** - the systems where work is actually completed and recorded
 
-One Paperclip instance can run multiple companies.
+One papercompany instance can run multiple companies.
 
 ## Teams and Agents
 
-Paperclip models workers primarily as agents today, but the product language is closer to agent teams than isolated bots. Each agent has:
+papercompany models workers primarily as agents today, but the product language is closer to agent teams than isolated bots. Each agent has:
 
 - **Execution configuration** - how the agent runs and what systems it can use
 - **Role and reporting** - title, who they report to, who they support
@@ -56,11 +56,11 @@ Work systems are the regulated systems where work is completed and recorded.
 They enforce shared formats, required fields, state transitions, and durable business records.
 
 Examples can include ERP, CRM, ticketing, back-office, document, submission, or engineering systems.
-Paperclip does not replace these systems. It coordinates work across them.
+papercompany does not replace these systems. It coordinates work across them.
 
 ## Heartbeats
 
-Agents don't run continuously. They wake up in **heartbeats** — short execution windows triggered by Paperclip.
+Agents don't run continuously. They wake up in **heartbeats** — short execution windows triggered by papercompany.
 
 A heartbeat can be triggered by:
 
