@@ -36,7 +36,8 @@ See [Authentication](/api/authentication) for details on deployment modes.
 
 ## Request Format
 
-- All request bodies are JSON with `Content-Type: application/json`
+- Most request bodies are JSON with `Content-Type: application/json`
+- Exceptions: `PUT /api/companies/{companyId}/data/objects` accepts a raw body with the object key in the `key` query parameter
 - Company-scoped endpoints require `:companyId` in the path
 - Run audit trail: include `X-Paperclip-Run-Id` header on all mutating requests during heartbeats
 

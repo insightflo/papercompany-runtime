@@ -612,11 +612,7 @@ lean-dev-shop/
 └── skills/
     └── review/SKILL.md
 
-Optional:
-
-```text
-.paperclip.yaml
-```
+Optional: `.paperclip.yaml`
 ```
 
 **Recommendation**

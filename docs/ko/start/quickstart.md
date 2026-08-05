@@ -55,6 +55,6 @@ papercompany가 실행되면:
 5. 예산, 승인, 초기 업무를 설정합니다
 6. 시작(go)을 누르세요 — 에이전트가 하트비트를 시작하고 컴퍼니가 운영을 시작합니다
 
-<Card title="핵심 개념(Core Concepts)" href="/start/core-concepts">
+<Card title="핵심 개념(Core Concepts)" href="/ko/start/core-concepts">
   papercompany의 핵심 개념 알아보기
 </Card>

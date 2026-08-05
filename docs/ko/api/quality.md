@@ -27,8 +27,8 @@ GET /api/quality/review-items/{reviewItemId}
 POST /api/companies/{companyId}/quality/review-items
 {
   "title": "Evaluate Q3 research report",
-  "targetType": "workflow_step_run",
-  "triggerSource": "workflow_failure",
+  "targetType": "work_product",
+  "triggerSource": "delivery_verification",
   "missionId": "{missionId}",
   "targetId": "{targetId}",
   "failureType": "evidence_gap",
@@ -39,6 +39,10 @@ POST /api/companies/{companyId}/quality/review-items
 ```
 
 리뷰 항목을 생성합니다. `title`, `targetType`, `triggerSource`는 필수입니다.
+
+`targetType`은 `work_product`, `public_url`, `mission_output`, `other` 중 하나입니다.
+
+`triggerSource`는 `delivery_verification`, `post_completion_audit`, `oversight_stall`, `plan_qa_failure`, `final_qa_failure`, `user_feedback`, `manual` 중 하나입니다.
 
 ### 평결 게시
 
@@ -56,9 +60,13 @@ POST /api/quality/review-items/{reviewItemId}/verdict
 
 ```
 POST /api/quality/review-items/{reviewItemId}/promote-anchor
+{
+  "verdictId": "{verdictId}",
+  "title": "Anchor example title"
+}
 ```
 
-리뷰 항목의 후보를 향후 평가를 위한 앵커 예시로 승격합니다.
+리뷰 항목의 후보를 향후 평가를 위한 앵커 예시로 승격합니다. `verdictId`와 `title`은 필수입니다.
 
 ### 증거 요청
 
@@ -78,12 +86,16 @@ POST /api/quality/review-items/{reviewItemId}/request-evidence
 POST /api/quality/review-items/{reviewItemId}/evidence
 {
   "surface": "transcript",
-  "status": "submitted",
-  "content": "Run transcript reference"
+  "status": "verified",
+  "expected": { "format": "run transcript" },
+  "actual": { "transcriptId": "run-123" },
+  "sourceRunId": "{runId}",
+  "sourceUrl": "https://...",
+  "blocking": true
 }
 ```
 
-리뷰 항목에 대한 증거를 제출합니다. `surface`와 `status`는 필수입니다.
+리뷰 항목에 대한 증거를 제출합니다. `surface`와 `status`는 필수입니다. `status`는 `missing`, `pending`, `verified`, `failed`, `insufficient`, `stale` 중 하나입니다.
 
 ## 요약
 

@@ -36,7 +36,8 @@ Authorization: Bearer <token>
 
 ## 요청 형식
 
-- 모든 요청 본문은 `Content-Type: application/json`을 사용하는 JSON입니다.
+- 대부분의 요청 본문은 `Content-Type: application/json`을 사용하는 JSON입니다.
+- 예외: `PUT /api/companies/{companyId}/data/objects`는 raw 본문을 받으며 객체 키는 `key` 쿼리 파라미터로 전달합니다.
 - 회사 범위(company-scoped) 엔드포인트는 경로에 `:companyId`가 필요합니다.
 - 실행 감사 추적: heartbeat 중 발생하는 모든 변경(mutating) 요청에는 `X-Paperclip-Run-Id` 헤더를 포함하세요.
 

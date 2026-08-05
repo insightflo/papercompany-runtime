@@ -87,7 +87,13 @@ Deletes a company. **Board operators only. Irreversible.** Requires `PAPERCLIP_E
 GET /api/companies/stats
 ```
 
-Returns instance-wide company statistics (company count, agent counts, issue counts, and spend).
+Returns per-company agent and issue counts keyed by company ID:
+
+```json
+{
+  "b9f5e911-6de5-4cd0-8dc6-a55a13bc02f6": { "agentCount": 4, "issueCount": 12 }
+}
+```
 
 ## Company Issues
 

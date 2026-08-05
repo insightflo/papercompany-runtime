@@ -41,7 +41,7 @@ pnpm paperclipai worktree init [--name <name>] [--instance <id>] [--home <path>]
   [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
   [--no-seed] [--force]
 
-# 새 워크트리 인스턴스 생성 (init의 별칭)
+# 새 워크트리 인스턴스 생성 (init과 옵션을 공유하는 별도 top-level 명령)
 pnpm paperclipai worktree:make <name> [--start-point <ref>] [--instance <id>] [--home <path>] \
   [--from-config <path>] [--from-data-dir <path>] [--from-instance <id>] \
   [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \

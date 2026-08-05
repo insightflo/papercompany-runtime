@@ -195,7 +195,7 @@ Agents report workflow outcomes through these endpoints during heartbeats.
 ```
 POST /api/issues/{issueId}/workflow/artifacts
 {
-  "path": "report.md",
+  "path": "/srv/papercompany/projects/inflo/report.md",
   "title": "Market analysis",
   "type": "artifact",
   "summary": "Analysis of market conditions",
@@ -203,7 +203,7 @@ POST /api/issues/{issueId}/workflow/artifacts
 }
 ```
 
-Registers a local artifact. `type` is `artifact` or `document`. A `preview_url` variant is also accepted (`{ "type": "preview_url", "url": "https://...", "title": "..." }`).
+Registers a local artifact. `type` is `artifact` or `document`. When a `path` is supplied it **must be an absolute local path** (relative paths return 422). A `preview_url` variant is also accepted (`{ "type": "preview_url", "url": "https://...", "title": "..." }`).
 
 ### Post Verdict
 

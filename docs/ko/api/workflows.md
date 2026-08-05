@@ -195,7 +195,7 @@ issue 뒤의 워크플로우 스텝을 수동으로 완료로 표시합니다.
 ```
 POST /api/issues/{issueId}/workflow/artifacts
 {
-  "path": "report.md",
+  "path": "/srv/papercompany/projects/inflo/report.md",
   "title": "Market analysis",
   "type": "artifact",
   "summary": "Analysis of market conditions",
@@ -203,7 +203,7 @@ POST /api/issues/{issueId}/workflow/artifacts
 }
 ```
 
-로컬 산출물을 등록합니다. `type`은 `artifact` 또는 `document`입니다. `preview_url` 변형도 허용됩니다 (`{ "type": "preview_url", "url": "https://...", "title": "..." }`).
+로컬 산출물을 등록합니다. `type`은 `artifact` 또는 `document`입니다. `path`를 제공할 때는 **절대 로컬 경로여야 합니다** (상대 경로는 422). `preview_url` 변형도 허용됩니다 (`{ "type": "preview_url", "url": "https://...", "title": "..." }`).
 
 ### 평결 게시
 

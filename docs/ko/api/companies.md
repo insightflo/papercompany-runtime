@@ -87,7 +87,13 @@ DELETE /api/companies/{companyId}
 GET /api/companies/stats
 ```
 
-인스턴스 전역 회사 통계(회사 수, 에이전트 수, issue 수, 지출)를 반환합니다.
+회사 ID를 키로 한 회사별 에이전트/이슈 수를 반환합니다:
+
+```json
+{
+  "b9f5e911-6de5-4cd0-8dc6-a55a13bc02f6": { "agentCount": 4, "issueCount": 12 }
+}
+```
 
 ## 회사 Issues
 

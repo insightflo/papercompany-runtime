@@ -27,8 +27,8 @@ GET /api/quality/review-items/{reviewItemId}
 POST /api/companies/{companyId}/quality/review-items
 {
   "title": "Evaluate Q3 research report",
-  "targetType": "workflow_step_run",
-  "triggerSource": "workflow_failure",
+  "targetType": "work_product",
+  "triggerSource": "delivery_verification",
   "missionId": "{missionId}",
   "targetId": "{targetId}",
   "failureType": "evidence_gap",
@@ -39,6 +39,10 @@ POST /api/companies/{companyId}/quality/review-items
 ```
 
 Creates a review item. `title`, `targetType`, and `triggerSource` are required.
+
+`targetType` is one of: `work_product`, `public_url`, `mission_output`, `other`.
+
+`triggerSource` is one of: `delivery_verification`, `post_completion_audit`, `oversight_stall`, `plan_qa_failure`, `final_qa_failure`, `user_feedback`, `manual`.
 
 ### Post Verdict
 
@@ -56,9 +60,13 @@ Records an evaluation verdict. `verdict` is one of: `pass`, `fail`, `request_cha
 
 ```
 POST /api/quality/review-items/{reviewItemId}/promote-anchor
+{
+  "verdictId": "{verdictId}",
+  "title": "Anchor example title"
+}
 ```
 
-Promotes the review item's candidate as an anchor example for future evaluations.
+Promotes the review item's candidate as an anchor example for future evaluations. `verdictId` and `title` are required.
 
 ### Request Evidence
 
@@ -78,12 +86,16 @@ Requests additional evidence from the work agent. `requiredEvidenceSurfaces` is 
 POST /api/quality/review-items/{reviewItemId}/evidence
 {
   "surface": "transcript",
-  "status": "submitted",
-  "content": "Run transcript reference"
+  "status": "verified",
+  "expected": { "format": "run transcript" },
+  "actual": { "transcriptId": "run-123" },
+  "sourceRunId": "{runId}",
+  "sourceUrl": "https://...",
+  "blocking": true
 }
 ```
 
-Submits evidence for a review item. `surface` and `status` are required.
+Submits evidence for a review item. `surface` and `status` are required. `status` is one of: `missing`, `pending`, `verified`, `failed`, `insufficient`, `stale`.
 
 ## Summary
 

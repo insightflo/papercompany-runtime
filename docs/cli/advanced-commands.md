@@ -41,7 +41,7 @@ pnpm paperclipai worktree init [--name <name>] [--instance <id>] [--home <path>]
   [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
   [--no-seed] [--force]
 
-# Create a new worktree instance (alias: init)
+# Create a new worktree instance (top-level command, shares options with init)
 pnpm paperclipai worktree:make <name> [--start-point <ref>] [--instance <id>] [--home <path>] \
   [--from-config <path>] [--from-data-dir <path>] [--from-instance <id>] \
   [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
