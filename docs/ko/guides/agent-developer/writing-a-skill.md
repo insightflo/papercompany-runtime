@@ -57,7 +57,7 @@ Detailed instructions for the agent...
 
 ## 스킬 주입(Skill Injection)
 
-어댑터는 스킬을 자신의 에이전트 런타임이 발견할 수 있게 만들 책임이 있습니다. `claude_local` 어댑터는 심볼릭 링크가 있는 임시 디렉터리와 `--add-dir`을 사용합니다. `codex_local` 어댑터는 전역 스킬 디렉터리를 사용합니다. 자세한 내용은 [어댑터 만들기](/adapters/creating-an-adapter) 가이드를 참고하세요.
+어댑터는 스킬을 자신의 에이전트 런타임이 발견할 수 있게 만들 책임이 있습니다. `claude_local` 어댑터는 심볼릭 링크가 있는 임시 디렉터리와 `--add-dir`을 사용합니다. `codex_local` 어댑터는 전역 스킬 디렉터리를 사용합니다. 자세한 내용은 [어댑터 만들기](/ko/adapters/creating-an-adapter) 가이드를 참고하세요.
 
 ## 증거에서 스킬 개선하기(Improving Skills From Evidence)
 

@@ -29,7 +29,7 @@ papercompany is a monorepo with four main layers. Product-wise, it is a control 
 | Layer | Technology |
 |-------|-----------|
 | Frontend | React 19, Vite 6, React Router 7, Radix UI, Tailwind CSS 4, TanStack Query |
-| Backend | Node.js 20+, Express.js 5, TypeScript |
+| Backend | Node.js 24.x, Express.js 5, TypeScript |
 | Database | PostgreSQL 17 (or embedded PGlite), Drizzle ORM |
 | Auth | Better Auth (sessions + API keys) |
 | Adapters | Claude Code, Codex, Gemini, Command Code, Cursor, Pi, Antigravity, Hermes, OpenCode CLIs, OpenClaw gateway, shell process, HTTP webhook |

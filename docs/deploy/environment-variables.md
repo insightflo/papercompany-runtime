@@ -65,13 +65,13 @@ All environment variables that papercompany uses for server configuration.
 | `PAPERCLIP_SECRETS_MASTER_KEY` | (from file) | 32-byte encryption key (base64/hex/raw) |
 | `PAPERCLIP_SECRETS_MASTER_KEY_FILE` | `~/.paperclip/.../secrets/master.key` | Path to key file |
 | `PAPERCLIP_SECRETS_STRICT_MODE` | `false` | Require secret refs for sensitive env vars |
-| `PAPERCLIP_SECRETS_PROVIDER` | `local-encrypted` | Secrets provider: `local-encrypted` or external vault |
+| `PAPERCLIP_SECRETS_PROVIDER` | `local_encrypted` | Secrets provider: `local_encrypted` or external vault |
 
 ## Storage
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PAPERCLIP_STORAGE_PROVIDER` | `local` | Storage provider: `local` or `s3` |
+| `PAPERCLIP_STORAGE_PROVIDER` | `local_disk` | Storage provider: `local_disk` or `s3` |
 | `PAPERCLIP_STORAGE_LOCAL_DIR` | `~/.paperclip/.../storage` | Local storage directory |
 | `PAPERCLIP_STORAGE_S3_BUCKET` | — | S3 bucket name |
 | `PAPERCLIP_STORAGE_S3_REGION` | — | S3 region |
@@ -83,9 +83,9 @@ All environment variables that papercompany uses for server configuration.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PAPERCLIP_DB_BACKUP_ENABLED` | `false` | Enable scheduled DB backups |
-| `PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES` | `60` | Backup interval |
-| `PAPERCLIP_DB_BACKUP_RETENTION_DAYS` | `7` | Backup retention window |
+| `PAPERCLIP_DB_BACKUP_ENABLED` | `true` | Enable scheduled DB backups |
+| `PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES` | `1440` | Backup interval (24 hours) |
+| `PAPERCLIP_DB_BACKUP_RETENTION_DAYS` | `3` | Backup retention window |
 | `PAPERCLIP_DB_BACKUP_DIR` | — | Backup output directory |
 
 ## Heartbeat Scheduler

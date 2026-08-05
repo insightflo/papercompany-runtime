@@ -84,10 +84,10 @@ Deletes a company. **Board operators only. Irreversible.** Requires `PAPERCLIP_E
 ## Company Stats
 
 ```
-GET /api/companies/{companyId}/stats
+GET /api/companies/stats
 ```
 
-Returns company statistics (agent counts, issue counts, spend, and activity).
+Returns instance-wide company statistics (company count, agent counts, issue counts, and spend).
 
 ## Company Issues
 
@@ -102,12 +102,12 @@ Lists issues scoped to a company (alternative to the `/api/companies/{companyId}
 ```
 PATCH /api/companies/{companyId}/branding
 {
-  "logoAssetId": "b9f5e911-6de5-4cd0-8dc6-a55a13bc02f6",
-  "primaryColor": "#18181B"
+  "brandColor": "#18181B",
+  "logoAssetId": "b9f5e911-6de5-4cd0-8dc6-a55a13bc02f6"
 }
 ```
 
-Updates company branding settings.
+Updates company branding settings. Supported fields: `name`, `description`, `timezone`, `brandColor` (hex), `logoAssetId`.
 
 ## Export & Import
 

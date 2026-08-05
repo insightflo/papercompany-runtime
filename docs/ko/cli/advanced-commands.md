@@ -32,27 +32,42 @@ pnpm paperclipai plugin examples
 
 ## 워크트리 명령
 
-격리된 에이전트 실행을 위한 git 워크트리 관리:
+격리된 에이전트 실행을 위한 워크트리 로컬 Paperclip 인스턴스 관리:
 
 ```sh
-# Initialize worktree configuration
-pnpm paperclipai worktree init [--path <path>]
+# 현재 저장소에 워크트리 설정 초기화
+pnpm paperclipai worktree init [--name <name>] [--instance <id>] [--home <path>] \
+  [--from-config <path>] [--from-data-dir <path>] [--from-instance <id>] \
+  [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
+  [--no-seed] [--force]
 
-# Create a worktree
-pnpm paperclipai worktree make <name> [--base <ref>] [--path <path>]
+# 새 워크트리 인스턴스 생성 (init의 별칭)
+pnpm paperclipai worktree:make <name> [--start-point <ref>] [--instance <id>] [--home <path>] \
+  [--from-config <path>] [--from-data-dir <path>] [--from-instance <id>] \
+  [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
+  [--no-seed] [--force]
 
-# Print worktree environment for the current directory
-pnpm paperclipai worktree env [--json]
+# 현재 디렉토리의 워크트리 환경 출력
+pnpm paperclipai worktree env [-c, --config <path>] [--json]
 
-# List worktrees
-pnpm paperclipai worktree list [--json]
+# 워크트리 목록
+pnpm paperclipai worktree:list [--json]
 
-# Show merge history
-pnpm paperclipai worktree merge-history <name>
+# 워크트리 간 머지 이력 보기 (기본은 import 계획 미리보기)
+pnpm paperclipai worktree:merge-history \
+  [--from <worktree>] [--to <worktree>] [--company <id-or-prefix>] \
+  [--scope issues,comments] [--apply] [--dry] [--yes]
 
-# Clean up merged/stale worktrees
-pnpm paperclipai worktree cleanup [--dry-run]
+# 머지 완료/오래된 워크트리 정리
+pnpm paperclipai worktree:cleanup [--instance <id>]
 ```
+
+참고:
+
+- `worktree:make`는 소스 인스턴스에서 새 격리 인스턴스를 생성합니다 (기본적으로 설정과 DB를 시드)
+- `--start-point`는 새 브랜치의 기준이 되는 원격 ref를 지정합니다 (`PAPERCLIP_WORKTREE_START_POINT` 환경 변수)
+- `worktree:merge-history`는 워크트리 간 이슈/댓글 import 계획을 미리 보여주며, `--apply`를 붙이면 실행합니다
+- `worktree:cleanup`은 머지가 완료된 워크트리를 제거합니다 (인스턴스 id는 기본적으로 워크트리 이름)
 
 ## 컨텍스트 명령
 

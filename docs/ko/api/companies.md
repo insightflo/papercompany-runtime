@@ -84,10 +84,10 @@ DELETE /api/companies/{companyId}
 ## 회사 통계
 
 ```
-GET /api/companies/{companyId}/stats
+GET /api/companies/stats
 ```
 
-회사 통계(에이전트 수, issue 수, 지출, 활동)를 반환합니다.
+인스턴스 전역 회사 통계(회사 수, 에이전트 수, issue 수, 지출)를 반환합니다.
 
 ## 회사 Issues
 
@@ -102,12 +102,12 @@ GET /api/companies/{companyId}/issues
 ```
 PATCH /api/companies/{companyId}/branding
 {
-  "logoAssetId": "b9f5e911-6de5-4cd0-8dc6-a55a13bc02f6",
-  "primaryColor": "#18181B"
+  "brandColor": "#18181B",
+  "logoAssetId": "b9f5e911-6de5-4cd0-8dc6-a55a13bc02f6"
 }
 ```
 
-회사 브랜딩 설정을 업데이트합니다.
+회사 브랜딩 설정을 업데이트합니다. 지원되는 필드: `name`, `description`, `timezone`, `brandColor` (hex), `logoAssetId`.
 
 ## 내보내기 & 가져오기
 

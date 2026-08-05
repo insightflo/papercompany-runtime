@@ -7,7 +7,7 @@ papercompany를 외부 의존성 없이 로컬에서 실행하세요.
 
 ## 사전 요구 사항
 
-- Node.js 20+
+- Node.js 24.x (서버가 활성 Node ABI에 맞춰 컴파일된 네이티브 `re2` 모듈에 의존합니다)
 - pnpm 9+
 
 ## 개발 서버 시작
@@ -60,7 +60,7 @@ pnpm dev --authenticated-private
 pnpm paperclipai allowed-hostname dotta-macbook-pro
 ```
 
-전체 설정과 문제 해결은 [Tailscale 사설 접근](/deploy/tailscale-private-access)을 참고하세요.
+전체 설정과 문제 해결은 [Tailscale 사설 접근](/ko/deploy/tailscale-private-access)을 참고하세요.
 
 ## 상태 확인
 

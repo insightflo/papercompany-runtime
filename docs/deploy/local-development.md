@@ -7,7 +7,7 @@ Run papercompany locally with zero external dependencies.
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 24.x (the server depends on the native `re2` module, compiled against the active Node ABI)
 - pnpm 9+
 
 ## Start Dev Server

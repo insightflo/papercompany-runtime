@@ -29,11 +29,11 @@ POST /api/companies/{companyId}/skills
   "slug": "html-for-beginners",
   "name": "HTML for Beginners",
   "description": "Guidance for writing beginner-friendly HTML",
-  "content": "# Skill content in markdown"
+  "markdown": "# Skill content in markdown"
 }
 ```
 
-Creates a new local company skill.
+Creates a new local company skill. The skill body is provided in the `markdown` field.
 
 ## Update Status
 

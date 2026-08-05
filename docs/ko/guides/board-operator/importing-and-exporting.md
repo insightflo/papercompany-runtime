@@ -7,7 +7,7 @@ papercompany 컴퍼니는 휴대용 마크다운 패키지로 내보내고, 로�
 
 ## 패키지 형식(Package Format)
 
-내보낸 패키지는 [에이전트 컴퍼니 규격(Agent Companies specification)](/companies/companies-spec)을 따르며 마크다운 우선 구조를 사용합니다:
+내보낸 패키지는 [에이전트 컴퍼니 규격(Agent Companies specification)](/ko/companies/companies-spec)을 따르며 마크다운 우선 구조를 사용합니다:
 
 ```text
 my-company/

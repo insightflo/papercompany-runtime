@@ -16,12 +16,11 @@ GET /api/instance/settings/general
 ```
 PATCH /api/instance/settings/general
 {
-  "defaultStorageProvider": "local",
-  "allowedHostnames": ["paperclip.example.com"]
+  "censorUsernameInLogs": true
 }
 ```
 
-일반 인스턴스 설정을 업데이트합니다.
+일반 인스턴스 설정을 업데이트합니다. 지원되는 필드는 `censorUsernameInLogs`뿐입니다.
 
 ## 실험적 설정
 
@@ -34,8 +33,10 @@ GET /api/instance/settings/experimental
 ```
 PATCH /api/instance/settings/experimental
 {
-  "workflowNativeSchedulerEnabled": true
+  "enableIsolatedWorkspaces": true,
+  "autoRestartDevServerWhenIdle": false,
+  "enableHeartbeatFinalizationV1": false
 }
 ```
 
-실험적 설정을 업데이트합니다.
+실험적 설정을 업데이트합니다. 지원되는 필드: `enableIsolatedWorkspaces`, `autoRestartDevServerWhenIdle`, `enableHeartbeatFinalizationV1`.

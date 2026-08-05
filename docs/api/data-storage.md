@@ -49,14 +49,14 @@ Lists objects in the company data storage.
 ### Write Object
 
 ```
-PUT /api/companies/{companyId}/data/objects
-{
-  "key": "market/2026-08-05.csv",
-  "content": "date,symbol,close\n..."
-}
+PUT /api/companies/{companyId}/data/objects?key=market/2026-08-05.csv
+Content-Type: text/csv
+
+date,symbol,close
+2026-08-05,AAPL,210.5
 ```
 
-Writes an object to the company data storage.
+Writes an object to the company data storage. The object key is passed via the `key` query parameter and the raw body is the object content (up to 50 MB).
 
 ## Work-Product Storage
 

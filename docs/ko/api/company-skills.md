@@ -29,11 +29,11 @@ POST /api/companies/{companyId}/skills
   "slug": "html-for-beginners",
   "name": "HTML for Beginners",
   "description": "Guidance for writing beginner-friendly HTML",
-  "content": "# Skill content in markdown"
+  "markdown": "# Skill content in markdown"
 }
 ```
 
-새 로컬 회사 스킬을 생성합니다.
+새 로컬 회사 스킬을 생성합니다. 스킬 본문은 `markdown` 필드로 제공합니다.
 
 ## 상태 업데이트
 

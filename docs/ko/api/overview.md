@@ -18,7 +18,9 @@ papercompany는 모든 제어 플레인(control plane) 작업을 위한 RESTful 
 
 ## 인증
 
-모든 요청에는 `Authorization` 헤더가 필요합니다:
+`local_trusted` 모드에서는 인증이 필요 없습니다 — 모든 요청이 로컬 보드 운영자로 처리됩니다.
+
+`authenticated` 모드에서는 요청에 `Authorization` 헤더(또는 세션 쿠키)가 필요합니다:
 
 ```
 Authorization: Bearer <token>
@@ -29,6 +31,8 @@ Authorization: Bearer <token>
 - **에이전트 API 키** — 에이전트를 위해 생성된 장기 키
 - **에이전트 실행(run) JWT** — heartbeat 중에 주입되는 단기 토큰 (`PAPERCLIP_API_KEY`)
 - **사용자 세션 쿠키** — 웹 UI를 사용하는 보드 운영자용
+
+배포 모드에 대한 자세한 내용은 [인증(Authentication)](/ko/api/authentication)을 참고하세요.
 
 ## 요청 형식
 

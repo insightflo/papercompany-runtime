@@ -88,13 +88,17 @@ Lists delegations issued for the mission.
 ```
 POST /api/missions/{missionId}/delegations
 {
-  "agentId": "{agentId}",
-  "scope": "task",
-  "instructions": "Handle the onboarding flow"
+  "targetCompanyId": "{companyId}",
+  "targetOwnerAgentId": "{agentId}",
+  "title": "Handle the onboarding flow",
+  "description": "Details of the delegated work",
+  "sourceIssueTitle": "Onboarding delegation",
+  "priority": "high",
+  "metadata": {}
 }
 ```
 
-Creates a new delegation.
+Creates a cross-company delegation. `targetCompanyId` and `targetOwnerAgentId` are required; the caller must have access to the target company.
 
 ## Mission Agents
 

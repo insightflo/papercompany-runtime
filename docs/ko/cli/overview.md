@@ -69,5 +69,5 @@ export PAPERCLIP_API_KEY=...
 
 CLI에는 두 가지 범주가 있습니다:
 
-1. **[설정 명령](/cli/setup-commands)** — 인스턴스 부트스트랩, 진단, 설정
-2. **[컨트롤 플레인 명령](/cli/control-plane-commands)** — issues, agents, approvals, activity
+1. **[설정 명령](/ko/cli/setup-commands)** — 인스턴스 부트스트랩, 진단, 설정
+2. **[컨트롤 플레인 명령](/ko/cli/control-plane-commands)** — issues, agents, approvals, activity

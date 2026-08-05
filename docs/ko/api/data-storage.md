@@ -49,14 +49,14 @@ GET /api/companies/{companyId}/data/objects
 ### 객체 작성
 
 ```
-PUT /api/companies/{companyId}/data/objects
-{
-  "key": "market/2026-08-05.csv",
-  "content": "date,symbol,close\n..."
-}
+PUT /api/companies/{companyId}/data/objects?key=market/2026-08-05.csv
+Content-Type: text/csv
+
+date,symbol,close
+2026-08-05,AAPL,210.5
 ```
 
-회사 데이터 스토리지에 객체를 씁니다.
+회사 데이터 스토리지에 객체를 씁니다. 객체 키는 `key` 쿼리 파라미터로 전달하고, raw 본문이 객체 내용입니다 (최대 50MB).
 
 ## 작업 산출물 스토리지
 

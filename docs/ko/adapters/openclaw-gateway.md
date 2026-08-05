@@ -24,4 +24,4 @@ summary: OpenClaw webhook 게이트웨이 어댑터
 
 ## Docker 설정
 
-로컬 개발의 경우 자동화된 조인 스모크 테스트와 초대/온보딩 플로우에 대해서는 [Running OpenClaw in Docker](/guides/openclaw-docker-setup)를 참고하세요.
+로컬 개발의 경우 자동화된 조인 스모크 테스트와 초대/온보딩 플로우에 대해서는 [Running OpenClaw in Docker](/ko/guides/openclaw-docker-setup)를 참고하세요.

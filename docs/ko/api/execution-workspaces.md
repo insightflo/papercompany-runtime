@@ -30,7 +30,11 @@ GET /api/execution-workspaces/{workspaceId}
 ```
 PATCH /api/execution-workspaces/{workspaceId}
 {
-  "name": "Analyst sandbox",
-  "maxConcurrentRuns": 2
+  "status": "active",
+  "cleanupEligibleAt": "2026-08-06T00:00:00Z",
+  "cleanupReason": "Work completed",
+  "metadata": { "note": "Reviewed" }
 }
 ```
+
+실행 워크스페이스를 수정합니다. 지원되는 필드: `status`, `cleanupEligibleAt` (ISO datetime), `cleanupReason`, `metadata`.

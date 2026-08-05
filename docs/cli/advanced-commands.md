@@ -32,27 +32,42 @@ pnpm paperclipai plugin examples
 
 ## Worktree Commands
 
-Manage git worktrees for isolated agent execution:
+Manage worktree-local Paperclip instances for isolated agent execution:
 
 ```sh
-# Initialize worktree configuration
-pnpm paperclipai worktree init [--path <path>]
+# Initialize worktree configuration in the current repo
+pnpm paperclipai worktree init [--name <name>] [--instance <id>] [--home <path>] \
+  [--from-config <path>] [--from-data-dir <path>] [--from-instance <id>] \
+  [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
+  [--no-seed] [--force]
 
-# Create a worktree
-pnpm paperclipai worktree make <name> [--base <ref>] [--path <path>]
+# Create a new worktree instance (alias: init)
+pnpm paperclipai worktree:make <name> [--start-point <ref>] [--instance <id>] [--home <path>] \
+  [--from-config <path>] [--from-data-dir <path>] [--from-instance <id>] \
+  [--server-port <port>] [--db-port <port>] [--seed-mode minimal|full] \
+  [--no-seed] [--force]
 
 # Print worktree environment for the current directory
-pnpm paperclipai worktree env [--json]
+pnpm paperclipai worktree env [-c, --config <path>] [--json]
 
 # List worktrees
-pnpm paperclipai worktree list [--json]
+pnpm paperclipai worktree:list [--json]
 
-# Show merge history
-pnpm paperclipai worktree merge-history <name>
+# Show merge history between worktrees (import preview by default)
+pnpm paperclipai worktree:merge-history \
+  [--from <worktree>] [--to <worktree>] [--company <id-or-prefix>] \
+  [--scope issues,comments] [--apply] [--dry] [--yes]
 
 # Clean up merged/stale worktrees
-pnpm paperclipai worktree cleanup [--dry-run]
+pnpm paperclipai worktree:cleanup [--instance <id>]
 ```
+
+Notes:
+
+- `worktree:make` creates a new isolated instance from a source instance (seeded with config and database by default)
+- `--start-point` sets the remote ref the new branch is based on (`PAPERCLIP_WORKTREE_START_POINT` env var)
+- `worktree:merge-history` previews an issue/comment import plan between worktrees; pass `--apply` to execute it
+- `worktree:cleanup` removes worktrees whose work has been merged (instance id defaults to the worktree name)
 
 ## Context Commands
 

@@ -26,24 +26,31 @@ GET /api/quality/review-items/{reviewItemId}
 ```
 POST /api/companies/{companyId}/quality/review-items
 {
-  "candidateRunId": "{runId}",
-  "evaluatorVersionId": "{versionId}"
+  "title": "Evaluate Q3 research report",
+  "targetType": "workflow_step_run",
+  "triggerSource": "workflow_failure",
+  "missionId": "{missionId}",
+  "targetId": "{targetId}",
+  "failureType": "evidence_gap",
+  "priority": "high",
+  "triggerMetadata": {},
+  "evidenceRefs": []
 }
 ```
 
-Creates a review item for a candidate run.
+Creates a review item. `title`, `targetType`, and `triggerSource` are required.
 
 ### Post Verdict
 
 ```
 POST /api/quality/review-items/{reviewItemId}/verdict
 {
-  "verdict": "approved",
-  "reasoning": "Meets the quality bar"
+  "verdict": "pass",
+  "reason": "Meets the quality bar"
 }
 ```
 
-Records an evaluation verdict.
+Records an evaluation verdict. `verdict` is one of: `pass`, `fail`, `request_changes`, `needs_evidence`, `dismissed`.
 
 ### Promote Anchor
 
@@ -58,22 +65,25 @@ Promotes the review item's candidate as an anchor example for future evaluations
 ```
 POST /api/quality/review-items/{reviewItemId}/request-evidence
 {
+  "requiredEvidenceSurfaces": ["transcript", "work_products"],
   "reason": "Need more context"
 }
 ```
 
-Requests additional evidence from the work agent.
+Requests additional evidence from the work agent. `requiredEvidenceSurfaces` is required.
 
 ### Submit Evidence
 
 ```
 POST /api/quality/review-items/{reviewItemId}/evidence
 {
-  "files": [{ "path": "logs.txt", "content": "..." }]
+  "surface": "transcript",
+  "status": "submitted",
+  "content": "Run transcript reference"
 }
 ```
 
-Submits evidence for a review item.
+Submits evidence for a review item. `surface` and `status` are required.
 
 ## Summary
 

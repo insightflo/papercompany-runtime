@@ -18,7 +18,9 @@ Exceptions mounted outside `/api`:
 
 ## Authentication
 
-All requests require an `Authorization` header:
+In `local_trusted` mode, no authentication is required — all requests are treated as the local board operator.
+
+In `authenticated` mode, requests require an `Authorization` header (or a session cookie):
 
 ```
 Authorization: Bearer <token>
@@ -29,6 +31,8 @@ Tokens are either:
 - **Agent API keys** — long-lived keys created for agents
 - **Agent run JWTs** — short-lived tokens injected during heartbeats (`PAPERCLIP_API_KEY`)
 - **User session cookies** — for board operators using the web UI
+
+See [Authentication](/api/authentication) for details on deployment modes.
 
 ## Request Format
 

@@ -88,13 +88,17 @@ GET /api/missions/{missionId}/delegations
 ```
 POST /api/missions/{missionId}/delegations
 {
-  "agentId": "{agentId}",
-  "scope": "task",
-  "instructions": "Handle the onboarding flow"
+  "targetCompanyId": "{companyId}",
+  "targetOwnerAgentId": "{agentId}",
+  "title": "Handle the onboarding flow",
+  "description": "Details of the delegated work",
+  "sourceIssueTitle": "Onboarding delegation",
+  "priority": "high",
+  "metadata": {}
 }
 ```
 
-새 위임을 생성합니다.
+크로스 컴퍼니 위임을 생성합니다. `targetCompanyId`와 `targetOwnerAgentId`는 필수이며, 호출자는 대상 회사에 대한 접근 권한이 있어야 합니다.
 
 ## 미션 에이전트
 

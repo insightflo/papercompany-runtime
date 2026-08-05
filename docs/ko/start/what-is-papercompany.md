@@ -64,7 +64,7 @@ Paperclip base는 태스크와 하트비트를 제공합니다. papercompany는 
 - 네이티브 워크플로 엔진이 중복 런 가드, 조건부 스킵, 리워크/백 엣지(back-edge), 멈춘 런의 정합성 회복(reconciliation)을 처리합니다
 - 수동 완료, 스텝 재실행, 재개, 취소는 모두 일급(first-class) 작업입니다
 
-API 레퍼런스에서 [워크플로](/api/workflows)와 [미션](/api/missions)을 참고하세요.
+API 레퍼런스에서 [워크플로](/ko/api/workflows)와 [미션](/ko/api/missions)을 참고하세요.
 
 ### 2. 미션 중심 실행
 
@@ -75,7 +75,7 @@ API 레퍼런스에서 [워크플로](/api/workflows)와 [미션](/api/missions)
 - 거버넌스 스레드, 인간 운영자 요청, 런타임 스냅샷이 모든 미션을 감사 가능하게 만듭니다
 - 회복 조언과 감독(supervision) 런은 미션이 정체될 때 운영자에게 안내된 경로를 제공합니다
 
-[미션](/api/missions)을 참고하세요.
+[미션](/ko/api/missions)을 참고하세요.
 
 ### 3. QA 평가와 루프
 
@@ -86,7 +86,7 @@ API 레퍼런스에서 [워크플로](/api/workflows)와 [미션](/api/missions)
 - 데일리 리포트가 컴퍼니 전반의 품질을 요약합니다
 - 후보 런은 평가자를 통해 리플레이할 수 있습니다
 
-[품질(Quality)](/api/quality)을 참고하세요.
+[품질(Quality)](/ko/api/quality)을 참고하세요.
 
 ### 4. 에이전트 위키
 
@@ -95,7 +95,7 @@ API 레퍼런스에서 [워크플로](/api/workflows)와 [미션](/api/missions)
 - 컴퍼니 범위의 위키 콘텐츠는 런타임에 에이전트에게 제공됩니다
 - 컴퍼니 지침 파일(`AGENTS.md`)과 함께 사용하면 에이전트는 매번 깨어날 때(wake) 일관된 컨텍스트를 받습니다
 
-[에이전트 위키](/api/agent-wiki)와 [컴퍼니 지침](/api/company-instructions)을 참고하세요.
+[에이전트 위키](/ko/api/agent-wiki)와 [컴퍼니 지침](/ko/api/company-instructions)을 참고하세요.
 
 ### 5. 가드 레일
 
@@ -106,7 +106,7 @@ API 레퍼런스에서 [워크플로](/api/workflows)와 [미션](/api/missions)
 - 툴 승인은 워크플로가 호출할 수 있는 툴을 제어합니다
 - 권한 그룹과 실행 정책은 각 행위자가 무엇을 할 수 있는지 정의합니다
 
-[워크트리](/api/worktree)와 [접근 및 멤버](/api/access)를 참고하세요.
+[워크트리](/ko/api/worktree)와 [접근 및 멤버](/ko/api/access)를 참고하세요.
 
 ### 6. QA 평가 및 진화 시스템
 
@@ -116,7 +116,7 @@ QA 시스템 자체가 **시간이 지날수록 개선됩니다**.
 - 평가자 버전은 버전 관리되며 활성(active) 상태로 승격됩니다
 - 후보 런 리플레이로 새 평가자가 과거 작업을 어떻게 평가했을지 측정할 수 있습니다
 
-[품질(Quality)](/api/quality) — 평가자 버전 및 앵커 엔드포인트를 참고하세요.
+[품질(Quality)](/ko/api/quality) — 평가자 버전 및 앵커 엔드포인트를 참고하세요.
 
 ### 7. 툴 등록과 에이전트 권한
 
@@ -126,7 +126,7 @@ QA 시스템 자체가 **시간이 지날수록 개선됩니다**.
 - 툴은 컴퍼니별로 범위가 정해지며, 테스트 엔드포인트가 샘플 인자로 툴을 검증합니다
 - 워크플로 툴 승인과 에이전트 권한이 역할과 컴퍼니별로 호출을 게이트합니다
 
-[툴 정의](/api/tool-definitions)와 [워크플로](/api/workflows)를 참고하세요.
+[툴 정의](/ko/api/tool-definitions)와 [워크플로](/ko/api/workflows)를 참고하세요.
 
 ### 8. 워크 프로덕트
 
@@ -137,7 +137,7 @@ QA 시스템 자체가 **시간이 지날수록 개선됩니다**.
 - 워크 프로덕트 스토리지(S3 호환 또는 로컬)는 생성된 아티팩트를 저장합니다
 - 연결성 테스트가 구성 시점에 두 스토리지 백엔드를 검증합니다
 
-[워크 프로덕트](/api/issues)와 [데이터 스토리지](/api/data-storage)를 참고하세요.
+[워크 프로덕트](/ko/api/issues)와 [데이터 스토리지](/ko/api/data-storage)를 참고하세요.
 
 ## 핵심 원칙(Core Principle)
 

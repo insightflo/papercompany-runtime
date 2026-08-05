@@ -29,7 +29,7 @@ papercompany는 네 개의 주요 계층으로 구성된 모노레포입니다. 
 | 계층 | 기술 |
 |-------|-----------|
 | 프론트엔드(Frontend) | React 19, Vite 6, React Router 7, Radix UI, Tailwind CSS 4, TanStack Query |
-| 백엔드(Backend) | Node.js 20+, Express.js 5, TypeScript |
+| 백엔드(Backend) | Node.js 24.x, Express.js 5, TypeScript |
 | 데이터베이스(Database) | PostgreSQL 17(또는 임베디드 PGlite), Drizzle ORM |
 | 인증(Auth) | Better Auth(세션 + API 키) |
 | 어댑터(Adapters) | Claude Code, Codex, Gemini, Command Code, Cursor, Pi, Antigravity, Hermes, OpenCode CLI, OpenClaw 게이트웨이, 셸 프로세스, HTTP 웹훅 |

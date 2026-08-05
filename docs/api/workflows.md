@@ -71,24 +71,29 @@ GET /api/companies/{companyId}/workflows/tools
 
 Lists tools available to workflows.
 
-### Grant Tools
+### Grant Tool to Agent
 
 ```
 POST /api/companies/{companyId}/workflows/tools/grants
 {
-  "toolIds": ["{toolId}"]
+  "agentId": "{agentId}",
+  "toolName": "research-search"
 }
 ```
 
-Grants workflow access to specific tools.
+Grants an agent access to a specific workflow tool.
 
-### Revoke Tools
+### Revoke Tool from Agent
 
 ```
 DELETE /api/companies/{companyId}/workflows/tools/grants
+{
+  "agentId": "{agentId}",
+  "toolName": "research-search"
+}
 ```
 
-Revokes tool grants.
+Revokes an agent's access to a workflow tool.
 
 ### Sync From Tool Registry
 
@@ -185,51 +190,62 @@ Manually marks the workflow step behind an issue as complete.
 
 Agents report workflow outcomes through these endpoints during heartbeats.
 
-### Post Artifacts
+### Register Artifact
 
 ```
 POST /api/issues/{issueId}/workflow/artifacts
 {
-  "files": [{ "path": "report.md", "content": "# Report" }]
+  "path": "report.md",
+  "title": "Market analysis",
+  "type": "artifact",
+  "summary": "Analysis of market conditions",
+  "isPrimary": true
 }
 ```
+
+Registers a local artifact. `type` is `artifact` or `document`. A `preview_url` variant is also accepted (`{ "type": "preview_url", "url": "https://...", "title": "..." }`).
 
 ### Post Verdict
 
 ```
 POST /api/issues/{issueId}/workflow/verdict
 {
-  "verdict": "approve",
-  "reasoning": "Evidence meets acceptance criteria"
+  "verdict": "pass",
+  "reason": "Evidence meets acceptance criteria"
 }
 ```
+
+`verdict` is `pass` or `request_changes`. When verdict is `request_changes`, an optional `nonblockingAcceptance` object (`{ "classification": "nonblocking", "limitations": ["..."] }`) may accompany it.
 
 ### Post Mission Plan QA Verdict
 
 ```
 POST /api/issues/{issueId}/mission-plan-qa/verdict
 {
-  "verdict": "approve",
-  "reasoning": "Plan is sound"
+  "verdict": "pass",
+  "diagnostics": []
 }
 ```
+
+`verdict` is `pass` or `request_changes`; `diagnostics` is an optional array of objects.
 
 ### Post Mission Plan Decision
 
 ```
 POST /api/issues/{issueId}/mission-plan-decision
 {
-  "decision": "proceed"
+  "decision": { "approved": true, "note": "Proceed with plan" }
 }
 ```
+
+`decision` is a free-form object.
 
 ### Complete Workflow
 
 ```
 POST /api/issues/{issueId}/workflow/complete
 {
-  "status": "completed",
-  "summary": "All steps finished"
+  "comment": "All steps finished"
 }
 ```
 
@@ -238,9 +254,12 @@ POST /api/issues/{issueId}/workflow/complete
 ```
 POST /api/issues/{issueId}/owner-recovery/decision
 {
-  "decision": "retry",
-  "reasoning": "Transient failure"
+  "decision": "retry_source_issue",
+  "reason": "Transient failure",
+  "nextAction": "Retry the step",
+  "evidence": "Run log reference",
+  "targetAgentId": "{agentId}"
 }
 ```
 
-Reports a mission owner's recovery decision for a stuck step.
+`decision` is one of: `request_input`, `retry_source_issue`, `reassign_source_issue`, `replan_mission`, `escalate`, `report_impossible`, `recover_artifact`, `no_action_waiting`. `reassign_source_issue` requires a same-company `targetAgentId`.

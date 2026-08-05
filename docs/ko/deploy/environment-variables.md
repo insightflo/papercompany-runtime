@@ -65,13 +65,13 @@ papercompany가 서버 설정에 사용하는 모든 환경 변수입니다.
 | `PAPERCLIP_SECRETS_MASTER_KEY` | (파일에서) | 32바이트 암호화 키(base64/hex/raw) |
 | `PAPERCLIP_SECRETS_MASTER_KEY_FILE` | `~/.paperclip/.../secrets/master.key` | 키 파일 경로 |
 | `PAPERCLIP_SECRETS_STRICT_MODE` | `false` | 민감한 env 변수에 시크릿 참조 요구 |
-| `PAPERCLIP_SECRETS_PROVIDER` | `local-encrypted` | 시크릿 제공자: `local-encrypted` 또는 외부 볼트 |
+| `PAPERCLIP_SECRETS_PROVIDER` | `local_encrypted` | 시크릿 제공자: `local_encrypted` 또는 외부 볼트 |
 
 ## 스토리지
 
 | 변수 | 기본값 | 설명 |
 |----------|---------|-------------|
-| `PAPERCLIP_STORAGE_PROVIDER` | `local` | 스토리지 제공자: `local` 또는 `s3` |
+| `PAPERCLIP_STORAGE_PROVIDER` | `local_disk` | 스토리지 제공자: `local_disk` 또는 `s3` |
 | `PAPERCLIP_STORAGE_LOCAL_DIR` | `~/.paperclip/.../storage` | 로컬 스토리지 디렉터리 |
 | `PAPERCLIP_STORAGE_S3_BUCKET` | — | S3 버킷 이름 |
 | `PAPERCLIP_STORAGE_S3_REGION` | — | S3 리전 |
@@ -83,9 +83,9 @@ papercompany가 서버 설정에 사용하는 모든 환경 변수입니다.
 
 | 변수 | 기본값 | 설명 |
 |----------|---------|-------------|
-| `PAPERCLIP_DB_BACKUP_ENABLED` | `false` | 예약 DB 백업 활성화 |
-| `PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES` | `60` | 백업 간격 |
-| `PAPERCLIP_DB_BACKUP_RETENTION_DAYS` | `7` | 백업 보존 기간 |
+| `PAPERCLIP_DB_BACKUP_ENABLED` | `true` | 예약 DB 백업 활성화 |
+| `PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES` | `1440` | 백업 간격 (24시간) |
+| `PAPERCLIP_DB_BACKUP_RETENTION_DAYS` | `3` | 백업 보존 기간 |
 | `PAPERCLIP_DB_BACKUP_DIR` | — | 백업 출력 디렉터리 |
 
 ## 하트비트 스케줄러

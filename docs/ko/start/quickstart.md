@@ -23,7 +23,7 @@ npx paperclipai run
 
 ## 로컬 개발(Local Development)
 
-papercompany 자체를 개발하는 기여자를 위한 방법입니다. 사전 요구 사항: Node.js 20+ 및 pnpm 9+.
+papercompany 자체를 개발하는 기여자를 위한 방법입니다. 사전 요구 사항: Node.js 24.x 및 pnpm 9+.
 
 저장소를 클론한 다음:
 

@@ -16,12 +16,11 @@ Returns general instance settings.
 ```
 PATCH /api/instance/settings/general
 {
-  "defaultStorageProvider": "local",
-  "allowedHostnames": ["paperclip.example.com"]
+  "censorUsernameInLogs": true
 }
 ```
 
-Updates general instance settings.
+Updates general instance settings. The only supported field is `censorUsernameInLogs`.
 
 ## Experimental Settings
 
@@ -34,8 +33,10 @@ Returns experimental feature flags for the instance.
 ```
 PATCH /api/instance/settings/experimental
 {
-  "workflowNativeSchedulerEnabled": true
+  "enableIsolatedWorkspaces": true,
+  "autoRestartDevServerWhenIdle": false,
+  "enableHeartbeatFinalizationV1": false
 }
 ```
 
-Updates experimental settings.
+Updates experimental settings. Supported fields: `enableIsolatedWorkspaces`, `autoRestartDevServerWhenIdle`, `enableHeartbeatFinalizationV1`.

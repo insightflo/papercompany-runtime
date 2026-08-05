@@ -71,24 +71,29 @@ GET /api/companies/{companyId}/workflows/tools
 
 워크플로우에서 사용할 수 있는 도구를 나열합니다.
 
-### 도구 부여
+### 에이전트에게 도구 부여
 
 ```
 POST /api/companies/{companyId}/workflows/tools/grants
 {
-  "toolIds": ["{toolId}"]
+  "agentId": "{agentId}",
+  "toolName": "research-search"
 }
 ```
 
-특정 도구에 대한 워크플로우 접근을 부여합니다.
+특정 에이전트에게 워크플로우 도구 접근 권한을 부여합니다.
 
-### 도구 부여 취소
+### 에이전트의 도구 부여 취소
 
 ```
 DELETE /api/companies/{companyId}/workflows/tools/grants
+{
+  "agentId": "{agentId}",
+  "toolName": "research-search"
+}
 ```
 
-도구 부여를 취소합니다.
+에이전트의 워크플로우 도구 접근 권한을 취소합니다.
 
 ### 도구 레지스트리에서 동기화
 
@@ -185,51 +190,62 @@ issue 뒤의 워크플로우 스텝을 수동으로 완료로 표시합니다.
 
 에이전트는 heartbeat 중에 다음 엔드포인트를 통해 워크플로우 결과를 보고합니다.
 
-### 산출물 게시
+### 산출물 등록
 
 ```
 POST /api/issues/{issueId}/workflow/artifacts
 {
-  "files": [{ "path": "report.md", "content": "# Report" }]
+  "path": "report.md",
+  "title": "Market analysis",
+  "type": "artifact",
+  "summary": "Analysis of market conditions",
+  "isPrimary": true
 }
 ```
+
+로컬 산출물을 등록합니다. `type`은 `artifact` 또는 `document`입니다. `preview_url` 변형도 허용됩니다 (`{ "type": "preview_url", "url": "https://...", "title": "..." }`).
 
 ### 평결 게시
 
 ```
 POST /api/issues/{issueId}/workflow/verdict
 {
-  "verdict": "approve",
-  "reasoning": "Evidence meets acceptance criteria"
+  "verdict": "pass",
+  "reason": "Evidence meets acceptance criteria"
 }
 ```
+
+`verdict`는 `pass` 또는 `request_changes`입니다. `request_changes`인 경우 선택적으로 `nonblockingAcceptance` 객체(`{ "classification": "nonblocking", "limitations": ["..."] }`)를 함께 보낼 수 있습니다.
 
 ### 미션 플랜 QA 평결 게시
 
 ```
 POST /api/issues/{issueId}/mission-plan-qa/verdict
 {
-  "verdict": "approve",
-  "reasoning": "Plan is sound"
+  "verdict": "pass",
+  "diagnostics": []
 }
 ```
+
+`verdict`는 `pass` 또는 `request_changes`이며, `diagnostics`는 선택적인 객체 배열입니다.
 
 ### 미션 플랜 결정 게시
 
 ```
 POST /api/issues/{issueId}/mission-plan-decision
 {
-  "decision": "proceed"
+  "decision": { "approved": true, "note": "Proceed with plan" }
 }
 ```
+
+`decision`은 자유 형식 객체입니다.
 
 ### 워크플로우 완료
 
 ```
 POST /api/issues/{issueId}/workflow/complete
 {
-  "status": "completed",
-  "summary": "All steps finished"
+  "comment": "All steps finished"
 }
 ```
 
@@ -238,9 +254,12 @@ POST /api/issues/{issueId}/workflow/complete
 ```
 POST /api/issues/{issueId}/owner-recovery/decision
 {
-  "decision": "retry",
-  "reasoning": "Transient failure"
+  "decision": "retry_source_issue",
+  "reason": "Transient failure",
+  "nextAction": "Retry the step",
+  "evidence": "Run log reference",
+  "targetAgentId": "{agentId}"
 }
 ```
 
-막힌 스텝에 대한 미션 소유자의 복구 결정을 보고합니다.
+막힌 스텝에 대한 미션 소유자의 복구 결정을 보고합니다. `decision`은 `request_input`, `retry_source_issue`, `reassign_source_issue`, `replan_mission`, `escalate`, `report_impossible`, `recover_artifact`, `no_action_waiting` 중 하나입니다. `reassign_source_issue`는 같은 회사의 `targetAgentId`가 필요합니다.
