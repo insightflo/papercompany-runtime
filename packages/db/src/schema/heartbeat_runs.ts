@@ -79,5 +79,22 @@ export const heartbeatRuns = pgTable(
     unsettledFinalizationIdx: index("heartbeat_runs_unsettled_finalization_idx")
       .on(table.companyId, table.finalizationVersion)
       .where(sql`${table.finalizationVersion} > 0 and ${table.settledAt} is null`),
+    companyCreatedIdx: index("heartbeat_runs_company_created_idx").on(
+      table.companyId,
+      table.createdAt,
+      table.id,
+    ),
+    companyStatusCreatedIdx: index("heartbeat_runs_company_status_created_idx").on(
+      table.companyId,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    companyAgentCreatedIdx: index("heartbeat_runs_company_agent_created_idx").on(
+      table.companyId,
+      table.agentId,
+      table.createdAt,
+      table.id,
+    ),
   }),
 );
