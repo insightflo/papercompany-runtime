@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
-import { attentionItemToRun } from "./useInboxHeartbeatData";
+import { attentionItemToRun, isFailedRunAttentionItem } from "./useInboxHeartbeatData";
 import { encodeHeartbeatCursor } from "../api/heartbeats";
 
 describe("useInboxHeartbeatData attention adaptation", () => {
@@ -43,6 +43,31 @@ describe("useInboxHeartbeatData attention adaptation", () => {
       "company-1",
     );
     expect(run.contextSnapshot).toBeNull();
+  });
+});
+
+describe("isFailedRunAttentionItem (cancelled not a retryable failure)", () => {
+  const base = {
+    runId: "run-1",
+    agentId: "agent-1",
+    issueId: null,
+    createdAt: new Date("2026-07-01T00:00:00.000Z"),
+    error: null,
+    errorCode: null,
+  };
+
+  it("accepts failed and timed_out (historical FAILED_RUN_STATUSES)", () => {
+    expect(isFailedRunAttentionItem({ ...base, status: "failed" })).toBe(true);
+    expect(isFailedRunAttentionItem({ ...base, status: "timed_out" })).toBe(true);
+  });
+
+  it("rejects cancelled so it is never converted into a red retryable row", () => {
+    expect(isFailedRunAttentionItem({ ...base, status: "cancelled" })).toBe(false);
+  });
+
+  it("rejects other statuses", () => {
+    expect(isFailedRunAttentionItem({ ...base, status: "succeeded" })).toBe(false);
+    expect(isFailedRunAttentionItem({ ...base, status: "running" })).toBe(false);
   });
 });
 

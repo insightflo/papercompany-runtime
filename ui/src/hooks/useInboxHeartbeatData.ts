@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
-import { isHeartbeatPageScopeCurrent } from "../lib/inbox";
+import { FAILED_RUN_STATUSES, isHeartbeatPageScopeCurrent } from "../lib/inbox";
 import { queryKeys } from "../lib/queryKeys";
 import type {
   HeartbeatRun,
@@ -10,6 +10,15 @@ import type {
 } from "@paperclipai/shared";
 
 const ATTENTION_PAGE_SIZE = 50;
+
+/**
+ * Historical inbox failure semantics: only failed and timed_out are shown as
+ * red retryable rows; cancelled stays in the attention contract only. Reuses
+ * the shared FAILED_RUN_STATUSES export from lib/inbox.
+ */
+export function isFailedRunAttentionItem(item: HeartbeatRunAttentionItem): boolean {
+  return FAILED_RUN_STATUSES.has(item.status);
+}
 
 /**
  * Adapt an attention item (bounded lightweight shape) into a HeartbeatRun so

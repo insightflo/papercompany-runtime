@@ -9,6 +9,8 @@ import {
   createBoundedReadsTestDb,
   freshAgent,
   freshCompany,
+  seedOpenIssue,
+  seedResolvedIssue,
   seedRun,
 } from "./helpers/bounded-reads-test-utils.js";
 import {
@@ -186,5 +188,54 @@ describeEP("heartbeat attention paging (integration)", () => {
     expect(staleDismissed.summary.agents).toBe(11);
     expect(staleDismissed.items.some((item) => item.runId === dismissedRunId)).toBe(false);
     void runIds;
+  });
+
+  it("resolves issue linkage from context_snapshot.issueId (legacy) and excludes resolved issues", async () => {
+    const company = await freshCompany(db);
+    const agentId = await freshAgent(db, company);
+    const resolvedIssueId = await seedResolvedIssue(db, company);
+    await seedRun(db, company, agentId, "failed", new Date(), {
+      issueId: null,
+      contextSnapshot: { issueId: resolvedIssueId },
+    });
+
+    const attention = await attentionHeartbeatRuns(db, { companyId: company, agentId });
+    // The run links to a resolved issue via the legacy context key, so it is
+    // excluded.
+    expect(attention.items).toHaveLength(0);
+    expect(attention.summary.agents).toBe(0);
+  });
+
+  it("resolves issue linkage from context_snapshot.taskId (legacy) and keeps the item with its issue id", async () => {
+    const company = await freshCompany(db);
+    const agentId = await freshAgent(db, company);
+    const openIssueId = await seedOpenIssue(db, company);
+    await seedRun(db, company, agentId, "timed_out", new Date(), {
+      issueId: null,
+      contextSnapshot: { taskId: openIssueId },
+    });
+
+    const attention = await attentionHeartbeatRuns(db, { companyId: company, agentId });
+    expect(attention.items).toHaveLength(1);
+    // The returned item retains the resolved issue id for link/retry.
+    expect(attention.items[0]!.issueId).toBe(openIssueId);
+    expect(attention.items[0]!.status).toBe("timed_out");
+  });
+
+  it("prefers heartbeat_runs.issue_id over legacy context issueId", async () => {
+    const company = await freshCompany(db);
+    const agentId = await freshAgent(db, company);
+    const resolvedIssueId = await seedResolvedIssue(db, company);
+    const openIssueId = await seedOpenIssue(db, company);
+    // issue_id points at a resolved issue, but the legacy context points at an
+    // open one — issue_id wins, so the run is excluded.
+    await seedRun(db, company, agentId, "failed", new Date(), {
+      issueId: resolvedIssueId,
+      contextSnapshot: { issueId: openIssueId },
+    });
+
+    const attention = await attentionHeartbeatRuns(db, { companyId: company, agentId });
+    expect(attention.items).toHaveLength(0);
+    expect(attention.summary.agents).toBe(0);
   });
 });

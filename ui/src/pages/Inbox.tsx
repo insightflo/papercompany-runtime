@@ -51,12 +51,16 @@ import {
   readIssueIdFromRun,
   InboxApprovalFilter,
   saveLastInboxTab,
-  shouldShowInboxSection,
   shouldShowHeartbeatLoadMoreSection,
+  shouldShowInboxSection,
   type InboxTab,
 } from "../lib/inbox";
 import { useDismissedInboxItems } from "../hooks/useInboxBadge";
-import { attentionItemToRun, useInboxHeartbeatData } from "../hooks/useInboxHeartbeatData";
+import {
+  attentionItemToRun,
+  isFailedRunAttentionItem,
+  useInboxHeartbeatData,
+} from "../hooks/useInboxHeartbeatData";
 
 type InboxCategoryFilter =
   | "everything"
@@ -398,6 +402,10 @@ export function Inbox() {
   const failedRuns = useMemo(
     () =>
       attentionItems
+        // Only failed/timed_out become red retryable rows (historical
+        // behavior); cancelled stays in the attention contract but is not
+        // shown as a failure.
+        .filter(isFailedRunAttentionItem)
         .filter((r) => !dismissed.has(`run:${r.runId}`))
         .map((item) => attentionItemToRun(item, selectedCompanyId ?? "")),
     [attentionItems, dismissed, selectedCompanyId],

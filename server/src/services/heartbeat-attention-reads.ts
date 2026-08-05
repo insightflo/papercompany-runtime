@@ -35,7 +35,8 @@ const MAX_DISMISSED_RUN_IDS = 200;
 const ATTENTION_STATUSES = new Set(["failed", "timed_out", "cancelled"]);
 const RESOLVED_ISSUE_STATUSES = new Set(["done", "cancelled", "completed"]);
 
-/** Lightweight columns for attention reads; excludes heavy JSON/log payloads. */
+/** Lightweight columns for attention reads; only contextSnapshot is added
+ * for legacy issue linkage (no resultJson/log payloads). */
 const heartbeatRunAttentionColumns = {
   id: heartbeatRuns.id,
   agentId: heartbeatRuns.agentId,
@@ -44,7 +45,26 @@ const heartbeatRunAttentionColumns = {
   createdAt: heartbeatRuns.createdAt,
   error: heartbeatRuns.error,
   errorCode: heartbeatRuns.errorCode,
+  contextSnapshot: heartbeatRuns.contextSnapshot,
 } as const;
+
+/**
+ * Resolve the issue linked to a run: heartbeat_runs.issue_id first, then the
+ * legacy context_snapshot.issueId, then context_snapshot.taskId.
+ */
+function resolveAttentionIssueId(row: {
+  issueId: string | null;
+  contextSnapshot: Record<string, unknown> | null;
+}): string | null {
+  if (row.issueId) return row.issueId;
+  const context = row.contextSnapshot;
+  if (!context) return null;
+  const issueId = context["issueId"];
+  if (typeof issueId === "string" && issueId.length > 0) return issueId;
+  const taskId = context["taskId"];
+  if (typeof taskId === "string" && taskId.length > 0) return taskId;
+  return null;
+}
 
 /**
  * Exact latest run per agent (DISTINCT ON agentId over the full company
@@ -75,11 +95,19 @@ export async function attentionHeartbeatRuns(db: Db, input: HeartbeatRunAttentio
       createdAt: latestRun.createdAt,
       error: latestRun.error,
       errorCode: latestRun.errorCode,
+      contextSnapshot: latestRun.contextSnapshot,
     })
     .from(latestRun)
     .where(inArray(latestRun.status, Array.from(ATTENTION_STATUSES)));
 
-  const issueIds = Array.from(new Set(allLatest.map((row) => row.issueId).filter((id): id is string => !!id)));
+  // Resolve issue linkage (issue_id -> context.issueId -> context.taskId)
+  // so resolved issues are excluded and returned items keep a usable id.
+  const rowsWithIssue = allLatest.map((row) => ({
+    ...row,
+    resolvedIssueId: resolveAttentionIssueId(row),
+  }));
+
+  const issueIds = Array.from(new Set(rowsWithIssue.map((row) => row.resolvedIssueId).filter((id): id is string => !!id)));
   const resolvedIssueIds = new Set<string>();
   if (issueIds.length > 0) {
     const issueRows = await db
@@ -92,8 +120,8 @@ export async function attentionHeartbeatRuns(db: Db, input: HeartbeatRunAttentio
   }
 
   const dismissedIds = new Set((input.dismissedRunIds ?? []).slice(0, MAX_DISMISSED_RUN_IDS));
-  const eligible = allLatest
-    .filter((row) => !row.issueId || !resolvedIssueIds.has(row.issueId))
+  const eligible = rowsWithIssue
+    .filter((row) => !row.resolvedIssueId || !resolvedIssueIds.has(row.resolvedIssueId))
     .filter((row) => !dismissedIds.has(row.id))
     .sort((a, b) => {
       const timeDiff = b.createdAt.getTime() - a.createdAt.getTime();
@@ -124,7 +152,7 @@ export async function attentionHeartbeatRuns(db: Db, input: HeartbeatRunAttentio
     runId: row.id,
     agentId: row.agentId,
     status: row.status as HeartbeatRunStatus,
-    issueId: row.issueId,
+    issueId: row.resolvedIssueId,
     createdAt: row.createdAt,
     error: row.error,
     errorCode: row.errorCode,
