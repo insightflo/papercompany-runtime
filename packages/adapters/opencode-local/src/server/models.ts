@@ -8,7 +8,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 
 const MODELS_CACHE_TTL_MS = 60_000;
-const MODELS_DISCOVERY_TIMEOUT_MS = 20_000;
+const MODELS_DISCOVERY_TIMEOUT_MS = 60_000;
 // 만료된 cache entry 가 stale fallback 으로 살아있는 보존 기간. 이 window 안의 expired entry 는
 // fresh discovery 실패 시 반환된다(Phase 3: stale serve). 이를 넘으면 prune.
 const MODELS_STALE_RETENTION_MS = 5 * 60_000;
