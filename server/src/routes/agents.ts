@@ -14,6 +14,7 @@ import {
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   type AgentSkillSnapshot,
+  type HeartbeatRunStatus,
   type InstanceSchedulerHeartbeatAgent,
   upsertAgentInstructionsFileSchema,
   updateAgentInstructionsBundleSchema,
@@ -62,6 +63,15 @@ import {
   loadDefaultAgentInstructionsBundle,
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
+import {
+  parseOptionalAgentId,
+  parseRunListLimit,
+  parseRunStatsDays,
+  parseAttentionLimit,
+  parseRunStatuses,
+  parseRunCursor,
+  parseDismissedRunIds,
+} from "./heartbeat-run-query-parsers.js";
 
 export function agentRoutes(db: Db) {
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -2067,11 +2077,53 @@ export function agentRoutes(db: Db) {
   router.get("/companies/:companyId/heartbeat-runs", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const agentId = req.query.agentId as string | undefined;
-    const limitParam = req.query.limit as string | undefined;
-    const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : undefined;
+    const agentId = parseOptionalAgentId(req.query.agentId);
+    const limit = parseRunListLimit(req.query.limit);
     const runs = await heartbeat.list(companyId, agentId, limit);
     res.json(runs);
+  });
+
+  router.get("/companies/:companyId/heartbeat-runs/page", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const agentId = parseOptionalAgentId(req.query.agentId);
+    const limit = parseRunListLimit(req.query.limit);
+    const cursor = parseRunCursor(req.query.cursor);
+    const page = await heartbeat.listSummaryPage({ companyId, agentId, limit, cursor });
+    res.json(page);
+  });
+
+  router.get("/companies/:companyId/heartbeat-runs/count", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const agentId = parseOptionalAgentId(req.query.agentId);
+    const statuses = parseRunStatuses(req.query.status);
+    const counts = await heartbeat.count({
+      companyId,
+      agentId,
+      statuses: statuses as HeartbeatRunStatus[] | undefined,
+    });
+    res.json(counts);
+  });
+
+  router.get("/companies/:companyId/heartbeat-runs/stats", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const agentId = parseOptionalAgentId(req.query.agentId);
+    const days = parseRunStatsDays(req.query.days);
+    const stats = await heartbeat.stats({ companyId, agentId, days });
+    res.json(stats);
+  });
+
+  router.get("/companies/:companyId/heartbeat-runs/attention", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const agentId = parseOptionalAgentId(req.query.agentId);
+    const limit = parseAttentionLimit(req.query.limit);
+    const cursor = parseRunCursor(req.query.cursor);
+    const dismissedRunIds = parseDismissedRunIds(req.query.dismissedRunIds);
+    const attention = await heartbeat.attention({ companyId, agentId, limit, cursor, dismissedRunIds });
+    res.json(attention);
   });
 
   router.get("/companies/:companyId/live-runs", async (req, res) => {
@@ -2080,6 +2132,7 @@ export function agentRoutes(db: Db) {
 
     const minCountParam = req.query.minCount as string | undefined;
     const minCount = minCountParam ? Math.max(0, Math.min(20, parseInt(minCountParam, 10) || 0)) : 0;
+    const agentId = parseOptionalAgentId(req.query.agentId);
 
     const columns = {
       id: heartbeatRuns.id,
@@ -2095,31 +2148,32 @@ export function agentRoutes(db: Db) {
       issueId: heartbeatRuns.issueId,
     };
 
+    const activeConditions = [
+      eq(heartbeatRuns.companyId, companyId),
+      inArray(heartbeatRuns.status, ["queued", "running"]),
+    ];
+    if (agentId) activeConditions.push(eq(heartbeatRuns.agentId, agentId));
+
     const liveRuns = await db
       .select(columns)
       .from(heartbeatRuns)
       .innerJoin(agentsTable, eq(heartbeatRuns.agentId, agentsTable.id))
-      .where(
-        and(
-          eq(heartbeatRuns.companyId, companyId),
-          inArray(heartbeatRuns.status, ["queued", "running"]),
-        ),
-      )
+      .where(and(...activeConditions))
       .orderBy(desc(heartbeatRuns.createdAt));
 
     if (minCount > 0 && liveRuns.length < minCount) {
       const activeIds = liveRuns.map((r) => r.id);
+      const recentConditions = [
+        eq(heartbeatRuns.companyId, companyId),
+        not(inArray(heartbeatRuns.status, ["queued", "running"])),
+        ...(activeIds.length > 0 ? [not(inArray(heartbeatRuns.id, activeIds))] : []),
+      ];
+      if (agentId) recentConditions.push(eq(heartbeatRuns.agentId, agentId));
       const recentRuns = await db
         .select(columns)
         .from(heartbeatRuns)
         .innerJoin(agentsTable, eq(heartbeatRuns.agentId, agentsTable.id))
-        .where(
-          and(
-            eq(heartbeatRuns.companyId, companyId),
-            not(inArray(heartbeatRuns.status, ["queued", "running"])),
-            ...(activeIds.length > 0 ? [not(inArray(heartbeatRuns.id, activeIds))] : []),
-          ),
-        )
+        .where(and(...recentConditions))
         .orderBy(desc(heartbeatRuns.createdAt))
         .limit(minCount - liveRuns.length);
 

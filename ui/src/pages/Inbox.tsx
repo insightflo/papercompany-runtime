@@ -7,7 +7,6 @@ import { ApiError } from "../api/client";
 import { dashboardApi } from "../api/dashboard";
 import { issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
-import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -38,20 +37,26 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { PageTabBar } from "../components/PageTabBar";
-import type { Approval, HeartbeatRun, Issue, JoinRequest } from "@paperclipai/shared";
+import type {
+  Approval,
+  HeartbeatRun,
+  Issue,
+  JoinRequest,
+} from "@paperclipai/shared";
 import {
   ACTIONABLE_APPROVAL_STATUSES,
   getApprovalsForTab,
   getInboxWorkItems,
-  getUnresolvedLatestFailedRunsByAgent,
   getRecentTouchedIssues,
   readIssueIdFromRun,
   InboxApprovalFilter,
   saveLastInboxTab,
   shouldShowInboxSection,
+  shouldShowHeartbeatLoadMoreSection,
   type InboxTab,
 } from "../lib/inbox";
 import { useDismissedInboxItems } from "../hooks/useInboxBadge";
+import { attentionItemToRun, useInboxHeartbeatData } from "../hooks/useInboxHeartbeatData";
 
 type InboxCategoryFilter =
   | "everything"
@@ -359,11 +364,14 @@ export function Inbox() {
     enabled: !!selectedCompanyId,
   });
 
-  const { data: heartbeatRuns, isLoading: isRunsLoading } = useQuery({
-    queryKey: queryKeys.heartbeats(selectedCompanyId!),
-    queryFn: () => heartbeatsApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
-  });
+  const {
+    isLoading: isRunsLoading,
+    attentionItems,
+    liveIssueIds,
+    hasMore: attentionHasMore,
+    loadingMore: attentionLoading,
+    loadMore: loadMoreAttention,
+  } = useInboxHeartbeatData(selectedCompanyId);
 
   const touchedIssues = useMemo(() => getRecentTouchedIssues(touchedIssuesRaw), [touchedIssuesRaw]);
   const unreadTouchedIssues = useMemo(
@@ -389,20 +397,11 @@ export function Inbox() {
 
   const failedRuns = useMemo(
     () =>
-      getUnresolvedLatestFailedRunsByAgent(heartbeatRuns ?? [], issues ?? []).filter(
-        (r) => !dismissed.has(`run:${r.id}`),
-      ),
-    [heartbeatRuns, issues, dismissed],
+      attentionItems
+        .filter((r) => !dismissed.has(`run:${r.runId}`))
+        .map((item) => attentionItemToRun(item, selectedCompanyId ?? "")),
+    [attentionItems, dismissed, selectedCompanyId],
   );
-  const liveIssueIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const run of heartbeatRuns ?? []) {
-      if (run.status !== "running" && run.status !== "queued") continue;
-      const issueId = readIssueIdFromRun(run);
-      if (issueId) ids.add(issueId);
-    }
-    return ids;
-  }, [heartbeatRuns]);
 
   const approvalsToRender = useMemo(
     () => getApprovalsForTab(approvals ?? [], tab, allApprovalFilter),
@@ -597,7 +596,7 @@ export function Inbox() {
     !dismissed.has("alert:budget");
   const hasAlerts = showAggregateAgentError || showBudgetAlert;
   const hasJoinRequests = joinRequests.length > 0;
-  const showWorkItemsSection = workItemsToRender.length > 0;
+  const showWorkItemsSection = shouldShowHeartbeatLoadMoreSection(workItemsToRender.length, attentionHasMore, tab, showFailedRunsCategory);
   const showJoinRequestsSection =
     tab === "all" ? showJoinRequestsCategory && hasJoinRequests : tab === "unread" && hasJoinRequests;
   const showAlertsSection = shouldShowInboxSection({
@@ -799,6 +798,19 @@ export function Inbox() {
                 );
               })}
             </div>
+            {attentionHasMore && (
+              <div className="mt-3 text-center">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadMoreAttention()}
+                  disabled={attentionLoading}
+                >
+                  {attentionLoading ? "Loading…" : "Load more"}
+                </Button>
+              </div>
+            )}
           </div>
         </>
       )}

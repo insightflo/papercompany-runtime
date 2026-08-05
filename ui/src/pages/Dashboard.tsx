@@ -83,9 +83,9 @@ export function Dashboard() {
     enabled: !!selectedCompanyId,
   });
 
-  const { data: runs } = useQuery({
-    queryKey: queryKeys.heartbeats(selectedCompanyId!),
-    queryFn: () => heartbeatsApi.list(selectedCompanyId!),
+  const { data: runStats } = useQuery({
+    queryKey: queryKeys.heartbeatStats(selectedCompanyId!),
+    queryFn: () => heartbeatsApi.stats(selectedCompanyId!, { days: 14 }),
     enabled: !!selectedCompanyId,
   });
 
@@ -307,7 +307,7 @@ export function Dashboard() {
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <ChartCard title="Run Activity" subtitle="Last 14 days">
-              <RunActivityChart runs={runs ?? []} />
+              <RunActivityChart runs={runStats?.days ?? []} />
             </ChartCard>
             <ChartCard title="Work by Priority" subtitle="Last 14 days">
               <PriorityChart issues={issues ?? []} />
@@ -316,7 +316,7 @@ export function Dashboard() {
               <IssueStatusChart issues={issues ?? []} />
             </ChartCard>
             <ChartCard title="Success Rate" subtitle="Last 14 days">
-              <SuccessRateChart runs={runs ?? []} />
+              <SuccessRateChart runs={runStats?.days ?? []} />
             </ChartCard>
           </div>
 

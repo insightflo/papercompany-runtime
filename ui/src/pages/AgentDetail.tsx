@@ -69,7 +69,6 @@ import {
   Copy,
   ChevronRight,
   ChevronDown,
-  ArrowLeft,
   HelpCircle,
   Wrench,
 } from "lucide-react";
@@ -86,7 +85,10 @@ import {
   type AgentDetail as AgentDetailRecord,
   type BudgetPolicySummary,
   type HeartbeatRun,
+  type HeartbeatRunCursor,
   type HeartbeatRunEvent,
+  type HeartbeatRunStats,
+  type HeartbeatRunSummary,
   type AgentRuntimeState,
   type LiveEvent,
   type WorkspaceOperation,
@@ -98,6 +100,7 @@ import {
   arraysEqual,
   isReadOnlyUnmanagedSkillEntry,
 } from "../lib/agent-skills-state";
+import { AgentRunsTab } from "../components/agent-detail/AgentRunsTab";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -107,6 +110,8 @@ const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string 
   timed_out: { icon: Timer, color: "text-orange-600 dark:text-orange-400" },
   cancelled: { icon: Slash, color: "text-neutral-500 dark:text-neutral-400" },
 };
+
+const EMPTY_HEARTBEAT_RUN_SUMMARIES: HeartbeatRunSummary[] = [];
 
 const REDACTED_ENV_VALUE = "***REDACTED***";
 const SECRET_ENV_KEY_RE =
@@ -252,9 +257,9 @@ function setsEqual<T>(left: Set<T>, right: Set<T>) {
   return true;
 }
 
-function runMetrics(run: HeartbeatRun) {
+function runMetrics(run: HeartbeatRun | HeartbeatRunSummary) {
   const usage = (run.usageJson ?? null) as Record<string, unknown> | null;
-  const result = (run.resultJson ?? null) as Record<string, unknown> | null;
+  const result = "resultJson" in run ? ((run as HeartbeatRun).resultJson ?? null) as Record<string, unknown> | null : null;
   const input = usageNumber(usage, "inputTokens", "input_tokens");
   const output = usageNumber(usage, "outputTokens", "output_tokens");
   const cached = usageNumber(
@@ -568,10 +573,30 @@ export function AgentDetail() {
     enabled: Boolean(resolvedAgentId) && needsDashboardData,
   });
 
-  const { data: heartbeats } = useQuery({
+  const { data: runStats } = useQuery({
+    queryKey: queryKeys.heartbeatStats(resolvedCompanyId!, agent?.id ?? undefined),
+    queryFn: () => heartbeatsApi.stats(resolvedCompanyId!, { agentId: agent?.id, days: 14 }),
+    enabled: !!resolvedCompanyId && !!agent?.id && needsDashboardData,
+  });
+
+  const { data: runPage } = useQuery({
     queryKey: queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined),
-    queryFn: () => heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined),
+    queryFn: () => heartbeatsApi.page(resolvedCompanyId!, { agentId: agent?.id, limit: 100 }),
     enabled: !!resolvedCompanyId && !!agent?.id && shouldLoadHeartbeats,
+  });
+
+  const latestRunId = runPage?.items[0]?.id ?? null;
+  const { data: latestRunDetail } = useQuery({
+    queryKey: queryKeys.runDetail(latestRunId ?? "__none__"),
+    queryFn: () => heartbeatsApi.get(latestRunId!),
+    enabled: !!latestRunId && needsDashboardData,
+  });
+
+  const { data: mobileLiveRuns } = useQuery({
+    queryKey: queryKeys.liveRuns(resolvedCompanyId!, agent?.id),
+    queryFn: () => heartbeatsApi.liveRunsForCompany(resolvedCompanyId!, undefined, agent?.id),
+    enabled: !!resolvedCompanyId && !!agent?.id,
+    refetchInterval: 15_000,
   });
 
   const { data: allIssues } = useQuery({
@@ -631,8 +656,8 @@ export function AgentDetail() {
     } satisfies BudgetPolicySummary;
   }, [agent, budgetOverview?.policies, resolvedCompanyId, routeAgentRef]);
   const mobileLiveRun = useMemo(
-    () => (heartbeats ?? []).find((r) => r.status === "running" || r.status === "queued") ?? null,
-    [heartbeats],
+    () => (mobileLiveRuns ?? []).find((r) => r.status === "running" || r.status === "queued") ?? null,
+    [mobileLiveRuns],
   );
 
   useEffect(() => {
@@ -991,7 +1016,9 @@ export function AgentDetail() {
       {activeView === "dashboard" && (
         <AgentOverview
           agent={agent}
-          runs={heartbeats ?? []}
+          runs={runPage?.items ?? EMPTY_HEARTBEAT_RUN_SUMMARIES}
+          latestRunDetail={latestRunDetail ?? null}
+          runStats={runStats}
           assignedIssues={assignedIssues}
           runtimeState={runtimeState}
           agentId={agent.id}
@@ -1032,7 +1059,8 @@ export function AgentDetail() {
 
       {activeView === "runs" && (
         <RunsTab
-          runs={heartbeats ?? []}
+          initialRuns={runPage?.items ?? EMPTY_HEARTBEAT_RUN_SUMMARIES}
+          nextCursor={runPage?.nextCursor ?? null}
           companyId={resolvedCompanyId!}
           agentId={agent.id}
           agentRouteId={canonicalAgentRef}
@@ -1066,7 +1094,7 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
   );
 }
 
-function LatestRunCard({ runs, agentId }: { runs: HeartbeatRun[]; agentId: string }) {
+function LatestRunCard({ runs, detailRun, agentId }: { runs: HeartbeatRunSummary[]; detailRun: HeartbeatRun | null; agentId: string }) {
   if (runs.length === 0) return null;
 
   const sorted = [...runs].sort(
@@ -1078,8 +1106,9 @@ function LatestRunCard({ runs, agentId }: { runs: HeartbeatRun[]; agentId: strin
   const isLive = run.status === "running" || run.status === "queued";
   const statusInfo = runStatusIcons[run.status] ?? { icon: Clock, color: "text-neutral-400" };
   const StatusIcon = statusInfo.icon;
-  const summary = run.resultJson
-    ? String((run.resultJson as Record<string, unknown>).summary ?? (run.resultJson as Record<string, unknown>).result ?? "")
+  const detail = detailRun?.id === run.id ? detailRun : null;
+  const summary = detail?.resultJson
+    ? String((detail.resultJson as Record<string, unknown>).summary ?? (detail.resultJson as Record<string, unknown>).result ?? "")
     : run.error ?? "";
 
   return (
@@ -1140,13 +1169,17 @@ function LatestRunCard({ runs, agentId }: { runs: HeartbeatRun[]; agentId: strin
 function AgentOverview({
   agent,
   runs,
+  latestRunDetail,
+  runStats,
   assignedIssues,
   runtimeState,
   agentId,
   agentRouteId,
 }: {
   agent: AgentDetailRecord;
-  runs: HeartbeatRun[];
+  runs: HeartbeatRunSummary[];
+  latestRunDetail: HeartbeatRun | null;
+  runStats?: HeartbeatRunStats;
   assignedIssues: { id: string; title: string; status: string; priority: string; identifier?: string | null; createdAt: Date }[];
   runtimeState?: AgentRuntimeState;
   agentId: string;
@@ -1155,12 +1188,12 @@ function AgentOverview({
   return (
     <div className="space-y-8">
       {/* Latest Run */}
-      <LatestRunCard runs={runs} agentId={agentRouteId} />
+      <LatestRunCard runs={runs} detailRun={latestRunDetail} agentId={agentRouteId} />
 
       {/* Charts */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <ChartCard title="Run Activity" subtitle="Last 14 days">
-          <RunActivityChart runs={runs} />
+          <RunActivityChart runs={runStats?.days ?? []} />
         </ChartCard>
         <ChartCard title="Work by Priority" subtitle="Last 14 days">
           <PriorityChart issues={assignedIssues} />
@@ -1169,7 +1202,7 @@ function AgentOverview({
           <IssueStatusChart issues={assignedIssues} />
         </ChartCard>
         <ChartCard title="Success Rate" subtitle="Last 14 days">
-          <SuccessRateChart runs={runs} />
+          <SuccessRateChart runs={runStats?.days ?? []} />
         </ChartCard>
       </div>
 
@@ -1218,7 +1251,7 @@ function CostsSection({
   runs,
 }: {
   runtimeState?: AgentRuntimeState;
-  runs: HeartbeatRun[];
+  runs: HeartbeatRunSummary[];
 }) {
   const runsWithCost = runs
     .filter((r) => {
@@ -2792,138 +2825,28 @@ function AgentSkillsTab({
 
 /* ---- Runs Tab ---- */
 
-function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelected: boolean; agentId: string }) {
-  const statusInfo = runStatusIcons[run.status] ?? { icon: Clock, color: "text-neutral-400" };
-  const StatusIcon = statusInfo.icon;
-  const metrics = runMetrics(run);
-  const summary = run.resultJson
-    ? String((run.resultJson as Record<string, unknown>).summary ?? (run.resultJson as Record<string, unknown>).result ?? "")
-    : run.error ?? "";
-
-  return (
-    <Link
-      to={isSelected ? `/agents/${agentId}/runs` : `/agents/${agentId}/runs/${run.id}`}
-      className={cn(
-        "flex flex-col gap-1 w-full px-3 py-2.5 text-left border-b border-border last:border-b-0 transition-colors no-underline text-inherit",
-        isSelected ? "bg-accent/40" : "hover:bg-accent/20",
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <StatusIcon className={cn("h-3.5 w-3.5 shrink-0", statusInfo.color, run.status === "running" && "animate-spin")} />
-        <span className="font-mono text-xs text-muted-foreground">
-          {run.id.slice(0, 8)}
-        </span>
-        <span className={cn(
-          "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0",
-          run.invocationSource === "timer" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
-            : run.invocationSource === "assignment" ? "bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-300"
-            : run.invocationSource === "on_demand" ? "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/50 dark:text-cyan-300"
-            : "bg-muted text-muted-foreground"
-        )}>
-          {sourceLabels[run.invocationSource] ?? run.invocationSource}
-        </span>
-        <span className="ml-auto text-[11px] text-muted-foreground shrink-0">
-          {relativeTime(run.createdAt)}
-        </span>
-      </div>
-      {summary && (
-        <span className="text-xs text-muted-foreground truncate pl-5.5">
-          {summary.slice(0, 60)}
-        </span>
-      )}
-      {(metrics.totalTokens > 0 || metrics.cost > 0) && (
-        <div className="flex items-center gap-2 pl-5.5 text-[11px] text-muted-foreground tabular-nums">
-          {metrics.totalTokens > 0 && <span>{formatTokens(metrics.totalTokens)} tok</span>}
-          {metrics.cost > 0 && <span>${metrics.cost.toFixed(3)}</span>}
-        </div>
-      )}
-    </Link>
-  );
-}
-
-function RunsTab({
-  runs,
-  companyId,
-  agentId,
-  agentRouteId,
-  selectedRunId,
-  adapterType,
-}: {
-  runs: HeartbeatRun[];
+function RunsTab(props: {
+  initialRuns: HeartbeatRunSummary[];
+  nextCursor: HeartbeatRunCursor | null;
   companyId: string;
   agentId: string;
   agentRouteId: string;
   selectedRunId: string | null;
   adapterType: string;
 }) {
-  const { isMobile } = useSidebar();
-
-  if (runs.length === 0) {
-    return <p className="text-sm text-muted-foreground">No runs yet.</p>;
-  }
-
-  // Sort by created descending
-  const sorted = [...runs].sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  );
-
-  // On mobile, don't auto-select so the list shows first; on desktop, auto-select latest
-  const effectiveRunId = isMobile ? selectedRunId : (selectedRunId ?? sorted[0]?.id ?? null);
-  const selectedRun = sorted.find((r) => r.id === effectiveRunId) ?? null;
-
-  // Mobile: show either run list OR run detail with back button
-  if (isMobile) {
-    if (selectedRun) {
-      return (
-        <div className="space-y-3 min-w-0 overflow-x-hidden">
-          <Link
-            to={`/agents/${agentRouteId}/runs`}
-            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors no-underline"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back to runs
-          </Link>
-          <RunDetail key={selectedRun.id} run={selectedRun} agentRouteId={agentRouteId} adapterType={adapterType} />
-        </div>
-      );
-    }
-    return (
-      <div className="border border-border rounded-lg overflow-x-hidden">
-        {sorted.map((run) => (
-          <RunListItem key={run.id} run={run} isSelected={false} agentId={agentRouteId} />
-        ))}
-      </div>
-    );
-  }
-
-  // Desktop: side-by-side layout
   return (
-    <div className="flex gap-0">
-      {/* Left: run list — border stretches full height, content sticks */}
-      <div className={cn(
-        "shrink-0 border border-border rounded-lg",
-        selectedRun ? "w-72" : "w-full",
-      )}>
-        <div className="sticky top-4 overflow-y-auto" style={{ maxHeight: "calc(100vh - 2rem)" }}>
-        {sorted.map((run) => (
-          <RunListItem key={run.id} run={run} isSelected={run.id === effectiveRunId} agentId={agentRouteId} />
-        ))}
-        </div>
-      </div>
-
-      {/* Right: run detail — natural height, page scrolls */}
-      {selectedRun && (
-        <div className="flex-1 min-w-0 pl-4">
-          <RunDetail key={selectedRun.id} run={selectedRun} agentRouteId={agentRouteId} adapterType={adapterType} />
-        </div>
+    <AgentRunsTab
+      {...props}
+      renderRunDetail={(run) => (
+        <RunDetail run={run} agentRouteId={props.agentRouteId} adapterType={props.adapterType} />
       )}
-    </div>
+    />
   );
 }
 
 /* ---- Run Detail (expanded) ---- */
 
-function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: HeartbeatRun; agentRouteId: string; adapterType: string }) {
+function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: HeartbeatRun | HeartbeatRunSummary; agentRouteId: string; adapterType: string }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { data: hydratedRun } = useQuery({
@@ -2931,7 +2854,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: Heartb
     queryFn: () => heartbeatsApi.get(initialRun.id),
     enabled: Boolean(initialRun.id),
   });
-  const run = hydratedRun ?? initialRun;
+  const run = (hydratedRun ?? initialRun) as HeartbeatRun;
   const metrics = runMetrics(run);
   const [sessionOpen, setSessionOpen] = useState(false);
   const [claudeLoginResult, setClaudeLoginResult] = useState<ClaudeLoginResult | null>(null);

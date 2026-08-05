@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import type { BillingType } from "@paperclipai/shared";
+import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
 import {
   agents,
   agentRuntimeState,
@@ -48,6 +48,13 @@ import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import {
+  attentionHeartbeatRuns,
+  clampRunListLimit,
+  countHeartbeatRuns,
+  listHeartbeatRunSummaryPage,
+  statsHeartbeatRuns,
+} from "./heartbeat-bounded-reads.js";
 import { extractCodexTaskCompleteMessages } from "./workflow/codex-task-output.js";
 import { createWorktreeHarness, WorktreeViolation } from "./worktree/harness.js";
 import {
@@ -9125,7 +9132,8 @@ export function heartbeatService(db: Db) {
 
   return {
     list: async (companyId: string, agentId?: string, limit?: number) => {
-      const query = db
+      const effectiveLimit = clampRunListLimit(limit);
+      const rows = await db
         .select(heartbeatRunListColumns)
         .from(heartbeatRuns)
         .where(
@@ -9133,14 +9141,26 @@ export function heartbeatService(db: Db) {
             ? and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId))
             : eq(heartbeatRuns.companyId, companyId),
         )
-        .orderBy(desc(heartbeatRuns.createdAt));
+        .orderBy(desc(heartbeatRuns.createdAt))
+        .limit(effectiveLimit);
 
-      const rows = limit ? await query.limit(limit) : await query;
       return rows.map((row) => ({
         ...row,
         resultJson: summarizeHeartbeatRunResultJson(row.resultJson),
       }));
     },
+
+    listSummaryPage: (input: { companyId: string; agentId?: string; limit?: number; cursor?: { createdAt: Date; id: string } | null }) =>
+      listHeartbeatRunSummaryPage(db, input),
+
+    count: (input: { companyId: string; agentId?: string; statuses?: HeartbeatRunStatus[] }) =>
+      countHeartbeatRuns(db, input),
+
+    stats: (input: { companyId: string; agentId?: string; days?: number }) =>
+      statsHeartbeatRuns(db, input),
+
+    attention: (input: { companyId: string; agentId?: string; limit?: number; cursor?: { createdAt: Date; id: string } | null; dismissedRunIds?: string[] }) =>
+      attentionHeartbeatRuns(db, input),
 
     getRun,
 
