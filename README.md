@@ -17,7 +17,7 @@
 
 <br/>
 
-> `papercompany` is a derivative of [Paperclip](https://github.com/paperclipai/paperclip), adapted for the papercompany operating model. The original Paperclip project remains the upstream source for several package names, CLI commands, environment variables, and compatibility paths that still use `paperclipai`, `PAPERCLIP_*`, or `~/.paperclip`.
+> `papercompany` is built on the open-source [Paperclip base](https://github.com/paperclipai/paperclip), extended into a mission-driven operating system for agent companies. The original Paperclip project remains the upstream source for several package names, CLI commands, environment variables, and compatibility paths that still use `paperclipai`, `PAPERCLIP_*`, or `~/.paperclip`.
 
 ## What is papercompany?
 
@@ -41,9 +41,20 @@ papercompany sits one layer above direct CLI daily use: community best practice 
 
 <br/>
 
-## What changed from Paperclip
+## What changed from Paperclip base
 
-papercompany keeps the upstream Paperclip control-plane foundation, then changes the product toward running agent companies instead of only coordinating agent tasks.
+papercompany keeps the upstream Paperclip base control-plane foundation, then changes the product toward running agent companies instead of only coordinating agent tasks. Eight evolutions define the difference:
+
+| # | Evolution | What it adds |
+| --- | --- | --- |
+| 1 | **Agent workflow harness** | Executable workflow definitions with DAG step runs, tool steps, agent steps, and a native workflow engine that orchestrates missions end to end. |
+| 2 | **Mission-centered execution** | Work is organized around missions — evidence-gated execution slices with delegation, governance threads, and runtime snapshots for full traceability. |
+| 3 | **QA evaluation & loop** | Quality review items, evaluator versions, evidence submission, verdicts, and daily reports that guarantee mission completion quality. |
+| 4 | **Agent wiki** | A company knowledge base that agents consult to prevent repeating the same mistakes. |
+| 5 | **Guard rails** | Worktree rules, tool grants, permission groups, and execution policies that block unintended agent actions. |
+| 6 | **QA evaluation & evolution system** | Anchor examples, candidate run replay, and evaluator version promotion that make the QA system improve over time. |
+| 7 | **Tool registration & agent permissions** | Companies register tools (executable programs or external execution paths) and control which agents may invoke them. |
+| 8 | **Work products** | Formal storage of deliverables with work-product storage backed by S3-compatible or local object storage. |
 
 | Area | What changed in papercompany |
 | --- | --- |
@@ -279,11 +290,11 @@ We welcome contributions. See [doc/DEVELOPING.md](doc/DEVELOPING.md) for local s
 
 ## License
 
-MIT. Portions of this repository derive from Paperclip, copyright 2025 Paperclip AI, and remain under the MIT license.
+MIT. Portions of this repository derive from Paperclip base, copyright 2025 Paperclip AI, and remain under the MIT license.
 
 ## Upstream
 
-papercompany keeps explicit compatibility with the upstream Paperclip ecosystem while changing the product surface and operating model. See [Paperclip](https://github.com/paperclipai/paperclip) for the original project.
+papercompany keeps explicit compatibility with the upstream Paperclip base ecosystem while changing the product surface and operating model. See [Paperclip base](https://github.com/paperclipai/paperclip) for the original project.
 
 <br/>
 
