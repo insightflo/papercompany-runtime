@@ -1,6 +1,11 @@
 import type {
   HeartbeatRun,
+  HeartbeatRunAttention,
+  HeartbeatRunCounts,
+  HeartbeatRunCursor,
   HeartbeatRunEvent,
+  HeartbeatRunPage,
+  HeartbeatRunStats,
   InstanceSchedulerHeartbeatAgent,
   WorkspaceOperation,
 } from "@paperclipai/shared";
@@ -24,6 +29,15 @@ export interface LiveRunForIssue {
   agentName: string;
   adapterType: string;
   issueId?: string | null;
+}
+
+export function encodeHeartbeatCursor(cursor: HeartbeatRunCursor | null | undefined): string | null {
+  if (!cursor) return null;
+  // Do NOT encodeURIComponent here: callers pass the result to
+  // URLSearchParams.set(), which already percent-encodes. Double-encoding
+  // the ISO colons (':' → '%3A' → '%253A') makes the server's parseRunCursor
+  // produce an Invalid Date and return 400 on every page-2 request.
+  return `${cursor.createdAt}_${cursor.id}`;
 }
 
 export const heartbeatsApi = {
@@ -54,8 +68,48 @@ export const heartbeatsApi = {
     api.get<LiveRunForIssue[]>(`/issues/${issueId}/live-runs`),
   activeRunForIssue: (issueId: string) =>
     api.get<ActiveRunForIssue | null>(`/issues/${issueId}/active-run`),
-  liveRunsForCompany: (companyId: string, minCount?: number) =>
-    api.get<LiveRunForIssue[]>(`/companies/${companyId}/live-runs${minCount ? `?minCount=${minCount}` : ""}`),
+  liveRunsForCompany: (companyId: string, minCount?: number, agentId?: string) => {
+    const searchParams = new URLSearchParams();
+    if (minCount) searchParams.set("minCount", String(minCount));
+    if (agentId) searchParams.set("agentId", agentId);
+    const qs = searchParams.toString();
+    return api.get<LiveRunForIssue[]>(`/companies/${companyId}/live-runs${qs ? `?${qs}` : ""}`);
+  },
+  page: (companyId: string, opts?: { agentId?: string; limit?: number; cursor?: HeartbeatRunCursor | null }) => {
+    const searchParams = new URLSearchParams();
+    if (opts?.agentId) searchParams.set("agentId", opts.agentId);
+    if (opts?.limit) searchParams.set("limit", String(opts.limit));
+    const cursor = encodeHeartbeatCursor(opts?.cursor);
+    if (cursor) searchParams.set("cursor", cursor);
+    const qs = searchParams.toString();
+    return api.get<HeartbeatRunPage>(`/companies/${companyId}/heartbeat-runs/page${qs ? `?${qs}` : ""}`);
+  },
+  count: (companyId: string, opts?: { agentId?: string; statuses?: string[] }) => {
+    const searchParams = new URLSearchParams();
+    if (opts?.agentId) searchParams.set("agentId", opts.agentId);
+    if (opts?.statuses && opts.statuses.length > 0) searchParams.set("status", opts.statuses.join(","));
+    const qs = searchParams.toString();
+    return api.get<HeartbeatRunCounts>(`/companies/${companyId}/heartbeat-runs/count${qs ? `?${qs}` : ""}`);
+  },
+  stats: (companyId: string, opts?: { agentId?: string; days?: number }) => {
+    const searchParams = new URLSearchParams();
+    if (opts?.agentId) searchParams.set("agentId", opts.agentId);
+    if (opts?.days) searchParams.set("days", String(opts.days));
+    const qs = searchParams.toString();
+    return api.get<HeartbeatRunStats>(`/companies/${companyId}/heartbeat-runs/stats${qs ? `?${qs}` : ""}`);
+  },
+  attention: (companyId: string, opts?: { agentId?: string; limit?: number; cursor?: HeartbeatRunCursor | null; dismissedRunIds?: string[] }) => {
+    const searchParams = new URLSearchParams();
+    if (opts?.agentId) searchParams.set("agentId", opts.agentId);
+    if (opts?.limit) searchParams.set("limit", String(opts.limit));
+    const cursor = encodeHeartbeatCursor(opts?.cursor);
+    if (cursor) searchParams.set("cursor", cursor);
+    if (opts?.dismissedRunIds && opts.dismissedRunIds.length > 0) {
+      searchParams.set("dismissedRunIds", opts.dismissedRunIds.join(","));
+    }
+    const qs = searchParams.toString();
+    return api.get<HeartbeatRunAttention>(`/companies/${companyId}/heartbeat-runs/attention${qs ? `?${qs}` : ""}`);
+  },
   listInstanceSchedulerAgents: () =>
     api.get<InstanceSchedulerHeartbeatAgent[]>("/instance/scheduler-heartbeats"),
 };

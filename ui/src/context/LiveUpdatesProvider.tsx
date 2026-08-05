@@ -335,6 +335,9 @@ function invalidateHeartbeatQueries(
 ) {
   queryClient.invalidateQueries({ queryKey: queryKeys.liveRuns(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.heartbeatAttention(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.heartbeatStats(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.heartbeatCount(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.costs(companyId) });
@@ -344,6 +347,8 @@ function invalidateHeartbeatQueries(
   if (agentId) {
     queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId, agentId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.heartbeatStats(companyId, agentId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.heartbeatCount(companyId, agentId) });
   }
 }
 
