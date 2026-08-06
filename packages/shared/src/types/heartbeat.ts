@@ -136,3 +136,88 @@ export interface InstanceSchedulerHeartbeatAgent {
   schedulerActive: boolean;
   lastHeartbeatAt: Date | null;
 }
+
+/**
+ * Lightweight heartbeat-run payload used by bounded reads. It intentionally
+ * excludes heavy columns (contextSnapshot, resultJson, stdout/stderr excerpts,
+ * and log references) so list/cursor pages stay small on companies with large
+ * run history. The single-run detail endpoint still returns the full run.
+ */
+export interface HeartbeatRunSummary {
+  id: string;
+  companyId: string;
+  agentId: string;
+  invocationSource: HeartbeatInvocationSource;
+  triggerDetail: WakeupTriggerDetail | null;
+  status: HeartbeatRunStatus;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  error: string | null;
+  errorCode: string | null;
+  exitCode: number | null;
+  signal: string | null;
+  usageJson: Record<string, unknown> | null;
+  resultSummary: string | null;
+  issueId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Cursor for stable (createdAt, id) ordering. */
+export interface HeartbeatRunCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface HeartbeatRunPage {
+  items: HeartbeatRunSummary[];
+  nextCursor: HeartbeatRunCursor | null;
+}
+
+export interface HeartbeatRunCounts {
+  total: number;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  timedOut: number;
+}
+
+export interface HeartbeatRunDailyStat {
+  day: string;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  timedOut: number;
+  other: number;
+  total: number;
+}
+
+export interface HeartbeatRunStats {
+  days: HeartbeatRunDailyStat[];
+  total: number;
+}
+
+export interface HeartbeatRunAttentionItem {
+  runId: string;
+  agentId: string;
+  status: HeartbeatRunStatus;
+  issueId: string | null;
+  createdAt: Date;
+  error: string | null;
+  errorCode: string | null;
+}
+
+export interface HeartbeatRunAttentionSummary {
+  failed: number;
+  timedOut: number;
+  cancelled: number;
+  agents: number;
+}
+
+export interface HeartbeatRunAttention {
+  summary: HeartbeatRunAttentionSummary;
+  items: HeartbeatRunAttentionItem[];
+  nextCursor: HeartbeatRunCursor | null;
+}

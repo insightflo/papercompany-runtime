@@ -17,6 +17,25 @@ import {
 
 const INBOX_ISSUE_STATUSES = "backlog,todo,in_progress,in_review,blocked,done";
 
+const MAX_DISMISSED_RUN_IDS = 200;
+const RUN_DISMISS_PREFIX = "run:";
+
+/**
+ * Extract bare run ids from the local dismissal set. Only `run:`-prefixed
+ * keys map to heartbeat runs; other keys (alerts, approvals, ...) are
+ * ignored. The result is sorted and capped so the URL/query key stays
+ * bounded and stable regardless of insertion order.
+ */
+export function dismissedRunIdList(dismissed: Set<string>): string[] {
+  const ids: string[] = [];
+  for (const key of dismissed) {
+    if (!key.startsWith(RUN_DISMISS_PREFIX)) continue;
+    const runId = key.slice(RUN_DISMISS_PREFIX.length);
+    if (runId.length > 0) ids.push(runId);
+  }
+  return Array.from(new Set(ids)).sort().slice(0, MAX_DISMISSED_RUN_IDS);
+}
+
 export function useDismissedInboxItems() {
   const [dismissed, setDismissed] = useState<Set<string>>(loadDismissedInboxItems);
 
@@ -43,6 +62,7 @@ export function useDismissedInboxItems() {
 
 export function useInboxBadge(companyId: string | null | undefined) {
   const { dismissed } = useDismissedInboxItems();
+  const dismissedRunIds = useMemo(() => dismissedRunIdList(dismissed), [dismissed]);
 
   const { data: approvals = [] } = useQuery({
     queryKey: queryKeys.approvals.list(companyId!),
@@ -93,11 +113,25 @@ export function useInboxBadge(companyId: string | null | undefined) {
     [touchedIssues],
   );
 
-  const { data: heartbeatRuns = [] } = useQuery({
-    queryKey: queryKeys.heartbeats(companyId!),
-    queryFn: () => heartbeatsApi.list(companyId!),
+  // Bounded attention summary (latest failed/timed_out/cancelled run per
+  // agent, unresolved issues only) instead of full run history. The server
+  // summary is exact across all agents AND already excludes the locally
+  // dismissed run ids (server-side membership check), so refresh keeps
+  // page-2 dismissals applied.
+  const { data: attention = { summary: { failed: 0, timedOut: 0, cancelled: 0, agents: 0 }, items: [], nextCursor: null } } = useQuery({
+    queryKey: queryKeys.heartbeatAttention(companyId!, dismissedRunIds.join(",")),
+    queryFn: () =>
+      heartbeatsApi.attention(companyId!, {
+        limit: 50,
+        dismissedRunIds,
+      }),
     enabled: !!companyId,
   });
+
+  // Match the legacy FAILED_RUN_STATUSES semantics: only failed and
+  // timed_out runs count toward the badge; cancelled runs are not inbox
+  // failures. The summary already reflects server-side dismissal.
+  const failedRuns = attention.summary.failed + attention.summary.timedOut;
 
   return useMemo(
     () =>
@@ -105,11 +139,12 @@ export function useInboxBadge(companyId: string | null | undefined) {
         approvals,
         joinRequests,
         dashboard,
-        heartbeatRuns,
+        heartbeatRuns: [],
+        failedRuns,
         issues,
         unreadIssues,
         dismissed,
       }),
-    [approvals, joinRequests, dashboard, heartbeatRuns, issues, unreadIssues, dismissed],
+    [approvals, joinRequests, dashboard, failedRuns, issues, unreadIssues, dismissed],
   );
 }
