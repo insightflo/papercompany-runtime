@@ -11,6 +11,7 @@ import {
 } from "@paperclipai/db";
 import { defaultMissionSearchScopes, missionSearchScopesAllowRepo, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
 import { resolveWorkProductLocalFilePath } from "./work-products.js";
+import { ensurePlanQaWorkProduct } from "./missions/plan-qa-work-product.js";
 
 export type RuntimeSearchPathPermissions = {
   version: 1;
@@ -75,6 +76,26 @@ export async function buildRuntimeSearchPathPermissions(input: {
       // can discover declared work products and mission output through the authenticated
       // API. The workingDirectory is the declared review workspace. Direct repo-root broad
       // scans stay blocked (broadScanRepoAllowed=false) — discovery is server-side only.
+      // Self-heal: deterministically project the accepted plan under the mission output
+      // root and register one local_file work product for this exact issue so the reviewer
+      // can read it. Scopes, outputDirectory, and broadScan stay unchanged; only the
+      // declared dependency files/directories are populated. An explicit miss (no active
+      // plan tied to this issue or no resolvable root) keeps the safe minimal permissions
+      // above (no scope widening, no repo/secret access). A filesystem write or registration
+      // failure throws, failing this invocation's preparation rather than silently starting
+      // an under-declared review.
+      if (noCardIssue.missionId) {
+        const planQaWorkProduct = await ensurePlanQaWorkProduct({
+          db: input.db,
+          companyId: input.companyId,
+          planQaIssueId: input.issueId,
+          missionId: noCardIssue.missionId,
+        });
+        if (planQaWorkProduct) {
+          permissions.dependencyFiles = [planQaWorkProduct.filePath];
+          permissions.dependencyDirectories = [planQaWorkProduct.fileDirectory];
+        }
+      }
       return permissions;
     }
     return buildMissionRecoverySearchPermissions(input, permissions, noCardIssue);
