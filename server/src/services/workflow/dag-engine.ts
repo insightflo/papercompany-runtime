@@ -1737,11 +1737,17 @@ async function createWorkflowStepIssue(input: {
     !requiresWorkProduct ? "- For QA/validator steps, validate dependency issue workProducts above; do not require a QA issue to have its own workProduct unless QA creates a separate deliverable." : null,
   ].filter((line) => line !== null).join("\n");
 
-  // [idempotency] 같은 run + 같은 step(title) 의 기존 workflow_execution issue 가 살아있으면
+  // [idempotency] 같은 run + 같은 STEP 의 기존 workflow_execution issue 가 살아있으면
   // (cancelled 제외) 재사용. step 실패→재시도/Unblock 시 createWorkflowStepIssue 가 매번 새
   // issue 를 찍어 signal/sector/narrative 가 처음부터 반복되는 것(가즈아 gazua-morning
   // CMPA-5415→5419→5424→5427→5430 반복) 을 막는다. done/blocked issue 도 재사용 — 이후
   // dispatch 의 wake/skip 이 상태를 판단한다(이미 done 이면 재실행 안 함).
+  // [B: same-title step collision] title 만으로 재사용하면 같은 run 안에서 서로 다른 stepId 가
+  // 같은 title(예: 두 개의 "[QA] Verify mission result") 을 쓰는 경우 둘 다 같은 issue 를
+  // 가리키게 되어 verdict/validation 바인딩이 깨진다. 반드시 workflowStepRuns.stepId 로
+  // exact step 매칭을 해야 한다. stepRun.issueId 는 첫 생성 시점엔 null 이므로(생성 후
+  // update 로 연결), 같은 run + 같은 stepId 의 다른 stepRun 이 이미 issue 를 갖고 있으면
+  // 그 issue 를 재사용한다. 같은-title legacy issue(step 매칭 불가) 는 재사용하지 않는다.
   const reusable = await input.db
     .select({
       id: issues.id,
@@ -1751,14 +1757,16 @@ async function createWorkflowStepIssue(input: {
       projectId: issues.projectId,
       missionId: issues.missionId,
     })
-    .from(issues)
+    .from(workflowStepRuns)
+    .innerJoin(issues, eq(issues.id, workflowStepRuns.issueId))
     .where(and(
+      eq(workflowStepRuns.workflowRunId, input.run.id),
+      eq(workflowStepRuns.stepId, input.step.id),
       eq(issues.originRunId, input.run.id),
       eq(issues.originKind, "workflow_execution"),
-      eq(issues.title, title),
       ne(issues.status, "cancelled"),
     ))
-    .orderBy(asc(issues.createdAt))
+    .orderBy(desc(workflowStepRuns.iterationIndex), desc(workflowStepRuns.startedAt))
     .limit(1);
   if (reusable.length > 0) {
     const reusableIssue = reusable[0];

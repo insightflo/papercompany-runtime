@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   applyPendingMigrations,
@@ -1210,5 +1210,84 @@ describe("heartbeat orphaned process recovery", () => {
       .then((rows) => rows[0] ?? null);
     // sibling progressing run protects the agent from demotion.
     expect(agent?.status).toBe("running");
+  });
+
+  it("skips release+promote when the bound issue is locked by another transaction (SKIP LOCKED)", async () => {
+    // Regression: releaseIssueExecutionAndPromote locks the issue with FOR UPDATE
+    // SKIP LOCKED. If another transaction holds the row lock, the lock select returns
+    // no rows and the whole transaction must bail early (return null) instead of
+    // waiting — otherwise the recovery lane hangs on the lock wait.
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+    const wakeupRequestId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "SkipLocked Co",
+      issuePrefix: `SL${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "SkipLocked Agent",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Locked issue",
+      status: "in_progress",
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      status: "claimed",
+      runId,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      issueId,
+      wakeupRequestId,
+      contextSnapshot: {},
+    });
+    // Link execution_run_id AFTER the run exists (FK: issues.execution_run_id -> heartbeat_runs.id).
+    await db
+      .update(issues)
+      .set({ executionRunId: runId })
+      .where(eq(issues.id, issueId));
+
+    const heartbeat = heartbeatService(db);
+
+    // Hold the issue row lock in a separate transaction.
+    const heldLock = await db.transaction(async (tx) => {
+      await tx.execute(sql`select id from issues where id = ${issueId} for update`);
+      // While the lock is held, reapOrphanedRuns must NOT hang; the run is
+      // terminal and would otherwise go through release+promote.
+      const result = await heartbeat.reapOrphanedRuns();
+      return result;
+    });
+
+    expect(heldLock.reaped).toBe(1); // run itself is reaped (terminalized)…
+    // …but the release+promote step bailed early (return null) — the issue lock
+    // was not acquired, so execution_run_id is still set (no early cleanup).
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(issue?.executionRunId).toBe(runId);
   });
 });
