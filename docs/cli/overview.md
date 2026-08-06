@@ -3,7 +3,7 @@ title: CLI Overview
 summary: CLI installation and setup
 ---
 
-The Paperclip CLI handles instance setup, diagnostics, and control-plane operations.
+The papercompany CLI handles instance setup, diagnostics, and control-plane operations.
 
 ## Usage
 
@@ -11,20 +11,20 @@ The Paperclip CLI handles instance setup, diagnostics, and control-plane operati
 pnpm paperclipai --help
 ```
 
-## Global Options
+## Client Options
 
-All commands support:
+Control-plane (client) commands — issues, agents, approvals, activity, dashboard, company, plugin, auth — support these options:
 
 | Flag | Description |
 |------|-------------|
-| `--data-dir <path>` | Local Paperclip data root (isolates from `~/.paperclip`) |
+| `-C, --company-id <id>` | Company ID (required by company-scoped commands) |
 | `--api-base <url>` | API base URL |
 | `--api-key <token>` | API authentication token |
 | `--context <path>` | Context file path |
 | `--profile <name>` | Context profile name |
 | `--json` | Output as JSON |
 
-Company-scoped commands also accept `--company-id <id>`.
+Setup commands (`onboard`, `doctor`, `env`, `configure`, `run`, `db:backup`) do **not** support these options — they use `-c/--config` and `-d/--data-dir` instead.
 
 For clean local instances, pass `--data-dir` on the command you run:
 
@@ -38,7 +38,7 @@ Store defaults to avoid repeating flags:
 
 ```sh
 # Set defaults
-pnpm paperclipai context set --api-base http://localhost:3100 --company-id <id>
+pnpm paperclipai context set --api-base http://localhost:3200 --company-id <id>
 
 # View current context
 pnpm paperclipai context show
@@ -48,6 +48,12 @@ pnpm paperclipai context list
 
 # Switch profile
 pnpm paperclipai context use default
+
+# Set a profile
+pnpm paperclipai context set --profile ops --api-base http://localhost:3200
+
+# JSON output
+pnpm paperclipai context list --json
 ```
 
 To avoid storing secrets in context, use an env var:

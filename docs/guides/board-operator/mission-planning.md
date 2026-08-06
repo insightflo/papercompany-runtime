@@ -7,7 +7,7 @@ Missions are outcome boundaries. A mission plan should not be a hidden prompt, a
 
 ## Dynamic workflow operating model
 
-In Paperclip, dynamic workflow means **uncertainty reduction with gates**, not simply "use more subagents" or "run everything in parallel."
+In papercompany, dynamic workflow means **uncertainty reduction with gates**, not simply "use more subagents" or "run everything in parallel."
 
 Use the mission owner or lead agent as a controller:
 
@@ -94,7 +94,7 @@ Do not split work just to create more agents. Keep a slice together when:
 
 ## SkillOpt-lite self-improvement loop
 
-Use SkillOpt as an operating pattern, not as permission for agents to rewrite their own instructions unchecked. Paperclip agents should improve company skills, rules, KB, workflows, or role harnesses through bounded evidence-gated proposals:
+Use SkillOpt as an operating pattern, not as permission for agents to rewrite their own instructions unchecked. papercompany agents should improve company skills, rules, KB, workflows, or role harnesses through bounded evidence-gated proposals:
 
 ```text
 rollout evidence
@@ -105,7 +105,7 @@ rollout evidence
   -> periodic slow/meta review for durable patterns
 ```
 
-Paperclip mapping:
+papercompany mapping:
 
 - **Rollout evidence**: issue threads, run logs, test output, API/DB readbacks, screenshots, artifacts, validator comments, and user corrections.
 - **Reflection**: the lead or validator names the recurring behavior that should change; avoid example-specific fixes.

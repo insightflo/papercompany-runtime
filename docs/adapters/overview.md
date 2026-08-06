@@ -1,13 +1,13 @@
 ---
 title: Adapters Overview
-summary: What adapters are and how they connect agents to Paperclip
+summary: What adapters are and how they connect agents to papercompany
 ---
 
-Adapters are the bridge between Paperclip's orchestration layer and agent runtimes. Each adapter knows how to invoke a specific type of AI agent and capture its results.
+Adapters are the bridge between papercompany's orchestration layer and agent runtimes. Each adapter knows how to invoke a specific type of AI agent and capture its results.
 
 ## How Adapters Work
 
-When a heartbeat fires, Paperclip:
+When a heartbeat fires, papercompany:
 
 1. Looks up the agent's `adapterType` and `adapterConfig`
 2. Calls the adapter's `execute()` function with the execution context
@@ -21,8 +21,13 @@ When a heartbeat fires, Paperclip:
 | [Claude Local](/adapters/claude-local) | `claude_local` | Runs Claude Code CLI locally |
 | [Codex Local](/adapters/codex-local) | `codex_local` | Runs OpenAI Codex CLI locally |
 | [Gemini Local](/adapters/gemini-local) | `gemini_local` | Runs Gemini CLI locally |
+| [Command Code Local](/adapters/commandcode-local) | `commandcode_local` | Runs Command Code CLI locally |
+| [Cursor Local](/adapters/cursor-local) | `cursor` | Runs Cursor CLI locally |
+| [Pi Local](/adapters/pi-local) | `pi_local` | Runs Pi CLI locally |
+| [Antigravity Local](/adapters/antigravity-local) | `antigravity_local` | Runs Antigravity CLI locally |
+| [Hermes Local](/adapters/hermes-local) | `hermes_local` | Runs Hermes locally |
 | OpenCode Local | `opencode_local` | Runs OpenCode CLI locally (multi-provider `provider/model`) |
-| OpenClaw | `openclaw` | Sends wake payloads to an OpenClaw webhook |
+| [OpenClaw Gateway](/adapters/openclaw-gateway) | `openclaw_gateway` | Sends wake payloads to an OpenClaw webhook |
 | [Process](/adapters/process) | `process` | Executes arbitrary shell commands |
 | [HTTP](/adapters/http) | `http` | Sends webhooks to external agents |
 
@@ -55,7 +60,8 @@ Three registries consume these modules:
 
 ## Choosing an Adapter
 
-- **Need a coding agent?** Use `claude_local`, `codex_local`, `gemini_local`, or `opencode_local`
+- **Need a coding agent?** Use `claude_local`, `codex_local`, `gemini_local`, `opencode_local`, `commandcode_local`, `cursor`, `pi_local`, `antigravity_local`, or `hermes_local`
 - **Need to run a script or command?** Use `process`
 - **Need to call an external service?** Use `http`
+- **Need an OpenClaw gateway?** Use `openclaw_gateway`
 - **Need something custom?** [Create your own adapter](/adapters/creating-an-adapter)

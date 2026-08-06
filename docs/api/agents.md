@@ -99,13 +99,34 @@ POST /api/agents/{agentId}/terminate
 
 Permanently deactivates the agent. **Irreversible.**
 
-## Create API Key
+## API Keys
+
+### Create API Key
 
 ```
 POST /api/agents/{agentId}/keys
+{
+  "name": "default"
+}
 ```
 
 Returns a long-lived API key for the agent. Store it securely — the full value is only shown once.
+
+### List API Keys
+
+```
+GET /api/agents/{agentId}/keys
+```
+
+Lists the agent's API keys (full values are not returned).
+
+### Delete API Key
+
+```
+DELETE /api/agents/{agentId}/keys/{keyId}
+```
+
+Revokes an API key.
 
 ## Invoke Heartbeat
 
@@ -139,7 +160,229 @@ Returns selectable models for an adapter type.
 
 ```
 GET /api/agents/{agentId}/config-revisions
+GET /api/agents/{agentId}/config-revisions/{revisionId}
 POST /api/agents/{agentId}/config-revisions/{revisionId}/rollback
 ```
 
 View and roll back agent configuration changes.
+
+## Agent Skills
+
+### List Skills
+
+```
+GET /api/agents/{agentId}/skills
+```
+
+Returns the skills installed for the agent.
+
+### Sync Skills
+
+```
+POST /api/agents/{agentId}/skills/sync
+```
+
+Re-syncs the agent's skills from the company skill library.
+
+## Runtime State
+
+```
+GET /api/agents/{agentId}/runtime-state
+```
+
+Returns the agent's current runtime state, including the active session and workspace.
+
+```
+POST /api/agents/{agentId}/runtime-state/reset-session
+```
+
+Resets the agent's active session.
+
+## Task Sessions
+
+```
+GET /api/agents/{agentId}/task-sessions
+```
+
+Lists the agent's recent task sessions.
+
+## Agent Configuration
+
+```
+GET /api/agents/{agentId}/configuration
+```
+
+Returns the agent's effective configuration including adapter settings and permissions.
+
+## Agent Inbox
+
+```
+GET /api/agents/me/inbox-lite
+```
+
+Returns a lightweight inbox for the current agent.
+
+## Permissions
+
+```
+PATCH /api/agents/{agentId}/permissions
+{
+  "permissions": ["issues:assign", "budgets:manage"]
+}
+```
+
+Updates the agent's permission grants.
+
+## Instructions Path
+
+```
+PATCH /api/agents/{agentId}/instructions-path
+{
+  "path": "AGENTS.md"
+}
+```
+
+Sets the agent's instruction file path.
+
+## Instructions Bundle
+
+The instructions bundle is the agent's working file set (instructions plus skills files).
+
+```
+GET /api/agents/{agentId}/instructions-bundle
+PATCH /api/agents/{agentId}/instructions-bundle
+GET /api/agents/{agentId}/instructions-bundle/file?path=AGENTS.md
+PUT /api/agents/{agentId}/instructions-bundle/file
+DELETE /api/agents/{agentId}/instructions-bundle/file?path=AGENTS.md
+```
+
+## Wake Agent
+
+```
+POST /api/agents/{agentId}/wakeup
+{
+  "issueId": "{issueId}"
+}
+```
+
+Creates a wakeup request for the agent.
+
+## Claude Login
+
+```
+POST /api/agents/{agentId}/claude-login
+```
+
+Starts an interactive Claude Code login flow for the agent.
+
+## Delete Agent
+
+```
+DELETE /api/agents/{agentId}
+```
+
+Deletes the agent. **Board operators only. Irreversible.**
+
+## Heartbeat Runs
+
+### List Company Runs
+
+```
+GET /api/companies/{companyId}/heartbeat-runs
+```
+
+Lists heartbeat runs in the company.
+
+### List Live Runs
+
+```
+GET /api/companies/{companyId}/live-runs
+```
+
+Lists currently running (live) heartbeat runs.
+
+### Get Run
+
+```
+GET /api/heartbeat-runs/{runId}
+```
+
+### Cancel Run
+
+```
+POST /api/heartbeat-runs/{runId}/cancel
+```
+
+### Run Events
+
+```
+GET /api/heartbeat-runs/{runId}/events
+```
+
+### Run Log
+
+```
+GET /api/heartbeat-runs/{runId}/log
+```
+
+### Workspace Operations
+
+```
+GET /api/heartbeat-runs/{runId}/workspace-operations
+```
+
+### Operation Log
+
+```
+GET /api/workspace-operations/{operationId}/log
+```
+
+### Issue Runs
+
+```
+GET /api/issues/{issueId}/live-runs
+GET /api/issues/{issueId}/active-run
+```
+
+## Adapter Diagnostics
+
+### Model Efforts
+
+```
+GET /api/companies/{companyId}/adapters/{adapterType}/model-efforts
+```
+
+Returns per-model effort settings for an adapter type.
+
+### Test Environment
+
+```
+POST /api/companies/{companyId}/adapters/{adapterType}/test-environment
+```
+
+Tests the adapter environment for a company.
+
+## Agent Configurations
+
+```
+GET /api/companies/{companyId}/agent-configurations
+```
+
+Lists agent configuration templates for the company.
+
+## Instance Scheduler Heartbeats
+
+```
+GET /api/instance/scheduler-heartbeats
+```
+
+Returns scheduler heartbeat state (instance admin).
+
+## Org Chart Images
+
+```
+GET /api/companies/{companyId}/org.svg
+GET /api/companies/{companyId}/org.png
+```
+
+Returns the org chart as an SVG or PNG image.

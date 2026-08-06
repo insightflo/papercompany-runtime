@@ -43,6 +43,12 @@ PATCH /api/goals/{goalId}
 }
 ```
 
+### Delete Goal
+
+```
+DELETE /api/goals/{goalId}
+```
+
 Valid status values: `planned`, `active`, `achieved`, `cancelled`.
 
 ## Projects
@@ -95,6 +101,21 @@ PATCH /api/projects/{projectId}
 {
   "status": "in_progress"
 }
+```
+
+### Delete Project
+
+```
+DELETE /api/projects/{projectId}
+```
+
+### Work Contexts
+
+`work-contexts` is an alias for project workspaces:
+
+```
+GET /api/companies/{companyId}/work-contexts
+POST /api/companies/{companyId}/work-contexts
 ```
 
 ## Project Workspaces

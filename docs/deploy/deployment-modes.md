@@ -3,7 +3,7 @@ title: Deployment Modes
 summary: local_trusted vs authenticated (private/public)
 ---
 
-Paperclip supports two runtime modes with different security profiles.
+papercompany supports two runtime modes with different security profiles.
 
 ## `local_trusted`
 
@@ -58,7 +58,7 @@ pnpm paperclipai onboard
 
 ## Board Claim Flow
 
-When migrating from `local_trusted` to `authenticated`, Paperclip emits a one-time claim URL at startup:
+When migrating from `local_trusted` to `authenticated`, papercompany emits a one-time claim URL at startup:
 
 ```
 /board-claim/<token>?code=<code>

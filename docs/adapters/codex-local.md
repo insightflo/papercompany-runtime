@@ -3,7 +3,7 @@ title: Codex Local
 summary: OpenAI Codex local adapter setup and configuration
 ---
 
-The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session persistence via `previous_response_id` chaining and skills injection through the global Codex skills directory.
+The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session persistence via `previous_response_id` chaining and skills injection into the agent workspace.
 
 ## Prerequisites
 
@@ -29,9 +29,7 @@ Codex uses `previous_response_id` for session continuity. The adapter serializes
 
 ## Skills Injection
 
-The adapter symlinks Paperclip skills into the global Codex skills directory (`~/.codex/skills`). Existing user skills are not overwritten.
-
-When Paperclip is running inside a managed worktree instance (`PAPERCLIP_IN_WORKTREE=true`), the adapter instead uses a worktree-isolated `CODEX_HOME` under the Paperclip instance so Codex skills, sessions, logs, and other runtime state do not leak across checkouts. It seeds that isolated home from the user's main Codex home for shared auth/config continuity.
+The adapter injects papercompany skills into the active workspace's `.agents/skills` directory, and runs Codex with a per-company managed `CODEX_HOME` so Codex skills, sessions, logs, and other runtime state are isolated per company and do not leak across checkouts. It seeds that isolated home from the user's main Codex home for shared auth/config continuity.
 
 For manual local CLI usage outside heartbeat runs (for example running as `codexcoder` directly), use:
 
@@ -62,7 +60,7 @@ Use this when `codex_local` fails with `401 Unauthorized` (including `auth error
    - Ensure `OPENAI_API_KEY` is set to a valid key in agent config or environment
 4. Re-run one heartbeat and confirm there are no `401 Unauthorized` or `turn.failed` events in the run log.
 
-Paperclip heartbeat guard behavior:
+papercompany heartbeat guard behavior:
 
 - `codex_local` 401 auth failures are normalized to `codex_auth_401*` error codes.
-- When such a failure happens on an issue run, Paperclip automatically sets the issue to `blocked` and posts a standard comment with a reason code (`CODEX_AUTH_401*`) and recovery steps.
+- When such a failure happens on an issue run, papercompany automatically sets the issue to `blocked` and posts a standard comment with a reason code (`CODEX_AUTH_401*`) and recovery steps.

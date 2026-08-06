@@ -1,9 +1,9 @@
 ---
 title: Architecture
-summary: Stack overview, request flow, and how Paperclip coordinates work systems
+summary: Stack overview, request flow, and how papercompany coordinates work systems
 ---
 
-Paperclip is a monorepo with four main layers. Product-wise, it is a control plane for company operations. Implementation-wise, V1 still centers much of that work around agents, issues, adapters, and workspaces.
+papercompany is a monorepo with four main layers. Product-wise, it is a control plane for company operations. It is built on the open-source Paperclip base, extended with mission-driven execution, workflow harnesses, and QA evaluation.
 
 ## Stack Overview
 
@@ -29,10 +29,10 @@ Paperclip is a monorepo with four main layers. Product-wise, it is a control pla
 | Layer | Technology |
 |-------|-----------|
 | Frontend | React 19, Vite 6, React Router 7, Radix UI, Tailwind CSS 4, TanStack Query |
-| Backend | Node.js 20+, Express.js 5, TypeScript |
+| Backend | Node.js 24.x, Express.js 5, TypeScript |
 | Database | PostgreSQL 17 (or embedded PGlite), Drizzle ORM |
 | Auth | Better Auth (sessions + API keys) |
-| Adapters | Claude Code CLI, Codex CLI, shell process, HTTP webhook |
+| Adapters | Claude Code, Codex, Gemini, Command Code, Cursor, Pi, Antigravity, Hermes, OpenCode CLIs, OpenClaw gateway, shell process, HTTP webhook |
 | Package manager | pnpm 9 with workspaces |
 
 ## Repository Structure
@@ -56,8 +56,15 @@ paperclip/
 │   ├── shared/                  # API types, constants, validators
 │   ├── adapter-utils/           # Adapter interfaces and helpers
 │   └── adapters/
-│       ├── claude-local/        # Claude Code adapter
-│       └── codex-local/         # OpenAI Codex adapter
+│       ├── claude-local/          # Claude Code adapter
+│       ├── codex-local/           # OpenAI Codex adapter
+│       ├── gemini-local/          # Gemini adapter
+│       ├── commandcode-local/     # Command Code adapter
+│       ├── cursor-local/          # Cursor adapter
+│       ├── pi-local/              # Pi adapter
+│       ├── antigravity-local/     # Antigravity adapter
+│       ├── opencode-local/        # OpenCode adapter
+│       └── openclaw-gateway/      # OpenClaw gateway adapter
 │
 ├── skills/                      # Agent skills
 │   └── paperclip/               # Core Paperclip skill (heartbeat protocol)
@@ -74,26 +81,26 @@ When a heartbeat fires:
 
 1. **Trigger** — Scheduler, manual invoke, or event (assignment, mention) triggers a heartbeat
 2. **Adapter invocation** — Server calls the configured adapter's `execute()` function
-3. **Agent process** — Adapter spawns the agent (e.g. Claude Code CLI) with Paperclip env vars and a prompt
-4. **Agent work** - The agent calls Paperclip's REST API to check assignments, checkout work items, do work, and update status
+3. **Agent process** — Adapter spawns the agent (e.g. Claude Code CLI) with papercompany env vars and a prompt
+4. **Agent work** - The agent calls papercompany's REST API to check assignments, checkout work items, do work, and update status
 5. **Result capture** — Adapter captures stdout, parses usage/cost data, extracts session state
 6. **Run record** — Server records the run result, costs, and any session state for next heartbeat
 
 ## Execution Model
 
-Adapters are the bridge between Paperclip and agent runtimes. They are execution infrastructure, not the business identity of the product. Each adapter is a package with three modules:
+Adapters are the bridge between papercompany and agent runtimes. They are execution infrastructure, not the business identity of the product. Each adapter is a package with three modules:
 
 - **Server module** — `execute()` function that spawns/calls the agent, plus environment diagnostics
 - **UI module** — stdout parser for the run viewer, config form fields for agent creation
 - **CLI module** — terminal formatter for `paperclipai run --watch`
 
-Built-in adapters: `claude_local`, `codex_local`, `process`, `http`. You can create custom adapters for any runtime.
+Built-in adapters: `claude_local`, `codex_local`, `gemini_local`, `commandcode_local`, `cursor`, `pi_local`, `antigravity_local`, `hermes_local`, `opencode_local`, `openclaw_gateway`, `process`, `http`. You can create custom adapters for any runtime.
 
-Paperclip also sits above the broader set of work systems where business work is actually completed. Those systems are not all represented as adapters today, but product-wise they matter just as much as the agent runtimes.
+papercompany also sits above the broader set of work systems where business work is actually completed. Those systems are not all represented as adapters today, but product-wise they matter just as much as the agent runtimes.
 
 ## Key Design Decisions
 
-- **Control plane, not execution plane** — Paperclip orchestrates agents; it doesn't run them
+- **Control plane, not execution plane** — papercompany orchestrates agents; it doesn't run them
 - **Company-scoped** — all entities belong to exactly one company; strict data boundaries
 - **Single-assignee work items** - atomic checkout prevents concurrent work on the same unit of work
 - **Adapter-agnostic** — any runtime that can call an HTTP API works as an agent
