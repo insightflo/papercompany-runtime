@@ -6,9 +6,10 @@ import {
   splitRuntimeShellSegments,
 } from "./runtime-broad-scan-command-policy.js";
 import {
-  missionSearchScopesAllowRepo,
-  normalizeMissionSearchScopes,
-} from "./runtime-search-scopes.js";
+  containsWorkingDirectoryChange,
+  readAllowedFileViewPaths,
+  readRuntimeSearchPaths,
+} from "./runtime-broad-scan-context.js";
 
 export interface RuntimeBroadScanToolGuardResult {
   blocked: boolean;
@@ -16,6 +17,14 @@ export interface RuntimeBroadScanToolGuardResult {
   matchedCommand: string | null;
 }
 
+/**
+ * Legacy guard entrypoint. Retained as a thin wrapper so existing tests keep
+ * exercising the block-judgment policy directly. The heartbeat now uses
+ * `evaluateRuntimeBroadScanHook` (intercept + synthesize) instead of throwing.
+ *
+ * shellVariables stays an empty Map here to preserve the historical contract the
+ * guard tests assert against; the hook passes real variable assignments.
+ */
 export function evaluateRuntimeBroadScanToolGuard(input: {
   adapterType: string;
   line: string;
@@ -74,48 +83,4 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   }
 
   return { blocked: false, reason: null, matchedCommand: null };
-}
-
-function readAllowedFileViewPaths(value: unknown) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((entry) => parseObject(entry)?.relativePath)
-    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-}
-
-function readRuntimeSearchPaths(value: unknown) {
-  const permissions = parseObject(value);
-  const workingDirectory = permissions?.workingDirectory;
-  const outputDirectory = permissions?.outputDirectory;
-  const dependencyFiles = Array.isArray(permissions?.dependencyFiles)
-    ? permissions.dependencyFiles.filter(
-      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
-    )
-    : [];
-  const dependencyDirectories = Array.isArray(permissions?.dependencyDirectories)
-    ? permissions.dependencyDirectories.filter(
-      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
-    )
-    : [];
-  const allowedSearchScopes = normalizeMissionSearchScopes(permissions?.allowedSearchScopes);
-  const broadScanRepoAllowed = typeof permissions?.broadScanRepoAllowed === "boolean"
-    ? permissions.broadScanRepoAllowed
-    : missionSearchScopesAllowRepo(allowedSearchScopes);
-  return {
-    declared: permissions?.version === 1,
-    workingDirectory: typeof workingDirectory === "string" && workingDirectory.trim().length > 0
-      ? workingDirectory
-      : null,
-    outputDirectory: typeof outputDirectory === "string" && outputDirectory.trim().length > 0
-      ? outputDirectory
-      : null,
-    dependencyFiles,
-    dependencyDirectories,
-    allowedSearchScopes,
-    broadScanRepoAllowed,
-  };
-}
-
-function containsWorkingDirectoryChange(command: string) {
-  return /(^|[\s;(])(cd|pushd|popd)\s/i.test(command);
 }
