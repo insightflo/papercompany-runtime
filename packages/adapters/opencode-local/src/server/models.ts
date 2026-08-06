@@ -25,6 +25,17 @@ function resolveOpenCodeCommand(input: unknown): string {
   return asString(input, envOverride);
 }
 
+/**
+ * [목적] parseProviderFromModel — `provider/model` 형식의 model id 에서 provider prefix 를 추출.
+ *   provider 가 없거나 빈 문자열이면 "" 반환(이 경우 discovery 는 전체 조회로 동작).
+ * [연결] ensureOpenCodeModelConfiguredAndAvailable 이 model 의 provider 만 스캔하도록 전달.
+ */
+function parseProviderFromModel(model: string): string {
+  const trimmed = model.trim();
+  if (!trimmed.includes("/")) return "";
+  return trimmed.slice(0, trimmed.indexOf("/")).trim();
+}
+
 const discoveryCache = new Map<string, { expiresAt: number; models: AdapterModel[] }>();
 const VOLATILE_ENV_KEY_PREFIXES = ["PAPERCLIP_", "npm_", "NPM_"] as const;
 const VOLATILE_ENV_KEY_EXACT = new Set(["PWD", "OLDPWD", "SHLVL", "_", "TERM_SESSION_ID", "HOME"]);
@@ -91,13 +102,13 @@ function hashValue(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function discoveryCacheKey(command: string, cwd: string, env: Record<string, string>) {
+function discoveryCacheKey(command: string, cwd: string, env: Record<string, string>, provider = "") {
   const envKey = Object.entries(env)
     .filter(([key]) => !isVolatileEnvKey(key))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${key}=${hashValue(value)}`)
     .join("\n");
-  return `${command}\n${cwd}\n${envKey}`;
+  return `${command}\n${provider}\n${cwd}\n${envKey}`;
 }
 
 // [수정시 주의] stale serve 를 위해 만료 즉시 삭제하지 않는다. expiresAt + STALE_RETENTION 을
@@ -165,10 +176,14 @@ export async function discoverOpenCodeModels(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  provider?: unknown;
 } = {}): Promise<AdapterModel[]> {
   const command = resolveOpenCodeCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
+  // provider 가 주어지면 `opencode models <provider>` 로 단일 provider 만 스캔한다.
+  // auth.json provider 가 많을 때 전체 스캔(`opencode models`)의 간헐적 누락을 회피한다.
+  const provider = asString(input.provider, "").trim();
   // Ensure HOME points to the actual running user's home directory.
   // When the server is started via `runuser -u <user>`, HOME may still
   // reflect the parent process (e.g. /root), causing OpenCode to miss
@@ -181,12 +196,13 @@ export async function discoverOpenCodeModels(input: {
     // /etc/passwd entry (e.g. `docker run --user 1234` with a minimal
     // image). Fall back to process.env.HOME.
   }
+  const args = provider ? ["models", provider] : ["models"];
   const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env, ...(resolvedHome ? { HOME: resolvedHome } : {}) }));
 
   const result = await runChildProcess(
     `opencode-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     command,
-    ["models"],
+    args,
     {
       cwd,
       env: runtimeEnv,
@@ -230,11 +246,13 @@ async function resolveModelsCached(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  provider?: unknown;
 }): Promise<ResolvedModels> {
   const command = resolveOpenCodeCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
-  const key = discoveryCacheKey(command, cwd, env);
+  const provider = asString(input.provider, "").trim();
+  const key = discoveryCacheKey(command, cwd, env, provider);
   const now = Date.now();
   pruneExpiredDiscoveryCache(now);
 
@@ -250,7 +268,7 @@ async function resolveModelsCached(input: {
 
   try {
     const models = await withRetry(
-      () => discoverForCache({ command, cwd, env }),
+      () => discoverForCache({ command, cwd, env, provider }),
       maxAttempts,
       MODELS_DISCOVERY_RETRY_BACKOFF_MS,
       isRetryableDiscoveryError,
@@ -275,6 +293,7 @@ export async function discoverOpenCodeModelsCached(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  provider?: unknown;
 } = {}): Promise<AdapterModel[]> {
   return (await resolveModelsCached(input)).models;
 }
@@ -289,11 +308,16 @@ export async function ensureOpenCodeModelConfiguredAndAvailable(input: {
   if (!model) {
     throw new Error("OpenCode requires `adapterConfig.model` in provider/model format.");
   }
+  // model 문자열에서 provider 를 추출해 discovery 에 전달. `opencode models <provider>` 로
+  // 단일 provider 만 스캔 → auth.json provider 과다 시 전체 스캔 누락(mis-detected unavailable) 회피.
+  // provider prefix 가 없는 model 은 빈 문자열(전체 조회)로 폴백.
+  const provider = parseProviderFromModel(model);
 
   const { models, fresh, staleReason } = await resolveModelsCached({
     command: input.command,
     cwd: input.cwd,
     env: input.env,
+    provider,
   });
 
   if (!fresh) {
@@ -317,9 +341,9 @@ export async function ensureOpenCodeModelConfiguredAndAvailable(input: {
   return models;
 }
 
-export async function listOpenCodeModels(): Promise<AdapterModel[]> {
+export async function listOpenCodeModels(provider?: unknown): Promise<AdapterModel[]> {
   try {
-    return await discoverOpenCodeModelsCached();
+    return await discoverOpenCodeModelsCached({ provider });
   } catch {
     return [];
   }
@@ -334,14 +358,15 @@ export function resetOpenCodeModelsCacheForTests() {
  *   < 0 이면 stale(만료, retention 내) entry 를 만든다. stale-serve / fresh-hit 테스트에 사용.
  */
 export function seedOpenCodeModelsCacheForTests(
-  input: { command?: unknown; cwd?: unknown; env?: unknown },
+  input: { command?: unknown; cwd?: unknown; env?: unknown; provider?: unknown },
   models: AdapterModel[],
   expiresAtOffsetMs: number,
 ) {
   const command = resolveOpenCodeCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
-  const key = discoveryCacheKey(command, cwd, env);
+  const provider = asString(input.provider, "").trim();
+  const key = discoveryCacheKey(command, cwd, env, provider);
   discoveryCache.set(key, { expiresAt: Date.now() + expiresAtOffsetMs, models });
 }
 
