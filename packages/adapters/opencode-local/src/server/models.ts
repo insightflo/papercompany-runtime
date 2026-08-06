@@ -8,7 +8,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 
 const MODELS_CACHE_TTL_MS = 60_000;
-const MODELS_DISCOVERY_TIMEOUT_MS = 60_000;
+const MODELS_DISCOVERY_TIMEOUT_MS = 20_000;
 // 만료된 cache entry 가 stale fallback 으로 살아있는 보존 기간. 이 window 안의 expired entry 는
 // fresh discovery 실패 시 반환된다(Phase 3: stale serve). 이를 넘으면 prune.
 const MODELS_STALE_RETENTION_MS = 5 * 60_000;
@@ -218,17 +218,6 @@ export async function discoverOpenCodeModels(input: {
   if ((result.exitCode ?? 1) !== 0) {
     const detail = firstNonEmptyLine(result.stderr) || firstNonEmptyLine(result.stdout);
     throw new Error(detail ? `\`opencode models\` failed: ${detail}` : "`opencode models` failed.");
-  }
-
-  // [TEMP DEBUG] discovery stdout 캡처 — 원인 파악 후 제거 예정 (파일 직접 기록)
-  try {
-    const fs = await import("node:fs");
-    fs.appendFileSync(
-      "/tmp/opencode-discovery.log",
-      `[${new Date().toISOString()}] cwd=${cwd} exit=${result.exitCode} len=${result.stdout.length}\n${result.stdout.slice(0, 8000)}\n---END---\n`,
-    );
-  } catch {
-    // non-fatal
   }
 
   return sortModels(parseModelsOutput(result.stdout));
