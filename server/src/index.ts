@@ -27,7 +27,7 @@ import { toPublicSocialAuthProviders, type PublicSocialAuthProvider } from "./au
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
+import { heartbeatService, reconcilePersistedAgentStatusOnStartup, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
 import { createHeartbeatScheduler } from "./services/heartbeat-scheduler.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
@@ -529,6 +529,18 @@ export async function startServer(): Promise<StartedServer> {
     })
     .catch((err) => {
       logger.error({ err }, "startup reconciliation of persisted runtime services failed");
+    });
+  void reconcilePersistedAgentStatusOnStartup(db as any)
+    .then((result) => {
+      if (result.reconciled > 0) {
+        logger.warn(
+          { reconciled: result.reconciled },
+          "reset phantom-running agents to idle on startup (no running heartbeat run)",
+        );
+      }
+    })
+    .catch((err) => {
+      logger.error({ err }, "startup reconciliation of persisted agent status failed");
     });
   
   if (config.databaseBackupEnabled) {

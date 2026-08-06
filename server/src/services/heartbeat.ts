@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
 import {
@@ -176,6 +176,12 @@ const DETACHED_PROCESS_ERROR_CODE = "process_detached";
 // 로 매 tick defer 만 하던 무한 대기(CMPA-5519 ~72분 hang)를 상한으로 끊고 process_lost+retry 로 회수.
 const DETACHED_REAP_AFTER_MS = 30 * 60 * 1000;
 const DETACHED_GRACE_SEC = 5;
+// [paperclip-stuck 2026-08-06, A2] detached 유예 창 동안 agents.status 가 `running`에 갇히는
+// (phantom running) 것을 끊는다. reapOrphanedRuns 는 detached child 를 DETACHED_REAP_AFTER_MS 까지
+// 유예하지만, 그 동안 finalizeAgentStatus 가 호출되지 않아 agent 가 최장 30분간 running 으로 보임.
+// agent.updatedAt 기준으로 이 임계를 넘기면 agent 를 `error` 로 강등해 보드/QA 가 실상을 반영하게 한다.
+// (run 자체는 longevity cap 에 따라 별도 회수 — 여기서는 agent 가시성만 교정.)
+const HEARTBEAT_AGENT_DETACHED_DEMOTE_MS = 10 * 60 * 1000;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 
@@ -4678,6 +4684,71 @@ export function heartbeatService(db: Db) {
     }
   }
 
+  // [A2] detached child 유예 창 동안 agents.status 가 `running`에 갇힌(phantom running) 상태를
+  // 직접 교정한다. finalizeAgentStatus 경로를 타지 않는 detached defer 분기에서 호출되며, agent 가
+  // HEARTBEAT_AGENT_DETACHED_DEMOTE_MS 이상 stale 하고 해당 agent 의 running run 이 모두 detached 상태일
+  // 때만 `error` 로 강등한다. 진행 중인(non-detached) sibling run 이 하나라도 있으면 절대 강등하지 않는다.
+  async function demoteAgentStuckDetached(run: typeof heartbeatRuns.$inferSelect, now: Date) {
+    const [agent] = await db
+      .select({ id: agents.id, status: agents.status, updatedAt: agents.updatedAt, companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.id, run.agentId))
+      .limit(1);
+    if (!agent || agent.status !== "running") return;
+
+    const agentStaleMs = agent.updatedAt ? now.getTime() - new Date(agent.updatedAt).getTime() : Number.POSITIVE_INFINITY;
+    if (agentStaleMs < HEARTBEAT_AGENT_DETACHED_DEMOTE_MS) return;
+
+    // sibling 이라도 진짜로 실행 중인(non-detached) run 이 있으면 agent 는 여전히 running 이어야 한다.
+    const nonDetachedRunning = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.agentId, run.agentId),
+          eq(heartbeatRuns.status, "running"),
+          // IS DISTINCT FROM treats NULL as non-detached (a run that never entered the
+          // detached state is genuinely progressing). Plain `!=` would drop NULL rows.
+          sql`${heartbeatRuns.errorCode} is distinct from ${DETACHED_PROCESS_ERROR_CODE}`,
+        ),
+      )
+      .limit(1);
+    if (nonDetachedRunning.length > 0) return;
+
+    const updated = await db
+      .update(agents)
+      .set({ status: "error", lastHeartbeatAt: now, updatedAt: now })
+      .where(and(eq(agents.id, run.agentId), eq(agents.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (updated) {
+      publishLiveEvent({
+        companyId: updated.companyId,
+        type: "agent.status",
+        payload: {
+          agentId: updated.id,
+          status: updated.status,
+          lastHeartbeatAt: updated.lastHeartbeatAt ? new Date(updated.lastHeartbeatAt).toISOString() : null,
+          outcome: "failed",
+          reasonCode: "detached_agent_demoted",
+        },
+      });
+      logger.warn(
+        { agentId: run.agentId, runId: run.id, agentStaleMs },
+        "demoted phantom-running agent to error while detached child deferred",
+      );
+      fireWikiRecord(wikiSvc, {
+        companyId: run.companyId,
+        agentId: run.agentId,
+        missionId: null,
+        pattern: "phantom running (detached 유예 창)",
+        cause: "in-memory handle 은 상실했지만 child pid 가 살아있어 reapOrphanedRuns 가 detached 로 유예하는 동안 agents.status 가 running 에 갇힘. 서버 재시작/handle 상실 후 finalizeAgentStatus 가 호출되지 않아 발생.",
+        solution: "detached 유예 창에서도 agent.updatedAt staleness 를 별도 검사해 error 로 강등. run 자체는 DETACHED_REAP_AFTER_MS cap 으로 회수되므로 가시성만 교정.",
+        errorCode: "detached_agent_demoted",
+      }, run.id);
+    }
+  }
+
   async function reapOrphanedRuns(opts?: {
     staleThresholdMs?: number;
     activeExecutionTimeoutMs?: number;
@@ -4837,6 +4908,9 @@ export function heartbeatService(db: Db) {
           );
           // fall through to process_lost/retry below (의도적 continue 생략).
         } else {
+          // [A2] run 은 longevity cap 까지 detached 로 유예하지만, 그동안 agent 가 phantom running
+          // 에 갇히지 않도록 agent 가시성을 직접 교정한 뒤 유예한다.
+          await demoteAgentStuckDetached(run, now);
           continue;
         }
       }
@@ -4927,13 +5001,12 @@ export function heartbeatService(db: Db) {
       for (const run of queuedRuns) {
         if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
 
-        const hasRunningRunForAgent = await db
-          .select({ id: heartbeatRuns.id })
-          .from(heartbeatRuns)
-          .where(and(eq(heartbeatRuns.agentId, run.agentId), eq(heartbeatRuns.status, "running")))
-          .limit(1)
-          .then((rows) => rows.length > 0);
-        if (hasRunningRunForAgent) continue;
+        // [B2] Stale detection is decoupled from concurrency here. A queued run past
+        // queuedStaleThresholdMs is recorded as failed even while the agent owns a running
+        // run. Previously a `hasRunningRunForAgent` guard skipped every stale check when
+        // maxConcurrentRuns=1, so a single phantom running run blocked all queued runs
+        // forever (paperclip-stuck 2026-08-06). Promotion still respects the slot via
+        // startNextQueuedRunForAgent below — only genuinely-stale queued runs are failed.
 
         const refTime = run.createdAt ? new Date(run.createdAt).getTime() : new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < queuedStaleThresholdMs) continue;
@@ -4971,6 +5044,63 @@ export function heartbeatService(db: Db) {
         await finalizeAgentStatus(run.agentId, "failed");
         await startNextQueuedRunForAgent(run.agentId);
         reaped.push(run.id);
+      }
+      // [B1] Also reap stale agent_wakeup_requests rows that never created a heartbeat run
+      // (runId IS NULL). The mission-dedup enqueue path persists such rows without a
+      // heartbeat_runs row, so the loop above never inspects them and they sat queued
+      // forever in the incident (5 of them). Fail stale ones with a CAS guard so callers
+      // can re-enqueue fresh requests; idempotency keys dedupe duplicate re-enqueues.
+      const staleOrphanWakeups = await db
+        .select({
+          id: agentWakeupRequests.id,
+          companyId: agentWakeupRequests.companyId,
+          agentId: agentWakeupRequests.agentId,
+          createdAt: agentWakeupRequests.createdAt,
+        })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.status, "queued"),
+            sql`${agentWakeupRequests.runId} is null`,
+            lt(agentWakeupRequests.createdAt, new Date(now.getTime() - queuedStaleThresholdMs)),
+          ),
+        );
+
+      const orphanAffectedAgentIds = new Set<string>();
+      const orphanReapedIds: string[] = [];
+      for (const request of staleOrphanWakeups) {
+        const orphanMessage = `stale_queued: queued wakeup exceeded ${Math.round(queuedStaleThresholdMs / 1000)}s without a heartbeat run (mission dedup without heartbeatRuns)`;
+        const failed = await db
+          .update(agentWakeupRequests)
+          .set({ status: "failed", error: orphanMessage, finishedAt: now, updatedAt: now })
+          .where(and(eq(agentWakeupRequests.id, request.id), eq(agentWakeupRequests.status, "queued")))
+          .returning({ id: agentWakeupRequests.id })
+          .then((rows) => rows[0] ?? null);
+        if (!failed) continue; // raced: promoted/claimed between select and update
+        await recordQueueTransitionEvent({
+          companyId: request.companyId,
+          wakeupRequestId: request.id,
+          eventType: "wakeup_stale_queued",
+          layer: "heartbeat",
+          decision: "failed",
+          reason: "stale_queued",
+          reasonCode: "stale_queued",
+          idempotencyKey: `wakeup-stale-queued:${request.id}`,
+          payload: { queuedStaleThresholdMs, runId: null },
+        });
+        orphanAffectedAgentIds.add(request.agentId);
+        orphanReapedIds.push(request.id);
+      }
+
+      for (const affectedAgentId of orphanAffectedAgentIds) {
+        await startNextQueuedRunForAgent(affectedAgentId);
+      }
+
+      if (orphanReapedIds.length > 0) {
+        logger.warn(
+          { orphanWakeupCount: orphanReapedIds.length, wakeupIds: orphanReapedIds },
+          "reaped stale queued wakeup requests without a heartbeat run",
+        );
       }
     }
 
@@ -5418,7 +5548,22 @@ export function heartbeatService(db: Db) {
             sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForWake}`,
           ))
           .limit(1);
-        if (existingMissionRun.length > 0) return null;
+        if (existingMissionRun.length > 0) {
+          // [B3] Previously this branch dropped the promotion silently: the request stayed
+          // `queued` with runId=NULL and no state change, so it was invisible until B1's
+          // stale-queued reap eventually fired. Record each block: bump coalescedCount (durable,
+          // tx-scoped counter) and warn so a request stuck behind a long-running same-mission
+          // run is observable long before it goes stale.
+          await tx
+            .update(agentWakeupRequests)
+            .set({ coalescedCount: sql`${agentWakeupRequests.coalescedCount} + 1`, updatedAt: new Date() })
+            .where(eq(agentWakeupRequests.id, request.id));
+          logger.warn(
+            { agentId: agent.id, wakeupRequestId: request.id, missionId: missionIdForWake, blockingRunId: existingMissionRun[0]?.id },
+            "queue_promotion_blocked_by_mission_dedup",
+          );
+          return null;
+        }
 
         try {
           await assertMissionRuntimeAcceptsWork(tx as unknown as Db, {

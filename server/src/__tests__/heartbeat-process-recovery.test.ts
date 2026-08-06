@@ -847,7 +847,13 @@ describe("heartbeat orphaned process recovery", () => {
     expect(wakeup?.status).toBe("failed");
   });
 
-  it("does not expire an old queued run while the same agent is still running another run", async () => {
+  it("expires a stale queued run even while the same agent is still running another run (B2)", async () => {
+    // [paperclip-stuck 2026-08-06, B2] Previously a single running run caused the stale
+    // check for every queued run of that agent to be skipped (hasRunningRunForAgent guard),
+    // so with maxConcurrentRuns=1 one phantom running run blocked all queued runs forever.
+    // Stale detection is now independent of whether a running run exists: a queued run past
+    // queuedStaleThresholdMs is recorded as failed (stale_queued) regardless. Promotion still
+    // respects the concurrency slot, so only genuinely-stale queued runs are affected.
     const { companyId, agentId, runId: runningRunId } = await seedRunFixture({
       includeIssue: false,
       updatedAt: new Date(),
@@ -891,11 +897,118 @@ describe("heartbeat orphaned process recovery", () => {
 
     const heartbeat = heartbeatService(db);
     const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+    // B2: the stale queued run is failed even though the agent still owns a running run.
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toContain(queuedRunId);
+
+    const queuedRun = await heartbeat.getRun(queuedRunId);
+    expect(queuedRun?.status).toBe("failed");
+    expect(queuedRun?.errorCode).toBe("stale_queued");
+
+    const queuedWakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, queuedWakeupId))
+      .then((rows) => rows[0] ?? null);
+    expect(queuedWakeup?.status).toBe("failed");
+  });
+
+  it("does not expire a within-threshold queued run while the agent is running another run", async () => {
+    // [B2 threshold guard] Removing the hasRunningRunForAgent guard must not make every
+    // queued run eligible — only runs past queuedStaleThresholdMs. A freshly-queued run
+    // sitting behind a running run must still be preserved (it is legitimately waiting).
+    const { companyId, agentId, runId: runningRunId } = await seedRunFixture({
+      includeIssue: false,
+      updatedAt: new Date(),
+    });
+    const queuedRunId = randomUUID();
+    const queuedWakeupId = randomUUID();
+    const freshAt = new Date(); // within threshold
+
+    await db.insert(agentWakeupRequests).values({
+      id: queuedWakeupId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: {},
+      status: "pending",
+      runId: queuedRunId,
+      createdAt: freshAt,
+      updatedAt: freshAt,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: queuedRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId: queuedWakeupId,
+      contextSnapshot: {},
+      createdAt: freshAt,
+      updatedAt: freshAt,
+    });
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    runningProcesses.set(runningRunId, { child, graceSec: 1 });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
     expect(result.reaped).toBe(0);
 
     const queuedRun = await heartbeat.getRun(queuedRunId);
     expect(queuedRun?.status).toBe("queued");
     expect(queuedRun?.errorCode).toBeNull();
+  });
+
+  it("expires stale agent_wakeup_requests rows that never created a heartbeat run (runId IS NULL, B1)", async () => {
+    // [paperclip-stuck 2026-08-06, B1] The mission-dedup enqueue path persists an
+    // agent_wakeup_requests row with status='queued' and runId=NULL but never creates a
+    // heartbeat_runs row. The stale-queued reaper only inspected heartbeat_runs, so these
+    // rows sat queued forever (5 of them in the incident). The reaper must now also fail
+    // stale runId=NULL queued wakeup requests so callers can re-enqueue fresh requests.
+    const { companyId, agentId } = await seedRunFixture({
+      includeIssue: false,
+      runStatus: "queued",
+    });
+    const orphanWakeupId = randomUUID();
+    const staleAt = new Date("2026-03-19T00:00:00.000Z");
+
+    await db.insert(agentWakeupRequests).values({
+      id: orphanWakeupId,
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "mission_owner_retry_source_issue",
+      payload: {},
+      status: "queued",
+      runId: null,
+      idempotencyKey: "mission-owner-plan-rework:abc:def",
+      createdAt: staleAt,
+      updatedAt: staleAt,
+    });
+    // Make the seeded queued heartbeat run fresh so only the orphan wakeup is stale.
+    await db
+      .update(heartbeatRuns)
+      .set({ createdAt: new Date(), updatedAt: new Date() })
+      .where(eq(heartbeatRuns.status, "queued"));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+
+    const orphanWakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, orphanWakeupId))
+      .then((rows) => rows[0] ?? null);
+    expect(orphanWakeup?.status).toBe("failed");
+    expect(orphanWakeup?.error).toContain("stale_queued");
+    expect(orphanWakeup?.finishedAt).toBeInstanceOf(Date);
+    // The fresh seeded queued run is untouched.
+    expect(result.reaped).toBe(0);
   });
 
   it("marks a failed mission_main_executor_unblock blocked without emitting a Human Operator request (boundary)", async () => {
@@ -965,5 +1078,137 @@ describe("heartbeat orphaned process recovery", () => {
     // heartbeat failure path must NOT create the Human Operator request — supervision owns that.
     const issueActivities = await db.select().from(activityLog).where(eq(activityLog.entityId, ownerActionIssueId));
     expect(issueActivities.some((row) => row.action === HUMAN_OPERATOR_REQUEST_ACTION)).toBe(false);
+  });
+  it("demotes a phantom-running agent to error while a detached child is deferred (A2)", async () => {
+    // [paperclip-stuck 2026-08-06, A2] When the in-memory process handle is gone but the
+    // recorded child pid is still alive, reapOrphanedRuns defers the run up to the 30min
+    // detached cap. During that window finalizeAgentStatus is never called, so agents.status
+    // was pinned at `running` (phantom running). Directly demote the agent to `error` once
+    // it has been stuck detached beyond a shorter heartbeat threshold, even though the run
+    // itself is intentionally left alive under the longevity cap.
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issuePrefix = `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const staleUpdatedAt = new Date(Date.now() - 15 * 60 * 1000); // > 10min demote threshold
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Phantom Co",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Phantom",
+      role: "engineer",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+      updatedAt: staleUpdatedAt,
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: {},
+      status: "claimed",
+      runId,
+      claimedAt: staleUpdatedAt,
+    });
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      wakeupRequestId,
+      contextSnapshot: {},
+      processPid: child.pid ?? null,
+      processStartedAt: new Date(),
+      processLossRetryCount: 0,
+      startedAt: staleUpdatedAt,
+      updatedAt: staleUpdatedAt,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+    // run is within the 30min cap → not reaped, stays running + detached.
+    expect(result.reaped).toBe(0);
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+    expect(run?.errorCode).toBe("process_detached");
+    // agent is no longer phantom-running: demoted to error.
+    const agent = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    expect(agent?.status).toBe("error");
+  });
+
+  it("does not demote an agent that still has a genuinely-progressing (non-detached) run", async () => {
+    // [A2 guard] A demote must never fire while a sibling run is making real progress. Here
+    // the agent has one detached run AND one fresh non-detached running run → it stays running.
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const detachedRunId = randomUUID();
+    const progressingRunId = randomUUID();
+    const detachedWakeupId = randomUUID();
+    const progressingWakeupId = randomUUID();
+    const issuePrefix = `G${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const staleUpdatedAt = new Date(Date.now() - 15 * 60 * 1000);
+
+    await db.insert(companies).values({ id: companyId, name: "Guard Co", issuePrefix, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Guard", role: "engineer", status: "running",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+      updatedAt: staleUpdatedAt,
+    });
+    await db.insert(agentWakeupRequests).values([
+      { id: detachedWakeupId, companyId, agentId, source: "assignment", triggerDetail: "system", reason: "issue_assigned", payload: {}, status: "claimed", runId: detachedRunId, claimedAt: staleUpdatedAt },
+      { id: progressingWakeupId, companyId, agentId, source: "assignment", triggerDetail: "system", reason: "issue_assigned", payload: {}, status: "claimed", runId: progressingRunId, claimedAt: new Date() },
+    ]);
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    // progressing run is genuinely tracked in-memory (live handle) → survives the reaper.
+    const progressingChild = spawnAliveProcess();
+    childProcesses.add(progressingChild);
+    runningProcesses.set(progressingRunId, { child: progressingChild, graceSec: 1 });
+    await db.insert(heartbeatRuns).values([
+      {
+        id: detachedRunId, companyId, agentId, invocationSource: "assignment", triggerDetail: "system",
+        status: "running", wakeupRequestId: detachedWakeupId, contextSnapshot: {},
+        processPid: child.pid ?? null, processStartedAt: new Date(), processLossRetryCount: 0,
+        startedAt: staleUpdatedAt, updatedAt: staleUpdatedAt,
+      },
+      {
+        id: progressingRunId, companyId, agentId, invocationSource: "assignment", triggerDetail: "system",
+        status: "running", wakeupRequestId: progressingWakeupId, contextSnapshot: {},
+        processPid: progressingChild.pid ?? null, processStartedAt: new Date(), processLossRetryCount: 0,
+        startedAt: new Date(), updatedAt: new Date(),
+      },
+    ]);
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+
+    const agent = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    // sibling progressing run protects the agent from demotion.
+    expect(agent?.status).toBe("running");
   });
 });
