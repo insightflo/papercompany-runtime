@@ -39,6 +39,8 @@ export const queryKeys = {
     configRevisions: (agentId: string) => ["agents", "config-revisions", agentId] as const,
     adapterModels: (companyId: string, adapterType: string) =>
       ["agents", companyId, "adapter-models", adapterType] as const,
+    adapterProviderModels: (companyId: string, adapterType: string, provider: string) =>
+      ["agents", companyId, "adapter-provider-models", adapterType, provider] as const,
     adapterModelEfforts: (companyId: string, adapterType: string, model: string) =>
       ["agents", companyId, "adapter-model-efforts", adapterType, model] as const,
   },

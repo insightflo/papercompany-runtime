@@ -281,7 +281,7 @@ export interface ServerAdapterModule {
   sessionManagement?: import("./session-compaction.js").AdapterSessionManagement;
   supportsLocalAgentJwt?: boolean;
   models?: AdapterModel[];
-  listModels?: () => Promise<AdapterModel[]>;
+  listModels?: (provider?: string) => Promise<AdapterModel[]>;
   /**
    * Optional: discover the reasoning-effort levels a specific model supports
    * (e.g. ["low","medium","high","max"]). Adapters that cannot determine this

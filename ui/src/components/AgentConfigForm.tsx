@@ -57,6 +57,7 @@ import { ReportsToPicker } from "./ReportsToPicker";
 import { shouldShowLegacyWorkingDirectoryField } from "../lib/legacy-agent-config";
 import { isAdapterTypeEnabled } from "./agent-config-adapter-types";
 import { useAdapterModelEfforts } from "../hooks/useAdapterModelEfforts";
+import { useAdapterProviderModels } from "../hooks/useAdapterProviderModels";
 import { buildCommandCodeEffortOptions, shouldResetCommandCodeEffort } from "../lib/commandcode-efforts";
 
 /* ---- Create mode values ---- */
@@ -371,6 +372,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const [providerOpen, setProviderOpen] = useState(false);
   const [fallbackModelOpen, setFallbackModelOpen] = useState(false);
   const [thinkingEffortOpen, setThinkingEffortOpen] = useState(false);
+  // opencode_local provider→model 2-step: locally-tracked pending provider (selected
+  // before a model is chosen). The effective provider is derived from the model id,
+  // falling back to this pending selection when no model is set yet.
+  const [openCodeSelectedProvider, setOpenCodeSelectedProvider] = useState("");
 
   // Create mode helpers
   const val = isCreate ? props.values : null;
@@ -444,8 +449,43 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       label: extractModelName(model.id) || model.label,
     }));
   }, [adapterType, currentHermesProvider, models]);
+  // opencode_local provider→model: provider is derived from the model id (provider/model),
+  // falling back to a locally-tracked pending selection when no model is chosen yet.
+  const currentOpenCodeProvider =
+    adapterType === "opencode_local"
+      ? extractProviderId(currentModelId) ?? openCodeSelectedProvider
+      : "";
+  const { data: openCodeProviderModels } = useAdapterProviderModels(
+    selectedCompanyId,
+    adapterType,
+    currentOpenCodeProvider || null,
+  );
+  const openCodeProviderOptions = useMemo(() => {
+    if (adapterType !== "opencode_local") return [];
+    const options = listModelProviders(models);
+    if (!currentOpenCodeProvider || options.some((option) => option.id === currentOpenCodeProvider)) {
+      return options;
+    }
+    return [
+      ...options,
+      { id: currentOpenCodeProvider, label: currentOpenCodeProvider, modelCount: 0 },
+    ].sort((left, right) => left.id.localeCompare(right.id));
+  }, [adapterType, currentOpenCodeProvider, models]);
+  const openCodeModelOptions = useMemo<AdapterModel[]>(() => {
+    if (adapterType !== "opencode_local") return models;
+    // Prefer the reliable provider-filtered query. While it loads (or if it fails),
+    // fall back to a client-side filter of the full list so the dropdown is never empty.
+    if (openCodeProviderModels && openCodeProviderModels.length > 0) return openCodeProviderModels;
+    return currentOpenCodeProvider
+      ? filterModelsByProvider(models, currentOpenCodeProvider)
+      : [];
+  }, [adapterType, openCodeProviderModels, models, currentOpenCodeProvider]);
   const currentModelOptions =
-    adapterType === "hermes_local" ? hermesModelOptions : models;
+    adapterType === "hermes_local"
+      ? hermesModelOptions
+      : adapterType === "opencode_local"
+        ? openCodeModelOptions
+        : models;
 
   function handleHermesProviderChange(provider: string) {
     const nextModelId = provider
@@ -461,6 +501,17 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       "model",
       nextModelId ? extractModelName(nextModelId) : undefined,
     );
+  }
+
+  function handleOpenCodeProviderChange(provider: string) {
+    // opencode stores model as provider/model. Switching provider clears the model;
+    // the pending provider is tracked locally so the provider-filtered query loads.
+    setOpenCodeSelectedProvider(provider);
+    if (isCreate) {
+      set!({ model: "" });
+    } else {
+      mark("adapterConfig", "model", undefined);
+    }
   }
 
   function handleModelChange(modelId: string) {
@@ -917,6 +968,16 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 />
               )}
 
+              {adapterType === "opencode_local" && (
+                <ProviderDropdown
+                  hint="OpenCode provider to scan for models. Scanning a single provider avoids intermittent omissions when many providers are configured."
+                  providers={openCodeProviderOptions}
+                  value={currentOpenCodeProvider}
+                  onChange={handleOpenCodeProviderChange}
+                  open={providerOpen}
+                  onOpenChange={setProviderOpen}
+                />
+              )}
               {adapterType === "hermes_local" && (
                 <ProviderDropdown
                   providers={hermesProviderOptions}
@@ -1550,18 +1611,20 @@ function ProviderDropdown({
   onChange,
   open,
   onOpenChange,
+  hint = "Provider passed to Hermes for this model run.",
 }: {
   providers: ReadonlyArray<{ id: string; label: string; modelCount: number }>;
   value: string;
   onChange: (id: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  hint?: string;
 }) {
   const selected = providers.find((provider) => provider.id === value);
   const disabled = providers.length === 0;
 
   return (
-    <Field label="Provider" hint="Provider passed to Hermes for this model run.">
+    <Field label="Provider" hint={hint}>
       <Popover open={open} onOpenChange={onOpenChange}>
         <PopoverTrigger asChild>
           <button

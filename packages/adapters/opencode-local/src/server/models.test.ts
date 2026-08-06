@@ -62,7 +62,8 @@ describe("openCode models", () => {
 
   it("checks configured-model availability against stale cache when fresh discovery fails", async () => {
     const seeded = [{ id: "openai/gpt-5", label: "openai/gpt-5" }];
-    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND }, seeded, -30_000); // stale
+    // provider-scoped cache(model 의 provider 인 "openai" 키로 시드)
+    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND, provider: "openai" }, seeded, -30_000); // stale
     // configured model is present in stale list → availability OK against stale (warns, but returns models)
     await expect(
       ensureOpenCodeModelConfiguredAndAvailable({ model: "openai/gpt-5", command: BAD_COMMAND }),
@@ -71,7 +72,8 @@ describe("openCode models", () => {
 
   it("still rejects an unavailable configured model even when using stale cache", async () => {
     const seeded = [{ id: "openai/gpt-5", label: "openai/gpt-5" }];
-    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND }, seeded, -30_000); // stale
+    // provider-scoped cache(model 의 provider 인 "anthropic" 키로 시드)
+    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND, provider: "anthropic" }, seeded, -30_000); // stale
     await expect(
       ensureOpenCodeModelConfiguredAndAvailable({ model: "anthropic/claude-5", command: BAD_COMMAND }),
     ).rejects.toThrow("Configured OpenCode model is unavailable");
@@ -121,6 +123,54 @@ describe("openCode models", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("openCode provider-filtered discovery", () => {
+  afterEach(() => {
+    resetOpenCodeModelsCacheForTests();
+    resetOpenCodeModelsDiscoveryForTests();
+  });
+
+  it("extracts the configured model's provider and passes it to discovery", async () => {
+    const seenProviders: string[] = [];
+    setOpenCodeModelsDiscoveryForTests(async (input) => {
+      seenProviders.push(String((input as { provider?: unknown }).provider ?? ""));
+      return [{ id: "zai-coding-plan/glm-5.2", label: "zai-coding-plan/glm-5.2" }];
+    });
+    await expect(
+      ensureOpenCodeModelConfiguredAndAvailable({
+        model: "zai-coding-plan/glm-5.2",
+        command: BAD_COMMAND,
+      }),
+    ).resolves.toEqual([{ id: "zai-coding-plan/glm-5.2", label: "zai-coding-plan/glm-5.2" }]);
+    expect(seenProviders).toEqual(["zai-coding-plan"]);
+  });
+
+  it("scopes the cache by provider (provider entry ≠ full-scan entry)", async () => {
+    const full = [{ id: "openai/gpt-5", label: "openai/gpt-5" }];
+    const providerModels = [{ id: "openai/gpt-5", label: "openai/gpt-5" }];
+    // full-scan cache(provider 없음) 와 provider 스캔 캐시는 별도 키 → 독립 TTL.
+    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND }, full, 30_000);
+    seedOpenCodeModelsCacheForTests({ command: BAD_COMMAND, provider: "openai" }, providerModels, 30_000);
+    // provider 없는 조회는 full-scan cache hit.
+    await expect(discoverOpenCodeModelsCached({ command: BAD_COMMAND })).resolves.toEqual(full);
+    // provider 조회는 provider-scoped cache hit.
+    await expect(
+      discoverOpenCodeModelsCached({ command: BAD_COMMAND, provider: "openai" }),
+    ).resolves.toEqual(providerModels);
+  });
+
+  it("falls back to full-scan discovery when the model has no provider prefix", async () => {
+    const seenProviders: string[] = [];
+    setOpenCodeModelsDiscoveryForTests(async (input) => {
+      seenProviders.push(String((input as { provider?: unknown }).provider ?? ""));
+      return [{ id: "gpt-5", label: "gpt-5" }];
+    });
+    await expect(
+      ensureOpenCodeModelConfiguredAndAvailable({ model: "gpt-5", command: BAD_COMMAND }),
+    ).resolves.toEqual([{ id: "gpt-5", label: "gpt-5" }]);
+    expect(seenProviders).toEqual([""]); // provider 없음 → 전체 조회
   });
 });
 

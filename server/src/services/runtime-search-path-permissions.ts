@@ -69,6 +69,14 @@ export async function buildRuntimeSearchPathPermissions(input: {
       permissions.broadScanRepoAllowed = false;
       return permissions;
     }
+    if (noCardIssue?.originKind === "mission_plan_qa") {
+      // PLAN-QA owns no execution card (it reviews a plan decision, it does not run a
+      // workflow step). Grant the minimal default missionSearch scopes so the reviewer
+      // can discover declared work products and mission output through the authenticated
+      // API. The workingDirectory is the declared review workspace. Direct repo-root broad
+      // scans stay blocked (broadScanRepoAllowed=false) — discovery is server-side only.
+      return permissions;
+    }
     return buildMissionRecoverySearchPermissions(input, permissions, noCardIssue);
   }
 
