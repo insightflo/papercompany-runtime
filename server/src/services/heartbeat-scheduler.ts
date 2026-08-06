@@ -40,7 +40,7 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
   const routineIntervalMs = opts.routineIntervalMs ?? opts.timerIntervalMs;
   const recoveryIntervalMs = opts.recoveryIntervalMs ?? Math.max(opts.timerIntervalMs * 10, 5 * 60 * 1000);
   const recoveryStaleThresholdMs = opts.recoveryStaleThresholdMs ?? 5 * 60 * 1000;
-  const activeExecutionTimeoutMs = 10 * 60 * 1000;
+  const activeExecutionTimeoutMs = 15 * 60 * 1000;
   const queuedStaleThresholdMs = Math.max(recoveryStaleThresholdMs * 3, 15 * 60 * 1000);
 
   let running = false;

@@ -138,6 +138,18 @@ async function waitForRunTerminal(heartbeat: ReturnType<typeof heartbeatService>
   throw new Error(`Timed out waiting for run ${runId} to finish`);
 }
 
+/** Assert a runtime broad-scan hook interception event was recorded (not a throw). */
+async function expectBroadScanInterception(db: ReturnType<typeof createDb>, runId: string) {
+  const events = await db
+    .select({ eventType: heartbeatRunEvents.eventType, payload: heartbeatRunEvents.payload })
+    .from(heartbeatRunEvents)
+    .where(eq(heartbeatRunEvents.runId, runId));
+  const intercepted = events.find((e) => e.eventType === "guard.broad_scan_intercepted");
+  expect(intercepted, "expected a guard.broad_scan_intercepted event").toBeTruthy();
+  const payload = typeof intercepted?.payload === "string" ? JSON.parse(intercepted.payload) : intercepted?.payload;
+  expect(payload).toMatchObject({ errorCode: "manifest_broad_scan_hook_intercepted", phase: "runtime_hook" });
+}
+
 async function waitForIssueStatus(
   db: ReturnType<typeof createDb>,
   issueId: string,
@@ -4447,7 +4459,7 @@ describe("heartbeat context budget preflight", () => {
     expect(finalized.error).toContain("scan the entire repo");
   });
 
-  it("blocks a live broad-scan tool call before adapter execution can continue", async () => {
+  it("intercepts a live broad-scan tool call and continues the run (hook injects synthetic output)", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const taskKey = "manual:runtime-broad-scan";
@@ -4502,12 +4514,14 @@ describe("heartbeat context budget preflight", () => {
 
     expect(run).not.toBeNull();
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
-    expect(finalized.status).toBe("failed");
-    expect(finalized.errorCode).toBe("manifest_broad_scan_tool_blocked");
-    expect(finalized.error).toContain("find .");
+    // Runtime broad-scan tool calls are now INTERCEPTED by the hook (a synthetic
+    // in-scope output is injected) instead of killing the run — the run succeeds.
+    expect(finalized.status).toBe("succeeded");
+    expect(finalized.errorCode).not.toBe("manifest_broad_scan_tool_blocked");
+    await expectBroadScanInterception(db, finalized.id);
   });
 
-  it("blocks a chunk-split live tool call after the full JSON line is reconstructed", async () => {
+  it("intercepts a chunk-split broad-scan tool call after the full JSON line is reconstructed", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const taskKey = "manual:runtime-broad-scan-split";
@@ -4567,12 +4581,14 @@ describe("heartbeat context budget preflight", () => {
 
     expect(run).not.toBeNull();
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
-    expect(finalized.status).toBe("failed");
-    expect(finalized.errorCode).toBe("manifest_broad_scan_tool_blocked");
-    expect(finalized.error).toContain("find .");
+    // Runtime broad-scan tool calls are now INTERCEPTED (hook injects a synthetic
+    // in-scope output) instead of killing the run — the run succeeds.
+    expect(finalized.status).toBe("succeeded");
+    expect(finalized.errorCode).not.toBe("manifest_broad_scan_tool_blocked");
+    await expectBroadScanInterception(db, finalized.id);
   });
 
-  it("blocks a cursor shell tool call when normalized JSONL arrives on stderr", async () => {
+  it("intercepts a cursor shell tool call when normalized JSONL arrives on stderr", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const taskKey = "manual:runtime-broad-scan-cursor-stderr";
@@ -4631,9 +4647,11 @@ describe("heartbeat context budget preflight", () => {
 
     expect(run).not.toBeNull();
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
-    expect(finalized.status).toBe("failed");
-    expect(finalized.errorCode).toBe("manifest_broad_scan_tool_blocked");
-    expect(finalized.error).toContain("find .");
+    // Runtime broad-scan tool calls are now INTERCEPTED (hook injects a synthetic
+    // in-scope output) instead of killing the run — the run succeeds.
+    expect(finalized.status).toBe("succeeded");
+    expect(finalized.errorCode).not.toBe("manifest_broad_scan_tool_blocked");
+    await expectBroadScanInterception(db, finalized.id);
   });
 
   it("still blocks bootstrap broad-scan prompts when a saved session exists but cwd mismatch prevents resume", async () => {

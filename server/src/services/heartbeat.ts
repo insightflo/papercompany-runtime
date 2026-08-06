@@ -82,7 +82,7 @@ import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
-import { evaluateRuntimeBroadScanToolGuard } from "./runtime-broad-scan-tool-guard.js";
+import { evaluateRuntimeBroadScanHook } from "./runtime-broad-scan-hook.js";
 import { buildRuntimeSearchPathPermissions } from "./runtime-search-path-permissions.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
 import {
@@ -4124,10 +4124,12 @@ export function heartbeatService(db: Db) {
   }
 
   /**
-   * Audit a broad-scan block as a redacted run event BEFORE the guard throws.
-   * Without this the offending command/instruction is lost (the throw precedes
-   * log-store append and excerpt capture). Payload is sanitized by appendRunEvent.
-   * Non-fatal: a DB failure here must not mask the original guard error.
+   * Audit a broad-scan block or hook intercept as a redacted run event.
+   * Preflight/runtime blocks throw; runtime_hook intercepts are audit-only
+   * (the run continues — the synthetic output is for operator visibility,
+   * not the agent LLM). F6: runtime_hook uses a distinct eventType so
+   * "blocked" vs "intercepted" is observable. Payload is sanitized by
+   * appendRunEvent. Non-fatal: a DB failure here must not mask the caller.
    */
   async function appendBroadScanBlockEvent(
     run: typeof heartbeatRuns.$inferSelect,
@@ -4135,16 +4137,20 @@ export function heartbeatService(db: Db) {
     details: {
       reason: string;
       errorCode: string;
-      phase: "preflight" | "runtime" | "runtime_flush";
+      phase: "preflight" | "runtime" | "runtime_flush" | "runtime_hook";
       stream?: "stdout" | "stderr";
       matchedCommand?: string | null;
       matchedPhrase?: string | null;
       line?: string;
     },
   ): Promise<void> {
+    const eventType =
+      details.phase === "runtime_hook"
+        ? "guard.broad_scan_intercepted"
+        : "guard.broad_scan_blocked";
     try {
       await appendRunEvent(run, seq, {
-        eventType: "guard.broad_scan_blocked",
+        eventType,
         stream: details.stream ?? "system",
         level: "warn",
         message: details.reason,
@@ -6466,39 +6472,39 @@ export function heartbeatService(db: Db) {
       };
       let lastActivityTouchMs = 0;
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
-        const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
+        let sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
         const now = new Date();
         const ts = now.toISOString();
         for (const line of evaluateRuntimeGuardLines(stream, sanitizedChunk)) {
-          const runtimeGuard = evaluateRuntimeBroadScanToolGuard({
+          const hook = await evaluateRuntimeBroadScanHook(db, {
             adapterType: agent.adapterType,
             line,
             ts,
             context,
+            runId: run.id,
           });
-          if (runtimeGuard.blocked) {
-            // Audit the blocked command BEFORE aborting. The throw below would
-            // otherwise drop the offending line (it precedes runLogStore.append
-            // and stdoutExcerpt/stderrExcerpt capture in this callback).
-            if (handle) {
-              try {
-                await runLogStore.append(handle, { stream, chunk: sanitizedChunk, ts });
-              } catch {
-                // non-fatal — the guard error must still win
-              }
-            }
+          if (hook.intercepted) {
+            // Runtime broad-scan hook (audit-not-block): black-box CLI adapters
+            // run outside heartbeat's stdio pipe — the synthetic output is
+            // appended to runLogStore/excerpt/liveEvent for operator audit and
+            // next-turn guidance only; it does NOT replace the agent's tool
+            // result. The run continues (no throw) so the agent can retry with
+            // a declared path or missionSearch. Only the current streaming chunk
+            // is replaced (break at most one chunk); remaining output in this
+            // callback is intentionally not forwarded — the agent's own context
+            // is unaffected. Trade-off vs preflight hard-block is documented in
+            // runtime-broad-scan-hook.ts file header.
             await appendBroadScanBlockEvent(run, seq, {
-              reason: runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command",
-              errorCode: "manifest_broad_scan_tool_blocked",
-              phase: "runtime",
+              reason: hook.reason ?? "Broad-scan command intercepted; synthetic audit output injected (agent tool result unchanged)",
+              errorCode: "manifest_broad_scan_hook_intercepted",
+              phase: "runtime_hook",
               stream,
-              matchedCommand: runtimeGuard.matchedCommand ?? null,
+              matchedCommand: hook.rewrittenCommand ?? null,
               line,
             });
             seq++;
-            throw Object.assign(new Error(runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command"), {
-              code: "manifest_broad_scan_tool_blocked",
-            });
+            sanitizedChunk = hook.syntheticOutput ?? "";
+            break;
           }
         }
         if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
@@ -6791,24 +6797,35 @@ export function heartbeatService(db: Db) {
         ...evaluateRuntimeGuardLines("stdout", "", true),
         ...evaluateRuntimeGuardLines("stderr", "", true),
       ]) {
-        const runtimeGuard = evaluateRuntimeBroadScanToolGuard({
+        const hook = await evaluateRuntimeBroadScanHook(db, {
           adapterType: agent.adapterType,
           line,
           ts: new Date().toISOString(),
           context,
+          runId: run.id,
         });
-        if (runtimeGuard.blocked) {
+        if (hook.intercepted) {
+          // Final-flush hook intercept: adapter has already returned, so this
+          // is a retroactive audit only (no throw — marking the run failed over
+          // a trailing broad scan would be punitive). Synthetic output is
+          // appended to the run log for operator visibility. See
+          // runtime-broad-scan-hook.ts header for the audit-not-block trade-off.
+          if (handle) {
+            try {
+              await runLogStore.append(handle, { stream: "stdout", chunk: hook.syntheticOutput ?? "", ts: new Date().toISOString() });
+            } catch {
+              // non-fatal — the audit event below still records the interception
+            }
+          }
           await appendBroadScanBlockEvent(run, seq, {
-            reason: runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command",
-            errorCode: "manifest_broad_scan_tool_blocked",
-            phase: "runtime_flush",
-            matchedCommand: runtimeGuard.matchedCommand ?? null,
+            reason: hook.reason ?? "Broad-scan command intercepted; synthetic audit output injected (agent tool result unchanged)",
+            errorCode: "manifest_broad_scan_hook_intercepted",
+            phase: "runtime_hook",
+            matchedCommand: hook.rewrittenCommand ?? null,
             line,
           });
           seq++;
-          throw Object.assign(new Error(runtimeGuard.reason ?? "Step Input Manifest blocked runtime broad scan command"), {
-            code: "manifest_broad_scan_tool_blocked",
-          });
+          break;
         }
       }
       const adapterManagedRuntimeServices = adapterResult.runtimeServices
