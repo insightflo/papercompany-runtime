@@ -13,6 +13,8 @@ GET /api/companies/{companyId}/routines
 
 Returns all routines in the company.
 
+`GET /api/companies/{companyId}/recurring-procedures` is an alias for the same resource.
+
 ## Get Routine
 
 ```
@@ -158,6 +160,8 @@ POST /api/routines/{routineId}/run
 ```
 
 Fires a run immediately, bypassing the schedule. Concurrency policy still applies.
+
+`source` accepts `manual` or `api`. When using `source: "api"`, the run is attributed as an API-triggered run (used by `kind: "api"` triggers).
 
 `triggerId` is optional. When supplied, the server validates the trigger belongs to this routine (`403`) and is enabled (`409`), then records the run against that trigger and updates its `lastFiredAt`. Omit it for a generic manual run with no trigger attribution.
 

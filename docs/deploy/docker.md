@@ -3,7 +3,7 @@ title: Docker
 summary: Docker Compose quickstart
 ---
 
-Run Paperclip in Docker without installing Node or pnpm locally.
+Run papercompany in Docker without installing Node or pnpm locally.
 
 ## Compose Quickstart (Recommended)
 
@@ -11,21 +11,23 @@ Run Paperclip in Docker without installing Node or pnpm locally.
 docker compose -f docker-compose.quickstart.yml up --build
 ```
 
-Open [http://localhost:3100](http://localhost:3100).
+Open [http://localhost:3200](http://localhost:3200).
 
 Defaults:
 
-- Host port: `3100`
+- Host port: `3200`
 - Data directory: `./data/docker-paperclip`
 
 Override with environment variables:
 
 ```sh
-PAPERCLIP_PORT=3200 PAPERCLIP_DATA_DIR=./data/pc \
+PAPERCLIP_PORT=3300 PAPERCLIP_DATA_DIR=./data/pc \
   docker compose -f docker-compose.quickstart.yml up --build
 ```
 
 ## Manual Docker Build
+
+The `Dockerfile` image pins `PORT=3100` (unlike the quickstart's `3200`):
 
 ```sh
 docker build -t paperclip-local .

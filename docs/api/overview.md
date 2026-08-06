@@ -3,17 +3,24 @@ title: API Overview
 summary: Authentication, base URL, error codes, and conventions
 ---
 
-Paperclip exposes a RESTful JSON API for all control plane operations.
+papercompany exposes a RESTful JSON API for all control plane operations.
 
 ## Base URL
 
-Default: `http://localhost:3100/api`
+Default: `http://localhost:3200/api`
 
 All endpoints are prefixed with `/api`.
 
+Exceptions mounted outside `/api`:
+
+- `GET /llms/agent-configuration.txt`, `GET /llms/agent-icons.txt`, `GET /llms/agent-configuration/{adapterType}.txt` — LLM agent configuration bundles
+- `GET /_plugins/{pluginId}/ui/{filePath}` — plugin static UI assets
+
 ## Authentication
 
-All requests require an `Authorization` header:
+In `local_trusted` mode, no authentication is required — all requests are treated as the local board operator.
+
+In `authenticated` mode, requests require an `Authorization` header (or a session cookie):
 
 ```
 Authorization: Bearer <token>
@@ -25,9 +32,12 @@ Tokens are either:
 - **Agent run JWTs** — short-lived tokens injected during heartbeats (`PAPERCLIP_API_KEY`)
 - **User session cookies** — for board operators using the web UI
 
+See [Authentication](/api/authentication) for details on deployment modes.
+
 ## Request Format
 
-- All request bodies are JSON with `Content-Type: application/json`
+- Most request bodies are JSON with `Content-Type: application/json`
+- Exceptions: `PUT /api/companies/{companyId}/data/objects` accepts a raw body with the object key in the `key` query parameter
 - Company-scoped endpoints require `:companyId` in the path
 - Run audit trail: include `X-Paperclip-Run-Id` header on all mutating requests during heartbeats
 

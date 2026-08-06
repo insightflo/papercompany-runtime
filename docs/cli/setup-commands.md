@@ -25,6 +25,19 @@ Choose a specific instance:
 pnpm paperclipai run --instance dev
 ```
 
+Repair control:
+
+```sh
+pnpm paperclipai run --repair     # run doctor with auto-repair before start
+pnpm paperclipai run --no-repair  # skip repair
+```
+
+Config and data-dir flags (setup commands use `-c/--config`, `-d/--data-dir` instead of the client options):
+
+```sh
+pnpm paperclipai run -c ./config.json -d ./data
+```
+
 ## `paperclipai onboard`
 
 Interactive first-time setup:
@@ -50,6 +63,12 @@ Non-interactive defaults + immediate start (opens browser on server listen):
 pnpm paperclipai onboard --yes
 ```
 
+Custom config and data dir:
+
+```sh
+pnpm paperclipai onboard --config ./config.json --data-dir ./data
+```
+
 ## `paperclipai doctor`
 
 Health checks with optional auto-repair:
@@ -57,6 +76,9 @@ Health checks with optional auto-repair:
 ```sh
 pnpm paperclipai doctor
 pnpm paperclipai doctor --repair
+pnpm paperclipai doctor --fix      # alias for --repair
+pnpm paperclipai doctor -y --repair # non-interactive repair
+pnpm paperclipai doctor --config ./config.json --data-dir ./data
 ```
 
 Validates:
@@ -75,7 +97,12 @@ Update configuration sections:
 pnpm paperclipai configure --section server
 pnpm paperclipai configure --section secrets
 pnpm paperclipai configure --section storage
+pnpm paperclipai configure --section llm
+pnpm paperclipai configure --section database
+pnpm paperclipai configure --section logging
 ```
+
+Available sections: `llm`, `database`, `logging`, `server`, `storage`, `secrets`.
 
 ## `paperclipai env`
 
@@ -92,6 +119,23 @@ Allow a private hostname for authenticated/private mode:
 ```sh
 pnpm paperclipai allowed-hostname my-tailscale-host
 ```
+
+## `paperclipai db:backup`
+
+Create a database backup:
+
+```sh
+pnpm paperclipai db:backup
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--dir <path>` | Backup output directory |
+| `--retention-days <n>` | Retention window in days |
+| `--filename-prefix <prefix>` | Backup file name prefix |
+| `--json` | Output as JSON |
 
 ## Local Storage Paths
 
