@@ -1601,6 +1601,98 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("notVerified");
   });
 
+  it("creates distinct issues for two QA steps with the same title in one run (same-title step collision regression)", async () => {
+    // Regression for the B incident: two QA steps named "[QA] Verify mission result"
+    // in the SAME run previously shared one issue because createWorkflowStepIssue
+    // reused by title. That collapsed verdict/validation binding (RES-2759).
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const missionId = randomUUID();
+    const workProductRoot = `/tmp/wf-same-title-${companyId}`;
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-same-title-qa" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Same Title QA",
+      issuePrefix: `ST${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      workProductRoot,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "QA Agent",
+      role: "validator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: "Same-title QA mission",
+      status: "active",
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "same-title qa steps",
+      stepsJson: [
+        {
+          id: "qa-6-ac16fc87c5",
+          name: "[QA] Verify mission result",
+          agentId,
+          dependencies: [],
+          description: "First QA step verifying mission result.",
+        },
+        {
+          id: "qa-9dde506b6c",
+          name: "[QA] Verify mission result",
+          agentId,
+          dependencies: [],
+          description: "Second QA step verifying mission result (synthetic).",
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+      status: "pending",
+      runDate: "2026-08-06",
+    });
+
+    await executeWorkflowRun(db, runId);
+
+    const stepRuns = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId));
+    const qa6 = stepRuns.find((row) => row.stepId === "qa-6-ac16fc87c5");
+    const qa9 = stepRuns.find((row) => row.stepId === "qa-9dde506b6c");
+    expect(qa6?.issueId).toBeTruthy();
+    expect(qa9?.issueId).toBeTruthy();
+    // Distinct issues — the core regression.
+    expect(qa6!.issueId).not.toEqual(qa9!.issueId);
+
+    const issuesForRun = await db
+      .select({ id: issues.id, title: issues.title })
+      .from(issues)
+      .where(and(
+        eq(issues.originRunId, runId),
+        eq(issues.originKind, "workflow_execution"),
+      ));
+    expect(issuesForRun.filter((row) => row.title === "[QA] Verify mission result").length).toBe(2);
+  });
+
   it("injects a delivery verification gate for manual-onboarding publish workflows and blocks completion until readback passes", async () => {
     const companyId = randomUUID();
     const producerAgentId = randomUUID();

@@ -4851,7 +4851,17 @@ export function heartbeatService(db: Db) {
               activeExecutionTimeoutMs,
             },
           });
-          await releaseIssueExecutionAndPromote(timedOutRun);
+          // [recovery liveness hardening] per-run isolation: 이 run 의 terminal 처리(release,
+          // finalize, startNext) 중 어느 단계가 실패/정지해도 전체 sweep 과 recovery lane 을
+          // 중단시키지 않고 다음 run 으로 진행한다.
+          try {
+            await releaseIssueExecutionAndPromote(timedOutRun, { skipLocked: true });
+            await finalizeAgentStatus(run.agentId, "timed_out");
+            await startNextQueuedRunForAgent(run.agentId);
+            reaped.push(run.id);
+          } catch (err) {
+            logger.warn({ err, runId: run.id }, "failed to finalize timed-out run; continuing sweep");
+          }
         }
         // Agent self-learning wiki (Phase 1): execution stale(hang) 패턴 기록 (non-blocking).
         fireWikiRecord(wikiSvc, {
@@ -4863,9 +4873,6 @@ export function heartbeatService(db: Db) {
           solution: "API_TIMEOUT(10분)과 idle 점검. 장기 실행 명령은 타임아웃/백그라운드 분리. 자식이 stdout을 닫지 않고 누수하는지 확인.",
           errorCode: "execution_stale_timeout",
         }, run.id);
-        await finalizeAgentStatus(run.agentId, "timed_out");
-        await startNextQueuedRunForAgent(run.agentId);
-        reaped.push(run.id);
         continue;
       }
 
@@ -4972,7 +4979,13 @@ export function heartbeatService(db: Db) {
             fallbackReason: "process_lost",
           });
         } else {
-          await releaseIssueExecutionAndPromote(finalizedRun);
+          // [recovery liveness hardening] per-run isolation: fallback 없는 run 의 release+promote
+          // 실패가 전체 sweep 을 중단시키지 않게 격리.
+          try {
+            await releaseIssueExecutionAndPromote(finalizedRun, { skipLocked: true });
+          } catch (err) {
+            logger.warn({ err, runId: run.id }, "failed to release+promote finalized run; continuing sweep");
+          }
         }
       }
 
@@ -4992,10 +5005,16 @@ export function heartbeatService(db: Db) {
         },
       });
 
-      await finalizeAgentStatus(run.agentId, "failed");
-      await startNextQueuedRunForAgent(run.agentId);
-      runningProcesses.delete(run.id);
-      reaped.push(run.id);
+      // [recovery liveness hardening] terminal 체인 후속(finalize/startNext) 도 격리 — 이 run 의
+      // 실패가 전체 sweep 을 중단시키지 않는다.
+      try {
+        await finalizeAgentStatus(run.agentId, "failed");
+        await startNextQueuedRunForAgent(run.agentId);
+        runningProcesses.delete(run.id);
+        reaped.push(run.id);
+      } catch (err) {
+        logger.warn({ err, runId: run.id }, "failed to finalize process-lost run; continuing sweep");
+      }
     }
 
     if (queuedStaleThresholdMs > 0) {
@@ -5035,7 +5054,12 @@ export function heartbeatService(db: Db) {
             message: staleQueuedMessage,
             payload: { queuedStaleThresholdMs },
           });
-          await releaseIssueExecutionAndPromote(failedRun);
+          // [recovery liveness hardening] per-run isolation (release+promote 는 hang 가능 경로).
+          try {
+            await releaseIssueExecutionAndPromote(failedRun, { skipLocked: true });
+          } catch (err) {
+            logger.warn({ err, runId: run.id }, "failed to release+promote stale queued run; continuing sweep");
+          }
 
           // A stale queued run never enters executeRun, so its normal finally block
           // cannot settle finalization v1. Re-read after the terminal hook releases
@@ -5047,9 +5071,15 @@ export function heartbeatService(db: Db) {
             });
           }
         }
-        await finalizeAgentStatus(run.agentId, "failed");
-        await startNextQueuedRunForAgent(run.agentId);
-        reaped.push(run.id);
+        // [recovery liveness hardening] terminal 체인 후속(finalize/startNext) 도 격리 — 이 run 의
+        // 실패가 전체 sweep 을 중단시키지 않는다.
+        try {
+          await finalizeAgentStatus(run.agentId, "failed");
+          await startNextQueuedRunForAgent(run.agentId);
+          reaped.push(run.id);
+        } catch (err) {
+          logger.warn({ err, runId: run.id }, "failed to finalize stale queued run; continuing sweep");
+        }
       }
       // [B1] Also reap stale agent_wakeup_requests rows that never created a heartbeat run
       // (runId IS NULL). The mission-dedup enqueue path persists such rows without a
@@ -7392,7 +7422,10 @@ export function heartbeatService(db: Db) {
         }
   }
 
-  async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
+  async function releaseIssueExecutionAndPromote(
+    run: typeof heartbeatRuns.$inferSelect,
+    options: { readonly skipLocked?: boolean } = {},
+  ) {
     const postTransactionWorkflowIssueSyncIssueIds = new Set<string>();
     const queuePostTransactionWorkflowIssueSync = (issueId: string | null | undefined) => {
       if (issueId) postTransactionWorkflowIssueSyncIssueIds.add(issueId);
@@ -7411,9 +7444,27 @@ export function heartbeatService(db: Db) {
       sourceRunId: string;
     }> = [];
     const transactionResult = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
-      );
+      // [recovery liveness hardening] recovery lane(skipLocked=true) 에서만 행 락 대기가 lane 을
+      // 막지 않도록 bounded 한다: lock_timeout/statement_timeout + FOR UPDATE SKIP LOCKED 로
+      // 이미 잠긴 issue 는 건너뛴다(빈 결과 → 조기 반환, 다음 recovery tick 에 재시도).
+      // 정상 run 종료 경로(skipLocked=false) 는 기존 FOR UPDATE 동작 유지 — 락 획득 실패는
+      // 예외로 전파되어 호출부가 재처리 근거를 가진다.
+      const skipLocked = options.skipLocked === true;
+      if (skipLocked) {
+        await tx.execute(sql`set local lock_timeout = '8s'`);
+        await tx.execute(sql`set local statement_timeout = '30s'`);
+        const lockedRows = await tx.execute(
+          sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id} or id = ${run.issueId}) for update skip locked`,
+        );
+        const lockedList = Array.isArray(lockedRows) ? lockedRows : [];
+        if (lockedList.length === 0) {
+          return null;
+        }
+      } else {
+        await tx.execute(
+          sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
+        );
+      }
 
       const issue = await tx
         .select({
@@ -7993,7 +8044,34 @@ export function heartbeatService(db: Db) {
         })
         .where(eq(issues.id, issue.id));
 
+      // [recovery liveness hardening] deferred 승격 루프에 bounded budget. 새 deferred 가
+      // 재삽입되며 무한 루프가 되면 recovery lane 이 영원히 막힌다. max iterations + wall-clock
+      // 예산 초과 시 루프를 중단한다. 남은 deferred 는 deferred 상태 그대로 유지되므로 (a) 같은
+      // issue 가 다음에 release 될 때(정상 종료 경로 포함) 다시 승격되고, (b) mission-dedup
+      // enqueue 시 coalesce/재시도된다. 즉 영구 유실이 아니라 지연이다 — 무한 루프에 대한
+      // fail-safe 이다.
+      const deferredPromotionBudget = {
+        maxIterations: 50,
+        startedAtMs: Date.now(),
+        wallClockMs: 30_000,
+      };
+      let deferredPromotionIterations = 0;
       while (true) {
+        if (deferredPromotionIterations >= deferredPromotionBudget.maxIterations) {
+          logger.warn(
+            { issueId: issue.id, iterations: deferredPromotionIterations },
+            "deferred wake promotion loop exceeded max iterations; deferring remainder to next tick",
+          );
+          break;
+        }
+        if (Date.now() - deferredPromotionBudget.startedAtMs >= deferredPromotionBudget.wallClockMs) {
+          logger.warn(
+            { issueId: issue.id, elapsedMs: Date.now() - deferredPromotionBudget.startedAtMs },
+            "deferred wake promotion loop exceeded wall-clock budget; deferring remainder to next tick",
+          );
+          break;
+        }
+        deferredPromotionIterations += 1;
         const deferred = await tx
           .select()
           .from(agentWakeupRequests)
