@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, ne, not, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -186,6 +186,39 @@ export function deduplicateAgentName(
     }
   }
   return `${candidateName} ${Date.now()}`;
+}
+
+// [paperclip-stuck 2026-08-06, A1] On a cold server restart every in-memory process handle is
+// gone, but agents.status can still read 'running' from the DB (phantom running). The runtime
+// reaper (A2/B paths) only corrects this after its staleness windows elapse, so a restart can
+// leave agents pinned at 'running' and block the wakeup queue for minutes. Sweep once at
+// startup: any agent still marked 'running' with NO heartbeat_runs row still marked 'running'
+// cannot actually be executing (its handle is gone), so reset it to 'idle'. Agents that
+// genuinely own a running heartbeat run are left untouched.
+export async function reconcilePersistedAgentStatusOnStartup(db: Db) {
+  const runningAgentIds = await db
+    .select({ agentId: heartbeatRuns.agentId })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.status, "running"))
+    .then((rows) => [...new Set(rows.map((row) => row.agentId))]);
+
+  // inArray with an empty list is never true, so when no agent owns a running run there is
+  // nothing to exclude — match every running agent directly.
+  const staleWhere =
+    runningAgentIds.length > 0
+      ? and(eq(agents.status, "running"), not(inArray(agents.id, runningAgentIds)))
+      : eq(agents.status, "running");
+
+  const staleAgents = await db.select({ id: agents.id }).from(agents).where(staleWhere);
+  if (staleAgents.length === 0) return { reconciled: 0 };
+
+  const now = new Date();
+  await db
+    .update(agents)
+    .set({ status: "idle", lastHeartbeatAt: now, updatedAt: now })
+    .where(staleWhere);
+
+  return { reconciled: staleAgents.length };
 }
 
 export function agentService(db: Db) {
