@@ -1,4 +1,5 @@
 import { parseObject } from "../adapters/utils.js";
+import { readRunToolContract } from "@paperclipai/adapter-utils";
 import {
   buildMissionSearchGuidance,
   missionSearchScopesAllowRepo,
@@ -24,10 +25,8 @@ export function buildStepInputManifest(input: {
     ? context.paperclipRuntimeServices.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
     : [];
   const runtimeSearchPaths = parseObject(context.paperclipRuntimeSearchPaths);
-  const toolContract = parseObject(context.paperclipWorkflowStepToolContract);
-  const toolEntries = Array.isArray(toolContract.tools)
-    ? toolContract.tools.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
-    : [];
+  const toolContract = readRunToolContract(context);
+  const toolEntries = toolContract?.tools ?? [];
   const knowledgeContract = parseObject(context.paperclipWorkflowStepKnowledgeContext);
   const knowledgeEntries = Array.isArray(knowledgeContract.entries)
     ? knowledgeContract.entries.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)

@@ -53,5 +53,12 @@ export {
 } from "./log-redaction.js";
 export { joinPromptSections, renderTemplate, resolvePathValue } from "./prompt-utils.js";
 export { buildPaperclipRuntimeBrief } from "./runtime-brief.js";
+export {
+  LEGACY_WORKFLOW_TOOL_CONTRACT_CONTEXT_KEY,
+  RUN_TOOL_CONTRACT_CONTEXT_KEY,
+  parseRunToolContract,
+  readRunToolContract,
+} from "./run-tool-contract.js";
+export type { PaperclipRunToolContractV1, ParsedRunToolContract, RunToolContractTool } from "./run-tool-contract.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
 export * from "./skills.js";
