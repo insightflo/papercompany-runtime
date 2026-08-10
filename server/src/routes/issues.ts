@@ -53,6 +53,7 @@ import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } 
 import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
 import { handleDelegatedArtifactHandback } from "../services/delegated-artifact-handback.js";
 import { completeUnblockActionWithSourceHandback } from "../services/missions/owner-action-completion.js";
+import { standaloneIssueExecutionContractService } from "../services/standalone-issue-execution-contract.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -74,6 +75,7 @@ function contentTypeForWorkProductPath(filePath: string): string {
 export function issueRoutes(db: Db, storage: StorageService) {
   const router = Router();
   const svc = issueService(db);
+  const executionContractSvc = standaloneIssueExecutionContractService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db);
   const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
@@ -412,6 +414,56 @@ export function issueRoutes(db: Db, storage: StorageService) {
       q: req.query.q as string | undefined,
     });
     res.json(result);
+  });
+
+  router.get("/companies/:companyId/issues/:issueId/execution-contract", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const issueId = req.params.issueId as string;
+    assertCompanyAccess(req, companyId);
+    const result = await executionContractSvc.get(companyId, issueId);
+    if (!result) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    res.json(result);
+  });
+
+  router.put("/companies/:companyId/issues/:issueId/execution-contract", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const issueId = req.params.issueId as string;
+    assertCompanyAccess(req, companyId);
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Board authentication required" });
+      return;
+    }
+
+    const result = await executionContractSvc.put(companyId, issueId, req.body);
+    if (result.kind === "not_found") {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    if (result.kind === "conflict") {
+      res.status(409).json({ error: result.reason, ...(result.runId ? { runId: result.runId } : {}) });
+      return;
+    }
+    if (result.kind === "invalid") {
+      res.status(422).json({ error: "Execution contract validation failed", ...result.response });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue_execution_contract.updated",
+      entityType: "issue",
+      entityId: issueId,
+      details: { contentHash: result.contentHash, executionMode: "standalone", version: 2 },
+    });
+    res.json(result.response);
   });
 
   router.get("/companies/:companyId/work-items", async (req, res) => {
@@ -1205,6 +1257,17 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (assigneeWillChange) {
       if (!isAgentReturningIssueToCreator) {
         await assertCanAssignTasks(req, existing.companyId);
+      }
+    }
+    if (req.body.assigneeAgentId !== undefined && req.body.assigneeAgentId !== existing.assigneeAgentId) {
+      const contractValidation = await executionContractSvc.validateAssigneeChange(
+        existing.companyId,
+        existing.id,
+        req.body.assigneeAgentId,
+      );
+      if (contractValidation && contractValidation.blockers.length > 0) {
+        res.status(409).json({ error: "execution_contract_assignee_invalid", blockers: contractValidation.blockers });
+        return;
       }
     }
     if (

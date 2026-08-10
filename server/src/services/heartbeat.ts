@@ -149,6 +149,7 @@ import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-fina
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
+  RUN_TOOL_CONTRACT_CONTEXT_KEY,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 
@@ -5959,6 +5960,22 @@ export function heartbeatService(db: Db) {
       context.paperclipWorkflowStepToolContract = workflowStepToolContext;
     } else {
       delete context.paperclipWorkflowStepToolContract;
+    }
+    if (workflowStepToolContext && issueRef) {
+      context[RUN_TOOL_CONTRACT_CONTEXT_KEY] = {
+        version: 1,
+        sourceKind: "workflow_step",
+        issueId: issueRef.id,
+        workflowRunId: workflowStepToolContext.workflowRunId,
+        workflowId: workflowStepToolContext.workflowId,
+        stepId: workflowStepToolContext.stepId,
+        stepName: workflowStepToolContext.stepName,
+        toolNames: workflowStepToolContext.toolNames,
+        toolArgs: workflowStepToolContext.toolArgs,
+        tools: workflowStepToolContext.tools,
+      };
+    } else {
+      delete context[RUN_TOOL_CONTRACT_CONTEXT_KEY];
     }
     if (workflowStepKnowledgeContext) {
       context.paperclipWorkflowStepKnowledgeContext = workflowStepKnowledgeContext;
