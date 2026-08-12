@@ -66,6 +66,76 @@ describe("mission plan execution placement pure checks", () => {
     expect(diagnostics).toEqual([]);
   });
 
+  it("rejects a Markdown-only validator assigned to an HTML producer", () => {
+    const toolName = "validate-tech-scout-note-coverage";
+    const diagnostics = reviewMissionPlanExecutionPlacementWithContext({
+      selectedExecutionUnits: [
+        unit({
+          id: "synthesize",
+          title: "[ACTION] Synthesize beginner-friendly HTML page",
+          expectedOutput: "Registered index.html workProduct with rendered images.",
+          graphWorkProductRequired: true,
+        }),
+        unit({
+          id: "qa",
+          title: "[QA] Validate synthesized HTML page",
+          dependsOn: ["synthesize"],
+          assigneeAgentId: "validator-agent",
+          toolNames: [toolName],
+        }),
+      ],
+      context: {
+        workflowToolsByName: new Map([[toolName, {
+          name: toolName,
+          enabled: true,
+          description: "Validates Tech Scout Markdown reports only.",
+          inputSchema: { type: "object", properties: { noteContent: { type: "string" } } },
+          planningMetadata: { acceptedInputKinds: ["markdown"] },
+        }]]),
+        workflowToolGrantKeys: new Set([`validator-agent:${toolName}`]),
+        agentNamesById: new Map([["validator-agent", "Report Validator"]]),
+        agentSkillProfilesById: new Map(),
+      },
+    });
+
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ code: "workflow_tool_input_kind_mismatch" }),
+    ]);
+  });
+
+  it("allows a Markdown-only validator when the producer output is Markdown", () => {
+    const toolName = "validate-tech-scout-note-coverage";
+    const diagnostics = reviewMissionPlanExecutionPlacementWithContext({
+      selectedExecutionUnits: [
+        unit({
+          id: "synthesize",
+          title: "[ACTION] Synthesize Tech Scout Markdown report",
+          expectedOutput: "Registered report.md workProduct with full Markdown content.",
+          graphWorkProductRequired: true,
+        }),
+        unit({
+          id: "qa",
+          title: "[QA] Validate Tech Scout Markdown coverage",
+          dependsOn: ["synthesize"],
+          assigneeAgentId: "validator-agent",
+          toolNames: [toolName],
+        }),
+      ],
+      context: {
+        workflowToolsByName: new Map([[toolName, {
+          name: toolName,
+          enabled: true,
+          planningMetadata: { acceptedInputKinds: ["markdown"] },
+        }]]),
+        workflowToolGrantKeys: new Set([`validator-agent:${toolName}`]),
+        agentNamesById: new Map([["validator-agent", "Report Validator"]]),
+        agentSkillProfilesById: new Map(),
+      },
+    });
+
+    expect(diagnostics).toEqual([]);
+  });
+
   it("rejects ACTION preflight units that re-check downstream workflow tool access", () => {
     const diagnostics = reviewDeliveryToolPreflightMarkers([
       unit({

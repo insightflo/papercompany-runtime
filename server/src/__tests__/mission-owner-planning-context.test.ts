@@ -479,6 +479,8 @@ describeEmbeddedPostgres("mission owner planning context", () => {
       entries: [expect.objectContaining({
         name: "insightflo.research-workbench:research-search",
         displayName: "Research Search",
+        description: "Search current web sources.",
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
         source: "plugin",
         enabled: true,
       })],

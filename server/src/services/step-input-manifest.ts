@@ -56,6 +56,16 @@ export function buildStepInputManifest(input: {
   const planningDossierAgentRoster = readObjectArray(planningDossierAssets.agentRoster);
   const planningDossierGaps = readObjectArray(planningDossier.gaps);
   const planningDossierTools = parseObject(planningDossierAssets.tools);
+  const planningDossierToolEntries = readObjectArray(planningDossierTools.entries)
+    .slice(0, 10)
+    .map((entry) => ({
+      name: readString(entry.name),
+      displayName: readString(entry.displayName),
+      description: readString(entry.description),
+      inputSchema: parseObject(entry.inputSchema),
+      planningMetadata: parseObject(entry.planningMetadata),
+    }))
+    .filter((entry) => entry.name.length > 0);
   const planningDossierRuntimeServices = parseObject(planningDossierAssets.runtimeServices);
   const planningDossierFileViews = parseObject(planningDossierAssets.fileViews);
   const planningDossierExecutionSourceSummary = parseObject(planningDossierAssets.executionSourceSummary);
@@ -233,6 +243,7 @@ export function buildStepInputManifest(input: {
           fileViews: readNumber(planningDossierFileViews.count) ?? 0,
           executionSourceUnits: readNumber(planningDossierExecutionSourceSummary.unitCount) ?? 0,
         },
+        planningDossierToolEntries,
         planningDossierGapCount: planningDossierGaps.length,
         planningDossierSevereGapCount: missionOwnerPlanningSevereGaps.length,
       },
