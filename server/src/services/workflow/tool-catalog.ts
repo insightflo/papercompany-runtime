@@ -20,10 +20,17 @@ export type WorkflowToolCatalogTool = {
   name: string;
   displayName: string;
   description: string;
+  inputSchema: Record<string, unknown>;
+  planningMetadata?: WorkflowToolPlanningMetadata;
   source: "core" | "tool-registry" | "plugin";
   enabled: boolean;
   pluginId?: string;
   unavailableReason?: string;
+};
+
+export type WorkflowToolPlanningMetadata = {
+  acceptedInputKinds?: string[];
+  outputKinds?: string[];
 };
 
 export type WorkflowToolCatalogGrant = {
@@ -82,6 +89,24 @@ function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim())
+    : [];
+}
+
+function readPlanningMetadata(value: unknown): WorkflowToolPlanningMetadata | undefined {
+  const record = recordValue(value);
+  const acceptedInputKinds = stringArray(record.acceptedInputKinds);
+  const outputKinds = stringArray(record.outputKinds);
+  if (acceptedInputKinds.length === 0 && outputKinds.length === 0) return undefined;
+  return {
+    ...(acceptedInputKinds.length > 0 ? { acceptedInputKinds } : {}),
+    ...(outputKinds.length > 0 ? { outputKinds } : {}),
+  };
 }
 
 function sortTools(tools: WorkflowToolCatalogTool[]): WorkflowToolCatalogTool[] {
@@ -388,6 +413,8 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
       name: definition.name,
       displayName: definition.name,
       description: definition.description ?? "",
+      inputSchema: definition.inputSchema ?? {},
+      planningMetadata: readPlanningMetadata(definition.adapterConfig?.planningMetadata),
       source: "core" as const,
       enabled: definition.enabled !== false,
     }))
@@ -423,6 +450,7 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
     name: tool.name,
     displayName: tool.displayName,
     description: tool.description,
+    inputSchema: tool.inputSchema,
     source: "plugin" as const,
     enabled: true,
     pluginId: tool.pluginId,
@@ -481,6 +509,8 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
         name,
         displayName: name,
         description: stringValue(data.description),
+        inputSchema: recordValue(data.argsSchema),
+        planningMetadata: readPlanningMetadata(data.planningMetadata),
         source: "tool-registry",
         enabled: toolRegistryAvailable && !deleted,
         pluginId: toolRegistryPlugin.id,

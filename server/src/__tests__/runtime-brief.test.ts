@@ -9,6 +9,55 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("tool calls, code, identifiers, JSON, and other machine-facing control-plane data in English");
   });
 
+  it("shows planning tool descriptions and input schemas without injecting tool instructions", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipStepInputManifest: {
+        inputs: {
+          missionOwnerPlanningContext: {
+            available: true,
+            missionId: "mission-1",
+            planningIssueId: "issue-plan-1",
+            activePlanAvailable: false,
+            selectedExecutionUnitCount: 0,
+            executionSourceUnitCount: 0,
+            planningDossierAssetCounts: {
+              workflows: 0,
+              tools: 1,
+              runtimeServices: 0,
+              ruleRefs: 0,
+              kbRefs: 0,
+              agentRoster: 1,
+              files: 0,
+              executionSourceUnits: 0,
+            },
+            planningDossierToolEntries: [
+              {
+                name: "validate-tech-scout-note-coverage",
+                displayName: "Tech Scout Markdown Coverage",
+                description: "Validates Tech Scout Markdown reports only.",
+                inputSchema: {
+                  type: "object",
+                  properties: { noteContent: { type: "string", description: "Full Markdown" } },
+                  required: ["noteContent"],
+                },
+                planningMetadata: { acceptedInputKinds: ["markdown"] },
+              },
+            ],
+            planningDossierGapCount: 0,
+            planningDossierSevereGapCount: 0,
+          },
+        },
+      },
+    });
+
+    expect(brief).toContain("Planning dossier tool contracts");
+    expect(brief).toContain("Validates Tech Scout Markdown reports only.");
+    expect(brief).toContain('Input schema: {"type":"object"');
+    expect(brief).toContain("Accepted input kinds: markdown");
+    expect(brief).toContain("Tool instructions are intentionally omitted");
+    expect(brief).not.toContain("full registered report Markdown");
+  });
+
   it("surfaces exact workflow tool-call contract and recent controller comments", () => {
     const brief = buildPaperclipRuntimeBrief({
       paperclipWorkflowStepToolContract: {

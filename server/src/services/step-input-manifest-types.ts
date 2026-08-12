@@ -124,6 +124,13 @@ export interface StepInputManifest {
         fileViews: number;
         executionSourceUnits: number;
       };
+      planningDossierToolEntries: Array<{
+        name: string;
+        displayName: string;
+        description: string;
+        inputSchema: Record<string, unknown>;
+        planningMetadata: Record<string, unknown>;
+      }>;
       planningDossierGapCount: number;
       planningDossierSevereGapCount: number;
     };

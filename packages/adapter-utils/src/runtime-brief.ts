@@ -331,6 +331,38 @@ function summarizeMarkdownHandoff(markdown: string | null) {
   return summary.length > 220 ? `${summary.slice(0, 217)}...` : summary;
 }
 
+function buildMissionOwnerPlanningToolDetails(missionOwnerPlanningContext: Record<string, unknown>) {
+  const planningDossier = asRecord(missionOwnerPlanningContext.planningDossier);
+  const assets = asRecord(planningDossier?.assets);
+  const tools = asRecord(assets?.tools);
+  const rawEntries = Array.isArray(missionOwnerPlanningContext.planningDossierToolEntries)
+    ? missionOwnerPlanningContext.planningDossierToolEntries
+    : tools?.entries;
+  const entries = Array.isArray(rawEntries)
+    ? rawEntries.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  if (entries.length === 0) return [];
+
+  return [
+    "Planning dossier tool contracts (description and input schema; Tool instructions are intentionally omitted):",
+    ...entries.slice(0, 10).flatMap((entry) => {
+      const name = asString(entry.name) ?? "unknown-tool";
+      const displayName = asString(entry.displayName);
+      const description = asString(entry.description);
+      const inputSchema = asRecord(entry.inputSchema);
+      const planningMetadata = asRecord(entry.planningMetadata);
+      const acceptedInputKinds = asStringArray(planningMetadata?.acceptedInputKinds);
+      return [
+        `- Tool: ${name}${displayName && displayName !== name ? ` (${displayName})` : ""}${description ? ` — ${truncateBriefLine(description, 260)}` : ""}`,
+        inputSchema && Object.keys(inputSchema).length > 0
+          ? `  Input schema: ${stringifyBriefJson(inputSchema, 1_200)}`
+          : "  Input schema: {}",
+        acceptedInputKinds.length > 0 ? `  Accepted input kinds: ${acceptedInputKinds.join(", ")}` : null,
+      ].filter((line): line is string => line !== null);
+    }),
+  ];
+}
+
 function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<string, unknown> | null) {
   if (missionOwnerPlanningContext?.available !== true) return null;
 
@@ -348,6 +380,7 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     "Produce a Mission Planning Assessment before acting beyond status discovery.",
     "Use dossier asset counts as pointers only. Missing tool/runtime-service assets do not prove that the Paperclip worker runtime is down.",
     assetCountsLine,
+    ...buildMissionOwnerPlanningToolDetails(missionOwnerPlanningContext),
     `- Planning dossier gaps: ${asNumber(missionOwnerPlanningContext.planningDossierGapCount)} total, ${asNumber(missionOwnerPlanningContext.planningDossierSevereGapCount)} severe/blocking-or-research gaps.`,
     "Common operating boundary:",
     "Stay within your assigned role, authority, and issue scope. Do not perform work that belongs to another role just because you can reach a tool.",

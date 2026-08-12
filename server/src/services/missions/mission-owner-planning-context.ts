@@ -14,7 +14,7 @@ import { notFound } from "../../errors.js";
 import { missionPlanArtifactService, summarizeMissionPlanForRuntime } from "../mission-plan-artifacts.js";
 import type { MissionPlanRuntimeSummary } from "../mission-plan-artifacts.js";
 import { listWorkflowDefinitions } from "../workflow/workflow-store.js";
-import { listWorkflowToolCatalog } from "../workflow/tool-catalog.js";
+import { listWorkflowToolCatalog, type WorkflowToolPlanningMetadata } from "../workflow/tool-catalog.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
 import type { MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
@@ -94,6 +94,9 @@ export type MissionOwnerPlanningBoundedAssetSummary = {
   entries?: Array<{
     name: string;
     displayName: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    planningMetadata?: WorkflowToolPlanningMetadata;
     source: string;
     enabled: boolean;
   }>;
@@ -178,7 +181,8 @@ const MAX_PURPOSE_TOKENS = 10;
 const PURPOSE_TOKEN_MIN_LENGTH = 3;
 const MAX_DOSSIER_OBJECTIVE_FRAGMENTS = 5;
 const MAX_DOSSIER_LABELS = 10;
-// [capability manifest] company skills top-K 압축 한도. raw SKILL.md/tool schema 는 넣지 않는다.
+// [capability manifest] company skills top-K 압축 한도. Skill 본문과 Tool instructions는 넣지 않지만,
+// planner가 Tool 적합성을 판단할 수 있도록 description/inputSchema는 bounded dossier에 포함한다.
 const MAX_NOTABLE_SKILLS = 12;
 const MAX_PUBLISH_CAPABILITIES = 8;
 const MAX_SKILL_PURPOSE_LENGTH = 160;
@@ -275,6 +279,9 @@ async function listWorkflowToolSummary(db: Db, companyId: string): Promise<Missi
     entries: usableTools.slice(0, MAX_DOSSIER_LABELS).map((tool) => ({
       name: tool.name,
       displayName: tool.displayName,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      ...(tool.planningMetadata ? { planningMetadata: tool.planningMetadata } : {}),
       source: tool.source,
       enabled: tool.enabled,
     })),
@@ -365,6 +372,7 @@ function buildPlanningDossier(input: {
     requiredAssessmentChecklist: [
       "Restate the mission objective and expected deliverables before selecting execution units.",
       "Assess workflow candidates, rules, KB refs, agent roster, execution sources, tools, runtime services, and file views explicitly.",
+      "For every selected tool unit, record why the Tool description/inputSchema accepts the upstream artifact; a grant or matching name alone is insufficient.",
       EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE,
       "Mark each gap as info, needs_research, or blocked and resolve blocked gaps before claiming readiness.",
       "Submit a structured Mission owner plan decision via `POST /api/issues/{planningIssueId}/mission-plan-decision` (`{ \"decision\": { ... } }`) from the checked-out owner run. Markdown comments are display/audit only and are not parsed as control-plane authority.",

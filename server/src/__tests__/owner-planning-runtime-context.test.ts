@@ -63,6 +63,7 @@ describe("owner planning runtime context surfaces", () => {
         fileViews: 0,
         executionSourceUnits: 1,
       },
+      planningDossierToolEntries: [],
       planningDossierGapCount: 2,
       planningDossierSevereGapCount: 1,
     });

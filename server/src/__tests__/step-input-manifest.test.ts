@@ -238,6 +238,7 @@ describe("buildStepInputManifest", () => {
             fileViews: 0,
             executionSourceUnits: 0,
           },
+          planningDossierToolEntries: [],
           planningDossierGapCount: 0,
           planningDossierSevereGapCount: 0,
         },
