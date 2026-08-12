@@ -1,5 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { buildPaperclipRuntimeBrief } from "@paperclipai/adapter-utils";
+import { buildPaperclipRuntimeBrief, readRunToolContract } from "@paperclipai/adapter-utils";
+
+describe("run tool contract parsing", () => {
+  const legacy = {
+    paperclipWorkflowStepToolContract: {
+      toolNames: ["legacy-tool"],
+      tools: [{ name: "legacy-tool" }],
+    },
+  };
+
+  it("treats a present valid V1 contract as authoritative without merging legacy data", () => {
+    const contract = readRunToolContract({
+      ...legacy,
+      paperclipRunToolContract: {
+        version: 1,
+        sourceKind: "workflow_step",
+        issueId: "issue-1",
+        toolNames: ["new-tool", "second-tool"],
+        tools: [{ name: "new-tool" }, { name: "second-tool" }],
+      },
+    });
+
+    expect(contract?.source).toBe("run");
+    expect(contract?.toolNames).toEqual(["new-tool", "second-tool"]);
+  });
+
+  it("fails closed for a malformed or null present V1 contract", () => {
+    expect(readRunToolContract({ ...legacy, paperclipRunToolContract: null })).toBeNull();
+    expect(readRunToolContract({
+      ...legacy,
+      paperclipRunToolContract: {
+        version: 1,
+        sourceKind: "workflow_step",
+        issueId: null,
+        toolNames: ["new-tool"],
+        tools: [{ name: "new-tool" }],
+      },
+    })).toBeNull();
+  });
+
+  it("falls back to legacy only when the V1 key is absent", () => {
+    expect(readRunToolContract(legacy)).toMatchObject({ source: "legacy", toolNames: ["legacy-tool"] });
+  });
+});
 
 describe("buildPaperclipRuntimeBrief", () => {
   it("separates the configured user-facing language from English machine-facing execution", () => {

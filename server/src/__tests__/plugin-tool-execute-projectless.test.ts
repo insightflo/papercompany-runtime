@@ -11,6 +11,20 @@ const mockRegistry = vi.hoisted(() => ({
   listByStatus: vi.fn(),
 }));
 
+const mockToolCatalog = vi.hoisted(() => ({
+  listWorkflowToolCatalog: vi.fn(() => ({
+    tools: [
+      { name: "daily-tech-scout", source: "core", enabled: true },
+      { name: "insightflo.research-workbench:research-search", source: "plugin", enabled: true },
+    ],
+    grants: [
+      { agentId: "agent-1", agentName: "Agent One", toolName: "daily-tech-scout", source: "core" },
+      { agentId: "agent-1", agentName: "Agent One", toolName: "insightflo.research-workbench:research-search", source: "plugin" },
+    ],
+    sources: { core: { available: true, count: 1 }, toolRegistry: { available: true, installed: true, count: 0 } },
+  })),
+}));
+
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
 }));
@@ -18,6 +32,8 @@ vi.mock("../services/plugin-registry.js", () => ({
 vi.mock("../services/plugin-lifecycle.js", () => ({
   pluginLifecycleManager: () => ({}),
 }));
+
+vi.mock("../services/workflow/tool-catalog.js", () => mockToolCatalog);
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn(),
@@ -123,6 +139,7 @@ describe("plugin tool execution projectless run context", () => {
         id: "run-1",
         agentId: "agent-1",
         companyId: "company-1",
+        status: "running",
         contextSnapshot: {
           paperclipWorkflowStepToolContract: {
             toolNames: ["daily-tech-scout"],
@@ -136,6 +153,84 @@ describe("plugin tool execution projectless run context", () => {
 
     expect(res.status).toBe(200);
     expect(toolDispatcher.executeTool).toHaveBeenCalledWith("daily-tech-scout", { limit: 25 }, runContext);
+  });
+
+  it("allows any selected tool listed in a multi-tool authoritative run contract", async () => {
+    const toolDispatcher = {
+      listToolsForAgent: vi.fn(),
+      getTool: vi.fn().mockReturnValue({ namespacedName: "second-tool", enabled: true }),
+      executeTool: vi.fn().mockResolvedValue({ content: "ok" }),
+    };
+    const runContext = { agentId: "agent-1", runId: "run-1", companyId: "company-1" };
+    mockToolCatalog.listWorkflowToolCatalog.mockReturnValueOnce({
+      tools: [{ name: "second-tool", source: "plugin", enabled: true }],
+      grants: [{ agentId: "agent-1", agentName: "Agent One", toolName: "second-tool", source: "plugin" }],
+      sources: { core: { available: true, count: 0 }, toolRegistry: { available: true, installed: true, count: 0 } },
+    });
+
+    const res = await request(createApp(toolDispatcher, {
+      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      dbRows: [{
+        id: "run-1",
+        agentId: "agent-1",
+        companyId: "company-1",
+        status: "running",
+        issueId: "issue-1",
+        contextSnapshot: {
+          paperclipRunToolContract: {
+            version: 1,
+            sourceKind: "workflow_step",
+            issueId: "issue-1",
+            toolNames: ["first-tool", "second-tool"],
+            tools: [{ name: "first-tool" }, { name: "second-tool" }],
+          },
+        },
+      }],
+    }))
+      .post("/api/plugins/tools/execute")
+      .send({ tool: "second-tool", parameters: {}, runContext });
+
+    expect(res.status).toBe(200);
+    expect(toolDispatcher.executeTool).toHaveBeenCalled();
+  });
+
+  it("rejects an agent without a current effective grant", async () => {
+    mockToolCatalog.listWorkflowToolCatalog.mockReturnValueOnce({
+      tools: [{ name: "daily-tech-scout", source: "core", enabled: true }],
+      grants: [],
+      sources: { core: { available: true, count: 1 }, toolRegistry: { available: true, installed: true, count: 0 } },
+    });
+    const toolDispatcher = {
+      listToolsForAgent: vi.fn(),
+      getTool: vi.fn().mockReturnValue({ namespacedName: "daily-tech-scout", enabled: true }),
+      executeTool: vi.fn(),
+    };
+    const res = await request(createApp(toolDispatcher, {
+      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      dbRows: [{
+        id: "run-1",
+        agentId: "agent-1",
+        companyId: "company-1",
+        status: "running",
+        issueId: "issue-1",
+        contextSnapshot: {
+          paperclipRunToolContract: {
+            version: 1,
+            sourceKind: "workflow_step",
+            issueId: "issue-1",
+            toolNames: ["daily-tech-scout"],
+            tools: [{ name: "daily-tech-scout" }],
+          },
+        },
+      }],
+    }))
+      .post("/api/plugins/tools/execute")
+      .send({ tool: "daily-tech-scout", parameters: {}, runContext: {
+        agentId: "agent-1", runId: "run-1", companyId: "company-1",
+      } });
+
+    expect(res.status).toBe(403);
+    expect(toolDispatcher.executeTool).not.toHaveBeenCalled();
   });
 
   it("falls back to a granted core builtin workflow tool when no plugin tool is registered", async () => {
@@ -153,6 +248,7 @@ describe("plugin tool execution projectless run context", () => {
           id: "run-1",
           agentId: "agent-1",
           companyId: "company-1",
+          status: "running",
           issueId: "issue-1",
           contextSnapshot: {
             paperclipWorkflowStepToolContract: {
@@ -204,6 +300,7 @@ describe("plugin tool execution projectless run context", () => {
         id: "run-1",
         agentId: "agent-1",
         companyId: "company-1",
+        status: "running",
         contextSnapshot: {
           paperclipWorkflowStepToolContract: {
             toolNames: ["daily-tech-scout"],

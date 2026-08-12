@@ -62,6 +62,8 @@ import {
   executeCoreWorkflowTool,
   resolveRunStepEnv,
 } from "../services/workflow/core-tool-executor.js";
+import { listWorkflowToolCatalog } from "../services/workflow/tool-catalog.js";
+import { authorizeRunToolExecution } from "../services/workflow/plugin-tool-authorization.js";
 
 /** Request body for POST /api/plugins/install */
 interface PluginInstallRequest {
@@ -328,30 +330,6 @@ interface PluginToolExecuteRequest {
   /** Agent run context. */
   runContext: ToolRunContext;
 }
-
-function readObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function readStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-    : [];
-}
-
-function workflowToolContractAllowsTool(contextSnapshot: unknown, toolName: string): boolean {
-  const context = readObject(contextSnapshot);
-  const contract = readObject(context.paperclipWorkflowStepToolContract);
-  const tools = Array.isArray(contract.tools)
-    ? contract.tools.filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object" && !Array.isArray(entry))
-    : [];
-  const allowedToolNames = new Set([
-    ...readStringArray(contract.toolNames),
-    ...tools.map((tool) => typeof tool.name === "string" ? tool.name.trim() : "").filter(Boolean),
-  ]);
-  return allowedToolNames.has(toolName);
-}
-
 
 /**
  * Create Express router for plugin management API.
@@ -1047,9 +1025,12 @@ export function pluginRoutes(
 
     assertCompanyAccess(req, runContext.companyId);
     let workflowRunIssueId: string | null = null;
+    const registeredTool = toolDeps?.toolDispatcher.getTool(tool) ?? null;
     if (req.actor.type === "agent") {
-      if (req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId) {
-        res.status(403).json({ error: "Agent can only execute workflow tools for its own company run context" });
+      const agentId = req.actor.agentId;
+      const companyId = req.actor.companyId;
+      if (!agentId || !companyId) {
+        res.status(403).json({ error: "Agent run context is not valid for tool execution" });
         return;
       }
       const run = await db
@@ -1057,6 +1038,7 @@ export function pluginRoutes(
           id: heartbeatRuns.id,
           agentId: heartbeatRuns.agentId,
           companyId: heartbeatRuns.companyId,
+          status: heartbeatRuns.status,
           issueId: heartbeatRuns.issueId,
           contextSnapshot: heartbeatRuns.contextSnapshot,
         })
@@ -1064,20 +1046,32 @@ export function pluginRoutes(
         .where(eq(heartbeatRuns.id, runContext.runId))
         .limit(1)
         .then((rows) => rows[0] ?? null);
-      if (!run || run.agentId !== req.actor.agentId || run.companyId !== req.actor.companyId) {
-        res.status(403).json({ error: "Agent run context is not valid for tool execution" });
+      const catalog = await listWorkflowToolCatalog(db, runContext.companyId);
+      const catalogTool = catalog.tools.find((entry) => entry.name === tool);
+      const authorization = authorizeRunToolExecution({
+        actor: {
+          type: "agent",
+          agentId,
+          companyId,
+        },
+        runContext,
+        run,
+        toolName: tool,
+        currentEffectiveGrant: catalog.grants.some((grant) => grant.agentId === runContext.agentId && grant.toolName === tool),
+        registeredEnabledTool: Boolean(
+          catalogTool?.enabled
+          && (catalogTool.source !== "plugin" || registeredTool !== null),
+        ),
+      });
+      if (!authorization.allowed) {
+        res.status(403).json({ error: authorization.reason });
         return;
       }
-      workflowRunIssueId = run.issueId;
-      if (!workflowToolContractAllowsTool(run.contextSnapshot, tool)) {
-        res.status(403).json({ error: `Workflow tool "${tool}" is not allowed for this agent run` });
-        return;
-      }
+      workflowRunIssueId = run?.issueId ?? null;
     } else {
       assertBoard(req);
     }
 
-    const registeredTool = toolDeps?.toolDispatcher.getTool(tool);
     if (registeredTool) {
       try {
         const result = await toolDeps!.toolDispatcher.executeTool(

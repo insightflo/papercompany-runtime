@@ -52,6 +52,12 @@ vi.mock("../services/srb/source-status-sync.js", () => ({
   syncSrbSourceIssueStatus: mockSyncSrbSourceIssueStatus,
 }));
 
+vi.mock("../services/standalone-issue-execution-contract.js", () => ({
+  standaloneIssueExecutionContractService: () => ({
+    validateAssigneeChange: vi.fn(async () => null),
+  }),
+}));
+
 function createApp(db: any = {}) {
   const app = express();
   app.use(express.json());

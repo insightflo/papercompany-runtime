@@ -1,4 +1,5 @@
 import { joinPromptSections } from "./prompt-utils.js";
+import { readRunToolContract } from "./run-tool-contract.js";
 import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
 import { buildWorkflowReworkContractBriefLines, buildWorkflowReworkTaskHeader } from "./runtime-brief-rework-section.js";
 import { buildQaCapAcceptanceBriefLines } from "./runtime-brief-qa-cap-section.js";
@@ -49,8 +50,17 @@ function extractSchemaDefaults(schema: Record<string, unknown> | null): Record<s
   return defaults;
 }
 
-function buildWorkflowToolContractBrief(contract: Record<string, unknown> | null) {
-  if (!contract || Object.keys(contract).length === 0) return null;
+function buildWorkflowToolContractBrief(context: unknown) {
+  const parsed = readRunToolContract(context);
+  if (!parsed) return null;
+  const contract: Record<string, unknown> = {
+    ...parsed.raw,
+    stepName: parsed.stepName,
+    stepId: parsed.stepId,
+    toolNames: parsed.toolNames,
+    toolArgs: parsed.toolArgs,
+    tools: parsed.tools,
+  };
 
   const tools = Array.isArray(contract.tools)
     ? contract.tools.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
@@ -459,7 +469,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   // [QA rework] rework 선두 헤더 + rework 모드 여부. 헤더는 brief 시작에, 상세 contract 라인은 기존 위치 유지.
   const reworkHeaderLines = buildWorkflowReworkTaskHeader(context.paperclipWorkflowReworkContract);
   const isReworkMode = reworkHeaderLines.length > 0;
-  const workflowToolContractLine = buildWorkflowToolContractBrief(asRecord(context.paperclipWorkflowStepToolContract));
+  const workflowToolContractLine = buildWorkflowToolContractBrief(context);
   // [QA rework] rework contract가 최신 QA feedback을 이미 가지면 최근 코멘트는 중복이므로 억제(prompt dilution 방지).
   const recentIssueCommentsLine = isReworkMode ? null : buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
   const hermesChatLine = buildHermesChatBrief(context.paperclipHermesChat);
