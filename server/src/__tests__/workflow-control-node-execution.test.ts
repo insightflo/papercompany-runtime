@@ -48,6 +48,7 @@ import {
   syncWorkflowRunState,
 } from "../services/workflow/dag-engine.js";
 import { workflowService } from "../services/workflow/engine.js";
+import { buildWorkflowReworkContract } from "../services/workflow/control-flow/rework-contract.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -256,5 +257,77 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
       .where(eq(workflowStepRuns.id, ifRun.id)).then((rows) => rows[0]!);
     expect(reloaded.status).toBe("failed");
     expect(result.status).toBe("failed");
+  });
+
+  it("Fix1: rework 재완료 시 producer startedAt 을 rework 계약 createdAt 으로 잡아 현 시도 산물이 stale 처리되지 않는다", async () => {
+    const seeded = await seedRun("selected");
+    const producerRun = seeded.stepRuns.find((row) => row.stepId === "producer")!;
+    const issueId = producerRun.issueId!;
+
+    // rework 시작 하한. 현 시도 산물은 이보다 뒤에 생산된다.
+    const reworkStartedAt = new Date("2026-07-20T10:00:00Z");
+    const priorCompletedAt = new Date("2026-07-20T09:50:00Z"); // 직전(반려된) 시도 완료
+    const issueCompletedAt = new Date("2026-07-20T10:05:00Z"); // 현 시도 issue 완료(> prior)
+    const workProductUpdatedAt = new Date("2026-07-20T10:02:00Z"); // 현 시도 산물(> reworkStartedAt)
+
+    // rework 리셋 상태 시뮬레이션: pending, startedAt=null, iteration+1, 직전 시도 archive + rework 계약.
+    const reworkContract = buildWorkflowReworkContract({
+      producerStepId: "producer",
+      qaFeedbacks: [{ qaStepId: "if-decision", qaIssueId: null, feedback: "needs update" }],
+      currentIteration: 0,
+      maxIterations: 3,
+      createdAt: reworkStartedAt,
+    });
+    await db.update(workflowStepRuns).set({
+      status: "pending",
+      startedAt: null,
+      completedAt: null,
+      iterationIndex: 1,
+      metadata: {
+        controlFlowAttempts: [{ iteration: 0, verdict: "request_changes", completedAt: priorCompletedAt.toISOString() }],
+        workflowReworkContract: reworkContract,
+      },
+    }).where(eq(workflowStepRuns.id, producerRun.id));
+
+    // 현 시도 issue 완료 + 산물 갱신. issue.startedAt=null 로 둬 reworkStartedAt 폴백을 유도한다.
+    await db.update(issues).set({
+      status: "done",
+      startedAt: null,
+      completedAt: issueCompletedAt,
+    }).where(eq(issues.id, issueId));
+    await db.update(issueWorkProducts).set({ updatedAt: workProductUpdatedAt })
+      .where(eq(issueWorkProducts.issueId, issueId));
+
+    await syncWorkflowRunState(db, seeded.runId);
+
+    const reloaded = await db.select().from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, producerRun.id)).then((rows) => rows[0]!);
+    expect(reloaded.status).toBe("completed");
+    // 핵심: startedAt 이 완료 시각(now)이 아니라 rework 계약 createdAt 이다.
+    expect(reloaded.startedAt?.toISOString()).toBe(reworkStartedAt.toISOString());
+    // 그래서 현 시도 산물(updatedAt)이 startedAt 보다 뒤 → IF 신선도 검사 통과 조건.
+    expect(workProductUpdatedAt.getTime()).toBeGreaterThanOrEqual(reloaded.startedAt!.getTime());
+  });
+
+  it("Fix2: resume 이 failed control node(IF) 를 pending 리셋 후 재평가해 복구한다", async () => {
+    const seeded = await seedRun("invalid-json");
+    const ifRun = seeded.stepRuns.find((row) => row.stepId === "if-decision")!;
+    expect(ifRun.status).toBe("failed");
+    expect(seeded.result?.status).toBe("failed");
+
+    // 원인(잘못된 JSON) 수정 + 산물 갱신해 IF 신선도/파싱이 통과하게 한다.
+    await writeFile(seeded.artifactPath, JSON.stringify({ status: "selected" }), "utf8");
+    const producerIssueId = seeded.stepRuns.find((r) => r.stepId === "producer")!.issueId!;
+    await db.update(issueWorkProducts).set({ updatedAt: new Date() })
+      .where(eq(issueWorkProducts.issueId, producerIssueId));
+
+    const result = await workflowService.resumeRun(db, { runId: seeded.runId, companyId: seeded.companyId });
+
+    const reloaded = await db.select().from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, ifRun.id)).then((rows) => rows[0]!);
+    expect(reloaded.status).toBe("completed");
+    expect(reloaded.metadata).toMatchObject({ controlNodeResult: { nodeType: "if", outcome: "condition_true" } });
+    expect(reloaded.lastDispatchErrorSummary).toBeNull();
+    expect(result.status).not.toBe("failed");
   });
 });

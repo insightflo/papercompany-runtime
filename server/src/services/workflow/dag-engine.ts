@@ -1305,16 +1305,26 @@ async function syncStepRunsFromIssueState(
     });
     const patch: Partial<typeof workflowStepRuns.$inferInsert> = {};
     const now = new Date();
+    // [rework startedAt 타이밍] rework 리셋 후 stepRun.startedAt 이 null 이면 startedAt 이 완료
+    //   시각(now)으로 잡혀, 같은 시도가 막 생산한 work product(updatedAt 이 몇 초 먼저)이 "이전 시도
+    //   산물(stale)"로 오분류돼 하류 IF 노드의 신선도 검사(condition-source-resolver)가 실패한다.
+    //   rework 계약의 createdAt(= 현 시도 시작의 신뢰 가능 하한)으로 폴백해 현 시도 산물이 stale 처리
+    //   되지 않게 한다. 비-rework(최초 시도)는 reworkStartedAt 이 null 이라 기존 동작과 동일.
+    const reworkContract = readWorkflowReworkContract(
+      normalizeRecord(stepRun.metadata).workflowReworkContract,
+    );
+    const reworkStartedAt = reworkContract?.createdAt ? new Date(reworkContract.createdAt) : null;
+    const attemptStartedAt = stepRun.startedAt ?? issue.startedAt ?? reworkStartedAt ?? now;
 
     if (desiredStatus !== stepRun.status) {
       patch.status = desiredStatus;
     }
 
     if (desiredStatus === "running") {
-      patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
+      patch.startedAt = attemptStartedAt;
       patch.completedAt = null;
     } else if (desiredStatus === "completed") {
-      patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
+      patch.startedAt = attemptStartedAt;
       patch.completedAt = issue.completedAt ?? now;
       // When finalization v1 is active, issue-backed steps also need
       // dispatch_ready_at set so downstream edge-condition evaluation admits
@@ -1329,7 +1339,7 @@ async function syncStepRunsFromIssueState(
         patch.metadata = cleanedRetryMetadata;
       }
     } else if (desiredStatus === "failed") {
-      patch.startedAt = stepRun.startedAt ?? issue.startedAt ?? now;
+      patch.startedAt = attemptStartedAt;
       patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? now;
     } else {
       patch.startedAt = null;
