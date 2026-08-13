@@ -24,6 +24,7 @@ import {
   Bot,
 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { HumanReviewPacket } from "../components/HumanReviewPacket";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -116,6 +117,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
   const queryClient = useQueryClient();
   const [reviewNote, setReviewNote] = useState("");
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
 
   // We need a reviewedByAgentId — use the proposedBy agent's counterpart or
   // a sentinel value; the server only validates it is non-empty.
@@ -129,6 +131,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
         status,
         reviewedByAgentId: REVIEWER_ID,
         reviewNote: reviewNote.trim() || undefined,
+        reviewAcknowledged,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.worktree.proposals(proposal.companyId) });
@@ -139,6 +142,15 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
 
   return (
     <div className="mt-3 space-y-2 border-t border-border pt-3">
+      <HumanReviewPacket packet={{
+        schemaVersion: "human-review-v1", decisionSubject: `${proposal.proposedChange.name} 운영 규칙 변경을 적용할까요?`,
+        evidence: [{ label: "규칙 변경 제안 원본", href: `/worktree/proposals#proposal-${proposal.id}`, location: `제안 ${proposal.id} > Proposed rule`, description: proposal.rationale }],
+        interpretation: `${proposal.proposedChange.action} 작업에 ${proposal.proposedChange.severity} 수준으로 적용될 규칙 변경입니다.`,
+        impact: { ifApproved: "제안된 조건과 판단 방식이 회사 운영 규칙에 반영됩니다.", ifRejected: "현재 운영 규칙을 유지합니다.", ifWrong: "정상 업무가 차단되거나 허용하면 안 되는 Agent 행동이 허용될 수 있습니다." },
+        unresolvedFacts: [], questions: ["조건식, 결정 결과, 심각도와 기존 규칙과의 충돌을 확인했습니까?"],
+        recommendedNextStep: "아래 규칙 원문과 조건식을 확인한 뒤 결정하세요.", requiredReviewer: "회사 운영 정책 권한이 있는 Human Operator",
+      }} />
+      <label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={reviewAcknowledged} onChange={(event) => setReviewAcknowledged(event.target.checked)} /><span>원본 규칙, 적용 영향과 오판 위험을 확인했습니다.</span></label>
       <textarea
         className="w-full h-16 text-xs rounded-md border border-input bg-background px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
         placeholder="Review note (optional)"
@@ -151,7 +163,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
           size="sm"
           className="h-7 text-xs bg-green-600 hover:bg-green-700 text-white"
           onClick={() => mutation.mutate("approved")}
-          disabled={mutation.isPending}
+          disabled={mutation.isPending || !reviewAcknowledged}
         >
           <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
           Approve
@@ -199,7 +211,7 @@ function ProposalRow({ proposal, agentMap }: ProposalRowProps) {
   const isPending = status === "proposed";
 
   return (
-    <div className="border-b border-border last:border-b-0">
+    <div id={`proposal-${proposal.id}`} className="border-b border-border last:border-b-0">
       {/* Row header */}
       <div className="flex items-center gap-3 px-4 py-3 text-sm">
         <button

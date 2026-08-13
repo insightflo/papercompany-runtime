@@ -15,6 +15,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
 import type { ApprovalComment } from "@paperclipai/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
+import { HumanReviewPacket } from "../components/HumanReviewPacket";
+import { approvalHumanReview } from "../lib/humanReview";
 
 export function ApprovalDetail() {
   const { approvalId } = useParams<{ approvalId: string }>();
@@ -145,6 +147,7 @@ export function ApprovalDetail() {
   if (!approval) return <p className="text-sm text-muted-foreground">Approval not found.</p>;
 
   const payload = approval.payload as Record<string, unknown>;
+  const reviewPacket = approvalHumanReview(approval);
   const linkedAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
   const isActionable = approval.status === "pending" || approval.status === "revision_requested";
   const isBudgetApproval = approval.type === "budget_override_required";
@@ -220,6 +223,7 @@ export function ApprovalDetail() {
             </div>
           )}
           <ApprovalPayloadRenderer type={approval.type} payload={payload} />
+          <HumanReviewPacket packet={reviewPacket} />
           <button
             type="button"
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors mt-2"
@@ -267,7 +271,8 @@ export function ApprovalDetail() {
                 size="sm"
                 className="bg-green-700 hover:bg-green-600 text-white"
                 onClick={() => approveMutation.mutate()}
-                disabled={approveMutation.isPending}
+                disabled={approveMutation.isPending || !reviewPacket}
+                title={!reviewPacket ? "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." : undefined}
               >
                 Approve
               </Button>

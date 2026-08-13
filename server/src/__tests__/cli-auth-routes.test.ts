@@ -145,7 +145,7 @@ describe("cli auth routes", () => {
     });
     const res = await request(app)
       .post("/api/cli-auth/challenges/challenge-1/approve")
-      .send({ token: "pcp_cli_auth_secret" });
+      .send({ token: "pcp_cli_auth_secret", reviewAcknowledged: true });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
@@ -163,6 +163,13 @@ describe("cli auth routes", () => {
         action: "board_api_key.created",
       }),
     );
+  });
+
+  it("blocks CLI approval when the operator has not acknowledged the source and impact", async () => {
+    const app = await createApp({ type: "board", userId: "user-1", source: "session", isInstanceAdmin: false, companyIds: ["company-1"] });
+    const res = await request(app).post("/api/cli-auth/challenges/challenge-1/approve").send({ token: "pcp_cli_auth_secret" });
+    expect(res.status).toBe(400);
+    expect(mockBoardAuthService.approveCliAuthChallenge).not.toHaveBeenCalled();
   });
 
   it("logs approve activity for instance admins without company memberships", async () => {
@@ -187,7 +194,7 @@ describe("cli auth routes", () => {
     });
     const res = await request(app)
       .post("/api/cli-auth/challenges/challenge-2/approve")
-      .send({ token: "pcp_cli_auth_secret" });
+      .send({ token: "pcp_cli_auth_secret", reviewAcknowledged: true });
 
     expect(res.status).toBe(200);
     expect(mockBoardAuthService.resolveBoardActivityCompanyIds).toHaveBeenCalledWith({

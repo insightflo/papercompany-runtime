@@ -32,7 +32,7 @@ function createApproval(status: string): ApprovalRecord {
     companyId: "company-1",
     type: "hire_agent",
     status,
-    payload: { agentId: "agent-1" },
+    payload: { agentId: "agent-1", name: "Reviewer", role: "general" },
     requestedByAgentId: "requester-1",
   };
 }
@@ -95,7 +95,7 @@ describe("approvalService resolution idempotency", () => {
 
   it("still performs side effects when the resolution update is newly applied", async () => {
     const approved = createApproval("approved");
-    const dbStub = createDbStub([[createApproval("pending")]], [approved]);
+    const dbStub = createDbStub([[createApproval("pending")], [createApproval("pending")]], [approved]);
 
     const svc = approvalService(dbStub.db as any);
     const result = await svc.approve("approval-1", "board", "ship it");
@@ -103,5 +103,15 @@ describe("approvalService resolution idempotency", () => {
     expect(result.applied).toBe(true);
     expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith("agent-1");
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks approval when the request does not explain the decision or link its source", async () => {
+    const incomplete = { ...createApproval("pending"), type: "external_automation", payload: { workProductId: "wp-1" } };
+    const dbStub = createDbStub([[incomplete]], []);
+    const svc = approvalService(dbStub.db as any);
+    await expect(svc.approve("approval-1", "board")).rejects.toMatchObject({
+      status: 422, details: { code: "human_review_packet_required" },
+    });
+    expect(dbStub.returning).not.toHaveBeenCalled();
   });
 });

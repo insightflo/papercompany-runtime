@@ -446,3 +446,10 @@ export {
   type SetPluginState,
   type ListPluginState,
 } from "./plugin.js";
+
+export {
+  humanReviewEvidenceRefSchema,
+  humanReviewPacketSchema,
+  readHumanReviewPacket,
+  type HumanReviewPacketInput,
+} from "./human-review.js";

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { humanReviewPacketSchema } from "./human-review.js";
 import type {
   OperatorDecisionDefinition,
   OperatorDecisionResult,
@@ -33,7 +34,7 @@ const factSchema = z.object({
 
 const evidenceRefSchema = z.object({
   label: normalized(1, 120),
-  href: normalized(1, 2_000).refine((value) => hasProtocol(value, ["http:", "https:"]), "Expected HTTP(S) URL"),
+  href: normalized(1, 2_000).refine((value) => value.startsWith("/") || hasProtocol(value, ["http:", "https:"]), "Expected an application path or HTTP(S) URL"),
 }).strict();
 
 const optionSchema = z.object({
@@ -85,6 +86,7 @@ export const operatorDecisionDefinitionSchema = z.object({
   comment: commentSchema,
   approvedScope: scopeSchema,
   forbiddenScope: scopeSchema,
+  humanReview: humanReviewPacketSchema.nullable().optional(),
 }).strict().superRefine((definition, ctx) => {
   if (!unique(definition.options.map((item) => item.id))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Option IDs must be unique", path: ["options"] });
@@ -114,8 +116,8 @@ export const operatorDecisionSourceContextSchema = z.object({
   artifactRefs: z.array(z.object({
     label: normalized(1, 120),
     uri: normalized(1, 1_000).refine(
-      (value) => hasProtocol(value, ["http:", "https:", "artifact:"]),
-      "Expected HTTP(S) or artifact URI",
+      (value) => value.startsWith("/") || hasProtocol(value, ["http:", "https:", "artifact:"]),
+      "Expected an application path, HTTP(S), or artifact URI",
     ),
   }).strict()).max(20),
 }).strict();

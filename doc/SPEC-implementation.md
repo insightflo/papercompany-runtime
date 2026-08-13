@@ -403,6 +403,13 @@ Invariant: each event must attach to agent and company; rollups are aggregation,
 - `decided_by_user_id` uuid fk `users.id` null
 - `decided_at` timestamptz null
 
+Human review contract:
+
+- Every actionable approval or operator decision exposes a versioned `human-review-v1` packet with the decision subject, evidence, interpretation, impact, unresolved facts, questions, recommended next step, required reviewer, and customer authority.
+- Evidence references use resolvable source links, including exact work-product anchors where available, so the reviewer can inspect the original material before deciding.
+- The UI requires the reviewer to acknowledge that context before an approval or operator-decision action is enabled. The server independently enforces the same condition and rejects incomplete packets or missing acknowledgement.
+- Incomplete legacy approvals remain visible for diagnosis. They cannot be approved; a general approval may still be rejected so a malformed request can be closed safely.
+
 ## 7.11 `activity_log`
 
 - `id` uuid pk

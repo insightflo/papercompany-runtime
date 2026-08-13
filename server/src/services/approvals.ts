@@ -7,6 +7,7 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { assertApprovalCanBeApproved } from "./human-review-packet.js";
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -100,6 +101,10 @@ export function approvalService(db: Db) {
         .then((rows) => rows[0]),
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+      const pending = await getExistingApproval(id);
+      if (pending.status === "pending" || pending.status === "revision_requested") {
+        assertApprovalCanBeApproved(pending.type, pending.payload as Record<string, unknown>);
+      }
       const { approval: updated, applied } = await resolveApproval(
         id,
         "approved",

@@ -19,6 +19,17 @@ const definition = {
   comment: { mode: "disabled", label: null, placeholder: null, maxLength: 0 },
   approvedScope: [],
   forbiddenScope: [],
+  humanReview: {
+    schemaVersion: "human-review-v1" as const,
+    decisionSubject: "Hold or reject this work?",
+    evidence: [{ label: "Decision request", href: "/operator-decisions/fixture", location: "Decision fixture > request" }],
+    interpretation: "The operator is choosing whether this fixture work should remain stopped.",
+    impact: { ifApproved: "The selected action is recorded.", ifRejected: "The alternate action is recorded.", ifWrong: "The wrong work state could be retained." },
+    unresolvedFacts: [],
+    questions: ["Does the requested action match the linked work?"],
+    recommendedNextStep: "Review the request and choose one action.",
+    requiredReviewer: "Human Operator",
+  },
 };
 
 function body(requestKey: string) {

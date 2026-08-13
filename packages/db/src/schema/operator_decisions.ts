@@ -3,6 +3,7 @@ import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uu
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { issues } from "./issues.js";
+import type { HumanReviewPacket } from "@paperclipai/shared";
 
 export interface OperatorDecisionDefinitionJson {
   options: Array<{
@@ -28,6 +29,7 @@ export interface OperatorDecisionDefinitionJson {
   };
   approvedScope: string[];
   forbiddenScope: string[];
+  humanReview?: HumanReviewPacket | null;
 }
 
 export interface OperatorDecisionResultJson {

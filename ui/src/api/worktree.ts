@@ -77,6 +77,7 @@ export interface ReviewProposalInput {
   status: "approved" | "rejected";
   reviewedByAgentId: string;
   reviewNote?: string;
+  reviewAcknowledged: boolean;
 }
 
 export const worktreeApi = {

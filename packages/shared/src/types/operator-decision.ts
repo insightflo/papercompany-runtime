@@ -61,6 +61,7 @@ export interface OperatorDecisionDefinition {
   };
   approvedScope: string[];
   forbiddenScope: string[];
+  humanReview?: import("./human-review.js").HumanReviewPacket | null;
 }
 
 export interface OperatorDecisionResult {

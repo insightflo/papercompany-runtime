@@ -235,7 +235,7 @@ export const accessApi = {
     ),
 
   approveJoinRequest: (companyId: string, requestId: string) =>
-    api.post<JoinRequest>(`/companies/${companyId}/join-requests/${requestId}/approve`, {}),
+    api.post<JoinRequest>(`/companies/${companyId}/join-requests/${requestId}/approve`, { reviewAcknowledged: true }),
 
   rejectJoinRequest: (companyId: string, requestId: string) =>
     api.post<JoinRequest>(`/companies/${companyId}/join-requests/${requestId}/reject`, {}),
@@ -258,7 +258,7 @@ export const accessApi = {
   approveCliAuthChallenge: (id: string, token: string) =>
     api.post<{ approved: boolean; status: string; userId: string; keyId: string | null; expiresAt: string }>(
       `/cli-auth/challenges/${id}/approve`,
-      { token },
+      { token, reviewAcknowledged: true },
     ),
 
   cancelCliAuthChallenge: (id: string, token: string) =>

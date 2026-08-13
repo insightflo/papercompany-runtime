@@ -6,6 +6,7 @@ import type {
 import type { ResolveOperatorDecisionInput } from "../api/operator-decisions";
 import { timeAgo } from "../lib/timeAgo";
 import { cn } from "../lib/utils";
+import { HumanReviewPacket } from "./HumanReviewPacket";
 
 interface OperatorDecisionCardProps {
   decision: OperatorDecisionView;
@@ -106,12 +107,14 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       </h2>
       <p id={descriptionId} className="mt-1 text-sm text-muted-foreground">{decision.description}</p>
 
+      <HumanReviewPacket packet={decision.definition.humanReview ?? null} />
+
       <div className="mt-3 flex flex-wrap gap-3 text-xs">
         {decision.issueId && <a href={`/issues/${decision.issueId}`}>Open linked work</a>}
         {decision.sourceContext.missionId && <a href={`/missions/${decision.sourceContext.missionId}`}>Open mission</a>}
         {decision.sourceContext.artifactRefs.map((ref) => (
-          ref.uri.startsWith("http:") || ref.uri.startsWith("https:")
-            ? <a key={ref.uri} href={ref.uri} target="_blank" rel="noreferrer">{ref.label}</a>
+          ref.uri.startsWith("http:") || ref.uri.startsWith("https:") || ref.uri.startsWith("/")
+            ? <a key={ref.uri} href={ref.uri} target={ref.uri.startsWith("/") ? undefined : "_blank"} rel={ref.uri.startsWith("/") ? undefined : "noreferrer"}>{ref.label}</a>
             : <span key={ref.uri}>{ref.label}</span>
         ))}
       </div>
@@ -176,7 +179,8 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
             maxLength={decision.definition.comment.maxLength}
             required={decision.definition.comment.mode === "required"}
             aria-describedby={`${descriptionId} ${errorId}`}
-            disabled={submittingActionId !== null}
+            disabled={submittingActionId !== null || !decision.definition.humanReview}
+            title={!decision.definition.humanReview ? "판단 정보와 원본 위치를 보완해야 결정할 수 있습니다." : undefined}
             className="mt-1 min-h-20 w-full border border-border bg-background p-2 text-sm"
           />
         </div>
@@ -191,7 +195,8 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
             key={action.id}
             type="button"
             onClick={() => void submit(action)}
-            disabled={submittingActionId !== null}
+            disabled={submittingActionId !== null || !decision.definition.humanReview}
+            title={!decision.definition.humanReview ? "판단 정보와 원본 위치를 보완해야 결정할 수 있습니다." : undefined}
             className={cn("border px-3 py-2 text-sm font-medium disabled:opacity-50", toneClass(action.tone))}
           >
             {submittingActionId === action.id ? "Submitting…" : action.label}

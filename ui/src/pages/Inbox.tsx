@@ -56,6 +56,7 @@ import {
   type InboxTab,
 } from "../lib/inbox";
 import { useDismissedInboxItems } from "../hooks/useInboxBadge";
+import { HumanReviewPacket } from "../components/HumanReviewPacket";
 import {
   attentionItemToRun,
   isFailedRunAttentionItem,
@@ -233,44 +234,16 @@ function ApprovalInboxRow({
         </Link>
         {showResolutionButtons ? (
           <div className="hidden shrink-0 items-center gap-2 sm:flex">
-            <Button
-              size="sm"
-              className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
-              onClick={onApprove}
-              disabled={isPending}
-            >
-              Approve
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              className="h-8 px-3"
-              onClick={onReject}
-              disabled={isPending}
-            >
-              Reject
+            <Button size="sm" variant="outline" className="h-8 px-3" asChild>
+              <Link to={`/approvals/${approval.id}`}>검토 후 결정</Link>
             </Button>
           </div>
         ) : null}
       </div>
       {showResolutionButtons ? (
         <div className="mt-3 flex gap-2 sm:hidden">
-          <Button
-            size="sm"
-            className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
-            onClick={onApprove}
-            disabled={isPending}
-          >
-            Approve
-          </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            className="h-8 px-3"
-            onClick={onReject}
-            disabled={isPending}
-          >
-            Reject
+          <Button size="sm" variant="outline" className="h-8 px-3" asChild>
+            <Link to={`/approvals/${approval.id}`}>검토 후 결정</Link>
           </Button>
         </div>
       ) : null}
@@ -832,7 +805,7 @@ export function Inbox() {
             </h3>
             <div className="grid gap-3">
               {joinRequests.map((joinRequest) => (
-                <div key={joinRequest.id} className="rounded-xl border border-border bg-card p-4">
+                <div key={joinRequest.id} id={`join-request-${joinRequest.id}`} className="rounded-xl border border-border bg-card p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div className="space-y-1">
                       <p className="text-sm font-medium">
@@ -870,6 +843,15 @@ export function Inbox() {
                       </Button>
                     </div>
                   </div>
+                  <HumanReviewPacket packet={{
+                    schemaVersion: "human-review-v1",
+                    decisionSubject: `${joinRequest.requestType === "human" ? joinRequest.requestEmailSnapshot ?? "사용자" : joinRequest.agentName ?? "Agent"}의 회사 합류를 승인할까요?`,
+                    evidence: [{ label: "합류 요청 원본", href: `/inbox#join-request-${joinRequest.id}`, location: `Join Requests > ${joinRequest.id}`, description: `요청 IP ${joinRequest.requestIp}, 요청 시각 ${new Date(joinRequest.createdAt).toLocaleString()}` }],
+                    interpretation: joinRequest.requestType === "human" ? "표시된 사용자를 회사 구성원으로 추가하는 요청입니다." : `${joinRequest.adapterType ?? "지정되지 않은"} Adapter를 사용하는 Agent를 회사에 추가하는 요청입니다.`,
+                    impact: { ifApproved: "초대 기본값에 따른 회사 구성원 또는 Agent 권한이 활성화됩니다.", ifRejected: "이 요청으로는 회사에 합류하거나 권한을 받을 수 없습니다.", ifWrong: "신뢰하지 않는 사용자나 Agent가 회사 데이터와 업무에 접근할 수 있습니다." },
+                    unresolvedFacts: joinRequest.capabilities ? [] : ["요청한 세부 기능 권한이 명시되지 않았습니다."], questions: ["요청자 신원, 초대 경로, Adapter와 부여될 기본 권한을 확인했습니까?"],
+                    recommendedNextStep: "요청 신원과 출처, 부여될 권한을 대조한 뒤 승인하거나 거절하세요.", requiredReviewer: "회사 접근 권한 관리자",
+                  }} />
                 </div>
               ))}
             </div>
