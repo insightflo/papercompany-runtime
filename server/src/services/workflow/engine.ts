@@ -10,6 +10,7 @@ import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
+import { resetFailedControlNodesForResume } from "./control-flow/control-node-executor.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { missionService } from "../missions.js";
@@ -485,6 +486,14 @@ export const workflowService = {
     if (!run) {
       throw new Error(`Workflow run not found: ${input.runId}`);
     }
+    // [control node resume recovery] failed control node(IF/complete) 는 executeWorkflowControlNode 의
+    //   CAS(status=pending) 재클레임이 불가해 resume 만으로는 재평가되지 않는다. 재실행 전 pending 으로
+    //   리셋해 현 상태로 다시 평가되게 한다.
+    await resetFailedControlNodesForResume({
+      db,
+      workflowRunId: run.id,
+      steps: normalizeWorkflowStepsForExecution(workflow.steps),
+    });
     return executeWorkflowRun(db, run.id);
   },
 

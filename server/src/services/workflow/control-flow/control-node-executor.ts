@@ -6,7 +6,7 @@
  * a bounded schema-validated result. Source values are never persisted or copied into
  * errors. Evaluation failures fail the control step instead of selecting the false branch.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowStepRuns } from "@paperclipai/db";
 import {
@@ -151,4 +151,51 @@ export async function executeWorkflowControlNode(input: {
         eq(workflowStepRuns.status, "running"),
       ));
   }
+}
+
+/**
+ * [목적] resume 시 failed control node(IF/complete) 를 pending 으로 리셋해 재평가되게 한다.
+ *   control node 는 issue 가 없고(issueId IS NULL), 한 번 failed 되면 executeWorkflowControlNode 의
+ *   CAS(status=pending) 재클레임이 불가해 resume 만으로는 복구되지 않는다. resume 경로에서 명시적으로
+ *   pending 으로 리셋한다. 일반 tool/issue step 의 failed 상태는 건드리지 않는다(범위 한정).
+ * [주의] control node 만 리셋 — 재평가 후 다시 실패하면 failed 로 돌아가 run 은 다시 실패한다(idempotent).
+ *   하류 issue 는 executeWorkflowRun 의 launch/skip pass 가 현 시점 상태로 다시 파생한다.
+ */
+export async function resetFailedControlNodesForResume(input: {
+  db: Db;
+  workflowRunId: string;
+  steps: WorkflowStep[];
+}): Promise<number> {
+  const controlStepIds = input.steps.filter(isWorkflowControlNode).map((step) => step.id);
+  if (controlStepIds.length === 0) return 0;
+
+  const failedControlRuns = await input.db
+    .select({ id: workflowStepRuns.id, metadata: workflowStepRuns.metadata })
+    .from(workflowStepRuns)
+    .where(and(
+      eq(workflowStepRuns.workflowRunId, input.workflowRunId),
+      eq(workflowStepRuns.status, "failed"),
+      isNull(workflowStepRuns.issueId),
+      inArray(workflowStepRuns.stepId, controlStepIds),
+    ));
+  if (failedControlRuns.length === 0) return 0;
+
+  for (const row of failedControlRuns) {
+    const metadata = normalizeRecord(row.metadata);
+    delete metadata.controlNodeError;
+    delete metadata.controlNodeResult;
+    await input.db
+      .update(workflowStepRuns)
+      .set({
+        status: "pending",
+        startedAt: null,
+        completedAt: null,
+        dispatchReadyAt: null,
+        lastDispatchErrorAt: null,
+        lastDispatchErrorSummary: null,
+        metadata,
+      })
+      .where(eq(workflowStepRuns.id, row.id));
+  }
+  return failedControlRuns.length;
 }
