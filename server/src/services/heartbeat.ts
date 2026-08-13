@@ -5749,12 +5749,15 @@ export function heartbeatService(db: Db) {
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
-    const defaultLanguage = await db
-      .select({ defaultLanguage: companies.defaultLanguage })
+    const companyRuntimeContext = await db
+      .select({
+        defaultLanguage: companies.defaultLanguage,
+        companyKind: companies.companyKind,
+      })
       .from(companies)
       .where(eq(companies.id, agent.companyId))
-      .then((rows) => rows[0]?.defaultLanguage ?? "en");
-    context.paperclipUserFacingLanguage = defaultLanguage;
+      .then((rows) => rows[0] ?? null);
+    context.paperclipUserFacingLanguage = companyRuntimeContext?.defaultLanguage ?? "en";
     applyPaperclipApiContext(context);
     const taskKey = deriveTaskKey(context, null);
     // Mission session branch: when missionId is present, session is keyed by
@@ -5982,22 +5985,29 @@ export function heartbeatService(db: Db) {
     } else {
       delete context.paperclipWorkflowStepKnowledgeContext;
     }
-    const maintenanceGuidanceContext = await resolveMaintenanceGuidanceContext({
-      db,
-      companyId: agent.companyId,
-      agentId: agent.id,
-      workflowStepKnowledgeContext,
-      issueTitle: issueContext?.title ?? null,
-      issueDescription: issueContext?.description ?? null,
-      note: readNonEmptyString(context.note),
-      taskKey,
-    });
+    // Maintenance intake rules are only meaningful for an explicitly
+    // maintenance-scoped company. Do not leak them into product, GitHub PR,
+    // research, or other business work merely because the company has rules
+    // or accessible knowledge bases.
+    const maintenanceGuidanceContext = companyRuntimeContext?.companyKind === "maintenance"
+      ? await resolveMaintenanceGuidanceContext({
+          db,
+          companyId: agent.companyId,
+          agentId: agent.id,
+          workflowStepKnowledgeContext,
+          issueTitle: issueContext?.title ?? null,
+          issueDescription: issueContext?.description ?? null,
+          note: readNonEmptyString(context.note),
+          taskKey,
+        })
+      : null;
     if (maintenanceGuidanceContext) {
       context.paperclipMaintenanceGuidance = maintenanceGuidanceContext;
     } else {
       delete context.paperclipMaintenanceGuidance;
     }
-    const maintenanceDecisionContext = issueContext?.missionId && !maintenanceGuidanceContext
+    const maintenanceDecisionContext = companyRuntimeContext?.companyKind !== "maintenance" ||
+      (issueContext?.missionId && !maintenanceGuidanceContext)
       ? null
       : buildMaintenanceDecisionContext({
           issue: issueContext

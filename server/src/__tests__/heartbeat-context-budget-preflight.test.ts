@@ -4842,6 +4842,7 @@ describe("heartbeat context budget preflight", () => {
       id: companyId,
       name: "Paperclip",
       issuePrefix: "PAP",
+      companyKind: "maintenance",
       requireBoardApprovalForNewAgents: false,
     });
     await db.insert(agents).values({
@@ -5028,7 +5029,7 @@ describe("heartbeat context budget preflight", () => {
     );
   });
 
-  it("does not attach maintenance decision preflight to mission-scoped research issues", async () => {
+  it("does not attach maintenance guidance or decision to a GitHub PR review in a business company", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -5036,18 +5037,18 @@ describe("heartbeat context budget preflight", () => {
     let invocationContext: Record<string, unknown> | undefined;
     await db.insert(companies).values({
       id: companyId,
-      name: "Research Company",
-      issuePrefix: "RES",
+      name: "Repository Review Company",
+      issuePrefix: "INF",
       requireBoardApprovalForNewAgents: false,
     });
     await db.insert(agents).values({
       id: agentId,
       companyId,
-      name: "Research Agent",
-      role: "researcher",
+      name: "Runtime Repository Steward",
+      role: "repository_steward",
       status: "active",
       adapterType: "codex_local",
-      adapterConfig: { promptTemplate: "Follow the research issue." },
+      adapterConfig: { promptTemplate: "Review the pull request." },
       runtimeConfig: {},
       permissions: {},
     });
@@ -5055,16 +5056,16 @@ describe("heartbeat context budget preflight", () => {
       id: missionId,
       companyId,
       ownerAgentId: agentId,
-      title: "Oklo SMR research mission",
+      title: "Runtime review mission",
       status: "active",
     });
     await db.insert(issues).values({
       id: issueId,
       companyId,
       missionId,
-      identifier: "RES-RESEARCH",
-      title: "[Research] Oklo corporate valuation and AI power demand",
-      description: "Research Oklo valuation, business model, and AI data center demand with source-backed evidence.",
+      identifier: "INF-293",
+      title: "[insightflo/papercompany-runtime #88] Add human-readable approval review packets",
+      description: "<!-- papercompany-github-bridge:source=github -->\nPull request imported from GitHub.\n\n- Repository: insightflo/papercompany-runtime\n- Number: #88\n- Revision: 21a7691cc84aef1250dab6f0147129b8821c62a4",
       status: "todo",
       assigneeAgentId: agentId,
       originKind: "manual",
@@ -5076,7 +5077,7 @@ describe("heartbeat context budget preflight", () => {
     });
 
     const heartbeat = heartbeatService(db);
-    const run = await heartbeat.invoke(agentId, "on_demand", { issueId, note: "research retry" }, "manual", {
+    const run = await heartbeat.invoke(agentId, "on_demand", { issueId, note: "review the exact PR revision" }, "manual", {
       actorType: "system",
       actorId: "test-suite",
     });
@@ -5084,6 +5085,7 @@ describe("heartbeat context budget preflight", () => {
     expect(run).not.toBeNull();
     const finalized = await waitForRunTerminal(heartbeat, run!.id);
     expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipMaintenanceGuidance).toBeUndefined();
     expect(invocationContext?.paperclipMaintenanceDecision).toBeUndefined();
 
     const auditRows = await db
@@ -5101,6 +5103,7 @@ describe("heartbeat context budget preflight", () => {
       id: companyId,
       name: "Paperclip",
       issuePrefix: "PAP",
+      companyKind: "maintenance",
       requireBoardApprovalForNewAgents: false,
     });
     await db.insert(agents).values({
