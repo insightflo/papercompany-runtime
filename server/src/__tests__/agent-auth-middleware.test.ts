@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agentApiKeys, agents, authUsers, boardApiKeys, companyMemberships } from "@paperclipai/db";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { actorMiddleware } from "../middleware/auth.js";
@@ -52,6 +52,17 @@ function appFor(db: any) {
 }
 
 describe("agent auth middleware", () => {
+  const originalJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+
+  beforeAll(() => {
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "agent-auth-middleware-test-secret";
+  });
+
+  afterAll(() => {
+    if (originalJwtSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    else process.env.PAPERCLIP_AGENT_JWT_SECRET = originalJwtSecret;
+  });
+
   it("rejects a run header that disagrees with the signed JWT and writes an audit event", async () => {
     const companyId = "company-1";
     const agentId = "agent-1";
