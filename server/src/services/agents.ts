@@ -16,6 +16,10 @@ import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
+import {
+  requireAgentApiKeyResponsibleUserBinding,
+  type AgentApiKeyResponsibilityContext,
+} from "./agent-api-key-policy.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -601,7 +605,12 @@ export function agentService(db: Db) {
       });
     },
 
-    createApiKey: async (id: string, name: string) => {
+    createApiKey: async (
+      id: string,
+      name: string,
+      responsibleUserId: string | null | undefined,
+      context: AgentApiKeyResponsibilityContext,
+    ) => {
       const existing = await getById(id);
       if (!existing) throw notFound("Agent not found");
       if (existing.status === "pending_approval") {
@@ -611,6 +620,12 @@ export function agentService(db: Db) {
         throw conflict("Cannot create keys for terminated agents");
       }
 
+      const normalizedResponsibleUserId = await requireAgentApiKeyResponsibleUserBinding(
+        db,
+        existing.companyId,
+        responsibleUserId,
+        context,
+      );
       const token = createToken();
       const keyHash = hashToken(token);
       const created = await db
@@ -620,6 +635,7 @@ export function agentService(db: Db) {
           companyId: existing.companyId,
           name,
           keyHash,
+          responsibleUserId: normalizedResponsibleUserId,
         })
         .returning()
         .then((rows) => rows[0]);

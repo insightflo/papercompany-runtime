@@ -6,11 +6,13 @@ import type {
 import {
   asString,
   asStringArray,
+  buildPaperclipExecutionEnv,
   parseObject,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import path from "node:path";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "../index.js";
@@ -81,7 +83,15 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const configuredEnv = buildPaperclipExecutionEnv({}, envConfig);
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
   try {
     await ensureCommandResolvable(command, cwd, runtimeEnv);
     checks.push({
@@ -148,7 +158,7 @@ export async function testEnvironment(
         args,
         {
           cwd,
-          env,
+          env: runtimeEnv,
           timeoutSec: 45,
           graceSec: 5,
           onLog: async () => {},

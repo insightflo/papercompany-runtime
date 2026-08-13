@@ -11,12 +11,14 @@ import {
   parseObject,
   parseJson,
   buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
   redactEnvForLogs,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -165,8 +167,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
 
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent, { context }) };
   env.PAPERCLIP_RUN_ID = runId;
   const wakeTaskId =
@@ -206,16 +206,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (agentHome) env.AGENT_HOME = agentHome;
   if (workspaceHints.length > 0) env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
 
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  if (!hasExplicitApiKey && authToken) {
-    env.PAPERCLIP_API_KEY = authToken;
-  }
+  const configuredEnv = buildPaperclipExecutionEnv(env, envConfig, authToken);
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
   await ensureCommandResolvable(command, cwd, runtimeEnv);
 
@@ -414,7 +412,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         cwd,
         commandNotes,
         commandArgs: [...args, `<stdin prompt ${prompt.length} chars>`],
-        env: redactEnvForLogs(env),
+        env: redactEnvForLogs(configuredEnv),
         prompt,
         promptMetrics,
         context,

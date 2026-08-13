@@ -194,6 +194,7 @@ export type {
   InstanceGeneralSettings,
   InstanceSettings,
   Agent,
+  AgentApiKeyScope,
   AgentAccessState,
   AgentChainOfCommandEntry,
   AgentDetail,
@@ -770,6 +771,7 @@ export { API_PREFIX, API } from "./api.js";
 export * from "./mission-plan-events.js";
 export * from "./validators/workflow-condition.js";
 export { normalizeAgentUrlKey, deriveAgentUrlKey, isUuidLike } from "./agent-url-key.js";
+export { normalizeAgentApiKeyScope } from "./types/agent-api-key.js";
 export { deriveProjectUrlKey, normalizeProjectUrlKey } from "./project-url-key.js";
 export {
   AGENT_MENTION_SCHEME,

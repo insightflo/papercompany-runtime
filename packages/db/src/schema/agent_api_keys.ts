@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, index } from "drizzle-orm/pg-core";
+import { authUsers } from "./auth.js";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 
@@ -10,6 +11,8 @@ export const agentApiKeys = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id),
     name: text("name").notNull(),
     keyHash: text("key_hash").notNull(),
+    responsibleUserId: text("responsible_user_id").references(() => authUsers.id, { onDelete: "set null" }),
+    scopeConfig: jsonb("scope_config").$type<Record<string, unknown>>(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -17,5 +20,6 @@ export const agentApiKeys = pgTable(
   (table) => ({
     keyHashIdx: index("agent_api_keys_key_hash_idx").on(table.keyHash),
     companyAgentIdx: index("agent_api_keys_company_agent_idx").on(table.companyId, table.agentId),
+    responsibleUserIdx: index("agent_api_keys_responsible_user_idx").on(table.responsibleUserId),
   }),
 );

@@ -4,13 +4,26 @@ import os from "node:os";
 import path from "node:path";
 import { testEnvironment } from "@paperclipai/adapter-cursor-local/server";
 
-async function writeFakeAgentCommand(binDir: string, argsCapturePath: string): Promise<string> {
+async function writeFakeAgentCommand(
+  binDir: string,
+  argsCapturePath: string,
+  envCapturePath: string,
+): Promise<string> {
   const commandPath = path.join(binDir, "agent");
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
-const outPath = process.env.PAPERCLIP_TEST_ARGS_PATH;
-if (outPath) {
-  fs.writeFileSync(outPath, JSON.stringify(process.argv.slice(2)), "utf8");
+const argsPath = process.env.ADAPTER_TEST_ARGS_PATH;
+if (argsPath) {
+  fs.writeFileSync(argsPath, JSON.stringify(process.argv.slice(2)), "utf8");
+}
+const envPath = process.env.ADAPTER_TEST_ENV_PATH;
+if (envPath) {
+  fs.writeFileSync(envPath, JSON.stringify({
+    PAPERCLIP_AGENT_ID: process.env.PAPERCLIP_AGENT_ID,
+    PAPERCLIP_API_KEY: process.env.PAPERCLIP_API_KEY,
+    PAPERCLIP_RUN_ID: process.env.PAPERCLIP_RUN_ID,
+    CURSOR_API_KEY: process.env.CURSOR_API_KEY,
+  }), "utf8");
 }
 console.log(JSON.stringify({
   type: "assistant",
@@ -61,27 +74,44 @@ describe("cursor environment diagnostics", () => {
     const binDir = path.join(root, "bin");
     const cwd = path.join(root, "workspace");
     const argsCapturePath = path.join(root, "args.json");
+    const envCapturePath = path.join(root, "env.json");
     await fs.mkdir(binDir, { recursive: true });
-    await writeFakeAgentCommand(binDir, argsCapturePath);
+    await writeFakeAgentCommand(binDir, argsCapturePath, envCapturePath);
 
-    const result = await testEnvironment({
-      companyId: "company-1",
-      adapterType: "cursor",
-      config: {
-        command: "agent",
-        cwd,
-        env: {
-          CURSOR_API_KEY: "test-key",
-          PAPERCLIP_TEST_ARGS_PATH: argsCapturePath,
-          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    const originalRunId = process.env.PAPERCLIP_RUN_ID;
+    process.env.PAPERCLIP_RUN_ID = "inherited-run";
+    try {
+      const result = await testEnvironment({
+        companyId: "company-1",
+        adapterType: "cursor",
+        config: {
+          command: "agent",
+          cwd,
+          env: {
+            CURSOR_API_KEY: "test-key",
+            PAPERCLIP_AGENT_ID: "configured-agent",
+            PAPERCLIP_API_KEY: "configured-token",
+            PAPERCLIP_RUN_ID: "configured-run",
+            ADAPTER_TEST_ARGS_PATH: argsCapturePath,
+            ADAPTER_TEST_ENV_PATH: envCapturePath,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          },
         },
-      },
-    });
+      });
 
-    expect(result.status).toBe("pass");
-    const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
-    expect(args).toContain("--yolo");
-    await fs.rm(root, { recursive: true, force: true });
+      expect(result.status).toBe("pass");
+      const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
+      expect(args).toContain("--yolo");
+      const childEnv = JSON.parse(await fs.readFile(envCapturePath, "utf8")) as Record<string, string | undefined>;
+      expect(childEnv.PAPERCLIP_AGENT_ID).toBeUndefined();
+      expect(childEnv.PAPERCLIP_API_KEY).toBeUndefined();
+      expect(childEnv.PAPERCLIP_RUN_ID).toBeUndefined();
+      expect(childEnv.CURSOR_API_KEY).toBe("test-key");
+    } finally {
+      if (originalRunId === undefined) delete process.env.PAPERCLIP_RUN_ID;
+      else process.env.PAPERCLIP_RUN_ID = originalRunId;
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("does not auto-add --yolo when extraArgs already bypass trust", async () => {
@@ -92,8 +122,9 @@ describe("cursor environment diagnostics", () => {
     const binDir = path.join(root, "bin");
     const cwd = path.join(root, "workspace");
     const argsCapturePath = path.join(root, "args.json");
+    const envCapturePath = path.join(root, "env.json");
     await fs.mkdir(binDir, { recursive: true });
-    await writeFakeAgentCommand(binDir, argsCapturePath);
+    await writeFakeAgentCommand(binDir, argsCapturePath, envCapturePath);
 
     const result = await testEnvironment({
       companyId: "company-1",
@@ -104,7 +135,8 @@ describe("cursor environment diagnostics", () => {
         extraArgs: ["--yolo"],
         env: {
           CURSOR_API_KEY: "test-key",
-          PAPERCLIP_TEST_ARGS_PATH: argsCapturePath,
+          ADAPTER_TEST_ARGS_PATH: argsCapturePath,
+          ADAPTER_TEST_ENV_PATH: envCapturePath,
           PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         },
       },

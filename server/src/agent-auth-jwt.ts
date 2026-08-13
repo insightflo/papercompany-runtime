@@ -2,6 +2,11 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseEnvFileContents } from "dotenv";
 import { resolvePaperclipEnvPath } from "./paths.js";
+import { resolvePaperclipInstanceId } from "./home-paths.js";
+import { normalizeAgentApiKeyScope, type AgentApiKeyScope } from "@paperclipai/shared";
+
+export { normalizeAgentApiKeyScope } from "@paperclipai/shared";
+export type { AgentApiKeyScope } from "@paperclipai/shared";
 
 interface JwtHeader {
   alg: string;
@@ -13,10 +18,13 @@ export interface LocalAgentJwtClaims {
   company_id: string;
   adapter_type: string;
   run_id: string;
+  responsible_user_id?: string | null;
+  key_scope?: AgentApiKeyScope | null;
   iat: number;
   exp: number;
   iss?: string;
   aud?: string;
+  instance_id?: string;
   jti?: string;
 }
 
@@ -42,6 +50,11 @@ function readSecretFromPaperclipEnvFile(): string | null {
   }
 }
 
+function parseBooleanEnv(value: string | undefined): boolean {
+  if (!value) return false;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 function jwtConfig() {
   const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim() || readSecretFromPaperclipEnvFile();
   if (!secret) return null;
@@ -51,7 +64,13 @@ function jwtConfig() {
     ttlSeconds: parseNumber(process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS, 60 * 60 * 48),
     issuer: process.env.PAPERCLIP_AGENT_JWT_ISSUER ?? "paperclip",
     audience: process.env.PAPERCLIP_AGENT_JWT_AUDIENCE ?? "paperclip-api",
+    instanceId: resolvePaperclipInstanceId(),
+    disableLegacyFallback: parseBooleanEnv(process.env.PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK),
   };
+}
+
+function deriveCompanySigningKey(masterSecret: string, companyId: string, instanceId: string): string {
+  return createHmac("sha256", masterSecret).update(`jwt:${instanceId}:${companyId}`).digest("hex");
 }
 
 function base64UrlEncode(value: string) {
@@ -82,7 +101,14 @@ function safeCompare(a: string, b: string) {
   return timingSafeEqual(left, right);
 }
 
-export function createLocalAgentJwt(agentId: string, companyId: string, adapterType: string, runId: string) {
+export function createLocalAgentJwt(
+  agentId: string,
+  companyId: string,
+  adapterType: string,
+  runId: string,
+  responsibleUserId?: string | null,
+  keyScope: AgentApiKeyScope = { kind: "standard" },
+) {
   const config = jwtConfig();
   if (!config) return null;
 
@@ -92,10 +118,13 @@ export function createLocalAgentJwt(agentId: string, companyId: string, adapterT
     company_id: companyId,
     adapter_type: adapterType,
     run_id: runId,
+    responsible_user_id: responsibleUserId?.trim() || null,
+    ...(keyScope.kind === "standard" ? {} : { key_scope: keyScope }),
     iat: now,
     exp: now + config.ttlSeconds,
     iss: config.issuer,
     aud: config.audience,
+    instance_id: config.instanceId,
   };
 
   const header = {
@@ -104,7 +133,8 @@ export function createLocalAgentJwt(agentId: string, companyId: string, adapterT
   };
 
   const signingInput = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(claims))}`;
-  const signature = signPayload(config.secret, signingInput);
+  const signingKey = deriveCompanySigningKey(config.secret, companyId, config.instanceId);
+  const signature = signPayload(signingKey, signingInput);
 
   return `${signingInput}.${signature}`;
 }
@@ -121,15 +151,24 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
   const header = parseJson(base64UrlDecode(headerB64));
   if (!header || header.alg !== JWT_ALGORITHM) return null;
 
-  const signingInput = `${headerB64}.${claimsB64}`;
-  const expectedSig = signPayload(config.secret, signingInput);
-  if (!safeCompare(signature, expectedSig)) return null;
-
   const claims = parseJson(base64UrlDecode(claimsB64));
   if (!claims) return null;
 
-  const sub = typeof claims.sub === "string" ? claims.sub : null;
   const companyId = typeof claims.company_id === "string" ? claims.company_id : null;
+  if (!companyId) return null;
+
+  const signingInput = `${headerB64}.${claimsB64}`;
+  const derivedSignature = signPayload(
+    deriveCompanySigningKey(config.secret, companyId, config.instanceId),
+    signingInput,
+  );
+  let signatureOk = safeCompare(signature, derivedSignature);
+  if (!signatureOk && !config.disableLegacyFallback) {
+    signatureOk = safeCompare(signature, signPayload(config.secret, signingInput));
+  }
+  if (!signatureOk) return null;
+
+  const sub = typeof claims.sub === "string" ? claims.sub : null;
   const adapterType = typeof claims.adapter_type === "string" ? claims.adapter_type : null;
   const runId = typeof claims.run_id === "string" ? claims.run_id : null;
   const iat = typeof claims.iat === "number" ? claims.iat : null;
@@ -144,15 +183,29 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
   if (issuer && issuer !== config.issuer) return null;
   if (audience && audience !== config.audience) return null;
 
+  const instanceId = typeof claims.instance_id === "string" ? claims.instance_id : undefined;
+  if (instanceId && instanceId !== config.instanceId) return null;
+  const responsibleUserId = Object.hasOwn(claims, "responsible_user_id")
+    ? typeof claims.responsible_user_id === "string" && claims.responsible_user_id.trim()
+      ? claims.responsible_user_id.trim()
+      : null
+    : undefined;
+  const keyScope = Object.hasOwn(claims, "key_scope")
+    ? normalizeAgentApiKeyScope(claims.key_scope)
+    : undefined;
+
   return {
     sub,
     company_id: companyId,
     adapter_type: adapterType,
     run_id: runId,
+    ...(responsibleUserId !== undefined ? { responsible_user_id: responsibleUserId } : {}),
+    ...(keyScope !== undefined ? { key_scope: keyScope } : {}),
     iat,
     exp,
     ...(issuer ? { iss: issuer } : {}),
     ...(audience ? { aud: audience } : {}),
+    ...(instanceId ? { instance_id: instanceId } : {}),
     jti: typeof claims.jti === "string" ? claims.jti : undefined,
   };
 }

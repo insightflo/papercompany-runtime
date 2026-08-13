@@ -1,14 +1,22 @@
-import { createHash } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
-import { and, asc, eq, gt, isNull } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, companyMemberships, heartbeatRunEvents, instanceUserRoles } from "@paperclipai/db";
+import { heartbeatRunEvents } from "@paperclipai/db";
 import type { DeploymentMode, LiveEvent } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
+import {
+  authorizeUpgrade,
+  parseHeartbeatReplayCursors,
+  type HeartbeatReplayCursor,
+  type UpgradeContext,
+} from "./live-events-auth.js";
+
+export { authorizeUpgrade, parseHeartbeatReplayCursors } from "./live-events-auth.js";
+export type { HeartbeatReplayCursor, UpgradeContext } from "./live-events-auth.js";
 
 interface WsSocket {
   readyState: number;
@@ -40,19 +48,8 @@ const { WebSocket, WebSocketServer } = require("ws") as {
   WebSocketServer: new (opts: { noServer: boolean }) => WsServer;
 };
 
-interface UpgradeContext {
-  companyId: string;
-  actorType: "board" | "agent";
-  actorId: string;
-  heartbeatReplayCursors: HeartbeatReplayCursor[];
-}
-
 interface IncomingMessageWithContext extends IncomingMessage {
   paperclipUpgradeContext?: UpgradeContext;
-}
-
-function hashToken(token: string) {
-  return createHash("sha256").update(token).digest("hex");
 }
 
 function rejectUpgrade(socket: Duplex, statusLine: string, message: string) {
@@ -72,11 +69,6 @@ function parseCompanyId(pathname: string) {
   }
 }
 
-export interface HeartbeatReplayCursor {
-  runId: string;
-  afterSeq: number;
-}
-
 interface HeartbeatRunEventForReplay {
   id: number;
   companyId: string;
@@ -90,22 +82,6 @@ interface HeartbeatRunEventForReplay {
   message: string | null;
   payload: Record<string, unknown> | null | undefined;
   createdAt: Date;
-}
-
-export function parseHeartbeatReplayCursors(url: URL): HeartbeatReplayCursor[] {
-  const out: HeartbeatReplayCursor[] = [];
-  for (const raw of url.searchParams.getAll("heartbeatRun")) {
-    if (!raw.includes(":")) continue;
-    const [rawRunId, rawAfterSeq] = raw.split(":");
-    const runId = rawRunId?.trim();
-    if (!runId) continue;
-    const parsedSeq = Number(rawAfterSeq ?? 0);
-    out.push({
-      runId,
-      afterSeq: Number.isFinite(parsedSeq) && parsedSeq > 0 ? Math.floor(parsedSeq) : 0,
-    });
-  }
-  return out;
 }
 
 function heartbeatRunEventToLiveEvent(event: HeartbeatRunEventForReplay): LiveEvent {
@@ -166,113 +142,6 @@ async function listHeartbeatRunEventsForReplay(
     )
     .orderBy(asc(heartbeatRunEvents.seq))
     .limit(Math.max(1, Math.min(limit, 250)));
-}
-
-function parseBearerToken(rawAuth: string | string[] | undefined) {
-  const auth = Array.isArray(rawAuth) ? rawAuth[0] : rawAuth;
-  if (!auth) return null;
-  if (!auth.toLowerCase().startsWith("bearer ")) return null;
-  const token = auth.slice("bearer ".length).trim();
-  return token.length > 0 ? token : null;
-}
-
-function headersFromIncomingMessage(req: IncomingMessage): Headers {
-  const headers = new Headers();
-  for (const [key, raw] of Object.entries(req.headers)) {
-    if (!raw) continue;
-    if (Array.isArray(raw)) {
-      for (const value of raw) headers.append(key, value);
-      continue;
-    }
-    headers.set(key, raw);
-  }
-  return headers;
-}
-
-async function authorizeUpgrade(
-  db: Db,
-  req: IncomingMessage,
-  companyId: string,
-  url: URL,
-  opts: {
-    deploymentMode: DeploymentMode;
-    resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
-  },
-): Promise<UpgradeContext | null> {
-  const queryToken = url.searchParams.get("token")?.trim() ?? "";
-  const authToken = parseBearerToken(req.headers.authorization);
-  const token = authToken ?? (queryToken.length > 0 ? queryToken : null);
-
-  // Browser board context has no bearer token in local_trusted and authenticated modes.
-  if (!token) {
-    if (opts.deploymentMode === "local_trusted") {
-      return {
-        companyId,
-        actorType: "board",
-        actorId: "board",
-        heartbeatReplayCursors: parseHeartbeatReplayCursors(url),
-      };
-    }
-
-    if (opts.deploymentMode !== "authenticated" || !opts.resolveSessionFromHeaders) {
-      return null;
-    }
-
-    const session = await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req));
-    const userId = session?.user?.id;
-    if (!userId) return null;
-
-    const [roleRow, memberships] = await Promise.all([
-      db
-        .select({ id: instanceUserRoles.id })
-        .from(instanceUserRoles)
-        .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
-        .then((rows) => rows[0] ?? null),
-      db
-        .select({ companyId: companyMemberships.companyId })
-        .from(companyMemberships)
-        .where(
-          and(
-            eq(companyMemberships.principalType, "user"),
-            eq(companyMemberships.principalId, userId),
-            eq(companyMemberships.status, "active"),
-          ),
-        ),
-    ]);
-
-    const hasCompanyMembership = memberships.some((row) => row.companyId === companyId);
-    if (!roleRow && !hasCompanyMembership) return null;
-
-    return {
-      companyId,
-      actorType: "board",
-      actorId: userId,
-      heartbeatReplayCursors: parseHeartbeatReplayCursors(url),
-    };
-  }
-
-  const tokenHash = hashToken(token);
-  const key = await db
-    .select()
-    .from(agentApiKeys)
-    .where(and(eq(agentApiKeys.keyHash, tokenHash), isNull(agentApiKeys.revokedAt)))
-    .then((rows) => rows[0] ?? null);
-
-  if (!key || key.companyId !== companyId) {
-    return null;
-  }
-
-  await db
-    .update(agentApiKeys)
-    .set({ lastUsedAt: new Date() })
-    .where(eq(agentApiKeys.id, key.id));
-
-  return {
-    companyId,
-    actorType: "agent",
-    actorId: key.agentId,
-    heartbeatReplayCursors: parseHeartbeatReplayCursors(url),
-  };
 }
 
 export function setupLiveEventsWebSocketServer(

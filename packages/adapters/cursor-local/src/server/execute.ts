@@ -10,12 +10,14 @@ import {
   asStringArray,
   parseObject,
   buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
   redactEnvForLogs,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   parseJson,
+  sanitizeInheritedPaperclipEnv,
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
@@ -191,8 +193,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
 
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent, { context }) };
   env.PAPERCLIP_RUN_ID = runId;
   const wakeTaskId =
@@ -257,19 +257,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (workspaceHints.length > 0) {
     env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
   }
-  for (const [k, v] of Object.entries(envConfig)) {
-    if (typeof v === "string") env[k] = v;
-  }
-  if (!hasExplicitApiKey && authToken) {
-    env.PAPERCLIP_API_KEY = authToken;
-  }
-  const effectiveEnv = Object.fromEntries(
-    Object.entries({ ...process.env, ...env }).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
+  const configuredEnv = buildPaperclipExecutionEnv(env, envConfig, authToken);
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
-  const billingType = resolveCursorBillingType(effectiveEnv);
-  const runtimeEnv = ensurePathInEnv(effectiveEnv);
+  const billingType = resolveCursorBillingType(runtimeEnv);
   await ensureCommandResolvable(command, cwd, runtimeEnv);
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
@@ -368,7 +365,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
   const runtimeBrief = buildPaperclipRuntimeBrief(context);
-  const paperclipEnvNote = renderPaperclipEnvNote(env);
+  const paperclipEnvNote = renderPaperclipEnvNote(runtimeEnv);
   const prompt = joinPromptSections([
     instructionsPrefix,
     renderedBootstrapPrompt,
@@ -436,7 +433,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         cwd,
         commandNotes,
         commandArgs: args,
-        env: redactEnvForLogs(env),
+        env: redactEnvForLogs(configuredEnv),
         prompt,
         promptMetrics,
         context,
@@ -470,7 +467,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const proc = await runChildProcess(runId, command, args, {
       cwd,
-      env,
+      env: runtimeEnv,
       timeoutSec,
       graceSec,
       stdin: prompt,
@@ -547,7 +544,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionParams: resolvedSessionParams,
       sessionDisplayId: resolvedSessionId,
       provider: providerFromModel,
-      biller: resolveCursorBiller(effectiveEnv, billingType, providerFromModel),
+      biller: resolveCursorBiller(runtimeEnv, billingType, providerFromModel),
       model,
       billingType,
       costUsd: attempt.parsed.costUsd,

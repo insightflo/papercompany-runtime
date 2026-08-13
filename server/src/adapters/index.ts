@@ -1,4 +1,4 @@
-export { getServerAdapter, listAdapterModels, listAdapterModelEfforts, listServerAdapters, findServerAdapter } from "./registry.js";
+export { getServerAdapter, requireServerAdapter, listAdapterModels, listAdapterModelEfforts, listServerAdapters, findServerAdapter } from "./registry.js";
 export type {
   ServerAdapterModule,
   AdapterExecutionContext,
@@ -11,6 +11,13 @@ export type {
   AdapterEnvironmentTestContext,
   AdapterSessionCodec,
   AdapterSessionUpdate,
+  AdapterModelProfileKey,
+  AdapterModelProfileDefinition,
+  ConfigFieldOption,
+  ConfigFieldSchema,
+  AdapterConfigSchema,
+  AdapterRuntimeCommandSpec,
+  AdapterModelDetection,
   UsageSummary,
   AdapterAgent,
   AdapterRuntime,

@@ -273,8 +273,16 @@ Invariants:
 - `key_hash` text not null
 - `last_used_at` timestamptz null
 - `revoked_at` timestamptz null
+- `responsible_user_id` text fk `user.id` null (`ON DELETE SET NULL`; added by migration `0087_agent_api_keys_responsibility_scope`)
+- `scope_config` jsonb null (added by migration `0087_agent_api_keys_responsibility_scope`; interpreted by `normalizeAgentApiKeyScope` in `packages/shared`)
 
 Invariant: plaintext key shown once at creation; only hash stored.
+
+Responsibility invariant (normative from migration 0087 onward):
+
+- Every active (non-revoked) key has non-null `responsible_user_id`; the migration raises an exception if any active key is left without responsibility, and runtime auth refuses requests for keys without a valid binding.
+- Responsibility eligibility means an actual user record (`user.id`) plus an active same-company user membership (`company_memberships` with `principal_type = user` and `status = active`), or the exact `instance_admin` role in `instance_user_roles`.
+- `responsible_user_id` is bound at key creation or join-claim time; it is never inferred from agent-authored text, and runtime control flow never parses documentation or comments.
 
 ## 7.3.1 `permission_groups`
 
@@ -570,6 +578,17 @@ Side effects:
   - bypass approval gates
   - modify company-wide budgets directly
   - mutate auth/keys
+
+Key responsibility binding policy (authority types `authenticated_user` and `local_implicit_board`):
+
+- Direct key creation and join-claim key binding use the same policy (`requireAgentApiKeyResponsibleUserBinding` in `server/src/services/agent-api-key-policy.ts`).
+- Only an explicit `local_implicit` board actor in local-trusted mode may bind the `local-board` identifier; it is rejected in every other context.
+- Authenticated/session/board-key pseudo-local actors reject `local-board` with `RESPONSIBLE_USER_REQUIRED`; historical join-claim approvals (`approved_by_user_id = 'local-board'`) are evaluated in authenticated mode and reject the same way.
+- A binding is valid only when the responsible user is an actual user with an active same-company user membership, or has the exact `instance_admin` role; otherwise the operation fails with `RESPONSIBLE_USER_UNAVAILABLE`.
+
+Fail-closed behavior:
+
+- HTTP agent-key authentication and WebSocket connection auth both fail closed when the key's responsibility is missing, unavailable, suspended, or out of company; no API request is served and no event connection is opened without a valid binding.
 
 ## 9.3 Permission Matrix (V1)
 
@@ -902,6 +921,12 @@ Required UX behaviors:
 - Drizzle migrations are source of truth
 - no destructive migration in-place for V1 upgrade path
 - provide migration script from existing minimal tables to company-scoped schema
+- Migration `0087_agent_api_keys_responsibility_scope` is a single-file transaction guarded by advisory lock `870087001`; it is the only migration that writes responsibility columns, and it records its history in `activity_log`. Docs and runbooks are explanatory only; runtime control flow never parses them.
+- Provenance is deterministic: candidates come only from `direct_key_created` (the `agent.key_created` activity entry that names the key id) and `join_claim` (the approved join request whose claim created the key); no other evidence is considered.
+- Backfill is exact-one: a key is backfilled only when exactly one eligible candidate exists; eligible means an actual user with an active same-company membership or the exact `instance_admin` role.
+- Report-before-mutation: for every key the migration first writes a versioned receipt (`agent_api_key.responsibility_migration_reported`, schemaVersion 1) and only then backfills or revokes.
+- Unresolved keys (no provenance, no eligible candidate, or conflicting eligible candidates) are revoked with audit action `agent_api_key.revoked_by_responsibility_migration` and flagged `requiresOperatorAction: true`; their plaintext cannot be recovered and they must be reissued.
+- Replay is idempotent: re-running the migration reuses existing receipts, skips already-reported keys, and keeps already-revoked keys as `preserve_revoked`; a stored report (`--mode stored`) is accepted only when every receipt parses against the exact schema.
 
 ## 15.3 Logging and Audit
 
@@ -922,6 +947,7 @@ Required UX behaviors:
 - CSRF protection for board session endpoints
 - rate limit auth and key-management endpoints
 - strict company boundary checks on every entity fetch/mutation
+- responsibility reports and stored receipts never contain key hashes, plaintext keys, claim secrets, or auth tokens; verification steps never place tokens in the query string, shell tracing, command history, or reports
 
 ## 17. Testing Strategy
 
@@ -953,6 +979,15 @@ A release candidate is blocked unless these pass:
 3. hard budget stop test
 4. agent pause/resume test
 5. dashboard summary consistency test
+6. API-key responsibility policy: direct create and join-claim use the same binding matrix; `local-board` is rejected under `authenticated_user` authority and required under `local_implicit_board`; errors are `RESPONSIBLE_USER_REQUIRED` / `RESPONSIBLE_USER_UNAVAILABLE`
+7. direct/join provenance: candidates come only from `direct_key_created` and `join_claim` evidence; eligibility means an actual user with an active same-company membership or the exact `instance_admin` role
+8. HTTP and WebSocket fail-closed: requests and connections are refused when responsibility is missing, unavailable, suspended, or out of company
+9. rollback: 0087 runs as one transaction; a simulated failure leaves no active key without responsibility and no partial receipts
+10. serialization: stored receipts validate against the exact schema (schemaVersion 1) and malformed receipts are rejected
+11. idempotent replay: re-running 0087 reuses existing receipts and preserves `preserve_revoked` without double-revoking
+12. parity: report builder and migration SQL agree on decisions, reason codes, and `requiresOperatorAction` for the same evidence
+13. invariant: after 0087, the final invariant query — active keys with null `responsible_user_id` — returns 0
+14. secret-sentinel: reports and receipts never contain key hashes, plaintext keys, claim secrets, or auth tokens
 
 ## 18. Delivery Plan
 

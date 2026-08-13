@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ describe("agent local JWT", () => {
     issuer: process.env[issuerEnv],
     audience: process.env[audienceEnv],
     paperclipConfig: process.env.PAPERCLIP_CONFIG,
+    instanceId: process.env.PAPERCLIP_INSTANCE_ID,
   };
 
   let tempDir: string | null = null;
@@ -25,6 +27,7 @@ describe("agent local JWT", () => {
     process.env[ttlEnv] = "3600";
     delete process.env[issuerEnv];
     delete process.env[audienceEnv];
+    delete process.env.PAPERCLIP_INSTANCE_ID;
     vi.useFakeTimers();
   });
 
@@ -40,6 +43,8 @@ describe("agent local JWT", () => {
     else process.env[audienceEnv] = originalEnv.audience;
     if (originalEnv.paperclipConfig === undefined) delete process.env.PAPERCLIP_CONFIG;
     else process.env.PAPERCLIP_CONFIG = originalEnv.paperclipConfig;
+    if (originalEnv.instanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+    else process.env.PAPERCLIP_INSTANCE_ID = originalEnv.instanceId;
     if (tempDir) {
       rmSync(tempDir, { recursive: true, force: true });
       tempDir = null;
@@ -59,7 +64,50 @@ describe("agent local JWT", () => {
       run_id: "run-1",
       iss: "paperclip",
       aud: "paperclip-api",
+      responsible_user_id: null,
+      instance_id: "default",
     });
+  });
+
+  it("includes responsible user and non-standard key scope claims", () => {
+    const token = createLocalAgentJwt(
+      "agent-1",
+      "company-1",
+      "codex_local",
+      "run-1",
+      "user-1",
+      { kind: "skill_test", issueId: "issue-1" },
+    );
+
+    expect(verifyLocalAgentJwt(token!)).toMatchObject({
+      responsible_user_id: "user-1",
+      key_scope: { kind: "skill_test", issueId: "issue-1" },
+      instance_id: "default",
+    });
+  });
+
+  it("rejects a token signed for another instance or company", () => {
+    const token = createLocalAgentJwt("agent-1", "company-1", "codex_local", "run-1");
+    process.env.PAPERCLIP_INSTANCE_ID = "fork-instance";
+    expect(verifyLocalAgentJwt(token!)).toBeNull();
+
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+    const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+    const claims = Buffer.from(JSON.stringify({
+      sub: "agent-1",
+      company_id: "company-2",
+      adapter_type: "codex_local",
+      run_id: "run-1",
+      iat: 1767225600,
+      exp: 1767229200,
+      iss: "paperclip",
+      aud: "paperclip-api",
+      instance_id: "default",
+    })).toString("base64url");
+    const signingInput = `${header}.${claims}`;
+    const key = createHmac("sha256", "test-secret").update("jwt:default:company-1").digest("hex");
+    const signature = createHmac("sha256", key).update(signingInput).digest("base64url");
+    expect(verifyLocalAgentJwt(`${signingInput}.${signature}`)).toBeNull();
   });
 
   it("loads PAPERCLIP_AGENT_JWT_SECRET from the Paperclip env file when it is absent from process env", () => {

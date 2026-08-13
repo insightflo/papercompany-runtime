@@ -19,7 +19,13 @@ Core fields:
 - url (string, required): OpenClaw gateway WebSocket URL (ws:// or wss://)
 - headers (object, optional): handshake headers; supports x-openclaw-token / x-openclaw-auth
 - authToken (string, optional): shared gateway token override
+- deviceToken / bootstrapToken (string, optional): gateway device/bootstrap token used for connect and device signing when authToken is absent
 - password (string, optional): gateway shared password, if configured
+
+Gateway protocol compatibility fields:
+- protocolVersion (3 | 4, optional): pin one gateway protocol version when negotiation is unavailable
+- minProtocol / maxProtocol (3 | 4, optional): negotiated protocol range; defaults to 3..4
+- fallbackProtocolVersion (3 | 4, optional): one explicit fallback after a structured protocol-range rejection; defaults to v3 for the 3..4 range
 
 Gateway connect identity fields:
 - clientId (string, optional): gateway client id (default gateway-client)
@@ -30,22 +36,21 @@ Gateway connect identity fields:
 - disableDeviceAuth (boolean, optional): disable signed device payload in connect params (default false)
 
 Request behavior fields:
-- payloadTemplate (object, optional): additional fields merged into gateway agent params
-- workspaceRuntime (object, optional): desired runtime service intents; Paperclip forwards these in a standardized paperclip.workspaceRuntime block for remote execution environments
+- payloadTemplate (object, optional): fields matching OpenClaw v4 AgentParams are sent at the request root; legacy text and paperclip fields plus unsupported fields are preserved in the structured wake message instead of being sent as unknown roots. payloadTemplate.agentId overrides config.agentId for routing and session scope
+- workspaceRuntime (object, optional): desired runtime service intents; Paperclip preserves these in the structured wake context for remote execution environments
 - timeoutSec (number, optional): adapter timeout in seconds (default 120)
 - waitTimeoutMs (number, optional): agent.wait timeout override (default timeoutSec * 1000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
+- claimedApiKeyPath (string, optional): agent-readable claimed API-key JSON path (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
 
 Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run
-- sessionKey (string, optional): fixed session key when strategy=fixed (default paperclip)
+- sessionKey (string, optional): fixed session key when strategy=fixed; when gateway agentId is configured, all resolved keys are agent-scoped unless already prefixed with agent:
 
-Standard outbound payload additions:
-- paperclip (object): standardized Paperclip context added to every gateway agent request
-- paperclip.workspace (object, optional): resolved execution workspace for this run
-- paperclip.workspaces (array, optional): additional workspace hints Paperclip exposed to the run
-- paperclip.workspaceRuntime (object, optional): normalized runtime service intent config for the workspace
+Standard Papercompany context mapping:
+- Paperclip preserves the standardized workspace/workspaces/workspaceRuntime context in the structured wake message JSON.
+- The v4 gateway agent request does not send a root-level \`paperclip\` field because upstream AgentParams validation rejects unknown root fields.
 
 Standard result metadata supported:
 - meta.runtimeServices (array, optional): normalized adapter-managed runtime service reports

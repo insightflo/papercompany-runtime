@@ -55,6 +55,10 @@ import {
   logActivity,
   notifyHireApproved
 } from "../services/index.js";
+import {
+  requireAgentApiKeyResponsibleUserBinding,
+  type AgentApiKeyResponsibilityContext,
+} from "../services/agent-api-key-policy.js";
 import { assertCompanyAccess } from "./authz.js";
 import {
   claimBoardOwnership,
@@ -2798,6 +2802,21 @@ export function accessRoutes(
         .then((rows) => rows[0] ?? null);
       if (existingKey) throw conflict("API key already claimed");
 
+      const responsibilityContext: AgentApiKeyResponsibilityContext =
+        opts.deploymentMode === "local_trusted" &&
+        joinRequest.status === "approved" &&
+        joinRequest.approvedAt !== null &&
+        joinRequest.approvedByUserId === "local-board"
+          ? { authority: "local_implicit_board" }
+          : { authority: "authenticated_user" };
+
+      const responsibleUserId = await requireAgentApiKeyResponsibleUserBinding(
+        db,
+        joinRequest.companyId,
+        joinRequest.approvedByUserId,
+        responsibilityContext,
+      );
+
       const consumed = await db
         .update(joinRequests)
         .set({ claimSecretConsumedAt: new Date(), updatedAt: new Date() })
@@ -2813,7 +2832,9 @@ export function accessRoutes(
 
       const created = await agents.createApiKey(
         joinRequest.createdAgentId,
-        "initial-join-key"
+        "initial-join-key",
+        responsibleUserId,
+        responsibilityContext,
       );
 
       await logActivity(db, {

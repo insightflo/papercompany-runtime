@@ -18,7 +18,7 @@ let stdin = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { stdin += chunk; });
 process.stdin.on('end', () => {
-  const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+  const capturePath = process.env.ADAPTER_TEST_CAPTURE_PATH;
   if (capturePath) {
     fs.writeFileSync(capturePath, JSON.stringify({ argv: process.argv.slice(2), stdin }, null, 2), 'utf8');
   }
@@ -75,7 +75,7 @@ describe("pi execute", () => {
           command: commandPath,
           cwd: workspace,
           env: {
-            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            ADAPTER_TEST_CAPTURE_PATH: capturePath,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
           provider: "openai",

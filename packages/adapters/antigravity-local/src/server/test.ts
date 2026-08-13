@@ -8,10 +8,12 @@ import {
   asBoolean,
   asString,
   asStringArray,
+  buildPaperclipExecutionEnv,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
   parseObject,
+  sanitizeInheritedPaperclipEnv,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { buildAntigravityArgs, extractLatestAntigravityResponse } from "./execute.js";
@@ -48,11 +50,15 @@ export async function testEnvironment(
   }
 
   const envConfig = parseObject(config.env);
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const configuredEnv = buildPaperclipExecutionEnv({}, envConfig);
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
   try {
     await ensureCommandResolvable(command, cwd, runtimeEnv);
     checks.push({ code: "antigravity_command_resolvable", level: "info", message: `Command is executable: ${command}` });
@@ -94,7 +100,7 @@ export async function testEnvironment(
       });
       const probe = await runChildProcess(`antigravity-envtest-${Date.now()}`, command, args, {
         cwd,
-        env,
+        env: runtimeEnv,
         timeoutSec: 180,
         graceSec: 5,
         onLog: async () => {},

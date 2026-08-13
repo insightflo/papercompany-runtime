@@ -21,20 +21,22 @@ Don't use when:
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): markdown instructions file path resolved from the effective cwd and appended to the system prompt via --append-system-prompt
-- promptTemplate (string, optional): user prompt template passed via -p flag
+- promptTemplate (string, optional): heartbeat prompt sent as a JSON RPC \`prompt\` command on stdin
 - model (string, required): Pi model id in provider/model format (for example xai/grok-4)
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)
 - command (string, optional): defaults to "pi"
-- env (object, optional): KEY=VALUE environment variables
+- env (object, optional): KEY=VALUE environment variables; \`HOME\` controls the Pi session and skill directories
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
 - graceSec (number, optional): SIGTERM grace period in seconds
 
 Notes:
-- Pi supports multiple providers and models. Use \`pi --list-models\` to list available options.
+- Pi supports multiple providers and models. Use \`pi --list-models\` to list available options; Paperclip reads model tables from stdout and stderr and deduplicates rows.
 - Paperclip requires an explicit \`model\` value for \`pi_local\` agents.
 - Sessions are stored in ~/.pi/paperclips/ and resumed with --session.
 - All tools (read, bash, edit, write, grep, find, ls) are enabled by default.
-- Agent instructions are appended to Pi's system prompt via --append-system-prompt, while the user task is sent via -p.
+- Agent instructions are appended to Pi's system prompt via \`--append-system-prompt\`, while the user task is sent through Pi's \`--mode rpc\` stdin protocol.
+- Paperclip invokes Pi with \`--session\` and \`--skill\`; \`extraArgs\` (or legacy \`args\`) may add provider-specific flags.
+- Structured Pi \`error\`/\`auto_retry_end\` events and assistant turn messages with \`status=error\` or \`stopReason=error\` fail the run even when the process exits 0.
 `;

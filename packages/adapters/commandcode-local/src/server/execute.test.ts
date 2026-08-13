@@ -252,7 +252,7 @@ describe("commandcode execute", () => {
     const script = `#!/usr/bin/env node
 const fs = require('node:fs');
 const argv = process.argv.slice(2);
-fs.writeFileSync(process.env.PAPERCLIP_TEST_CAPTURE_PATH, JSON.stringify({ argv }, null, 2), 'utf8');
+fs.writeFileSync(process.env.ADAPTER_TEST_CAPTURE_PATH, JSON.stringify({ argv }, null, 2), 'utf8');
 const resumeIdx = argv.indexOf('--resume');
 if (resumeIdx !== -1) {
   console.error('Error: unknown session id ' + argv[resumeIdx + 1]);
@@ -266,7 +266,7 @@ process.exit(0);
     try {
       const result = await execute(
         buildCtx(
-          { env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath } },
+          { env: { ADAPTER_TEST_CAPTURE_PATH: capturePath } },
           { command: commandPath, cwd: workspace, capture: capturePath, runtime: { sessionParams: { sessionId: "stale-1", cwd: workspace } } },
         ),
       );

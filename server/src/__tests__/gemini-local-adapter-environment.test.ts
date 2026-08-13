@@ -4,13 +4,26 @@ import os from "node:os";
 import path from "node:path";
 import { testEnvironment } from "@paperclipai/adapter-gemini-local/server";
 
-async function writeFakeGeminiCommand(binDir: string, argsCapturePath: string): Promise<string> {
+async function writeFakeGeminiCommand(
+  binDir: string,
+  argsCapturePath: string,
+  envCapturePath: string,
+): Promise<string> {
   const commandPath = path.join(binDir, "gemini");
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
-const outPath = process.env.PAPERCLIP_TEST_ARGS_PATH;
-if (outPath) {
-  fs.writeFileSync(outPath, JSON.stringify(process.argv.slice(2)), "utf8");
+const argsPath = process.env.ADAPTER_TEST_ARGS_PATH;
+if (argsPath) {
+  fs.writeFileSync(argsPath, JSON.stringify(process.argv.slice(2)), "utf8");
+}
+const envPath = process.env.ADAPTER_TEST_ENV_PATH;
+if (envPath) {
+  fs.writeFileSync(envPath, JSON.stringify({
+    PAPERCLIP_AGENT_ID: process.env.PAPERCLIP_AGENT_ID,
+    PAPERCLIP_API_KEY: process.env.PAPERCLIP_API_KEY,
+    PAPERCLIP_RUN_ID: process.env.PAPERCLIP_RUN_ID,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  }), "utf8");
 }
 console.log(JSON.stringify({
   type: "assistant",
@@ -76,9 +89,13 @@ describe("gemini_local environment diagnostics", () => {
     const cwd = path.join(root, "workspace");
     const argsCapturePath = path.join(root, "args.json");
     await fs.mkdir(binDir, { recursive: true });
-    await writeFakeGeminiCommand(binDir, argsCapturePath);
+    const envCapturePath = path.join(root, "env.json");
+    await writeFakeGeminiCommand(binDir, argsCapturePath, envCapturePath);
 
-    const result = await testEnvironment({
+    const originalRunId = process.env.PAPERCLIP_RUN_ID;
+    process.env.PAPERCLIP_RUN_ID = "inherited-run";
+    try {
+      const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "gemini_local",
       config: {
@@ -88,20 +105,33 @@ describe("gemini_local environment diagnostics", () => {
         yolo: true,
         env: {
           GEMINI_API_KEY: "test-key",
-          PAPERCLIP_TEST_ARGS_PATH: argsCapturePath,
+          PAPERCLIP_AGENT_ID: "configured-agent",
+          PAPERCLIP_API_KEY: "configured-token",
+          PAPERCLIP_RUN_ID: "configured-run",
+          ADAPTER_TEST_ARGS_PATH: argsCapturePath,
+          ADAPTER_TEST_ENV_PATH: envCapturePath,
           PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         },
       },
     });
 
-    expect(result.status).not.toBe("fail");
-    const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
-    expect(args).toContain("--model");
-    expect(args).toContain("gemini-2.5-pro");
-    expect(args).toContain("--approval-mode");
-    expect(args).toContain("yolo");
-    expect(args).toContain("--prompt");
-    await fs.rm(root, { recursive: true, force: true });
+      expect(result.status).not.toBe("fail");
+      const args = JSON.parse(await fs.readFile(argsCapturePath, "utf8")) as string[];
+      expect(args).toContain("--model");
+      expect(args).toContain("gemini-2.5-pro");
+      expect(args).toContain("--approval-mode");
+      expect(args).toContain("yolo");
+      expect(args).toContain("--prompt");
+      const childEnv = JSON.parse(await fs.readFile(envCapturePath, "utf8")) as Record<string, string | undefined>;
+      expect(childEnv.PAPERCLIP_AGENT_ID).toBeUndefined();
+      expect(childEnv.PAPERCLIP_API_KEY).toBeUndefined();
+      expect(childEnv.PAPERCLIP_RUN_ID).toBeUndefined();
+      expect(childEnv.GEMINI_API_KEY).toBe("test-key");
+    } finally {
+      if (originalRunId === undefined) delete process.env.PAPERCLIP_RUN_ID;
+      else process.env.PAPERCLIP_RUN_ID = originalRunId;
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("classifies quota exhaustion as a quota warning instead of a generic failure", async () => {

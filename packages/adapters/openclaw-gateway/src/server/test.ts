@@ -4,8 +4,12 @@ import type {
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
-import { randomUUID } from "node:crypto";
-import { WebSocket } from "ws";
+import { probeGateway } from "./gateway-probe.js";
+import {
+  fallbackGatewayProtocol,
+  resolveGatewayProtocol,
+  type GatewayProtocolSelection,
+} from "./protocol.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -70,121 +74,8 @@ function resolveAuthToken(config: Record<string, unknown>, headers: Record<strin
   const authHeader =
     headerMapGetIgnoreCase(headers, "x-openclaw-auth") ??
     headerMapGetIgnoreCase(headers, "authorization");
-  return tokenFromAuthHeader(authHeader);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-function rawDataToString(data: unknown): string {
-  if (typeof data === "string") return data;
-  if (Buffer.isBuffer(data)) return data.toString("utf8");
-  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
-  if (Array.isArray(data)) {
-    return Buffer.concat(
-      data.map((entry) => (Buffer.isBuffer(entry) ? entry : Buffer.from(String(entry), "utf8"))),
-    ).toString("utf8");
-  }
-  return String(data ?? "");
-}
-
-async function probeGateway(input: {
-  url: string;
-  headers: Record<string, string>;
-  authToken: string | null;
-  role: string;
-  scopes: string[];
-  timeoutMs: number;
-}): Promise<"ok" | "challenge_only" | "failed"> {
-  return await new Promise((resolve) => {
-    const ws = new WebSocket(input.url, { headers: input.headers, maxPayload: 2 * 1024 * 1024 });
-    const timeout = setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      resolve("failed");
-    }, input.timeoutMs);
-
-    let completed = false;
-
-    const finish = (status: "ok" | "challenge_only" | "failed") => {
-      if (completed) return;
-      completed = true;
-      clearTimeout(timeout);
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      resolve(status);
-    };
-
-    ws.on("message", (raw) => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(rawDataToString(raw));
-      } catch {
-        return;
-      }
-      const event = asRecord(parsed);
-      if (event?.type === "event" && event.event === "connect.challenge") {
-        const nonce = nonEmpty(asRecord(event.payload)?.nonce);
-        if (!nonce) {
-          finish("failed");
-          return;
-        }
-
-        const connectId = randomUUID();
-        ws.send(
-          JSON.stringify({
-            type: "req",
-            id: connectId,
-            method: "connect",
-            params: {
-              minProtocol: 3,
-              maxProtocol: 3,
-              client: {
-                id: "gateway-client",
-                version: "paperclip-probe",
-                platform: process.platform,
-                mode: "probe",
-              },
-              role: input.role,
-              scopes: input.scopes,
-              ...(input.authToken
-                ? {
-                    auth: {
-                      token: input.authToken,
-                    },
-                  }
-                : {}),
-            },
-          }),
-        );
-        return;
-      }
-
-      if (event?.type === "res") {
-        if (event.ok === true) {
-          finish("ok");
-        } else {
-          finish("challenge_only");
-        }
-      }
-    });
-
-    ws.on("error", () => {
-      finish("failed");
-    });
-
-    ws.on("close", () => {
-      if (!completed) finish("failed");
-    });
-  });
+  const fromHeader = tokenFromAuthHeader(authHeader);
+  return fromHeader ?? nonEmpty(process.env.OPENCLAW_TOKEN);
 }
 
 export async function testEnvironment(
@@ -229,6 +120,17 @@ export async function testEnvironment(
     });
   }
 
+  let protocolSelection: GatewayProtocolSelection | null = null;
+  try {
+    protocolSelection = resolveGatewayProtocol(config);
+  } catch (err) {
+    checks.push({
+      code: "openclaw_gateway_protocol_config_invalid",
+      level: "error",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   if (url) {
     checks.push({
       code: "openclaw_gateway_url_valid",
@@ -267,24 +169,39 @@ export async function testEnvironment(
     });
   }
 
-  if (url && (url.protocol === "ws:" || url.protocol === "wss:")) {
+  if (url && (url.protocol === "ws:" || url.protocol === "wss:") && protocolSelection) {
     try {
-      const probeResult = await probeGateway({
+      let probeResult = await probeGateway({
         url: url.toString(),
         headers,
         authToken,
+        password,
         role,
         scopes: scopes.length > 0 ? scopes : ["operator.admin"],
+        protocol: protocolSelection,
         timeoutMs: 3_000,
       });
+      const fallbackProtocol = fallbackGatewayProtocol(protocolSelection);
+      if (probeResult.protocolMismatch && fallbackProtocol) {
+        probeResult = await probeGateway({
+          url: url.toString(),
+          headers,
+          authToken,
+          password,
+          role,
+          scopes: scopes.length > 0 ? scopes : ["operator.admin"],
+          protocol: fallbackProtocol,
+          timeoutMs: 3_000,
+        });
+      }
 
-      if (probeResult === "ok") {
+      if (probeResult.status === "ok") {
         checks.push({
           code: "openclaw_gateway_probe_ok",
           level: "info",
           message: "Gateway connect probe succeeded.",
         });
-      } else if (probeResult === "challenge_only") {
+      } else if (probeResult.status === "challenge_only") {
         checks.push({
           code: "openclaw_gateway_probe_challenge_only",
           level: "warn",

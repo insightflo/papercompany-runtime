@@ -15,10 +15,12 @@ import {
   asString,
   asStringArray,
   buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
   parseObject,
+  sanitizeInheritedPaperclipEnv,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { resolveAntigravitySkillPrompt } from "./skills.js";
@@ -163,12 +165,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = { ...buildPaperclipEnv(agent, { context }), PAPERCLIP_RUN_ID: runId };
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  if (!env.PAPERCLIP_API_KEY && authToken) env.PAPERCLIP_API_KEY = authToken;
+  const configuredEnv = buildPaperclipExecutionEnv(env, envConfig, authToken);
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv({ ...sanitizeInheritedPaperclipEnv(process.env), ...configuredEnv })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -233,7 +232,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     command,
     cwd,
     commandArgs: args,
-    env,
+    env: configuredEnv,
     prompt,
     context: { sessionId, model, effort, chromeSupportedByCurrentCli: false, chromeRequested: chrome },
   });
@@ -242,7 +241,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const graceSec = asNumber(config.graceSec, 20);
   const child = await runChildProcess(`antigravity-${runId}`, command, args, {
     cwd,
-    env,
+    env: runtimeEnv,
     timeoutSec,
     graceSec,
     onLog,

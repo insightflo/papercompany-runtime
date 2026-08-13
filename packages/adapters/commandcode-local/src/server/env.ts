@@ -1,8 +1,10 @@
 import {
   asString,
   buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
   ensurePathInEnv,
   parseObject,
+  sanitizeInheritedPaperclipEnv,
   redactEnvForLogs,
 } from "@paperclipai/adapter-utils/server-utils";
 
@@ -66,8 +68,8 @@ export function buildCommandCodeRunEnv(params: BuildRunEnvParams): CommandCodeRu
   const { runId, agent, config, context, authToken, workspace } = params;
   const envConfig = parseObject(config.env);
 
-  const env: Record<string, string> = { ...buildPaperclipEnv(agent, { context }) };
-  env.PAPERCLIP_RUN_ID = runId;
+  const paperclipEnv: Record<string, string> = { ...buildPaperclipEnv(agent, { context }) };
+  paperclipEnv.PAPERCLIP_RUN_ID = runId;
 
   const wakeTaskId = firstNonEmpty(context.taskId, context.issueId);
   const wakeReason = firstNonEmpty(context.wakeReason);
@@ -80,32 +82,26 @@ export function buildCommandCodeRunEnv(params: BuildRunEnvParams): CommandCodeRu
       )
     : [];
 
-  if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
-  if (wakeReason) env.PAPERCLIP_WAKE_REASON = wakeReason;
-  if (wakeCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = wakeCommentId;
-  if (approvalId) env.PAPERCLIP_APPROVAL_ID = approvalId;
-  if (approvalStatus) env.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
-  if (linkedIssueIds.length > 0) env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
-  if (workspace.workspaceCwd) env.PAPERCLIP_WORKSPACE_CWD = workspace.workspaceCwd;
-  if (workspace.workspaceSource) env.PAPERCLIP_WORKSPACE_SOURCE = workspace.workspaceSource;
+  if (wakeTaskId) paperclipEnv.PAPERCLIP_TASK_ID = wakeTaskId;
+  if (wakeReason) paperclipEnv.PAPERCLIP_WAKE_REASON = wakeReason;
+  if (wakeCommentId) paperclipEnv.PAPERCLIP_WAKE_COMMENT_ID = wakeCommentId;
+  if (approvalId) paperclipEnv.PAPERCLIP_APPROVAL_ID = approvalId;
+  if (approvalStatus) paperclipEnv.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
+  if (linkedIssueIds.length > 0) paperclipEnv.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
+  if (workspace.workspaceCwd) paperclipEnv.PAPERCLIP_WORKSPACE_CWD = workspace.workspaceCwd;
+  if (workspace.workspaceSource) paperclipEnv.PAPERCLIP_WORKSPACE_SOURCE = workspace.workspaceSource;
 
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
-  }
-
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
-  if (!hasExplicitApiKey && authToken) {
-    env.PAPERCLIP_API_KEY = authToken;
-  }
-
+  const configuredEnv = buildPaperclipExecutionEnv(paperclipEnv, envConfig, authToken);
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
 
-  return { runtimeEnv, redactedEnv: redactEnvForLogs(env) };
+  return { runtimeEnv, redactedEnv: redactEnvForLogs(configuredEnv) };
 }
 
 export function resolveExtraArgs(config: Record<string, unknown>): string[] {

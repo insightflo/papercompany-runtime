@@ -7,12 +7,12 @@ import { execute } from "@paperclipai/adapter-gemini-local/server";
 // Snapshot of original process.env values for every key this file mutates or
 // reads, so the worker's env is pristine for subsequent test files regardless
 // of where the write occurs (top-level, beforeAll, beforeEach, or inline).
-// HOME is reassigned per-test below; PAPERCLIP_TEST_CAPTURE_PATH is read by the
+// HOME is reassigned per-test below; ADAPTER_TEST_CAPTURE_PATH is read by the
 // fake gemini command but is never assigned on process.env here — snapshotted
 // defensively for completeness.
 const __ENV_RESTORE: Record<string, string | undefined> = {
   HOME: process.env.HOME,
-  PAPERCLIP_TEST_CAPTURE_PATH: process.env.PAPERCLIP_TEST_CAPTURE_PATH,
+  ADAPTER_TEST_CAPTURE_PATH: process.env.ADAPTER_TEST_CAPTURE_PATH,
 };
 
 afterAll(() => {
@@ -29,7 +29,7 @@ async function writeFakeGeminiCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 
-const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const capturePath = process.env.ADAPTER_TEST_CAPTURE_PATH;
 const payload = {
   argv: process.argv.slice(2),
   paperclipEnvKeys: Object.keys(process.env)
@@ -99,7 +99,7 @@ describe("gemini execute", () => {
           cwd: workspace,
           model: "gemini-2.5-pro",
           env: {
-            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            ADAPTER_TEST_CAPTURE_PATH: capturePath,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
@@ -194,7 +194,7 @@ describe("gemini execute", () => {
         config: {
           command: commandPath,
           cwd: workspace,
-          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          env: { ADAPTER_TEST_CAPTURE_PATH: capturePath },
         },
         context: {},
         authToken: "t",

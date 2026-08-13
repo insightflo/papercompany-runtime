@@ -11,6 +11,7 @@ export default defineConfig({
       "packages/adapters/antigravity-local",
       "packages/adapters/pi-local",
       "packages/adapters/commandcode-local",
+      "packages/adapters/openclaw-gateway",
       "server",
       "ui",
       "cli",
