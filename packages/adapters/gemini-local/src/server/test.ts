@@ -9,11 +9,13 @@ import {
   asNumber,
   asString,
   asStringArray,
+  buildPaperclipExecutionEnv,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
   parseObject,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "../index.js";
 import { detectGeminiAuthRequired, detectGeminiQuotaExhausted, parseGeminiJsonl } from "./parse.js";
@@ -71,7 +73,15 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const configuredEnv = buildPaperclipExecutionEnv({}, envConfig);
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
   try {
     await ensureCommandResolvable(command, cwd, runtimeEnv);
     checks.push({
@@ -158,7 +168,7 @@ export async function testEnvironment(
         args,
         {
           cwd,
-          env,
+          env: runtimeEnv,
           timeoutSec: helloProbeTimeoutSec,
           graceSec: 5,
           onLog: async () => { },

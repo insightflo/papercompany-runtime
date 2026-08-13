@@ -43,6 +43,31 @@ describe("parsePiJsonl", () => {
     expect(parsed.messages).toContain("Hello World");
   });
 
+  it("records structured Pi error events so a zero-exit process cannot look successful", () => {
+    const stdout = [
+      JSON.stringify({ type: "error", message: "provider unavailable" }),
+      JSON.stringify({ type: "auto_retry_end", success: false, finalError: "retry budget exhausted" }),
+    ].join("\n");
+
+    const parsed = parsePiJsonl(stdout);
+    expect(parsed.errors).toEqual(["provider unavailable", "retry budget exhausted"]);
+  });
+
+  it("records structured assistant turn errors", () => {
+    const stdout = JSON.stringify({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        status: "error",
+        stopReason: "error",
+        errorMessage: "provider request failed",
+      },
+    });
+
+    const parsed = parsePiJsonl(stdout);
+    expect(parsed.errors).toEqual(["provider request failed"]);
+  });
+
   it("parses tool execution", () => {
     const stdout = [
       JSON.stringify({

@@ -17,11 +17,13 @@ function parseModelsOutput(stdout: string): AdapterModel[] {
   const parsed: AdapterModel[] = [];
   const lines = stdout.split(/\r?\n/);
   
-  // Skip header line if present
-  let startIndex = 0;
-  if (lines.length > 0 && (lines[0].includes("provider") || lines[0].includes("model"))) {
-    startIndex = 1;
-  }
+  // Ignore wrapper warnings before the table header. Older output without a
+  // header remains supported by starting at the first non-empty row.
+  const headerIndex = lines.findIndex((line) => {
+    const columns = line.trim().split(/\s{2,}/).map((column) => column.trim().toLowerCase());
+    return columns[0] === "provider" && columns[1] === "model";
+  });
+  const startIndex = headerIndex >= 0 ? headerIndex + 1 : 0;
   
   for (let i = startIndex; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -36,6 +38,7 @@ function parseModelsOutput(stdout: string): AdapterModel[] {
     const model = parts[1].trim();
     
     if (!provider || !model) continue;
+    if (/\s/.test(model)) continue;
     if (provider === "provider" && model === "model") continue; // Skip header
     
     const id = `${provider}/${model}`;
@@ -131,7 +134,10 @@ export async function discoverPiModels(input: {
     throw new Error(detail ? `\`pi --list-models\` failed: ${detail}` : "`pi --list-models` failed.");
   }
 
-  return sortModels(dedupeModels(parseModelsOutput(result.stdout)));
+  // Pi versions and wrappers may emit the table on either stream; warnings on
+  // stderr must not hide valid model rows from stdout.
+  const models = [...parseModelsOutput(result.stdout), ...parseModelsOutput(result.stderr)];
+  return sortModels(dedupeModels(models));
 }
 
 function normalizeEnv(input: unknown): Record<string, string> {

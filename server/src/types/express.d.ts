@@ -1,3 +1,5 @@
+import type { AgentApiKeyScope } from "../agent-auth-jwt.js";
+
 export {};
 
 declare global {
@@ -11,6 +13,13 @@ declare global {
         companyIds?: string[];
         isInstanceAdmin?: boolean;
         keyId?: string;
+        keyScope?: AgentApiKeyScope;
+        onBehalfOfUserId?: string;
+        onBehalfOfMemberships?: Array<{
+          companyId: string;
+          membershipRole: string | null;
+          status: string;
+        }>;
         runId?: string;
         source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "none";
         // authn 시 agentRecord 기반으로 한 번만 계산. hermes-ops-mutation-guard가 읽음.

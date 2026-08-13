@@ -40,6 +40,7 @@
     "typecheck": "tsc --noEmit",
     "generate": "tsc -p tsconfig.json && drizzle-kit generate",
     "migrate": "tsx src/migrate.ts",
+    "report:agent-api-key-responsibility": "tsx src/agent-api-key-responsibility-report-cli.ts",
     "seed": "tsx src/seed.ts"
   },
   "dependencies": {

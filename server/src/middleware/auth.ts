@@ -2,16 +2,43 @@ import { createHash } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, agents, companyMemberships, instanceUserRoles } from "@paperclipai/db";
-import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
+import { activityLog, agentApiKeys, agents, companyMemberships, instanceUserRoles } from "@paperclipai/db";
+import { normalizeAgentApiKeyScope, verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { resolveHermesOpsLiaisonIdentity } from "../services/missions/agent-role-boundaries.js";
-import type { DeploymentMode } from "@paperclipai/shared";
+import { isUuidLike, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
+import { forbidden, unprocessable } from "../errors.js";
+import { loadAgentApiKeyResponsibleUser } from "../services/agent-api-key-policy.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function normalizeOptionalString(value: string | null | undefined) {
+  return value?.trim() || null;
+}
+
+async function auditAuthFailure(
+  db: Db,
+  input: { companyId: string; agentId: string; action: string; entityId: string; details: Record<string, unknown> },
+) {
+  try {
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: "agent",
+      actorId: input.agentId,
+      action: input.action,
+      entityType: input.action.includes("run_header") ? "heartbeat_run" : "agent_api_key",
+      entityId: input.entityId,
+      ...(isUuidLike(input.agentId) ? { agentId: input.agentId } : {}),
+      ...(isUuidLike(input.entityId) && input.action.includes("run_header") ? { runId: input.entityId } : {}),
+      details: input.details,
+    });
+  } catch (err) {
+    logger.warn({ err, ...input }, "Failed to audit rejected agent authentication");
+  }
 }
 
 interface ActorMiddlewareOptions {
@@ -132,12 +159,41 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
+      const normalizedRunIdHeader = normalizeOptionalString(runIdHeader);
+      if (normalizedRunIdHeader && normalizedRunIdHeader !== claims.run_id) {
+        await auditAuthFailure(db, {
+          companyId: claims.company_id,
+          agentId: claims.sub,
+          action: "auth.agent_jwt_run_header_mismatch",
+          entityId: claims.run_id,
+          details: {
+            claimRunId: claims.run_id,
+            headerRunId: normalizedRunIdHeader,
+            method: req.method,
+            url: req.originalUrl,
+          },
+        });
+        next(
+          unprocessable("X-Paperclip-Run-Id does not match signed agent JWT run_id", {
+            code: "agent_jwt_run_id_mismatch",
+            claimRunId: claims.run_id,
+            headerRunId: normalizedRunIdHeader,
+          }),
+        );
+        return;
+      }
+
+      const responsibleUserId = normalizeOptionalString(claims.responsible_user_id);
+      const responsibleBinding = await loadAgentApiKeyResponsibleUser(db, claims.company_id, responsibleUserId);
       req.actor = {
         type: "agent",
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        runId: runIdHeader || claims.run_id || undefined,
+        keyScope: normalizeAgentApiKeyScope(claims.key_scope),
+        runId: claims.run_id,
+        onBehalfOfUserId: responsibleUserId ?? undefined,
+        onBehalfOfMemberships: responsibleBinding.memberships,
         source: "agent_jwt",
         // [P3] liaison identity(mode 포함)를 authn에서 한 번에 산출. hermes-ops-mutation-guard가 읽음.
         ...resolveHermesOpsLiaisonIdentity(agentRecord),
@@ -157,8 +213,39 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       .where(eq(agents.id, key.agentId))
       .then((rows) => rows[0] ?? null);
 
-    if (!agentRecord || agentRecord.status === "terminated" || agentRecord.status === "pending_approval") {
+    if (
+      !agentRecord ||
+      agentRecord.companyId !== key.companyId ||
+      agentRecord.status === "terminated" ||
+      agentRecord.status === "pending_approval"
+    ) {
       next();
+      return;
+    }
+
+    const keyRecord = key as typeof key & {
+      responsibleUserId?: string | null;
+      scopeConfig?: unknown;
+    };
+    const responsibleUserId = normalizeOptionalString(keyRecord.responsibleUserId);
+    const responsibleBinding = await loadAgentApiKeyResponsibleUser(db, key.companyId, responsibleUserId);
+    if (
+      !responsibleUserId ||
+      !responsibleBinding.user ||
+      (responsibleBinding.memberships.length === 0 && !responsibleBinding.isInstanceAdmin)
+    ) {
+      await auditAuthFailure(db, {
+        companyId: key.companyId,
+        agentId: key.agentId,
+        action: "auth.agent_key_missing_responsible_user",
+        entityId: key.id,
+        details: { method: req.method, url: req.originalUrl },
+      });
+      next(
+        forbidden("Responsible user is unavailable for this agent key", {
+          code: "RESPONSIBLE_USER_UNAVAILABLE",
+        }),
+      );
       return;
     }
 
@@ -167,6 +254,9 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
+      keyScope: normalizeAgentApiKeyScope(keyRecord.scopeConfig),
+      onBehalfOfUserId: responsibleUserId,
+      onBehalfOfMemberships: responsibleBinding.memberships,
       runId: runIdHeader || undefined,
       source: "agent_key",
       ...resolveHermesOpsLiaisonIdentity(agentRecord),

@@ -10,9 +10,11 @@ This adapter always uses WebSocket gateway transport.
 - Connect flow follows gateway protocol:
 1. receive `connect.challenge`
 2. send `req connect` (protocol/client/auth/device payload)
-3. send `req agent`
-4. wait for completion via `req agent.wait`
-5. stream `event agent` frames into Paperclip logs/transcript parsing
+3. negotiate v3-v4 by default (`minProtocol=3`, `maxProtocol=4`)
+4. send `req agent`
+5. wait for completion via `req agent.wait`
+6. stream v3 `event agent` and v4 `event chat` frames into Paperclip logs/transcript parsing
+- Set `protocolVersion=3` or `protocolVersion=4` to pin a gateway. The default range retries once with v3 only after a structured protocol-range rejection; auth and transport failures are not retried as protocol fallbacks.
 
 ## Auth Modes
 
@@ -22,6 +24,7 @@ Gateway credentials can be provided in any of these ways:
 - `headers.x-openclaw-token`
 - `headers.x-openclaw-auth` (legacy)
 - `password` (shared password mode)
+- `deviceToken` / `bootstrapToken` (device/bootstrap auth modes)
 
 When a token is present and `authorization` header is missing, the adapter derives `Authorization: Bearer <token>`.
 
@@ -41,7 +44,7 @@ The adapter supports the same session routing model as HTTP OpenClaw mode:
 - `sessionKeyStrategy=issue|fixed|run`
 - `sessionKey` is used when strategy is `fixed`
 
-Resolved session key is sent as `agent.sessionKey`.
+Resolved session key is sent as `agent.sessionKey`. When `agentId` is configured, issue and run strategies include it (`agent:<agentId>:paperclip:issue:<issueId>` / `agent:<agentId>:paperclip:run:<runId>`) to prevent cross-agent session reuse; fixed keys are routed the same way unless already prefixed with `agent:`. Without a gateway `agentId`, the legacy key shape is preserved.
 
 ## Payload Mapping
 
@@ -51,9 +54,15 @@ The agent request is built as:
   - `message` (wake text plus optional `payloadTemplate.message`/`payloadTemplate.text` prefix)
   - `idempotencyKey` (Paperclip `runId`)
   - `sessionKey` (resolved strategy)
+- structured wake context JSON carries the standardized Papercompany run, issue, workspace, and workspaceRuntime mapping
+- the v4 agent request omits root-level `paperclip` because upstream AgentParams validation rejects unknown fields
 - optional additions:
-  - all `payloadTemplate` fields merged in
-  - `agentId` from config if set and not already in template
+  - fields supported by the closed v4 `AgentParams` schema are merged at the request root
+  - `payloadTemplate.agentId` overrides `agentId` for both outbound routing and session-key scoping; otherwise the configured `agentId` is used
+  - legacy `text`/`paperclip` and unsupported template fields are preserved in the structured wake-message context, not sent as unknown roots
+  - v4 `chat` deltas use `deltaText`, replacement snapshots use `replace=true`, and the server-side result summary deduplicates cumulative message snapshots
+
+The claimed API-key JSON path defaults to `~/.openclaw/workspace/paperclip-claimed-api-key.json` and can be overridden with `claimedApiKeyPath`.
 
 ## Timeouts
 
@@ -67,6 +76,6 @@ If `agent.wait` returns `timeout`, adapter returns `openclaw_gateway_wait_timeou
 Structured gateway event logs use:
 
 - `[openclaw-gateway] ...` for lifecycle/system logs
-- `[openclaw-gateway:event] run=<id> stream=<stream> data=<json>` for `event agent` frames
+- `[openclaw-gateway:event] run=<id> stream=<stream> data=<json>` for `event agent` and v4 `event chat` frames
 
-UI/CLI parsers consume these lines to render transcript updates.
+UI/CLI parsers consume these lines to render transcript updates. The server-side result summary deduplicates cumulative snapshots, but the shared board transcript type currently has no replacement marker; therefore the raw UI transcript may still show a cumulative final snapshot after earlier deltas. Fixing that display behavior requires a shared UI/type change and is intentionally outside this package-local change.

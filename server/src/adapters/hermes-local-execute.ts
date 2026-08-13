@@ -12,7 +12,9 @@ import {
 } from "@paperclipai/adapter-utils";
 import {
   buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
   ensureAbsoluteDirectory,
+  sanitizeInheritedPaperclipEnv,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 
@@ -627,19 +629,19 @@ export async function executeHermesLocal(
     extraArgs,
   });
 
-  const rawEnv: Record<string, unknown> = {
-    ...process.env,
+  const paperclipEnv: Record<string, string> = {
     ...buildPaperclipEnv(ctx.agent, { context: ctx.context }),
   };
-  if (ctx.runId) rawEnv.PAPERCLIP_RUN_ID = ctx.runId;
+  if (ctx.runId) paperclipEnv.PAPERCLIP_RUN_ID = ctx.runId;
   const taskId = cfgString(ctx.config?.taskId);
-  if (taskId) rawEnv.PAPERCLIP_TASK_ID = taskId;
-  if (config.env && typeof config.env === "object")
-    Object.assign(rawEnv, config.env);
-  const env = Object.fromEntries(
-    Object.entries(rawEnv).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
+  if (taskId) paperclipEnv.PAPERCLIP_TASK_ID = taskId;
+  const env = buildPaperclipExecutionEnv(
+    {
+      ...sanitizeInheritedPaperclipEnv(process.env),
+      ...paperclipEnv,
+    },
+    config.env,
+    ctx.authToken,
   );
 
   const cwd =

@@ -6,11 +6,13 @@ import type {
 import {
   asString,
   asStringArray,
+  buildPaperclipExecutionEnv,
   parseObject,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import { discoverOpenCodeModels, ensureOpenCodeModelConfiguredAndAvailable } from "./models.js";
 import { parseOpenCodeJsonl } from "./parse.js";
@@ -79,7 +81,6 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-
   const openaiKeyOverride = "OPENAI_API_KEY" in envConfig ? asString(envConfig.OPENAI_API_KEY, "") : null;
   if (openaiKeyOverride !== null && openaiKeyOverride.trim() === "") {
     checks.push({
@@ -89,9 +90,8 @@ export async function testEnvironment(
       hint: "The OPENAI_API_KEY override is empty. Set a valid key or remove the override.",
     });
   }
-
-  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
-
+  const configuredEnv = buildPaperclipExecutionEnv({}, envConfig);
+  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...sanitizeInheritedPaperclipEnv(process.env), ...configuredEnv }));
   const cwdInvalid = checks.some((check) => check.code === "opencode_cwd_invalid");
   if (cwdInvalid) {
     checks.push({

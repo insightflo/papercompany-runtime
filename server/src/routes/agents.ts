@@ -46,6 +46,7 @@ import {
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { findServerAdapter, listAdapterModels, listAdapterModelEfforts } from "../adapters/index.js";
+import type { AgentApiKeyResponsibilityContext } from "../services/agent-api-key-policy.js";
 import { logger } from "../middleware/logger.js";
 import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
@@ -1917,7 +1918,17 @@ export function agentRoutes(db: Db) {
   router.post("/agents/:id/keys", validate(createAgentKeySchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
-    const key = await svc.createApiKey(id, req.body.name);
+    const responsibilityContext: AgentApiKeyResponsibilityContext =
+      req.actor.source === "local_implicit"
+        ? { authority: "local_implicit_board" }
+        : { authority: "authenticated_user" };
+
+    const key = await svc.createApiKey(
+      id,
+      req.body.name,
+      req.actor.userId ?? null,
+      responsibilityContext,
+    );
 
     const agent = await svc.getById(id);
     if (agent) {

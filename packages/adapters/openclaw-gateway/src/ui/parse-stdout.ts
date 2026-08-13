@@ -18,6 +18,16 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function extractText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => extractText(entry)).join("");
+  }
+  const record = asRecord(value);
+  if (!record) return "";
+  return asString(record.text) || extractText(record.content) || asString(record.deltaText);
+}
+
 function parseAgentEventLine(line: string, ts: string): TranscriptEntry[] {
   const match = line.match(/^\[openclaw-gateway:event\]\s+run=([^\s]+)\s+stream=([^\s]+)\s+data=(.*)$/s);
   if (!match) return [{ kind: "stdout", ts, text: line }];
@@ -36,6 +46,21 @@ function parseAgentEventLine(line: string, ts: string): TranscriptEntry[] {
       return [{ kind: "assistant", ts, text }];
     }
     return [];
+  }
+
+  if (stream === "chat") {
+    const deltaText = asString(data?.deltaText);
+    if (deltaText.length > 0) {
+      return [{ kind: "assistant", ts, text: deltaText, delta: true }];
+    }
+
+    const message = extractText(data?.message);
+    if (message.length > 0) {
+      return [{ kind: "assistant", ts, text: message }];
+    }
+
+    const errorMessage = asString(data?.errorMessage) || asString(data?.error);
+    return errorMessage ? [{ kind: "stderr", ts, text: errorMessage }] : [];
   }
 
   if (stream === "error") {

@@ -5,6 +5,7 @@ import {
   asString,
   ensurePathInEnv,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 
 const MODELS_CACHE_TTL_MS = 60_000;
@@ -197,8 +198,7 @@ export async function discoverOpenCodeModels(input: {
     // image). Fall back to process.env.HOME.
   }
   const args = provider ? ["models", provider] : ["models"];
-  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env, ...(resolvedHome ? { HOME: resolvedHome } : {}) }));
-
+  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...sanitizeInheritedPaperclipEnv(process.env), ...env, ...(resolvedHome ? { HOME: resolvedHome } : {}) }));
   const result = await runChildProcess(
     `opencode-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     command,

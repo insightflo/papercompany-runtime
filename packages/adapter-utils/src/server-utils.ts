@@ -8,6 +8,15 @@ import type {
 } from "./types.js";
 import { joinPromptSections, renderTemplate } from "./prompt-utils.js";
 import { materializeProviderSkills, resolveProviderSkillsDir } from "./skills.js";
+import { sanitizeInheritedPaperclipEnv } from "./paperclip-env.js";
+
+export {
+  type BuildPaperclipEnvOptions,
+  buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
+  isPaperclipRuntimeEnvKey,
+  sanitizeInheritedPaperclipEnv,
+} from "./paperclip-env.js";
 
 export interface RunProcessResult {
   exitCode: number | null;
@@ -194,82 +203,6 @@ export function redactEnvForLogs(env: Record<string, string>): Record<string, st
     redacted[key] = SENSITIVE_ENV_KEY.test(key) ? "***REDACTED***" : value;
   }
   return redacted;
-}
-
-export type BuildPaperclipEnvOptions = {
-  context?: Record<string, unknown> | null;
-  apiUrl?: string | null;
-};
-
-function normalizePaperclipApiUrl(rawUrl: string): string | null {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return null;
-  try {
-    const parsed = new URL(trimmed.replace(/\/+$/, ""));
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-  } catch {
-    return null;
-  }
-  return trimmed;
-}
-
-function apiBaseUrl(rawUrl: string): string {
-  const trimmed = rawUrl.replace(/\/+$/, "");
-  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
-}
-
-function stripApiSuffix(rawUrl: string): string {
-  const trimmed = rawUrl.trim().replace(/\/+$/, "");
-  return trimmed.endsWith("/api") ? trimmed.slice(0, -4) : trimmed;
-}
-
-function readContextPaperclipApiUrl(context: Record<string, unknown> | null | undefined): string | null {
-  const rawApiUrl =
-    typeof context?.paperclipApiUrl === "string"
-      ? context.paperclipApiUrl
-      : typeof context?.paperclipControlPlaneUrl === "string"
-        ? context.paperclipControlPlaneUrl
-        : null;
-  if (rawApiUrl) {
-    const normalized = normalizePaperclipApiUrl(rawApiUrl);
-    if (normalized) return normalized;
-  }
-
-  const rawApiBaseUrl =
-    typeof context?.paperclipApiBaseUrl === "string"
-      ? context.paperclipApiBaseUrl
-      : typeof context?.paperclipControlPlaneApiBaseUrl === "string"
-        ? context.paperclipControlPlaneApiBaseUrl
-        : null;
-  return rawApiBaseUrl ? normalizePaperclipApiUrl(stripApiSuffix(rawApiBaseUrl)) : null;
-}
-
-export function buildPaperclipEnv(
-  agent: { id: string; companyId: string },
-  options: BuildPaperclipEnvOptions = {},
-): Record<string, string> {
-  const resolveHostForUrl = (rawHost: string): string => {
-    const host = rawHost.trim();
-    if (!host || host === "0.0.0.0" || host === "::") return "localhost";
-    if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
-    return host;
-  };
-  const vars: Record<string, string> = {
-    PAPERCLIP_AGENT_ID: agent.id,
-    PAPERCLIP_COMPANY_ID: agent.companyId,
-  };
-  const runtimeHost = resolveHostForUrl(
-    process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
-  );
-  const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
-  const apiUrl =
-    normalizePaperclipApiUrl(options.apiUrl ?? "") ??
-    normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL ?? "") ??
-    readContextPaperclipApiUrl(options.context) ??
-    `http://${runtimeHost}:${runtimePort}`;
-  vars.PAPERCLIP_API_URL = apiUrl;
-  vars.PAPERCLIP_API_BASE_URL = apiBaseUrl(apiUrl);
-  return vars;
 }
 
 export function defaultPathForPlatform() {
@@ -914,7 +847,10 @@ export async function runChildProcess(
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
 
   return new Promise<RunProcessResult>((resolve, reject) => {
-    const rawMerged: NodeJS.ProcessEnv = { ...process.env, ...opts.env };
+    const rawMerged: NodeJS.ProcessEnv = {
+      ...sanitizeInheritedPaperclipEnv(process.env),
+      ...opts.env,
+    };
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".

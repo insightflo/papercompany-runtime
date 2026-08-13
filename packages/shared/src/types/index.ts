@@ -65,6 +65,10 @@ export type {
   AgentSkillSnapshot,
   AgentSkillSyncRequest,
 } from "./adapter-skills.js";
+export type { AgentApiKeyScope } from "./agent-api-key.js";
+export {
+  normalizeAgentApiKeyScope,
+} from "./agent-api-key.js";
 export type {
   Agent,
   AgentAccessState,

@@ -271,6 +271,51 @@ export interface ProviderQuotaResult {
   windows: QuotaWindow[];
 }
 
+export type AdapterModelProfileKey = string;
+
+export interface AdapterModelProfileDefinition {
+  key: AdapterModelProfileKey;
+  label: string;
+  description?: string | null;
+  adapterConfig: Record<string, unknown>;
+  source?: "adapter_default" | "operator" | "environment" | string;
+}
+
+export interface ConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface ConfigFieldSchema {
+  key: string;
+  label: string;
+  type: "text" | "textarea" | "number" | "boolean" | "password" | "select" | "json";
+  description?: string | null;
+  required?: boolean;
+  secret?: boolean;
+  placeholder?: string | null;
+  defaultValue?: unknown;
+  options?: ConfigFieldOption[];
+}
+
+export interface AdapterConfigSchema {
+  fields: ConfigFieldSchema[];
+}
+
+export interface AdapterRuntimeCommandSpec {
+  command: string;
+  detectCommand?: string | null;
+  installCommand?: string | null;
+}
+
+export interface AdapterModelDetection {
+  model: string;
+  provider: string;
+  source: string;
+  candidates?: string[];
+}
+
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
@@ -280,8 +325,17 @@ export interface ServerAdapterModule {
   sessionCodec?: AdapterSessionCodec;
   sessionManagement?: import("./session-compaction.js").AdapterSessionManagement;
   supportsLocalAgentJwt?: boolean;
+  supportsInstructionsBundle?: boolean;
+  instructionsPathKey?: string;
+  requiresMaterializedRuntimeSkills?: boolean;
   models?: AdapterModel[];
+  modelProfiles?: AdapterModelProfileDefinition[];
   listModels?: (provider?: string) => Promise<AdapterModel[]>;
+  refreshModels?: () => Promise<AdapterModel[]>;
+  listModelProfiles?: () => Promise<AdapterModelProfileDefinition[]>;
+  detectModel?: () => Promise<AdapterModelDetection | null>;
+  getConfigSchema?: () => AdapterConfigSchema;
+  getRuntimeCommandSpec?: (config: Record<string, unknown>) => AdapterRuntimeCommandSpec;
   /**
    * Optional: discover the reasoning-effort levels a specific model supports
    * (e.g. ["low","medium","high","max"]). Adapters that cannot determine this

@@ -76,6 +76,20 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
       continue;
     }
 
+    if (eventType === "auto_retry_end") {
+      if (event.success !== true) {
+        const finalError = asString(event.finalError, "").trim();
+        result.errors.push(finalError || "Pi exhausted automatic retries without producing a response.");
+      }
+      continue;
+    }
+
+    if (eventType === "error") {
+      const message = asString(event.message, "").trim();
+      if (message) result.errors.push(message);
+      continue;
+    }
+
     // Turn lifecycle
     if (eventType === "turn_start") {
       continue;
@@ -84,6 +98,16 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
     if (eventType === "turn_end") {
       const message = asRecord(event.message);
       if (message) {
+        const status = asString(message.status, "").trim().toLowerCase();
+        const stopReason = asString(message.stopReason, "").trim().toLowerCase();
+        if (status === "error" || stopReason === "error") {
+          const errorMessage = asString(message.errorMessage, "").trim();
+          result.errors.push(
+            errorMessage ||
+              `Pi assistant turn failed${stopReason ? ` with stopReason=${stopReason}` : ""}.`,
+          );
+        }
+
         const content = message.content as string | Array<{ type: string; text?: string }>;
         const text = extractTextContent(content);
         if (text) {

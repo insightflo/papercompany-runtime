@@ -19,7 +19,7 @@ export async function writeFakeCmd(commandPath: string, options: FakeCmdOptions 
   const script = `#!/usr/bin/env node
 const fs = require('node:fs');
 const argv = process.argv.slice(2);
-const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const capturePath = process.env.ADAPTER_TEST_CAPTURE_PATH;
 if (capturePath) {
   fs.writeFileSync(capturePath, JSON.stringify({ argv }, null, 2), 'utf8');
 }
@@ -41,7 +41,7 @@ export function buildCtx(
     runId: "run-1",
     agent: { id: "agent-1", companyId: "company-1", name: "Cmd Coder", adapterType: "commandcode_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null, ...(opts.runtime ?? {}) },
-    config: { command: opts.command, cwd: opts.cwd, env: { PAPERCLIP_TEST_CAPTURE_PATH: opts.capture }, promptTemplate: "do the work", ...config },
+    config: { command: opts.command, cwd: opts.cwd, env: { ADAPTER_TEST_CAPTURE_PATH: opts.capture }, promptTemplate: "do the work", ...config },
     context: {},
     authToken: undefined,
     onLog: async () => {},

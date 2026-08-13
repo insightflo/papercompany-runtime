@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -14,26 +13,14 @@ import {
   resolvePaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
 
+import { resolvePiSkillsDir } from "./runtime-paths.js";
+
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function resolvePiSkillsHome(config: Record<string, unknown>) {
-  const env =
-    typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
-      ? (config.env as Record<string, unknown>)
-      : {};
-  const configuredHome = asString(env.HOME);
-  const home = configuredHome ? path.resolve(configuredHome) : os.homedir();
-  return path.join(home, ".pi", "agent", "skills");
-}
 
 async function buildPiSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
   const availableEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkills = resolvePaperclipDesiredSkillNames(config, availableEntries);
-  const skillsHome = resolvePiSkillsHome(config);
+  const skillsHome = resolvePiSkillsDir(config);
   const installed = await readInstalledSkillTargets(skillsHome);
   return buildPersistentSkillSnapshot({
     adapterType: "pi_local",
@@ -61,7 +48,7 @@ export async function syncPiSkills(
     ...desiredSkills,
     ...availableEntries.filter((entry) => entry.required).map((entry) => entry.key),
   ]);
-  const skillsHome = resolvePiSkillsHome(ctx.config);
+  const skillsHome = resolvePiSkillsDir(ctx.config);
   await fs.mkdir(skillsHome, { recursive: true });
   const installed = await readInstalledSkillTargets(skillsHome);
   const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));

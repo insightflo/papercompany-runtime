@@ -1,5 +1,6 @@
 import type { ServerAdapterModule } from "./types.js";
 import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
+import { acpxLocalAdapter } from "./acpx-retired.js";
 import {
   execute as antigravityExecute,
   listAntigravitySkills,
@@ -203,8 +204,12 @@ const piLocalAdapter: ServerAdapterModule = {
   sessionCodec: piSessionCodec,
   sessionManagement: getAdapterSessionManagement("pi_local") ?? undefined,
   models: [],
+  modelProfiles: [],
   listModels: listPiModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
   agentConfigurationDoc: piAgentConfigurationDoc,
 };
 const commandCodeLocalAdapter: ServerAdapterModule = {
@@ -221,7 +226,6 @@ const commandCodeLocalAdapter: ServerAdapterModule = {
   supportsLocalAgentJwt: true,
   agentConfigurationDoc: commandCodeAgentConfigurationDoc,
 };
-
 const hermesLocalAdapter: ServerAdapterModule = {
   type: "hermes_local",
   execute: executeHermesLocal,
@@ -235,9 +239,9 @@ const hermesLocalAdapter: ServerAdapterModule = {
   syncSkills: syncHermesSkills,
   agentConfigurationDoc: hermesAgentConfigurationDoc,
 };
-
 const adaptersByType = new Map<string, ServerAdapterModule>(
   [
+    acpxLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
     antigravityLocalAdapter,
@@ -256,9 +260,15 @@ const adaptersByType = new Map<string, ServerAdapterModule>(
 export function getServerAdapter(type: string): ServerAdapterModule {
   const adapter = adaptersByType.get(type);
   if (!adapter) {
-    // Fall back to process adapter for unknown types
+    // Fall back to process adapter for unknown types for explicit legacy callers.
     return processAdapter;
   }
+  return adapter;
+}
+
+export function requireServerAdapter(type: string): ServerAdapterModule {
+  const adapter = adaptersByType.get(type);
+  if (!adapter) throw new Error(`Unknown adapter type: ${type}`);
   return adapter;
 }
 

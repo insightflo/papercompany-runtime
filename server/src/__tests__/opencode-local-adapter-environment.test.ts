@@ -20,6 +20,34 @@ afterAll(() => {
   }
 });
 
+async function writeFakeOpenCodeCommand(binDir: string, envCapturePath: string): Promise<string> {
+  const commandPath = path.join(binDir, "opencode");
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const envPath = process.env.ADAPTER_TEST_ENV_PATH;
+if (envPath) {
+  let entries = [];
+  try { entries = JSON.parse(fs.readFileSync(envPath, "utf8")); } catch {}
+  entries.push({
+    phase: process.argv[2] ?? "unknown",
+    PAPERCLIP_AGENT_ID: process.env.PAPERCLIP_AGENT_ID,
+    PAPERCLIP_API_KEY: process.env.PAPERCLIP_API_KEY,
+    PAPERCLIP_RUN_ID: process.env.PAPERCLIP_RUN_ID,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  });
+  fs.writeFileSync(envPath, JSON.stringify(entries), "utf8");
+}
+if (process.argv[2] === "models") {
+  console.log("openai/test-model");
+} else {
+  console.log(JSON.stringify({ type: "text", part: { text: "hello" } }));
+}
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+  return commandPath;
+}
+
 describe("opencode_local environment diagnostics", () => {
   it("reports a missing working directory as an error when cwd is absolute", async () => {
     const cwd = path.join(
@@ -72,6 +100,51 @@ describe("opencode_local environment diagnostics", () => {
         process.env.OPENAI_API_KEY = originalOpenAiKey;
       }
       await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("sanitizes Paperclip runtime variables for model discovery and hello probe children", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-env-child-"));
+    const binDir = path.join(root, "bin");
+    const cwd = path.join(root, "workspace");
+    const envCapturePath = path.join(root, "env.json");
+    await fs.mkdir(binDir, { recursive: true });
+    await fs.mkdir(cwd, { recursive: true });
+    const command = await writeFakeOpenCodeCommand(binDir, envCapturePath);
+    const originalRunId = process.env.PAPERCLIP_RUN_ID;
+    process.env.PAPERCLIP_RUN_ID = "inherited-run";
+
+    try {
+      const result = await testEnvironment({
+        companyId: "company-1",
+        adapterType: "opencode_local",
+        config: {
+          command,
+          cwd,
+          model: "openai/test-model",
+          env: {
+            OPENAI_API_KEY: "test-key",
+            PAPERCLIP_AGENT_ID: "configured-agent",
+            PAPERCLIP_API_KEY: "configured-token",
+            PAPERCLIP_RUN_ID: "configured-run",
+            ADAPTER_TEST_ENV_PATH: envCapturePath,
+          },
+        },
+      });
+
+      expect(result.status).toBe("pass");
+      const children = JSON.parse(await fs.readFile(envCapturePath, "utf8")) as Array<Record<string, string | undefined>>;
+      expect(children.length).toBeGreaterThanOrEqual(2);
+      for (const childEnv of children) {
+        expect(childEnv.PAPERCLIP_AGENT_ID).toBeUndefined();
+        expect(childEnv.PAPERCLIP_API_KEY).toBeUndefined();
+        expect(childEnv.PAPERCLIP_RUN_ID).toBeUndefined();
+        expect(childEnv.OPENAI_API_KEY).toBe("test-key");
+      }
+    } finally {
+      if (originalRunId === undefined) delete process.env.PAPERCLIP_RUN_ID;
+      else process.env.PAPERCLIP_RUN_ID = originalRunId;
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 

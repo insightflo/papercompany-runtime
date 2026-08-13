@@ -10,11 +10,13 @@ import {
   asString,
   asStringArray,
   buildPaperclipEnv,
+  buildPaperclipExecutionEnv,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   readPaperclipRuntimeSkillEntries,
+  sanitizeInheritedPaperclipEnv,
   resolvePaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
   parseJson,
@@ -136,8 +138,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureGeminiSkillsInjected(onLog, geminiSkillEntries, desiredGeminiSkillNames);
 
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent, { context }) };
   env.PAPERCLIP_RUN_ID = runId;
   const wakeTaskId =
@@ -177,19 +177,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (agentHome) env.AGENT_HOME = agentHome;
   if (workspaceHints.length > 0) env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
 
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  if (!hasExplicitApiKey && authToken) {
-    env.PAPERCLIP_API_KEY = authToken;
-  }
-  const effectiveEnv = Object.fromEntries(
-    Object.entries({ ...process.env, ...env }).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
+  const configuredEnv = buildPaperclipExecutionEnv(env, envConfig, authToken);
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(
+      ensurePathInEnv({
+        ...sanitizeInheritedPaperclipEnv(process.env),
+        ...configuredEnv,
+      }),
+    ).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
-  const billingType = resolveGeminiBillingType(effectiveEnv);
-  const runtimeEnv = ensurePathInEnv(effectiveEnv);
+  const billingType = resolveGeminiBillingType(runtimeEnv);
   await ensureCommandResolvable(command, cwd, runtimeEnv);
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
@@ -376,7 +373,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         commandArgs: args.map((value, index) => (
           index === args.length - 1 ? `<prompt ${prompt.length} chars>` : value
         )),
-        env: redactEnvForLogs(env),
+        env: redactEnvForLogs(configuredEnv),
         prompt,
         promptMetrics,
         context,
@@ -385,7 +382,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const proc = await runChildProcess(runId, command, args, {
       cwd,
-      env,
+      env: runtimeEnv,
       timeoutSec,
       graceSec,
       fatalOnLogError: true,
