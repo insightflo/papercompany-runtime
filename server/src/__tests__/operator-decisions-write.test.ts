@@ -26,6 +26,15 @@ const definition = {
   comment: { mode: "optional" as const, label: "Note", placeholder: null, maxLength: 100 },
   approvedScope: ["internal"],
   forbiddenScope: ["external"],
+  humanReview: {
+    schemaVersion: "human-review-v1" as const,
+    decisionSubject: "Choose the next operation",
+    evidence: [{ label: "Linked work", href: "/issues/fixture", location: "Issue detail > evidence" }],
+    interpretation: "The operator must choose one bounded continuation.",
+    impact: { ifApproved: "The selected continuation runs.", ifRejected: "The continuation remains stopped.", ifWrong: "The wrong continuation could run." },
+    unresolvedFacts: [], questions: ["Is the selected continuation correct?"],
+    recommendedNextStep: "Open the linked work, verify the evidence, and decide.", requiredReviewer: "Human Operator",
+  },
 };
 
 function input(requestKey: string, issueId: string | null = null) {
@@ -111,6 +120,16 @@ describeDb("operator decision write service", () => {
     const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, created.decision.id));
     expect(activities.map((row) => row.action)).toEqual(["operator_decision.created", "operator_decision.resolved"]);
     expect(activities[1]?.details).not.toHaveProperty("comment");
+  });
+
+  it("blocks a decision when the human-readable packet and exact source location are missing", async () => {
+    const service = operatorDecisionWriteService(db);
+    const created = await service.create(companyId, {
+      ...input("missing-review"), definition: { ...definition, humanReview: null },
+    }, { type: "agent", id: agentId });
+    await expect(service.resolve(created.decision.id, {
+      actionId: "choose", selectedOptionIds: ["one"], comment: null,
+    }, "board-user")).rejects.toMatchObject({ status: 422, details: { code: "human_review_packet_required" } });
   });
 
   it("makes resolution immutable with identical replay and first-writer-wins", async () => {

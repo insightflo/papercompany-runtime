@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { accessApi } from "../api/access";
 import { authApi } from "../api/auth";
 import { queryKeys } from "../lib/queryKeys";
+import { HumanReviewPacket } from "../components/HumanReviewPacket";
 
 export function CliAuthPage() {
   const queryClient = useQueryClient();
@@ -147,6 +148,17 @@ export function CliAuthPage() {
             </div>
           )}
         </div>
+
+        <HumanReviewPacket packet={{
+          schemaVersion: "human-review-v1",
+          decisionSubject: `${challenge.clientName ?? "papercompany CLI"}에 ${challenge.requestedAccess === "instance_admin_required" ? "인스턴스 관리자" : "Board"} 접근을 허용할까요?`,
+          evidence: [{ label: "CLI 인증 요청 원본", href: currentPath, location: `요청 ${challenge.id} > 명령 ${challenge.command}`, description: `만료 시각 ${challenge.expiresAt}` }],
+          interpretation: `표시된 명령을 실행한 로컬 CLI가 ${challenge.requestedCompanyName ?? "이 인스턴스"}의 운영 API 인증 키를 요청합니다.`,
+          impact: { ifApproved: "요청한 CLI가 표시된 범위의 운영 API를 호출할 수 있습니다.", ifRejected: "인증 키가 발급되지 않아 이 요청으로는 접근할 수 없습니다.", ifWrong: "신뢰하지 않는 프로세스가 회사 데이터와 운영 기능에 접근할 수 있습니다." },
+          unresolvedFacts: [], questions: ["지금 본인이 이 명령을 실행했고, 클라이언트와 요청 권한이 예상과 일치합니까?"],
+          recommendedNextStep: "명령, 클라이언트, 접근 범위, 대상 회사를 대조한 뒤 승인하거나 취소하세요.",
+          requiredReviewer: challenge.requestedAccess === "instance_admin_required" ? "인스턴스 관리자" : "회사 Board 사용자",
+        }} />
 
         {(approveMutation.error || cancelMutation.error) && (
           <p className="mt-4 text-sm text-destructive">

@@ -156,6 +156,7 @@ export type {
 } from "./issue.js";
 export type { Goal } from "./goal.js";
 export type { Approval, ApprovalComment } from "./approval.js";
+export type { HumanReviewEvidenceRef, HumanReviewImpact, HumanReviewPacket } from "./human-review.js";
 export type {
   BudgetPolicy,
   BudgetPolicySummary,

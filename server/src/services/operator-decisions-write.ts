@@ -116,6 +116,12 @@ export function operatorDecisionWriteService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!before) throw notFound("Operator decision not found");
     const result = validateOperatorDecisionResult(before.definition, rawInput);
+    if (before.status === "pending" && !before.definition.humanReview) {
+      throw unprocessable(
+        "판단 주제, 근거 원본 위치, 해석, 영향과 다음 단계가 없어 결정할 수 없습니다. 요청자에게 정보 보완을 요구해 주세요.",
+        { code: "human_review_packet_required" },
+      );
+    }
 
     const applied = await db.transaction(async (tx) => {
       const now = new Date();

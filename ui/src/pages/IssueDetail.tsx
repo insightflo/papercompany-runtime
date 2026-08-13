@@ -20,6 +20,7 @@ import { relativeTime, cn, formatTokens, visibleRunCostUsd } from "../lib/utils"
 import { InlineEditor } from "../components/InlineEditor";
 import { CommentThread } from "../components/CommentThread";
 import { IssueDocumentsSection } from "../components/IssueDocumentsSection";
+import { openWorkProductInBrowser } from "../lib/workProductOpen";
 import { IssueProperties } from "../components/IssueProperties";
 import { LiveRunWidget } from "../components/LiveRunWidget";
 import type { MentionOption } from "../components/MarkdownEditor";
@@ -211,6 +212,7 @@ export function IssueDetail() {
   const [detailTab, setDetailTab] = useState("comments");
   const [secondaryOpen, setSecondaryOpen] = useState({
     approvals: false,
+    workProducts: true,
   });
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
@@ -246,6 +248,12 @@ export function IssueDetail() {
   const { data: linkedApprovals } = useQuery({
     queryKey: queryKeys.issues.approvals(issueId!),
     queryFn: () => issuesApi.listApprovals(issueId!),
+    enabled: !!issueId,
+  });
+
+  const { data: workProducts } = useQuery({
+    queryKey: queryKeys.issues.workProducts(issueId!),
+    queryFn: () => issuesApi.listWorkProducts(issueId!),
     enabled: !!issueId,
   });
 
@@ -1128,6 +1136,26 @@ export function IssueDetail() {
           </TabsContent>
         )}
       </Tabs>
+
+      {workProducts && workProducts.length > 0 && (
+        <Collapsible
+          id="work-products"
+          open={secondaryOpen.workProducts}
+          onOpenChange={(open) => setSecondaryOpen((prev) => ({ ...prev, workProducts: open }))}
+          className="rounded-lg border border-border"
+        >
+          <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-2 text-left">
+            <span className="text-sm font-medium text-muted-foreground">Work Products ({workProducts.length})</span>
+            <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", secondaryOpen.workProducts && "rotate-180")} />
+          </CollapsibleTrigger>
+          <CollapsibleContent><div className="border-t border-border divide-y divide-border">
+            {workProducts.map((product) => <div key={product.id} id={`work-product-${product.id}`} className="flex items-start justify-between gap-3 px-3 py-2 text-xs">
+              <div><p className="font-medium">{product.title}</p><p className="text-muted-foreground">{product.summary ?? `${product.provider} · ${product.type}`}</p><p className="mt-1 font-mono text-[11px] text-muted-foreground">{product.id}</p></div>
+              <Button size="sm" variant="outline" onClick={() => void openWorkProductInBrowser(product.id)}>원본 열기</Button>
+            </div>)}
+          </div></CollapsibleContent>
+        </Collapsible>
+      )}
 
       {linkedApprovals && linkedApprovals.length > 0 && (
         <Collapsible

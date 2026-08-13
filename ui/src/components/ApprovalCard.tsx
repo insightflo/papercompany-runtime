@@ -5,6 +5,8 @@ import { Identity } from "./Identity";
 import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer } from "./ApprovalPayload";
 import { timeAgo } from "../lib/timeAgo";
 import type { Approval, Agent } from "@paperclipai/shared";
+import { HumanReviewPacket } from "./HumanReviewPacket";
+import { approvalHumanReview } from "../lib/humanReview";
 
 function statusIcon(status: string) {
   if (status === "approved") return <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />;
@@ -36,6 +38,7 @@ export function ApprovalCard({
   const showResolutionButtons =
     approval.type !== "budget_override_required" &&
     (approval.status === "pending" || approval.status === "revision_requested");
+  const reviewPacket = approvalHumanReview(approval);
 
   return (
     <div className="border border-border rounded-lg p-4 space-y-0">
@@ -61,6 +64,7 @@ export function ApprovalCard({
 
       {/* Payload */}
       <ApprovalPayloadRenderer type={approval.type} payload={approval.payload} />
+      <HumanReviewPacket packet={reviewPacket} />
 
       {/* Decision note */}
       {approval.decisionNote && (
@@ -76,7 +80,8 @@ export function ApprovalCard({
             size="sm"
             className="bg-green-700 hover:bg-green-600 text-white"
             onClick={onApprove}
-            disabled={isPending}
+            disabled={isPending || !reviewPacket}
+            title={!reviewPacket ? "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." : undefined}
           >
             Approve
           </Button>

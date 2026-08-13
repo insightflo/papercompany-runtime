@@ -272,10 +272,13 @@ export function worktreeRoutes(db: Db) {
     const existing = await proposals.getById(req.params.id);
     assertCompanyAccess(req, existing.companyId);
 
-    const { status, reviewedByAgentId, reviewNote } = req.body;
+    const { status, reviewedByAgentId, reviewNote, reviewAcknowledged } = req.body;
 
     if (!status || !reviewedByAgentId) {
       throw badRequest("status and reviewedByAgentId are required");
+    }
+    if (status === "approved" && reviewAcknowledged !== true) {
+      throw badRequest("Review the original rule, impact, and risk before approval");
     }
 
     const updated = await proposals.review(req.params.id, {

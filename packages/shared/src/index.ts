@@ -267,6 +267,9 @@ export type {
   Goal,
   Approval,
   ApprovalComment,
+  HumanReviewEvidenceRef,
+  HumanReviewImpact,
+  HumanReviewPacket,
   BudgetPolicy,
   BudgetPolicySummary,
   BudgetIncident,
@@ -826,3 +829,10 @@ export {
   type MissionOwnerDecisionOption,
   type MissionOwnerDecisionSubmit,
 } from "./validators/workflow-agent-api.js";
+
+export {
+  humanReviewEvidenceRefSchema,
+  humanReviewPacketSchema,
+  readHumanReviewPacket,
+  type HumanReviewPacketInput,
+} from "./validators/human-review.js";

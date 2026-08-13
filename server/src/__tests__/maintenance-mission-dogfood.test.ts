@@ -189,6 +189,7 @@ describe("maintenance mission dogfood", () => {
       id: companyId,
       name: "Papercompany Maintenance Dogfood",
       issuePrefix: `PMD${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      companyKind: "maintenance",
       requireBoardApprovalForNewAgents: false,
     });
     await db.insert(agents).values({

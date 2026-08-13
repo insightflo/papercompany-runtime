@@ -1686,6 +1686,9 @@ export function accessRoutes(
       ) {
         throw unauthorized("Sign in before approving CLI access");
       }
+      if (req.body.reviewAcknowledged !== true) {
+        throw badRequest("Review the command, client, requested access, target company, and impact before approval");
+      }
 
       const userId = req.actor.userId ?? "local-board";
       const approved = await boardAuth.approveCliAuthChallenge(
@@ -2554,6 +2557,9 @@ export function accessRoutes(
       const companyId = req.params.companyId as string;
       const requestId = req.params.requestId as string;
       await assertCompanyPermission(req, companyId, "joins:approve");
+      if (req.body?.reviewAcknowledged !== true) {
+        throw badRequest("Review the requester identity, requested permissions, source, and impact before approval");
+      }
 
       const existing = await db
         .select()

@@ -70,6 +70,7 @@ export type CreateCliAuthChallenge = z.infer<typeof createCliAuthChallengeSchema
 
 export const resolveCliAuthChallengeSchema = z.object({
   token: z.string().min(16).max(256),
+  reviewAcknowledged: z.literal(true).optional(),
 });
 
 export type ResolveCliAuthChallenge = z.infer<typeof resolveCliAuthChallengeSchema>;
