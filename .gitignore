@@ -107,3 +107,4 @@ scripts/setup-agent-config.sh
 # Doc maintenance
 .doc-review-cursor
 .superset/
+.gstack/
