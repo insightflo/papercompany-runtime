@@ -46,7 +46,7 @@ import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rewo
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
 import { loadWorkflowApiFeedback } from "../validation-verdict-ledger.js";
-import type { StepIterationAttempt } from "./types.js";
+import { readCapBoostAmount, type StepIterationAttempt } from "./types.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 
@@ -166,10 +166,13 @@ export async function applyBackEdgeReworkPass(
     //   cap 도 QA edge 단위가 아닌 producer 단위로 판정한다(여러 edge 의 max 이상치 사용).
     const maxIterations = Math.max(...siblingQas.map((q) => q.edge.maxIterations!));
     const currentIteration = stepRun.iterationIndex ?? 0;
+    // [operator cap boost] operator 가 명시적으로 부여한 일시 추가 한도(metadata.qaReworkCapBoost.amount).
+    //   기본 0 — 부여하지 않으면 기존 maxIterations 그대로. boost 는 오직 이번 stepRun 세대의 cap 판정에만 쓴다.
+    const capBoost = readCapBoostAmount(stepRun.metadata);
 
-    // cap: iteration_index(수행된 rework 수) 가 maxIterations 에 도달하면 더 리셋하지 않는다(bounded).
+    // cap: iteration_index(수행된 rework 수) 가 maxIterations+boost 에 도달하면 더 리셋하지 않는다(bounded).
     //   cap-exhausted → owner/replan 신호는 Patch 2 가 supervision 과 연결; 여기선 기존대로 terminal 유지.
-    if (currentIteration >= maxIterations) continue;
+    if (currentIteration >= maxIterations + capBoost) continue;
 
     const attempt: StepIterationAttempt = {
       iteration: currentIteration,

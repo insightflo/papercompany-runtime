@@ -28,6 +28,7 @@ import {
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { conflict, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { QA_REWORK_CAP_BOOST_KEY } from "../services/workflow/control-flow/types.js";
 
 function serializeValue(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -596,6 +597,62 @@ export function workflowRoutes(db: Db) {
       stepId: stepRun.stepId,
       stepRunId: retryResult.stepRunId,
       result: serializeValue(retryResult.result),
+    });
+  });
+
+  // [operator cap boost] board-only. operator 가 특정 stepRun 의 QA rework cap 을 일시적으로
+  //   늘린다(workflow 정의 불변 — metadata 에만 기록). loop-driver 의 cap 판정이 이 boost 를 더해 평가.
+  router.post("/workflow-step-runs/:stepRunId/qa-rework-cap-boost", async (req, res) => {
+    assertBoard(req);
+    const stepRunId = req.params.stepRunId as string;
+    const [stepRun] = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, stepRunId))
+      .limit(1);
+    if (!stepRun) {
+      throw notFound("Workflow step run not found");
+    }
+    const run = await workflowService.getRun(db, stepRun.workflowRunId);
+    if (!run || !canAccessRecord(req, run.companyId)) {
+      throw notFound("Workflow step run not found");
+    }
+    const amount = Number((req.body as Record<string, unknown>)?.amount);
+    if (!Number.isInteger(amount) || amount < 1 || amount > 50) {
+      throw unprocessable("amount must be an integer between 1 and 50");
+    }
+    const reason = typeof (req.body as Record<string, unknown>)?.reason === "string"
+      ? String((req.body as Record<string, unknown>).reason).trim().slice(0, 500)
+      : "";
+    const metadata = stepRun.metadata && typeof stepRun.metadata === "object" && !Array.isArray(stepRun.metadata)
+      ? { ...(stepRun.metadata as Record<string, unknown>) }
+      : {};
+    metadata[QA_REWORK_CAP_BOOST_KEY] = {
+      amount,
+      ...(reason ? { reason } : {}),
+      grantedAt: new Date().toISOString(),
+    };
+    await db
+      .update(workflowStepRuns)
+      .set({ metadata })
+      .where(eq(workflowStepRuns.id, stepRunId));
+    const actor = actorForActivity(req);
+    await logActivity(db, {
+      companyId: run.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow_step_run.qa_rework_cap_boost",
+      entityType: "workflow_step_run",
+      entityId: stepRunId,
+      details: { workflowRunId: run.id, stepId: stepRun.stepId, amount, reason },
+    });
+    res.json({
+      stepRunId,
+      stepId: stepRun.stepId,
+      amount,
+      metadata: serializeValue(metadata),
     });
   });
 

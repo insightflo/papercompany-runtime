@@ -36,7 +36,7 @@ import {
   type MissionOwnerActionExplanation,
 } from "./missions/mission-owner-recovery-explanations.js";
 import { normalizeWorkflowStepsForExecution } from "./workflow/dag-engine.js";
-import { normalizeConditionalEdges } from "./workflow/control-flow/types.js";
+import { normalizeConditionalEdges, readCapBoostAmount } from "./workflow/control-flow/types.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
 import { asStringArray, asTrimmedString, isMissionDateOnlyFilter, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
@@ -324,6 +324,19 @@ function assertMissionId(value: string): void {
   if (!isUuidLike(value)) {
     throw badRequest(`Invalid mission id: ${value}`);
   }
+}
+
+/**
+ * [QA rework cap 표시] step 정의의 back-edge 중 최대 maxIterations 를 구한다.
+ *   producer rework cap 표시(UI)와 일치하는 producer-level 판정(loop-driver) 기준과 동일하다.
+ *   back-edge 가 없으면 null(일반 step).
+ */
+function qaReworkCapForStep(step: { conditionalDependencies?: unknown }): number | null {
+  const edges = normalizeConditionalEdges(step.conditionalDependencies) ?? [];
+  const caps = edges
+    .filter((edge) => edge.isBackEdge === true && typeof edge.maxIterations === "number")
+    .map((edge) => edge.maxIterations as number);
+  return caps.length > 0 ? Math.max(...caps) : null;
 }
 
 
@@ -1020,7 +1033,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
    */
   async function listWorkflowRuns(missionId: string): Promise<MissionWorkflowRunDetail[]> {
     assertMissionId(missionId);
-
     const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
     if (!mission) throw notFound(`Mission not found: ${missionId}`);
 
@@ -1154,6 +1166,10 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           workProducts: stepRun?.issueId ? stepWorkProductsMap.get(stepRun.issueId) ?? [] : [],
           startedAt: stepRun?.startedAt ?? null,
           completedAt: stepRun?.completedAt ?? null,
+          stepRunId: stepRun?.id ?? null,
+          iterationIndex: stepRun?.iterationIndex ?? 0,
+          reworkCap: qaReworkCapForStep(step),
+          capBoost: readCapBoostAmount(stepRun?.metadata ?? null),
         };
       });
 
@@ -1176,6 +1192,10 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
           workProducts: stepRun.issueId ? stepWorkProductsMap.get(stepRun.issueId) ?? [] : [],
           startedAt: stepRun.startedAt,
           completedAt: stepRun.completedAt,
+          stepRunId: stepRun.id,
+          iterationIndex: stepRun.iterationIndex ?? 0,
+          reworkCap: null,
+          capBoost: readCapBoostAmount(stepRun.metadata ?? null),
         });
       }
 

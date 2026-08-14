@@ -60,6 +60,36 @@ export interface StepIterationAttempt {
 export const STEP_ITERATION_ATTEMPTS_KEY = "controlFlowAttempts";
 
 /**
+ * [operator cap boost] operator 가 화면에서 부여하는 일시 추가 QA rework 한도.
+ *   step_run.metadata.qaReworkCapBoost 로 저장. 이번 stepRun 세대의 cap 판정에만 더해진다.
+ *   workflow 정의의 maxIterations 는 바꾸지 않는다(일시 조정 — 정의 불변).
+ */
+export interface QaReworkCapBoost {
+  /** 추가 허용 rework 횟수 (>=1). */
+  amount: number;
+  /** 부여 주체/사유 (감사 추적용). */
+  reason?: string;
+  /** 부여 시각 ISO. */
+  grantedAt?: string;
+}
+
+/** step_run.metadata 에 boost 를 저장할 때 쓰는 키. */
+export const QA_REWORK_CAP_BOOST_KEY = "qaReworkCapBoost";
+
+/**
+ * [목적] step_run.metadata 에서 operator cap boost 를 안전하게 읽는다.
+ *   스키마 검증 실패/음수/비정수면 0(부여 없음)으로 수렴 — cap 판정을 느슨하게 만들지 않는다.
+ */
+export function readCapBoostAmount(metadata: unknown): number {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return 0;
+  const raw = (metadata as Record<string, unknown>)[QA_REWORK_CAP_BOOST_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return 0;
+  const amount = (raw as Record<string, unknown>).amount;
+  if (typeof amount !== "number" || !Number.isInteger(amount) || amount < 1) return 0;
+  return amount;
+}
+
+/**
  * [목적] UI/plugin payload 의 conditionalDependencies 를 정규화(normalizeWorkflowStepsForExecution
  *   round-trip). 잘못된 edge 는 drop 하되, back-edge 는 maxIterations 동반을 강제(무한 loop 방지).
  * [입력] raw(unknown). [출력] 유효 edge 배열, 또는 없으면 undefined(필드 생략).

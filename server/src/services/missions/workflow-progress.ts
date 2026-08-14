@@ -59,6 +59,10 @@ export type MissionWorkflowRunStep = {
   workProducts: MissionWorkflowStepWorkProduct[];
   startedAt: Date | null;
   completedAt: Date | null;
+  stepRunId?: string | null;
+  iterationIndex?: number;
+  reworkCap?: number | null;
+  capBoost?: number;
 };
 
 const MISSION_WORKFLOW_STEP_STATUSES = new Set([

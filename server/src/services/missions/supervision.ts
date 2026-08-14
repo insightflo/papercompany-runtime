@@ -41,7 +41,7 @@ import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-sourc
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
-import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
+import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapProducerIssueRef, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 import {
   TERMINAL_FAILURE_RUN_STATUSES,
   classifyTerminalMissionContinuation,
@@ -1346,6 +1346,14 @@ export function createSupervision({ db, deps, ownerActions }: {
                   sourceIssueId = resolveOwnerIssueRef(ownerDecision.sourceIssueRef);
                 }
                 let producerReworkResolved = false;
+                // [cap-oversight producer authority] qa-cap-oversight 이슈는 origin 이 oversight(스텝 없음)라
+                //   DAG 역추적이 producer 를 찾지 못한다. 시스템 생성 설명의 "Producer source issue:" 가
+                //   유일한 구조 경로 — 명시 reworkTarget 이 없을 때만 fallback 으로 쓴다.
+                if (!sourceIssueId && isQaReworkCapOversightIssue(issue.description)) {
+                  const capProducerRef = extractQaCapProducerIssueRef(issue.description);
+                  sourceIssueId = resolveOwnerIssueRef(capProducerRef);
+                  producerReworkResolved = sourceIssueId !== null;
+                }
                 // [Patch 2 cap-exhausted] producer rework budget. 기본 true = budget 을 알 수 없으면 기존 동작(skip) 유지.
                 //   producer 를 찾은 경우에만 iterationIndex vs max(producer back-edge maxIterations) 으로 계산한다.
                 let producerBudgetRemaining = true;
@@ -1662,7 +1670,16 @@ export function createSupervision({ db, deps, ownerActions }: {
                 if (isProducerRework && sourceCandidate.id !== issue.originId) {
                   // 명시 reworkTarget 또는 current-gen REQUEST_CHANGES 만 producer reopen 허용(req 3, codex 계약 3).
                   // DAG-guess/guardrail/stale/unverified = deny+replan.
-                  const authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+                  // [cap-oversight QA authority] origin 이 oversight 라 resolveQaGateIssueId 가 null 인
+                  //   qa-cap 이슈는 설명의 QA step id 로 stepRows 를 직접 찾아 QA 게이트 이슈를 구한다.
+                  let authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+                  if (!authQaGateId && isQaReworkCapOversightIssue(issue.description)) {
+                    const capQaStepId = extractQaCapQaStepId(issue.description);
+                    if (capQaStepId) {
+                      const qaStepRow = stepRows.find((row) => row.stepRun.stepId === capQaStepId && row.stepRun.issueId) ?? null;
+                      authQaGateId = qaStepRow?.stepRun.issueId ?? null;
+                    }
+                  }
                   const validationVerdictsByIssueId = await loadQaGateVerdictMap(db, mission.companyId, authQaGateId);
                   const failureReasonCode = await loadLatestFailureReasonCode(db, mission.companyId, sourceCandidate.id);
                   const artifactUpdatedAt = await loadActiveWorkProductUpdatedAt(db, mission.companyId, sourceCandidate.id);
