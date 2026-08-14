@@ -126,4 +126,64 @@ describe("loadInstructionsWithInlinedReferences", () => {
       expect(compacted.content).not.toContain("FULL UNIQUE INSTRUCTIONS BODY");
     });
   });
+
+  it("strips a leading YAML frontmatter block from the entry instructions", async () => {
+    await withTempDir(async (dir) => {
+      const entryPath = path.join(dir, "AGENTS.md");
+      await writeFile(
+        entryPath,
+        [
+          "---",
+          "name: economics-researcher",
+          "title: Economics",
+          "---",
+          "",
+          "# Economics Researcher",
+          "",
+          "Do the work.",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const loaded = await loadInstructionsWithInlinedReferences(entryPath);
+
+      expect(loaded.content.startsWith("# Economics Researcher")).toBe(true);
+      expect(loaded.content.startsWith("---")).toBe(false);
+      expect(loaded.content).toContain("Do the work.");
+      expect(loaded.content).not.toContain("name: economics-researcher");
+      expect(loaded.content).not.toContain("title: Economics");
+    });
+  });
+
+  it("leaves entry content unchanged when there is no leading frontmatter", async () => {
+    await withTempDir(async (dir) => {
+      const entryPath = path.join(dir, "AGENTS.md");
+      const body = ["# Plain Agent", "", "- rule one", "- rule two", "", "---", "", "thematic break kept"].join("\n");
+      await writeFile(entryPath, body, "utf8");
+
+      const loaded = await loadInstructionsWithInlinedReferences(entryPath);
+
+      expect(loaded.content).toBe(body);
+    });
+  });
+
+  it("also strips leading frontmatter from inlined referenced instruction files", async () => {
+    await withTempDir(async (dir) => {
+      const entryPath = path.join(dir, "AGENTS.md");
+      const sharedPath = path.join(dir, "shared.md");
+      await writeFile(entryPath, "Follow `./shared.md`.\n", "utf8");
+      await writeFile(
+        sharedPath,
+        ["---", "name: shared", "---", "", "# Shared Rules", "", "- keep this body"].join("\n"),
+        "utf8",
+      );
+
+      const loaded = await loadInstructionsWithInlinedReferences(entryPath);
+
+      expect(loaded.includedPaths).toEqual([sharedPath]);
+      expect(loaded.content).toContain("Shared Rules");
+      expect(loaded.content).toContain("keep this body");
+      expect(loaded.content).not.toContain("name: shared");
+    });
+  });
 });

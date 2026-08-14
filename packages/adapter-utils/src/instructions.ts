@@ -123,6 +123,21 @@ async function readBoundedTextFile(filePath: string, maxBytes: number): Promise<
   return fs.readFile(filePath, "utf8");
 }
 
+/**
+ * [목적] LEADING_FRONTMATTER_RE + stripLeadingMarkdownFrontmatter —
+ *   AGENTS.md/참조 파일 선두의 YAML frontmatter(`---\n...\n---\n`) 제거.
+ *   command-code/opencode 등 어댑터가 프롬프트(`-p`) 선두의 `---`를 "No query provided"로
+ *   거절하거나 메타데이터(name/title/reportsTo)를 프롬프트에 누출하는 것을 방지.
+ *   frontmatter가 없으면 미매치(no-op). 닫는 펜스 이후 줄바꿈까지 함께 제거해 본문이 깔끔히 시작.
+ *   주의: loadFile 이후에 추가되는 inline 참조 섹션 구분자("---")와는 무관(이 시점엔 아직 없음).
+ *   플랫폼은 name/title/reportsTo를 DB에서 별도 관리 → 머리말 본문은 inert, 제거 안전.
+ */
+const LEADING_FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n+/;
+
+function stripLeadingMarkdownFrontmatter(content: string): string {
+  return content.replace(LEADING_FRONTMATTER_RE, "");
+}
+
 export async function loadInstructionsWithInlinedReferences(
   entryPath: string,
   options: LoadOptions = {},
@@ -146,7 +161,7 @@ export async function loadInstructionsWithInlinedReferences(
     }
 
     seen.add(resolvedPath);
-    let content = await readBoundedTextFile(resolvedPath, maxBytesPerFile);
+    let content = stripLeadingMarkdownFrontmatter(await readBoundedTextFile(resolvedPath, maxBytesPerFile));
     if (!isEntry) includedPaths.push(resolvedPath);
     if (depth >= maxDepth) return content;
 
