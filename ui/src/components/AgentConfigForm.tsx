@@ -1308,7 +1308,6 @@ function AdapterTypeDropdown({
   onChange: (type: string) => void;
 }) {
   const adapterDisplayList = AGENT_ADAPTER_TYPES
-    .filter((type) => type !== "pi_local" || value === "pi_local")
     .map((type) => ({
       value: type,
       label: adapterLabels[type] ?? type,
