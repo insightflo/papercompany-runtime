@@ -10,9 +10,7 @@ import { AGENT_ADAPTER_TYPES } from "@paperclipai/shared";
 import type { AgentAdapterType, JoinRequest } from "@paperclipai/shared";
 
 type JoinType = "human" | "agent";
-const joinAdapterOptions: AgentAdapterType[] = AGENT_ADAPTER_TYPES.filter(
-  (type): type is AgentAdapterType => type !== "pi_local",
-);
+const joinAdapterOptions: AgentAdapterType[] = [...AGENT_ADAPTER_TYPES];
 
 const adapterLabels: Record<string, string> = {
   claude_local: "Claude (local)",
@@ -24,6 +22,7 @@ const adapterLabels: Record<string, string> = {
   commandcode_local: "Command Code (local)",
   openclaw_gateway: "OpenClaw Gateway",
   cursor: "Cursor (local)",
+  pi_local: "Pi (local)",
   process: "Process",
   http: "HTTP",
 };
@@ -37,6 +36,7 @@ const ENABLED_INVITE_ADAPTERS = new Set([
   "hermes_local",
   "cursor",
   "commandcode_local",
+  "pi_local",
 ]);
 
 function dateTime(value: string) {

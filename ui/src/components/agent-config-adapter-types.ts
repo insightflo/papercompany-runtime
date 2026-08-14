@@ -7,6 +7,7 @@ const ENABLED_ADAPTER_TYPES = new Set([
   "commandcode_local",
   "hermes_local",
   "cursor",
+  "pi_local",
 ]);
 
 export function isAdapterTypeEnabled(type: string): boolean {

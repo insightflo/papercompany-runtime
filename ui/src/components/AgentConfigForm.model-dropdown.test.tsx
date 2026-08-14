@@ -34,6 +34,10 @@ describe("AgentConfigForm model dropdown custom option", () => {
   it("treats Antigravity local as selectable rather than coming soon", () => {
     expect(isAdapterTypeEnabled("antigravity_local")).toBe(true);
   });
+
+  it("treats Pi local as selectable rather than coming soon", () => {
+    expect(isAdapterTypeEnabled("pi_local")).toBe(true);
+  });
 });
 
 describe("Hermes provider model helpers", () => {
