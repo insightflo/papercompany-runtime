@@ -246,16 +246,12 @@ function isHermesOperationsLiaisonAgent(ctx: AdapterExecutionContext) {
     metadata?: unknown;
   };
   const runtimeConfig = asRecord(agent.runtimeConfig);
-  const metadata = asRecord(agent.metadata);
   const domain = cfgString(runtimeConfig?.domain);
   const operatingMode = cfgString(runtimeConfig?.operatingMode);
-  const purpose = cfgString(metadata?.purpose);
   return (
     agent.name === "Hermes Operations Manager" ||
     agent.name === "Hermes Ops Manager" ||
     domain === "operations" ||
-    purpose === "research-company-hermes-management" ||
-    purpose === "gazua-hermes-management" ||
     operatingMode === "chief_of_staff_liaison" ||
     operatingMode === "independent_management_operator"
   );
