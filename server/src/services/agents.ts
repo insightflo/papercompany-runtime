@@ -37,6 +37,7 @@ const CONFIG_REVISION_FIELDS = [
   "capabilities",
   "adapterType",
   "adapterConfig",
+  "agentConfig",
   "runtimeConfig",
   "budgetMonthlyCents",
   "metadata",
@@ -87,6 +88,10 @@ function buildConfigSnapshot(
     typeof row.adapterConfig === "object" && row.adapterConfig !== null && !Array.isArray(row.adapterConfig)
       ? sanitizeRecord(row.adapterConfig as Record<string, unknown>)
       : {};
+  const agentConfig =
+    typeof row.agentConfig === "object" && row.agentConfig !== null && !Array.isArray(row.agentConfig)
+      ? sanitizeRecord(row.agentConfig as Record<string, unknown>)
+      : {};
   const runtimeConfig =
     typeof row.runtimeConfig === "object" && row.runtimeConfig !== null && !Array.isArray(row.runtimeConfig)
       ? sanitizeRecord(row.runtimeConfig as Record<string, unknown>)
@@ -103,6 +108,7 @@ function buildConfigSnapshot(
     capabilities: row.capabilities,
     adapterType: row.adapterType,
     adapterConfig,
+    agentConfig,
     runtimeConfig,
     budgetMonthlyCents: row.budgetMonthlyCents,
     metadata,
@@ -143,7 +149,7 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
     throw unprocessable("Invalid revision snapshot: budgetMonthlyCents");
   }
 
-  return {
+  const patch: Record<string, unknown> = {
     name: snapshot.name,
     role: snapshot.role,
     title: typeof snapshot.title === "string" || snapshot.title === null ? snapshot.title : null,
@@ -159,6 +165,10 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
     budgetMonthlyCents: Math.max(0, Math.floor(snapshot.budgetMonthlyCents)),
     metadata: isPlainRecord(snapshot.metadata) || snapshot.metadata === null ? snapshot.metadata : null,
   };
+  if (isPlainRecord(snapshot.agentConfig)) {
+    patch.agentConfig = snapshot.agentConfig;
+  }
+  return patch as Partial<typeof agents.$inferInsert>;
 }
 
 export function hasAgentShortnameCollision(
