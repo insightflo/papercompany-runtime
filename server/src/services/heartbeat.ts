@@ -5837,7 +5837,7 @@ export function heartbeatService(db: Db) {
       : null;
     const missionSessionBinding = missionSessionAuthority?.missionSessionBinding ?? null;
     const missionSessionId = missionSessionAuthority?.decision.preferredSessionId ?? null;
-    const config = parseObject(agent.adapterConfig);
+    const config = { ...parseObject(agent.adapterConfig), ...parseObject(agent.agentConfig) };
     const executionWorkspaceMode = resolveExecutionWorkspaceMode({
       projectPolicy: projectExecutionWorkspacePolicy,
       issueSettings: issueExecutionWorkspaceSettings,
