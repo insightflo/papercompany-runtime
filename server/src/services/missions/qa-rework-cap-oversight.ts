@@ -63,6 +63,38 @@ export function isQaReworkCapOversightIssue(
   return KEY_RE.test(description);
 }
 
+const PRODUCER_SOURCE_ISSUE_RE = /^Producer source issue:\s*([0-9a-f-]{36}|[A-Z]+-\d+)\s*$/im;
+const QA_STEP_ID_RE = /^QA: step\s+([A-Za-z0-9_-]+)\s*$/im;
+
+/**
+ * [cap-oversight producer authority] qa-cap-oversight 이슈 설명의 "Producer source issue:" 라인에서
+ *   producer issue id/identifier 를 추출한다. 이 이슈의 origin 은 oversight issue(스텝 없음)라
+ *   supervision 의 DAG 역추적이 producer 를 찾지 못하는 갭을 메우는 유일한 구조 경로다.
+ *   자연어 코멘트가 아니라 시스템이 생성한 설명이므로 신뢰 가능한 입력.
+ */
+export function extractQaCapProducerIssueRef(
+  description: string | null | undefined,
+): string | null {
+  if (!description) return null;
+  const match = PRODUCER_SOURCE_ISSUE_RE.exec(description);
+  const ref = match?.[1]?.trim();
+  return ref ? ref : null;
+}
+
+/**
+ * [cap-oversight QA gate authority] qa-cap-oversight 이슈 설명의 "QA: step <stepId>" 라인에서
+ *   QA step id 를 추출한다. producer rework authorization 의 fresh REQUEST_CHANGES 검증이
+ *   QA 게이트 이슈를 찾는 데 쓴다(origin 이 oversight 라 resolveQaGateIssueId 가 null 인 갭 보완).
+ */
+export function extractQaCapQaStepId(
+  description: string | null | undefined,
+): string | null {
+  if (!description) return null;
+  const match = QA_STEP_ID_RE.exec(description);
+  const ref = match?.[1]?.trim();
+  return ref ? ref : null;
+}
+
 // ---------------------------------------------------------------------------
 // Description
 // ---------------------------------------------------------------------------

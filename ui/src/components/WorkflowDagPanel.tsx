@@ -208,6 +208,7 @@ function WorkflowRunList({
                     step={step}
                     steps={run.steps}
                     agentMap={agentMap}
+                    stepRunId={step.stepRunId ?? null}
                   />
                 ))}
               </div>
@@ -289,17 +290,43 @@ function WorkflowStepRow({
   step,
   steps,
   agentMap,
+  stepRunId,
+  onCapBoosted,
 }: {
   missionId: string;
   step: MissionWorkflowStep;
   steps: MissionWorkflowStep[];
   agentMap: Record<string, string>;
+  stepRunId: string | null;
+  onCapBoosted?: () => void;
 }) {
   const dependencyNames = step.dependencies.map(
     (dependencyId) => steps.find((candidate) => candidate.stepId === dependencyId)?.name ?? dependencyId,
   );
   const assignee = getStepAssignee(step, agentMap);
   const workProducts = step.workProducts ?? [];
+  const [boostAmount, setBoostAmount] = useState(1);
+  const [boostReason, setBoostReason] = useState("");
+  const [boostState, setBoostState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [boostError, setBoostError] = useState<string | null>(null);
+
+  const hasReworkCap = typeof step.reworkCap === "number" && step.reworkCap > 0;
+  const effectiveCap = hasReworkCap ? step.reworkCap! + (step.capBoost ?? 0) : null;
+  const capExhausted = hasReworkCap && (step.iterationIndex ?? 0) >= (step.reworkCap ?? 0) + (step.capBoost ?? 0);
+
+  async function handleBoost() {
+    if (!stepRunId) return;
+    setBoostState("busy");
+    setBoostError(null);
+    try {
+      await missionsApi.grantQaReworkCapBoost(stepRunId, boostAmount, boostReason.trim() || undefined);
+      setBoostState("done");
+      onCapBoosted?.();
+    } catch (error) {
+      setBoostState("error");
+      setBoostError(error instanceof Error ? error.message : "Failed to grant rework cap boost");
+    }
+  }
 
   return (
     <div className="rounded border border-border/70 px-3 py-2">
@@ -316,6 +343,18 @@ function WorkflowStepRow({
             <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
               {formatStatusLabel(step.status)}
             </span>
+            {hasReworkCap ? (
+              <span
+                className={cn(
+                  "shrink-0 rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide",
+                  capExhausted ? "border-red-500/60 text-red-600 dark:text-red-400" : "border-border text-muted-foreground",
+                )}
+                title={capExhausted ? "QA rework cap exhausted — automatic rework stopped" : "QA rework budget"}
+              >
+                QA rework {step.iterationIndex ?? 0}/{effectiveCap}
+                {(step.capBoost ?? 0) > 0 ? ` (+${step.capBoost} boost)` : ""}
+              </span>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span
@@ -338,6 +377,43 @@ function WorkflowStepRow({
             </span>
             {dependencyNames.length > 0 ? <span>Depends on: {dependencyNames.join(", ")}</span> : <span>Entry step</span>}
           </div>
+          {hasReworkCap && capExhausted && stepRunId ? (
+            <div className="mt-1 flex flex-wrap items-center gap-2 rounded border border-red-500/30 bg-red-500/5 px-2 py-1.5">
+              <span className="text-[11px] text-muted-foreground">QA rework cap reached. Grant a temporary boost:</span>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                step={1}
+                value={boostAmount}
+                onChange={(event) => setBoostAmount(Number(event.target.value) || 1)}
+                aria-label="Boost amount"
+                className="w-16 rounded border border-border bg-background px-1.5 py-0.5 text-xs"
+              />
+              <input
+                type="text"
+                value={boostReason}
+                onChange={(event) => setBoostReason(event.target.value)}
+                placeholder="Reason (optional)"
+                aria-label="Boost reason"
+                className="min-w-32 flex-1 rounded border border-border bg-background px-1.5 py-0.5 text-xs"
+              />
+              <button
+                type="button"
+                disabled={boostState === "busy"}
+                onClick={() => void handleBoost()}
+                className="rounded border border-border px-2 py-0.5 text-xs hover:bg-accent/50 disabled:opacity-60"
+              >
+                {boostState === "busy" ? "Granting" : "Grant"}
+              </button>
+            </div>
+          ) : null}
+          {boostState === "done" ? (
+            <p className="text-[11px] text-emerald-600 dark:text-emerald-400">Cap boost granted. The next workflow sync will allow more rework.</p>
+          ) : null}
+          {boostState === "error" ? (
+            <p className="text-[11px] text-destructive">{boostError}</p>
+          ) : null}
           {step.toolNames.length > 0 ? (
             <div className="flex flex-wrap gap-1">
               {step.toolNames.map((toolName) => (
@@ -726,7 +802,13 @@ function WorkflowRunGraph({
       {selectedStep ? (
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Selected step</p>
-          <WorkflowStepRow missionId={missionId} step={selectedStep} steps={run.steps} agentMap={agentMap} />
+          <WorkflowStepRow
+            missionId={missionId}
+            step={selectedStep}
+            steps={run.steps}
+            agentMap={agentMap}
+            stepRunId={selectedStep.stepRunId ?? null}
+          />
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">

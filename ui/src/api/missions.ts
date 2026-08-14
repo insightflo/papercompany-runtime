@@ -63,6 +63,10 @@ export interface MissionWorkflowStep {
   workProducts: MissionWorkflowStepWorkProduct[];
   startedAt: string | null;
   completedAt: string | null;
+  stepRunId?: string | null;
+  iterationIndex?: number;
+  reworkCap?: number | null;
+  capBoost?: number;
 }
 
 export interface MissionWorkflowRunProgress {
@@ -391,6 +395,11 @@ export const missionsApi = {
   listAgents: (id: string) => api.get<MissionAgentEntry[]>(`/missions/${id}/agents`),
   listIssues: (id: string) => api.get<Issue[]>(`/missions/${id}/issues`),
   listWorkflowRuns: (id: string) => api.get<MissionWorkflowRun[]>(`/missions/${id}/workflow-runs`),
+  grantQaReworkCapBoost: (stepRunId: string, amount: number, reason?: string) =>
+    api.post<{ stepRunId: string; stepId: string; amount: number; metadata: Record<string, unknown> }>(
+      `/workflow-step-runs/${stepRunId}/qa-rework-cap-boost`,
+      { amount, ...(reason ? { reason } : {}) },
+    ),
   getGovernanceThread: (id: string) => api.get<MissionGovernanceThreadResponse>(`/missions/${id}/governance-thread`),
   listHumanOperatorRequests: (companyId: string) =>
     api.get<MissionHumanOperatorRequest[]>(`/companies/${companyId}/missions/human-operator-requests`),
