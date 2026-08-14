@@ -20,7 +20,6 @@ export function isMissionExecutionLiaisonAgent(agent: MissionExecutionAssigneeAg
   const metadata = isRecord(agent.metadata) ? agent.metadata : EMPTY_RECORD;
   const domain = asTrimmedString(runtimeConfig.domain);
   const operatingMode = asTrimmedString(runtimeConfig.operatingMode);
-  const purpose = asTrimmedString(metadata.purpose);
 
   // [P3] 신뢰 가능한 신호(explicit flag / mode)를 먼저 보고, 이름은 legacy fallback으로만 둔다.
   //   이름 기반 단독 판정은 fragile(잘못 named agent, rename 시 누락/과잉 매칭).
@@ -32,8 +31,6 @@ export function isMissionExecutionLiaisonAgent(agent: MissionExecutionAssigneeAg
     domain === "operations" ||
     operatingMode === "chief_of_staff_liaison" ||
     operatingMode === "independent_management_operator" ||
-    purpose === "research-company-hermes-management" ||
-    purpose === "gazua-hermes-management" ||
     agent.name === "Hermes Operations Manager" ||
     agent.name === "Hermes Ops Manager"
   );
