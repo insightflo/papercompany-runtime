@@ -256,6 +256,34 @@ describe("buildStepInputManifest", () => {
     });
   });
 
+  it("carries forward missionPlan from the previous manifest when the raw context key was pruned for wake persistence", () => {
+    const seeded: Record<string, unknown> = {
+      taskKey: "issue:123",
+      issueId: "issue-1",
+      paperclipMissionPlan: {
+        available: true,
+        missionPlanId: "plan-1",
+        revision: 2,
+        status: "active",
+        missionGoal: "Customer homepage rollout",
+        selectedExecutionUnitLabels: ["Run preflight smoke"],
+      },
+    };
+    const previous = buildStepInputManifest({ taskKey: "issue:123", context: seeded });
+    // Simulate the pruned wake context persisted after a prior refresh.
+    const prunedContext: Record<string, unknown> = {
+      taskKey: "issue:123",
+      issueId: "issue-1",
+      paperclipStepInputManifest: previous,
+    };
+    delete prunedContext.paperclipMissionPlan;
+
+    const manifest = buildStepInputManifest({ taskKey: "issue:123", context: prunedContext });
+
+    expect(manifest.inputs.missionPlan.available).toBe(true);
+    expect(manifest.inputs.missionPlan.missionPlanId).toBe("plan-1");
+  });
+
   it("blocks explicit broad-scan instructions when the manifest forbids them", async () => {
     const result = await evaluateStepInputManifestGuard({
       adapterConfig: {
