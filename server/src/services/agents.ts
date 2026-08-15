@@ -83,12 +83,26 @@ export const AGENT_LEVEL_CONFIG_KEYS = [
   "agentsMdPath",
 ] as const;
 
+// Engine-routing/system env keys that must stay in adapterConfig so adapter
+// switches reset them. Everything else inside `env` is agent intent.
+export const ENGINE_ENV_KEYS = ["HOME", "CODEX_HOME", "HERMES_HOME", "PATH"] as const;
+
+function isEngineEnvKey(key: string): boolean {
+  return (ENGINE_ENV_KEYS as readonly string[]).includes(key);
+}
+
 export function mergeAgentConfig(
   agent: { adapterConfig: unknown; agentConfig?: unknown },
 ): Record<string, unknown> {
   const adapterConfig = isPlainRecord(agent.adapterConfig) ? agent.adapterConfig : {};
   const agentConfig = isPlainRecord(agent.agentConfig) ? agent.agentConfig : {};
-  return { ...adapterConfig, ...agentConfig };
+  const merged = { ...adapterConfig, ...agentConfig };
+  const adapterEnv = isPlainRecord(adapterConfig.env) ? adapterConfig.env : {};
+  const agentEnv = isPlainRecord(agentConfig.env) ? agentConfig.env : {};
+  if (Object.keys(adapterEnv).length > 0 || Object.keys(agentEnv).length > 0) {
+    merged.env = { ...adapterEnv, ...agentEnv };
+  }
+  return merged;
 }
 
 export function splitAgentLevelKeys(input: unknown): {
@@ -100,7 +114,25 @@ export function splitAgentLevelKeys(input: unknown): {
   const agentConfig: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(source)) {
-    if ((AGENT_LEVEL_CONFIG_KEYS as readonly string[]).includes(key)) {
+    if (key === "env") {
+      // Special case: env is partitioned key-wise, not owned wholesale.
+      // Engine-routing keys stay in adapterConfig; intent keys move to agentConfig.
+      if (isPlainRecord(value)) {
+        const adapterEnv: Record<string, unknown> = {};
+        const agentEnv: Record<string, unknown> = {};
+        for (const [envKey, envValue] of Object.entries(value)) {
+          if (isEngineEnvKey(envKey)) {
+            adapterEnv[envKey] = envValue;
+          } else {
+            agentEnv[envKey] = envValue;
+          }
+        }
+        if (Object.keys(adapterEnv).length > 0) adapterConfig.env = adapterEnv;
+        if (Object.keys(agentEnv).length > 0) agentConfig.env = agentEnv;
+      } else {
+        adapterConfig.env = value;
+      }
+    } else if ((AGENT_LEVEL_CONFIG_KEYS as readonly string[]).includes(key)) {
       agentConfig[key] = value;
     } else {
       adapterConfig[key] = value;
@@ -429,23 +461,83 @@ export function agentService(db: Db) {
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions, role);
     }
 
-    if (Object.prototype.hasOwnProperty.call(data, "adapterConfig")) {
+    const hasAdapterConfigKey = Object.prototype.hasOwnProperty.call(data, "adapterConfig");
+    const hasAgentConfigKey = Object.prototype.hasOwnProperty.call(data, "agentConfig");
+    if (hasAdapterConfigKey) {
+      const hasIncomingEnvKey =
+        isPlainRecord(data.adapterConfig) &&
+        Object.prototype.hasOwnProperty.call(data.adapterConfig, "env");
       const split = splitAgentLevelKeys(data.adapterConfig);
       normalizedPatch.adapterConfig = split.adapterConfig;
-      if (Object.prototype.hasOwnProperty.call(data, "agentConfig")) {
+      if (hasAgentConfigKey) {
         // Rollback and explicit dual-column patches restore agentConfig verbatim.
         normalizedPatch.agentConfig = isPlainRecord(data.agentConfig)
           ? data.agentConfig
           : {};
+      } else if (hasIncomingEnvKey) {
+        // (a) env-authoritative patch: the incoming env fully replaces both env
+        // halves. Agent keys keep the P2 authoritative rule (merged-derived
+        // patches propagate deletions).
+        const splitAgentConfig = split.agentConfig;
+        const nonEnvKeys = Object.keys(splitAgentConfig).filter((key) => key !== "env");
+        if (nonEnvKeys.length > 0) {
+          // Whole-column replace; split.agentConfig.env presence/absence is the
+          // full replacement of the intent env half.
+          normalizedPatch.agentConfig = splitAgentConfig;
+        } else {
+          // env-only patch: replace just the intent env half, keep other agent keys.
+          const nextAgentConfig: Record<string, unknown> = {
+            ...(isPlainRecord(existing.agentConfig) ? existing.agentConfig : {}),
+          };
+          if (isPlainRecord(splitAgentConfig.env) && Object.keys(splitAgentConfig.env).length > 0) {
+            nextAgentConfig.env = splitAgentConfig.env;
+          } else {
+            delete nextAgentConfig.env;
+          }
+          normalizedPatch.agentConfig = nextAgentConfig;
+        }
       } else if (Object.keys(split.agentConfig).length > 0) {
-        // The incoming config carries agent-level keys, so it was derived from a
-        // merged read (field edits, instructions/skills RMW). Treat it as
-        // authoritative for agent keys so deletions (clearLegacyPromptTemplate,
-        // cleared instructions paths) propagate instead of being resurrected.
-        normalizedPatch.agentConfig = split.agentConfig;
+        // P2 authoritative merged-derived patch (agent keys, no env): whole-column
+        // replace, but the intent env half is untouched (rule (b)).
+        const splitAgentConfig = { ...split.agentConfig };
+        if (isPlainRecord(existing.agentConfig) && isPlainRecord(existing.agentConfig.env)) {
+          splitAgentConfig.env = existing.agentConfig.env;
+        }
+        normalizedPatch.agentConfig = splitAgentConfig;
       }
-      // Engine-only adapterConfig (adapter switch) leaves agentConfig untouched.
-    } else if (Object.prototype.hasOwnProperty.call(data, "agentConfig")) {
+      if (!hasIncomingEnvKey) {
+        // (b) env absent from the patch: both env columns are left untouched.
+        // The engine-env half must be carried forward explicitly because the
+        // patch replaces the whole adapterConfig column. When the adapter type
+        // actually changes, engine entries are dropped instead (e.g. CODEX_HOME
+        // must not survive a codex -> claude switch).
+        const nextAdapterType =
+          typeof data.adapterType === "string" && data.adapterType.length > 0
+            ? data.adapterType
+            : existing.adapterType;
+        const existingAdapterEnv =
+          isPlainRecord(existing.adapterConfig) && isPlainRecord(existing.adapterConfig.env)
+            ? existing.adapterConfig.env
+            : {};
+        const adapterConfigRecord = isPlainRecord(normalizedPatch.adapterConfig)
+          ? normalizedPatch.adapterConfig
+          : {};
+        if (nextAdapterType !== existing.adapterType) {
+          const retainedEnv: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(existingAdapterEnv)) {
+            if (!isEngineEnvKey(key)) retainedEnv[key] = value;
+          }
+          if (Object.keys(retainedEnv).length > 0) {
+            normalizedPatch.adapterConfig = { ...adapterConfigRecord, env: retainedEnv };
+          } else {
+            const { env: _engineEnv, ...withoutEnv } = adapterConfigRecord;
+            normalizedPatch.adapterConfig = withoutEnv;
+          }
+        } else if (Object.keys(existingAdapterEnv).length > 0) {
+          normalizedPatch.adapterConfig = { ...adapterConfigRecord, env: existingAdapterEnv };
+        }
+      }
+    } else if (hasAgentConfigKey) {
       normalizedPatch.agentConfig = isPlainRecord(data.agentConfig)
         ? data.agentConfig
         : {};
@@ -510,10 +602,13 @@ export function agentService(db: Db) {
       const role = data.role ?? "general";
       const normalizedPermissions = normalizeAgentPermissions(data.permissions, role);
       const split = splitAgentLevelKeys(data.adapterConfig);
-      const mergedAgentConfig = {
-        ...split.agentConfig,
-        ...(isPlainRecord(data.agentConfig) ? data.agentConfig : {}),
-      };
+      const explicitAgentConfig = isPlainRecord(data.agentConfig) ? data.agentConfig : {};
+      const mergedAgentConfig = { ...split.agentConfig, ...explicitAgentConfig };
+      const splitEnv = isPlainRecord(split.agentConfig.env) ? split.agentConfig.env : {};
+      const explicitEnv = isPlainRecord(explicitAgentConfig.env) ? explicitAgentConfig.env : {};
+      if (Object.keys(splitEnv).length > 0 || Object.keys(explicitEnv).length > 0) {
+        mergedAgentConfig.env = { ...splitEnv, ...explicitEnv };
+      }
       const created = await db
         .insert(agents)
         .values({

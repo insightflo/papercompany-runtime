@@ -2313,9 +2313,10 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         warnings.push(...exportedInstructions.warnings);
 
         const envInputsStart = envInputs.length;
+        const mergedAgentConfig = mergeAgentConfig(agent);
         const exportedEnvInputs = extractPortableEnvInputs(
           slug,
-          (agent.adapterConfig as Record<string, unknown>).env,
+          mergedAgentConfig.env,
           warnings,
         );
         envInputs.push(...exportedEnvInputs);

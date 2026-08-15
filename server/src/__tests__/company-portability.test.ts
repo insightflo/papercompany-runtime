@@ -661,6 +661,56 @@ describe("company portability", () => {
     ]);
   });
 
+  it("extracts env inputs from both config columns (agentConfig.env included)", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    agentSvc.list.mockResolvedValue([
+      {
+        id: "agent-env-split",
+        name: "EnvSplit",
+        status: "idle",
+        role: "engineer",
+        title: null,
+        icon: "code",
+        reportsTo: null,
+        capabilities: null,
+        adapterType: "claude_local",
+        adapterConfig: {
+          model: "claude-opus-4-6",
+          env: {
+            HOME: { type: "plain", value: "/engine-home" },
+            ENGINE_KEY: { type: "plain", value: "engine-value" },
+          },
+        },
+        agentConfig: {
+          env: {
+            AGENT_KEY: { type: "plain", value: "agent-value" },
+          },
+        },
+        runtimeConfig: {},
+        budgetMonthlyCents: 0,
+        permissions: {},
+        metadata: null,
+      },
+    ]);
+    projectSvc.list.mockResolvedValue([]);
+    issueSvc.list.mockResolvedValue([]);
+
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+    });
+
+    const envInputKeys = (exported.manifest.envInputs ?? []).map((entry) => entry.key);
+    expect(envInputKeys).toContain("AGENT_KEY");
+    expect(envInputKeys).toContain("ENGINE_KEY");
+    expect(envInputKeys).toContain("HOME");
+  });
+
   it("imports a vendor-neutral package without .paperclip.yaml", async () => {
     const portability = companyPortabilityService({} as any);
 

@@ -72,7 +72,7 @@ describeDb("agentService config normalizer", () => {
         ...ALL_AGENT_KEYS,
         model: "claude-opus-4-6",
         command: "/usr/local/bin/claude",
-        env: { KEY: "v" },
+        env: { KEY: "v", HOME: "/engine-home", CODEX_HOME: "/codex" },
       },
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
@@ -82,9 +82,32 @@ describeDb("agentService config normalizer", () => {
     expect(row?.adapterConfig).toEqual({
       model: "claude-opus-4-6",
       command: "/usr/local/bin/claude",
+      env: { HOME: "/engine-home", CODEX_HOME: "/codex" },
+    });
+    expect(row?.agentConfig).toEqual({
+      ...ALL_AGENT_KEYS,
       env: { KEY: "v" },
     });
-    expect(row?.agentConfig).toEqual(ALL_AGENT_KEYS);
+  });
+
+  it("create: env-key merges explicit agentConfig.env over intent env from adapterConfig", async () => {
+    const svc = agentService(db);
+    const companyId = await seedCompany();
+
+    const created = await svc.create(companyId, {
+      name: "Explicit Env Agent",
+      role: "engineer",
+      status: "idle",
+      adapterType: "claude_local",
+      adapterConfig: { env: { KEY: "from-adapter", ENGINE_ONLY: "gone", HOME: "/h" } },
+      agentConfig: { env: { KEY: "from-explicit", OTHER: "kept" } },
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+
+    const row = await fetchAgent(created.id);
+    expect(row?.adapterConfig).toEqual({ env: { HOME: "/h" } });
+    expect(row?.agentConfig).toEqual({ env: { KEY: "from-explicit", OTHER: "kept", ENGINE_ONLY: "gone" } });
   });
 
   it("update with engine-only adapterConfig preserves existing agentConfig (adapter switch)", async () => {
