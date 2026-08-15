@@ -132,6 +132,10 @@ export function approvalService(db: Db) {
               typeof payload.adapterConfig === "object" && payload.adapterConfig !== null
                 ? (payload.adapterConfig as Record<string, unknown>)
                 : {},
+            agentConfig:
+              typeof payload.agentConfig === "object" && payload.agentConfig !== null
+                ? (payload.agentConfig as Record<string, unknown>)
+                : undefined,
             budgetMonthlyCents:
               typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0,
             metadata:

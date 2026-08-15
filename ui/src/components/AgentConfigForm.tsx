@@ -273,7 +273,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       // with old config since old adapter fields are meaningless for the new type
       patch.adapterConfig = overlay.adapterConfig;
     } else if (Object.keys(overlay.adapterConfig).length > 0) {
-      const existing = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      const existing = {
+        ...((agent.adapterConfig ?? {}) as Record<string, unknown>),
+        ...((agent.agentConfig ?? {}) as Record<string, unknown>),
+      };
       patch.adapterConfig = { ...existing, ...overlay.adapterConfig };
     }
     if (Object.keys(overlay.heartbeat).length > 0) {
@@ -306,7 +309,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   }, [isCreate, props.onDirtyChange, props.onSaveActionChange, props.onCancelActionChange]);
 
   // ---- Resolve values ----
-  const config = !isCreate ? ((props.agent.adapterConfig ?? {}) as Record<string, unknown>) : {};
+  const config = !isCreate
+    ? ({
+        ...((props.agent.adapterConfig ?? {}) as Record<string, unknown>),
+        ...((props.agent.agentConfig ?? {}) as Record<string, unknown>),
+      } as Record<string, unknown>)
+    : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
 

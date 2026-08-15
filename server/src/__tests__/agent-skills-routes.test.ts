@@ -57,6 +57,13 @@ const mockAdapter = vi.hoisted(() => ({
   syncSkills: vi.fn(),
 }));
 
+const mockMergeAgentConfig = vi.hoisted(() =>
+  vi.fn((agent: { adapterConfig?: Record<string, unknown>; agentConfig?: Record<string, unknown> }) => ({
+    ...(agent.adapterConfig ?? {}),
+    ...(agent.agentConfig ?? {}),
+  })),
+);
+
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
   agentInstructionsService: () => mockAgentInstructionsService,
@@ -68,6 +75,7 @@ vi.mock("../services/index.js", () => ({
   issueApprovalService: () => mockIssueApprovalService,
   issueService: () => ({}),
   logActivity: mockLogActivity,
+  mergeAgentConfig: mockMergeAgentConfig,
   secretService: () => mockSecretService,
   syncInstructionsBundleConfigFromFilePath: vi.fn((_agent, config) => config),
   workspaceOperationService: () => mockWorkspaceOperationService,

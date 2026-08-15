@@ -3,6 +3,7 @@ import { agents } from "@paperclipai/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { listWorkflowToolCatalog } from "../workflow/tool-catalog.js";
 import type { WorkflowToolPlanningMetadata } from "../workflow/tool-catalog.js";
+import { mergeAgentConfig } from "../agents.js";
 
 export type MissionPlanExecutionPlacementDiagnostic = {
   readonly code: string;
@@ -70,8 +71,8 @@ function readAssigneeAgentId(unit: Record<string, unknown>): string {
   return readString(unit.assigneeAgentId) || readString(unit.agentId);
 }
 
-function readPaperclipDesiredSkills(adapterConfig: unknown): string[] {
-  const config = asRecord(adapterConfig);
+function readPaperclipDesiredSkills(agentRow: { adapterConfig: unknown; agentConfig?: unknown }): string[] {
+  const config = mergeAgentConfig(agentRow);
   const skillSync = asRecord(config?.paperclipSkillSync);
   return Array.from(new Set(readStringArray(skillSync?.desiredSkills)));
 }
@@ -307,7 +308,7 @@ export async function reviewMissionPlanExecutionPlacement(input: {
     agentIds.length === 0
       ? Promise.resolve([])
       : input.db
-      .select({ id: agents.id, name: agents.name, adapterConfig: agents.adapterConfig })
+      .select({ id: agents.id, name: agents.name, adapterConfig: agents.adapterConfig, agentConfig: agents.agentConfig })
       .from(agents)
       .where(and(eq(agents.companyId, input.companyId), inArray(agents.id, agentIds))),
   ]);
@@ -322,7 +323,7 @@ export async function reviewMissionPlanExecutionPlacement(input: {
       agentNamesById: new Map(agentNameEntries(agentRows)),
       agentSkillProfilesById: new Map(agentRows.map((agent) => [
         agent.id,
-        { id: agent.id, desiredSkills: readPaperclipDesiredSkills(agent.adapterConfig) },
+        { id: agent.id, desiredSkills: readPaperclipDesiredSkills(agent) },
       ])),
     },
   });

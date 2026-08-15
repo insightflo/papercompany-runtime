@@ -39,7 +39,9 @@ import {
   issueApprovalService,
   issueService,
   logActivity,
+  mergeAgentConfig,
   secretService,
+  splitAgentLevelKeys,
   syncInstructionsBundleConfigFromFilePath,
   workspaceOperationService,
 } from "../services/index.js";
@@ -459,7 +461,7 @@ export function agentRoutes(db: Db) {
       return agent;
     }
 
-    const adapterConfig = asRecord(agent.adapterConfig) ?? {};
+    const adapterConfig = mergeAgentConfig(agent) ?? {};
     const hasExplicitInstructionsBundle =
       Boolean(asNonEmptyString(adapterConfig.instructionsBundleMode))
       || Boolean(asNonEmptyString(adapterConfig.instructionsRootPath))
@@ -592,6 +594,7 @@ export function agentRoutes(db: Db) {
     return {
       ...agent,
       adapterConfig: {},
+      agentConfig: {},
       runtimeConfig: {},
     };
   }
@@ -608,6 +611,7 @@ export function agentRoutes(db: Db) {
       reportsTo: agent.reportsTo,
       adapterType: agent.adapterType,
       adapterConfig: redactEventPayload(agent.adapterConfig),
+      agentConfig: redactEventPayload(agent.agentConfig),
       runtimeConfig: redactEventPayload(agent.runtimeConfig),
       permissions: agent.permissions,
       updatedAt: agent.updatedAt,
@@ -617,7 +621,7 @@ export function agentRoutes(db: Db) {
   function redactRevisionSnapshot(snapshot: unknown): Record<string, unknown> {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return {};
     const record = snapshot as Record<string, unknown>;
-    return {
+    const redacted: Record<string, unknown> = {
       ...record,
       adapterConfig: redactEventPayload(
         typeof record.adapterConfig === "object" && record.adapterConfig !== null
@@ -634,6 +638,10 @@ export function agentRoutes(db: Db) {
           ? redactEventPayload(record.metadata as Record<string, unknown>)
           : record.metadata ?? null,
     };
+    if (typeof record.agentConfig === "object" && record.agentConfig !== null) {
+      redacted.agentConfig = redactEventPayload(record.agentConfig as Record<string, unknown>);
+    }
+    return redacted;
   }
 
   function redactConfigRevision(
@@ -747,9 +755,7 @@ export function agentRoutes(db: Db) {
 
     const adapter = findServerAdapter(agent.adapterType);
     if (!adapter?.listSkills) {
-      const preference = readPaperclipSkillSyncPreference(
-        agent.adapterConfig as Record<string, unknown>,
-      );
+      const preference = readPaperclipSkillSyncPreference(mergeAgentConfig(agent));
       const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId, {
         materializeMissing: false,
       });
@@ -760,7 +766,7 @@ export function agentRoutes(db: Db) {
 
     const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(
       agent.companyId,
-      agent.adapterConfig,
+      mergeAgentConfig(agent),
     );
     const runtimeSkillConfig = await buildRuntimeSkillConfig(
       agent.companyId,
@@ -802,7 +808,7 @@ export function agentRoutes(db: Db) {
       } = await resolveDesiredSkillAssignment(
         agent.companyId,
         agent.adapterType,
-        agent.adapterConfig as Record<string, unknown>,
+        mergeAgentConfig(agent),
         requestedSkills,
       );
       if (!desiredSkills || !runtimeSkillEntries) {
@@ -826,7 +832,7 @@ export function agentRoutes(db: Db) {
       const adapter = findServerAdapter(updated.adapterType);
       const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(
         updated.companyId,
-        updated.adapterConfig,
+        mergeAgentConfig(updated),
       );
       const runtimeSkillConfig = {
         ...runtimeConfig,
@@ -1261,6 +1267,10 @@ export function agentRoutes(db: Db) {
         redactEventPayload(
           (normalizedHireInput.runtimeConfig ?? agent.runtimeConfig) as Record<string, unknown>,
         ) ?? {};
+      const requestedAgentConfig =
+        redactEventPayload(
+          (agent.agentConfig ?? {}) as Record<string, unknown>,
+        ) ?? {};
       const requestedMetadata =
         redactEventPayload(
           ((normalizedHireInput.metadata ?? agent.metadata ?? {}) as Record<string, unknown>),
@@ -1279,6 +1289,7 @@ export function agentRoutes(db: Db) {
           capabilities: normalizedHireInput.capabilities ?? null,
           adapterType: requestedAdapterType,
           adapterConfig: requestedAdapterConfig,
+          agentConfig: requestedAgentConfig,
           runtimeConfig: requestedRuntimeConfig,
           budgetMonthlyCents:
             typeof normalizedHireInput.budgetMonthlyCents === "number"
@@ -1291,6 +1302,7 @@ export function agentRoutes(db: Db) {
           requestedConfigurationSnapshot: {
             adapterType: requestedAdapterType,
             adapterConfig: requestedAdapterConfig,
+            agentConfig: requestedAgentConfig,
             runtimeConfig: requestedRuntimeConfig,
             desiredSkills: desiredSkillAssignment.desiredSkills,
           },
@@ -1503,7 +1515,7 @@ export function agentRoutes(db: Db) {
 
     await assertCanManageInstructionsPath(req, existing);
 
-    const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
+    const existingAdapterConfig = mergeAgentConfig(existing);
     const explicitKey = asNonEmptyString(req.body.adapterConfigKey);
     const defaultKey = DEFAULT_INSTRUCTIONS_PATH_KEYS[existing.adapterType] ?? null;
     const adapterConfigKey = explicitKey ?? defaultKey;
@@ -1527,10 +1539,14 @@ export function agentRoutes(db: Db) {
       syncedAdapterConfig,
       { strictMode: strictSecretsMode },
     );
+    // The merged read starts from agentConfig values; pass the extracted agent
+    // keys back as an explicit agentConfig patch so clears propagate instead of
+    // being resurrected by the update normalizer.
+    const agentConfigPatch = splitAgentLevelKeys(normalizedAdapterConfig).agentConfig;
     const actor = getActorInfo(req);
     const agent = await svc.update(
       id,
-      { adapterConfig: normalizedAdapterConfig },
+      { adapterConfig: normalizedAdapterConfig, agentConfig: agentConfigPatch },
       {
         recordRevision: {
           createdByAgentId: actor.agentId,
@@ -1544,7 +1560,7 @@ export function agentRoutes(db: Db) {
       return;
     }
 
-    const updatedAdapterConfig = asRecord(agent.adapterConfig) ?? {};
+    const updatedAdapterConfig = mergeAgentConfig(agent);
     const pathValue = asNonEmptyString(updatedAdapterConfig[adapterConfigKey]);
 
     await logActivity(db, {
@@ -1769,7 +1785,7 @@ export function agentRoutes(db: Db) {
     if (touchesAdapterConfiguration) {
       const rawEffectiveAdapterConfig = Object.prototype.hasOwnProperty.call(patchData, "adapterConfig")
         ? (asRecord(patchData.adapterConfig) ?? {})
-        : (asRecord(existing.adapterConfig) ?? {});
+        : mergeAgentConfig(existing);
       const effectiveAdapterConfig = applyCreateDefaultsByAdapterType(
         requestedAdapterType,
         rawEffectiveAdapterConfig,
@@ -2070,7 +2086,7 @@ export function agentRoutes(db: Db) {
       return;
     }
 
-    const config = asRecord(agent.adapterConfig) ?? {};
+    const config = mergeAgentConfig(agent);
     const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(agent.companyId, config);
     const result = await runClaudeLogin({
       runId: `claude-login-${randomUUID()}`,

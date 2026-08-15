@@ -23,7 +23,7 @@ import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWikiEntries, agentWikiEditProposals } from "@paperclipai/db";
 import { logger as defaultLogger } from "../middleware/logger.js";
-import { agentService } from "./agents.js";
+import { agentService, mergeAgentConfig } from "./agents.js";
 
 // ---------------------------------------------------------------------------
 // env 게이트 — resolveWorkflowSchedulerOwnership(scheduler-ownership.ts) 미러. default OFF.
@@ -192,6 +192,7 @@ export async function runWikiEvolutionPass(
         id: agents.id,
         companyId: agents.companyId,
         adapterConfig: agents.adapterConfig,
+        agentConfig: agents.agentConfig,
       })
       .from(agents)
       .where(eq(agents.id, entry.agentId))
@@ -201,7 +202,7 @@ export async function runWikiEvolutionPass(
       continue;
     }
 
-    const currentPrompt = readLegacyPromptTemplate(agentRow.adapterConfig);
+    const currentPrompt = readLegacyPromptTemplate(mergeAgentConfig(agentRow));
     if (currentPrompt === null) {
       // managed-bundle 이거나 inline prompt 없음 → v1 skip(file IO 는 v2).
       result.skipped += 1;
@@ -212,8 +213,7 @@ export async function runWikiEvolutionPass(
       const nextPrompt = hasLessonBlock(currentPrompt, entry.id)
         ? currentPrompt
         : appendLessonBlock(currentPrompt, entry.id, entry.pattern, entry.solution);
-      const baseConfig = (agentRow.adapterConfig as Record<string, unknown> | null) ?? {};
-      const nextConfig = { ...baseConfig, promptTemplate: nextPrompt };
+      const nextConfig = { ...mergeAgentConfig(agentRow), promptTemplate: nextPrompt };
       await agtSvc.update(
         agentRow.id,
         { adapterConfig: nextConfig },
@@ -261,11 +261,15 @@ export async function runWikiEvolutionPass(
       // 기각: 마커 블록 surgically 제거(revert).
       if (!dryRun) {
         const [agentRow] = await db
-          .select({ id: agents.id, adapterConfig: agents.adapterConfig })
+          .select({
+            id: agents.id,
+            adapterConfig: agents.adapterConfig,
+            agentConfig: agents.agentConfig,
+          })
           .from(agents)
           .where(eq(agents.id, proposal.agentId))
           .limit(1);
-        const livePrompt = readLegacyPromptTemplate(agentRow?.adapterConfig ?? null);
+        const livePrompt = readLegacyPromptTemplate(agentRow ? mergeAgentConfig(agentRow) : null);
         const reverted = removeLessonBlock(
           hasLessonBlock(livePrompt ?? "", proposal.entryId)
             ? (livePrompt as string)
@@ -273,7 +277,7 @@ export async function runWikiEvolutionPass(
           proposal.entryId,
         );
         if (agentRow) {
-          const baseConfig = (agentRow.adapterConfig as Record<string, unknown> | null) ?? {};
+          const baseConfig = mergeAgentConfig(agentRow);
           await agtSvc.update(
             agentRow.id,
             { adapterConfig: { ...baseConfig, promptTemplate: reverted } },

@@ -9,18 +9,20 @@ type TestAgent = {
   companyId: string;
   name: string;
   adapterConfig: Record<string, unknown>;
+  agentConfig?: Record<string, unknown>;
 };
 
 async function makeTempDir(prefix: string) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-function makeAgent(adapterConfig: Record<string, unknown>): TestAgent {
+function makeAgent(adapterConfig: Record<string, unknown>, agentConfig?: Record<string, unknown>): TestAgent {
   return {
     id: "agent-1",
     companyId: "company-1",
     name: "Agent 1",
     adapterConfig,
+    ...(agentConfig ? { agentConfig } : {}),
   };
 }
 
@@ -160,5 +162,69 @@ describe("agent instructions service", () => {
       "AGENTS.md",
       "docs/TOOLS.md",
     ]);
+  });
+
+  it("reads bundle state from the merged agentConfig when cwd lives only in agentConfig", async () => {
+    const paperclipHome = await makeTempDir("paperclip-agent-instructions-merged-");
+    cleanupDirs.add(paperclipHome);
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
+
+    // Dedicated cwd: getBundle enumerates the bundle root, so a shared dir like
+    // /tmp would list foreign ephemeral files that can vanish mid-stat (CI flake).
+    const cwd = await makeTempDir("paperclip-agent-instructions-merged-cwd-");
+    cleanupDirs.add(cwd);
+
+    // engine-only adapterConfig + agent-level keys in agentConfig (post-P2 shape)
+    const agent = makeAgent(
+      { model: "claude-opus-4-6" },
+      {
+        cwd,
+        instructionsFilePath: "relative-AGENTS.md",
+      },
+    );
+
+    await fs.writeFile(path.join(cwd, "relative-AGENTS.md"), "# Merged Instructions\n", "utf8");
+
+    const svc = agentInstructionsService();
+    const bundle = await svc.getBundle(agent);
+
+    expect(bundle.mode).toBe("external");
+    expect(bundle.rootPath).toBe(cwd);
+    expect(bundle.entryFile).toBe("relative-AGENTS.md");
+  });
+
+  it("materializes a managed bundle using the merged config for legacy promptTemplate fallback", async () => {
+    const paperclipHome = await makeTempDir("paperclip-agent-instructions-materialize-merged-");
+    cleanupDirs.add(paperclipHome);
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
+
+    const agent = makeAgent(
+      { model: "claude-opus-4-6" },
+      { promptTemplate: "You are a merged agent." },
+    );
+
+    const svc = agentInstructionsService();
+    const result = await svc.ensureManagedBundle(agent);
+
+    expect(result.adapterConfig).toMatchObject({
+      instructionsBundleMode: "managed",
+      instructionsEntryFile: "AGENTS.md",
+    });
+    expect(result.state.rootPath).toBe(
+      path.join(
+        paperclipHome,
+        "instances",
+        "test-instance",
+        "companies",
+        "company-1",
+        "agents",
+        "agent-1",
+        "instructions",
+      ),
+    );
+    await expect(fs.readFile(path.join(result.state.rootPath, "AGENTS.md"), "utf8"))
+      .resolves.toBe("You are a merged agent.");
   });
 });

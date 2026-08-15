@@ -3,7 +3,7 @@ import type { Db } from "@paperclipai/db";
 import type { AdapterEnvironmentTestResult } from "@paperclipai/shared";
 import { findServerAdapter } from "../adapters/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
-import { logActivity, secretService } from "../services/index.js";
+import { logActivity, mergeAgentConfig, secretService } from "../services/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { hermesChatService } from "../services/hermes-chat.js";
 import { resolveRecoveryAdviceForChat } from "../services/hermes-chat-recovery.js";
@@ -88,7 +88,7 @@ export function hermesChatRoutes(db: Db) {
     }
 
     const agent = await service.findOperationsAgent(companyId);
-    const adapterConfig = (agent?.adapterConfig ?? {}) as Record<string, unknown>;
+    const adapterConfig = mergeAgentConfig(agent ?? { adapterConfig: {} });
     try {
       const { config } = await secrets.resolveAdapterConfigForRuntime(companyId, adapterConfig);
       return await adapter.testEnvironment({

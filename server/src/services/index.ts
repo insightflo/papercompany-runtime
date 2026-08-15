@@ -2,7 +2,14 @@ export { companyService } from "./companies.js";
 export { companySkillService } from "./company-skills.js";
 export { companyInstructionsService } from "./company-instructions.js";
 export { missionPlanTemplateService } from "./missions/mission-plan-templates.js";
-export { agentService, deduplicateAgentName, reconcilePersistedAgentStatusOnStartup } from "./agents.js";
+export {
+  agentService,
+  deduplicateAgentName,
+  reconcilePersistedAgentStatusOnStartup,
+  mergeAgentConfig,
+  splitAgentLevelKeys,
+  AGENT_LEVEL_CONFIG_KEYS,
+} from "./agents.js";
 export { agentInstructionsService, syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
 export { assetService } from "./assets.js";
 export { documentService, extractLegacyPlanBody } from "./documents.js";
