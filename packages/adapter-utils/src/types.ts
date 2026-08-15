@@ -325,7 +325,6 @@ export interface ServerAdapterModule {
   sessionCodec?: AdapterSessionCodec;
   sessionManagement?: import("./session-compaction.js").AdapterSessionManagement;
   supportsLocalAgentJwt?: boolean;
-  supportsInstructionsBundle?: boolean;
   instructionsPathKey?: string;
   requiresMaterializedRuntimeSkills?: boolean;
   models?: AdapterModel[];

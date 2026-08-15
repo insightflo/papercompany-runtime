@@ -60,7 +60,6 @@ describe("server adapter registry boundaries", () => {
   it("declares pi_local capability and model-profile contracts", () => {
     const adapter = registry.findServerAdapter("pi_local");
     expect(adapter).not.toBeNull();
-    expect(adapter?.supportsInstructionsBundle).toBe(true);
     expect(adapter?.instructionsPathKey).toBe("instructionsFilePath");
     expect(adapter?.requiresMaterializedRuntimeSkills).toBe(true);
     expect(adapter?.modelProfiles).toEqual([]);

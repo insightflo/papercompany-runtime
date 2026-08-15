@@ -207,7 +207,6 @@ const piLocalAdapter: ServerAdapterModule = {
   modelProfiles: [],
   listModels: listPiModels,
   supportsLocalAgentJwt: true,
-  supportsInstructionsBundle: true,
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: true,
   agentConfigurationDoc: piAgentConfigurationDoc,
