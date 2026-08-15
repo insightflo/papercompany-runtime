@@ -16,6 +16,11 @@ describe("heartbeat-stability knobs", () => {
     expect(resolveQaStepActiveExecutionTimeoutMs({ PAPERCLIP_QA_STEP_ACTIVE_EXECUTION_TIMEOUT_MS: "0" } as NodeJS.ProcessEnv)).toBe(0);
   });
 
+  it("defaults the runaway log limit to 16MB (between observed legit 12.8MB and runaway 26MB)", () => {
+    expect(DEFAULT_RUNAWAY_LOG_LIMIT_BYTES).toBe(16 * 1024 * 1024);
+    expect(resolveRunawayLogLimitBytes(null)).toBe(16 * 1024 * 1024);
+  });
+
   it("resolves the runaway log limit from adapterConfig first, then env, then default", () => {
     expect(resolveRunawayLogLimitBytes(null)).toBe(DEFAULT_RUNAWAY_LOG_LIMIT_BYTES);
     expect(resolveRunawayLogLimitBytes({ runawayLogLimitBytes: 12345 })).toBe(12345);
