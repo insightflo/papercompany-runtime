@@ -3,6 +3,8 @@ export interface SessionCompactionPolicy {
   maxSessionRuns: number;
   maxRawInputTokens: number;
   maxSessionAgeHours: number;
+  /** [session hygiene] 재개 히스토리 상한 — 세션 파일의 message 엔트리 수가 이 값을 넘으면 회전한다. */
+  maxSessionMessages: number;
 }
 
 export type NativeContextManagement = "confirmed" | "likely" | "unknown" | "none";
@@ -25,6 +27,7 @@ const DEFAULT_SESSION_COMPACTION_POLICY: SessionCompactionPolicy = {
   maxSessionRuns: 200,
   maxRawInputTokens: 2_000_000,
   maxSessionAgeHours: 72,
+  maxSessionMessages: 40,
 };
 
 // Adapters with native context management still participate in session resume,
@@ -34,6 +37,7 @@ const ADAPTER_MANAGED_SESSION_POLICY: SessionCompactionPolicy = {
   maxSessionRuns: 0,
   maxRawInputTokens: 0,
   maxSessionAgeHours: 0,
+  maxSessionMessages: 0,
 };
 
 export const LEGACY_SESSIONED_ADAPTER_TYPES = new Set([
@@ -140,11 +144,13 @@ export function readSessionCompactionOverride(runtimeConfig: unknown): Partial<S
   const maxSessionRuns = readNumber(compaction.maxSessionRuns);
   const maxRawInputTokens = readNumber(compaction.maxRawInputTokens);
   const maxSessionAgeHours = readNumber(compaction.maxSessionAgeHours);
+  const maxSessionMessages = readNumber(compaction.maxSessionMessages);
 
   if (enabled !== undefined) explicit.enabled = enabled;
   if (maxSessionRuns !== undefined) explicit.maxSessionRuns = maxSessionRuns;
   if (maxRawInputTokens !== undefined) explicit.maxRawInputTokens = maxRawInputTokens;
   if (maxSessionAgeHours !== undefined) explicit.maxSessionAgeHours = maxSessionAgeHours;
+  if (maxSessionMessages !== undefined) explicit.maxSessionMessages = maxSessionMessages;
 
   return explicit;
 }
@@ -168,6 +174,7 @@ export function resolveSessionCompactionPolicy(
       maxSessionRuns: explicitOverride.maxSessionRuns ?? basePolicy.maxSessionRuns,
       maxRawInputTokens: explicitOverride.maxRawInputTokens ?? basePolicy.maxRawInputTokens,
       maxSessionAgeHours: explicitOverride.maxSessionAgeHours ?? basePolicy.maxSessionAgeHours,
+      maxSessionMessages: explicitOverride.maxSessionMessages ?? basePolicy.maxSessionMessages,
     },
     adapterSessionManagement,
     explicitOverride,
@@ -181,7 +188,7 @@ export function resolveSessionCompactionPolicy(
 
 export function hasSessionCompactionThresholds(policy: Pick<
   SessionCompactionPolicy,
-  "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours"
+  "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours" | "maxSessionMessages"
 >) {
-  return policy.maxSessionRuns > 0 || policy.maxRawInputTokens > 0 || policy.maxSessionAgeHours > 0;
+  return policy.maxSessionRuns > 0 || policy.maxRawInputTokens > 0 || policy.maxSessionAgeHours > 0 || policy.maxSessionMessages > 0;
 }

@@ -152,6 +152,7 @@ import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-exe
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import {
+  countSessionFileMessages,
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
   RUN_TOOL_CONTRACT_CONTEXT_KEY,
@@ -3432,20 +3433,33 @@ export function heartbeatService(db: Db) {
   async function evaluateIssueScopedRawSessionResume(input: {
     readonly agentId: string;
     readonly currentIssueId: string | null;
+    readonly currentMissionId: string | null;
     readonly currentRunId: string;
     readonly sessionId: string | null;
   }): Promise<IssueScopedRawSessionResumeDecision> {
     const currentIssueId = readNonEmptyString(input.currentIssueId);
+    const currentMissionId = readNonEmptyString(input.currentMissionId);
     const sessionId = readNonEmptyString(input.sessionId);
-    if (!currentIssueId || !sessionId) return { rotate: false };
+    if (!sessionId) return { rotate: false };
+    if (!currentIssueId && !currentMissionId) return { rotate: false };
 
     const previousRun = await getLatestRunForSession(input.agentId, sessionId, {
       excludeRunId: input.currentRunId,
     });
     const previousContext = parseObject(previousRun?.contextSnapshot);
+    // [session hygiene] 미션 간 세션 재개 금지 — 같은 세션을 다른 미션 컨텍스트에서
+    //   재개하면 이전 미션의 대화 히스토리가 새 미션에 흘러든다. 미션이 다르면 회전.
+    const previousMissionId = readNonEmptyString(previousContext.missionId);
+    if (currentMissionId && previousMissionId && previousMissionId !== currentMissionId) {
+      return {
+        rotate: true,
+        previousSessionId: sessionId,
+        reason: `mission changed from ${previousMissionId} to ${currentMissionId}`,
+      };
+    }
     const previousIssueId =
       readNonEmptyString(previousRun?.issueId) ?? readNonEmptyString(previousContext.issueId);
-    if (!previousIssueId || previousIssueId === currentIssueId) return { rotate: false };
+    if (!currentIssueId || !previousIssueId || previousIssueId === currentIssueId) return { rotate: false };
 
     return {
       rotate: true,
@@ -3557,7 +3571,15 @@ export function heartbeatService(db: Db) {
         : 0;
 
     let reason: string | null = null;
-    if (policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
+    if (policy.maxSessionMessages > 0) {
+      // [session hygiene] 재개 히스토리 상한 — usageJson이 비어 토큰 트리거가 동작하지
+      //   않아도 세션 파일의 메시지 수로 무한 증식(hermes-era 136+ 메시지 사례)을 막는다.
+      const sessionMessageCount = await countSessionFileMessages(sessionId);
+      if (sessionMessageCount !== null && sessionMessageCount > policy.maxSessionMessages) {
+        reason = `session reached ${sessionMessageCount} messages (threshold ${policy.maxSessionMessages})`;
+      }
+    }
+    if (!reason && policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
       reason = `session exceeded ${policy.maxSessionRuns} runs`;
     } else if (
       policy.maxRawInputTokens > 0 &&
@@ -6374,6 +6396,7 @@ export function heartbeatService(db: Db) {
     const issueScopedRawSessionResume = await evaluateIssueScopedRawSessionResume({
       agentId: agent.id,
       currentIssueId: issueId,
+      currentMissionId: missionId,
       currentRunId: run.id,
       sessionId: runtimeSessionIdForAdapter,
     });

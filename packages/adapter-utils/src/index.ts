@@ -52,6 +52,7 @@ export {
   resolveSessionCompactionPolicy,
   hasSessionCompactionThresholds,
 } from "./session-compaction.js";
+export { countSessionFileMessages } from "./session-file-stats.js";
 export {
   REDACTED_HOME_PATH_USER,
   redactHomePathUserSegments,
