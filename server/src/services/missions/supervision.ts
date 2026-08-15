@@ -99,6 +99,8 @@ function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): stri
       return `- ${action.type}: planning_issue=${action.planIssueId} decision_hash=${action.decisionHash} result=${action.resultStatus}`;
     case "stale_source_issue_wakeup":
       return `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`;
+    case "mission_settled_from_workflow_runs":
+      return `- ${action.type}: mission=${action.missionId} result=${action.resultStatus}`;
   }
 }
 
@@ -336,6 +338,40 @@ export function createSupervision({ db, deps, ownerActions }: {
       activePlan,
     } = context;
     const supervisionLanguage = await loadCompanySystemLanguage(db, mission.companyId);
+    // [settlement-pending mission] 실행 단위가 전부 terminal-good(활성 없음 + 최소 1개 completed)하고
+    //   열린 소유 work(oversight 제외)가 없으면 mission 을 여기서 정리(settle)한다. monitor 스윕은
+    //   svc.getById 를 거치지 않아 lazy reconcile 이 안 돌기 때문에 run completed 후 mission 이
+    //   active 로 orphan 되었다(2026-08-15 GAZ ef12d027: 수동 supervision/run 호출로만 정리됨).
+    //   oversight/plan 이슈 생성보다 먼저 판정해 정리 상황에서 부작용 이슈를 만들지 않는다.
+    const settlementUnits = executionSnapshot.units;
+    const settlementPending = mission.status === "active"
+      && input.applySafeActions === true
+      && settlementUnits.length > 0
+      && settlementUnits.some((unit) => unit.status === "completed")
+      && settlementUnits.every((unit) => !ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status))
+      && liveWakeupIssueIds.size === 0
+      && !missionIssues.some((row) =>
+        row.hiddenAt == null
+        && row.status !== "done" && row.status !== "cancelled"
+        && row.originKind !== "mission_main_executor_oversight");
+    if (settlementPending) {
+      const reconciled = await ownerActions.reconcileMissionStatusFromWorkflowRuns(mission);
+      if (isTerminalMissionStatus(reconciled.status)) {
+        return {
+          missionId: mission.id,
+          oversightIssueId: null,
+          findings: [`mission_settled_from_workflow_runs: mission=${mission.id} run terminal-good, no open owner work — reconciled to ${reconciled.status}`],
+          recommendations: [],
+          appliedActions: [{
+            type: "mission_settled_from_workflow_runs",
+            missionId: mission.id,
+            resultStatus: reconciled.status,
+          }],
+          ownerActionExplanations: [],
+          commented: false,
+        };
+      }
+    }
     const governanceReasonSuffix = governanceThreadReasonSuffix(governanceThread?.summary);
     const governanceEvidenceLines = formatGovernanceThreadEvidenceLines(governanceThread?.summary);
     const enrichRecommendationReason = (reason: string): string => governanceReasonSuffix
@@ -2919,11 +2955,38 @@ export function createSupervision({ db, deps, ownerActions }: {
             .filter((missionId) => !activeHeartbeatMissionIds.has(missionId))
           : [],
       );
+      // [settlement-pending mission] 실행 단위가 전부 terminal-good(활성 없음 + 최소 1개 completed)하고
+      //   열린 소유 work 가 없으면(oversight 제외) mission 을 정리(settle)해야 한다. monitor 선택은
+      //   svc.getById 를 거치지 않아 lazy reconcile 이 안 돌기 때문에 별도 후보로 올린다
+      //   (2026-08-15 GAZ ef12d027: run completed 후 mission 이 active 로 orphan — 수동 supervision/run 으로만 정리됨).
+      const openNonOversightWorkMissionIds = new Set(
+        rowMissionIds.length > 0
+          ? (await db
+            .select({ missionId: issues.missionId })
+            .from(issues)
+            .where(and(
+              eq(issues.companyId, companyId),
+              inArray(issues.missionId, rowMissionIds),
+              isNull(issues.hiddenAt),
+              sql`${issues.status} not in ('done', 'cancelled')`,
+              sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
+            )))
+            .map((row) => row.missionId)
+            .filter((missionId): missionId is string => Boolean(missionId))
+          : [],
+      );
 
       for (const row of rows) {
         const snapshot = snapshots[row.id];
         const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        if (hasSupervisionUnit || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || blockedOwnerActionFailedRunMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || staleInProgressMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
+        const units = snapshot?.units ?? [];
+        const settlementPending = !hasSupervisionUnit
+          && units.length > 0
+          && units.some((unit) => unit.status === "completed")
+          && units.every((unit) => !ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status))
+          && !openNonOversightWorkMissionIds.has(row.id)
+          && !activeHeartbeatMissionIds.has(row.id);
+        if (hasSupervisionUnit || settlementPending || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || blockedOwnerActionFailedRunMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || staleInProgressMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
       }
 
       const planningRows = rows.filter((row) => row.id && !missionIds.includes(row.id));
