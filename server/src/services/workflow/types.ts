@@ -179,6 +179,10 @@ export interface WorkflowStepExecutionContract {
   toolNames: string[];
   toolArgs: unknown;
   knowledgeBaseIds: string[];
+  /** [run stability] step 정의의 명시적 타임아웃(초). 0 = 미지정. */
+  stepTimeoutSeconds: number;
+  /** [run stability] QA/검수류 step 여부(등급 타임아웃 근거). */
+  isQaStep: boolean;
 }
 
 /**
