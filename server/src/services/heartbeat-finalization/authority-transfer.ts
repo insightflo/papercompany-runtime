@@ -19,7 +19,7 @@ export async function transferHeartbeatAuthorityToChild(
     childRunId: string;
     childWakeupRequestId: string;
     now: Date;
-    reason: "adapter_fallback" | "process_lost_retry";
+    reason: "adapter_fallback" | "process_lost_retry" | "adapter_failed_retry";
   },
 ): Promise<boolean> {
   const parent = input.parent;

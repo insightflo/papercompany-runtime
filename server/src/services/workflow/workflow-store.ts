@@ -18,6 +18,7 @@ import type {
 import type { CreateWorkflowDefinitionInput, CreateWorkflowRunInput } from "./types.js";
 import { isDynamicOwnerPlanWorkflowDefinition, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
+import { stepTimeoutSignalsFromStep } from "../heartbeat-stability.js";
 
 function inferWorkflowExecutionMode(name: string, steps: WorkflowStep[]): WorkflowExecutionMode {
   return isDynamicOwnerPlanWorkflowDefinition({ name, steps }) ? "dynamic_owner_plan" : "static_dag";
@@ -433,6 +434,9 @@ export async function getWorkflowStepExecutionContractForIssue(
   const toolNames = Array.isArray(step?.toolNames)
     ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
+  const timeoutSignals = step
+    ? stepTimeoutSignalsFromStep(step)
+    : { stepTimeoutSeconds: 0, isQaStep: false };
 
   return {
     workflowRunId: row.run.id,
@@ -445,6 +449,8 @@ export async function getWorkflowStepExecutionContractForIssue(
     knowledgeBaseIds: Array.isArray(step?.knowledgeBaseIds)
       ? step.knowledgeBaseIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [],
+    stepTimeoutSeconds: timeoutSignals.stepTimeoutSeconds,
+    isQaStep: timeoutSignals.isQaStep,
   };
 }
 

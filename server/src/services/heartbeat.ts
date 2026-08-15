@@ -83,6 +83,12 @@ import {
   capWakeRecentCommentBody,
   refreshStepInputManifest,
 } from "./wake-context-hygiene.js";
+import {
+  resolveAdapterFailedTransientRetryMaxSec,
+  resolveQaStepActiveExecutionTimeoutMs,
+  resolveRunawayLogLimitBytes,
+  resolveStepAwareActiveExecutionTimeoutMs,
+} from "./heartbeat-stability.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
@@ -4239,7 +4245,11 @@ export function heartbeatService(db: Db) {
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
     now: Date,
+    opts?: { kind?: "process_lost" | "adapter_failed_transient" },
   ) {
+    const kind = opts?.kind ?? "process_lost";
+    const retryWakeReason = kind === "adapter_failed_transient" ? "adapter_failed_retry" : "process_lost_retry";
+    const retryReasonValue = kind === "adapter_failed_transient" ? "adapter_failed" : "process_lost";
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
     let retryMissionId = readNonEmptyString(contextSnapshot.missionId);
@@ -4273,8 +4283,8 @@ export function heartbeatService(db: Db) {
       ...(retryWorkflowRunId ? { workflowRunId: retryWorkflowRunId } : {}),
       ...(retryStepId ? { workflowStepId: retryStepId, stepId: retryStepId } : {}),
       retryOfRunId: run.id,
-      wakeReason: "process_lost_retry",
-      retryReason: "process_lost",
+      wakeReason: retryWakeReason,
+      retryReason: retryReasonValue,
     };
 
     const queued = await db.transaction(async (tx) => {
@@ -4285,7 +4295,7 @@ export function heartbeatService(db: Db) {
           agentId: run.agentId,
           source: "automation",
           triggerDetail: "system",
-          reason: "process_lost_retry",
+          reason: retryWakeReason,
           payload: {
             ...(issueId ? { issueId } : {}),
             retryOfRunId: run.id,
@@ -4293,7 +4303,7 @@ export function heartbeatService(db: Db) {
           status: "queued",
           requestedByActorType: "system",
           requestedByActorId: null,
-          requestKind: "process_lost_retry",
+          requestKind: retryWakeReason,
           issueId: issueId ?? null,
           missionId: retryMissionId ?? null,
           workflowRunId: retryWorkflowRunId ?? null,
@@ -4335,7 +4345,7 @@ export function heartbeatService(db: Db) {
         childRunId: retryRun.id,
         childWakeupRequestId: wakeupRequest.id,
         now,
-        reason: "process_lost_retry",
+        reason: retryWakeReason,
       });
 
       if (issueId) {
@@ -4369,7 +4379,9 @@ export function heartbeatService(db: Db) {
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: "Queued automatic retry after orphaned child process was confirmed dead",
+      message: kind === "adapter_failed_transient"
+        ? "Queued automatic retry after transient adapter failure"
+        : "Queued automatic retry after orphaned child process was confirmed dead",
       payload: {
         retryOfRunId: run.id,
       },
@@ -4776,6 +4788,26 @@ export function heartbeatService(db: Db) {
     }
   }
 
+  async function resolveRunActiveExecutionTimeoutMs(
+    run: typeof heartbeatRuns.$inferSelect,
+    baseMs: number,
+  ): Promise<number> {
+    if (baseMs <= 0) return 0;
+    const issueId = run.issueId ?? readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    if (!issueId) return baseMs;
+    try {
+      const { workflowService } = await import("./workflow/engine.js");
+      const contract = await workflowService.getStepExecutionContractForIssue(db, issueId);
+      return resolveStepAwareActiveExecutionTimeoutMs({
+        baseMs,
+        contract,
+        qaStepActiveExecutionTimeoutMs: resolveQaStepActiveExecutionTimeoutMs(),
+      });
+    } catch {
+      return baseMs;
+    }
+  }
+
   async function reapOrphanedRuns(opts?: {
     staleThresholdMs?: number;
     activeExecutionTimeoutMs?: number;
@@ -4837,8 +4869,12 @@ export function heartbeatService(db: Db) {
           }
         }
         if (activeExecutionTimeoutMs <= 0) continue;
+        // [run stability] step 등급 타임아웃 — QA/검수 step이거나 명시적 step timeout이 있으면
+        //   기본 부실 역치(900s) 대신 그 등급의 역치로 판정한다(낮추지 않는다).
+        const stepAwareTimeoutMs = await resolveRunActiveExecutionTimeoutMs(run, activeExecutionTimeoutMs);
+        if (stepAwareTimeoutMs <= 0) continue;
         const refTime = new Date(run.updatedAt).getTime();
-        if (now.getTime() - refTime < activeExecutionTimeoutMs) continue;
+        if (now.getTime() - refTime < stepAwareTimeoutMs) continue;
 
         if (trackedProcess) {
           trackedProcess.child.kill("SIGTERM");
@@ -4850,7 +4886,7 @@ export function heartbeatService(db: Db) {
           runningProcesses.delete(run.id);
         }
 
-        const timeoutMessage = `Heartbeat execution exceeded ${Math.round(activeExecutionTimeoutMs / 1000)}s without reaching a terminal state`;
+        const timeoutMessage = `Heartbeat execution exceeded ${Math.round(stepAwareTimeoutMs / 1000)}s without reaching a terminal state`;
         const timedOutRun = await setRunStatus(run.id, "timed_out", {
           error: timeoutMessage,
           errorCode: "execution_stale_timeout",
@@ -6463,6 +6499,12 @@ export function heartbeatService(db: Db) {
       let stderrExcerpt = "";
       let stdoutGuardBuffer = "";
       let stderrGuardBuffer = "";
+      // [run stability] 폭주 가드 — 성공 run 실측 최대 2.6MB vs 실패 run 8MB+.
+      //   run 로그 누적 바이트가 상한을 넘으면 자식을 죽고 errorCode=runaway_context 로
+      //   종료시킨다. 상한은 env/agent adapterConfig 로 조정 가능(heartbeat-stability).
+      const runawayLogLimitBytes = resolveRunawayLogLimitBytes(resolvedConfig);
+      let runawayLogBytes = 0;
+      let runawayTriggered = false;
     try {
       const startedAt = run.startedAt ?? new Date();
       const runningWithSession = await db
@@ -6595,6 +6637,33 @@ export function heartbeatService(db: Db) {
             chunk: sanitizedChunk,
             ts,
           });
+        }
+        if (
+          !runawayTriggered &&
+          runawayLogLimitBytes > 0 &&
+          (runawayLogBytes += Buffer.byteLength(sanitizedChunk, "utf8")) > runawayLogLimitBytes
+        ) {
+          runawayTriggered = true;
+          const tracked = runningProcesses.get(run.id);
+          if (tracked) {
+            tracked.child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!tracked.child.killed) {
+                tracked.child.kill("SIGKILL");
+              }
+            }, Math.max(1, tracked.graceSec) * 1000);
+            runningProcesses.delete(run.id);
+          }
+          await appendRunEvent(run, seq++, {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "error",
+            message: `Runaway log guard: run log exceeded ${runawayLogLimitBytes} bytes (wrote ${runawayLogBytes}); terminating adapter child`,
+            payload: {
+              runawayLogBytes,
+              runawayLogLimitBytes,
+            },
+          }).catch(() => undefined);
         }
         if (now.getTime() - lastActivityTouchMs >= RUN_ACTIVITY_TOUCH_INTERVAL_MS) {
           lastActivityTouchMs = now.getTime();
@@ -7154,7 +7223,9 @@ export function heartbeatService(db: Db) {
             : outcome === "cancelled"
               ? "cancelled"
               : outcome === "failed"
-                ? (adapterResult.errorCode ?? "adapter_failed")
+                ? runawayTriggered
+                  ? "runaway_context"
+                  : (adapterResult.errorCode ?? "adapter_failed")
                 : null,
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
@@ -7257,9 +7328,51 @@ export function heartbeatService(db: Db) {
           });
         }
         let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+        let transientAdapterRetryQueued = false;
         // Adapter failures can use a fallback command, but do not repeat the same
         // fallback after a deterministic provider/model configuration failure.
         if (outcome === "failed" && finalizedRun) {
+          // [run stability] 일시 adapter_failed(실측 평균 107초)는 같은 설정으로 1회만
+          //   자동 재시도한다. 재시도 우선 — fallback 명령은 재시도도 실패한 다음에 쓴다.
+          const transientRetryMaxSec = resolveAdapterFailedTransientRetryMaxSec();
+          const failedErrorCode = finalizedRun.errorCode ?? adapterResult.errorCode ?? null;
+          const finishedRef = finalizedRun.finishedAt ?? new Date();
+          const runDurationSec = finalizedRun.startedAt
+            ? Math.max(0, (finishedRef.getTime() - finalizedRun.startedAt.getTime()) / 1000)
+            : Number.POSITIVE_INFINITY;
+          const transientRetryQueued =
+            failedErrorCode === "adapter_failed" &&
+            transientRetryMaxSec > 0 &&
+            (finalizedRun.processLossRetryCount ?? 0) < 1 &&
+            runDurationSec <= transientRetryMaxSec &&
+            // 결정적 provider/model 설정 실패는 재시도로 나아지지 않는다.
+            !isTerminalAdapterFallbackConfigurationFailure(finalizedRun) &&
+            // fallback 실행 자체의 실패는 fallback 시도 카운팅을 존중해 재시도하지 않는다.
+            !readNonEmptyString(parseObject(finalizedRun.contextSnapshot).fallbackOfRunId)
+              ? await enqueueProcessLossRetry(finalizedRun, agent, new Date(), {
+                  kind: "adapter_failed_transient",
+                }).then(
+                  (retryRun) => {
+                    appendRunEvent(finalizedRun, seq++, {
+                      eventType: "lifecycle",
+                      stream: "system",
+                      level: "warn",
+                      message: `Run failed (transient adapter failure) — queued automatic retry ${retryRun?.id ?? ""}`.trim(),
+                      payload: {
+                        exitCode: adapterResult.exitCode ?? null,
+                        errorMessage: adapterResult.errorMessage ?? null,
+                        retryRunId: retryRun?.id ?? null,
+                        runDurationSec: Number.isFinite(runDurationSec) ? Math.round(runDurationSec) : null,
+                      },
+                    }).catch(() => undefined);
+                    return Boolean(retryRun);
+                  },
+                ).then((queued) => {
+                  transientAdapterRetryQueued = transientAdapterRetryQueued || queued;
+                  return queued;
+                }).catch(() => false)
+              : false;
+          if (!transientRetryQueued) {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
           if (fb && shouldQueueRunFailureAdapterFallback({ run: finalizedRun, fallback: fb })) {
             const fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
@@ -7297,8 +7410,9 @@ export function heartbeatService(db: Db) {
               },
             });
           }
+          }
         }
-        if (!queuedAdapterFallbackRun) {
+        if (!queuedAdapterFallbackRun && !transientAdapterRetryQueued) {
           await releaseIssueExecutionAndPromote(finalizedRun);
         }
       }
