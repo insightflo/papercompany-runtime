@@ -399,12 +399,14 @@ describe("parseSessionCompactionPolicy", () => {
       maxSessionRuns: 0,
       maxRawInputTokens: 0,
       maxSessionAgeHours: 0,
+      maxSessionMessages: 0,
     });
     expect(parseSessionCompactionPolicy(buildAgent("claude_local"))).toEqual({
       enabled: true,
       maxSessionRuns: 0,
       maxRawInputTokens: 0,
       maxSessionAgeHours: 0,
+      maxSessionMessages: 0,
     });
   });
 
@@ -414,12 +416,14 @@ describe("parseSessionCompactionPolicy", () => {
       maxSessionRuns: 200,
       maxRawInputTokens: 2_000_000,
       maxSessionAgeHours: 72,
+      maxSessionMessages: 40,
     });
     expect(parseSessionCompactionPolicy(buildAgent("opencode_local"))).toEqual({
       enabled: true,
       maxSessionRuns: 200,
       maxRawInputTokens: 2_000_000,
       maxSessionAgeHours: 72,
+      maxSessionMessages: 40,
     });
   });
 
@@ -440,6 +444,7 @@ describe("parseSessionCompactionPolicy", () => {
       maxSessionRuns: 25,
       maxRawInputTokens: 500_000,
       maxSessionAgeHours: 0,
+      maxSessionMessages: 0,
     });
   });
 });
