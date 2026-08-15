@@ -55,9 +55,13 @@ vi.mock("../services/companies.js", () => ({
   companyService: () => companySvc,
 }));
 
-vi.mock("../services/agents.js", () => ({
-  agentService: () => agentSvc,
-}));
+vi.mock("../services/agents.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/agents.js")>();
+  return {
+    ...actual,
+    agentService: () => agentSvc,
+  };
+});
 
 vi.mock("../services/access.js", () => ({
   accessService: () => accessSvc,
@@ -128,6 +132,7 @@ describe("company portability", () => {
           },
           instructionsFilePath: "/tmp/ignored.md",
           cwd: "/tmp/ignored",
+          agentsMdPath: "/tmp/agents.md",
           command: "/Users/dotta/.local/bin/claude",
           model: "claude-opus-4-6",
           env: {
@@ -355,6 +360,8 @@ describe("company portability", () => {
     expect(extension).toContain('schema: "paperclip/v1"');
     expect(extension).not.toContain("promptTemplate");
     expect(extension).not.toContain("instructionsFilePath");
+    expect(extension).not.toContain("agentsMdPath");
+    expect(extension).not.toContain("cwd");
     expect(extension).not.toContain("command:");
     expect(extension).not.toContain("secretId");
     expect(extension).not.toContain('type: "secret_ref"');
@@ -884,6 +891,109 @@ describe("company portability", () => {
         },
       }),
     }));
+  });
+
+  it("keeps agent-level keys out of the portable adapterConfig so the normalizer routes them into agentConfig on import", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.create.mockResolvedValue({
+      id: "agent-created",
+      name: "ClaudeCoder",
+    });
+
+    // Post-P2 source shape: agent keys live in agentConfig, engine keys in adapterConfig.
+    agentSvc.list.mockResolvedValue([
+      {
+        id: "agent-1",
+        name: "ClaudeCoder",
+        status: "idle",
+        role: "engineer",
+        title: "Software Engineer",
+        icon: "code",
+        reportsTo: null,
+        capabilities: "Writes code",
+        adapterType: "claude_local",
+        adapterConfig: {
+          model: "claude-opus-4-6",
+          command: "/Users/dotta/.local/bin/claude",
+        },
+        agentConfig: {
+          cwd: "/work",
+          agentsMdPath: "/work/AGENTS.md",
+          paperclipSkillSync: { desiredSkills: [paperclipKey] },
+        },
+        runtimeConfig: {},
+        budgetMonthlyCents: 0,
+        permissions: { canCreateAgents: false },
+        metadata: null,
+      },
+    ]);
+    agentInstructionsSvc.exportFiles.mockResolvedValue({
+      files: { "AGENTS.md": "You are ClaudeCoder." },
+      entryFile: "AGENTS.md",
+      warnings: [],
+    });
+
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+    });
+    const extension = asTextFile(exported.files[".paperclip.yaml"]);
+    expect(extension).not.toContain("cwd");
+    expect(extension).not.toContain("agentsMdPath");
+
+    agentSvc.list.mockResolvedValue([]);
+    await portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    const createCall = agentSvc.create.mock.calls.find((call) => (call[1] as { name?: string })?.name === "ClaudeCoder");
+    expect(createCall).toBeDefined();
+    expect(createCall![1]).toMatchObject({
+      adapterType: "claude_local",
+      adapterConfig: {
+        model: "claude-opus-4-6",
+      },
+    });
+    // Agent-level keys must not leak through the portable adapterConfig
+    // (paperclipSkillSync is re-written by import itself and routed into
+    // agentConfig by the persistence normalizer at create time).
+    const persistedAdapterConfig = (createCall![1] as { adapterConfig: Record<string, unknown> }).adapterConfig;
+    expect(persistedAdapterConfig).not.toMatchObject({
+      cwd: expect.anything(),
+      agentsMdPath: expect.anything(),
+      promptTemplate: expect.anything(),
+      instructionsFilePath: expect.anything(),
+      instructionsBundleMode: expect.anything(),
+      instructionsRootPath: expect.anything(),
+      instructionsEntryFile: expect.anything(),
+      bootstrapPromptTemplate: expect.anything(),
+    });
   });
 
   it("imports a packaged company logo and attaches it to the target company", async () => {

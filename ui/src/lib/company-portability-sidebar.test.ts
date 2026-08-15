@@ -19,6 +19,7 @@ function makeAgent(id: string, name: string): Agent {
     capabilities: null,
     adapterType: "process",
     adapterConfig: {},
+    agentConfig: {},
     runtimeConfig: {},
     budgetMonthlyCents: 0,
     spentMonthlyCents: 0,
