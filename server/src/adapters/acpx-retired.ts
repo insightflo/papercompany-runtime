@@ -39,7 +39,6 @@ export const acpxLocalAdapter: ServerAdapterModule = {
   },
   models: [],
   supportsLocalAgentJwt: false,
-  supportsInstructionsBundle: false,
   requiresMaterializedRuntimeSkills: false,
   getConfigSchema: () => ({ fields: [] }),
   agentConfigurationDoc: `# acpx_local retired\n\n${RETIRED_ACPX_MESSAGE}`,
