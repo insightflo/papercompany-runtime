@@ -126,4 +126,50 @@ describeEmbeddedPostgres("instruction injection ledger", () => {
       .where(eq(agentInstructionInjections.issueId, seeded.issueId));
     expect(row?.injectionCount).toBe(2);
   });
+
+  it("re-injects full instructions when the wake rotates the session", async () => {
+    const seeded = await seedIssueWithCard();
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ledger-instructions-"));
+    tempDirs.push(dir);
+    await fs.writeFile(path.join(dir, "AGENTS.md"), "Important operating manual.", "utf8");
+    const baseInput = (context: Record<string, unknown>) => ({
+      db,
+      context,
+      agent: { id: seeded.agentId, companyId: seeded.companyId, adapterType: "codex_local" },
+      issueId: seeded.issueId,
+      adapterConfig: { instructionsFilePath: "AGENTS.md" },
+      cwd: dir,
+    });
+
+    // First wake on the issue injects full.
+    const firstContext: Record<string, unknown> = {};
+    await applyInstructionInjectionLedger(baseInput(firstContext));
+    expect(firstContext.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+
+    // A session-rotating wake must re-inject full even on an unchanged hash.
+    const reworkRotation: Record<string, unknown> = {
+      paperclipWorkflowReworkContract: { kind: "workflow_qa_rework", producerStepId: "produce" },
+    };
+    await applyInstructionInjectionLedger(baseInput(reworkRotation));
+    expect(reworkRotation.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+
+    const freshSessionRotation: Record<string, unknown> = { forceFreshSession: true };
+    await applyInstructionInjectionLedger(baseInput(freshSessionRotation));
+    expect(freshSessionRotation.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+
+    const compactionRotation: Record<string, unknown> = { paperclipSessionRotationReason: "session_compaction" };
+    await applyInstructionInjectionLedger(baseInput(compactionRotation));
+    expect(compactionRotation.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+
+    // After the rotated session is bootstrapped, the next resumed wake compacts again.
+    const resumedContext: Record<string, unknown> = {};
+    await applyInstructionInjectionLedger(baseInput(resumedContext));
+    expect(resumedContext.paperclipInstructionInjection).toMatchObject({ mode: "compact" });
+    const [row] = await db
+      .select()
+      .from(agentInstructionInjections)
+      .where(eq(agentInstructionInjections.issueId, seeded.issueId));
+    // rotation resets to 1, then the resumed compact wake increments to 2.
+    expect(row?.injectionCount).toBe(2);
+  });
 });

@@ -78,7 +78,11 @@ import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
 import { applyInstructionInjectionLedger } from "./instruction-injection-ledger.js";
-import { buildStepInputManifest } from "./step-input-manifest.js";
+
+import {
+  capWakeRecentCommentBody,
+  refreshStepInputManifest,
+} from "./wake-context-hygiene.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
@@ -453,13 +457,6 @@ export async function recordHeartbeatRunTerminalTransitionEvent(
     reason: run.errorCode ?? run.error ?? "run_terminal",
     reasonCode: run.errorCode ?? "run_terminal",
     idempotencyKey: `queue-run-completed:${run.id}:${run.status}`,
-  });
-}
-
-function refreshStepInputManifest(context: Record<string, unknown>, taskKey: string | null) {
-  context.paperclipStepInputManifest = buildStepInputManifest({
-    taskKey,
-    context,
   });
 }
 
@@ -6305,7 +6302,7 @@ export function heartbeatService(db: Db) {
           authorType: comment.authorUserId ? "controller" : comment.authorAgentId ? "agent" : "unknown",
           authorAgentId: comment.authorAgentId,
           authorUserId: comment.authorUserId,
-          body: comment.body,
+          body: capWakeRecentCommentBody(comment.body),
           createdAt: comment.createdAt.toISOString(),
         }));
       } else {
