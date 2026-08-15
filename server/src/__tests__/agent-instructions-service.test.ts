@@ -170,25 +170,28 @@ describe("agent instructions service", () => {
     process.env.PAPERCLIP_HOME = paperclipHome;
     process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
 
+    // Dedicated cwd: getBundle enumerates the bundle root, so a shared dir like
+    // /tmp would list foreign ephemeral files that can vanish mid-stat (CI flake).
+    const cwd = await makeTempDir("paperclip-agent-instructions-merged-cwd-");
+    cleanupDirs.add(cwd);
+
     // engine-only adapterConfig + agent-level keys in agentConfig (post-P2 shape)
     const agent = makeAgent(
       { model: "claude-opus-4-6" },
       {
-        cwd: "/tmp",
+        cwd,
         instructionsFilePath: "relative-AGENTS.md",
       },
     );
 
-    await fs.writeFile(path.join("/tmp", "relative-AGENTS.md"), "# Merged Instructions\n", "utf8");
+    await fs.writeFile(path.join(cwd, "relative-AGENTS.md"), "# Merged Instructions\n", "utf8");
 
     const svc = agentInstructionsService();
     const bundle = await svc.getBundle(agent);
 
     expect(bundle.mode).toBe("external");
-    expect(bundle.rootPath).toBe("/tmp");
+    expect(bundle.rootPath).toBe(cwd);
     expect(bundle.entryFile).toBe("relative-AGENTS.md");
-
-    await fs.rm(path.join("/tmp", "relative-AGENTS.md"), { force: true });
   });
 
   it("materializes a managed bundle using the merged config for legacy promptTemplate fallback", async () => {
