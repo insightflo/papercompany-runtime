@@ -1,13 +1,15 @@
 // [run stability] 하트비트 실행 안정성 노브 — 증거 기반 임계값.
-//   근거(2026-08-15 GAZ/RES 실측):
-//   - 성공 run 로그 ≤2.6MB vs 실패 run 8~11.4MB → 폭주 가드 상한 5MB(2× 여유).
+//   근거(2026-08-15/16 GAZ/RES 실측):
+//   - 진짜 폭주: 실패 run 26MB(08-14), 57MB(08-13 GAZ). 정상 성공도 큰 로그가 있었다:
+//     RES 기술조사 run 12.8MB 성공(08-15). 기본 16MB = 성공 최대 ~1.25×, 폭주 ~0.6×.
+//     08-16 초기값 5MB는 GAZ 피크(≤2.6MB) 기준 오측정 — RES analyze 4연속 오탐으로 상향.
 //   - adapter_failed 19건 평균 107초 → 일시 오류 1회 자동 재시도의 transients 판정 상한 300초.
 //   - 900s 실행 부실 리퍼가 15분+ 검수 run을 죽임(08-11 사례) → QA/검수 step 기본 1800초.
 
 import { isQaLikeStep } from "./workflow-step-role.js";
 
 export const DEFAULT_QA_STEP_ACTIVE_EXECUTION_TIMEOUT_MS = 30 * 60 * 1000;
-export const DEFAULT_RUNAWAY_LOG_LIMIT_BYTES = 5 * 1024 * 1024;
+export const DEFAULT_RUNAWAY_LOG_LIMIT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC = 300;
 
 function readPositiveIntEnv(value: string | undefined): number | null {
