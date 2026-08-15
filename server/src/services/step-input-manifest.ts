@@ -39,7 +39,14 @@ export function buildStepInputManifest(input: {
     ? maintenanceGuidance.knowledge.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
     : [];
   const maintenanceDecision = parseObject(context.paperclipMaintenanceDecision);
-  const missionPlan = parseObject(context.paperclipMissionPlan);
+  // [wake envelope diet] 원시 paperclipMissionPlan 키는 웨이크 저장에서 제거된다
+  //   (refreshStepInputManifest). 재조립 시 이전 manifest의 missionPlan에서 이어받는다.
+  const rawMissionPlan = parseObject(context.paperclipMissionPlan);
+  const previousManifest = parseObject(context.paperclipStepInputManifest);
+  const previousManifestInputs = parseObject(previousManifest.inputs);
+  const missionPlan = Object.keys(rawMissionPlan).length > 0
+    ? rawMissionPlan
+    : parseObject(previousManifestInputs.missionPlan);
   const missionWorkingNote = parseObject(context.paperclipMissionWorkingNote);
   const missionOwnerPlanningContext = parseObject(context.paperclipMissionOwnerPlanningContext);
   const missionOwnerPlanningMission = parseObject(missionOwnerPlanningContext.mission);

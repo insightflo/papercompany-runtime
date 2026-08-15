@@ -6,6 +6,22 @@ import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-util
 import { hashStructuredValue } from "./issue-execution-cards/hash.js";
 import { parseObject } from "../adapters/utils.js";
 
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * [wake envelope diet] 세션이 회전(재시작)되는 웨이크에서는 compact stub이 거짓말을 한다
+ *   ("이전 실행에서 이미 주입됨" — 하지만 새 세션에는 그 내용이 없다).
+ *   회전 신호가 있으면 항상 full 재주입한다(부트스트랩 1회 + 해시 델타의 회전 예외).
+ */
+function wakeRotatesSession(context: Record<string, unknown>): boolean {
+  if (context.forceFreshSession === true) return true;
+  if (readNonEmptyString(context.paperclipSessionRotationReason)) return true;
+  const reworkContract = parseObject(context.paperclipWorkflowReworkContract);
+  return readNonEmptyString(reworkContract.kind) === "workflow_qa_rework";
+}
+
 function resolveInstructionsPath(adapterConfig: Record<string, unknown>, cwd: string): string | null {
   const raw = typeof adapterConfig.instructionsFilePath === "string"
     ? adapterConfig.instructionsFilePath.trim()
@@ -86,7 +102,7 @@ export async function applyInstructionInjectionLedger(input: {
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-  const compact = previous?.contentHash === injectionJson.contentHash;
+  const compact = !wakeRotatesSession(input.context) && previous?.contentHash === injectionJson.contentHash;
   const now = new Date();
   await input.db
     .insert(agentInstructionInjections)
