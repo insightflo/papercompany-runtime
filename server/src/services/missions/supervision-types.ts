@@ -97,6 +97,10 @@ export type MissionOwnerSupervisionAppliedAction = {
   artifactPath: string;
   resultStatus: string;
 } | {
+  type: "mission_settled_from_workflow_runs";
+  missionId: string;
+  resultStatus: string;
+} | {
   type: "stale_source_issue_wakeup";
   missionId: string;
   sourceIssueId: string;

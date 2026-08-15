@@ -2304,10 +2304,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       applySafeActions: true,
     });
 
-    expect(result.missionIds).not.toContain(missionId);
+    // [settlement contract] 실행이 완료된 재사용 워크플로 미션은 이제 정리(settle) 대상이다:
+    //   선택되어 mission 이 completed 로 수렴하지만, plan 이슈 생성/누락 취급은 여전히 하지 않는다.
+    expect(result.missionIds).toContain(missionId);
     expect(onPlanSubmissionMissing).not.toHaveBeenCalled();
     const planIssues = await db.select().from(issues).where(eq(issues.originKind, "mission_main_executor_plan"));
     expect(planIssues).toHaveLength(0);
+    const settledMission = await db.select().from(missions).where(eq(missions.id, missionId)).then((rows) => rows[0]);
+    expect(settledMission?.status).toBe("completed");
+    const settleActions = result.missions[0]?.appliedActions.filter((action) => action.type === "mission_settled_from_workflow_runs") ?? [];
+    expect(settleActions).toHaveLength(1);
   });
 
   it("re-wakes an existing stale owner-action issue with no heartbeat instead of duplicating it", async () => {
@@ -3074,6 +3080,58 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerActionCreated).not.toHaveBeenCalled();
     const ownerActionBodies = await db.select().from(issueComments).where(eq(issueComments.issueId, ownerAction.id));
     expect(ownerActionBodies.filter((row) => row.body.includes("mission-owner-retry-unresolved"))).toHaveLength(1);
+  });
+
+  it("settles an orphaned active mission whose run completed and only the oversight issue remains open", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const completedAt = new Date("2026-08-15T14:40:52.000Z");
+
+    await db.insert(companies).values({ id: companyId, name: "Settlement Orphan Company", issuePrefix: `SO${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Settlement orphan mission", status: "active", startedAt: new Date("2026-08-14T08:00:00.000Z") });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "settle-orphan",
+      stepsJson: [
+        { id: "produce", name: "Produce report", agentId: workerAgentId, dependencies: [] },
+      ],
+    });
+    await db.insert(workflowRuns).values({ id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system", status: "completed", startedAt: new Date("2026-08-14T08:00:00.000Z"), completedAt });
+    const producerIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", originId: workflowRunId, originRunId: workflowRunId, status: "done", title: "Produce report" });
+    await db.update(issues).set({ completedAt }).where(eq(issues.id, producerIssue.id));
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId, stepId: "produce", issueId: producerIssue.id, status: "completed", startedAt: new Date("2026-08-14T08:00:00.000Z"), completedAt },
+    ]);
+    const oversightIssue = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_oversight", status: "todo", title: "[OVERSIGHT] settle-orphan" });
+
+    const svc = missionService(db, {});
+    const result = await svc.runActiveMissionOwnerSupervision({
+      companyId,
+      staleAfterMinutes: 1,
+      now: new Date("2026-08-15T14:50:00.000Z"),
+      applySafeActions: true,
+      applyOwnerDecisionActions: true,
+      dispatchOwnerDecisionWakeups: true,
+    });
+
+    // 선택: 실행은 완료됐지만 oversight 만 열려 있으면 settlement 후보로 감독 스윕에 들어와야 한다.
+    expect(result.missionIds).toContain(missionId);
+    const settledMission = await db.select().from(missions).where(eq(missions.id, missionId)).then((rows) => rows[0]);
+    expect(settledMission?.status).toBe("completed");
+    const settledOversight = await db.select().from(issues).where(eq(issues.id, oversightIssue.id)).then((rows) => rows[0]);
+    expect(settledOversight?.status).toBe("done");
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "mission_settled_from_workflow_runs", missionId, resultStatus: "completed" }),
+    ]));
   });
 
   it("half-applied owner retry (wakeup marker not_requested) re-dispatches instead of stalling forever", async () => {
