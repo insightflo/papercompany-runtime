@@ -4,7 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { agentToolGrants, agents, toolDefinitions } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES, isMissionExecutionLiaisonAgent } from "./agent-role-boundaries.js";
-import { isRecord } from "./utils.js";
+import { mergeAgentConfig } from "../agents.js";
 
 export interface MissionExecutionCandidate {
   agentId: string;
@@ -15,8 +15,8 @@ export interface MissionExecutionCandidate {
   toolNames: string[];
 }
 
-function readDesiredSkillKeys(adapterConfig: unknown): string[] {
-  return readPaperclipSkillSyncPreference(isRecord(adapterConfig) ? adapterConfig : {}).desiredSkills;
+function readDesiredSkillKeys(agentRow: { adapterConfig: unknown; agentConfig?: unknown }): string[] {
+  return readPaperclipSkillSyncPreference(mergeAgentConfig(agentRow)).desiredSkills;
 }
 
 export async function listCompanyExecutionCandidates(db: Db, companyId: string): Promise<MissionExecutionCandidate[]> {
@@ -29,6 +29,7 @@ export async function listCompanyExecutionCandidates(db: Db, companyId: string):
       status: agents.status,
       adapterType: agents.adapterType,
       adapterConfig: agents.adapterConfig,
+      agentConfig: agents.agentConfig,
       runtimeConfig: agents.runtimeConfig,
       metadata: agents.metadata,
     })
@@ -68,7 +69,7 @@ export async function listCompanyExecutionCandidates(db: Db, companyId: string):
     name: a.name,
     role: a.role,
     capabilities: a.capabilities,
-    desiredSkillKeys: readDesiredSkillKeys(a.adapterConfig),
+    desiredSkillKeys: readDesiredSkillKeys(a),
     toolNames: toolsByAgent.get(a.id) ?? [],
   }));
 }

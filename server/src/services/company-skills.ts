@@ -30,7 +30,7 @@ import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { findServerAdapter } from "../adapters/index.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
-import { agentService } from "./agents.js";
+import { agentService, mergeAgentConfig } from "./agents.js";
 import { projectService } from "./projects.js";
 import { secretService } from "./secrets.js";
 
@@ -1485,7 +1485,7 @@ export function companySkillService(db: Db) {
     const agentRows = await agents.list(companyId);
     return rows.map((skill) => {
       const attachedAgentCount = agentRows.filter((agent) => {
-        const desiredSkills = resolveDesiredSkillKeys(rows, agent.adapterConfig as Record<string, unknown>);
+        const desiredSkills = resolveDesiredSkillKeys(rows, mergeAgentConfig(agent));
         return desiredSkills.includes(skill.key);
       }).length;
       return toCompanySkillListItem(skill, attachedAgentCount);
@@ -1524,7 +1524,7 @@ export function companySkillService(db: Db) {
     const skills = await listFull(companyId);
     const agentRows = await agents.list(companyId);
     const desiredAgents = agentRows.filter((agent) => {
-      const desiredSkills = resolveDesiredSkillKeys(skills, agent.adapterConfig as Record<string, unknown>);
+      const desiredSkills = resolveDesiredSkillKeys(skills, mergeAgentConfig(agent));
       return desiredSkills.includes(key);
     });
 
@@ -1539,7 +1539,7 @@ export function companySkillService(db: Db) {
           try {
             const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(
               agent.companyId,
-              agent.adapterConfig as Record<string, unknown>,
+              mergeAgentConfig(agent),
             );
             const runtimeSkillEntries = await listRuntimeSkillEntries(agent.companyId);
             const snapshot = await adapter.listSkills({
@@ -2295,7 +2295,7 @@ export function companySkillService(db: Db) {
     const agentRows = await agents.list(companyId);
     const allSkills = await listFull(companyId);
     for (const agent of agentRows) {
-      const config = agent.adapterConfig as Record<string, unknown>;
+      const config = mergeAgentConfig(agent);
       const preference = readPaperclipSkillSyncPreference(config);
       const referencesSkill = preference.desiredSkills.some((ref) => {
         const resolved = resolveSkillReference(allSkills, ref);

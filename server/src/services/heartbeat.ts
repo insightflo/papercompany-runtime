@@ -36,6 +36,7 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { mergeAgentConfig } from "./agents.js";
 import { readExplicitValidationVerdict } from "./validation-verdict.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { companySkillService } from "./company-skills.js";
@@ -5837,7 +5838,7 @@ export function heartbeatService(db: Db) {
       : null;
     const missionSessionBinding = missionSessionAuthority?.missionSessionBinding ?? null;
     const missionSessionId = missionSessionAuthority?.decision.preferredSessionId ?? null;
-    const config = { ...parseObject(agent.adapterConfig), ...parseObject(agent.agentConfig) };
+    const config = mergeAgentConfig(agent);
     const executionWorkspaceMode = resolveExecutionWorkspaceMode({
       projectPolicy: projectExecutionWorkspacePolicy,
       issueSettings: issueExecutionWorkspaceSettings,

@@ -269,6 +269,7 @@ export function hermesChatService(db: Db) {
         status: agents.status,
         adapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        agentConfig: agents.agentConfig,
         runtimeConfig: agents.runtimeConfig,
         metadata: agents.metadata,
       })

@@ -3,6 +3,7 @@ import { agents, companySkills, heartbeatRuns, issueExecutionCards, issues, type
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { findServerAdapter } from "../adapters/index.js";
 import { companySkillService } from "./company-skills.js";
+import { mergeAgentConfig } from "./agents.js";
 import { hashStructuredValue } from "./issue-execution-cards/hash.js";
 import { listWorkflowToolCatalog } from "./workflow/tool-catalog.js";
 
@@ -97,7 +98,7 @@ async function validate(input: {
     if (!providerSupportsSkills) blockers.push("provider_skill_support_unavailable");
     let desiredKeys: string[] = [];
     try {
-      const refs = readPaperclipSkillSyncPreference(record(input.assignee.adapterConfig)).desiredSkills;
+      const refs = readPaperclipSkillSyncPreference(mergeAgentConfig(input.assignee)).desiredSkills;
       desiredKeys = await skillSvc.resolveRequestedSkillKeys(input.companyId, strings(refs));
     } catch { /* desired references are not authoritative contract input */ }
     for (const key of skillKeys) {

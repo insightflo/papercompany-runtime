@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { notFound, unprocessable } from "../errors.js";
 import { resolveHomeAwarePath, resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { mergeAgentConfig } from "./agents.js";
 
 const ENTRY_FILE_DEFAULT = "AGENTS.md";
 const MODE_KEY = "instructionsBundleMode";
@@ -31,6 +32,7 @@ type AgentLike = {
   companyId: string;
   name: string;
   adapterConfig: unknown;
+  agentConfig?: unknown;
 };
 
 type AgentInstructionsFileSummary = {
@@ -222,7 +224,7 @@ async function readLegacyInstructions(agent: AgentLike, config: Record<string, u
 }
 
 function deriveBundleState(agent: AgentLike): BundleState {
-  const config = asRecord(agent.adapterConfig);
+  const config = mergeAgentConfig(agent);
   const warnings: string[] = [];
   const storedModeRaw = config[MODE_KEY];
   const storedRootRaw = asString(config[ROOT_KEY]);
@@ -618,7 +620,7 @@ export function agentInstructionsService() {
       await fs.writeFile(resolvePathWithinRoot(rootPath, entryFile), "", "utf8");
     }
 
-    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
+    const adapterConfig = applyBundleConfig(mergeAgentConfig(agent), {
       mode: "managed",
       rootPath,
       entryFile,

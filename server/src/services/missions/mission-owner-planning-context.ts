@@ -19,6 +19,7 @@ import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources
 import type { MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import type { MissionRuleRef } from "./mission-rule-context.js";
+import { mergeAgentConfig } from "../agents.js";
 import { extractMissionIntent, type MissionIntent } from "./mission-intent.js";
 import { EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE } from "./mission-quality-contract.js";
 import { stat } from "node:fs/promises";
@@ -569,6 +570,7 @@ async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerP
       name: agents.name,
       capabilities: agents.capabilities,
       adapterConfig: agents.adapterConfig,
+      agentConfig: agents.agentConfig,
     })
     .from(missionAgents)
     .leftJoin(agents, eq(missionAgents.agentId, agents.id))
@@ -582,9 +584,7 @@ async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerP
     assignedAt: row.assignedAt,
     capabilities: row.capabilities,
     desiredSkillKeys: readPaperclipSkillSyncPreference(
-      row.adapterConfig && typeof row.adapterConfig === "object" && !Array.isArray(row.adapterConfig)
-        ? row.adapterConfig as Record<string, unknown>
-        : {},
+      mergeAgentConfig(row),
     ).desiredSkills,
   }));
 }

@@ -38,7 +38,7 @@ import {
 import { notFound, unprocessable } from "../errors.js";
 import type { StorageService } from "../storage/types.js";
 import { accessService } from "./access.js";
-import { agentService } from "./agents.js";
+import { agentService, AGENT_LEVEL_CONFIG_KEYS, mergeAgentConfig } from "./agents.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
@@ -822,6 +822,13 @@ function ensureMarkdownPath(pathValue: string) {
   return normalized;
 }
 
+const PORTABLE_CONFIG_STRIP_KEYS = new Set<string>([
+  ...AGENT_LEVEL_CONFIG_KEYS,
+  // env is stripped for company-scoped secret reasons (secret_ref bindings),
+  // orthogonal to agent ownership.
+  "env",
+]);
+
 function normalizePortableConfig(
   value: unknown,
 ): Record<string, unknown> {
@@ -830,17 +837,7 @@ function normalizePortableConfig(
   const next: Record<string, unknown> = {};
 
   for (const [key, entry] of Object.entries(input)) {
-    if (
-      key === "cwd" ||
-      key === "instructionsFilePath" ||
-      key === "instructionsBundleMode" ||
-      key === "instructionsRootPath" ||
-      key === "instructionsEntryFile" ||
-      key === "promptTemplate" ||
-      key === "bootstrapPromptTemplate" ||
-      key === "paperclipSkillSync"
-    ) continue;
-    if (key === "env") continue;
+    if (PORTABLE_CONFIG_STRIP_KEYS.has(key)) continue;
     next[key] = entry;
   }
 
@@ -2345,7 +2342,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         );
         const reportsToSlug = agent.reportsTo ? (idToSlug.get(agent.reportsTo) ?? null) : null;
         const desiredSkills = readPaperclipSkillSyncPreference(
-          (agent.adapterConfig as Record<string, unknown>) ?? {},
+          mergeAgentConfig(agent),
         ).desiredSkills;
 
         const commandValue = asString(portableAdapterConfig.command);
@@ -3074,7 +3071,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               : []),
         );
         const markdownRaw = bundleFiles["AGENTS.md"] ?? readPortableTextFile(plan.source.files, manifestAgent.path);
-        const fallbackPromptTemplate = asString((manifestAgent.adapterConfig as Record<string, unknown>).promptTemplate) || "";
+        const fallbackPromptTemplate = asString(mergeAgentConfig(manifestAgent).promptTemplate) || "";
         if (!markdownRaw && fallbackPromptTemplate) {
           bundleFiles["AGENTS.md"] = fallbackPromptTemplate;
         }
@@ -3100,6 +3097,8 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         delete adapterConfigWithSkills.instructionsBundleMode;
         delete adapterConfigWithSkills.instructionsRootPath;
         delete adapterConfigWithSkills.instructionsEntryFile;
+        // cwd/agentsMdPath are NOT stripped here: the agent-level normalizer in
+        // agentService.create/update routes them into agentConfig on persist.
         const patch = {
           name: planAgent.plannedName,
           role: manifestAgent.role,

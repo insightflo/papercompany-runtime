@@ -71,6 +71,45 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export const AGENT_LEVEL_CONFIG_KEYS = [
+  "cwd",
+  "instructionsFilePath",
+  "instructionsBundleMode",
+  "instructionsRootPath",
+  "instructionsEntryFile",
+  "promptTemplate",
+  "bootstrapPromptTemplate",
+  "paperclipSkillSync",
+  "agentsMdPath",
+] as const;
+
+export function mergeAgentConfig(
+  agent: { adapterConfig: unknown; agentConfig?: unknown },
+): Record<string, unknown> {
+  const adapterConfig = isPlainRecord(agent.adapterConfig) ? agent.adapterConfig : {};
+  const agentConfig = isPlainRecord(agent.agentConfig) ? agent.agentConfig : {};
+  return { ...adapterConfig, ...agentConfig };
+}
+
+export function splitAgentLevelKeys(input: unknown): {
+  adapterConfig: Record<string, unknown>;
+  agentConfig: Record<string, unknown>;
+} {
+  const source = isPlainRecord(input) ? input : {};
+  const adapterConfig: Record<string, unknown> = {};
+  const agentConfig: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(source)) {
+    if ((AGENT_LEVEL_CONFIG_KEYS as readonly string[]).includes(key)) {
+      agentConfig[key] = value;
+    } else {
+      adapterConfig[key] = value;
+    }
+  }
+
+  return { adapterConfig, agentConfig };
+}
+
 function getDefaultParentIssueId(metadata: unknown): string | null {
   if (!isPlainRecord(metadata)) return null;
   const value = metadata.defaultParentIssueId;
@@ -390,6 +429,28 @@ export function agentService(db: Db) {
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions, role);
     }
 
+    if (Object.prototype.hasOwnProperty.call(data, "adapterConfig")) {
+      const split = splitAgentLevelKeys(data.adapterConfig);
+      normalizedPatch.adapterConfig = split.adapterConfig;
+      if (Object.prototype.hasOwnProperty.call(data, "agentConfig")) {
+        // Rollback and explicit dual-column patches restore agentConfig verbatim.
+        normalizedPatch.agentConfig = isPlainRecord(data.agentConfig)
+          ? data.agentConfig
+          : {};
+      } else if (Object.keys(split.agentConfig).length > 0) {
+        // The incoming config carries agent-level keys, so it was derived from a
+        // merged read (field edits, instructions/skills RMW). Treat it as
+        // authoritative for agent keys so deletions (clearLegacyPromptTemplate,
+        // cleared instructions paths) propagate instead of being resurrected.
+        normalizedPatch.agentConfig = split.agentConfig;
+      }
+      // Engine-only adapterConfig (adapter switch) leaves agentConfig untouched.
+    } else if (Object.prototype.hasOwnProperty.call(data, "agentConfig")) {
+      normalizedPatch.agentConfig = isPlainRecord(data.agentConfig)
+        ? data.agentConfig
+        : {};
+    }
+
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
@@ -448,9 +509,22 @@ export function agentService(db: Db) {
 
       const role = data.role ?? "general";
       const normalizedPermissions = normalizeAgentPermissions(data.permissions, role);
+      const split = splitAgentLevelKeys(data.adapterConfig);
+      const mergedAgentConfig = {
+        ...split.agentConfig,
+        ...(isPlainRecord(data.agentConfig) ? data.agentConfig : {}),
+      };
       const created = await db
         .insert(agents)
-        .values({ ...data, name: uniqueName, companyId, role, permissions: normalizedPermissions })
+        .values({
+          ...data,
+          adapterConfig: split.adapterConfig,
+          agentConfig: mergedAgentConfig,
+          name: uniqueName,
+          companyId,
+          role,
+          permissions: normalizedPermissions,
+        })
         .returning()
         .then((rows) => rows[0]);
 
