@@ -195,6 +195,30 @@ async function hasRecoveryIdempotency(db: Db, companyId: string, idempotencyKey:
   return Boolean(event || wakeup);
 }
 
+/**
+ * [half-applied owner decision] wakeup 멱등은 "실제로 발사된" 증거만 만족한다.
+ *   mission_owner_retry_wakeup 마커가 not_requested/failed/skipped_no_assignee 로 기록된 경우는
+ *   아무것도 발사되지 않은 것이므로 '이미 적용됨'으로 간주하지 않는다(2026-08-15 GAZ ef12d027
+ *   30시간 stall: not_requested 마커가 영구 멱급 게이트가 됐다). 실제 agent_wakeup_requests 행은
+ *   항상 발사 증거로 인정한다.
+ */
+const DISPATCHED_RECOVERY_WAKEUP_STATUSES = new Set(["dispatched", "workflow_already_dispatched"]);
+
+async function hasDispatchedRecoveryWakeup(db: Db, companyId: string, idempotencyKey: string): Promise<boolean> {
+  const [event, wakeup] = await Promise.all([
+    db.select({ toStatus: workflowTransitionEvents.toStatus }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.idempotencyKey, idempotencyKey),
+      inArray(workflowTransitionEvents.toStatus, [...DISPATCHED_RECOVERY_WAKEUP_STATUSES]),
+    )).limit(1).then((rows) => rows[0] ?? null),
+    db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+    )).limit(1).then((rows) => rows[0] ?? null),
+  ]);
+  return Boolean(event || wakeup);
+}
+
 async function recordRecoveryAction(input: {
   readonly db: Db; readonly companyId: string; readonly missionId: string; readonly issueId: string;
   readonly idempotencyKey: string; readonly eventType: string; readonly decision: string; readonly resultStatus: string;
@@ -215,6 +239,17 @@ async function recordRecoveryAction(input: {
       ...(input.stepId ? { stepId: input.stepId } : {}),
     },
   }).onConflictDoNothing();
+  // [half-applied owner decision] 같은 key 마커가 이미 있으면(예: not_requested) 결과 상태를 갱신한다.
+  //   doNothing 만으로는 발사 실패 마커가 영구 남아 재발사 수렴을 막는다(2026-08-15 GAZ ef12d027).
+  if (input.idempotencyKey) {
+    await input.db
+      .update(workflowTransitionEvents)
+      .set({ toStatus: input.resultStatus })
+      .where(and(
+        eq(workflowTransitionEvents.companyId, input.companyId),
+        eq(workflowTransitionEvents.idempotencyKey, input.idempotencyKey),
+      ));
+  }
 }
 // [final QA / mission validation owner recovery] retry 가 깨울 source issue 의 active workProduct 를
 //   company+mission+source-issue scope 로 명시적으로 읽는다(issueWorkProducts.companyId + issueId 와
@@ -1473,7 +1508,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                 });
                 const retryApplyIdempotencyKey = `${idempotencyKey}:apply`;
                 const [retryWakeupRecorded, retryApplyRecorded] = await Promise.all([
-                  hasRecoveryIdempotency(db, mission.companyId, idempotencyKey),
+                  hasDispatchedRecoveryWakeup(db, mission.companyId, idempotencyKey),
                   hasRecoveryIdempotency(db, mission.companyId, retryApplyIdempotencyKey),
                 ]);
                 const sourceIsRetryableStaleQueue = (sourceCandidate.status === "todo" || sourceCandidate.status === "backlog")
@@ -1660,6 +1695,98 @@ export function createSupervision({ db, deps, ownerActions }: {
                     });
                   } else {
                     findings.push(`owner_action_decision_already_applied: ${label} retry_source_issue source=${sourceCandidateLabel}`);
+                  }
+                  break;
+                }
+                if (retryApplyRecorded) {
+                  // [half-applied owner decision] apply 는 됐으나 wakeup 이 발사된 적 없다(not_requested/failed/skipped
+                  //   마커만 존재). 교리(owner-decision-apply-dispatch-wiring): 결정을 재적용(reopen/재코멘트)하지 말고
+                  //   빠진 발사만 보낸다. 발사가 계속 불가능하면 replan 권고로 가시화한다(무한 stall 방지).
+                  if (!sourceCandidate.assigneeAgentId) {
+                    findings.push(`owner_action_retry_wakeup_stalled: ${label} retry_source_issue source=${sourceCandidateLabel} apply recorded but source has no assignee; wakeup cannot be dispatched`);
+                    addRecommendation({
+                      type: "request_replan",
+                      missionId: mission.id,
+                      issueId: sourceCandidate.id,
+                      reason: `owner retry already applied but wakeup undispatchable (${sourceCandidateLabel} has no assignee); reassign or replan`,
+                      safeToAutoApply: false,
+                    });
+                  } else if (input.dispatchOwnerDecisionWakeups && deps.onOwnerDecisionRetrySourceIssueApplied) {
+                    try {
+                      const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
+                        mission,
+                        ownerActionIssue: issue,
+                        sourceIssue: sourceCandidate,
+                        targetAgentId: sourceCandidate.assigneeAgentId,
+                        idempotencyKey,
+                        decisionCommentId: await resolveOwnerRetryDecisionCommentId(db, mission.companyId, issue.id),
+                      });
+                      const redispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
+                      await recordRecoveryAction({
+                        db,
+                        companyId: mission.companyId,
+                        missionId: mission.id,
+                        issueId: issue.id,
+                        sourceIssueId: sourceCandidate.id,
+                        idempotencyKey,
+                        eventType: "mission_owner_retry_wakeup",
+                        decision: "retry_source_issue",
+                        resultStatus: redispatchStatus,
+                      });
+                      appliedActions.push({
+                        type: "owner_decision_retry_source_issue",
+                        missionId: mission.id,
+                        ownerActionIssueId: issue.id,
+                        sourceIssueId: sourceCandidate.id,
+                        resultStatus: sourceCandidate.status,
+                        wakeupDispatchStatus: redispatchStatus,
+                        idempotencyKey,
+                      });
+                      if (DISPATCHED_RECOVERY_WAKEUP_STATUSES.has(redispatchStatus)) {
+                        await issueService(db).addComment(
+                          sourceCandidate.id,
+                          buildRetrySourceIssueWakeupResultComment({
+                            status: redispatchStatus,
+                            missionId: mission.id,
+                            ownerActionIssueId: issue.id,
+                            ownerActionLabel: label,
+                            sourceIssueId: sourceCandidate.id,
+                            sourceLabel: sourceCandidateLabel,
+                            targetAgentId: sourceCandidate.assigneeAgentId,
+                            idempotencyKey,
+                          }),
+                          { agentId: mission.ownerAgentId },
+                        );
+                        const redispatchValidatorEvidence = ownerActions.buildCorrectedArtifactValidatorRetryEvidence({
+                          sourceIssue: sourceCandidate,
+                          sourceLabel: sourceCandidateLabel,
+                          missionIssues,
+                          commentsByIssueId,
+                        });
+                        if (redispatchValidatorEvidence) {
+                          await issueService(db).addComment(
+                            sourceCandidate.id,
+                            redispatchValidatorEvidence.comment,
+                            { agentId: mission.ownerAgentId },
+                          );
+                        }
+                        findings.push(`owner_action_retry_wakeup_redispatched: ${label} retry_source_issue source=${sourceCandidateLabel} — half-applied retry recovered, wakeup ${redispatchStatus}`);
+                      } else {
+                        findings.push(`owner_action_retry_wakeup_stalled: ${label} retry_source_issue source=${sourceCandidateLabel} apply recorded but dispatch result=${redispatchStatus}; native resume could not dispatch — replan or operator action required`);
+                        addRecommendation({
+                          type: "request_replan",
+                          missionId: mission.id,
+                          issueId: sourceCandidate.id,
+                          reason: `owner retry already applied but wakeup dispatch returned ${redispatchStatus}; native resume link missing — replan or operator action required`,
+                          safeToAutoApply: false,
+                        });
+                      }
+                    } catch (err) {
+                      const message = err instanceof Error ? err.message : String(err);
+                      findings.push(`owner_action_retry_wakeup_failed: ${sourceCandidateLabel} half-applied retry wakeup callback failed — ${message}`);
+                    }
+                  } else {
+                    findings.push(`owner_action_retry_wakeup_pending_dispatch: ${label} retry_source_issue source=${sourceCandidateLabel} apply recorded but wakeup not dispatched yet (dispatch flags or callback unavailable this sweep)`);
                   }
                   break;
                 }
