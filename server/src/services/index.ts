@@ -9,6 +9,7 @@ export {
   mergeAgentConfig,
   splitAgentLevelKeys,
   AGENT_LEVEL_CONFIG_KEYS,
+  ENGINE_ENV_KEYS,
 } from "./agents.js";
 export { agentInstructionsService, syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
 export { assetService } from "./assets.js";

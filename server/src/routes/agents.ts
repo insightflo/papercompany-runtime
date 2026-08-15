@@ -1779,11 +1779,12 @@ export function agentRoutes(db: Db) {
 
     const requestedAdapterType =
       typeof patchData.adapterType === "string" ? patchData.adapterType : existing.adapterType;
+    const patchHasAdapterConfig = Object.prototype.hasOwnProperty.call(patchData, "adapterConfig");
     const touchesAdapterConfiguration =
       Object.prototype.hasOwnProperty.call(patchData, "adapterType") ||
-      Object.prototype.hasOwnProperty.call(patchData, "adapterConfig");
+      patchHasAdapterConfig;
     if (touchesAdapterConfiguration) {
-      const rawEffectiveAdapterConfig = Object.prototype.hasOwnProperty.call(patchData, "adapterConfig")
+      const rawEffectiveAdapterConfig = patchHasAdapterConfig
         ? (asRecord(patchData.adapterConfig) ?? {})
         : mergeAgentConfig(existing);
       const effectiveAdapterConfig = applyCreateDefaultsByAdapterType(
@@ -1796,13 +1797,34 @@ export function agentRoutes(db: Db) {
         { strictMode: strictSecretsMode },
       );
       patchData.adapterConfig = syncInstructionsBundleConfigFromFilePath(existing, normalizedEffectiveAdapterConfig);
+      if (
+        !patchHasAdapterConfig &&
+        requestedAdapterType !== existing.adapterType
+      ) {
+        // P4 rule (b): the fabricated fallback config carries the merged env; a
+        // bare adapterType switch must reset engine env instead of replacing it.
+        // Drop env from the patch so the update normalizer applies the
+        // engine-env reset while agentConfig.env stays untouched.
+        const fabricatedConfig = asRecord(patchData.adapterConfig) ?? {};
+        const { env: _env, ...withoutEnv } = fabricatedConfig;
+        patchData.adapterConfig = withoutEnv;
+      }
     }
     if (touchesAdapterConfiguration && requestedAdapterType === "opencode_local") {
       const effectiveAdapterConfig = asRecord(patchData.adapterConfig) ?? {};
+      // Model discovery needs the effective env from BOTH config columns.
+      const mergedExisting = mergeAgentConfig(existing);
+      const validationConfig = { ...effectiveAdapterConfig };
+      if (!Object.prototype.hasOwnProperty.call(validationConfig, "env")) {
+        const mergedEnv = asRecord(mergedExisting.env);
+        if (mergedEnv) {
+          validationConfig.env = mergedEnv;
+        }
+      }
       await assertAdapterConfigConstraints(
         existing.companyId,
         requestedAdapterType,
-        effectiveAdapterConfig,
+        validationConfig,
       );
     }
 

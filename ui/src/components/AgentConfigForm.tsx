@@ -117,6 +117,23 @@ const emptyOverlay: Overlay = {
 /** Stable empty object used as fallback for missing env config to avoid new-object-per-render. */
 const EMPTY_ENV: Record<string, EnvBinding> = {};
 
+/** Merge config columns with env merged at the env-key level (server mergeAgentConfig parity). */
+function mergeConfigColumns(adapterConfig: unknown, agentConfig: unknown): Record<string, unknown> {
+  const adapter = (adapterConfig ?? {}) as Record<string, unknown>;
+  const agent = (agentConfig ?? {}) as Record<string, unknown>;
+  const merged = { ...adapter, ...agent };
+  const asEnv = (value: unknown): Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const adapterEnv = asEnv(adapter.env);
+  const agentEnv = asEnv(agent.env);
+  if (Object.keys(adapterEnv).length > 0 || Object.keys(agentEnv).length > 0) {
+    merged.env = { ...adapterEnv, ...agentEnv };
+  }
+  return merged;
+}
+
 function isOverlayDirty(o: Overlay): boolean {
   return (
     Object.keys(o.identity).length > 0 ||
@@ -273,10 +290,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       // with old config since old adapter fields are meaningless for the new type
       patch.adapterConfig = overlay.adapterConfig;
     } else if (Object.keys(overlay.adapterConfig).length > 0) {
-      const existing = {
-        ...((agent.adapterConfig ?? {}) as Record<string, unknown>),
-        ...((agent.agentConfig ?? {}) as Record<string, unknown>),
-      };
+      const existing = mergeConfigColumns(agent.adapterConfig, agent.agentConfig);
       patch.adapterConfig = { ...existing, ...overlay.adapterConfig };
     }
     if (Object.keys(overlay.heartbeat).length > 0) {
@@ -310,10 +324,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
 
   // ---- Resolve values ----
   const config = !isCreate
-    ? ({
-        ...((props.agent.adapterConfig ?? {}) as Record<string, unknown>),
-        ...((props.agent.agentConfig ?? {}) as Record<string, unknown>),
-      } as Record<string, unknown>)
+    ? mergeConfigColumns(props.agent.adapterConfig, props.agent.agentConfig)
     : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
@@ -1138,7 +1149,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   onChange={(env) =>
                     isCreate
                       ? set!({ envBindings: env ?? {}, envVars: "" })
-                      : mark("adapterConfig", "env", env)
+                      : mark("adapterConfig", "env", env ?? {})
                   }
                 />
               </Field>
