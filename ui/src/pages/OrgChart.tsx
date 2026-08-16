@@ -123,6 +123,7 @@ const adapterLabels: Record<string, string> = {
   gemini_local: "Gemini",
   opencode_local: "OpenCode",
   commandcode_local: "Command Code",
+  pi_local: "Pi",
   cursor: "Cursor",
   openclaw_gateway: "OpenClaw Gateway",
   process: "Process",

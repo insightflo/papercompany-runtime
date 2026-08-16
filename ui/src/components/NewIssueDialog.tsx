@@ -93,7 +93,7 @@ type StagedIssueFile = {
   title?: string | null;
 };
 
-const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local", "commandcode_local"]);
+const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local", "commandcode_local", "pi_local"]);
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 
 const ISSUE_THINKING_EFFORT_OPTIONS = {
@@ -111,6 +111,14 @@ const ISSUE_THINKING_EFFORT_OPTIONS = {
     { value: "high", label: "High" },
   ],
   opencode_local: [
+    { value: "", label: "Default" },
+    { value: "minimal", label: "Minimal" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "max", label: "Max" },
+  ],
+  pi_local: [
     { value: "", label: "Default" },
     { value: "minimal", label: "Minimal" },
     { value: "low", label: "Low" },
@@ -140,6 +148,8 @@ function buildAssigneeAdapterOverrides(input: {
       adapterConfig.variant = input.thinkingEffortOverride;
     } else if (adapterType === "claude_local" || adapterType === "commandcode_local") {
       adapterConfig.effort = input.thinkingEffortOverride;
+    } else if (adapterType === "pi_local") {
+      adapterConfig.thinking = input.thinkingEffortOverride;
     }
   }
   if (adapterType === "claude_local" && input.chrome) {
