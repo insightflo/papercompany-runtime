@@ -16,41 +16,55 @@ if (argv.includes("--list-models")) {
 }
 const capturePath = process.env.PI_TEST_CAPTURE_PATH;
 const attemptPath = process.env.PI_TEST_ATTEMPT_PATH;
-const input = fs.readFileSync(0, "utf8");
-if (capturePath) {
-  fs.writeFileSync(capturePath, JSON.stringify({
-    argv,
-    input,
-    apiKey: process.env.PAPERCLIP_API_KEY,
-    agentId: process.env.PAPERCLIP_AGENT_ID,
-    runId: process.env.PAPERCLIP_RUN_ID,
-    providerKey: process.env.ANTHROPIC_API_KEY,
-    home: process.env.HOME,
-  }, null, 2));
-}
-let attempt = 1;
-if (attemptPath) {
-  try { attempt = Number(fs.readFileSync(attemptPath, "utf8")) + 1; } catch {}
-  fs.writeFileSync(attemptPath, String(attempt));
-}
-if (process.env.PI_TEST_UNKNOWN_SESSION === "1" && attempt === 1) {
-  process.stderr.write("unknown session id\\n");
-  process.exit(1);
-}
-if (process.env.PI_TEST_STRUCTURED_ERROR === "1") {
-  process.stdout.write(JSON.stringify({
-    type: "turn_end",
-    message: {
-      role: "assistant",
-      status: "error",
-      stopReason: "error",
-      errorMessage: "structured provider failure",
-    },
-  }) + "\\n");
+// Real pi (rpc mode) consumes the prompt without stdin EOF; the adapter holds
+// stdin open until the run settles, so read stdin asynchronously and proceed
+// once the prompt chunk arrives (debounced for split writes).
+let input = "";
+let proceedTimer = null;
+const proceed = () => {
+  if (capturePath) {
+    fs.writeFileSync(capturePath, JSON.stringify({
+      argv,
+      input,
+      apiKey: process.env.PAPERCLIP_API_KEY,
+      agentId: process.env.PAPERCLIP_AGENT_ID,
+      runId: process.env.PAPERCLIP_RUN_ID,
+      providerKey: process.env.ANTHROPIC_API_KEY,
+      home: process.env.HOME,
+    }, null, 2));
+  }
+  let attempt = 1;
+  if (attemptPath) {
+    try { attempt = Number(fs.readFileSync(attemptPath, "utf8")) + 1; } catch {}
+    fs.writeFileSync(attemptPath, String(attempt));
+  }
+  if (process.env.PI_TEST_UNKNOWN_SESSION === "1" && attempt === 1) {
+    process.stderr.write("unknown session id\\n");
+    process.exit(1);
+  }
+  if (process.env.PI_TEST_STRUCTURED_ERROR === "1") {
+    process.stdout.write(JSON.stringify({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        status: "error",
+        stopReason: "error",
+        errorMessage: "structured provider failure",
+      },
+    }) + "\\n");
+    process.exit(0);
+  }
+  process.stdout.write(JSON.stringify({ type: "turn_end", message: { role: "assistant", content: "fake pi response" } }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "agent_end", willRetry: false }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
   process.exit(0);
-}
-process.stdout.write(JSON.stringify({ type: "turn_end", message: { role: "assistant", content: "fake pi response" } }) + "\\n");
-process.exit(0);
+};
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  if (proceedTimer) clearTimeout(proceedTimer);
+  proceedTimer = setTimeout(proceed, 25);
+});
 `;
   await fs.writeFile(commandPath, script, "utf8");
   await fs.chmod(commandPath, 0o755);
