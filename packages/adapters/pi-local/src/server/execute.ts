@@ -389,6 +389,78 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     // Buffer stdout by lines to handle partial JSON chunks
     let stdoutBuffer = "";
+    // pi --mode rpc exits on stdin EOF: if stdin closes right after the prompt
+    // is written, pi accepts the prompt, records the user message, and exits 0
+    // before any model call (4s no-op "succeeded" runs). Hold stdin open until
+    // the run settles so the model turn(s) run to completion; stdin then closes
+    // and pi exits cleanly. Child exit and the run timeout path both close/kill
+    // the child independently of this promise.
+    let releaseStdin: (() => void) | null = null;
+    const stdinRelease = new Promise<void>((resolve) => {
+      releaseStdin = resolve;
+    });
+    let finalAgentEndTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearFinalAgentEndTimer = (): void => {
+      if (finalAgentEndTimer !== null) {
+        clearTimeout(finalAgentEndTimer);
+        finalAgentEndTimer = null;
+      }
+    };
+    const releaseStdinNow = (): void => {
+      clearFinalAgentEndTimer();
+      releaseStdin?.();
+    };
+    const releaseStdinOnSettledEvent = (line: string): void => {
+      if (
+        !line.includes('"agent_end"') &&
+        !line.includes('"agent_settled"') &&
+        !line.includes('"auto_retry_end"') &&
+        !line.includes('"agent_start"') &&
+        !line.includes('"compaction_start"') &&
+        !line.includes('"auto_retry_start"') &&
+        !line.includes('"summarization_retry_scheduled"')
+      ) {
+        return;
+      }
+      let parsed: { type?: unknown; willRetry?: unknown; success?: unknown };
+      try {
+        parsed = JSON.parse(line) as { type?: unknown; willRetry?: unknown; success?: unknown };
+      } catch {
+        // non-JSON stdout line — ignore
+        return;
+      }
+      switch (parsed?.type) {
+        case "agent_settled":
+          // Definitive settle signal: no automatic retry, compaction retry, or
+          // queued continuation remains (verified on pi 0.84.1 RPC).
+          releaseStdinNow();
+          break;
+        case "agent_end":
+          if (parsed.willRetry !== true) {
+            // Fallback for pi builds that do not emit agent_settled: close
+            // shortly after the final agent_end unless more activity starts.
+            clearFinalAgentEndTimer();
+            finalAgentEndTimer = setTimeout(() => {
+              finalAgentEndTimer = null;
+              releaseStdin?.();
+            }, 1500);
+          }
+          break;
+        case "auto_retry_end":
+          if (parsed.success !== true) {
+            // Retries exhausted without a trailing agent_end — pi is done.
+            releaseStdinNow();
+          }
+          break;
+        case "agent_start":
+        case "compaction_start":
+        case "auto_retry_start":
+        case "summarization_retry_scheduled":
+          // Follow-on activity after a final agent_end: keep holding stdin.
+          clearFinalAgentEndTimer();
+          break;
+      }
+    };
     const bufferedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
       if (stream === "stderr") {
         // Pass stderr through immediately (not JSONL)
@@ -405,6 +477,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Emit complete lines
       for (const line of lines) {
         if (line) {
+          releaseStdinOnSettledEvent(line);
           await onLog(stream, line + "\n");
         }
       }
@@ -419,7 +492,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       onSpawn,
       onLog: bufferedOnLog,
       stdin: buildRpcStdin(),
+      stdinRelease,
     });
+    clearFinalAgentEndTimer();
     
     // Flush any remaining buffer content
     if (stdoutBuffer) {
@@ -460,8 +535,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
     const rawExitCode = attempt.proc.exitCode;
     const structuredErrorMessage = attempt.parsed.errors.join("; ");
+    // Anti-masking guard: exit 0 with zero assistant output means no model
+    // turn ran (e.g. stdin EOF closing pi before the turn starts). Never
+    // report success for a no-op run — surface it as a failure instead.
+    const noAssistantOutput =
+      attempt.parsed.messages.length === 0 &&
+      attempt.parsed.toolCalls.length === 0 &&
+      attempt.parsed.usage.outputTokens === 0;
+    const noopExitSuccess =
+      !structuredErrorMessage &&
+      (rawExitCode ?? 0) === 0 &&
+      !attempt.proc.signal &&
+      noAssistantOutput;
+    const noopErrorMessage =
+      "Pi exited 0 without any assistant output — no model turn ran (possible stdin EOF regression)";
+    const forceFailure = Boolean(structuredErrorMessage) || noopExitSuccess;
     const effectiveExitCode =
-      structuredErrorMessage && (rawExitCode === 0 || (rawExitCode == null && !attempt.proc.signal))
+      forceFailure && (rawExitCode === 0 || (rawExitCode == null && !attempt.proc.signal))
         ? 1
         : rawExitCode;
     const fallbackErrorMessage = stderrLine || `Pi exited with code ${effectiveExitCode ?? -1}`;
@@ -470,8 +560,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode: effectiveExitCode,
       signal: attempt.proc.signal,
       timedOut: false,
-      errorMessage:
-        structuredErrorMessage || ((effectiveExitCode ?? 0) === 0 ? null : fallbackErrorMessage),
+      errorMessage: structuredErrorMessage
+        ? structuredErrorMessage
+        : noopExitSuccess
+          ? noopErrorMessage
+          : (effectiveExitCode ?? 0) === 0
+            ? null
+            : fallbackErrorMessage,
       usage: {
         inputTokens: attempt.parsed.usage.inputTokens,
         outputTokens: attempt.parsed.usage.outputTokens,

@@ -842,6 +842,17 @@ export async function runChildProcess(
     fatalOnLogError?: boolean;
     onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     stdin?: string;
+    /**
+     * Hold stdin open after writing `stdin` until this promise resolves, then
+     * close it. Required for children that treat stdin EOF as an immediate
+     * shutdown signal mid-run (pi --mode rpc accepts the prompt, starts the
+     * turn, then exits 0 before any model call when stdin closes early).
+     * Without this option stdin closes immediately after the write (legacy
+     * behavior for adapters whose CLIs consume stdin as a one-shot payload).
+     * stdin is also closed when the child exits, so a crashed child cannot
+     * leave the pipe dangling.
+     */
+    stdinRelease?: Promise<unknown>;
   },
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
@@ -885,7 +896,22 @@ export async function runChildProcess(
 
         if (opts.stdin != null && child.stdin) {
           child.stdin.write(opts.stdin);
-          child.stdin.end();
+          if (opts.stdinRelease) {
+            let stdinClosed = false;
+            const closeStdin = () => {
+              if (stdinClosed) return;
+              stdinClosed = true;
+              try {
+                child.stdin?.end();
+              } catch {
+                // stream already destroyed — nothing to close
+              }
+            };
+            child.once("exit", closeStdin);
+            Promise.resolve(opts.stdinRelease).then(closeStdin, closeStdin);
+          } else {
+            child.stdin.end();
+          }
         }
 
         if (typeof child.pid === "number" && child.pid > 0 && opts.onSpawn) {
