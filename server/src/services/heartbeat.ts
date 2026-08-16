@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, lt, not, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
 import {
@@ -86,6 +86,7 @@ import {
 import {
   resolveAdapterFailedTransientRetryMaxSec,
   resolveQaStepActiveExecutionTimeoutMs,
+  resolveRunawayAdvisorySoftBytes,
   resolveRunawayLogLimitBytes,
   resolveStepAwareActiveExecutionTimeoutMs,
 } from "./heartbeat-stability.js";
@@ -6369,6 +6370,40 @@ export function heartbeatService(db: Db) {
     } else {
       delete context.paperclipIssueRecentComments;
     }
+    // [runaway recovery] 이 이슈의 직전 실행이 폭주(재고민 루프)로 종료됐다면, 이번 실행
+    //   프롬프트 선두에 회복 지시를 붙인다(런타임 브리프가 렌더). 6시간 창 — 오래된 폭주는
+    //   새 컨텍스트에서 무의미하므로 제외.
+    if (issueId) {
+      const runawayPrevious = await db
+        .select({
+          id: heartbeatRuns.id,
+          logBytes: heartbeatRuns.logBytes,
+        })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.agentId, agent.id),
+          eq(heartbeatRuns.issueId, issueId),
+          eq(heartbeatRuns.companyId, agent.companyId),
+          eq(heartbeatRuns.status, "failed"),
+          eq(heartbeatRuns.errorCode, "runaway_context"),
+          sql`${heartbeatRuns.id} <> ${run.id}`,
+          gte(heartbeatRuns.createdAt, new Date(Date.now() - 6 * 60 * 60 * 1000)),
+        ))
+        .orderBy(desc(heartbeatRuns.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (runawayPrevious) {
+        context.paperclipRunawayRecoveryBrief = {
+          kind: "runaway_recovery",
+          previousRunId: runawayPrevious.id,
+          logBytes: runawayPrevious.logBytes ?? 0,
+        };
+      } else {
+        delete context.paperclipRunawayRecoveryBrief;
+      }
+    } else {
+      delete context.paperclipRunawayRecoveryBrief;
+    }
     const wakeCommentId = readNonEmptyString(context.wakeCommentId);
     const wakeComment = wakeCommentId ? await issuesSvc.getComment(wakeCommentId) : null;
     const fileViews = await buildContextSafeFileViews({
@@ -6503,8 +6538,10 @@ export function heartbeatService(db: Db) {
       //   run 로그 누적 바이트가 상한을 넘으면 자식을 죽고 errorCode=runaway_context 로
       //   종료시킨다. 상한은 env/agent adapterConfig 로 조정 가능(heartbeat-stability).
       const runawayLogLimitBytes = resolveRunawayLogLimitBytes(resolvedConfig);
+      const runawayAdvisorySoftBytes = resolveRunawayAdvisorySoftBytes(runawayLogLimitBytes);
       let runawayLogBytes = 0;
       let runawayTriggered = false;
+      let runawayAdvisoryEmitted = false;
     try {
       const startedAt = run.startedAt ?? new Date();
       const runningWithSession = await db
@@ -6638,10 +6675,34 @@ export function heartbeatService(db: Db) {
             ts,
           });
         }
+        if (!runawayTriggered && runawayLogLimitBytes > 0) {
+          runawayLogBytes += Buffer.byteLength(sanitizedChunk, "utf8");
+          // [runaway advisory] 소프트 경고 — kill 전에 한 번, 감사 이벤트로 기록한다.
+          //   (commandcode는 stdin이 ignore로 스폰되어 실행 중 주입은 불가; 대신 다음 실행
+          //   웨이크의 paperclipRunawayRecoveryBrief가 회복 지시를 보장한다.)
+          if (
+            !runawayAdvisoryEmitted &&
+            runawayAdvisorySoftBytes > 0 &&
+            runawayLogBytes >= runawayAdvisorySoftBytes
+          ) {
+            runawayAdvisoryEmitted = true;
+            await appendRunEvent(run, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: `Runaway advisory: run log reached ${runawayLogBytes} bytes (soft threshold ${runawayAdvisorySoftBytes}, hard limit ${runawayLogLimitBytes}); the run will be terminated if output growth continues`,
+              payload: {
+                runawayLogBytes,
+                runawayAdvisorySoftBytes,
+                runawayLogLimitBytes,
+              },
+            }).catch(() => undefined);
+          }
+        }
         if (
           !runawayTriggered &&
           runawayLogLimitBytes > 0 &&
-          (runawayLogBytes += Buffer.byteLength(sanitizedChunk, "utf8")) > runawayLogLimitBytes
+          runawayLogBytes > runawayLogLimitBytes
         ) {
           runawayTriggered = true;
           const tracked = runningProcesses.get(run.id);
