@@ -389,6 +389,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     // Buffer stdout by lines to handle partial JSON chunks
     let stdoutBuffer = "";
+    // pi --mode rpc exits on stdin EOF: if stdin closes right after the prompt
+    // is written, pi accepts the prompt, records the user message, and exits 0
+    // before any model call (4s no-op "succeeded" runs). Hold stdin open until
+    // the final agent_end event (willRetry !== true) so the model turn runs to
+    // completion; stdin then closes and pi exits cleanly. Child exit and the
+    // run timeout path both close/kill the child independently of this promise.
+    let releaseStdin: (() => void) | null = null;
+    const stdinRelease = new Promise<void>((resolve) => {
+      releaseStdin = resolve;
+    });
+    const releaseStdinOnFinalAgentEnd = (line: string): void => {
+      if (!line.includes('"agent_end"')) return;
+      try {
+        const parsed = JSON.parse(line) as { type?: unknown; willRetry?: unknown };
+        if (parsed?.type === "agent_end" && parsed.willRetry !== true) {
+          releaseStdin?.();
+        }
+      } catch {
+        // non-JSON stdout line — ignore
+      }
+    };
     const bufferedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
       if (stream === "stderr") {
         // Pass stderr through immediately (not JSONL)
@@ -405,6 +426,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Emit complete lines
       for (const line of lines) {
         if (line) {
+          releaseStdinOnFinalAgentEnd(line);
           await onLog(stream, line + "\n");
         }
       }
@@ -419,6 +441,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       onSpawn,
       onLog: bufferedOnLog,
       stdin: buildRpcStdin(),
+      stdinRelease,
     });
     
     // Flush any remaining buffer content
