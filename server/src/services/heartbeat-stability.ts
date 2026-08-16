@@ -11,6 +11,9 @@ import { isQaLikeStep } from "./workflow-step-role.js";
 export const DEFAULT_QA_STEP_ACTIVE_EXECUTION_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_RUNAWAY_LOG_LIMIT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC = 300;
+/** [runaway advisory] 소프트 경고 임계 = 하드 상한의 이 비율(실행 중 감사 이벤트). */
+export const DEFAULT_RUNAWAY_ADVISORY_SOFT_RATIO = 0.6;
+const MIN_RUNAWAY_ADVISORY_SOFT_BYTES = 1024 * 1024;
 
 function readPositiveIntEnv(value: string | undefined): number | null {
   const parsed = Number(value ?? "");
@@ -46,6 +49,17 @@ export function resolveAdapterFailedTransientRetryMaxSec(env: NodeJS.ProcessEnv 
   if (raw === "0") return 0;
   const parsed = readPositiveIntEnv(raw);
   return parsed === null ? DEFAULT_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC : parsed;
+}
+
+/**
+ * [runaway advisory] 소프트 경고 임계(바이트). 하드 상한의 60%(최소 1MB, 단 하드 상한 이하로 캡).
+ *   가드 비활성(0)이면 경고도 없다. 도달 시 실행 중 감사 이벤트를 남기고,
+ *   다음 실행 웨이크에는 회복 지시(paperclipRunawayRecoveryBrief)가 붙는다.
+ */
+export function resolveRunawayAdvisorySoftBytes(runawayLogLimitBytes: number): number {
+  if (!(runawayLogLimitBytes > 0)) return 0;
+  const soft = Math.floor(runawayLogLimitBytes * DEFAULT_RUNAWAY_ADVISORY_SOFT_RATIO);
+  return Math.min(Math.max(MIN_RUNAWAY_ADVISORY_SOFT_BYTES, soft), runawayLogLimitBytes);
 }
 
 export type StepTimeoutContract = {

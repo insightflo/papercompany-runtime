@@ -612,4 +612,23 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).not.toContain('"missionId":"mission-1"');
     expect(brief).not.toContain("heavyBlob");
   });
+
+  it("renders a runaway recovery advisory block when the wake carries one", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      issueId: "issue-1",
+      paperclipRunawayRecoveryBrief: {
+        kind: "runaway_recovery",
+        previousRunId: "run-prev",
+        logBytes: 24 * 1024 * 1024,
+      },
+    });
+    expect(brief).toContain("RUNAWAY RECOVERY ADVISORY");
+    expect(brief).toContain("~24MB of output");
+    expect(brief).toContain("Do NOT start another full review");
+  });
+
+  it("omits the runaway recovery block for other wake shapes", () => {
+    const brief = buildPaperclipRuntimeBrief({ issueId: "issue-1" });
+    expect(brief).not.toContain("RUNAWAY RECOVERY ADVISORY");
+  });
 });
