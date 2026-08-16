@@ -360,4 +360,79 @@ describeEmbeddedPostgres("heartbeat run stability", () => {
 		});
 		expect(contexts[0]?.paperclipRunawayRecoveryBrief).toBeUndefined();
 	});
+
+	it("backfills evidence on a run terminalized by issue done while the adapter is still executing", async () => {
+		const { agentId, companyId, issueId } = await seedStabilityFixture(db, {});
+		const heartbeat = heartbeatService(db);
+
+		let releaseAdapter: () => void = () => {};
+		const adapterGate = new Promise<void>((resolve) => {
+			releaseAdapter = resolve;
+		});
+		const sessionPath = `/tmp/pi-sessions/final-${randomUUID()}.jsonl`;
+		executeSpy.mockImplementation(
+			async (input: {
+				onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+			}) => {
+				await input.onLog?.("stdout", "assistant working\n");
+				await adapterGate;
+				return {
+					...successfulAdapterResult(),
+					usage: { inputTokens: 111, outputTokens: 22, cachedInputTokens: 5 },
+					sessionId: sessionPath,
+					sessionParams: { sessionId: sessionPath, cwd: "/tmp" },
+					sessionDisplayId: sessionPath,
+				};
+			},
+		);
+
+		const run = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{ issueId, taskKey: `issue:${issueId}` },
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!run) throw new Error("Expected heartbeat run");
+
+		// Wait until the adapter actually started so finalize hits a running run.
+		const startDeadline = Date.now() + 5_000;
+		while (executeSpy.mock.calls.length === 0 && Date.now() < startDeadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		expect(executeSpy.mock.calls.length).toBeGreaterThan(0);
+
+		// The agent marks the issue done mid-run — same service path the issues
+		// route takes (finalizeLinkedRunsForIssueStatus).
+		const finalized = await heartbeat.finalizeLinkedRunsForIssueStatus({
+			issueId,
+			companyId,
+			status: "done",
+			linkedRunIds: [run.id],
+		});
+		expect(finalized.finalized).toBe(1);
+
+		const terminal = await waitForRunTerminal(heartbeat, run.id);
+		expect(terminal.status).toBe("succeeded");
+
+		// The adapter settles after the kill (SIGTERM resolves the child).
+		// Evidence must land on the already-terminal row without flipping status.
+		releaseAdapter();
+		const deadline = Date.now() + 5_000;
+		let evidence = await heartbeat.getRun(run.id);
+		while (
+			Date.now() < deadline &&
+			(evidence?.usageJson == null || evidence?.sessionIdAfter == null)
+		) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			evidence = await heartbeat.getRun(run.id);
+		}
+		expect(evidence?.status).toBe("succeeded");
+		expect(evidence?.exitCode).toBe(0);
+		expect(evidence?.sessionIdAfter).toBe(sessionPath);
+		const usage = (evidence?.usageJson ?? null) as Record<string, unknown> | null;
+		expect(usage).toMatchObject({ inputTokens: 111, outputTokens: 22, cachedInputTokens: 5 });
+		expect(evidence?.error).toBeNull();
+		expect(evidence?.errorCode).toBeNull();
+	});
 });

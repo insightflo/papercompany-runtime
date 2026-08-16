@@ -4068,6 +4068,28 @@ export function heartbeatService(db: Db) {
     return updated;
   }
 
+  // Evidence-only backfill for runs that were terminalized externally
+  // (finalizeLinkedRunsForIssueStatus / cancel / reap) while their adapter was
+  // still executing. Writes only evidence columns; never touches status,
+  // finishedAt, error, or errorCode, and emits no terminal events (the
+  // external finalizer already recorded those). See the completion path in
+  // runHeartbeat where this is used.
+  async function backfillTerminalRunEvidence(
+    runId: string,
+    evidence: Partial<Pick<
+      typeof heartbeatRuns.$inferInsert,
+      | "exitCode" | "signal" | "usageJson" | "resultJson" | "sessionIdAfter"
+      | "stdoutExcerpt" | "stderrExcerpt" | "logBytes" | "logSha256" | "logCompressed"
+    >>,
+  ) {
+    return db
+      .update(heartbeatRuns)
+      .set({ ...evidence, updatedAt: new Date() })
+      .where(eq(heartbeatRuns.id, runId))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function setWakeupStatus(
     wakeupRequestId: string | null | undefined,
     status: string,
@@ -7269,25 +7291,16 @@ export function heartbeatService(db: Db) {
         }
       }
 
-      const finalizedRun = latestTerminalRun ?? await setRunStatus(run.id, status, {
-        finishedAt: new Date(),
-        error:
-          outcome === "succeeded"
-            ? null
-            : redactCurrentUserText(
-                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
-                currentUserRedactionOptions,
-              ),
-        errorCode:
-          outcome === "timed_out"
-            ? "timeout"
-            : outcome === "cancelled"
-              ? "cancelled"
-              : outcome === "failed"
-                ? runawayTriggered
-                  ? "runaway_context"
-                  : (adapterResult.errorCode ?? "adapter_failed")
-                : null,
+      // Evidence columns shared by both branches below. When the run was
+      // terminalized externally while the adapter was still executing (issue
+      // done/cancelled/blocked via finalizeLinkedRunsForIssueStatus, cancel, or
+      // reap), status/finishedAt/error stay owned by that path — but the
+      // adapter result still carries the factual record of what the process
+      // actually did (exit code, signal, usage, final session, log summary).
+      // Backfill those so externally-terminalized runs keep their evidence
+      // (usage accounting, session lineage, log integrity) instead of landing
+      // terminal with every evidence column null.
+      const terminalEvidence = {
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
@@ -7298,7 +7311,30 @@ export function heartbeatService(db: Db) {
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
-      });
+      };
+      const finalizedRun = latestTerminalRun
+        ? await backfillTerminalRunEvidence(run.id, terminalEvidence)
+        : await setRunStatus(run.id, status, {
+          finishedAt: new Date(),
+          error:
+            outcome === "succeeded"
+              ? null
+              : redactCurrentUserText(
+                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
+                currentUserRedactionOptions,
+              ),
+          errorCode:
+            outcome === "timed_out"
+              ? "timeout"
+              : outcome === "cancelled"
+                ? "cancelled"
+                : outcome === "failed"
+                  ? runawayTriggered
+                    ? "runaway_context"
+                    : (adapterResult.errorCode ?? "adapter_failed")
+                  : null,
+          ...terminalEvidence,
+        });
 
       await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
         finishedAt: latestTerminalRun?.finishedAt ?? new Date(),
