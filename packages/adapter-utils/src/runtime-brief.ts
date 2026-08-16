@@ -113,6 +113,23 @@ function buildWorkflowToolContractBrief(context: unknown) {
   ], "\n");
 }
 
+// [runaway recovery] 직전 실행이 폭주(재고민 루프)로 종료된 경우, 다음 실행 선두에 붙는 회복 지시.
+//   kill 대신 모델 스스로 마무리하게 유도하는 deepseek-harness식 권고 패턴을 웨이크에 적용한 것.
+function buildRunawayRecoveryBriefLines(value: unknown): readonly string[] {
+  const record = asRecord(value);
+  if (record?.kind !== "runaway_recovery") return [];
+  const logBytes = asNumber(record.logBytes);
+  const mb = Math.round(logBytes / (1024 * 1024));
+  return [
+    "=== RUNAWAY RECOVERY ADVISORY (read first) ===",
+    `- Your previous run on this issue was terminated by the runaway guard after producing ~${mb > 0 ? mb : "<1"}MB of output without finishing.`,
+    "- That pattern almost always means endless re-reasoning over the same feedback instead of acting.",
+    "- This run: (1) restate in a short list the conclusions you already reached, (2) complete or fix the deliverable directly at the registered path, (3) submit/finish.",
+    "- Do NOT start another full review or re-derivation pass over the same material.",
+    "=== end runaway recovery advisory ===",
+  ];
+}
+
 function buildRecentIssueCommentsBrief(value: unknown) {
   const comments = Array.isArray(value)
     ? value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
@@ -468,6 +485,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const qaCapAcceptanceLines = buildQaCapAcceptanceBriefLines(context.paperclipQaCapAcceptanceContract);
   // [QA rework] rework 선두 헤더 + rework 모드 여부. 헤더는 brief 시작에, 상세 contract 라인은 기존 위치 유지.
   const reworkHeaderLines = buildWorkflowReworkTaskHeader(context.paperclipWorkflowReworkContract);
+  // [runaway recovery] 재고민 루프로 죽은 직후 재시동되는 실행에는 회복 지시를 최상단에.
+  const runawayRecoveryLines = buildRunawayRecoveryBriefLines(context.paperclipRunawayRecoveryBrief);
   const isReworkMode = reworkHeaderLines.length > 0;
   const workflowToolContractLine = buildWorkflowToolContractBrief(context);
   // [QA rework] rework contract가 최신 QA feedback을 이미 가지면 최근 코멘트는 중복이므로 억제(prompt dilution 방지).
@@ -691,6 +710,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       : null,
     // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
     ...reworkHeaderLines,
+    ...runawayRecoveryLines,
     missionSearchPointer,
     userFacingLanguageLine,
     taskKey ? `- Task key: ${taskKey}` : null,

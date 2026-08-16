@@ -53,9 +53,10 @@ async function waitForRows<T>(fetch: () => Promise<T[]>): Promise<T[]> {
 }
 
 async function seedStabilityFixture(db: Db, adapterConfig: Record<string, unknown>) {
-	const { agents, companies } = await import("@paperclipai/db");
+	const { agents, companies, issues } = await import("@paperclipai/db");
 	const companyId = randomUUID();
 	const agentId = randomUUID();
+	const issueId = randomUUID();
 	await db.insert(companies).values({
 		id: companyId,
 		name: "Run Stability",
@@ -73,7 +74,15 @@ async function seedStabilityFixture(db: Db, adapterConfig: Record<string, unknow
 		runtimeConfig: {},
 		permissions: {},
 	});
-	return { agentId, companyId };
+	await db.insert(issues).values({
+		id: issueId,
+		companyId,
+		identifier: `RST-${companyId.slice(0, 4).toUpperCase()}`,
+		title: "Run stability issue",
+		status: "todo",
+		assigneeAgentId: agentId,
+	});
+	return { agentId, companyId, issueId };
 }
 
 describeEmbeddedPostgres("heartbeat run stability", () => {
@@ -253,5 +262,102 @@ describeEmbeddedPostgres("heartbeat run stability", () => {
 		const final = await waitForRunTerminal(heartbeat, run.id);
 		expect(final.status).toBe("failed");
 		expect(final.errorCode).toBe("runaway_context");
+	});
+
+	it("emits a soft-threshold advisory event before the runaway kill", async () => {
+		const { agentId } = await seedStabilityFixture(db, { runawayLogLimitBytes: 100_000 });
+		const heartbeat = heartbeatService(db);
+
+		executeSpy.mockImplementation(
+			async (input: {
+				onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+			}) => {
+				// 6 × 20KB = 120KB — soft(60KB)를 먼저 지나 hard(100KB)에 도달
+				for (let i = 0; i < 6; i += 1) {
+					await input.onLog?.("stdout", `${"x".repeat(20_000)}\n`);
+				}
+				return {
+					...successfulAdapterResult(),
+					exitCode: 1,
+					errorMessage: "child terminated after runaway output",
+					errorCode: null,
+				};
+			},
+		);
+
+		const run = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{},
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!run) throw new Error("Expected heartbeat run");
+		const final = await waitForRunTerminal(heartbeat, run.id);
+		expect(final.status).toBe("failed");
+		expect(final.errorCode).toBe("runaway_context");
+
+		const { heartbeatRunEvents } = await import("@paperclipai/db");
+		const events = await db
+			.select()
+			.from(heartbeatRunEvents)
+			.where(eq(heartbeatRunEvents.runId, run.id));
+		const advisory = events.find((event) => (event.message ?? "").includes("Runaway advisory"));
+		expect(advisory).toBeTruthy();
+		expect(advisory?.level).toBe("warn");
+	});
+
+	it("injects a runaway recovery brief into the next run for the same issue", async () => {
+		const { agentId, issueId } = await seedStabilityFixture(db, { runawayLogLimitBytes: 60_000 });
+		const heartbeat = heartbeatService(db);
+		const contexts: Array<Record<string, unknown>> = [];
+
+		executeSpy.mockImplementation(
+			async (input: {
+				context: Record<string, unknown>;
+				onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+			}) => {
+				contexts.push(input.context);
+				if (contexts.length === 1) {
+					for (let i = 0; i < 5; i += 1) {
+						await input.onLog?.("stdout", `${"x".repeat(20_000)}\n`);
+					}
+					return {
+					...successfulAdapterResult(),
+					exitCode: 1,
+					errorMessage: "child terminated after runaway output",
+					errorCode: null,
+				};
+				}
+				return { ...successfulAdapterResult() };
+			},
+		);
+
+		const first = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{ issueId, taskKey: `issue:${issueId}` },
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!first) throw new Error("Expected first run");
+		expect((await waitForRunTerminal(heartbeat, first.id)).errorCode).toBe("runaway_context");
+
+		const second = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{ issueId, taskKey: `issue:${issueId}` },
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!second) throw new Error("Expected second run");
+		expect((await waitForRunTerminal(heartbeat, second.id)).status).toBe("succeeded");
+
+		expect(contexts).toHaveLength(2);
+		expect(contexts[1]?.paperclipRunawayRecoveryBrief).toMatchObject({
+			kind: "runaway_recovery",
+			previousRunId: first.id,
+		});
+		expect(contexts[0]?.paperclipRunawayRecoveryBrief).toBeUndefined();
 	});
 });
