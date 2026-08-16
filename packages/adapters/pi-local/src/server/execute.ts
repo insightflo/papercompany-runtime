@@ -400,10 +400,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       releaseStdin = resolve;
     });
     const releaseStdinOnFinalAgentEnd = (line: string): void => {
-      if (!line.includes('"agent_end"')) return;
+      if (!line.includes('"agent_end"') && !line.includes('"auto_retry_end"')) return;
       try {
-        const parsed = JSON.parse(line) as { type?: unknown; willRetry?: unknown };
+        const parsed = JSON.parse(line) as { type?: unknown; willRetry?: unknown; success?: unknown };
         if (parsed?.type === "agent_end" && parsed.willRetry !== true) {
+          // final agent_end — turn chain complete, safe to close stdin
+          releaseStdin?.();
+        } else if (parsed?.type === "auto_retry_end" && parsed.success !== true) {
+          // retries exhausted without a trailing agent_end — pi is done
           releaseStdin?.();
         }
       } catch {
