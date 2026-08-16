@@ -340,6 +340,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     adapterType === "hermes_local" ||
     adapterType === "antigravity_local" ||
     adapterType === "commandcode_local" ||
+    adapterType === "pi_local" ||
     adapterType === "cursor";
   const supportsAdapterFallback =
     adapterType === "claude_local" ||
@@ -589,7 +590,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const thinkingEffortKey =
     adapterType === "codex_local"
       ? "modelReasoningEffort"
-      : adapterType === "cursor"
+      : adapterType === "pi_local"
+        ? "thinking"
+        : adapterType === "cursor"
         ? "mode"
         : adapterType === "opencode_local"
           ? "variant"
@@ -599,7 +602,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       ? buildCommandCodeEffortOptions(commandCodeEfforts ?? [])
       : adapterType === "codex_local"
         ? codexThinkingEffortOptions
-        : adapterType === "cursor"
+        : adapterType === "pi_local"
+          ? openCodeThinkingEffortOptions
+          : adapterType === "cursor"
           ? cursorModeOptions
           : adapterType === "opencode_local"
             ? openCodeThinkingEffortOptions
@@ -612,7 +617,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           "modelReasoningEffort",
           String(config.modelReasoningEffort ?? config.reasoningEffort ?? ""),
         )
-      : adapterType === "cursor"
+      : adapterType === "pi_local"
+        ? eff("adapterConfig", "thinking", String(config.thinking ?? ""))
+        : adapterType === "cursor"
         ? eff("adapterConfig", "mode", String(config.mode ?? ""))
       : adapterType === "opencode_local"
         ? eff("adapterConfig", "variant", String(config.variant ?? ""))
