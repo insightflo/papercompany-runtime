@@ -615,7 +615,11 @@ describeEmbeddedPostgres("heartbeat run stability", () => {
 		}
 
 		// run 3이 코멘트를 남겼으므로 연쇄는 2에서 리셋 — K 미달 → 자동 완료, 차단 없음.
-		const issueRow = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+		//   (run terminal 관측이 release+promote 커밋보다 빨라도 통과해야 하므로 폴링 — 테스트1과 동일.)
+		const issueRow = await waitForIssueRow(
+			() => db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null),
+			(row) => row?.status === "done",
+		);
 		expect(issueRow?.status).toBe("done");
 		const blockActivities = await db
 			.select()
