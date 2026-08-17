@@ -40,8 +40,15 @@ describe("session compaction policy", () => {
   });
 
   it("does not enable unknown adapters by default", () => {
-    const resolved = resolveSessionCompactionPolicy("commandcode_local", {});
+    const resolved = resolveSessionCompactionPolicy("not_a_real_adapter", {});
     expect(resolved.policy.enabled).toBe(false);
+  });
+
+  it("enables default threshold rotation for commandcode_local (supports --resume, no confirmed native compaction)", () => {
+    const resolved = resolveSessionCompactionPolicy("commandcode_local", {});
+    expect(resolved.policy.enabled).toBe(true);
+    expect(resolved.policy.maxRawInputTokens).toBeGreaterThan(0);
+    expect(resolved.policy.maxSessionMessages).toBeGreaterThan(0);
   });
 
   it("exposes the default policy used for pi_local", () => {
