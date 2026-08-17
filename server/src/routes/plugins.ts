@@ -36,6 +36,7 @@ import type {
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { pluginLoader } from "../services/plugin-loader.js";
+import { condenseDuplicateToolErrorBody } from "../services/tool-result-hygiene.js";
 import { registerPluginCatalogRoutes } from "./plugin-catalog.js";
 import { registerPluginConfigRoutes } from "./plugin-config-routes.js";
 import { registerPluginDiagnosticsRoutes } from "./plugin-diagnostics-routes.js";
@@ -1079,15 +1080,35 @@ export function pluginRoutes(
           parameters ?? {},
           runContext,
         );
-        res.json(result);
+        // [tool result hygiene] 같은 run에서 같은 도구가 같은 에러를 반복하면 본문을 1줄 요약으로
+        //   축소해 에이전트 세션 히스토리 누적을 막는다(첫 발생은 전문 유지). 스텝 증거 경로와 무관.
+        res.json(
+          condenseDuplicateToolErrorBody({
+            runId: runContext.runId,
+            tool,
+            status: 200,
+            body: result as unknown as Record<string, unknown>,
+            errorPath: "result.error",
+          }).body,
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
 
         // Distinguish between "worker not running" (502) and other errors (500)
         if (message.includes("not running") || message.includes("worker")) {
-          res.status(502).json({ error: message });
+          res.status(502).json(condenseDuplicateToolErrorBody({
+            runId: runContext.runId,
+            tool,
+            status: 502,
+            body: { error: message },
+          }).body);
         } else {
-          res.status(500).json({ error: message });
+          res.status(500).json(condenseDuplicateToolErrorBody({
+            runId: runContext.runId,
+            tool,
+            status: 500,
+            body: { error: message },
+          }).body);
         }
       }
       return;
@@ -1108,7 +1129,14 @@ export function pluginRoutes(
         stepEnv,
       });
       if (coreResult.status !== 404 || coreResult.body.source === "core") {
-        res.status(coreResult.status).json(coreResult.body);
+        res.status(coreResult.status).json(
+          condenseDuplicateToolErrorBody({
+            runId: runContext.runId,
+            tool,
+            status: coreResult.status,
+            body: coreResult.body as Record<string, unknown>,
+          }).body,
+        );
         return;
       }
     } catch (err) {
