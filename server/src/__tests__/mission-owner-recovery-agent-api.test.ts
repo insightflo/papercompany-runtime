@@ -224,4 +224,55 @@ describeEP("mission owner recovery decision API source scope", () => {
     const [updatedSource] = await db.select().from(issues).where(eq(issues.id, seed.sourceIssueId));
     expect(updatedSource?.assigneeAgentId).toBe(seed.otherAgentId);
   });
+
+  it("QA-cap retry_source_issue derives reworkTargetRef from the structured producer line, keeps explicit targets, and rejects underivable ones", async () => {
+    const seed = await seedOwnerAction();
+    const actor = {
+      actorType: "agent" as const,
+      actorId: seed.ownerAgentId,
+      agentId: seed.ownerAgentId,
+      runId: seed.runId,
+    };
+    const qaCapDescription = [
+      "## QA rework cap exhausted — owner decision required <!-- qa-cap-key:0123456789abcdef0123456789abcdef -->",
+      "Mission: test mission",
+      `Producer source issue: ${seed.sourceIssueId}`,
+      "QA: step inspection",
+    ].join("\n");
+
+    // (1) 재작업 대상 미지출 + qa-cap 설명 → 설명의 구조 라인에서 기본값 채움(무음 정지 방지).
+    await db.update(issues).set({ description: qaCapDescription }).where(eq(issues.id, seed.ownerActionIssueId));
+    const derivedWithDescription = await submitMissionOwnerDecision({
+      db, issueId: seed.ownerActionIssueId, actor,
+      data: { decision: "retry_source_issue", reason: "approve producer rework" },
+    });
+    const [derivedEvent2] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, derivedWithDescription.eventId));
+    expect((derivedEvent2?.payload as Record<string, unknown>).reworkTargetRef).toBe(seed.sourceIssueId);
+
+    // (2) 명시 대상은 덮어쓰지 않는다.
+    const explicit = await submitMissionOwnerDecision({
+      db, issueId: seed.ownerActionIssueId, actor,
+      data: { decision: "retry_source_issue", reworkTargetRef: "GAZ-9999" },
+    });
+    const [explicitEvent] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, explicit.eventId));
+    expect((explicitEvent?.payload as Record<string, unknown>).reworkTargetRef).toBe("GAZ-9999");
+
+    // (3) 마커는 있지만 producer 라인이 없으면 fail-fast 거부.
+    await db.update(issues).set({
+      description: "## QA rework cap exhausted <!-- qa-cap-key:0123456789abcdef0123456789abcdef -->\n(no producer line)",
+    }).where(eq(issues.id, seed.ownerActionIssueId));
+    await expect(submitMissionOwnerDecision({
+      db, issueId: seed.ownerActionIssueId, actor,
+      data: { decision: "retry_source_issue" },
+    })).rejects.toThrow("reworkTargetRef");
+
+    // (4) qa-cap 마커 없는 이슈의 재시도 결정은 종전대로 허용(비-프로듀서 self-retry 경로 호환).
+    await db.update(issues).set({ description: null }).where(eq(issues.id, seed.ownerActionIssueId));
+    const plain = await submitMissionOwnerDecision({
+      db, issueId: seed.ownerActionIssueId, actor,
+      data: { decision: "retry_source_issue" },
+    });
+    const [plainEvent] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, plain.eventId));
+    expect(plainEvent?.payload).toMatchObject({ decision: "retry_source_issue" });
+  });
 });

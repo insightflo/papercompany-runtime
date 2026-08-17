@@ -124,6 +124,34 @@ describe("mission owner recovery comments", () => {
     },
   );
 
+  it("surfaces the fail-closed validation reason on not_requested comments and omits it when absent", () => {
+    const withReason = buildRetrySourceIssueWakeupResultComment({
+      status: "not_requested",
+      missionId: "mission-1",
+      ownerActionIssueId: "owner-1",
+      ownerActionLabel: "OWN-1",
+      sourceIssueId: "source-1",
+      sourceLabel: "SRC-1",
+      targetAgentId: "agent-1",
+      idempotencyKey: "key-1",
+      detailReason: "cap_override_no_marker",
+    });
+    expect(withReason).toContain("Queue result: not_requested");
+    expect(withReason).toContain("Validation detail: cap_override_no_marker");
+
+    const withoutReason = buildRetrySourceIssueWakeupResultComment({
+      status: "not_requested",
+      missionId: "mission-1",
+      ownerActionIssueId: "owner-1",
+      ownerActionLabel: "OWN-1",
+      sourceIssueId: "source-1",
+      sourceLabel: "SRC-1",
+      targetAgentId: "agent-1",
+      idempotencyKey: "key-1",
+    });
+    expect(withoutReason).not.toContain("Validation detail:");
+  });
+
   it("formats unblock descriptions and conservative status summaries", () => {
     const description = buildMissionOwnerUnblockDescription(
       { id: "mission-1", title: "Mission" },

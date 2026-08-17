@@ -7,7 +7,7 @@ import type { Db } from "@paperclipai/db";
 import type { MissionOwnerDecisionSubmit } from "@paperclipai/shared";
 import { issues, missions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
-import { conflict, forbidden, unauthorized } from "../../errors.js";
+import { badRequest, conflict, forbidden, unauthorized } from "../../errors.js";
 import { issueService } from "../issues.js";
 import {
   recordMissionOwnerDecision,
@@ -20,6 +20,7 @@ import {
   publishHumanOperatorRequestEvent,
 } from "./human-operator-alert-events.js";
 import { completeUnblockActionWithSourceHandback } from "./owner-action-completion.js";
+import { extractQaCapProducerIssueRef, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 
 export type OwnerRecoveryApiActor = {
   readonly actorType: "agent" | "user";
@@ -63,6 +64,7 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     identifier: issues.identifier,
     title: issues.title,
     assigneeAgentId: issues.assigneeAgentId,
+    description: issues.description,
   }).from(issues).where(eq(issues.id, issueId)).limit(1);
   if (!issue) return null;
   if (issue.originKind !== "mission_main_executor_unblock") {
@@ -113,7 +115,26 @@ export async function submitMissionOwnerDecision(input: {
   if (!auth) throw conflict("Owner-recovery decision API can only be used for mission-owner unblock issues");
   const { issue, ownerAgentId, sourceIssueId, sourceIssueOriginKind } = auth;
   const submission = toSubmission(input.data);
-  const needsHumanAlert = submission.decision === "request_input" || submission.decision === "escalate";
+  // [fail-fast + structured default] QA-cap oversight 이슈의 retry_source_issue 결정은 cap-override
+  //   권한 검증(validateOwnerDecisionComment)이 reworkTargetRef(producer 지정)를 요구한다.
+  //   미제출 결정은 검증에서 영구 not_requested(무음 정지)가 되므로: (1) 시스템이 생성한 설명의
+  //   "Producer source issue:" 줄에서 기본값을 채우고(감독이 sourceCandidate 산출에 쓰는 동일
+  //   구조 권위), (2) 파싱도 불가하면 제출을 거부해 제출자가 같은 실행에서 바로 교정하게 한다.
+  let effectiveSubmission = submission;
+  if (submission.decision === "retry_source_issue" && isQaReworkCapOversightIssue(issue.description)) {
+    const explicitTarget = (submission.reworkTargetRef ?? submission.sourceIssueRef ?? "").trim();
+    if (!explicitTarget) {
+      const derivedProducerRef = extractQaCapProducerIssueRef(issue.description);
+      if (derivedProducerRef) {
+        effectiveSubmission = { ...submission, reworkTargetRef: derivedProducerRef };
+      } else {
+        throw badRequest(
+          'retry_source_issue on a QA rework-cap oversight issue requires "reworkTargetRef" (the producer issue id or identifier). It could not be derived from the issue description — include it explicitly and resubmit.',
+        );
+      }
+    }
+  }
+  const needsHumanAlert = effectiveSubmission.decision === "request_input" || effectiveSubmission.decision === "escalate";
 
   // [atomicity] request_input/escalate 결정은 동일 tx 에서 human request 를 materialize 한다.
   //   결정 event 가 persist 되고 human request 가 같이 기록되거나, 둘 다 rollback 된다. live-event
@@ -125,7 +146,7 @@ export async function submitMissionOwnerDecision(input: {
     recorded = await recordMissionOwnerDecision({
       db: tx,
       issue: { id: issue.id, companyId: issue.companyId, missionId: issue.missionId! },
-      submission,
+      submission: effectiveSubmission,
       sourceIssueId,
       heartbeatRunId: input.actor.runId,
     });
@@ -133,7 +154,7 @@ export async function submitMissionOwnerDecision(input: {
       const materialized = await materializeHumanOperatorRequestEvent(tx as unknown as Db, {
         issue,
         record: { eventId: recorded.eventId, authorAgentId: ownerAgentId },
-        decision: submission,
+        decision: effectiveSubmission,
       });
       humanPayload = materialized.payload;
       humanInserted = materialized.inserted;
