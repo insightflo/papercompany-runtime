@@ -631,4 +631,33 @@ describe("buildPaperclipRuntimeBrief", () => {
     const brief = buildPaperclipRuntimeBrief({ issueId: "issue-1" });
     expect(brief).not.toContain("RUNAWAY RECOVERY ADVISORY");
   });
+
+  it("renders a no-progress recovery advisory block when the wake carries one", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      issueId: "issue-1",
+      paperclipNoProgressRecoveryBrief: {
+        kind: "no_progress_recovery",
+        consecutiveCount: 2,
+        lastRunId: "run-prev",
+        advisoryThreshold: 2,
+        autoBlockThreshold: 3,
+      },
+    });
+    expect(brief).toContain("NO-PROGRESS RECOVERY ADVISORY");
+    expect(brief).toContain("Your last 2 completed runs on this issue left no structured trace");
+    expect(brief).toContain("After 3 consecutive runs like this the issue is auto-blocked");
+    expect(brief).toContain("register the minimum required work product via the Workflow API");
+    expect(brief).toContain("explicitly report blocked with the concrete blocker reason");
+    expect(brief).toContain("Do NOT repeat the same exploration");
+  });
+
+  it("omits the no-progress recovery block for other wake shapes and non-matching kinds", () => {
+    expect(buildPaperclipRuntimeBrief({ issueId: "issue-1" })).not.toContain("NO-PROGRESS RECOVERY ADVISORY");
+    expect(
+      buildPaperclipRuntimeBrief({
+        issueId: "issue-1",
+        paperclipNoProgressRecoveryBrief: { kind: "runaway_recovery", previousRunId: "r", logBytes: 1 },
+      }),
+    ).not.toContain("NO-PROGRESS RECOVERY ADVISORY");
+  });
 });

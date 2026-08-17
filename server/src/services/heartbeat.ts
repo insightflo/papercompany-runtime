@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, gte, inArray, lt, not, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, lte, not, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
 import {
@@ -84,7 +84,12 @@ import {
   refreshStepInputManifest,
 } from "./wake-context-hygiene.js";
 import {
+  NO_PROGRESS_RUN_SCAN_LIMIT,
+  hasRunProgressEvidence,
   resolveAdapterFailedTransientRetryMaxSec,
+  resolveNoProgressAdvisoryThreshold,
+  resolveNoProgressAutoBlockThreshold,
+  resolveNoProgressWindowMs,
   resolveQaStepActiveExecutionTimeoutMs,
   resolveRunawayAdvisorySoftBytes,
   resolveRunawayLogLimitBytes,
@@ -988,6 +993,123 @@ export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | 
   if (value === true) return true;
   if (value === false) return false;
   return undefined;
+}
+
+export type NoProgressAssessment = {
+  count: number;
+  windowStart: Date;
+  lastRunId: string | null;
+  runsInspected: number;
+  evidenceSummary: {
+    runs: number;
+    workProductRuns: number;
+    transitionRuns: number;
+    agentCommentsInWindow: number;
+  };
+};
+
+/**
+ * [no-progress ladder] 같은 issue+assignee의 종료(성공) run들을 최신순으로 훑으며
+ *   진행 증거가 없는 run의 연쇄 길이를 매번 DB에서 재계산한다(stateless — 카운터 컬럼/메모리 없음).
+ *   증거 판정은 hasRunProgressEvidence(구조화된 DB 기록만). 진행 증거가 있는 run에서 연쇄 리셋.
+ *   창 밖(기본 6h)의 오래된 run은 새 컨텍스트에서 무의미하므로 제외(런어웨이 주입 창과 정렬).
+ */
+export async function computeConsecutiveNoProgress(
+  db: Db,
+  input: { companyId: string; issueId: string; agentId: string; now?: Date },
+): Promise<NoProgressAssessment | null> {
+  const windowMs = resolveNoProgressWindowMs();
+  if (!(windowMs > 0)) return null;
+  const now = input.now ?? new Date();
+  const windowStart = new Date(now.getTime() - windowMs);
+  const emptyAssessment: NoProgressAssessment = {
+    count: 0,
+    windowStart,
+    lastRunId: null,
+    runsInspected: 0,
+    evidenceSummary: { runs: 0, workProductRuns: 0, transitionRuns: 0, agentCommentsInWindow: 0 },
+  };
+  const runs = await db
+    .select({
+      id: heartbeatRuns.id,
+      startedAt: heartbeatRuns.startedAt,
+      finishedAt: heartbeatRuns.finishedAt,
+      createdAt: heartbeatRuns.createdAt,
+    })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.issueId, input.issueId),
+      eq(heartbeatRuns.agentId, input.agentId),
+      eq(heartbeatRuns.status, "succeeded"),
+      gte(heartbeatRuns.createdAt, windowStart),
+    ))
+    .orderBy(desc(heartbeatRuns.createdAt))
+    .limit(NO_PROGRESS_RUN_SCAN_LIMIT);
+  if (runs.length === 0) return emptyAssessment;
+
+  const runIds = runs.map((run) => run.id);
+  const [workProductRows, transitionRows, commentRows] = await Promise.all([
+    db
+      .selectDistinct({ runId: issueWorkProducts.createdByRunId })
+      .from(issueWorkProducts)
+      .where(and(eq(issueWorkProducts.issueId, input.issueId), inArray(issueWorkProducts.createdByRunId, runIds))),
+    db
+      .selectDistinct({ runId: workflowTransitionEvents.heartbeatRunId })
+      .from(workflowTransitionEvents)
+      .where(and(
+        inArray(workflowTransitionEvents.heartbeatRunId, runIds),
+        // queue_* 부기 이벤트(queue_run_started/completed 등)는 모든 run에 시스템이 남기는
+        // 기록이라 진행 증거가 아니다. 워크플로 판정/전이(verdict, step 결과 등)만 증거로 인정.
+        notLike(workflowTransitionEvents.eventType, "queue_%"),
+      )),
+    db
+      .select({ createdAt: issueComments.createdAt })
+      .from(issueComments)
+      .where(and(
+        eq(issueComments.issueId, input.issueId),
+        eq(issueComments.authorAgentId, input.agentId),
+        gte(issueComments.createdAt, windowStart),
+        lte(issueComments.createdAt, now),
+      )),
+  ]);
+  const workProductRunIds = new Set(
+    workProductRows.map((row) => row.runId).filter((value): value is string => Boolean(value)),
+  );
+  const transitionRunIds = new Set(
+    transitionRows.map((row) => row.runId).filter((value): value is string => Boolean(value)),
+  );
+  const agentCommentTimestamps = commentRows.map((row) => row.createdAt);
+
+  let count = 0;
+  let lastRunId: string | null = null;
+  for (const run of runs) {
+    if (
+      hasRunProgressEvidence({
+        run,
+        workProductRunIds,
+        transitionRunIds,
+        agentCommentTimestamps,
+      })
+    ) {
+      break;
+    }
+    // lastRunId = 연쇄에서 가장 최근에 종료된 무진행 run(루프는 최신순).
+    if (count === 0) lastRunId = run.id;
+    count += 1;
+  }
+  return {
+    count,
+    windowStart,
+    lastRunId,
+    runsInspected: runs.length,
+    evidenceSummary: {
+      runs: runs.length,
+      workProductRuns: workProductRunIds.size,
+      transitionRuns: transitionRunIds.size,
+      agentCommentsInWindow: agentCommentTimestamps.length,
+    },
+  };
 }
 
 export function workProductReferencesClaimedArtifact(
@@ -2881,6 +3003,42 @@ function normalizeEscapedMissionOwnerPlanDecisionMarkdown(text: string): string 
     .replace(/\\\\/g, "\\");
 }
 
+
+function buildNoProgressAutoBlockedComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  assessment: NoProgressAssessment;
+  advisoryThreshold: number;
+  autoBlockThreshold: number;
+}) {
+  const { run, assessment, advisoryThreshold, autoBlockThreshold } = input;
+  return [
+    "## 자동 차단: 연속 무진행 실행 (consecutive no-progress)",
+    `- 트리거 runId: \`${run.id}\``,
+    `- 연속 무진행 성공 run: ${assessment.count}회 (차단 기준 ${autoBlockThreshold}회, 경고 기준 ${advisoryThreshold}회)`,
+    `- 판정 창: ${assessment.windowStart.toISOString()} 이후 (구조화 DB 증거로 재계산)`,
+    `- 마지막 무진행 run: \`${assessment.lastRunId ?? "-"}\``,
+    `- 확인 증거: 산출물 등록 ${assessment.evidenceSummary.workProductRuns}건 / 워크플로 전이 ${assessment.evidenceSummary.transitionRuns}건 / 에이전트 코멘트 ${assessment.evidenceSummary.agentCommentsInWindow}건 — 연쇄 구간 run들(${assessment.evidenceSummary.runs}개 스캔)에서 모두 없음`,
+    "- 정책: 성공했지만 아무 변화 없는 실행이 반복되어 자동 디스패치를 멈춤. blocked는 owner-action/native-resume으로만 재개됩니다.",
+    "- 재개 전 확인: 이슈 범위 재조정, 산출물 계약 재명시, 또는 담당 재할당. 같은 상태로 재개하면 같은 연쇄가 이어집니다.",
+  ].join("\n");
+}
+
+function buildMissionWorkerNoProgressOversightComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  sourceIssue: { id: string; identifier: string | null; title: string };
+  assessment: NoProgressAssessment;
+  autoBlockThreshold: number;
+}) {
+  const issueLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
+  return [
+    "## Mission oversight: worker consecutive no-progress observed",
+    `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
+    `- latest succeeded runId: \`${input.run.id}\``,
+    `- consecutive no-progress runs: ${input.assessment.count} (auto-block threshold ${input.autoBlockThreshold})`,
+    `- evidence checked: work products ${input.assessment.evidenceSummary.workProductRuns}, workflow transitions ${input.assessment.evidenceSummary.transitionRuns}, agent comments ${input.assessment.evidenceSummary.agentCommentsInWindow} (window from ${input.assessment.windowStart.toISOString()})`,
+    "- policy: the worker issue was auto-blocked after repeated successful runs with no structured change; owner action is required to resume (re-scope, restate the deliverable contract, or reassign).",
+  ].join("\n");
+}
 
 function buildFailedIssueRunAutoBlockedComment(input: {
   run: typeof heartbeatRuns.$inferSelect;
@@ -6463,6 +6621,34 @@ export function heartbeatService(db: Db) {
     } else {
       delete context.paperclipRunawayRecoveryBrief;
     }
+    // [no-progress ladder 2단계] 이 이슈의 직전 성공 run들이 모두 무진행(산출물/코멘트/전이 없음)이면
+    //   이번 실행 선두에 회복 지시를 붙인다(런타임 브리프가 렌더). 판정은 DB 증거 쿼리로
+    //   매번 stateless 재계산 — 어드바이저(N회) 다음 단계, K회 도달 시 release 게이트에서 auto-block.
+    if (issueId) {
+      const noProgressAssessment = await computeConsecutiveNoProgress(db, {
+        companyId: agent.companyId,
+        issueId,
+        agentId: agent.id,
+      });
+      const noProgressAdvisoryThreshold = resolveNoProgressAdvisoryThreshold();
+      if (
+        noProgressAssessment &&
+        noProgressAdvisoryThreshold > 0 &&
+        noProgressAssessment.count >= noProgressAdvisoryThreshold
+      ) {
+        context.paperclipNoProgressRecoveryBrief = {
+          kind: "no_progress_recovery",
+          consecutiveCount: noProgressAssessment.count,
+          lastRunId: noProgressAssessment.lastRunId,
+          advisoryThreshold: noProgressAdvisoryThreshold,
+          autoBlockThreshold: resolveNoProgressAutoBlockThreshold(),
+        };
+      } else {
+        delete context.paperclipNoProgressRecoveryBrief;
+      }
+    } else {
+      delete context.paperclipNoProgressRecoveryBrief;
+    }
     const wakeCommentId = readNonEmptyString(context.wakeCommentId);
     const wakeComment = wakeCommentId ? await issuesSvc.getComment(wakeCommentId) : null;
     const fileViews = await buildContextSafeFileViews({
@@ -8042,6 +8228,136 @@ export function heartbeatService(db: Db) {
           queuePostTransactionWorkflowIssueSync(issue.id);
           return null;
         }
+      }
+
+      // [no-progress ladder 3단계] 성공했지만 아무 변화 없는 run 연쇄 — 어드바이저 이벤트(N회) 후
+      //   K회 도달 시 정직한 auto-block. 판정 입력은 구조화된 DB 기록만(work product 등록 /
+      //   에이전트 코멘트 시간창·본문 미파싱 / 워크플로 전이). stdout·comment 본문·resultJson
+      //   텍스트 파식 금지(규칙 8), 카운터 컬럼 없이 매번 재계산(규칙 7).
+      const noProgressAdvisoryThreshold = resolveNoProgressAdvisoryThreshold();
+      const noProgressAutoBlockThreshold = resolveNoProgressAutoBlockThreshold();
+      const noProgressLadderScope =
+        noProgressAdvisoryThreshold > 0 &&
+        isSucceededHeartbeatRunStatus(run.status) &&
+        isLinkedToRun &&
+        issue.status === "in_progress" &&
+        issue.assigneeAgentId === run.agentId &&
+        issue.originKind !== "mission_main_executor_oversight" &&
+        // producer+mission 이슈는 기존 단발 게이트(산출물 미등록 → blocked)가 담당 — 사다리와 대상 분리.
+        !(
+          !!issue.missionId &&
+          canApplyMissingWorkProductRegistrationGate(issue, stepRunRequiresWorkProduct)
+        );
+      const noProgressAssessment = noProgressLadderScope
+        ? await computeConsecutiveNoProgress(db, {
+            companyId: issue.companyId,
+            issueId: issue.id,
+            agentId: issue.assigneeAgentId!,
+          })
+        : null;
+      if (
+        noProgressAssessment &&
+        noProgressAssessment.count >= noProgressAdvisoryThreshold &&
+        (noProgressAutoBlockThreshold <= 0 ||
+          noProgressAssessment.count < noProgressAutoBlockThreshold)
+      ) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: `No-progress advisory: last ${noProgressAssessment.count} succeeded runs on this issue produced no work product, comment, or workflow transition (advisory threshold ${noProgressAdvisoryThreshold}, auto-block threshold ${noProgressAutoBlockThreshold})`,
+          payload: {
+            consecutiveNoProgress: noProgressAssessment.count,
+            advisoryThreshold: noProgressAdvisoryThreshold,
+            autoBlockThreshold: noProgressAutoBlockThreshold,
+            evidenceSummary: noProgressAssessment.evidenceSummary,
+            windowStart: noProgressAssessment.windowStart.toISOString(),
+            lastRunId: noProgressAssessment.lastRunId,
+          },
+        }).catch(() => undefined);
+      }
+      if (
+        noProgressAutoBlockThreshold > 0 &&
+        noProgressAssessment &&
+        noProgressAssessment.count >= noProgressAutoBlockThreshold
+      ) {
+        const now = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "blocked",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: buildNoProgressAutoBlockedComment({
+            run,
+            assessment: noProgressAssessment,
+            advisoryThreshold: noProgressAdvisoryThreshold,
+            autoBlockThreshold: noProgressAutoBlockThreshold,
+          }),
+        });
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.no_progress_auto_blocked",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: issue.status,
+            nextStatus: "blocked",
+            reason: "consecutive_no_progress",
+            consecutiveNoProgress: noProgressAssessment.count,
+            evidenceChecked: noProgressAssessment.evidenceSummary,
+            windowStart: noProgressAssessment.windowStart.toISOString(),
+            lastRunId: noProgressAssessment.lastRunId,
+          },
+        });
+        if (issue.missionId) {
+          const oversightIssueId = issue.parentId ?? issue.id;
+          if (oversightIssueId !== issue.id) {
+            await tx.insert(issueComments).values({
+              companyId: issue.companyId,
+              issueId: oversightIssueId,
+              authorAgentId: run.agentId,
+              body: buildMissionWorkerNoProgressOversightComment({
+                run,
+                sourceIssue: { id: issue.id, identifier: issue.identifier, title: issue.title },
+                assessment: noProgressAssessment,
+                autoBlockThreshold: noProgressAutoBlockThreshold,
+              }),
+            });
+          }
+          await tx.insert(activityLog).values({
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "mission.worker_no_progress_observed",
+            entityType: "mission",
+            entityId: issue.missionId,
+            agentId: run.agentId,
+            runId: run.id,
+            details: {
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              oversightIssueId,
+              consecutiveNoProgress: noProgressAssessment.count,
+              autoBlockThreshold: noProgressAutoBlockThreshold,
+            },
+          });
+        }
+        queuePostTransactionWorkflowIssueSync(issue.id);
+        return { promotedRun: null };
       }
 
       if (
