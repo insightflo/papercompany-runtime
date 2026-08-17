@@ -451,6 +451,179 @@ describeEmbeddedPostgres("heartbeat run stability", () => {
 		}
 	});
 
+	/** 조건을 만족하는 issue 상태가 될 때까지 폴링한다(최대 5초). run terminal 관측이
+	 * releaseIssueExecutionAndPromote 커밋보다 빨라도 통과해야 한다. */
+	async function waitForIssueRow(
+		fetch: () => Promise<{ status: string } | null>,
+		predicate: (row: { status: string } | null) => boolean,
+	): Promise<{ status: string } | null> {
+		const deadline = Date.now() + 5_000;
+		let row = await fetch();
+		while (!predicate(row) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			row = await fetch();
+		}
+		return row;
+	}
+
+	it("no-progress ladder: advisory at N, recovery brief on next wake, honest auto-block at K", async () => {
+		const { agentId, companyId, issueId } = await seedStabilityFixture(db, {});
+		const { issues, heartbeatRunEvents, issueComments, activityLog } = await import("@paperclipai/db");
+		const heartbeat = heartbeatService(db);
+		const contexts: Array<Record<string, unknown>> = [];
+
+		const reopenIssue = async () => {
+			await db
+				.update(issues)
+				.set({ status: "in_progress", completedAt: null })
+				.where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+		};
+		// 자율 재실행 루프 재현: 성공 → 자동 완료 → owner 재개봉 반복.
+		await reopenIssue();
+
+		executeSpy.mockImplementation(async (input: {
+			runId: string;
+			context: Record<string, unknown>;
+		}) => {
+			contexts.push(input.context);
+			// 자동 완료 경로 재현: 체크아웃 링크를 run에 연결한다(운영 체크아웃 의미 모방).
+			await db
+				.update(issues)
+				.set({ checkoutRunId: input.runId, executionRunId: input.runId })
+				.where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+			return { ...successfulAdapterResult() };
+		});
+
+		const invokeOnIssue = async () => {
+			const run = await heartbeat.invoke(
+				agentId,
+				"on_demand",
+				{ issueId, taskKey: `issue:${issueId}` },
+				"manual",
+				{ actorId: "test-suite", actorType: "system" },
+			);
+			if (!run) throw new Error("Expected heartbeat run");
+			const final = await waitForRunTerminal(heartbeat, run.id);
+			expect(final.status).toBe("succeeded");
+			return { runId: run.id, final };
+		};
+
+		// run 1 — 무진행 1회(경고 없음), 이슈는 자동 완료된다(정상 경로 회귀).
+		const first = await invokeOnIssue();
+		let issueRow = await waitForIssueRow(
+			() => db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null),
+			(row) => row?.status === "done",
+		);
+		expect(issueRow?.status).toBe("done");
+		const firstEvents = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, first.runId));
+		expect(firstEvents.some((event) => (event.message ?? "").includes("No-progress advisory"))).toBe(false);
+		expect(contexts[0]?.paperclipNoProgressRecoveryBrief).toBeUndefined();
+		await reopenIssue();
+
+		// run 2 — 무진행 2회(=N): 어드바이저 이벤트 발화, 이슈는 여전히 자동 완료.
+		const second = await invokeOnIssue();
+		issueRow = await waitForIssueRow(
+			() => db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null),
+			(row) => row?.status === "done",
+		);
+		expect(issueRow?.status).toBe("done");
+		const secondEvents = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, second.runId));
+		const advisory = secondEvents.find((event) => (event.message ?? "").includes("No-progress advisory"));
+		expect(advisory).toBeTruthy();
+		expect(advisory?.level).toBe("warn");
+		await reopenIssue();
+
+		// run 3 — 웨이크에 회복 지시 주입(2회 연쇄 ≥ N), 종료 시 3회(=K) 도달 → 정직한 auto-block.
+		const third = await invokeOnIssue();
+		expect(contexts[2]?.paperclipNoProgressRecoveryBrief).toMatchObject({
+			kind: "no_progress_recovery",
+			consecutiveCount: 2,
+			lastRunId: second.runId,
+		});
+
+		const blockedDeadline = Date.now() + 5_000;
+		let blockedIssue = null;
+		while (Date.now() < blockedDeadline) {
+			blockedIssue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+			if (blockedIssue?.status === "blocked") break;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		expect(blockedIssue?.status).toBe("blocked");
+		expect(blockedIssue?.executionRunId).toBeNull();
+
+		const blockActivity = await db
+			.select()
+			.from(activityLog)
+			.where(and(eq(activityLog.entityId, issueId), eq(activityLog.action, "issue.no_progress_auto_blocked")))
+			.then((rows) => rows[0] ?? null);
+		expect(blockActivity).toBeTruthy();
+		expect((blockActivity?.details as Record<string, unknown>)?.consecutiveNoProgress).toBe(3);
+		expect((blockActivity?.details as Record<string, unknown>)?.reason).toBe("consecutive_no_progress");
+
+		const blockComment = await db
+			.select({ body: issueComments.body })
+			.from(issueComments)
+			.where(eq(issueComments.issueId, issueId))
+			.then((rows) => rows.map((row) => row.body).join("\n"));
+		expect(blockComment).toContain("연속 무진행 실행");
+	});
+
+	it("no-progress ladder: structured evidence in the run resets the chain and the issue completes normally", async () => {
+		const { agentId, companyId, issueId } = await seedStabilityFixture(db, {});
+		const { issues, issueComments, activityLog } = await import("@paperclipai/db");
+		const heartbeat = heartbeatService(db);
+		let calls = 0;
+
+		const reopenIssue = async () => {
+			await db
+				.update(issues)
+				.set({ status: "in_progress", completedAt: null })
+				.where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+		};
+		await reopenIssue();
+
+		executeSpy.mockImplementation(async (input: { runId: string }) => {
+			calls += 1;
+			await db
+				.update(issues)
+				.set({ checkoutRunId: input.runId, executionRunId: input.runId })
+				.where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+			// run 3에서만 구조화 증거(코멘트)를 남긴다 — 본문은 판정에 쓰이지 않는다.
+			if (calls >= 3) {
+				await db.insert(issueComments).values({
+					companyId,
+					issueId,
+					authorAgentId: agentId,
+					body: "status: partial deliverable registered",
+				});
+			}
+			return { ...successfulAdapterResult() };
+		});
+
+		for (let i = 0; i < 3; i += 1) {
+			const run = await heartbeat.invoke(
+				agentId,
+				"on_demand",
+				{ issueId, taskKey: `issue:${issueId}` },
+				"manual",
+				{ actorId: "test-suite", actorType: "system" },
+			);
+			if (!run) throw new Error("Expected heartbeat run");
+			const final = await waitForRunTerminal(heartbeat, run.id);
+			expect(final.status).toBe("succeeded");
+			if (i < 2) await reopenIssue();
+		}
+
+		// run 3이 코멘트를 남겼으므로 연쇄는 2에서 리셋 — K 미달 → 자동 완료, 차단 없음.
+		const issueRow = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+		expect(issueRow?.status).toBe("done");
+		const blockActivities = await db
+			.select()
+			.from(activityLog)
+			.where(and(eq(activityLog.entityId, issueId), eq(activityLog.action, "issue.no_progress_auto_blocked")));
+		expect(blockActivities).toHaveLength(0);
+	});
+
 	it("backfills evidence on a run terminalized by issue done while the adapter is still executing", async () => {
 		const { agentId, companyId, issueId } = await seedStabilityFixture(db, {});
 		const heartbeat = heartbeatService(db);

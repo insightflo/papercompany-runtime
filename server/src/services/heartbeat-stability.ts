@@ -15,6 +15,15 @@ export const DEFAULT_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC = 300;
 export const DEFAULT_RUNAWAY_ADVISORY_SOFT_RATIO = 0.6;
 const MIN_RUNAWAY_ADVISORY_SOFT_BYTES = 1024 * 1024;
 
+// [no-progress ladder] 성공했지만 아무 변화 없는 run 연쇄의 회복 사다리 임계값.
+//   N(어드바이저+다음 실행 지시 주입) → K(정직한 auto-block). 창은 런어웨이 주입 창과 정렬(6h).
+//   근거(2026-08-17 런타임 회복성 분석): 성공+무변화 반복은 기존 어떤 카운터에도 잡히지 않음.
+export const DEFAULT_NO_PROGRESS_ADVISORY_THRESHOLD = 2;
+export const DEFAULT_NO_PROGRESS_AUTO_BLOCK_THRESHOLD = 3;
+export const DEFAULT_NO_PROGRESS_WINDOW_MS = 6 * 60 * 60 * 1000;
+/** 무진행 연쇄 산정 시 한 번에 스캔하는 최대 run 수(쿼리 상한). */
+export const NO_PROGRESS_RUN_SCAN_LIMIT = 20;
+
 function readPositiveIntEnv(value: string | undefined): number | null {
   const parsed = Number(value ?? "");
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
@@ -49,6 +58,51 @@ export function resolveAdapterFailedTransientRetryMaxSec(env: NodeJS.ProcessEnv 
   if (raw === "0") return 0;
   const parsed = readPositiveIntEnv(raw);
   return parsed === null ? DEFAULT_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC : parsed;
+}
+
+/** [no-progress ladder] 어드바이저+지시 주입 임계(N회). 0=비활성화. */
+export function resolveNoProgressAdvisoryThreshold(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.PAPERCLIP_NO_PROGRESS_ADVISORY_THRESHOLD ?? "").trim();
+  if (raw === "0") return 0;
+  const parsed = readPositiveIntEnv(raw);
+  return parsed === null ? DEFAULT_NO_PROGRESS_ADVISORY_THRESHOLD : parsed;
+}
+
+/** [no-progress ladder] auto-block 임계(K회). 0=차단 없이 어드바이저만. */
+export function resolveNoProgressAutoBlockThreshold(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.PAPERCLIP_NO_PROGRESS_AUTO_BLOCK_THRESHOLD ?? "").trim();
+  if (raw === "0") return 0;
+  const parsed = readPositiveIntEnv(raw);
+  return parsed === null ? DEFAULT_NO_PROGRESS_AUTO_BLOCK_THRESHOLD : parsed;
+}
+
+/** [no-progress ladder] 연쇄 산정 창(밀리초, env는 초). 0=사다리 전체 비활성화. */
+export function resolveNoProgressWindowMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.PAPERCLIP_NO_PROGRESS_WINDOW_SEC ?? "").trim();
+  if (raw === "0") return 0;
+  const parsed = readPositiveIntEnv(raw);
+  return parsed === null ? DEFAULT_NO_PROGRESS_WINDOW_MS : parsed * 1000;
+}
+
+/**
+ * [no-progress ladder] 단일 run의 진행 증거 판정(순수 함수, DB 없음).
+ *   증거는 구조화된 DB 기록만: (a) 이 run이 등록한 work product (b) run 실행 창 안에
+ *   남긴 에이전트 코멘트(본문 미파싱 — 존재와 시각만) (c) 이 run이 기록한 워크플로 전이.
+ *   usage 토큰은 보조 정보일 뿐 단독 판정에 쓰지 않는다(null=unknown).
+ *   stdout·comment 본문·resultJson 텍스트 파싱 금지(규칙 8: agent 자연어는 실행 근거 불가).
+ */
+export function hasRunProgressEvidence(input: {
+  run: { id: string; startedAt: Date | null; finishedAt: Date | null; createdAt: Date };
+  workProductRunIds: ReadonlySet<string>;
+  transitionRunIds: ReadonlySet<string>;
+  agentCommentTimestamps: readonly Date[];
+}): boolean {
+  const { run } = input;
+  if (input.workProductRunIds.has(run.id)) return true;
+  if (input.transitionRunIds.has(run.id)) return true;
+  const windowStart = run.startedAt ?? run.createdAt;
+  const windowEnd = run.finishedAt ?? windowStart;
+  return input.agentCommentTimestamps.some((ts) => ts >= windowStart && ts <= windowEnd);
 }
 
 /**

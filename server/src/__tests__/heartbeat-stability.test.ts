@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC,
+  DEFAULT_NO_PROGRESS_ADVISORY_THRESHOLD,
+  DEFAULT_NO_PROGRESS_AUTO_BLOCK_THRESHOLD,
+  DEFAULT_NO_PROGRESS_WINDOW_MS,
   DEFAULT_RUNAWAY_LOG_LIMIT_BYTES,
+  hasRunProgressEvidence,
   resolveAdapterFailedTransientRetryMaxSec,
+  resolveNoProgressAdvisoryThreshold,
+  resolveNoProgressAutoBlockThreshold,
+  resolveNoProgressWindowMs,
   resolveQaStepActiveExecutionTimeoutMs,
   resolveRunawayLogLimitBytes,
   resolveStepAwareActiveExecutionTimeoutMs,
@@ -57,5 +64,62 @@ describe("heartbeat-stability knobs", () => {
       stepTimeoutSeconds: 0,
       isQaStep: false,
     });
+  });
+});
+
+describe("no-progress ladder knobs", () => {
+  it("defaults the ladder to N=2 advisory / K=3 block / 6h window with env overrides and 0-disable", () => {
+    expect(DEFAULT_NO_PROGRESS_ADVISORY_THRESHOLD).toBe(2);
+    expect(DEFAULT_NO_PROGRESS_AUTO_BLOCK_THRESHOLD).toBe(3);
+    expect(DEFAULT_NO_PROGRESS_WINDOW_MS).toBe(6 * 60 * 60 * 1000);
+    expect(resolveNoProgressAdvisoryThreshold()).toBe(2);
+    expect(resolveNoProgressAdvisoryThreshold({ PAPERCLIP_NO_PROGRESS_ADVISORY_THRESHOLD: "4" } as NodeJS.ProcessEnv)).toBe(4);
+    expect(resolveNoProgressAdvisoryThreshold({ PAPERCLIP_NO_PROGRESS_ADVISORY_THRESHOLD: "0" } as NodeJS.ProcessEnv)).toBe(0);
+    expect(resolveNoProgressAutoBlockThreshold()).toBe(3);
+    expect(resolveNoProgressAutoBlockThreshold({ PAPERCLIP_NO_PROGRESS_AUTO_BLOCK_THRESHOLD: "5" } as NodeJS.ProcessEnv)).toBe(5);
+    expect(resolveNoProgressAutoBlockThreshold({ PAPERCLIP_NO_PROGRESS_AUTO_BLOCK_THRESHOLD: "0" } as NodeJS.ProcessEnv)).toBe(0);
+    expect(resolveNoProgressWindowMs()).toBe(DEFAULT_NO_PROGRESS_WINDOW_MS);
+    expect(resolveNoProgressWindowMs({ PAPERCLIP_NO_PROGRESS_WINDOW_SEC: "3600" } as NodeJS.ProcessEnv)).toBe(3_600_000);
+    expect(resolveNoProgressWindowMs({ PAPERCLIP_NO_PROGRESS_WINDOW_SEC: "0" } as NodeJS.ProcessEnv)).toBe(0);
+  });
+});
+
+describe("hasRunProgressEvidence (구조화 DB 증거만 판정)", () => {
+  const run = {
+    id: "run-1",
+    startedAt: new Date("2026-08-17T04:00:00Z"),
+    finishedAt: new Date("2026-08-17T04:05:00Z"),
+    createdAt: new Date("2026-08-17T04:00:00Z"),
+  };
+  const empty = { workProductRunIds: new Set<string>(), transitionRunIds: new Set<string>(), agentCommentTimestamps: [] };
+
+  it("counts a work product registered by the run as progress", () => {
+    expect(hasRunProgressEvidence({ run, ...empty, workProductRunIds: new Set(["run-1"]) })).toBe(true);
+  });
+
+  it("counts a workflow transition recorded by the run as progress", () => {
+    expect(hasRunProgressEvidence({ run, ...empty, transitionRunIds: new Set(["run-1"]) })).toBe(true);
+  });
+
+  it("counts an agent comment left inside the run window as progress (inclusive bounds, no body parsing)", () => {
+    expect(hasRunProgressEvidence({ run, ...empty, agentCommentTimestamps: [new Date("2026-08-17T04:02:30Z")] })).toBe(true);
+    expect(hasRunProgressEvidence({ run, ...empty, agentCommentTimestamps: [run.startedAt] })).toBe(true);
+    expect(hasRunProgressEvidence({ run, ...empty, agentCommentTimestamps: [run.finishedAt] })).toBe(true);
+  });
+
+  it("treats comments outside the run window as no progress", () => {
+    expect(hasRunProgressEvidence({ run, ...empty, agentCommentTimestamps: [new Date("2026-08-17T03:59:59Z")] })).toBe(false);
+    expect(hasRunProgressEvidence({ run, ...empty, agentCommentTimestamps: [new Date("2026-08-17T04:05:01Z")] })).toBe(false);
+  });
+
+  it("returns false when no structured evidence exists (usage tokens are never the sole signal)", () => {
+    expect(hasRunProgressEvidence({ run, ...empty })).toBe(false);
+  });
+
+  it("falls back to createdAt bounds when startedAt/finishedAt are null", () => {
+    const degenerate = { ...run, startedAt: null, finishedAt: null };
+    const atCreation = new Date("2026-08-17T04:00:00Z");
+    expect(hasRunProgressEvidence({ run: degenerate, ...empty, agentCommentTimestamps: [atCreation] })).toBe(true);
+    expect(hasRunProgressEvidence({ run: degenerate, ...empty, agentCommentTimestamps: [new Date("2026-08-17T04:00:01Z")] })).toBe(false);
   });
 });

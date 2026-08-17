@@ -130,6 +130,26 @@ function buildRunawayRecoveryBriefLines(value: unknown): readonly string[] {
   ];
 }
 
+// [no-progress recovery] 직전 성공 run들이 모두 무진행(구조화 증거 없음)이었을 때 다음 실행 선두에 붙는 회복 지시.
+//   어드바이저(soft event) 다음 단계 — 같은 탐색 반복 대신 최소 산출물 등록 또는 정직한 blocked 요청만 유도한다.
+//   지시 준수 여부는 다음 run의 DB 증거로만 재판정된다(이 텍스트 자체는 근거가 아님).
+function buildNoProgressRecoveryBriefLines(value: unknown): readonly string[] {
+  const record = asRecord(value);
+  if (record?.kind !== "no_progress_recovery") return [];
+  const consecutiveCount = asNumber(record.consecutiveCount);
+  const autoBlockThreshold = asNumber(record.autoBlockThreshold);
+  return [
+    "=== NO-PROGRESS RECOVERY ADVISORY (read first) ===",
+    `- Your last ${consecutiveCount} completed runs on this issue left no structured trace: no registered work product, no issue comment, no workflow transition.`,
+    autoBlockThreshold > 0
+      ? `- After ${autoBlockThreshold} consecutive runs like this the issue is auto-blocked and will not be dispatched again until the owner intervenes.`
+      : "- Repeated unchanged runs are tracked; do not rely on redispatch.",
+    "- This run MUST end with ONE of: (1) register the minimum required work product via the Workflow API, or (2) explicitly report blocked with the concrete blocker reason as an issue comment.",
+    "- Do NOT repeat the same exploration, re-derivation, or output-only pass over the same material.",
+    "=== end no-progress recovery advisory ===",
+  ];
+}
+
 function buildRecentIssueCommentsBrief(value: unknown) {
   const comments = Array.isArray(value)
     ? value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
@@ -487,6 +507,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const reworkHeaderLines = buildWorkflowReworkTaskHeader(context.paperclipWorkflowReworkContract);
   // [runaway recovery] 재고민 루프로 죽은 직후 재시동되는 실행에는 회복 지시를 최상단에.
   const runawayRecoveryLines = buildRunawayRecoveryBriefLines(context.paperclipRunawayRecoveryBrief);
+  const noProgressRecoveryLines = buildNoProgressRecoveryBriefLines(context.paperclipNoProgressRecoveryBrief);
   const isReworkMode = reworkHeaderLines.length > 0;
   const workflowToolContractLine = buildWorkflowToolContractBrief(context);
   // [QA rework] rework contract가 최신 QA feedback을 이미 가지면 최근 코멘트는 중복이므로 억제(prompt dilution 방지).
@@ -711,6 +732,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
     ...reworkHeaderLines,
     ...runawayRecoveryLines,
+    ...noProgressRecoveryLines,
     missionSearchPointer,
     userFacingLanguageLine,
     taskKey ? `- Task key: ${taskKey}` : null,
