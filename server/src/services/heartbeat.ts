@@ -2168,9 +2168,29 @@ type AdapterFallbackConfig = {
   command: string;
   provider?: string;
   model?: string;
+  /** [thinking ladder] 폴백 실행에 적용할 추론 수준(단일 값). command/provider/model은 바꾸지 않는다. */
+  thinking?: string;
+  /** [thinking ladder] 시도 횟수별 추론 수준 사다리(명시 config만 — 자동 승격 금지). */
+  thinkingLadder: string[];
   triggers: Set<string>;
   maxAttempts: number;
 };
+
+/**
+ * [thinking ladder] 폴백 시도(1-based)에 적용할 thinking 값.
+ *   - 사다리가 없으면 단일 thinking 값을 매 시도에 적용.
+ *   - 사다리가 있으면 ladder[min(attempt-1, len-1)] — 시도가 사다리보다 길면 마지막 값 유지.
+ * 어댑터별 정식 순서표가 없어(pi 문서 off~xhigh vs UI minimal~max 불일치) 값 자동 추론/승격은 금지이며,
+ * 반드시 agent config(fallback.thinking / fallback.thinkingLadder)에 명시된 값만 사용한다.
+ */
+function resolveAdapterFallbackThinking(
+  config: Pick<AdapterFallbackConfig, "thinking" | "thinkingLadder">,
+  attempt: number,
+): string | undefined {
+  if (config.thinkingLadder.length === 0) return config.thinking;
+  const index = Math.min(Math.max(attempt - 1, 0), config.thinkingLadder.length - 1);
+  return config.thinkingLadder[index];
+}
 
 function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbackConfig | null {
   const adapterConfig = parseObject(adapterConfigRaw);
@@ -2181,6 +2201,11 @@ function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbac
   if (!command) return null;
   const provider = readNonEmptyString(fallback.provider) ?? undefined;
   const model = readNonEmptyString(fallback.model) ?? undefined;
+  const thinking = readNonEmptyString(fallback.thinking) ?? undefined;
+  const rawThinkingLadder = Array.isArray(fallback.thinkingLadder) ? fallback.thinkingLadder : [];
+  const thinkingLadder = rawThinkingLadder
+    .map((value) => readNonEmptyString(value))
+    .filter((value): value is string => Boolean(value));
 
   const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
   const triggers = rawTriggers
@@ -2195,6 +2220,8 @@ function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbac
     command,
     provider,
     model,
+    thinking,
+    thinkingLadder,
     triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
     maxAttempts,
   };
@@ -2228,11 +2255,15 @@ function applyAdapterFallbackRuntimeConfig(input: {
   if (!command) return input.config;
   const provider = readNonEmptyString(input.context.fallbackProvider);
   const model = readNonEmptyString(input.context.fallbackModel);
+  // [thinking ladder] thinking만 덮어쓴다. command는 enqueue 시점에 현재 command와 동일하게
+  //   설정되도록 운용한다(단일 모델 바인딩 유지 — provider/model 불변).
+  const thinking = readNonEmptyString(input.context.fallbackThinking);
   return {
     ...input.config,
     command,
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
+    ...(thinking ? { thinking } : {}),
   };
 }
 
@@ -4421,6 +4452,7 @@ export function heartbeatService(db: Db) {
       fallbackCommand: string;
       fallbackProvider?: string;
       fallbackModel?: string;
+      fallbackThinking?: string;
       fallbackReason: string;
     },
   ) {
@@ -4461,6 +4493,7 @@ export function heartbeatService(db: Db) {
       fallbackCommand: input.fallbackCommand,
       ...(input.fallbackProvider ? { fallbackProvider: input.fallbackProvider } : {}),
       ...(input.fallbackModel ? { fallbackModel: input.fallbackModel } : {}),
+      ...(input.fallbackThinking ? { fallbackThinking: input.fallbackThinking } : {}),
       wakeReason: "adapter_fallback",
     };
     const taskKey = deriveTaskKey(fallbackContextSnapshot, null);
@@ -5056,6 +5089,10 @@ export function heartbeatService(db: Db) {
             fallbackCommand: fallback.command,
             fallbackProvider: fallback.provider,
             fallbackModel: fallback.model,
+            fallbackThinking: resolveAdapterFallbackThinking(
+              fallback,
+              resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot) + 1,
+            ),
             fallbackReason: "process_lost",
           });
         } else {
@@ -7476,6 +7513,10 @@ export function heartbeatService(db: Db) {
               fallbackCommand: fb.command,
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
+              fallbackThinking: resolveAdapterFallbackThinking(
+                fb,
+                resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot) + 1,
+              ),
               fallbackReason: "run_failed",
             });
             queuedAdapterFallbackRun = fallbackRun;
@@ -7564,6 +7605,10 @@ export function heartbeatService(db: Db) {
               fallbackCommand: fb.command,
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
+              fallbackThinking: resolveAdapterFallbackThinking(
+                fb,
+                resolveAdapterFallbackAttempt(failedRun.contextSnapshot) + 1,
+              ),
               fallbackReason: "run_failed",
             });
             queuedAdapterFallbackRun = fallbackRun;
