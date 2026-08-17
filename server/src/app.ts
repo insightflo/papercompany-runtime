@@ -740,8 +740,9 @@ export async function createApp(
           : { status: "workflow_already_dispatched" as const, workflowWakeupRequestId: null, runId: null };
       }
       // report-only: native link could not be proven. Oversight retains evidence; the native
-      //   workflow resumes only when a resumable step link exists.
-      return { status: "not_requested" as const, runId: null };
+      //   workflow resumes only when a resumable step link exists. `reason` carries the exact
+      //   fail-closed cause (e.g. cap_override_no_marker) so operators/agents can self-correct.
+      return { status: "not_requested" as const, runId: null, reason: (outcome as { reason?: unknown }).reason ?? null };
     },
     onStaleSourceIssueWakeupRequested: ({ mission, sourceIssue, failedRun, idempotencyKey, wakeCommentId }) => heartbeat.wakeup(mission.ownerAgentId, {
       source: "assignment",

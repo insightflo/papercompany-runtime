@@ -20,6 +20,8 @@ export function buildRetrySourceIssueWakeupResultComment(input: {
   sourceLabel: string;
   targetAgentId: string;
   idempotencyKey: string;
+  /** [observability] not_requested 사유(report_only outcome 의 reason) — 운영자/에이전트 자가 교정용. */
+  detailReason?: string | null;
 }) {
   const common = {
     missionId: input.missionId,
@@ -41,8 +43,9 @@ export function buildRetrySourceIssueWakeupResultComment(input: {
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     `Queue result: ${input.status}`,
+    input.detailReason ? `Validation detail: ${input.detailReason}` : null,
     `Idempotency key: ${input.idempotencyKey}`,
-  ].join("\n");
+  ].filter((line): line is string => line !== null).join("\n");
 }
 
 export function extractLatestMissionOwnerDecision(texts: string[]): ExtractedMissionOwnerDecision | null {

@@ -62,6 +62,13 @@ async function resolveOwnerRetryDecisionCommentId(db: Db, companyId: string, own
   if (!record || record.decision.decision !== "retry_source_issue") return null;
   return record.eventId;
 }
+
+/** [observability] wakeup callback 결과(report_only 등)에서 fail-closed 사유 문자열만 안전 추출. */
+function readWakeupResultDetailReason(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const reason = (value as { reason?: unknown }).reason;
+  return typeof reason === "string" && reason.length > 0 ? reason : null;
+}
 // [integration blocker] dispatchSourceIssueNativeResume 의 cap-override 진입 조건과 동일: source issue 의
 //   최신 step run 의 run 이 failed 이고 step 이 completed. 이면 supervision 이 producer issue 를 먼저 reopen
 //   하지 않고 cap-override 의 atomic reopen/rollback 에 맡긴다. under-cap/running 정상 경로는 기존 reopen 유지.
@@ -1697,6 +1704,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                             sourceLabel: sourceCandidateLabel,
                             targetAgentId: sourceCandidate.assigneeAgentId,
                             idempotencyKey,
+                            detailReason: readWakeupResultDetailReason(wakeupResult),
                           }),
                           { agentId: mission.ownerAgentId },
                         );
@@ -1930,6 +1938,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                           sourceLabel: sourceCandidateLabel,
                           targetAgentId: sourceCandidate.assigneeAgentId,
                           idempotencyKey,
+                          detailReason: readWakeupResultDetailReason(wakeupResult),
                         }),
                         { agentId: mission.ownerAgentId },
                       );
