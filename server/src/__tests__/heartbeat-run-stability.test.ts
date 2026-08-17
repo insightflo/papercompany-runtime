@@ -361,6 +361,96 @@ describeEmbeddedPostgres("heartbeat run stability", () => {
 		expect(contexts[0]?.paperclipRunawayRecoveryBrief).toBeUndefined();
 	});
 
+	it("applies the thinking fallback ladder without changing command/provider/model, and stops at maxAttempts", async () => {
+		// [thinking ladder] 같은 command로 thinking만 단계적으로 올리는 폴백 사다리.
+		//   transient 재시도 단계를 꺼서(=0) 첫 실패 즉시 폴백 경로를 탄다.
+		const prevTransientSec = process.env.PAPERCLIP_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC;
+		process.env.PAPERCLIP_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC = "0";
+		try {
+			const { agentId } = await seedStabilityFixture(db, {
+				command: "primary-agent",
+				fallbackCommand: "primary-agent",
+				fallback: { thinkingLadder: ["high", "xhigh"], maxAttempts: 2 },
+			});
+			const heartbeat = heartbeatService(db);
+			const configs: Array<Record<string, unknown>> = [];
+
+			executeSpy.mockImplementation(async (input: { config: Record<string, unknown> }) => {
+				configs.push(input.config);
+				return {
+					...successfulAdapterResult(),
+				exitCode: 1,
+				errorMessage: "CLI crashed transiently",
+					errorCode: null,
+				};
+			});
+
+			const first = await heartbeat.invoke(
+				agentId,
+				"on_demand",
+				{},
+				"manual",
+				{ actorId: "test-suite", actorType: "system" },
+			);
+			if (!first) throw new Error("Expected first heartbeat run");
+			expect((await waitForRunTerminal(heartbeat, first.id)).status).toBe("failed");
+
+			// primary(1) + fallback attempt1(2) + fallback attempt2(3) — 3번째 폴백은 없어야 한다.
+			const deadline = Date.now() + 10_000;
+			while (configs.length < 3 && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			expect(configs).toHaveLength(3);
+
+			// 단일 모델 바인딩 회귀: command/provider/model은 폴백에서 바뀌지 않는다.
+			expect(configs[0]?.command).toBe("primary-agent");
+			expect(configs[1]?.command).toBe("primary-agent");
+			expect(configs[2]?.command).toBe("primary-agent");
+			expect(configs[1]?.provider).toBeUndefined();
+			expect(configs[1]?.model).toBeUndefined();
+			expect(configs[2]?.provider).toBeUndefined();
+			expect(configs[2]?.model).toBeUndefined();
+			// 사다리: primary는 기본 thinking 없음 → attempt1=high → attempt2=xhigh.
+			expect(configs[0]?.thinking).toBeUndefined();
+			expect(configs[1]?.thinking).toBe("high");
+			expect(configs[2]?.thinking).toBe("xhigh");
+
+			const runs = await db
+				.select()
+				.from(heartbeatRuns)
+				.where(eq(heartbeatRuns.agentId, agentId));
+			expect(runs).toHaveLength(3);
+			const primaryRun = runs.find((row) => row.id === first.id) ?? null;
+			const fallbackOne = runs.find((row) => row.retryOfRunId === first.id) ?? null;
+			const fallbackTwo = runs.find((row) => row.id !== first.id && row.retryOfRunId !== first.id) ?? null;
+			expect(primaryRun).not.toBeNull();
+			expect(fallbackOne).not.toBeNull();
+			expect(fallbackTwo).not.toBeNull();
+			expect(primaryRun?.contextSnapshot).not.toHaveProperty("fallbackThinking");
+			expect(fallbackOne?.contextSnapshot).toMatchObject({
+				fallbackCommand: "primary-agent",
+				fallbackThinking: "high",
+				fallbackAttempt: 1,
+			});
+			expect(fallbackTwo?.contextSnapshot).toMatchObject({
+				fallbackCommand: "primary-agent",
+				fallbackThinking: "xhigh",
+				fallbackAttempt: 2,
+			});
+
+			// maxAttempts(2) 소진 후 추가 폴백이 없다.
+			await new Promise((resolve) => setTimeout(resolve, 400));
+			const afterExhaustion = await db
+				.select()
+				.from(heartbeatRuns)
+				.where(eq(heartbeatRuns.agentId, agentId));
+			expect(afterExhaustion).toHaveLength(3);
+		} finally {
+			if (prevTransientSec === undefined) delete process.env.PAPERCLIP_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC;
+			else process.env.PAPERCLIP_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC = prevTransientSec;
+		}
+	});
+
 	it("backfills evidence on a run terminalized by issue done while the adapter is still executing", async () => {
 		const { agentId, companyId, issueId } = await seedStabilityFixture(db, {});
 		const heartbeat = heartbeatService(db);
