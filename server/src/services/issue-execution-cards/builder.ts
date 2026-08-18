@@ -115,7 +115,7 @@ export function buildWorkflowIssueExecutionCard(input: {
       verdict: {
         required: requiresVerdict,
         ledger: requiresVerdict ? "workflow_validation_verdict" : null,
-        allowed: requiresVerdict ? ["PASS", "REQUEST_CHANGES"] : [],
+        allowed: requiresVerdict ? ["PASS", "REQUEST_CHANGES", "INSUFFICIENT_EVIDENCE"] : [],
       },
       deliveryReadback: {
         required: input.isQaStep ? deliveryReadbackRequired(input.description, input.step) : false,

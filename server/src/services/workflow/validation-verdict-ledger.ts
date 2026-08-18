@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, gte, isNotNull, or } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   heartbeatRuns,
@@ -11,8 +11,11 @@ import {
   workflowTransitionEvents,
 } from "@paperclipai/db";
 import { workflowNonblockingAcceptanceSchema } from "@paperclipai/shared";
-import type { WorkflowNonblockingAcceptance, WorkflowValidationVerdictPayload } from "@paperclipai/shared";
-import { type ValidationVerdict } from "../validation-verdict.js";
+import type {
+  WorkflowNonblockingAcceptance,
+  WorkflowValidationVerdictPayload,
+  WorkflowValidationVerdictValue,
+} from "@paperclipai/shared";
 
 type IssueRow = typeof issues.$inferSelect;
 type WorkflowValidationDb = Pick<Db, "select" | "insert">;
@@ -21,10 +24,15 @@ type WorkflowValidationIssue = Pick<IssueRow, "id" | "companyId" | "missionId" |
 export type WorkflowValidationLedgerResult = {
   readonly isCandidate: boolean;
   readonly satisfied: boolean;
-  readonly verdict: ValidationVerdict | null;
+  readonly verdict: WorkflowValidationVerdictValue | null;
   readonly workflowRunId: string | null;
   readonly workflowStepRunId: string | null;
   readonly stepId: string | null;
+  /** [verdict abstention] 최신 공식 판정이 insufficient_evidence 일 때 true. satisfied=false 와 함께
+   *    미제출(missing) 과 구분되는 완료 차단 사유로 소비된다(heartbeat 완료 게이트). */
+  readonly insufficientEvidence: boolean;
+  /** [verdict abstention] insufficient_evidence 판정의 reason(payload, bounded). 없으면 null. */
+  readonly insufficientEvidenceReason: string | null;
 };
 
 type StepLike = {
@@ -94,6 +102,10 @@ function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
+function isWorkflowValidationVerdictValue(value: unknown): value is WorkflowValidationVerdictValue {
+  return value === "pass" || value === "request_changes" || value === "insufficient_evidence";
+}
+
 
 export async function resolveWorkflowValidationContext(
   db: WorkflowValidationDb,
@@ -150,7 +162,7 @@ export async function resolveWorkflowValidationContext(
 export async function recordWorkflowValidationVerdict(input: {
   readonly db: WorkflowValidationDb;
   readonly issue: WorkflowValidationIssue;
-  readonly verdict: ValidationVerdict;
+  readonly verdict: WorkflowValidationVerdictValue;
   readonly source: "workflow_api";
   readonly actorAgentId?: string | null;
   readonly heartbeatRunId?: string | null;
@@ -159,7 +171,7 @@ export async function recordWorkflowValidationVerdict(input: {
 }): Promise<WorkflowValidationLedgerResult> {
   const context = await resolveWorkflowValidationContext(input.db, input.issue, { mode: "record" });
   if (!context.isCandidate || !context.workflowRunId || !context.workflowStepRunId) {
-    return { ...context, satisfied: false, verdict: null };
+    return { ...context, satisfied: false, verdict: null, insufficientEvidence: false, insufficientEvidenceReason: null };
   }
   // [qa-cap acceptance] nonblocking 분류는 request_changes verdict 와만 공존. heartbeat/comment 경로는
   //   이 필드를 넘기지 않으므로 구조적 수용은 오직 공식 workflow API(request_changes) 만 가능하다.
@@ -200,7 +212,13 @@ export async function recordWorkflowValidationVerdict(input: {
     payload,
   }).onConflictDoNothing();
 
-  return { ...context, satisfied: true, verdict: input.verdict };
+  return {
+    ...context,
+    satisfied: true,
+    verdict: input.verdict,
+    insufficientEvidence: false,
+    insufficientEvidenceReason: null,
+  };
 }
 
 /**
@@ -272,11 +290,13 @@ export async function hasWorkflowValidationCompletionLedger(input: {
   readonly issue: WorkflowValidationIssue;
 }): Promise<WorkflowValidationLedgerResult> {
   const context = await resolveWorkflowValidationContext(input.db, input.issue);
-  if (!context.isCandidate) return { ...context, satisfied: true, verdict: null };
+  if (!context.isCandidate) {
+    return { ...context, satisfied: true, verdict: null, insufficientEvidence: false, insufficientEvidenceReason: null };
+  }
   // [scope fail-closed] only a verdict bound to THIS issue's current workflow run + step run counts.
   //   a reused issue's prior-run verdict must never satisfy the current completion gate.
   if (!context.workflowRunId || !context.workflowStepRunId) {
-    return { ...context, satisfied: false, verdict: null };
+    return { ...context, satisfied: false, verdict: null, insufficientEvidence: false, insufficientEvidenceReason: null };
   }
 
   const conditions = [
@@ -287,25 +307,42 @@ export async function hasWorkflowValidationCompletionLedger(input: {
     eq(workflowTransitionEvents.reason, "workflow_api"),
     eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
     isNotNull(workflowTransitionEvents.heartbeatRunId),
-    or(eq(workflowTransitionEvents.verdict, "pass"), eq(workflowTransitionEvents.verdict, "request_changes"))!,
   ];
   if (input.issue.startedAt) {
     conditions.push(gte(workflowTransitionEvents.createdAt, input.issue.startedAt));
   }
 
-  const row = await input.db
-    .select({ verdict: workflowTransitionEvents.verdict, heartbeatRunId: workflowTransitionEvents.heartbeatRunId })
+  // [verdict abstention] latest-first: 최신 공식 판정이 insufficient_evidence 면 만족하지 않는다.
+  //   pass/request_changes 만 게이트를 만족시키며, 인식 불가능한(레거시) verdict 행은 건너뛴다.
+  const rows = await input.db
+    .select({
+      verdict: workflowTransitionEvents.verdict,
+      payload: workflowTransitionEvents.payload,
+      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+    })
     .from(workflowTransitionEvents)
     .where(and(...conditions))
     .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  // [verdict authority] the backing heartbeat run must be a checked-out run scoped to this QA issue.
-  const scoped = row
-    ? await heartbeatRunScopedToIssue(input.db, row.heartbeatRunId, { companyId: input.issue.companyId, issueId: input.issue.id })
-    : false;
-  const verdict = scoped && (row?.verdict === "pass" || row?.verdict === "request_changes") ? row.verdict : null;
-  return { ...context, satisfied: Boolean(verdict), verdict };
+    .limit(20);
+  for (const row of rows) {
+    if (!isWorkflowValidationVerdictValue(row.verdict)) continue;
+    // [verdict authority] the backing heartbeat run must be a checked-out run scoped to this QA issue.
+    const scoped = await heartbeatRunScopedToIssue(
+      input.db,
+      row.heartbeatRunId,
+      { companyId: input.issue.companyId, issueId: input.issue.id },
+    );
+    if (!scoped) continue;
+    if (row.verdict === "insufficient_evidence") {
+      const payloadReason = asRecord(row.payload).reason;
+      const reason = typeof payloadReason === "string" && payloadReason.trim().length > 0
+        ? payloadReason.trim().slice(0, 2000)
+        : null;
+      return { ...context, satisfied: false, verdict: null, insufficientEvidence: true, insufficientEvidenceReason: reason };
+    }
+    return { ...context, satisfied: true, verdict: row.verdict, insufficientEvidence: false, insufficientEvidenceReason: null };
+  }
+  return { ...context, satisfied: false, verdict: null, insufficientEvidence: false, insufficientEvidenceReason: null };
 }
 
 /**

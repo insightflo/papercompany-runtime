@@ -347,10 +347,12 @@ export {
 export {
   workflowArtifactRegisterSchema,
   workflowVerdictSubmitSchema,
+  workflowValidationVerdictValueSchema,
   workflowNonblockingAcceptanceSchema,
   workflowIssueCompleteSchema,
   type WorkflowArtifactRegister,
   type WorkflowNonblockingAcceptance,
+  type WorkflowValidationVerdictValue,
   type WorkflowVerdictSubmit,
   type WorkflowIssueComplete,
   missionOwnerDecisionOptionSchema,

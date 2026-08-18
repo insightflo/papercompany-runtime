@@ -2748,6 +2748,26 @@ function buildMissingWorkflowValidationVerdictGateComment(input: {
     `- 실행 runId: \`${input.run.id}\``,
     "- Reason: this workflow QA/validator issue cannot be marked done until the official workflow_validation_verdict ledger contains PASS or REQUEST_CHANGES.",
     "- Required evidence: a workflow_transition_events row with eventType=workflow_validation_verdict for this issue.",
+    "- If the artifact cannot be judged with the evidence available, submit the official INSUFFICIENT_EVIDENCE verdict with the missing evidence listed in `reason` instead of leaving no verdict.",
+  ].join("\n");
+}
+
+function buildInsufficientEvidenceWorkflowVerdictGateComment(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  reason: string | null;
+}) {
+  const reasonText = typeof input.reason === "string" && input.reason.trim().length > 0
+    ? input.reason.trim().slice(0, 2000)
+    : null;
+  return [
+    "## Completion blocked: workflow_validation_insufficient_evidence",
+    `- 실행 runId: \`${input.run.id}\``,
+    "- Reason: the QA validator submitted an official INSUFFICIENT_EVIDENCE verdict — the current artifacts cannot be judged with the evidence available.",
+    "- This is NOT a REQUEST_CHANGES rework verdict: no producer rework iteration or QA cap is consumed by this block.",
+    "- Completion requires a follow-up official PASS or REQUEST_CHANGES verdict after the missing evidence below is provided.",
+    reasonText
+      ? `- Missing evidence requested by the validator:\n\`\`\`text\n${reasonText}\n\`\`\``
+      : "- Missing evidence: the validator did not include a reason in the verdict payload.",
   ].join("\n");
 }
 
@@ -8089,9 +8109,14 @@ export function heartbeatService(db: Db) {
         issue.assigneeAgentId === run.agentId
           ? await hasWorkflowValidationCompletionLedger({ db: tx, issue })
           : null;
+      const shouldBlockInsufficientEvidenceWorkflowVerdict =
+        workflowValidationCompletionLedger?.isCandidate === true &&
+        workflowValidationCompletionLedger.satisfied === false &&
+        workflowValidationCompletionLedger.insufficientEvidence === true;
       const shouldBlockMissingWorkflowValidationVerdict =
         workflowValidationCompletionLedger?.isCandidate === true &&
-        workflowValidationCompletionLedger.satisfied === false;
+        workflowValidationCompletionLedger.satisfied === false &&
+        workflowValidationCompletionLedger.insufficientEvidence !== true;
       const missionWorkProductPaths = issue.missionId
         ? await resolveMissionWorkProductPaths(tx, {
           companyId: issue.companyId,
@@ -8121,6 +8146,53 @@ export function heartbeatService(db: Db) {
         successfulRunCanApplyCompletionGates &&
         issue.assigneeAgentId === run.agentId;
 
+
+      if (shouldBlockInsufficientEvidenceWorkflowVerdict) {
+        // [verdict abstention] 최신 공식 판정이 insufficient_evidence: 미제출(missing) 과 구분되는 사유로
+        //   blocked. QA 재작업 백엣지/qa-cap 은 request_changes 경로와 명시 분기되므로 소비되지 않는다.
+        const now = new Date();
+        await tx
+          .update(issues)
+          .set({
+            status: "blocked",
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            completedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(issueComments).values({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          authorAgentId: run.agentId,
+          body: buildInsufficientEvidenceWorkflowVerdictGateComment({
+            run,
+            reason: workflowValidationCompletionLedger.insufficientEvidenceReason,
+          }),
+        });
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.workflow_validation_insufficient_evidence_blocked",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: issue.status,
+            nextStatus: "blocked",
+            reason: "workflow_validation_insufficient_evidence",
+            workflowRunId: workflowValidationCompletionLedger.workflowRunId,
+            workflowStepRunId: workflowValidationCompletionLedger.workflowStepRunId,
+            stepId: workflowValidationCompletionLedger.stepId,
+          },
+        });
+        queuePostTransactionWorkflowIssueSync(issue.id);
+        return { promotedRun: null };
+      }
 
       if (shouldBlockMissingWorkflowValidationVerdict) {
         const now = new Date();

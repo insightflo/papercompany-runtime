@@ -1,4 +1,4 @@
-import type { WorkflowNonblockingAcceptance } from "./validators/workflow-agent-api.js";
+import type { WorkflowNonblockingAcceptance, WorkflowValidationVerdictValue } from "./validators/workflow-agent-api.js";
 
 export type MissionPlanQaVerdictValue = "pass" | "request_changes";
 
@@ -23,7 +23,7 @@ export interface WorkflowValidationVerdictPayload {
   workflowRunId: string;
   stepRunId: string;
   issueId: string;
-  verdict: MissionPlanQaVerdictValue;
+  verdict: WorkflowValidationVerdictValue;
   diagnostics?: Array<Record<string, unknown>>;
   /** bounded request-changes rationale carried by the official workflow_api verdict submission;
    * consumed as the rework feedback source (not parsed from comments/stdout). */
