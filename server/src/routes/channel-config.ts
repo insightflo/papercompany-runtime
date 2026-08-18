@@ -59,6 +59,9 @@ function serializeChannelConfig(row: ChannelConfigRow) {
   const config = row.configJson ?? {};
   const botUsername = typeof config.botUsername === "string" ? config.botUsername : null;
   const botTokenSecretId = typeof config.botTokenSecretId === "string" ? config.botTokenSecretId : null;
+  const telegramChatId = typeof config.telegramChatId === "number" && Number.isFinite(config.telegramChatId)
+    ? config.telegramChatId
+    : null;
 
   return {
     id: row.id,
@@ -66,6 +69,7 @@ function serializeChannelConfig(row: ChannelConfigRow) {
     kind: "telegram" as const,
     botUsername,
     botTokenSecretId,
+    telegramChatId,
     enabled: row.enabled,
     createdAt: row.createdAt.toISOString(),
   };
@@ -109,19 +113,35 @@ export function channelConfigRoutes(db: Db) {
       return;
     }
 
+    // [outbound persistence] UI 구성 갱신이 configJson 을 통째로 교체하므로, 저장된
+    //   telegramChatId(재시작 후 알림 복원용)를 먼저 읽어 보존한다.
+    const [existing] = await db
+      .select({ configJson: channelConfigs.configJson })
+      .from(channelConfigs)
+      .where(and(
+        eq(channelConfigs.companyId, companyId),
+        eq(channelConfigs.kind, "telegram"),
+      ))
+      .limit(1);
+    const persistedTelegramChatId = (existing?.configJson as { telegramChatId?: unknown } | null)?.telegramChatId;
+    const configJson: Record<string, unknown> = { botUsername, botTokenSecretId };
+    if (typeof persistedTelegramChatId === "number" && Number.isFinite(persistedTelegramChatId)) {
+      configJson.telegramChatId = persistedTelegramChatId;
+    }
+
     const [row] = await db
       .insert(channelConfigs)
       .values({
         companyId,
         kind: "telegram",
         enabled,
-        configJson: { botUsername, botTokenSecretId },
+        configJson,
       })
       .onConflictDoUpdate({
         target: [channelConfigs.companyId, channelConfigs.kind],
         set: {
           enabled,
-          configJson: { botUsername, botTokenSecretId },
+          configJson,
         },
       })
       .returning();

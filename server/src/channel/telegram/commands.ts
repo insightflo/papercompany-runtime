@@ -9,7 +9,7 @@ import type { Db } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { agents, approvals, issues, missions } from "@paperclipai/db";
 import { getChannelRegistry } from "../index.js";
-import { registerChatId } from "./outbound.js";
+import { persistChatId, registerChatId } from "./outbound.js";
 import {
   formatMissionStatus,
   formatMissionCreated,
@@ -55,8 +55,9 @@ export function buildTelegramHandler(db: Db, _companyId: string) {
     context: { companyId: string; botJwt: string },
   ): Promise<void> {
     const chatId = message.chat.id;
-    // Register this chat for outbound notifications
+    // Register this chat for outbound notifications (and persist for restart survival)
     registerChatId(context.companyId, chatId);
+    await persistChatId(db, context.companyId, chatId);
 
     const sender = getChannelRegistry().getTelegramSender(context.companyId);
     if (!sender) {
