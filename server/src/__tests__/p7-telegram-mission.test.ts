@@ -42,6 +42,7 @@ vi.mock("../channel/index.js", () => ({
 
 vi.mock("../channel/telegram/outbound.js", () => ({
   registerChatId: vi.fn(),
+  persistChatId: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ---------------------------------------------------------------------------
