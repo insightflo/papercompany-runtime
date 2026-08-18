@@ -290,6 +290,9 @@ async function claimSupervisionMarkerOnce(input: {
 /** [terminal-run closeout] 실행 단위의 종단 상태(이 상태에서 mission 이 아직 active 면 종결 브리지 대상). */
 const TERMINAL_CLOSEOUT_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
+/** [owner on-duty monitoring] 오너 주기 리뷰 대상 실행 상태 — 진행 중이거나 미결(실패류)인 단위. */
+const ACTIVE_SUPERVISION_EXECUTION_STATUSES_FOR_REVIEW = new Set(["pending", "running", "failed", "cancelled", "timed_out"]);
+
 /**
  * [escalate-suppressed watchdog] 최근(24h) 오너의 사람 상정(escalate/request_input) 결정이 존재하는지.
  *   억제(live-wakeup 계열)가 지속되는 동안 사람 통지가 실제로 전달됐는지 의심해야 하는 근거.
@@ -465,6 +468,53 @@ export function createSupervision({ db, deps, ownerActions }: {
     const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
     const missionHasActiveHeartbeat = [...heartbeatRunsByIssueId.values()]
       .some((runs) => runs.some((run) => run.status === "queued" || run.status === "running"));
+
+    // [owner on-duty monitoring] 활성 미션에 점검할 상황(진행 중 실행 단위 또는 열린 오너 액션)이 있으면
+    //   일정 주기마다 오너를 깨워 미션 상황을 스스로 점검하게 한다. 사건별 깨움만으로는 오너가
+    //   "지시 후 대기"에 머문다(2026-08-17 GAZ: 21시간 중 오너 자발 점검 0회). 버킷 멱등 클레임으로
+    //   5분 스윕이 리뷰를 쌓지 않게 하고, 기존 하트비트 가드(동일 미션 중복/동시성 제한)가 과잉을 막는다.
+    const MISSION_OWNER_PERIODIC_REVIEW_INTERVAL_MS = 30 * 60 * 1000;
+    if (
+      mission.status === "active"
+      && deps.onMissionOwnerPeriodicReviewWakeRequested
+      && (
+        executionSnapshot.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES_FOR_REVIEW.has(unit.status))
+        || missionIssues.some((row) =>
+          row.hiddenAt == null
+          && row.originKind === "mission_main_executor_unblock"
+          && (row.status === "todo" || row.status === "in_progress" || row.status === "blocked"))
+      )
+    ) {
+      const reviewBucket = Math.floor(now.getTime() / MISSION_OWNER_PERIODIC_REVIEW_INTERVAL_MS);
+      const reviewKey = `mission-owner-periodic-review:${mission.id}:${reviewBucket}`;
+      const claimed = await claimSupervisionMarkerOnce({
+        db, companyId: mission.companyId, missionId: mission.id,
+        issueId: oversightIssue.id,
+        idempotencyKey: reviewKey, eventType: "mission_owner_periodic_review_wake",
+        payload: { bucket: reviewBucket },
+      });
+      if (claimed) {
+        const openOwnerActionIds = missionIssues
+          .filter((row) => row.hiddenAt == null
+            && row.originKind === "mission_main_executor_unblock"
+            && (row.status === "todo" || row.status === "in_progress" || row.status === "blocked"))
+          .map((row) => row.id);
+        const inFlightUnitLabels = executionSnapshot.units
+          .filter((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES_FOR_REVIEW.has(unit.status))
+          .map((unit) => `${executionUnitKey(unit)}:${unit.status}`);
+        try {
+          await deps.onMissionOwnerPeriodicReviewWakeRequested({
+            mission,
+            openOwnerActionIds,
+            inFlightUnitLabels,
+            idempotencyKey: reviewKey,
+          });
+          findings.push(`mission_owner_periodic_review_wake_requested: open_owner_actions=${openOwnerActionIds.length} in_flight_units=${inFlightUnitLabels.length} bucket=${reviewBucket} — owner asked to review mission state and act (direct/coordinate/close) as needed`);
+        } catch (err) {
+          logger.warn({ err, missionId: mission.id }, "mission owner periodic review wake callback failed");
+        }
+      }
+    }
 
     const terminalOwnerActions = missionIssues
       .filter((issue) => issue.status === "blocked" && issue.originKind === "mission_main_executor_unblock")

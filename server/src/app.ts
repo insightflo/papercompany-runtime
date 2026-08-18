@@ -887,6 +887,27 @@ export async function createApp(
         dispatchStatus,
       },
     }),
+    onMissionOwnerPeriodicReviewWakeRequested: ({ mission, openOwnerActionIds, inFlightUnitLabels, idempotencyKey }) => heartbeat.wakeup(mission.ownerAgentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "mission_owner_periodic_review",
+      idempotencyKey,
+      payload: {
+        missionId: mission.id,
+        mutation: "mission_owner_periodic_review",
+        openOwnerActionIds,
+        inFlightUnits: inFlightUnitLabels,
+        hint: "Periodic mission review: inspect the mission (GET /api/missions/{id} + runtime-snapshot + issues), verify in-flight work is progressing, apply owner decisions where needed (retry/reassign/replan/escalate via owner-recovery API), and close out (complete oversight/cancel) when the mission is done.",
+      },
+      requestedByActorType: "system",
+      requestedByActorId: "mission-owner-supervision-monitor",
+      contextSnapshot: {
+        missionId: mission.id,
+        source: "mission_owner_periodic_review",
+        openOwnerActionIds,
+        inFlightUnits: inFlightUnitLabels,
+      },
+    }),
     onPlanQaIssueCreated: enqueuePlanQaWakeup,
   });
   missionOwnerSupervisionMonitor.start();

@@ -434,6 +434,18 @@ export type MissionOwnerDecisionDispatchStalledWakeRequestedHandler = (input: {
   idempotencyKey: string;
 }) => Promise<unknown> | unknown;
 
+/**
+ * [owner on-duty monitoring] 활성 미션에 진행 중 실행 단위 또는 열린 오너 액션이 있을 때
+ *   일정 주기(30분 버킷)로 오너를 깨워 미션 상황을 스스로 점검하게 하는 콜백.
+ *   지시만 하고 대기하는 게 아니라 운영자처럼 지속 모니터링→필요 시 지시/조율/종결.
+ */
+export type MissionOwnerPeriodicReviewWakeRequestedHandler = (input: {
+  mission: MissionRow;
+  openOwnerActionIds: string[];
+  inFlightUnitLabels: string[];
+  idempotencyKey: string;
+}) => Promise<unknown> | unknown;
+
 export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
@@ -445,6 +457,7 @@ export interface MissionServiceDeps {
   onPlanRevisionRequested?: MissionPlanRevisionRequestedHandler;
   onMissionTerminalRunCloseoutWakeRequested?: MissionTerminalRunCloseoutWakeRequestedHandler;
   onOwnerDecisionDispatchStalledWakeRequested?: MissionOwnerDecisionDispatchStalledWakeRequestedHandler;
+  onMissionOwnerPeriodicReviewWakeRequested?: MissionOwnerPeriodicReviewWakeRequestedHandler;
   /** Cancel a heartbeat run (kills the process + updates DB + releases issue lock). */
   cancelHeartbeatRun?: (runId: string) => Promise<unknown>;
 }

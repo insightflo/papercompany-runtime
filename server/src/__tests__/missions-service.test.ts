@@ -3303,6 +3303,87 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(plain).not.toContain("Consecutive QA rejects");
   });
 
+  it("wakes the owner for periodic mission review while work is in flight (bucket-idempotent)", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const onMissionOwnerPeriodicReviewWakeRequested = vi.fn();
+
+    await db.insert(companies).values({ id: companyId, name: "Periodic Review Company", issuePrefix: `PR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Periodic review mission", status: "active", startedAt: new Date("2026-08-18T09:00:00.000Z") });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId, companyId, name: "periodic-review",
+      stepsJson: [{ id: "produce", name: "Produce report", agentId: workerAgentId, dependencies: [] }],
+    });
+    await db.insert(workflowRuns).values({ id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system", status: "running", startedAt: new Date("2026-08-18T09:30:00.000Z") });
+    const producerIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", originId: workflowRunId, originRunId: workflowRunId, status: "in_progress", title: "Produce report" });
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId, stepId: "produce", issueId: producerIssue.id, status: "running", startedAt: new Date("2026-08-18T09:30:00.000Z") },
+    ]);
+    await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_oversight", status: "todo", title: "[OVERSIGHT] periodic-review" });
+
+    const svc = missionService(db, { onMissionOwnerPeriodicReviewWakeRequested });
+    // 같은 30분 버킷 안의 두 스윕 → 1회만 깨움.
+    const first = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-08-18T10:07:00.000Z"), applySafeActions: false, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    expect(first.findings.join("\n")).toContain("mission_owner_periodic_review_wake_requested");
+    expect(onMissionOwnerPeriodicReviewWakeRequested).toHaveBeenCalledTimes(1);
+    expect(onMissionOwnerPeriodicReviewWakeRequested).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ id: missionId }),
+      inFlightUnitLabels: expect.arrayContaining([`native_workflow_run:${workflowRunId}:running`]),
+    }));
+
+    const second = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-08-18T10:12:00.000Z"), applySafeActions: false, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    expect(second.findings.join("\n")).not.toContain("mission_owner_periodic_review_wake_requested");
+    expect(onMissionOwnerPeriodicReviewWakeRequested).toHaveBeenCalledTimes(1);
+
+    // 다음 버킷 → 다시 1회.
+    const third = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-08-18T10:38:00.000Z"), applySafeActions: false, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    expect(third.findings.join("\n")).toContain("mission_owner_periodic_review_wake_requested");
+    expect(onMissionOwnerPeriodicReviewWakeRequested).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not wake for periodic review when execution is fully settled", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const workerAgentId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const workflowRunId = randomUUID();
+    const completedAt = new Date("2026-08-18T11:00:00.000Z");
+    const onMissionOwnerPeriodicReviewWakeRequested = vi.fn();
+
+    await db.insert(companies).values({ id: companyId, name: "Settled Review Company", issuePrefix: `SR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values([
+      { id: ownerAgentId, companyId, name: "Mission Owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: workerAgentId, companyId, name: "Worker Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Settled review mission", status: "active", startedAt: new Date("2026-08-18T09:00:00.000Z") });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId, companyId, name: "settled-review",
+      stepsJson: [{ id: "produce", name: "Produce report", agentId: workerAgentId, dependencies: [] }],
+    });
+    await db.insert(workflowRuns).values({ id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system", status: "completed", startedAt: new Date("2026-08-18T09:30:00.000Z"), completedAt });
+    const producerIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", originId: workflowRunId, originRunId: workflowRunId, status: "done", title: "Produce report" });
+    await db.update(issues).set({ completedAt }).where(eq(issues.id, producerIssue.id));
+    await db.insert(workflowStepRuns).values([
+      { workflowRunId, stepId: "produce", issueId: producerIssue.id, status: "completed", startedAt: new Date("2026-08-18T09:30:00.000Z"), completedAt },
+    ]);
+    await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_oversight", status: "todo", title: "[OVERSIGHT] settled-review" });
+
+    const svc = missionService(db, { onMissionOwnerPeriodicReviewWakeRequested });
+    await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-08-18T11:10:00.000Z"), applySafeActions: true, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
+    expect(onMissionOwnerPeriodicReviewWakeRequested).not.toHaveBeenCalled();
+    // settlement 가 미션을 종결했고 리뷰 대상이 없다.
+    await expect(db.select().from(missions).where(eq(missions.id, missionId)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "completed" }));
+  });
+
   it("half-applied owner retry (wakeup marker not_requested) re-dispatches instead of stalling forever", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
