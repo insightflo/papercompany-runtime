@@ -41,7 +41,10 @@ export type IssueExecutionCardJson = {
     verdict: {
       required: boolean;
       ledger: "workflow_validation_verdict" | "mission_plan_qa_verdict" | null;
-      allowed: readonly ["PASS", "REQUEST_CHANGES"] | [];
+      allowed:
+        | readonly ["PASS", "REQUEST_CHANGES", "INSUFFICIENT_EVIDENCE"]
+        | readonly ["PASS", "REQUEST_CHANGES"]
+        | [];
     };
     deliveryReadback: {
       required: boolean;

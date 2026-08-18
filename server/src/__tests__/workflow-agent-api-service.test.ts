@@ -29,6 +29,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { errorHandler } from "../middleware/index.js";
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
 import { registerWorkflowArtifact, submitWorkflowVerdict, type WorkflowApiActor } from "../services/workflow/agent-api.js";
+import { hasWorkflowValidationCompletionLedger } from "../services/workflow/validation-verdict-ledger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -352,6 +353,142 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       eventType: "workflow_validation_verdict",
       reason: "workflow_api",
       verdict: "pass",
+    });
+  });
+
+  it("records an insufficient_evidence verdict with the missing-evidence reason", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "qa-coverage", stepType: "qa", title: "[QA] Coverage" });
+
+    const result = await submitWorkflowVerdict({
+      db,
+      issue,
+      actor,
+      data: { verdict: "insufficient_evidence", reason: "Source dataset not registered; cannot judge accuracy claims." },
+    });
+
+    expect(result).toMatchObject({ isCandidate: true, satisfied: true, verdict: "insufficient_evidence" });
+    const events = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.issueId, issue.id));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: "workflow_validation_verdict",
+      reason: "workflow_api",
+      verdict: "insufficient_evidence",
+      decision: "insufficient_evidence",
+    });
+    expect(events[0]?.payload).toMatchObject({
+      verdict: "insufficient_evidence",
+      reason: "Source dataset not registered; cannot judge accuracy claims.",
+    });
+  });
+
+  it("rejects insufficient_evidence submissions without a reason or with nonblocking acceptance", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "qa-audit", stepType: "qa", title: "[QA] Audit" });
+    const app = createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: issue.companyId,
+      agentId: "agent-1",
+      runId: null,
+    });
+
+    const missingReason = await request(app)
+      .post(`/api/issues/${issue.id}/workflow/verdict`)
+      .send({ verdict: "insufficient_evidence" });
+    expect(missingReason.status).toBe(400);
+
+    const withAcceptance = await request(app)
+      .post(`/api/issues/${issue.id}/workflow/verdict`)
+      .send({
+        verdict: "insufficient_evidence",
+        reason: "Need the registered source dataset to judge.",
+        nonblockingAcceptance: { classification: "nonblocking", limitations: ["minor typo"] },
+      });
+    expect(withAcceptance.status).toBe(400);
+  });
+
+  async function seedQaVerdictLedgerIssue() {
+    const issue = await seedWorkflowIssue({ stepId: "qa-coverage", stepType: "qa", title: "[QA] Coverage" });
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId: issue.companyId,
+      name: "Coverage Validator",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.issueId, issue.id)).limit(1);
+    const mkRun = async (runId: string, at: string) => {
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId: issue.companyId,
+        agentId,
+        issueId: issue.id,
+        status: "succeeded",
+        startedAt: new Date(at),
+        finishedAt: new Date(at),
+      });
+    };
+    const mkVerdictEvent = (verdict: "pass" | "request_changes" | "insufficient_evidence", runId: string, at: string, reason: string) => ({
+      companyId: issue.companyId,
+      issueId: issue.id,
+      workflowRunId: stepRun!.workflowRunId,
+      workflowStepRunId: stepRun!.id,
+      heartbeatRunId: runId,
+      eventType: "workflow_validation_verdict",
+      layer: "workflow_validation",
+      verdict,
+      decision: verdict,
+      reason: "workflow_api",
+      reasonCode: "workflow_api",
+      createdAt: new Date(at),
+      payload: { kind: "workflow_validation_verdict", verdict, reason },
+    });
+    return { issue, mkRun, mkVerdictEvent };
+  }
+
+  it("treats a latest insufficient_evidence verdict as a distinct unsatisfied completion state", async () => {
+    const { issue, mkRun, mkVerdictEvent } = await seedQaVerdictLedgerIssue();
+    const earlyRunId = randomUUID();
+    const lateRunId = randomUUID();
+    await mkRun(earlyRunId, "2026-07-06T01:00:00.000Z");
+    await mkRun(lateRunId, "2026-07-06T02:00:00.000Z");
+    await db.insert(workflowTransitionEvents).values([
+      mkVerdictEvent("request_changes", earlyRunId, "2026-07-06T01:10:00.000Z", "Fix glossary."),
+      mkVerdictEvent("insufficient_evidence", lateRunId, "2026-07-06T02:10:00.000Z", "Need the registered source dataset to judge accuracy."),
+    ]);
+
+    const ledger = await hasWorkflowValidationCompletionLedger({ db, issue });
+    expect(ledger).toMatchObject({
+      isCandidate: true,
+      satisfied: false,
+      verdict: null,
+      insufficientEvidence: true,
+    });
+    expect(ledger.insufficientEvidenceReason).toContain("registered source dataset");
+  });
+
+  it("satisfies the completion gate when a later pass follows an insufficient_evidence verdict", async () => {
+    const { issue, mkRun, mkVerdictEvent } = await seedQaVerdictLedgerIssue();
+    const earlyRunId = randomUUID();
+    const lateRunId = randomUUID();
+    await mkRun(earlyRunId, "2026-07-06T01:00:00.000Z");
+    await mkRun(lateRunId, "2026-07-06T02:00:00.000Z");
+    await db.insert(workflowTransitionEvents).values([
+      mkVerdictEvent("insufficient_evidence", earlyRunId, "2026-07-06T01:10:00.000Z", "Need the registered source dataset to judge accuracy."),
+      mkVerdictEvent("pass", lateRunId, "2026-07-06T02:10:00.000Z", "Evidence provided; coverage verified."),
+    ]);
+
+    const ledger = await hasWorkflowValidationCompletionLedger({ db, issue });
+    expect(ledger).toMatchObject({
+      isCandidate: true,
+      satisfied: true,
+      verdict: "pass",
+      insufficientEvidence: false,
+      insufficientEvidenceReason: null,
     });
   });
 

@@ -45,14 +45,43 @@ export const workflowNonblockingAcceptanceSchema = z.object({
     .max(WORKFLOW_NONBLOCKING_LIMITATION_MAX_ITEMS),
 });
 
+/**
+ * [verdict abstention] 공식 workflow QA 판정 값. insufficient_evidence = "지금 판단 불가 — 필요 자료 명시".
+ *   pass/request_changes 만 완료 게이트를 만족시키며, insufficient_evidence 는 이벤트로 기록되지만
+ *   게이트 만족 목록에서는 제외된다(missing-block 과 별개 사유로 blocked).
+ */
+export const workflowValidationVerdictValueSchema = z.enum([
+  "pass",
+  "request_changes",
+  "insufficient_evidence",
+]);
+export type WorkflowValidationVerdictValue = z.infer<typeof workflowValidationVerdictValueSchema>;
+
 export const workflowVerdictSubmitSchema = z.object({
-  verdict: z.enum(["pass", "request_changes"]),
+  verdict: workflowValidationVerdictValueSchema,
   reason: z.string().trim().optional().nullable(),
   nonblockingAcceptance: workflowNonblockingAcceptanceSchema.optional(),
-}).refine(
-  (value) => !value.nonblockingAcceptance || value.verdict === "request_changes",
-  { message: "nonblockingAcceptance requires verdict=request_changes" },
-);
+}).superRefine((value, ctx) => {
+  // [qa-cap acceptance] nonblocking 분류는 request_changes verdict 와만 공존.
+  if (value.nonblockingAcceptance && value.verdict !== "request_changes") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["nonblockingAcceptance"],
+      message: "nonblockingAcceptance requires verdict=request_changes",
+    });
+  }
+  // [verdict abstention] 보류 판정은 어떤 증거가 빠졌는지 reason 에 반드시 명시해야 한다.
+  if (value.verdict === "insufficient_evidence") {
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+    if (reason.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reason"],
+        message: "reason is required when verdict=insufficient_evidence (state the missing evidence)",
+      });
+    }
+  }
+});
 
 export const missionPlanQaVerdictSubmitSchema = z.object({
   verdict: z.enum(["pass", "request_changes"]),

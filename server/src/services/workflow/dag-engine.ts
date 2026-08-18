@@ -860,7 +860,8 @@ function buildWorkflowApiCloseoutLines(input: {
     lines.push("- If this step publishes a public URL, register it with `POST /api/issues/{issueId}/workflow/artifacts` using `type: \"preview_url\"` and `url` before completion.");
   }
   if (input.requiresVerdict) {
-    lines.push("- Submit the official `PASS` or `REQUEST_CHANGES` verdict with `POST /api/issues/{issueId}/workflow/verdict` before completion.");
+    lines.push("- Submit the official `PASS`, `REQUEST_CHANGES`, or `INSUFFICIENT_EVIDENCE` verdict with `POST /api/issues/{issueId}/workflow/verdict` before completion.");
+    lines.push("- Use `INSUFFICIENT_EVIDENCE` only when the evidence needed to judge is genuinely missing; list what is missing in `reason` (required). It records an abstention — it does not satisfy this gate and does not trigger producer rework.");
   }
   lines.push("- Complete this workflow issue with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.");
   lines.push("- Use normal issue status/comment updates only if the Workflow API is unavailable or the issue is blocked.");

@@ -18,7 +18,7 @@ describe("buildPaperclipRuntimeBrief issue execution card", () => {
           verdict: {
             required: false,
             ledger: "workflow_validation_verdict",
-            allowed: ["PASS", "REQUEST_CHANGES"],
+            allowed: ["PASS", "REQUEST_CHANGES", "INSUFFICIENT_EVIDENCE"],
           },
           deliveryReadback: { required: true, marker: null },
         },
@@ -47,7 +47,7 @@ describe("buildPaperclipRuntimeBrief issue execution card", () => {
     expect(brief).toContain("Work product: required=true; outputDir=/runs/out/sector-rotation");
     expect(brief).toContain("marker=[ARTIFACT]: <absolute path>");
     expect(brief).toContain("Verdict: required=false; ledger=workflow_validation_verdict");
-    expect(brief).toContain("allowed=PASS, REQUEST_CHANGES");
+    expect(brief).toContain("allowed=PASS, REQUEST_CHANGES, INSUFFICIENT_EVIDENCE");
     expect(brief).toContain("Delivery readback: required=true");
     expect(brief).toContain("Workflow API closeout: register artifacts with /workflow/artifacts, register public URLs with /workflow/artifacts type=preview_url, complete with /workflow/complete");
     expect(brief).toContain("use the paperclip skill for request examples");
