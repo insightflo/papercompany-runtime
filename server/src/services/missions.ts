@@ -408,6 +408,32 @@ export type MissionPlanRevisionRequestedHandler = (input: {
   idempotencyKey: string;
 }) => Promise<unknown> | unknown;
 
+/**
+ * [terminal-run closeout bridge] 실행 단위(예: native workflow run)는 종료됐는데 mission 이 아직
+ *   active 인 경우 오너에게 종결 처리(판정 기록·plan 정합·oversight 종결)를 요청하는 깨움.
+ *   2026-08-17 GAZ 사고: run completed 이후 아무도 오너를 깨우지 않아 11시간 방치.
+ */
+export type MissionTerminalRunCloseoutWakeRequestedHandler = (input: {
+  mission: MissionRow;
+  run: { readonly id: string; readonly status: string };
+  planUnitKey: string;
+  oversightIssueId: string | null;
+  idempotencyKey: string;
+}) => Promise<unknown> | unknown;
+
+/**
+ * [dispatch-stall escalation] 오너의 retry_source_issue 결정은 기록됐으나 파견이 계속 실패
+ *   (not_requested / no-assignee)할 때 오너를 1회 재깨우는 콜백.
+ *   2026-08-17 GAZ 사고: 결정→파견 단절이 6시간 이상 무응답으로 방치.
+ */
+export type MissionOwnerDecisionDispatchStalledWakeRequestedHandler = (input: {
+  mission: MissionRow;
+  ownerActionIssue: typeof issues.$inferSelect;
+  sourceIssue: typeof issues.$inferSelect;
+  dispatchStatus: string;
+  idempotencyKey: string;
+}) => Promise<unknown> | unknown;
+
 export interface MissionServiceDeps {
   onOwnerActionCreated?: MissionOwnerActionCreatedHandler;
   onOwnerDecisionRetrySourceIssueApplied?: MissionOwnerDecisionRetrySourceIssueAppliedHandler;
@@ -417,6 +443,8 @@ export interface MissionServiceDeps {
   onPlanQaIssueCreated?: PlanQaWakeupHandler;
   onPlanSubmissionMissing?: MissionPlanSubmissionMissingHandler;
   onPlanRevisionRequested?: MissionPlanRevisionRequestedHandler;
+  onMissionTerminalRunCloseoutWakeRequested?: MissionTerminalRunCloseoutWakeRequestedHandler;
+  onOwnerDecisionDispatchStalledWakeRequested?: MissionOwnerDecisionDispatchStalledWakeRequestedHandler;
   /** Cancel a heartbeat run (kills the process + updates DB + releases issue lock). */
   cancelHeartbeatRun?: (runId: string) => Promise<unknown>;
 }

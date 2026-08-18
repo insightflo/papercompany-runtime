@@ -104,8 +104,9 @@ export function buildQaReworkCapDescription(input: {
   exhaustion: QaReworkCapExhaustion;
   missionTitle: string;
   workflowName: string;
+  rejectTrend?: { readonly count: number; readonly latestReason: string | null } | null;
 }): string {
-  const { keyMarker, exhaustion, missionTitle, workflowName } = input;
+  const { keyMarker, exhaustion, missionTitle, workflowName, rejectTrend } = input;
   return [
     "## QA rework cap exhausted — owner decision required",
     "",
@@ -117,6 +118,14 @@ export function buildQaReworkCapDescription(input: {
     `Producer: step ${exhaustion.producerStepId} (iteration ${exhaustion.producerIteration}/${exhaustion.maxIterations}, completed ${exhaustion.producerCompletedAt || "unknown"})`,
     `Producer source issue: ${exhaustion.producerIssueId ?? "(unknown)"}`,
     `QA: step ${exhaustion.qaStepId}`,
+    ...((rejectTrend && rejectTrend.count >= 2)
+      ? [
+        "",
+        `Consecutive QA rejects on this gate: ${rejectTrend.count}`,
+        "- 직전 재시도들도 같은 게이트에서 반려됐다. output 파일 패치가 아닌 원천(생성기/템플릿/스킬) 수준의 근본 원인을 먼저 의심하고, 근거를 확인한 뒤에만 retry_source_issue 를 승인할 것. (Repeated identical rejects — suspect a source-level root cause, not an output patch, before approving another retry.)",
+        ...(rejectTrend.latestReason ? [`- Latest QA defect: ${rejectTrend.latestReason}`] : []),
+      ]
+      : []),
     "",
     "The producer has exhausted its QA rework cap.",
     "The semantic QA step is still requesting changes. Automatic rework will not retry beyond this cap.",
@@ -163,6 +172,7 @@ export async function ensureQaReworkCapOversightIssue(input: {
   oversightIssue: IssueRow;
   exhaustion: QaReworkCapExhaustion;
   workflowName: string;
+  rejectTrend?: { readonly count: number; readonly latestReason: string | null } | null;
   createIssue: (companyId: string, data: IssueCreateInput) => Promise<IssueRow>;
   onOwnerActionCreated: MissionServiceDeps["onOwnerActionCreated"];
 }): Promise<EnsureQaCapResult | null> {
@@ -237,7 +247,7 @@ export async function ensureQaReworkCapOversightIssue(input: {
   }
 
   // 5. Create issue HIDDEN at INSERT time — no visible window even on crash.
-  const description = buildQaReworkCapDescription({ keyMarker, exhaustion, missionTitle: mission.title, workflowName });
+  const description = buildQaReworkCapDescription({ keyMarker, exhaustion, missionTitle: mission.title, workflowName, rejectTrend: input.rejectTrend ?? null });
   const parentId = oversightIssue.parentId ? undefined : oversightIssue.id;
   const rawIssue = await createIssue(mission.companyId, {
     assigneeAgentId: mission.ownerAgentId, description, missionId: mission.id,

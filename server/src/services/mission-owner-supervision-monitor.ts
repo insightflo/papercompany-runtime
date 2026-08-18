@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
+import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -18,6 +18,8 @@ export interface MissionOwnerSupervisionMonitorOptions {
   onPlanQaIssueCreated?: PlanQaWakeupHandler;
   onPlanSubmissionMissing?: MissionPlanSubmissionMissingHandler;
   onPlanRevisionRequested?: MissionPlanRevisionRequestedHandler;
+  onMissionTerminalRunCloseoutWakeRequested?: MissionTerminalRunCloseoutWakeRequestedHandler;
+  onOwnerDecisionDispatchStalledWakeRequested?: MissionOwnerDecisionDispatchStalledWakeRequestedHandler;
 }
 
 export function createMissionOwnerSupervisionMonitor(
@@ -43,6 +45,8 @@ export function createMissionOwnerSupervisionMonitor(
         onPlanQaIssueCreated: options.onPlanQaIssueCreated,
         onPlanSubmissionMissing: options.onPlanSubmissionMissing,
         onPlanRevisionRequested: options.onPlanRevisionRequested,
+        onMissionTerminalRunCloseoutWakeRequested: options.onMissionTerminalRunCloseoutWakeRequested,
+        onOwnerDecisionDispatchStalledWakeRequested: options.onOwnerDecisionDispatchStalledWakeRequested,
       }).runActiveMissionOwnerSupervision({
         staleAfterMinutes,
         applySafeActions,
