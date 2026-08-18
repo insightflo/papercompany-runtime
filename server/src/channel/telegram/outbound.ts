@@ -8,7 +8,7 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { channelConfigs, heartbeatRuns } from "@paperclipai/db";
 import { getChannelRegistry } from "../index.js";
 import { logger } from "../../middleware/logger.js";
@@ -27,6 +27,38 @@ const companyChatIds = new Map<string, number>();
  */
 export function registerChatId(companyId: string, chatId: number): void {
   companyChatIds.set(companyId, chatId);
+}
+
+/**
+ * [outbound persistence] channel_configs.configJson.telegramChatId 에 chatId 를 기록한다.
+ *   서버 재시작 시 인메모리 맵이 비어 아웃바운드가 조용히 드랍되던 결함(재시작 후 운영자가 봇에
+ *   다시 메시지할 때까지 무통지)의 수정. 변경 시에만 쓴다(모든 인바운드 메시지가 호출함).
+ *   채널 설정이 없는 회사는 인메모리 등록만으로 동작(기존 동작 유지). 실패는 알림 기능을
+ *   저하시키지 않도록 warn 로그로만 처리한다.
+ */
+export async function persistChatId(db: Db, companyId: string, chatId: number): Promise<void> {
+  try {
+    const [row] = await db
+      .select({ configJson: channelConfigs.configJson })
+      .from(channelConfigs)
+      .where(and(
+        eq(channelConfigs.companyId, companyId),
+        eq(channelConfigs.kind, "telegram"),
+      ))
+      .limit(1);
+    if (!row) return;
+    const existing = (row.configJson as { telegramChatId?: unknown } | null)?.telegramChatId;
+    if (existing === chatId) return;
+    await db
+      .update(channelConfigs)
+      .set({ configJson: { ...(row.configJson ?? {}), telegramChatId: chatId } })
+      .where(and(
+        eq(channelConfigs.companyId, companyId),
+        eq(channelConfigs.kind, "telegram"),
+      ));
+  } catch (err) {
+    logger.warn({ err, companyId, msg: "Failed to persist telegram chatId — outbound will remain in-memory only until restart" });
+  }
 }
 
 /**
@@ -247,6 +279,12 @@ export async function initOutboundNotifier(db: Db): Promise<void> {
 
   for (const config of enabledConfigs) {
     const companyId = config.companyId;
+    // [outbound persistence] 재시작 전에 저장된 chatId 로 인메모리 맵을 복원한다.
+    const persistedChatId = (config.configJson as { telegramChatId?: unknown } | null)?.telegramChatId;
+    if (typeof persistedChatId === "number" && Number.isFinite(persistedChatId) && !companyChatIds.has(companyId)) {
+      companyChatIds.set(companyId, persistedChatId);
+      logger.info({ msg: "Telegram chatId restored from channel config", companyId });
+    }
     const handler = buildOutboundHandler(db, companyId);
 
     try {
