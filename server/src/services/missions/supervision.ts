@@ -3,7 +3,7 @@
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
 import { agentWakeupRequests, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -42,6 +42,7 @@ import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapProducerIssueRef, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
+import { loadConsecutiveQaRejectTrend } from "./qa-rework-cap-oversight-detection.js";
 import {
   TERMINAL_FAILURE_RUN_STATUSES,
   classifyTerminalMissionContinuation,
@@ -259,6 +260,53 @@ async function recordRecoveryAction(input: {
         eq(workflowTransitionEvents.idempotencyKey, input.idempotencyKey),
       ));
   }
+}
+
+/**
+ * [supervision once-only claim] 감독 스윕이 "최초 1회"만 의미 있는 부수 효과(오너 재깨움 등)를 켤 때
+ *   쓰는 멱등 클레임. 첫 insert 가 이기면 true, 이후 스윕은 false. append-only(삭제 없음).
+ */
+async function claimSupervisionMarkerOnce(input: {
+  readonly db: Db;
+  readonly companyId: string;
+  readonly missionId: string;
+  readonly issueId: string | null;
+  readonly idempotencyKey: string;
+  readonly eventType: string;
+  readonly payload: Record<string, unknown>;
+}): Promise<boolean> {
+  const rows = await input.db.insert(workflowTransitionEvents).values({
+    companyId: input.companyId,
+    missionId: input.missionId,
+    issueId: input.issueId,
+    eventType: input.eventType,
+    layer: "mission_owner_recovery",
+    idempotencyKey: input.idempotencyKey,
+    payload: { kind: input.eventType, ...input.payload },
+  }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
+  return rows.length > 0;
+}
+
+/** [terminal-run closeout] 실행 단위의 종단 상태(이 상태에서 mission 이 아직 active 면 종결 브리지 대상). */
+const TERMINAL_CLOSEOUT_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * [escalate-suppressed watchdog] 최근(24h) 오너의 사람 상정(escalate/request_input) 결정이 존재하는지.
+ *   억제(live-wakeup 계열)가 지속되는 동안 사람 통지가 실제로 전달됐는지 의심해야 하는 근거.
+ */
+async function hasRecentHumanEscalationDecision(db: Db, companyId: string, missionId: string): Promise<boolean> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [row] = await db.select({ id: workflowTransitionEvents.id })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.missionId, missionId),
+      eq(workflowTransitionEvents.layer, "mission_owner_recovery"),
+      inArray(workflowTransitionEvents.decision, ["escalate", "request_input"]),
+      gte(workflowTransitionEvents.createdAt, since),
+    ))
+    .limit(1);
+  return Boolean(row);
 }
 // [final QA / mission validation owner recovery] retry 가 깨울 source issue 의 active workProduct 를
 //   company+mission+source-issue scope 로 명시적으로 읽는다(issueWorkProducts.companyId + issueId 와
@@ -504,6 +552,13 @@ export function createSupervision({ db, deps, ownerActions }: {
       });
       if (!continuation.terminal) {
         findings.push(`terminal_mission_human_operator_request_suppressed: ${input.label}; continuation remains (${continuation.suppressReason})`);
+        // [escalate-suppressed watchdog] 억제 사유가 live-wakeup 계열인데 최근(24h) 사람 상정(escalate/
+        //   request_input) 결정이 있으면, 실제 사람 통지가 전달됐는지 의심해야 한다(2026-08-17 GAZ:
+        //   suppress 상태로 11시간 무통지). 코멘트 가시성이라도 유지한다.
+        if (continuation.suppressReason === "live-wakeup-or-accepted-source-resume"
+          && await hasRecentHumanEscalationDecision(db, mission.companyId, mission.id)) {
+          findings.push(`escalate_pending_suppressed_watchdog: ${input.label}; a recent escalate/request_input owner decision is pending while continuation suppression (${continuation.suppressReason}) holds — verify the human notification was actually delivered`);
+        }
         return;
       }
       const ownerAction = input.ownerAction ?? await input.ensureOwnerAction?.() ?? null;
@@ -566,6 +621,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           oversightIssue,
           exhaustion,
           workflowName,
+          rejectTrend: await loadConsecutiveQaRejectTrend(db, mission.companyId, exhaustion.qaIssueId),
           createIssue: ownerActions.createMissionOwnerActionIssue,
           onOwnerActionCreated: deps.onOwnerActionCreated,
         });
@@ -575,6 +631,13 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
         qaCapOwnerActionByWorkflowRunId.set(exhaustion.workflowRunId, result.issue);
         findings.push(`qa_rework_cap_oversight: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} qa=${exhaustion.qaStepId} generation=${exhaustion.producerIteration}/${exhaustion.maxIterations}${result.created ? " issue_created" : " issue_exists"} issue=${result.issue.identifier ?? result.issue.id}`);
+        // [repeated-defect trend] 같은 QA gate 의 연속 반려 추세 — 오너 도장 승인 방지 가시화.
+        if (exhaustion.qaIssueId) {
+          const trend = await loadConsecutiveQaRejectTrend(db, mission.companyId, exhaustion.qaIssueId);
+          if (trend.count >= 3) {
+            findings.push(`qa_repeated_reject_trend: run=${exhaustion.workflowRunId} qa issue=${exhaustion.qaIssueId} consecutive_rejects=${trend.count} — producer re-fixes are not landing; suspect a source-level root cause (renderer/template/skill), not another output patch`);
+          }
+        }
       } catch (err) {
         logger.warn({ err, missionId: mission.id, workflowRunId: exhaustion.workflowRunId }, "qa-cap-oversight ensure failed — will retry next supervision tick");
         findings.push(`qa_rework_cap_oversight_error: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} qa=${exhaustion.qaStepId} — ${err instanceof Error ? err.message : "unknown"}`);
@@ -1755,6 +1818,26 @@ export function createSupervision({ db, deps, ownerActions }: {
                       reason: `owner retry already applied but wakeup undispatchable (${sourceCandidateLabel} has no assignee); reassign or replan`,
                       safeToAutoApply: false,
                     });
+                    // [dispatch-stall escalation] 결정은 기록됐으나 파견 불능이 지속되면 오너를 1회 재깨운다(멱등 마커).
+                    if (deps.onOwnerDecisionDispatchStalledWakeRequested) {
+                      const stalledKey = `mission-owner-decision-stalled-wake:${mission.id}:${issue.id}`;
+                      const claimed = await claimSupervisionMarkerOnce({
+                        db, companyId: mission.companyId, missionId: mission.id, issueId: issue.id,
+                        idempotencyKey: stalledKey, eventType: "mission_owner_decision_stalled_wake",
+                        payload: { sourceIssueId: sourceCandidate.id, dispatchStatus: "no_assignee" },
+                      });
+                      if (claimed) {
+                        try {
+                          await deps.onOwnerDecisionDispatchStalledWakeRequested({
+                            mission, ownerActionIssue: issue, sourceIssue: sourceCandidate,
+                            dispatchStatus: "no_assignee", idempotencyKey: stalledKey,
+                          });
+                          findings.push(`owner_decision_dispatch_stalled_wake_requested: ${label} source=${sourceCandidateLabel} dispatch=no_assignee — owner re-woken once to fix the undispatchable retry`);
+                        } catch (err) {
+                          logger.warn({ err, missionId: mission.id, issueId: issue.id }, "owner decision stalled wake callback failed");
+                        }
+                      }
+                    }
                   } else if (input.dispatchOwnerDecisionWakeups && deps.onOwnerDecisionRetrySourceIssueApplied) {
                     try {
                       const wakeupResult = await deps.onOwnerDecisionRetrySourceIssueApplied({
@@ -1824,6 +1907,26 @@ export function createSupervision({ db, deps, ownerActions }: {
                           reason: `owner retry already applied but wakeup dispatch returned ${redispatchStatus}; native resume link missing — replan or operator action required`,
                           safeToAutoApply: false,
                         });
+                        // [dispatch-stall escalation] 재발사가 계속 실패하면 오너를 1회 재깨운다(멱등 마커).
+                        if (deps.onOwnerDecisionDispatchStalledWakeRequested) {
+                          const stalledKey = `mission-owner-decision-stalled-wake:${mission.id}:${issue.id}`;
+                          const claimed = await claimSupervisionMarkerOnce({
+                            db, companyId: mission.companyId, missionId: mission.id, issueId: issue.id,
+                            idempotencyKey: stalledKey, eventType: "mission_owner_decision_stalled_wake",
+                            payload: { sourceIssueId: sourceCandidate.id, dispatchStatus: redispatchStatus },
+                          });
+                          if (claimed) {
+                            try {
+                              await deps.onOwnerDecisionDispatchStalledWakeRequested({
+                                mission, ownerActionIssue: issue, sourceIssue: sourceCandidate,
+                                dispatchStatus: redispatchStatus, idempotencyKey: stalledKey,
+                              });
+                              findings.push(`owner_decision_dispatch_stalled_wake_requested: ${label} source=${sourceCandidateLabel} dispatch=${redispatchStatus} — owner re-woken once to fix the undispatchable retry`);
+                            } catch (err) {
+                              logger.warn({ err, missionId: mission.id, issueId: issue.id }, "owner decision stalled wake callback failed");
+                            }
+                          }
+                        }
                       }
                     } catch (err) {
                       const message = err instanceof Error ? err.message : String(err);
@@ -2454,6 +2557,39 @@ export function createSupervision({ db, deps, ownerActions }: {
         const runtimeUnit = executionSnapshot.units.find((unit) => executionUnitKey(unit) === key);
         if (!runtimeUnit || normalizedPlanStatus(runtimeUnit.status) === expectedStatus) continue;
         findings.push(`rule_mismatch: plan unit=${key} status=${expectedStatus} runtime_status=${runtimeUnit.status}`);
+        // [terminal-run closeout bridge] 실행 단위는 종단 상태인데 plan 이 아직 running 이고 mission 이
+        //   active 면(위 settlement 가 정리하지 못한 상황), 오너에게 종결 처리를 1회 요청한다(멱등 마커).
+        //   2026-08-17 GAZ: run completed 이후 오너가 깨어나지 않아 mission/oversight 가 11시간 방치.
+        const runtimeStatus = normalizedPlanStatus(runtimeUnit.status);
+        if (
+          mission.status === "active"
+          && expectedStatus === "running"
+          && runtimeStatus !== null
+          && TERMINAL_CLOSEOUT_RUN_STATUSES.has(runtimeStatus)
+          && deps.onMissionTerminalRunCloseoutWakeRequested
+        ) {
+          const closeoutKey = `mission-terminal-closeout:${mission.id}:${runtimeUnit.sourceRef.id}:${runtimeStatus}`;
+          const claimed = await claimSupervisionMarkerOnce({
+            db, companyId: mission.companyId, missionId: mission.id,
+            issueId: oversightIssue?.id ?? null,
+            idempotencyKey: closeoutKey, eventType: "mission_terminal_closeout_wake",
+            payload: { planUnitKey: key, runStatus: runtimeStatus, sourceRefId: runtimeUnit.sourceRef.id },
+          });
+          if (claimed) {
+            try {
+              await deps.onMissionTerminalRunCloseoutWakeRequested({
+                mission,
+                run: { id: runtimeUnit.sourceRef.id, status: runtimeStatus },
+                planUnitKey: key,
+                oversightIssueId: oversightIssue?.id ?? null,
+                idempotencyKey: closeoutKey,
+              });
+              findings.push(`workflow_run_terminal_closeout_wake_requested: run=${runtimeUnit.sourceRef.id} status=${runtimeStatus} — mission still active after terminal run; owner asked to reconcile and close out`);
+            } catch (err) {
+              logger.warn({ err, missionId: mission.id }, "mission terminal closeout wake callback failed");
+            }
+          }
+        }
       }
     }
 

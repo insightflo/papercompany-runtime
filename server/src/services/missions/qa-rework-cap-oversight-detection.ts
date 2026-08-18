@@ -90,6 +90,49 @@ async function loadOfficialVerdictsByStepRunId(
   return result;
 }
 
+export interface QaRejectTrend {
+  /** 최신 공식 판정부터 역방향으로 연속한 request_changes 개수(pass 등장 시 중단). */
+  readonly count: number;
+  /** 최신 request_changes 판정의 reason(payload, bounded). 없으면 null. */
+  readonly latestReason: string | null;
+}
+
+/**
+ * [repeated-defect trend] QA gate 이슈의 최신 공식 판정부터 연속 반려(request_changes) 횟수.
+ *   같은 결함이 반복되면 생산자 output 패치가 아니라 원천/템플릿 수준 근본 원인을 의심해야 한다
+ *   (2026-08-17 GAZ WCAG 사고: 같은 반려 6연속 — 오너가 추세를 못 보고 동일 재시도만 반복 승인).
+ *   권위 필터는 loadOfficialVerdictsByStepRunId 와 동일(reason=workflow_api + heartbeatRunId non-null).
+ */
+export async function loadConsecutiveQaRejectTrend(
+  db: Db, companyId: string, qaIssueId: string | null,
+): Promise<QaRejectTrend> {
+  if (!qaIssueId) return { count: 0, latestReason: null };
+  const rows = await db.select({
+    verdict: workflowTransitionEvents.verdict,
+    payload: workflowTransitionEvents.payload,
+    createdAt: workflowTransitionEvents.createdAt,
+  }).from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId),
+    eq(workflowTransitionEvents.issueId, qaIssueId),
+    eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+    eq(workflowTransitionEvents.reason, "workflow_api"),
+    isNotNull(workflowTransitionEvents.heartbeatRunId),
+  )).orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id)).limit(12);
+  let count = 0;
+  let latestReason: string | null = null;
+  for (const row of rows) {
+    if (row.verdict !== "request_changes") break;
+    count += 1;
+    if (count === 1) {
+      const reason = (row.payload as Record<string, unknown> | null)?.reason;
+      latestReason = typeof reason === "string" && reason.trim().length > 0
+        ? reason.trim().slice(0, 400)
+        : null;
+    }
+  }
+  return { count, latestReason };
+}
+
 /** Latest wakeup-bound heartbeat per exact workflow step-run (companyId-scoped on both sides). */
 async function loadLatestHeartbeatPerStepRun(
   db: Db, companyId: string, stepRunIds: string[],
