@@ -5447,12 +5447,16 @@ export function heartbeatService(db: Db) {
     status: string;
     linkedRunIds?: Array<string | null | undefined>;
   }) {
+    // [run honesty] issue→blocked 로 진행 중 런이 잘리는 것은 통제판 결정이지 에이전트/어댑트 결함이
+    //   아니다(2026-08-19 GAZ 실측: 오너 종결 진행 중이던 리뷰 런이 failed+issue_status_blocked 로
+    //   기록되어 모니터링을 오염했고, finalizeAgentStatus("failed") 가 에이전트를 error 로 마킹해
+    //   오너의 재할당 판단까지 흔들었다). cancelled + errorCode 유지로 사유는 구분 가능하게 둔다.
     const issueTerminalStatus = input.status === "done"
       ? "succeeded"
       : input.status === "cancelled"
         ? "cancelled"
         : input.status === "blocked"
-          ? "failed"
+          ? "cancelled"
           : null;
     if (!issueTerminalStatus) {
       return { finalized: 0, runIds: [] as string[] };
