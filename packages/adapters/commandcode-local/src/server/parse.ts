@@ -77,6 +77,154 @@ function readErrorText(error: unknown): string {
 }
 
 /**
+ * [run_end recovery] result 줄 부재 시 차선 권위로 승격할 수 있는 run_end 프레임.
+ *   CLI 1.26.0: 거대한 run_end(nextState.messages 원문) 출력 중 프로세스가 끝나면
+ *   always-last result 줄이 아예 출력되지 않는다(2026-08-19 A1 실측: missing_result 실패 10건 전부 동일 패턴).
+ *   이때 실행은 실제로 완료됐다(finalText + stopReason + usage 존재). 온전한 run_end 하나만
+ *   success 회복 근거로 인정한다 — 잘린 run_end/부분 finalText 는 여전히 fail-closed(규칙 8).
+ */
+export interface RunEndRecovery {
+  readonly recovered: boolean;
+  readonly finalMessage: string | null;
+  readonly stopReason: string | null;
+  readonly sessionId: string | null;
+  readonly usage: ParsedCommandCodeOutput["usage"] | null;
+}
+
+const EMPTY_RUN_END_RECOVERY: RunEndRecovery = {
+  recovered: false, finalMessage: null, stopReason: null, sessionId: null, usage: null,
+};
+
+function readAssistantTextFromMessageEnd(event: Record<string, unknown>): string | null {
+  // 프레임 형태 관용: {content:[...]} 직속과 {message:{role,content:[...]}} 래핑 모두 수용.
+  const message = typeof event.message === "object" && event.message !== null
+    ? event.message as Record<string, unknown>
+    : event;
+  const content = message.content;
+  if (!Array.isArray(content)) return null;
+  let text: string | null = null;
+  for (const block of content) {
+    if (typeof block === "object" && block !== null
+      && (block as { type?: unknown }).type === "text"
+      && typeof (block as { text?: unknown }).text === "string") {
+      text = (block as { text: string }).text;
+    }
+  }
+  return text !== null && text.trim().length > 0 ? text : null;
+}
+
+function messageEndRole(event: Record<string, unknown>): string | null {
+  const message = typeof event.message === "object" && event.message !== null
+    ? event.message as Record<string, unknown>
+    : event;
+  return typeof message.role === "string" ? message.role : null;
+}
+
+function messageEndHasToolUse(event: Record<string, unknown>): boolean {
+  const message = typeof event.message === "object" && event.message !== null
+    ? event.message as Record<string, unknown>
+    : event;
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((block) =>
+    typeof block === "object" && block !== null && (block as { type?: unknown }).type === "tool_use");
+}
+
+/**
+ * [run-tail recovery] result/run_end 모두 없거나 잘렸을 때의 2차 차선 권위.
+ *   마지막 턴 종료(turn_end, hadToolCalls=false)와 그 직전 message_end(text 블록 있고
+ *   tool_use 블록 없음 = 도구 없이 답변을 마친 최종 발화)가 온전하면 실행 완료의 기계적
+ *   증거로 인정한다(2026-08-19 A1 실측 10건 전부 이 형태: 거대 run_end 출력 절단 —
+ *   message_end/turn_end 는 생존). 어느 하나라도 없거나 tool_use 가 남아 있으면
+ *   회복하지 않는다(규칙 8 fail-closed).
+ */
+export function extractRunTailRecovery(stdout: string): RunEndRecovery {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  let lastTurnEndUsage: ParsedCommandCodeOutput["usage"] | null = null;
+  let lastTurnEndHadToolCalls = true;
+  let lastAssistantText: string | null = null;
+  let turnEndFound = false;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!.trim();
+    if (!line.startsWith('{"type":"event"')) continue;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      continue; // 잘린 줄은 권위 없음 — 계속 역주행
+    }
+    const event = (frame as { event?: unknown }).event;
+    if (typeof event !== "object" || event === null) continue;
+    const ev = event as { type?: unknown };
+    if (!turnEndFound) {
+      if (ev.type === "turn_end") {
+        const usage = readUsage((ev as { usage?: unknown }).usage);
+        if (usage) {
+          lastTurnEndUsage = usage;
+          lastTurnEndHadToolCalls = (ev as { hadToolCalls?: unknown }).hadToolCalls === true;
+          turnEndFound = true;
+        }
+      }
+      continue;
+    }
+    // turn_end 이후(스트림상 이전) 첫 온전한 message_end = 그 턴의 최종 발화 후보.
+    if (ev.type === "message_end") {
+      const text = readAssistantTextFromMessageEnd(ev as unknown as Record<string, unknown>);
+      const hasToolUse = messageEndHasToolUse(ev as unknown as Record<string, unknown>);
+      if (text && !hasToolUse) {
+        lastAssistantText = text;
+        break;
+      }
+      // tool_use 포함 message_end 는 중간 발화 — 더 이전의 최종 발화를 찾는다.
+    }
+  }
+  if (!turnEndFound || !lastTurnEndUsage || !lastAssistantText || lastTurnEndHadToolCalls) {
+    return EMPTY_RUN_END_RECOVERY;
+  }
+  return {
+    recovered: true,
+    finalMessage: lastAssistantText,
+    stopReason: "end_turn",
+    sessionId: null,
+    usage: lastTurnEndUsage,
+  };
+}
+
+export function extractRunEndRecovery(stdout: string): RunEndRecovery {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!.trim();
+    if (!line.startsWith('{"type":"event"')) continue;
+    // 후미부터 역주행: 첫 번째로 만나는 온전한 run_end 프레임만 후보로 검증한다.
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      continue; // 잘린 줄 — 권위 없음
+    }
+    const event = (frame as { event?: unknown }).event;
+    if (typeof event !== "object" || event === null) continue;
+    const ev = event as { type?: unknown; result?: unknown };
+    if (ev.type !== "run_end") continue;
+    const result = ev.result;
+    if (typeof result !== "object" || result === null) continue;
+    const r = result as { finalText?: unknown; stopReason?: unknown; usage?: unknown; sessionId?: unknown };
+    const finalText = typeof r.finalText === "string" ? r.finalText.trim() : "";
+    if (finalText.length === 0) continue;
+    const usage = readUsage(r.usage);
+    if (!usage) continue;
+    return {
+      recovered: true,
+      finalMessage: finalText,
+      stopReason: typeof r.stopReason === "string" ? r.stopReason : null,
+      sessionId: typeof r.sessionId === "string" ? r.sessionId : null,
+      usage,
+    };
+  }
+  return EMPTY_RUN_END_RECOVERY;
+}
+
+/**
  * Parse the documented Command Code headless NDJSON stream.
  *
  * Outer frames: `{"type":"event","event":{...AgentEvent...}}` and one

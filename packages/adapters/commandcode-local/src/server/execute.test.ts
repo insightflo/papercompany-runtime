@@ -279,3 +279,78 @@ process.exit(0);
     }
   });
 });
+
+describe("commandcode execute — run_end recovery", () => {
+  it("recovers a successful outcome when the result line is missing but a complete run_end frame exists", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cmd-exec-runend-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    // A1 실측 패턴 재현: run_end 는 완전, result 줄은 없음(절단).
+    const runEnd = JSON.stringify({
+      type: "event",
+      event: {
+        type: "run_end",
+        result: {
+          finalText: "Work finished and the artifact was registered.",
+          stopReason: "end_turn",
+          turnCount: 2,
+          usage: { inputTokens: 500, outputTokens: 40, cacheReadTokens: 300, cacheWriteTokens: 10 },
+        },
+      },
+    });
+    const logs: string[] = [];
+    await writeFakeCmd(commandPath, { lines: [runEnd] });
+    const ctx = buildCtx({}, { command: commandPath, cwd: workspace, capture: capturePath });
+    (ctx as { onLog: (stream: string, chunk: string) => Promise<void> }).onLog = async (stream: string, chunk: string) => {
+      if (stream === "stdout" && chunk.includes("[paperclip]")) logs.push(chunk);
+    };
+    const result = await execute(ctx as never);
+    expect(result.errorMessage).toBeNull();
+    expect(result.errorCode).toBeNull();
+    expect(result.usage?.inputTokens).toBe(500);
+    expect(result.usage?.cachedInputTokens).toBe(300);
+    expect(result.summary).toContain("Work finished");
+    expect(logs.join("")).toContain("recovered final outcome from the complete run_end frame");
+  });
+
+  it("stays fail-closed when the run_end frame itself is truncated", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cmd-exec-runend-trunc-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    const runEnd = JSON.stringify({
+      type: "event",
+      event: { type: "run_end", result: { finalText: "partial", stopReason: "end_turn", usage: { inputTokens: 5, outputTokens: 1 } } },
+    });
+    await writeFakeCmd(commandPath, { lines: [runEnd.slice(0, runEnd.length - 40)] });
+    const ctx = buildCtx({}, { command: commandPath, cwd: workspace, capture: capturePath });
+    const result = await execute(ctx as never);
+    expect(result.errorCode).toBe("commandcode_missing_result");
+    expect(result.errorMessage).toContain("without a final result line");
+  });
+});
+
+  it("recovers via turn-tail when the run_end frame itself is truncated (A1 field pattern)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cmd-exec-runtail-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    // 실측 형태: 최종 text-only message_end → turn_end(hadToolCalls=false) → 잘린 run_end. result 줄 없음.
+    const frames = [
+      JSON.stringify({ type: "event", event: { type: "message_end", content: [{ type: "text", text: "Submitted the plan and saved the document." }] } }),
+      JSON.stringify({ type: "event", event: { type: "turn_end", turnNumber: 2, hadToolCalls: false, usage: { inputTokens: 700, outputTokens: 60, cacheReadTokens: 400, cacheWriteTokens: 20 } } }),
+      JSON.stringify({ type: "event", event: { type: "run_end", result: { finalText: "Submitted the plan", stopReason: "end_turn", usage: { inputTokens: 700, outputTokens: 60 } } } }).slice(0, -30),
+    ];
+    await writeFakeCmd(commandPath, { lines: frames });
+    const ctx = buildCtx({}, { command: commandPath, cwd: workspace, capture: capturePath });
+    const result = await execute(ctx as never);
+    expect(result.errorMessage).toBeNull();
+    expect(result.errorCode).toBeNull();
+    expect(result.usage?.inputTokens).toBe(700);
+    expect(result.usage?.cachedInputTokens).toBe(400);
+    expect(result.summary).toContain("Submitted the plan");
+  });

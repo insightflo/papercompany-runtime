@@ -17,7 +17,7 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import type { ParsedCommandCodeOutput } from "./parse.js";
-import { isCommandCodeUnknownSessionError, parseCommandCodeJsonl } from "./parse.js";
+import { extractRunEndRecovery, extractRunTailRecovery, isCommandCodeUnknownSessionError, parseCommandCodeJsonl } from "./parse.js";
 import {
   buildCommandCodePermissionArgs,
   buildCommandCodeRunEnv,
@@ -268,7 +268,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const initial = await runAttempt(resumeId);
-  const initialOutcome = classifyOutcome(initial.parsed, initial.proc.exitCode);
+  let initialOutcome = classifyOutcome(initial.parsed, initial.proc.exitCode);
+
+  // [run_end/run-tail recovery] result 줄 부재(missing_result)지만 스트림 꼬리가 실행 완료를
+  //   증명하면 success 로 회복한다. 1차: 온전한 run_end 프레임. 2차: 마지막 turn_end(hadToolCalls
+  //   없음) + 그 직전 text-only message_end — CLI 1.26.0 이 거대 run_end 출력 중 끊기는 사례
+  //   (2026-08-19 A1 실측 10건 전부). 회복 시 finalText/usage/sessionId 를 반영해 청구·요약·
+  //   세션 연속이 정확해진다. 그 외는 기존대로 fail-closed(규칙 8).
+  if (initialOutcome.kind === "missing_result") {
+    const recovery = extractRunEndRecovery(initial.proc.stdout);
+    const tail = recovery.recovered ? recovery : extractRunTailRecovery(initial.proc.stdout);
+    if (tail.recovered) {
+      const recoverySource = recovery.recovered ? "complete run_end frame" : "turn_end + final message_end tail";
+      if (tail.finalMessage !== null) {
+        initial.parsed.finalMessage = tail.finalMessage;
+        initial.parsed.messages.push(tail.finalMessage);
+      }
+      await onLog("stdout", `[paperclip] Command Code result line missing; recovered final outcome from the ${recoverySource} (stopReason=${tail.stopReason ?? "unknown"}).\n`);
+      initial.parsed.subtype = "success";
+      initial.parsed.stopReason = tail.stopReason;
+      if (tail.sessionId) initial.parsed.sessionId = tail.sessionId;
+      if (tail.usage) initial.parsed.usage = tail.usage;
+      initialOutcome = classifyOutcome(initial.parsed, initial.proc.exitCode);
+    }
+  }
 
   // Stale-session recovery: retry fresh, then preserve any new session id
   // returned by the retry; clear only when the retry produced no new session.
