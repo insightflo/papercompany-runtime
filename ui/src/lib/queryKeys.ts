@@ -145,6 +145,8 @@ export const queryKeys = {
     ["costs", companyId, from, to] as const,
   usageByProvider: (companyId: string, from?: string, to?: string) =>
     ["usage-by-provider", companyId, from, to] as const,
+  providerModelOutcomes: (companyId: string, from?: string, to?: string) =>
+    ["provider-model-outcomes", companyId, from, to] as const,
   usageByBiller: (companyId: string, from?: string, to?: string) =>
     ["usage-by-biller", companyId, from, to] as const,
   financeSummary: (companyId: string, from?: string, to?: string) =>

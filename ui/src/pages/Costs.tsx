@@ -23,6 +23,7 @@ import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
 import { ProviderQuotaCard } from "../components/ProviderQuotaCard";
+import { ProviderOutcomesCard } from "../components/ProviderOutcomesCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
@@ -319,6 +320,14 @@ export function Costs() {
     enabled: !!selectedCompanyId && mainTab === "billers",
     refetchInterval: 30_000,
     staleTime: 10_000,
+  });
+
+  const { data: providerOutcomeData } = useQuery({
+    queryKey: queryKeys.providerModelOutcomes(companyId, from || undefined, to || undefined),
+    queryFn: () => costsApi.providerModelOutcomes(companyId, from || undefined, to || undefined),
+    enabled: !!selectedCompanyId && customReady && mainTab === "providers",
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
 
   const { data: windowData } = useQuery({
@@ -953,6 +962,7 @@ export function Costs() {
             <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>
           ) : (
             <>
+              <ProviderOutcomesCard rows={providerOutcomeData ?? []} />
               <Tabs value={effectiveProvider} onValueChange={setActiveProvider}>
                 <PageTabBar items={providerTabItems} value={effectiveProvider} />
 

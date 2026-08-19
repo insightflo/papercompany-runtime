@@ -11,6 +11,7 @@ import type {
   FinanceByKind,
   FinanceEvent,
   ProviderQuotaResult,
+  ProviderModelOutcomeRow,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -33,6 +34,8 @@ export const costsApi = {
     api.get<CostByProject[]>(`/companies/${companyId}/costs/by-project${dateParams(from, to)}`),
   byProvider: (companyId: string, from?: string, to?: string) =>
     api.get<CostByProviderModel[]>(`/companies/${companyId}/costs/by-provider${dateParams(from, to)}`),
+  providerModelOutcomes: (companyId: string, from?: string, to?: string) =>
+    api.get<ProviderModelOutcomeRow[]>(`/companies/${companyId}/costs/provider-model-outcomes${dateParams(from, to)}`),
   byBiller: (companyId: string, from?: string, to?: string) =>
     api.get<CostByBiller[]>(`/companies/${companyId}/costs/by-biller${dateParams(from, to)}`),
   financeSummary: (companyId: string, from?: string, to?: string) =>

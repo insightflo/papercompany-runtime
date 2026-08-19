@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, isNotNull, lt, lte, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, companies, costEvents, issues, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 
@@ -192,6 +192,91 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .where(and(...conditions))
         .groupBy(costEvents.provider, costEvents.biller, costEvents.billingType, costEvents.model)
         .orderBy(desc(sql`coalesce(sum(${costEvents.costCents}), 0)::int`));
+    },
+
+    /**
+     * Route memory: run outcomes + latency + cost per (provider, model).
+     *
+     * Joins cost_events to heartbeat_runs so each row answers, for runs that
+     * reported provider usage in the range: how many ran, how many succeeded /
+     * failed / timed out, run-time percentiles, and cost per successful run.
+     * Runs without any cost event (e.g. pure-local tooling) are not part of
+     * this population by design — they are not provider/model route choices.
+     *
+     * A run whose events span multiple providers/models contributes one row
+     * per (provider, model) slice it actually used.
+     */
+    providerModelOutcomes: async (companyId: string, range?: CostDateRange) => {
+      const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+
+      // Per-run usage slice: collapse multiple cost events of one run on the
+      // same (provider, model) into a single row so run counts and duration
+      // percentiles are not double-counted.
+      const runUsage = db
+        .select({
+          provider: costEvents.provider,
+          model: costEvents.model,
+          runId: heartbeatRuns.id,
+          status: heartbeatRuns.status,
+          startedAt: heartbeatRuns.startedAt,
+          finishedAt: heartbeatRuns.finishedAt,
+          costCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int`.as("cost_cents"),
+          inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::int`.as("input_tokens"),
+          cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::int`.as("cached_input_tokens"),
+          outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::int`.as("output_tokens"),
+          lastEventAt: sql<Date>`max(${costEvents.occurredAt})`.as("last_event_at"),
+        })
+        .from(costEvents)
+        .innerJoin(heartbeatRuns, eq(costEvents.heartbeatRunId, heartbeatRuns.id))
+        .where(and(...conditions))
+        .groupBy(
+          costEvents.provider,
+          costEvents.model,
+          heartbeatRuns.id,
+          heartbeatRuns.status,
+          heartbeatRuns.startedAt,
+          heartbeatRuns.finishedAt,
+        )
+        .as("run_usage");
+
+      const durationSec = sql<number>`extract(epoch from (${runUsage.finishedAt} - ${runUsage.startedAt}))`;
+      const succeededCount = sql<number>`count(*) filter (where ${runUsage.status} = 'succeeded')::int`;
+
+      const rows = await db
+        .select({
+          provider: runUsage.provider,
+          model: runUsage.model,
+          runs: sql<number>`count(*)::int`,
+          succeededRuns: succeededCount,
+          failedRuns: sql<number>`count(*) filter (where ${runUsage.status} = 'failed')::int`,
+          timedOutRuns: sql<number>`count(*) filter (where ${runUsage.status} = 'timed_out')::int`,
+          cancelledRuns: sql<number>`count(*) filter (where ${runUsage.status} = 'cancelled')::int`,
+          otherRuns: sql<number>`(count(*) - count(*) filter (where ${runUsage.status} in ('succeeded', 'failed', 'timed_out', 'cancelled')))::int`,
+          successRate: sql<number>`round(coalesce(${succeededCount}::numeric / nullif(count(*), 0), 0), 4)`,
+          medianDurationSec: sql<number>`coalesce(round(percentile_cont(0.5) within group (order by ${durationSec})), 0)::int`,
+          p95DurationSec: sql<number>`coalesce(round(percentile_cont(0.95) within group (order by ${durationSec})), 0)::int`,
+          costCents: sql<number>`coalesce(sum(${runUsage.costCents}), 0)::int`,
+          inputTokens: sql<number>`coalesce(sum(${runUsage.inputTokens}), 0)::int`,
+          cachedInputTokens: sql<number>`coalesce(sum(${runUsage.cachedInputTokens}), 0)::int`,
+          outputTokens: sql<number>`coalesce(sum(${runUsage.outputTokens}), 0)::int`,
+          costPerSucceededRunCents: sql<number>`coalesce(round(sum(${runUsage.costCents})::numeric / nullif(${succeededCount}, 0), 2), 0)::float8`,
+          lastOccurredAt: sql<Date>`max(${runUsage.lastEventAt})`,
+        })
+        .from(runUsage)
+        .groupBy(runUsage.provider, runUsage.model)
+        .orderBy(desc(sql`count(*)`));
+
+      return rows.map((row) => ({
+        ...row,
+        successRate: Number(row.successRate),
+        costPerSucceededRunCents: Number(row.costPerSucceededRunCents),
+        lastOccurredAt:
+          row.lastOccurredAt instanceof Date
+            ? row.lastOccurredAt.toISOString()
+            : String(row.lastOccurredAt),
+      }));
     },
 
     byBiller: async (companyId: string, range?: CostDateRange) => {
