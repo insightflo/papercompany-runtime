@@ -100,7 +100,9 @@ function buildOutboundHandler(db: Db, companyId: string) {
         msg: "Failed to send Telegram outbound notification",
         companyId,
         eventType: event.type,
-        error: err,
+        error: err instanceof Error
+          ? `${err.name}: ${err.message}`
+          : String(err),
       });
     }
   };

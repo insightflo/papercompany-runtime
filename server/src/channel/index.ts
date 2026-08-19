@@ -10,6 +10,7 @@
  */
 
 import type { Db } from "@paperclipai/db";
+import { setDefaultAutoSelectFamily } from "node:net";
 import { createTelegramBot, loadTelegramBotConfigs, type TelegramSender, type TelegramBot } from "./telegram/bot.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { logger } from "../middleware/logger.js";
@@ -36,6 +37,13 @@ export class ChannelRegistry {
   async start(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
+
+    // IPv6-less hosts (Oracle A1): Node's default autoSelectFamily (Happy Eyeballs)
+    // intermittently kills NEW outbound connections with ETIMEDOUT at the 250ms
+    // attempt timeout — 2026-08-19 A1 probe: 7/12 fresh TLS connections failed with
+    // it enabled, 12/12 succeeded with it disabled (TCP itself was 15/15 OK).
+    // This server has no global IPv6 route, so sequential connect by DNS order is safe.
+    setDefaultAutoSelectFamily(false);
 
     await this.startTelegramBots();
     this.subscribeToLiveEvents();

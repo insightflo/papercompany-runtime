@@ -26,6 +26,34 @@ const TELEGRAM_API_BASE = "https://api.telegram.org";
 const LONG_POLL_TIMEOUT = 25; // seconds — Telegram long poll
 const JWT_TTL_SECONDS = 60 * 60; // 1 hour
 const JWT_REFRESH_BEFORE_SECONDS = 5 * 60; // 5 minutes before expiry
+const TELEGRAM_API_MAX_ATTEMPTS = 3;
+const TELEGRAM_RETRY_BASE_DELAY_MS = 500;
+
+/**
+ * Telegram API error with a retryability classification.
+ * Network-level failures and server-side errors (5xx/429) are retryable;
+ * client errors (4xx — bad token, unknown chat) are not.
+ */
+class TelegramApiError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = "TelegramApiError";
+  }
+}
+
+/**
+ * Serialize an error for structured logs — JSON.stringify(Error) yields `{}`.
+ */
+function errorSummary(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code ? `${err.name} [${code}]: ${err.message}` : `${err.name}: ${err.message}`;
+  }
+  return String(err);
+}
 
 /**
  * JWT claims for the bot's company-scoped API token.
@@ -131,7 +159,7 @@ export class TelegramBot {
         }
       } catch (err) {
         if (this.running) {
-          logger.warn({ msg: "Telegram poll error, retrying", error: err });
+          logger.warn({ msg: "Telegram poll error, retrying", error: errorSummary(err) });
           await sleep(1000);
         }
       }
@@ -263,21 +291,73 @@ export class TelegramBot {
   }
 
   /**
-   * Make a Telegram Bot API call.
+   * Make a Telegram Bot API call with bounded retry.
+   *
+   * Notification sends are one-shot in v1: a single transient network failure
+   * permanently dropped the notification (observed 2026-08-19 on A1 where new
+   * connections to api.telegram.org fail intermittently). Retryable failures
+   * (network errors, HTTP 5xx, 429) are retried up to TELEGRAM_API_MAX_ATTEMPTS
+   * with linear backoff. Client errors (4xx) surface immediately.
    */
   private async telegramApi(
     method: string,
     payload: Record<string, unknown>,
   ): Promise<unknown> {
-    const response = await fetch(`${TELEGRAM_API_BASE}/bot${await this.getBotToken()}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    for (let attempt = 1; attempt <= TELEGRAM_API_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.telegramApiOnce(method, payload);
+      } catch (err) {
+        const retryable = err instanceof TelegramApiError && err.retryable;
+        if (!retryable || attempt === TELEGRAM_API_MAX_ATTEMPTS) {
+          throw err;
+        }
+        logger.warn({
+          msg: "Telegram API call failed, retrying",
+          method,
+          attempt,
+          maxAttempts: TELEGRAM_API_MAX_ATTEMPTS,
+          error: errorSummary(err),
+        });
+        await sleep(TELEGRAM_RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+    throw new Error(`Telegram ${method}: exhausted ${TELEGRAM_API_MAX_ATTEMPTS} attempts`);
+  }
 
-    const data = (await response.json()) as { ok: boolean; result?: unknown; description?: string };
+  /**
+   * Single Telegram Bot API attempt.
+   */
+  private async telegramApiOnce(
+    method: string,
+    payload: Record<string, unknown>,
+  ): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await fetch(`${TELEGRAM_API_BASE}/bot${await this.getBotToken()}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      throw new TelegramApiError(`Telegram ${method} network error: ${errorSummary(err)}`, true);
+    }
+
+    let data: { ok: boolean; result?: unknown; description?: string };
+    try {
+      data = (await response.json()) as { ok: boolean; result?: unknown; description?: string };
+    } catch {
+      const retryable = response.status >= 500 || response.status === 429;
+      throw new TelegramApiError(
+        `Telegram ${method} returned HTTP ${response.status} with a non-JSON body`,
+        retryable,
+      );
+    }
     if (!data.ok) {
-      throw new Error(`Telegram ${method} failed: ${data.description}`);
+      const retryable = response.status >= 500 || response.status === 429;
+      throw new TelegramApiError(
+        `Telegram ${method} failed: ${data.description ?? `HTTP ${response.status}`}`,
+        retryable,
+      );
     }
     return data.result;
   }
