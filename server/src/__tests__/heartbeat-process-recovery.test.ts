@@ -425,8 +425,10 @@ describe("heartbeat orphaned process recovery", () => {
     }));
   });
 
-  it("terminalizes an active linked run as failed when an issue is marked blocked", async () => {
-    const { companyId, runId, wakeupRequestId, issueId } = await seedRunFixture();
+  it("terminalizes an active linked run as cancelled (control-plane cut) when an issue is marked blocked", async () => {
+    const { companyId, runId, wakeupRequestId, issueId, agentId } = await seedRunFixture();
+    // finalizeAgentStatus 는 paused 에서 조기 반환하므로 에이전트 관찰 가능 상태로 만든다.
+    await db.update(agents).set({ status: "running" }).where(eq(agents.id, agentId));
 
     const heartbeat = heartbeatService(db);
     const result = await heartbeat.finalizeLinkedRunsForIssueStatus({
@@ -444,7 +446,8 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     expect(run).toEqual(expect.objectContaining({
-      status: "failed",
+      // [run honesty] 통제판 절단은 실패가 아니다 — 사유는 errorCode 로 구분한다.
+      status: "cancelled",
       errorCode: "issue_status_blocked",
       finishedAt: expect.any(Date),
     }));
@@ -455,9 +458,18 @@ describe("heartbeat orphaned process recovery", () => {
       .where(eq(agentWakeupRequests.id, wakeupRequestId))
       .then((rows) => rows[0] ?? null);
     expect(wakeup).toEqual(expect.objectContaining({
-      status: "failed",
+      status: "cancelled",
       finishedAt: expect.any(Date),
     }));
+
+    // 2차 오염 방지: 통제판 절단으로 에이전트가 error 로 마킹되지 않아야 한다
+    //   (2026-08-19 GAZ: error 마킹이 오너의 재할당 판단을 흔들었다).
+    const agent = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    expect(agent?.status).toBe("idle");
   });
 
   it("queues exactly one retry when the recorded local pid is dead", async () => {
