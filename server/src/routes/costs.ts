@@ -144,6 +144,19 @@ export function costRoutes(db: Db) {
     res.json(rows);
   });
 
+  /**
+   * Route memory for adapter/model choices: run outcomes, latency percentiles,
+   * and cost per successful run per (provider, model). Read-only; covers runs
+   * that reported provider usage in the requested range.
+   */
+  router.get("/companies/:companyId/costs/provider-model-outcomes", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const range = parseDateRange(req.query);
+    const rows = await costs.providerModelOutcomes(companyId, range);
+    res.json(rows);
+  });
+
   router.get("/companies/:companyId/costs/by-biller", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);

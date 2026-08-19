@@ -59,6 +59,37 @@ export interface CostByProviderModel {
   subscriptionOutputTokens: number;
 }
 
+/**
+ * Route-memory row: run outcomes + latency + cost per (provider, model).
+ *
+ * Derived by joining cost_events to heartbeat_runs, so the population is
+ * runs that reported provider usage. Success rate here answers "when work
+ * ran on this provider+model, how often did the run succeed, how long did it
+ * take, and what did it cost per successful run" — the comparison operators
+ * should check before assigning adapters/models.
+ */
+export interface ProviderModelOutcomeRow {
+  provider: string;
+  model: string;
+  runs: number;
+  succeededRuns: number;
+  failedRuns: number;
+  timedOutRuns: number;
+  cancelledRuns: number;
+  otherRuns: number;
+  /** succeededRuns / runs, 0..1 */
+  successRate: number;
+  medianDurationSec: number;
+  p95DurationSec: number;
+  costCents: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  /** total cost divided by succeeded runs; 0 when no succeeded runs */
+  costPerSucceededRunCents: number;
+  lastOccurredAt: string;
+}
+
 export interface CostByBiller {
   biller: string;
   costCents: number;
