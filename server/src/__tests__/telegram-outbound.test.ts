@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatEventNotification } from "../channel/telegram/outbound.js";
+import { composeRunFailureNotification, formatEventNotification } from "../channel/telegram/outbound.js";
 
 describe("Telegram outbound notifications", () => {
   it("suppresses normal heartbeat success events", () => {
@@ -72,5 +72,56 @@ describe("Telegram outbound notifications", () => {
     expect(message).toContain("RES-935");
     expect(message).toContain("Browser auth is required.");
     expect(message).not.toContain("*Success*");
+  });
+});
+
+describe("composeRunFailureNotification", () => {
+  const base = {
+    status: "failed",
+    runId: "9c008cff-1111-4111-8111-111111111111",
+    agentName: "Harry Potter",
+    issueIdentifier: "GAZ-1223",
+    issueTitle: "[유지보수] Gazua canonical report renderer 누락",
+    missionTitle: "gazua-morning-2026-08-19",
+    missionId: "0d67101e-8c0a-41a3-a342-d07c42477661",
+    error: "RendererError: canonical renderer missing\nstack line 2",
+  };
+
+  it("identifies agent, issue, and mission for a failed run", () => {
+    const message = composeRunFailureNotification(base);
+    expect(message).toContain("런 실패");
+    expect(message).toContain("에이전트: Harry Potter");
+    expect(message).toContain("이슈: GAZ-1223 — [유지보수] Gazua canonical report renderer 누락");
+    expect(message).toContain("미션: gazua-morning-2026-08-19");
+    expect(message).toContain("9c008cff");
+    expect(message).toContain("에러: RendererError: canonical renderer missing");
+    // only the first error line, no stack noise
+    expect(message).not.toContain("stack line 2");
+  });
+
+  it("omits missing context lines instead of showing unknown", () => {
+    const message = composeRunFailureNotification({
+      status: "timed_out",
+      runId: base.runId,
+    });
+    expect(message).toContain("시간 초과");
+    expect(message).not.toContain("에이전트:");
+    expect(message).not.toContain("이슈:");
+    expect(message).not.toContain("미션:");
+    expect(message).not.toContain("에러:");
+  });
+
+  it("truncates long error lines", () => {
+    const message = composeRunFailureNotification({
+      ...base,
+      error: "E".repeat(400),
+    });
+    const errorLine = message.split("\n").find((line) => line.startsWith("에러:")) ?? "";
+    expect(errorLine.length).toBeLessThanOrEqual("에러: ".length + 160);
+  });
+
+  it("labels cancelled runs in Korean", () => {
+    const message = composeRunFailureNotification({ ...base, status: "cancelled" });
+    expect(message).toContain("런 취소");
   });
 });
