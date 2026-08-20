@@ -1208,12 +1208,32 @@ async function syncStepRunsFromIssueState(
     const depCheck = checkDependencyFreshness(step.dependencies, stepRunByStepId, issueById);
     if (!depCheck.allFound || !depCheck.allDone) continue;
     if (depCheck.maxCompletedAt === 0) continue;
-    if (depCheck.maxCompletedAt <= latestVerdict.observedAt.getTime()) continue;
+    // [Transitive producer freshness] A reworked producer can sit 2+ hops above
+    //   the QA step (producer → intermediate QA/gate → semantic QA). Direct-dep
+    //   freshness then never advances after a producer rework and the recheck is
+    //   skipped forever — the QA re-fire chain dead-ends silently and the run
+    //   finalizes failed (gazua-evening 2026-08-20: producer gen2 completed 09:22,
+    //   direct-dep max stayed 09:04 < RC verdict 09:11 → owner-action stall).
+    //   Include gate-validated producers' completion times so a reworked producer
+    //   generation re-arms the recheck regardless of DAG topology.
+    let freshnessMaxCompletedAt = depCheck.maxCompletedAt;
+    for (const producerStepIds of collectGateValidatedProducerStepIds(step.dependencies, stepById).values()) {
+      for (const producerStepId of producerStepIds) {
+        const producerRun = stepRunByStepId.get(producerStepId);
+        if (!producerRun) continue;
+        const producerIssue = producerRun.issueId ? issueById.get(producerRun.issueId) : undefined;
+        const producerCompletedMs = producerIssue
+          ? (producerIssue.completedAt?.getTime() ?? 0)
+          : (producerRun.completedAt?.getTime() ?? 0);
+        if (producerCompletedMs > freshnessMaxCompletedAt) freshnessMaxCompletedAt = producerCompletedMs;
+      }
+    }
+    if (freshnessMaxCompletedAt <= latestVerdict.observedAt.getTime()) continue;
     // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
     //   중복 실행 요청을 만들지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가
     //   한 번이라도 있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate
     //   request 를 끊는다. 이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재요청이 허용된다.
-    const dependencyMaxCompletedAt = depCheck.maxCompletedAt;
+    const dependencyMaxCompletedAt = freshnessMaxCompletedAt;
     const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
     if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
 
