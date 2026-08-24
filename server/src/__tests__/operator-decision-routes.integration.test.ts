@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, issues, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, issueComments, issues, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { operatorDecisionRoutes } from "../routes/operator-decisions.js";
@@ -63,6 +64,7 @@ describeDb("operator decision routes", () => {
   afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   beforeEach(async () => {
+    await db.delete(issueComments);
     await db.delete(activityLog);
     await db.delete(operatorDecisionContinuations);
     await db.delete(operatorDecisions);
@@ -74,7 +76,7 @@ describeDb("operator decision routes", () => {
     agentId = randomUUID();
     await db.insert(agents).values({ id: agentId, companyId, name: "Requester" });
     issueId = randomUUID();
-    await db.insert(issues).values({ id: issueId, companyId, title: "Task", assigneeAgentId: agentId });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Task", assigneeAgentId: agentId, identifier: `${companyId.slice(0, 4).toUpperCase()}-1`, issueNumber: 1 });
   });
 
   function app(actor: "board" | "agent" | "none" = "board") {
@@ -160,5 +162,34 @@ describeDb("operator decision routes", () => {
       applied: true,
       continuation: { state: "pending", generation: 2, manualRetryCount: 1, attemptCount: 0 },
     });
+  });
+
+  it("attention projection carries operator context (issue identifier/title, mission, retry hint)", async () => {
+    const linked = { ...body("attention-context"), issueId, continuationMode: "issue_current_assignee" };
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(linked);
+    await request(app()).post(`/api/operator-decisions/${created.body.data.id}/resolve`).send({
+      actionId: "hold", selectedOptionIds: [], comment: null,
+    });
+    // Force the same blocked state the 2026-08-25 GAZ morning run hit: issue in_progress, assignee cleared.
+    await db.update(issues).set({ assigneeAgentId: null, status: "in_progress" }).where(eq(issues.id, issueId));
+    await db.update(operatorDecisionContinuations).set({
+      state: "blocked", errorCode: "issue_unassigned",
+    });
+    const attention = await request(app())
+      .get(`/api/companies/${companyId}/operator-decisions?view=attention`);
+    expect(attention.status).toBe(200);
+    const row = attention.body.data.find(
+      (entry: { id: string }) => entry.id === created.body.data.id,
+    );
+    expect(row?.continuation).toMatchObject({
+      errorCode: "issue_unassigned",
+      issueStatus: "in_progress",
+      issueAssigneeAgentId: null,
+      issueTitle: "Task",
+    });
+    expect(String(row?.continuation?.issueIdentifier ?? "")).toMatch(/-1$/);
+    expect(row?.continuation?.retryHint).toContain("담당자");
   });
 });

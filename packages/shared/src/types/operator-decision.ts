@@ -92,6 +92,16 @@ export interface OperatorDecisionContinuationView {
   wakeupRequestId: string | null;
   effectiveStatus: OperatorDecisionEffectiveStatus;
   errorCode: string | null;
+  /** Operator-facing context for the linked issue — lets the attention list say
+   *  WHICH mission/issue the retry belongs to without extra lookups. */
+  issueIdentifier: string | null;
+  issueTitle: string | null;
+  issueStatus: string | null;
+  issueAssigneeAgentId: string | null;
+  missionId: string | null;
+  missionTitle: string | null;
+  /** Human-readable hint for what retrying does next, derived from the blocked reason. */
+  retryHint: string | null;
 }
 
 export interface OperatorDecisionView {

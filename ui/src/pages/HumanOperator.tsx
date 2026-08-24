@@ -93,9 +93,21 @@ function ContinuationAttention({
   return (
     <li className="border border-destructive/40 bg-card p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
+        <div className="min-w-0">
           <h3 className="text-sm font-semibold">{decision.title}</h3>
+          {continuation.issueIdentifier && (
+            <p className="mt-1 text-sm text-foreground">
+              이슈: {continuation.issueIdentifier}
+              {continuation.issueTitle ? ` — ${continuation.issueTitle}` : ""}
+            </p>
+          )}
+          {continuation.missionTitle && (
+            <p className="mt-0.5 text-sm text-muted-foreground">미션: {continuation.missionTitle}</p>
+          )}
           <p className="mt-1 text-sm text-destructive">{humanize(continuation.errorCode)}</p>
+          {continuation.retryHint && (
+            <p className="mt-0.5 text-xs text-muted-foreground">{continuation.retryHint}</p>
+          )}
           <p className="mt-1 text-xs text-muted-foreground">
             {continuation.effectiveStatus} · generation {continuation.generation} · attempt {continuation.attemptCount}
           </p>
