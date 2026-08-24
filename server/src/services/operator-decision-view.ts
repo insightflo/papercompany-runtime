@@ -5,6 +5,7 @@ import {
   agents,
   heartbeatRuns,
   issues,
+  missions,
   operatorDecisionContinuations,
   type operatorDecisions,
 } from "@paperclipai/db";
@@ -45,6 +46,29 @@ const terminalRequestMapping: Record<string, [OperatorDecisionEffectiveStatus, s
 
 function derived(tuple: [OperatorDecisionEffectiveStatus, string | null, boolean]): DerivedContinuationStatus {
   return { effectiveStatus: tuple[0], errorCode: tuple[1], attention: tuple[2] };
+}
+
+/** Operator-facing Korean hint: what retrying this continuation actually does next. */
+function buildContinuationRetryHint(
+  effectiveStatus: OperatorDecisionEffectiveStatus,
+  errorCode: string | null,
+  issueStatus: string | null,
+): string | null {
+  if (errorCode === "issue_unassigned") {
+    return issueStatus === "in_progress"
+      ? "연결 이슈가 진행 중이지만 담당자가 없습니다. 이슈에 담당자를 지정하면 재시도가 깨움으로 이어집니다."
+      : "연결 이슈에 담당자가 없습니다. 이슈에 담당자를 지정한 뒤 재시도하세요.";
+  }
+  if (errorCode === "issue_terminal") {
+    return "연결 이슈가 완료/취소로 종결되어 후속 실행이 불가합니다. 새 카드 또는 이슈 재오픈이 필요합니다.";
+  }
+  if (effectiveStatus === "exhausted") {
+    return "자동 후속 실행이 시도 한도를 소진했습니다. 재시도는 수동으로 한 번 더 깨웁니다.";
+  }
+  if (effectiveStatus === "failed" || effectiveStatus === "timed_out") {
+    return "후속 실행 런이 실패/시간 초과했습니다. 재시도는 같은 지시로 실행을 다시 깨웁니다.";
+  }
+  return null;
 }
 
 export function deriveOperatorDecisionContinuationStatus(
@@ -122,8 +146,12 @@ async function loadContinuationProjection(
     ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wakeup.runId)).then((rows) => rows[0] ?? null)
     : null;
   const issue = continuation.issueId
-    ? await db.select({ id: issues.id, status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+    ? await db.select({ id: issues.id, status: issues.status, assigneeAgentId: issues.assigneeAgentId, identifier: issues.identifier, title: issues.title, missionId: issues.missionId })
       .from(issues).where(eq(issues.id, continuation.issueId)).then((rows) => rows[0] ?? null)
+    : null;
+  const mission = issue?.missionId
+    ? await db.select({ id: missions.id, title: missions.title }).from(missions)
+      .where(eq(missions.id, issue.missionId)).then((rows) => rows[0] ?? null)
     : null;
   const targetAgent = continuation.targetAgentId
     ? await db.select({ id: agents.id, status: agents.status }).from(agents)
@@ -145,6 +173,13 @@ async function loadContinuationProjection(
       wakeupRequestId: continuation.wakeupRequestId,
       effectiveStatus: status.effectiveStatus,
       errorCode: status.errorCode,
+      issueIdentifier: issue?.identifier ?? null,
+      issueTitle: issue?.title ?? null,
+      issueStatus: issue?.status ?? null,
+      issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
+      missionId: mission?.id ?? null,
+      missionTitle: mission?.title ?? null,
+      retryHint: buildContinuationRetryHint(status.effectiveStatus, status.errorCode, issue?.status ?? null),
     },
     attention: status.attention,
     updatedAt: continuation.updatedAt,

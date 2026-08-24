@@ -33,6 +33,9 @@ const attention: OperatorDecisionView = {
     manualRetryCount: 0, maxManualRetries: 2, nextAttemptAt: "2026-07-29T10:01:00.000Z",
     leaseExpiresAt: null, targetAgentId: null, wakeupRequestId: null,
     effectiveStatus: "blocked", errorCode: "issue_unassigned",
+    issueIdentifier: "GAZ-1337", issueTitle: "[OVERSIGHT] gazua-morning", issueStatus: "in_progress",
+    issueAssigneeAgentId: null, missionId: null, missionTitle: "2026-08-25 gazua-morning",
+    retryHint: "연결 이슈가 진행 중이지만 담당자가 없습니다. 이슈에 담당자를 지정하면 재시도가 깨움으로 이어집니다.",
   },
 };
 
