@@ -61,6 +61,8 @@ import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acce
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
 import { readAttempts } from "./control-flow/verdict-store.js";
+import { loadWorkflowApiFindings } from "./validation-verdict-ledger.js";
+import type { WorkflowVerdictFinding } from "@paperclipai/shared/validators/workflow-agent-api";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import {
@@ -874,6 +876,7 @@ async function commentOnValidationRecheckQueued(input: {
   issueId: string;
   workflowRunId: string;
   step: WorkflowStep;
+  priorFindings?: readonly WorkflowVerdictFinding[];
 }): Promise<void> {
   const dependencyStepIds = input.step.dependencies;
   const dependencyRows = dependencyStepIds.length > 0
@@ -958,6 +961,13 @@ async function commentOnValidationRecheckQueued(input: {
       `- stepId: ${input.step.id}`,
       `- dependencyStepIds: ${JSON.stringify(dependencyStepIds)}`,
       "",
+      ...(input.priorFindings && input.priorFindings.length > 0
+        ? [
+          "**Verify these previous REQUEST_CHANGES findings FIRST**, then continue the full checklist:",
+          ...input.priorFindings.map((finding) => `- [${finding.layer}] ${finding.id}: ${finding.summary}`),
+          "",
+        ]
+        : []),
       "Current dependency issue inputs:",
       ...(dependencyIssueLines.length > 0 ? dependencyIssueLines : ["- No dependency issue inputs are registered for this step."]),
       ...(missingWorkProductLines.length > 0
@@ -1238,6 +1248,22 @@ async function syncStepRunsFromIssueState(
     if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
 
     if (!context) continue;
+    // [recheck priority] Load the structured findings from the latest REQUEST_CHANGES
+    //   so the re-check can verify the previous fixes FIRST, then run the full
+    //   checklist. Machine contract only (workflow_api findings payload); absent
+    //   findings (legacy verdicts) degrade to the previous behavior.
+    let priorFindings: readonly WorkflowVerdictFinding[] | undefined;
+    try {
+      priorFindings = await loadWorkflowApiFindings({
+        db,
+        companyId: issue.companyId,
+        issueId: issue.id,
+        workflowRunId: stepRun.workflowRunId,
+        workflowStepRunId: stepRun.id,
+      }) ?? undefined;
+    } catch {
+      priorFindings = undefined;
+    }
     // [Hybrid QA] Force fresh session on semantic QA recheck so stale verdict/session
     //   state is not reused after a new producer generation.
     const queued = await wakeExistingWorkflowStepIssue({
@@ -1251,6 +1277,7 @@ async function syncStepRunsFromIssueState(
       allowCompletedIssue: true,
       allowBlockedIssue: true,
       forceFreshSession: true,
+      priorFindings,
     });
     if (!queued) continue;
 
@@ -1275,6 +1302,7 @@ async function syncStepRunsFromIssueState(
       issueId: issue.id,
       workflowRunId: stepRun.workflowRunId,
       step,
+      ...(priorFindings && priorFindings.length > 0 ? { priorFindings } : {}),
     });
     await logActivity(db, {
       companyId: issue.companyId,
@@ -1936,6 +1964,10 @@ export async function wakeExistingWorkflowStepIssue(input: {
   allowBlockedIssue?: boolean;
   /** When true, the heartbeat session is forced fresh (no stale context reuse). */
   forceFreshSession?: boolean;
+  /** [recheck priority] Structured findings from the previous REQUEST_CHANGES that
+   *  this recheck should verify FIRST (then continue the full checklist). Machine
+   *  contract only — never natural-language parsing. */
+  priorFindings?: readonly WorkflowVerdictFinding[];
   /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
   idempotencyKey?: string | null;
 }): Promise<boolean> {
@@ -2011,6 +2043,9 @@ export async function wakeExistingWorkflowStepIssue(input: {
   const reworkContext = reworkContract
     ? { paperclipWorkflowReworkContract: reworkContract }
     : {};
+  const priorFindingsContext = input.priorFindings && input.priorFindings.length > 0
+    ? { priorQaFindings: input.priorFindings.map((finding) => ({ id: finding.id, summary: finding.summary, layer: finding.layer })) }
+    : {};
   // [qa-cap acceptance] resumed downstream issue sees predecessor cap-accepted limitations.
   const capAcceptanceContext = await loadDownstreamQaCapAcceptanceContext({
     db: input.db,
@@ -2053,6 +2088,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
       ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
       ...reworkContext,
+      ...priorFindingsContext,
       ...capAcceptancePayload,
       ...qaCapAcceptancePayload,
     },
