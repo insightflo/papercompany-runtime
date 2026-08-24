@@ -10,11 +10,12 @@ import {
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
-import { workflowNonblockingAcceptanceSchema } from "@paperclipai/shared";
+import { workflowNonblockingAcceptanceSchema, workflowVerdictFindingsSchema } from "@paperclipai/shared";
 import type {
   WorkflowNonblockingAcceptance,
   WorkflowValidationVerdictPayload,
   WorkflowValidationVerdictValue,
+  WorkflowVerdictFinding,
 } from "@paperclipai/shared";
 
 type IssueRow = typeof issues.$inferSelect;
@@ -168,6 +169,7 @@ export async function recordWorkflowValidationVerdict(input: {
   readonly heartbeatRunId?: string | null;
   readonly sourceText?: string | null;
   readonly nonblockingAcceptance?: WorkflowNonblockingAcceptance | null;
+  readonly findings?: readonly WorkflowVerdictFinding[] | null;
 }): Promise<WorkflowValidationLedgerResult> {
   const context = await resolveWorkflowValidationContext(input.db, input.issue, { mode: "record" });
   if (!context.isCandidate || !context.workflowRunId || !context.workflowStepRunId) {
@@ -177,6 +179,11 @@ export async function recordWorkflowValidationVerdict(input: {
   //   이 필드를 넘기지 않으므로 구조적 수용은 오직 공식 workflow API(request_changes) 만 가능하다.
   const acceptance = input.nonblockingAcceptance && input.verdict === "request_changes"
     ? input.nonblockingAcceptance
+    : null;
+  // [qa defect layer] findings 도 nonblockingAcceptance 와 동일하게 request_changes 와만 공존한다.
+  //   heartbeat/comment 경로는 이 필드를 넘기지 않으므로 구조화 계층 태그는 오직 공식 workflow API 만 제출 가능.
+  const findings = input.findings && input.findings.length > 0 && input.verdict === "request_changes"
+    ? workflowVerdictFindingsSchema.parse(input.findings)
     : null;
   const boundedReason = typeof input.sourceText === "string" && input.sourceText.trim().length > 0
     ? input.sourceText.trim().slice(0, 4000)
@@ -190,6 +197,7 @@ export async function recordWorkflowValidationVerdict(input: {
     diagnostics: [],
     ...(boundedReason ? { reason: boundedReason } : {}),
     ...(acceptance ? { nonblockingAcceptance: acceptance } : {}),
+    ...(findings ? { findings } : {}),
   } satisfies WorkflowValidationVerdictPayload;
   const sourceKey = input.heartbeatRunId
     ? `run:${input.heartbeatRunId}`
@@ -282,6 +290,49 @@ export async function loadWorkflowApiFeedback(input: {
   return typeof reason === "string" && reason.trim().length > 0
     ? `### QA feedback at ${observedAt}\n${reason.trim().slice(0, 4000)}`
     : null;
+}
+
+/**
+ * [qa defect layer] loads the STRUCTURED defect-layer findings from the LATEST official workflow_api
+ *   request_changes verdict event exactly bound to the QA issue's current run + step (and a checked-out
+ *   heartbeat run scoped to that issue). Mirrors loadWorkflowApiFeedback's authority rules — comments,
+ *   stdout, and prose are never parsed. Returns null when the latest authoritative request_changes
+ *   verdict carries no schema-valid findings (legacy verdicts stay on the existing rework path).
+ */
+export async function loadWorkflowApiFindings(input: {
+  readonly db: Pick<Db, "select">;
+  readonly companyId: string;
+  readonly issueId: string;
+  readonly workflowRunId: string;
+  readonly workflowStepRunId: string;
+}): Promise<WorkflowVerdictFinding[] | null> {
+  const [row] = await input.db
+    .select({
+      payload: workflowTransitionEvents.payload,
+      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+    })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, input.companyId),
+      eq(workflowTransitionEvents.issueId, input.issueId),
+      eq(workflowTransitionEvents.workflowRunId, input.workflowRunId),
+      eq(workflowTransitionEvents.workflowStepRunId, input.workflowStepRunId),
+      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      eq(workflowTransitionEvents.reason, "workflow_api"),
+      eq(workflowTransitionEvents.verdict, "request_changes"),
+      isNotNull(workflowTransitionEvents.heartbeatRunId),
+    ))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id))
+    .limit(1);
+  if (!row) return null;
+  if (!(await heartbeatRunScopedToIssue(input.db, row.heartbeatRunId, { companyId: input.companyId, issueId: input.issueId }))) {
+    return null;
+  }
+  const raw = asRecord(row.payload).findings;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const parsed = workflowVerdictFindingsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return parsed.data;
 }
 
 

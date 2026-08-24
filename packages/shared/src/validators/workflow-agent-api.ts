@@ -57,10 +57,25 @@ export const workflowValidationVerdictValueSchema = z.enum([
 ]);
 export type WorkflowValidationVerdictValue = z.infer<typeof workflowValidationVerdictValueSchema>;
 
+/**
+ * [qa defect layer] 공식 QA 판정의 구조화 결함 항목. layer 가 원천 결함(source_data) 인지
+ *   산출물 결함(artifact) 인지에 따라 재작업 라우팅이 갈린다(loop-driver 계층 라우팅).
+ *   verdict=request_changes 와 함께만 제출 가능하며, 자연어 comment/표면 텍스트는 절대 권위가 아니다.
+ */
+export const workflowVerdictFindingSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  summary: z.string().trim().min(1).max(300),
+  layer: z.enum(["source_data", "artifact"]),
+});
+export const workflowVerdictFindingsSchema = z.array(workflowVerdictFindingSchema).max(20);
+
+export type WorkflowVerdictFinding = z.infer<typeof workflowVerdictFindingSchema>;
+
 export const workflowVerdictSubmitSchema = z.object({
   verdict: workflowValidationVerdictValueSchema,
   reason: z.string().trim().optional().nullable(),
   nonblockingAcceptance: workflowNonblockingAcceptanceSchema.optional(),
+  findings: workflowVerdictFindingsSchema.optional(),
 }).superRefine((value, ctx) => {
   // [qa-cap acceptance] nonblocking 분류는 request_changes verdict 와만 공존.
   if (value.nonblockingAcceptance && value.verdict !== "request_changes") {
@@ -68,6 +83,14 @@ export const workflowVerdictSubmitSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["nonblockingAcceptance"],
       message: "nonblockingAcceptance requires verdict=request_changes",
+    });
+  }
+  // [qa defect layer] 결함 계층 findings 는 request_changes verdict 와만 공존.
+  if (value.findings && value.verdict !== "request_changes") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["findings"],
+      message: "findings requires verdict=request_changes",
     });
   }
   // [verdict abstention] 보류 판정은 어떤 증거가 빠졌는지 reason 에 반드시 명시해야 한다.

@@ -15,6 +15,9 @@
  *   1. cancelled 거부 / conditional edge 없으면 no-op.
  *   2. 각 step 중 back-edge 를 가진 terminal step 에 대해:
  *      classifyStepActivation.runnable && iteration_index<maxIterations → resetStepRunForRework(attempt archive).
+ *   2b. [qa defect layer routing] 반려 QA 의 공식 findings 전부 source_data(원천 데이터 결함) 면
+ *      생산자 리셋/한도 소모 없이 즉시 오너 카드(operator_decisions)로 에스컬레이션하고 이 step 을 skip.
+ *      혼재(artifact 포함)면 기존 재작업 경로 + 오너 카드 병행, 미제출(구버전 판정)이면 카드 없이 기존 경로.
  *   3. 리셋 발생 시 stepRuns 재조회 반환.
  * [외부 연결] consumer: dag-engine.ts syncWorkflowRunState(skip-pass 직후, launch while-loop 직전).
  *   의존: edge-condition(classifyStepActivation/resolveEdges/workflowHasConditionalEdges, PredFacts),
@@ -28,9 +31,10 @@
  *     재호출하지 않으므로 1 sync = (step 당) 최대 1 리셋.
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, workflowStepRuns } from "@paperclipai/db";
+import { issueComments, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import {
   conditionalEdgeHolds,
   resolveEdges,
@@ -45,8 +49,13 @@ import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rework-contract.js";
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
-import { loadWorkflowApiFeedback } from "../validation-verdict-ledger.js";
+import { loadWorkflowApiFeedback, loadWorkflowApiFindings } from "../validation-verdict-ledger.js";
 import { readCapBoostAmount, type StepIterationAttempt } from "./types.js";
+import {
+  buildQaSourceDefectCardRequestKey,
+  ensureQaSourceDefectOwnerCard,
+  type QaSourceDefectCardQaRef,
+} from "../qa-source-defect-owner-card.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 
@@ -103,6 +112,100 @@ async function loadQaReworkFeedback(input: {
     workflowRunId: input.workflowRunId,
     workflowStepRunId: input.workflowStepRunId,
   });
+}
+
+interface RejectedQaWithFindings {
+  readonly qaStepId: string;
+  readonly qaIssueId: string | null;
+  readonly findings: readonly WorkflowVerdictFinding[] | null;
+}
+
+/** findings 병기 태그 — 원천 결함 항목을 생산자 재작업 계약 feedback 에 구조적으로 병기한다(표시 전용). */
+function renderSourceScopeTag(findings: readonly WorkflowVerdictFinding[]): string {
+  const lines = findings
+    .filter((finding) => finding.layer === "source_data")
+    .map((finding) => `- (${finding.id}) ${finding.summary}`);
+  return ["#### [생산자 범위 밖 — 원천 데이터 결함] 아래 항목은 원천(수집) 산출물 결함으로 생산자가 고칠 수 없습니다. 원천 라우팅 대상입니다:", ...lines].join("\n");
+}
+
+/**
+ * [qa defect layer — 즉시 오너 에스컬레이션] findings 전부 source_data 인 generation 은 생산자 리셋/한도
+ *   소모 없이 오너 카드로 즉시 넘긴다. 카드는 operator_decisions(기존 시스템)에 행만 추가하며, 해결 체인
+ *   (continuation worker → owner wake → mission_owner_decision API)은 기존 것을 재사용한다(규칙 7).
+ *   mission/oversight 이슈가 없으면 false 를 반환 — caller 는 기존 재작업 경로로 fail-closed 한다.
+ */
+async function escalateQaSourceDefectToOwner(input: {
+  readonly db: Db;
+  readonly run: LoopRun;
+  readonly producerStepId: string;
+  readonly iteration: number;
+  readonly maxIterations: number;
+  readonly rejectedQas: readonly RejectedQaWithFindings[];
+  /** 라우팅 결과 — source_only: 리셋 대체 즉시 에스컬레이션, mixed: 기존 재작업과 병행 카드. */
+  readonly route: "source_only" | "mixed";
+}): Promise<boolean> {
+  const { db, run } = input;
+  if (!run.missionId) return false;
+  // continuation wake 대상: mission owner agent 가 assignee 인 oversight 이슈(기존 감독이 유지하는 상시 이슈).
+  const [oversight] = await db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, run.companyId),
+      eq(issues.missionId, run.missionId),
+      eq(issues.originKind, "mission_main_executor_oversight"),
+    ))
+    .limit(1);
+  if (!oversight) return false;
+
+  const qaRefs: QaSourceDefectCardQaRef[] = input.rejectedQas.map((qa) => ({
+    qaStepId: qa.qaStepId,
+    qaIssueId: qa.qaIssueId,
+  }));
+  const findings = input.rejectedQas.flatMap((qa) => qa.findings ?? []);
+  const requestKey = buildQaSourceDefectCardRequestKey({
+    workflowRunId: run.id,
+    producerStepId: input.producerStepId,
+    iteration: input.iteration,
+  });
+
+  // 1) durable routing evidence — 왜 이 generation 에 오너 카드가 떴는지의 DB 기록(규칙 8).
+  await db.insert(workflowTransitionEvents).values({
+    companyId: run.companyId,
+    missionId: run.missionId,
+    workflowRunId: run.id,
+    eventType: "qa_source_defect_routed",
+    layer: "workflow_validation",
+    decision: input.route === "source_only" ? "owner_escalation" : "rework_with_card",
+    reason: "qa_defect_layer_routing",
+    reasonCode: "qa_defect_layer_routing",
+    idempotencyKey: `qa-source-defect-routed:${run.companyId}:${run.id}:${input.producerStepId}:${input.iteration}`,
+    payload: {
+      kind: "qa_source_defect_routed",
+      route: input.route,
+      producerStepId: input.producerStepId,
+      iteration: input.iteration,
+      maxIterations: input.maxIterations,
+      findings,
+      qaRefs,
+      cardRequestKey: requestKey,
+    },
+  }).onConflictDoNothing();
+
+  // 2) interactive owner card — requestKey 멱등(회사+키 unique). 실패해도 라우팅 사실(1)은 남는다.
+  await ensureQaSourceDefectOwnerCard({
+    db,
+    companyId: run.companyId,
+    missionId: run.missionId,
+    workflowRunId: run.id,
+    producerStepId: input.producerStepId,
+    iteration: input.iteration,
+    maxIterations: input.maxIterations,
+    findings,
+    qaRefs,
+    linkIssueId: oversight.id,
+  });
+  return true;
 }
 
 /**
@@ -166,6 +269,51 @@ export async function applyBackEdgeReworkPass(
     //   cap 도 QA edge 단위가 아닌 producer 단위로 판정한다(여러 edge 의 max 이상치 사용).
     const maxIterations = Math.max(...siblingQas.map((q) => q.edge.maxIterations!));
     const currentIteration = stepRun.iterationIndex ?? 0;
+
+    // [qa defect layer routing] 각 fresh 반려 QA 의 구조화 findings 를 공식 verdict 이벤트에서만 로드한다.
+    //   (a) findings 전부 source_data → 생산자 리셋 스킵/한도 미소모 + 즉시 오너 카드 에스컬레이션.
+    //   (b) artifact 계층 혼재 → 기존 재작업 경로(리셋)를 그대로 밟되 오너 카드를 병행 생성하고,
+    //       source_data 항목은 재작업 계약 feedback 에 '생산자 범위 밖' 태그로 병기한다.
+    //   (c) findings 미제출(구버전 판정) → 기존 동작 100% 유지, 카드 없음(fail-closed).
+    const rejectedWithFindings: RejectedQaWithFindings[] = [];
+    for (const q of rejectedQas) {
+      // 구조 권위 경로: QA issue/run/stepRun 바인딩이 온전할 때만 공식 verdict 이벤트에서 findings 를 읽는다.
+      const findings = q.qaRun?.issueId && q.qaRun?.id
+        ? await loadWorkflowApiFindings({
+            db,
+            companyId: run.companyId,
+            issueId: q.qaRun.issueId,
+            workflowRunId: q.qaRun.workflowRunId ?? run.id,
+            workflowStepRunId: q.qaRun.id,
+          })
+        : null;
+      rejectedWithFindings.push({
+        qaStepId: q.edge.stepId,
+        qaIssueId: q.qaRun?.issueId ?? null,
+        findings,
+      });
+    }
+    const allFindingsPresent = rejectedWithFindings.every((qa) => (qa.findings?.length ?? 0) > 0);
+    const allSourceData = allFindingsPresent
+      && rejectedWithFindings.every((qa) => qa.findings!.every((finding) => finding.layer === "source_data"));
+    if (allFindingsPresent) {
+      // 구조화 findings 가 있으면(원천-only 또는 혼합) 오너 카드를 띄운다 — 원천-only 는 리셋을 대체하고,
+      //       혼합은 기존 재작업 경로와 병행한다(운영자가 원천 부분을 조기에 볼 수 있다).
+      const escalated = await escalateQaSourceDefectToOwner({
+        db,
+        run,
+        producerStepId: step.id,
+        iteration: currentIteration,
+        maxIterations,
+        rejectedQas: rejectedWithFindings,
+        route: allSourceData ? "source_only" : "mixed",
+      });
+      if (allSourceData && escalated) {
+        // 생산자 리셋 스킵 — iteration 불변(한도 미소모). 런은 QA failed 로 수담하고 오너 카드가 조치를 기다린다.
+        continue;
+      }
+      // 혼합 경로 또는 에스컬레이션 불가(mission/oversight 부재) → 기존 재작업 경로로 흐른다(fail-closed).
+    }
     // [operator cap boost] operator 가 명시적으로 부여한 일시 추가 한도(metadata.qaReworkCapBoost.amount).
     //   기본 0 — 부여하지 않으면 기존 maxIterations 그대로. boost 는 오직 이번 stepRun 세대의 cap 판정에만 쓴다.
     const capBoost = readCapBoostAmount(stepRun.metadata);
@@ -183,18 +331,26 @@ export async function applyBackEdgeReworkPass(
     const producerOwnContext = await loadProducerOwnReworkContext({ db, companyId: run.companyId, missionId: run.missionId ?? null, workflowRunId: run.id, producerStepId: step.id, producerIssueId: stepRun.issueId ?? null });
 
     // 모든 반려 QA 의 feedback 을 합쳐 하나의 rework comment 로 생산자에게 전달.
+    //   [qa defect layer] 혼재 경로에서 source_data 항목은 '생산자 범위 밖' 태그로 병기된다(표시 전용 —
+    //   라우팅 권위는 아니고, 생산자가 원천 결함을 자기 탓으로 재작업하지 않게 안내한다).
     const qaFeedbacks = [];
     for (const q of rejectedQas) {
+      const layered = rejectedWithFindings.find((r) => r.qaStepId === q.edge.stepId) ?? null;
+      const sourceFindings = layered?.findings?.filter((finding) => finding.layer === "source_data") ?? [];
+      const baseFeedback = await loadQaReworkFeedback({
+        db,
+        companyId: run.companyId,
+        qaIssueId: q.qaRun?.issueId ?? null,
+        workflowRunId: q.qaRun?.workflowRunId ?? null,
+        workflowStepRunId: q.qaRun?.id ?? null,
+      });
+      const feedback = sourceFindings.length > 0 && layered?.findings
+        ? [baseFeedback, renderSourceScopeTag(layered.findings)].filter((part) => part !== null).join("\n\n")
+        : baseFeedback;
       qaFeedbacks.push({
         qaStepId: q.edge.stepId,
         qaIssueId: q.qaRun?.issueId ?? null,
-        feedback: await loadQaReworkFeedback({
-          db,
-          companyId: run.companyId,
-          qaIssueId: q.qaRun?.issueId ?? null,
-          workflowRunId: q.qaRun?.workflowRunId ?? null,
-          workflowStepRunId: q.qaRun?.id ?? null,
-        }),
+        feedback,
       });
     }
     const reworkContract = buildWorkflowReworkContract({
