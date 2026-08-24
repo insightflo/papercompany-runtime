@@ -256,6 +256,8 @@ export async function submitWorkflowVerdict(input: {
     sourceText: input.data.reason ?? input.data.verdict,
     // [qa-cap acceptance] 공식 request_changes body 만 nonblockingAcceptance 를 carry 한다(schema refine 보장).
     nonblockingAcceptance: input.data.nonblockingAcceptance ?? null,
+    // [qa defect layer] 공식 request_changes body 의 구조화 결함 계층 태그 — 계층 라우팅의 유일한 원천.
+    findings: input.data.findings ?? null,
   });
   if (!result.isCandidate) {
     throw unprocessable("Workflow verdict API can only be used on workflow execution issues linked to a workflow step run");

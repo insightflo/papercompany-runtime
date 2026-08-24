@@ -43,6 +43,8 @@ import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapProducerIssueRef, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 import { loadConsecutiveQaRejectTrend } from "./qa-rework-cap-oversight-detection.js";
+import { loadWorkflowApiFindings } from "../workflow/validation-verdict-ledger.js";
+import { ensureQaSourceDefectOwnerCard } from "../workflow/qa-source-defect-owner-card.js";
 import {
   TERMINAL_FAILURE_RUN_STATUSES,
   classifyTerminalMissionContinuation,
@@ -681,6 +683,40 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
         qaCapOwnerActionByWorkflowRunId.set(exhaustion.workflowRunId, result.issue);
         findings.push(`qa_rework_cap_oversight: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} qa=${exhaustion.qaStepId} generation=${exhaustion.producerIteration}/${exhaustion.maxIterations}${result.created ? " issue_created" : " issue_exists"} issue=${result.issue.identifier ?? result.issue.id}`);
+        // [qa defect layer — cap 경로 카드] cap 소진에도 동일 오너 카드를 띄운다(생성 지점 (b)).
+        //   requestKey(qa-source-defect:{run}:{producer}:{iteration}) 멱등 — 계층 라우팅(a)에서 이미
+        //   만든 카드면 replay/conflict 로 처리되고 여기서는 로깅만 남는다. linkIssue=[QA Cap] 오너액션
+        //   이슈(assignee=mission owner) → 해결 시 기존 continuation worker 가 owner 를 wake 한다.
+        try {
+          const capCardFindings = exhaustion.qaIssueId
+            ? await loadWorkflowApiFindings({
+                db,
+                companyId: mission.companyId,
+                issueId: exhaustion.qaIssueId,
+                workflowRunId: exhaustion.workflowRunId,
+                workflowStepRunId: exhaustion.qaStepRunId,
+              })
+            : null;
+          const cardResult = await ensureQaSourceDefectOwnerCard({
+            db,
+            companyId: mission.companyId,
+            missionId: mission.id,
+            workflowRunId: exhaustion.workflowRunId,
+            producerStepId: exhaustion.producerStepId,
+            iteration: exhaustion.producerIteration,
+            maxIterations: exhaustion.maxIterations,
+            findings: capCardFindings ?? [],
+            qaRefs: [{ qaStepId: exhaustion.qaStepId, qaIssueId: exhaustion.qaIssueId }],
+            linkIssueId: result.issue.id,
+          });
+          if (cardResult.outcome === "created" || cardResult.outcome === "replayed") {
+            findings.push(`qa_source_defect_owner_card: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} iteration=${exhaustion.producerIteration} decision=${cardResult.decisionId} ${cardResult.outcome}`);
+          } else {
+            findings.push(`qa_source_defect_owner_card_${cardResult.outcome}: run=${exhaustion.workflowRunId} producer=${exhaustion.producerStepId} iteration=${exhaustion.producerIteration} — ${cardResult.message.slice(0, 200)}`);
+          }
+        } catch (err) {
+          logger.warn({ err, missionId: mission.id, workflowRunId: exhaustion.workflowRunId }, "qa-source-defect owner card ensure failed — will retry next supervision tick");
+        }
         // [repeated-defect trend] 같은 QA gate 의 연속 반려 추세 — 오너 도장 승인 방지 가시화.
         if (exhaustion.qaIssueId) {
           const trend = await loadConsecutiveQaRejectTrend(db, mission.companyId, exhaustion.qaIssueId);

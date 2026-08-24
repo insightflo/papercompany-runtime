@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   companies,
@@ -9,6 +10,8 @@ import {
   issueComments,
   issues,
   missions,
+  operatorDecisionContinuations,
+  operatorDecisions,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -194,6 +197,12 @@ export async function loadQaCapStepRows(db: QaCapTestDb, base: QaCapBase) {
 }
 
 export async function cleanQaCapFixture(db: QaCapTestDb): Promise<void> {
+  // [qa-source-defect owner card] supervision 이 cap 경로에서 operator 카드를 만들면서
+  //   activity_log/operator_decision_continuations/operator_decisions 행이 생긴다 —
+  //   companies cascade 삭제 전에 FK 순서대로 정리한다.
+  await db.delete(activityLog);
+  await db.delete(operatorDecisionContinuations);
+  await db.delete(operatorDecisions);
   await db.delete(workflowTransitionEvents);
   await db.delete(issueComments);
   await db.delete(heartbeatRuns);
