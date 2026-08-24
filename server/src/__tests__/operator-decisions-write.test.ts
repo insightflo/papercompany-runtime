@@ -5,12 +5,14 @@ import {
   agents,
   companies,
   createDb,
+  issueComments,
   issues,
   operatorDecisionContinuations,
   operatorDecisions,
 } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -73,6 +75,8 @@ describeDb("operator decision write service", () => {
     await db.delete(activityLog);
     await db.delete(operatorDecisionContinuations);
     await db.delete(operatorDecisions);
+    // [delivery bridge] resolve 가 시스템 코멘트를 남기므로 issues 삭제 전에 정리한다(FK 순서).
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -96,6 +100,34 @@ describeDb("operator decision write service", () => {
     expect(replay).toMatchObject({ replayed: true, decision: { id: first.decision.id } });
     await expect(service.create(companyId, { ...input("same"), title: "Different" }, { type: "agent", id: agentId }))
       .rejects.toMatchObject({ status: 409 });
+  });
+
+  it("publishes exactly one operator_decision.created live event and stays silent on replay", async () => {
+    const service = operatorDecisionWriteService(db);
+    const events: { type: string; payload: Record<string, unknown> }[] = [];
+    const unsubscribe = subscribeCompanyLiveEvents(companyId, (event) => {
+      events.push({ type: event.type, payload: event.payload });
+    });
+    try {
+      const created = await service.create(companyId, input("card-alert"), { type: "user", id: "board-user" });
+      expect(created.replayed).toBe(false);
+      const published = events.filter((event) => event.type === "operator_decision.created");
+      expect(published).toHaveLength(1);
+      expect(published[0]!.payload).toMatchObject({
+        operatorDecisionId: created.decision.id,
+        issueId: null,
+        missionId: null,
+        title: "Choose",
+        priority: "high",
+      });
+
+      // [card alert] replay 는 이미 알림을 받았으므로 재발행하지 않는다(멱등).
+      const replay = await service.create(companyId, input("card-alert"), { type: "user", id: "board-user" });
+      expect(replay.replayed).toBe(true);
+      expect(events.filter((event) => event.type === "operator_decision.created")).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("enforces same-company requesters and linked issues", async () => {

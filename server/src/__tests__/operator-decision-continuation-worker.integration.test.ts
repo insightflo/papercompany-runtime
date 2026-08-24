@@ -75,12 +75,32 @@ describeDb("operator decision continuation worker", () => {
     });
     const worker = operatorDecisionContinuationWorker(db, { wakeup, workerId: "test-worker" });
     await worker.pollOnce();
+    // [delivery bridge] payload/contextSnapshot 매칭에 paperclipOperatorDecisionResolution 키 추가 —
+    //   기존 키의 의미는 변경 없음(신규 전달 필드 추가).
     expect(wakeup).toHaveBeenCalledWith(agentId, {
       source: "automation",
       triggerDetail: "system",
       reason: "operator_decision_resolved",
-      payload: { kind: "operator_decision_resolution", operatorDecisionId: decisionId, issueId, actionId: "choose", selectedOptionIds: ["one"] },
-      contextSnapshot: { issueId, wakeReason: "operator_decision_resolved", operatorDecisionId: decisionId },
+      payload: {
+        kind: "operator_decision_resolution",
+        operatorDecisionId: decisionId,
+        issueId,
+        actionId: "choose",
+        selectedOptionIds: ["one"],
+        paperclipOperatorDecisionResolution: {
+          operatorDecisionId: decisionId,
+          options: [{ id: "one", label: "One", description: null }],
+        },
+      },
+      contextSnapshot: {
+        issueId,
+        wakeReason: "operator_decision_resolved",
+        operatorDecisionId: decisionId,
+        paperclipOperatorDecisionResolution: {
+          operatorDecisionId: decisionId,
+          options: [{ id: "one", label: "One", description: null }],
+        },
+      },
       requestedByActorType: "user",
       requestedByActorId: "board",
       idempotencyKey: `operator-decision-wake:${decisionId}:g1:a1`,
