@@ -6,6 +6,7 @@ import {
   agents,
   companies,
   createDb,
+  issueComments,
   issues,
   operatorDecisionContinuations,
   operatorDecisions,
@@ -37,6 +38,8 @@ describeDb("Inflo Operator Decision end-to-end", () => {
     await db.delete(operatorDecisionContinuations);
     await db.delete(operatorDecisions);
     await db.delete(agentWakeupRequests);
+    // [delivery bridge] resolve 가 시스템 코멘트를 남기므로 issues 삭제 전에 정리한다(FK 순서).
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -82,6 +85,16 @@ describeDb("Inflo Operator Decision end-to-end", () => {
     });
     expect((await operatorDecisionReadService(db).list(companyId, { view: "pending", limit: 50 })).data).toEqual([]);
 
+    // [delivery bridge] resolve 는 이슈에 시스템 코멘트(저자 없음)를 남긴다 — running 런도 다음 실행에서
+    //   brief 의 recentIssueComments 로 결정을 본다.
+    const resolvedComments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(resolvedComments).toHaveLength(1);
+    expect(resolvedComments[0]).toMatchObject({ authorAgentId: null, authorUserId: null });
+    expect(resolvedComments[0]!.body).toContain("## 운영자 결정 반영 (operator decision resolved)");
+    expect(resolvedComments[0]!.body).toContain("- 선택: North District modernization — Internal proposal candidate");
+    expect(resolvedComments[0]!.body).toContain(`- operatorDecisionId: ${created.decision.id}`);
+    expect(resolvedComments[0]!.body).toContain("다음 실행자는 이 결정을 우선 지시로 따른다.");
+
     const wakeup = vi.fn(async (targetAgentId: string, options: Record<string, unknown>) => {
       await db.insert(agentWakeupRequests).values({
         companyId,
@@ -99,6 +112,8 @@ describeDb("Inflo Operator Decision end-to-end", () => {
       });
     });
     await operatorDecisionContinuationWorker(db, { wakeup, workerId: "inflo-e2e" }).pollOnce();
+    // [delivery bridge] payload 매칭에 paperclipOperatorDecisionResolution 키 추가 — 기존 키의 의미는
+    //   변경 없음(신규 전달 필드 추가).
     expect(wakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({
       payload: {
         kind: "operator_decision_resolution",
@@ -106,6 +121,19 @@ describeDb("Inflo Operator Decision end-to-end", () => {
         issueId,
         actionId: "prepare_internal_proposal",
         selectedOptionIds: ["candidate-north"],
+        paperclipOperatorDecisionResolution: {
+          operatorDecisionId: created.decision.id,
+          options: [{ id: "candidate-north", label: "North District modernization", description: "Internal proposal candidate" }],
+        },
+      },
+      contextSnapshot: {
+        issueId,
+        wakeReason: "operator_decision_resolved",
+        operatorDecisionId: created.decision.id,
+        paperclipOperatorDecisionResolution: {
+          operatorDecisionId: created.decision.id,
+          options: [{ id: "candidate-north", label: "North District modernization", description: "Internal proposal candidate" }],
+        },
       },
       idempotencyKey: `operator-decision-wake:${created.decision.id}:g1:a1`,
     }));
@@ -127,6 +155,8 @@ describeDb("Inflo Operator Decision end-to-end", () => {
     expect(replay.applied).toBe(false);
     expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
     expect(await db.select().from(agentWakeupRequests)).toHaveLength(1);
+    // [delivery bridge] replay resolve 는 시스템 코멘트를 중복 생성하지 않는다.
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issueId))).toHaveLength(1);
   });
 
   it.each([

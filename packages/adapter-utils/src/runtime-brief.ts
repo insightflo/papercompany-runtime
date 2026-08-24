@@ -150,6 +150,31 @@ function buildNoProgressRecoveryBriefLines(value: unknown): readonly string[] {
   ];
 }
 
+// [operator decision delivery] 오너 결정 카드가 해결되면 wake contextSnapshot 에 실려 오는
+//   paperclipOperatorDecisionResolution 를 brief 상단 우선 블록으로 렌더한다(fresh-run 전달 계층).
+//   규칙 8: 이 텍스트는 전달용이며 권위는 operator_decisions.result + activity log 에 있다.
+function buildOperatorDecisionResolutionBriefLines(value: unknown): readonly string[] {
+  const record = asRecord(value);
+  if (!record) return [];
+  const operatorDecisionId = asString(record.operatorDecisionId);
+  if (!operatorDecisionId) return [];
+  const options = Array.isArray(record.options)
+    ? record.options.map(asRecord).filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
+  const optionLines = options.flatMap((option) => {
+    const label = asString(option.label) ?? asString(option.id);
+    if (!label) return [];
+    const description = asString(option.description);
+    return [`- Operator decision resolved (card): ${label}${description ? ` — ${truncateBriefLine(description, 300)}` : ""}`];
+  });
+  return [
+    "Operator decision resolution — priority instruction (read first):",
+    ...optionLines,
+    `- operatorDecisionId: ${operatorDecisionId}`,
+    "이 결정은 운영자가 카드에서 선택한 우선 지시다.",
+  ];
+}
+
 function buildRecentIssueCommentsBrief(value: unknown) {
   const comments = Array.isArray(value)
     ? value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
@@ -732,6 +757,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
     ...reworkHeaderLines,
     ...runawayRecoveryLines,
+    // [operator decision delivery] reworkHeader/runawayRecovery 뒤 상단 우선 블록 — 오너 카드 해결 지시.
+    ...buildOperatorDecisionResolutionBriefLines(context.paperclipOperatorDecisionResolution),
     ...noProgressRecoveryLines,
     missionSearchPointer,
     userFacingLanguageLine,

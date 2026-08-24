@@ -3,6 +3,31 @@ import type { Db } from "@paperclipai/db";
 import { issues } from "@paperclipai/db";
 import { operatorDecisionContinuationStore } from "./operator-decision-continuation-store.js";
 
+// [delivery bridge] fresh-run 전달용 해결 요약. definition.options × selectedOptionIds 를
+//   한국어 라벨+영어 식별자로 해석해 wake payload 와 contextSnapshot 양쪽에 탑재한다.
+//   heartbeat.enrichWakeContextSnapshot 은 issueId 등 화이트리스트 키만 payload→contextSnapshot
+//   으로 복사하므로, worker 가 contextSnapshot 에 직접 넣는 것이 확실하다.
+interface OperatorDecisionResolutionSummary {
+  operatorDecisionId: string;
+  options: { id: string; label: string; description: string | null }[];
+}
+
+function buildOperatorDecisionResolutionSummary(
+  decision: { id: string; definition: { options: { id: string; label: string; description: string | null }[] }; result: { selectedOptionIds: string[] } | null },
+): OperatorDecisionResolutionSummary {
+  const selected = decision.result?.selectedOptionIds ?? [];
+  const byId = new Map(decision.definition.options.map((option) => [option.id, option]));
+  return {
+    operatorDecisionId: decision.id,
+    options: selected.map((optionId) => {
+      const option = byId.get(optionId);
+      return option
+        ? { id: option.id, label: option.label, description: option.description }
+        : { id: optionId, label: optionId, description: null };
+    }),
+  };
+}
+
 interface WakeupOptions {
   source: "automation";
   triggerDetail: "system";
@@ -13,11 +38,13 @@ interface WakeupOptions {
     issueId: string;
     actionId: string;
     selectedOptionIds: string[];
+    paperclipOperatorDecisionResolution: OperatorDecisionResolutionSummary;
   };
   contextSnapshot: {
     issueId: string;
     wakeReason: "operator_decision_resolved";
     operatorDecisionId: string;
+    paperclipOperatorDecisionResolution: OperatorDecisionResolutionSummary;
   };
   requestedByActorType: "user";
   requestedByActorId: string;
@@ -72,6 +99,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
     }
     const targeted = await store.setTarget(continuation.id, workerId, issue.assigneeAgentId);
     if (!targeted) return;
+    const resolutionSummary = buildOperatorDecisionResolutionSummary(decision);
     const wakeupOptions: WakeupOptions = {
       source: "automation",
       triggerDetail: "system",
@@ -82,11 +110,13 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
         issueId: issue.id,
         actionId: decision.result.actionId,
         selectedOptionIds: decision.result.selectedOptionIds,
+        paperclipOperatorDecisionResolution: resolutionSummary,
       },
       contextSnapshot: {
         issueId: issue.id,
         wakeReason: "operator_decision_resolved",
         operatorDecisionId: decision.id,
+        paperclipOperatorDecisionResolution: resolutionSummary,
       },
       requestedByActorType: "user",
       requestedByActorId: decision.resolvedByUserId,

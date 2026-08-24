@@ -3,12 +3,15 @@ import type { Db } from "@paperclipai/db";
 import {
   activityLog,
   agents,
+  issueComments,
   issues,
   operatorDecisionContinuations,
   operatorDecisions,
 } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
+import { publishLiveEvent } from "./live-events.js";
 import {
   sameOperatorDecisionResult,
   validateAndHashOperatorDecisionCreate,
@@ -21,6 +24,59 @@ export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
 function conflictFor(id: string, status: string, message = "Operator decision conflict") {
   return conflict(message, { operatorDecisionId: id, status });
+}
+
+// [delivery bridge] definition.options × result.selectedOptionIds 를 한국어 라벨+영어 식별자로 해석한다.
+//   규칙 8: 이 표시용 해석은 권위가 아니며, 권위는 operator_decisions.result + activity log 에 있다.
+function resolveSelectedOptions(
+  definition: CreateOperatorDecisionInput["definition"],
+  selectedOptionIds: readonly string[],
+): { id: string; label: string; description: string | null }[] {
+  const byId = new Map(definition.options.map((option) => [option.id, option]));
+  return selectedOptionIds
+    .map((optionId) => {
+      const option = byId.get(optionId);
+      return option
+        ? { id: option.id, label: option.label, description: option.description }
+        : { id: optionId, label: optionId, description: null };
+    });
+}
+
+// [delivery bridge] resolve 직후 이슈에 남는 시스템 코멘트(저자 null). 이미 running인 런도 다음 실행에서
+//   brief 의 recentIssueComments 로 이 결정을 본다. 삽입 실패는 resolve 를 깨지 않는다(display 계층).
+async function insertOperatorDecisionResolvedComment(
+  db: Db,
+  input: {
+    companyId: string;
+    issueId: string;
+    operatorDecisionId: string;
+    selectedOptions: { id: string; label: string; description: string | null }[];
+  },
+): Promise<void> {
+  const selectionLines = input.selectedOptions.map((option) =>
+    `- 선택: ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+  const body = [
+    "## 운영자 결정 반영 (operator decision resolved)",
+    ...selectionLines,
+    `- operatorDecisionId: ${input.operatorDecisionId}`,
+    "- 다음 실행자는 이 결정을 우선 지시로 따른다.",
+  ].join("\n");
+  try {
+    await db.insert(issueComments).values({
+      companyId: input.companyId,
+      issueId: input.issueId,
+      authorAgentId: null,
+      authorUserId: null,
+      body,
+    });
+  } catch (error) {
+    logger.warn({
+      msg: "Failed to insert operator-decision resolved system comment",
+      operatorDecisionId: input.operatorDecisionId,
+      issueId: input.issueId,
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+  }
 }
 
 export function operatorDecisionWriteService(db: Db) {
@@ -108,6 +164,18 @@ export function operatorDecisionWriteService(db: Db) {
       if (concurrentReplay) return concurrentReplay;
       throw error;
     }
+    // [card alert] 신규 생성(비-replay)에만 발행한다 — replay 는 이미 알림을 받았으므로 멱등하게 스킵.
+    publishLiveEvent({
+      companyId,
+      type: "operator_decision.created",
+      payload: {
+        operatorDecisionId: id,
+        issueId: validated.input.issueId,
+        missionId: validated.input.sourceContext.missionId ?? null,
+        title: validated.input.title,
+        priority: validated.input.priority,
+      },
+    });
     return { decision: await read.getRequired(id), replayed: false };
   }
 
@@ -172,6 +240,16 @@ export function operatorDecisionWriteService(db: Db) {
       return true;
     });
     const decision = await read.getRequired(id);
+    // [delivery bridge] applied(첫 적용)에만 코멘트를 남긴다 — replay 는 이미 코멘트가 존재한다.
+    //   이슈가 삭제된 경우 decision.issueId 는 FK(set null) 로 비어 자연 스킵된다.
+    if (applied && decision.issueId) {
+      await insertOperatorDecisionResolvedComment(db, {
+        companyId: decision.companyId,
+        issueId: decision.issueId,
+        operatorDecisionId: id,
+        selectedOptions: resolveSelectedOptions(decision.definition, result.selectedOptionIds),
+      });
+    }
     return { decision, applied, continuation: decision.continuation };
   }
 

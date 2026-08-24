@@ -93,6 +93,10 @@ function buildOutboundHandler(db: Db, companyId: string) {
 
       let message = await buildRunFailureNotification(db, event);
       if (!message) {
+        // [card alert] 오너 결정 카드 생성 알림 — 비동기 DB 조회가 필요해 전용 빌더에서 처리한다.
+        message = await buildOperatorDecisionCardNotification(db, event);
+      }
+      if (!message) {
         message = formatEventNotification(event);
       }
       if (message) {
@@ -274,6 +278,101 @@ async function buildRunFailureNotification(
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
     return null;
+  }
+}
+
+/**
+ * Compose an operator-decision card notification from resolved context.
+ * Pure function — exported for tests. Lines with missing context are omitted
+ * so the message degrades gracefully instead of showing "unknown".
+ */
+export function composeOperatorDecisionCardNotification(input: {
+  title: string;
+  issueIdentifier?: string | null;
+  issueTitle?: string | null;
+  missionTitle?: string | null;
+}): string {
+  const issueLine = [
+    input.issueIdentifier ?? null,
+    input.issueTitle ?? null,
+  ].filter(Boolean).join(" — ");
+
+  const lines = [
+    "🗂️ *오너 결정 대기*",
+    issueLine ? `이슈: ${issueLine}` : null,
+    input.missionTitle ? `미션: ${input.missionTitle}` : null,
+    `카드: ${input.title}`,
+    "→ 게시판 Human Operator 화면에서 선택",
+  ].filter((line): line is string => Boolean(line));
+
+  return lines.join("\n").slice(0, 3500);
+}
+
+/**
+ * Build an operator-decision card notification: resolve the linked issue
+ * (identifier/title) and mission (title) from the DB so the operator can tell
+ * WHICH mission/issue is waiting. Returns null for other event types. When
+ * the DB lookup fails, degrades to a card-title-only message.
+ */
+async function buildOperatorDecisionCardNotification(
+  db: Db,
+  event: { type: string; payload?: Record<string, unknown> },
+): Promise<string | null> {
+  if (event.type !== "operator_decision.created") return null;
+  const operatorDecisionId = readString(event.payload?.operatorDecisionId);
+  const title = readString(event.payload?.title);
+  if (!operatorDecisionId) return null;
+
+  const fallbackTitle = title ?? `operator decision ${operatorDecisionId.slice(0, 8)}`;
+  const issueId = readString(event.payload?.issueId);
+  const missionIdFromPayload = readString(event.payload?.missionId);
+
+  try {
+    let issueIdentifier: string | null = null;
+    let issueTitle: string | null = null;
+    let missionTitle: string | null = null;
+
+    if (issueId) {
+      const [row] = await db
+        .select({
+          issueIdentifier: issues.identifier,
+          issueTitle: issues.title,
+          missionId: issues.missionId,
+          missionTitle: missions.title,
+        })
+        .from(issues)
+        .leftJoin(missions, eq(issues.missionId, missions.id))
+        .where(eq(issues.id, issueId))
+        .limit(1);
+      if (row) {
+        issueIdentifier = row.issueIdentifier;
+        issueTitle = row.issueTitle;
+        missionTitle = row.missionTitle;
+      }
+    }
+    if (missionTitle === null && missionIdFromPayload) {
+      const [mission] = await db
+        .select({ title: missions.title })
+        .from(missions)
+        .where(eq(missions.id, missionIdFromPayload))
+        .limit(1);
+      missionTitle = mission?.title ?? null;
+    }
+
+    return composeOperatorDecisionCardNotification({
+      title: fallbackTitle,
+      issueIdentifier,
+      issueTitle,
+      missionTitle,
+    });
+  } catch (err) {
+    logger.warn({
+      msg: "Failed to enrich operator-decision card notification; falling back to title-only format",
+      operatorDecisionId,
+      issueId,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    return composeOperatorDecisionCardNotification({ title: fallbackTitle });
   }
 }
 
