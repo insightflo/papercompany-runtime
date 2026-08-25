@@ -76,6 +76,17 @@ export function deriveOperatorDecisionContinuationStatus(
 ): DerivedContinuationStatus {
   const { continuation, wakeup, run, issue, targetAgent, now } = input;
   if (continuation.state === "blocked") {
+    // [terminal cleanup] A blocked continuation whose linked issue has since reached a
+    // terminal state (done/cancelled) no longer represents actionable operator work —
+    // the mission moved on (e.g. oversight issue completed after a workflow finished).
+    // Classify as skipped (non-attention) instead of leaving a stale retry card up.
+    if (
+      continuation.errorCode === "issue_unassigned" || continuation.errorCode === "issue_terminal"
+    ) {
+      if (issue && ["done", "cancelled"].includes(issue.status)) {
+        return { effectiveStatus: "skipped", errorCode: "issue_terminal", attention: false };
+      }
+    }
     return { effectiveStatus: "blocked", errorCode: continuation.errorCode, attention: true };
   }
   if (continuation.state === "exhausted") {
