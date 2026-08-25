@@ -49,7 +49,9 @@ export function buildWorkflowReworkContract(input: {
     producerWorkProducts: (input.producerWorkProducts ?? []).map((wp) => ({ ...wp })),
     requiredActions: [
       "Treat this rework contract as the primary instruction for the current run.",
-      "Address the latest REQUEST_CHANGES feedback before registering or completing the step.",
+      // [surgical revision] 외과수술적 수정 지시 — 브리프 렌더 제약(requiredActions 첫 4개, 컴팩트 헤더 3개,
+      //   항목당 260자) 안에 전문이 들어가도록 index 1 + 길이 제한 유지.
+      "Revise surgically: edit your prior registered work products in place; change only what the QA feedback flags plus directly affected parts (summaries, TOC, cross-references, counts); keep unaffected content unchanged — do not rewrite from scratch.",
       "Do not close as already complete unless the requested changes are reflected in the deliverable.",
       "If the corrected artifact already exists, verify it satisfies the feedback and register that artifact.",
     ],
@@ -105,6 +107,15 @@ export function renderWorkflowReworkComment(contract: WorkflowReworkContract): s
         ...contract.producerWorkProducts.map((wp) => `- ${wp.title} → ${wp.ref}`),
       ].join("\n")
     : null;
+  // [surgical revision] 전문 지침 — 잘된 부분은 그대로 두고 지적된 부분(+직접 영향 부분)만 고친다.
+  //   comment 는 절단 없이 전문이 보이므로 상세 규칙을 여기에 둔다(requiredActions 는 브리프 요약).
+  const surgicalSection = [
+    "### How to apply this rework (surgical revision)",
+    "- Start from your prior registered work products above: load the current artifact and edit it — do not rebuild the deliverable from scratch.",
+    "- Change only the parts the QA feedback flags, plus the parts those changes directly affect (for example: section summaries, a table of contents, cross-references, counts and totals).",
+    "- Keep unaffected sections exactly as they are — do not rephrase, restructure, or refresh content the feedback did not flag.",
+    "- A wholesale rewrite that discards accepted content is itself a rework failure, even if the flagged items are fixed.",
+  ].join("\n");
   return [
     "## Workflow QA rework request",
     "",
@@ -113,6 +124,7 @@ export function renderWorkflowReworkComment(contract: WorkflowReworkContract): s
     `- Rework iteration: ${contract.iterationLabel}`,
     instructionSection,
     ownProductsSection,
+    surgicalSection,
     buildQaReworkArtifactInstructionLine({ feedbackScope: multi ? "ALL listed QA feedback above" : "the QA feedback" }),
     ...contract.requiredActions.map((action) => `- ${action}`),
     contract.dependencyArtifacts,
