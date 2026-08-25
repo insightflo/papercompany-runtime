@@ -33,15 +33,18 @@ export interface DerivedContinuationStatus {
 const terminalRunMapping: Record<string, [OperatorDecisionEffectiveStatus, string | null, boolean]> = {
   succeeded: ["completed", null, false],
   failed: ["failed", "heartbeat_failed", true],
-  cancelled: ["cancelled", "heartbeat_cancelled", true],
-  timed_out: ["timed_out", "heartbeat_timed_out", true],
+  // [terminal cleanup] a cancelled/timed-out continuation run whose linked issue is
+  // done/cancelled has no remaining delivery — the mission moved past it (mission cancel
+  // cascades run terminalization). Non-attention, same as 8/25 morning GAZ-1315 rows.
+  cancelled: ["cancelled", "heartbeat_cancelled", false],
+  timed_out: ["timed_out", "heartbeat_timed_out", false],
 };
 const terminalRequestMapping: Record<string, [OperatorDecisionEffectiveStatus, string | null, boolean]> = {
   completed: ["completed", null, false],
   failed: ["failed", "heartbeat_failed", true],
-  cancelled: ["cancelled", "heartbeat_cancelled", true],
-  skipped: ["skipped", "heartbeat_skipped", true],
-  timed_out: ["timed_out", "heartbeat_timed_out", true],
+  cancelled: ["cancelled", "heartbeat_cancelled", false],
+  skipped: ["skipped", "heartbeat_skipped", false],
+  timed_out: ["timed_out", "heartbeat_timed_out", false],
 };
 
 function derived(tuple: [OperatorDecisionEffectiveStatus, string | null, boolean]): DerivedContinuationStatus {
