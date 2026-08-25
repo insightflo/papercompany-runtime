@@ -2,8 +2,13 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
 import { OperatorDecisionCard } from "./OperatorDecisionCard";
+
+vi.mock("../lib/router", () => ({
+  Link: ({ children, to, className }: { children: ReactNode; to: string; className?: string }) => <a href={to} className={className}>{children}</a>,
+}));
 
 const baseDecision: OperatorDecisionView = {
   id: "decision-1",
@@ -43,6 +48,9 @@ const baseDecision: OperatorDecisionView = {
   },
   result: null,
   issueId: "issue-1",
+  issueIdentifier: null,
+  issueTitle: null,
+  missionTitle: null,
   continuationMode: "issue_current_assignee",
   requestedBy: { type: "agent", id: "agent-1" },
   resolvedByUserId: null,
@@ -120,6 +128,44 @@ describe("OperatorDecisionCard behavior", () => {
     click(host.querySelector('input[value="two"]')!);
     click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!);
     expect(host.querySelector('[role="alert"]')?.textContent).toContain("comment");
+  });
+
+  it("shows mission and issue labels at the top of the card", async () => {
+    await renderCard({
+      ...baseDecision,
+      issueIdentifier: "GAZ-1352",
+      issueTitle: "[Unblock] GAZ-1350: 미국시장 시그널 해석",
+      missionTitle: "2026-08-25 gazua-evening",
+    } as OperatorDecisionView);
+    const header = host.querySelector("[data-operator-decision-context]")!;
+    expect(header).toBeTruthy();
+    expect(header.textContent).toContain("2026-08-25 gazua-evening");
+    expect(header.textContent).toContain("GAZ-1352 — [Unblock] GAZ-1350: 미국시장 시그널 해석");
+    const priorityRow = host.querySelector("[data-operator-decision-meta]")!;
+    expect(header.compareDocumentPosition(priorityRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("hides the description paragraph when a human review packet is present", async () => {
+    await renderCard();
+    expect(host.textContent).not.toContain("Select the best candidate");
+    await renderCard({
+      ...baseDecision,
+      definition: { ...baseDecision.definition, humanReview: null },
+    });
+    expect(host.textContent).toContain("Select the best candidate");
+  });
+
+  it("renders Open linked work / Open mission as button-styled links with router hrefs", async () => {
+    await renderCard();
+    const issueLink = [...host.querySelectorAll<HTMLAnchorElement>('a[href="/issues/issue-1"]')]
+      .find((anchor) => anchor.textContent?.includes("Open linked work"))!;
+    const missionLink = host.querySelector<HTMLAnchorElement>('a[href="/missions/mission-1"]')!;
+    expect(issueLink).toBeTruthy();
+    expect(missionLink).toBeTruthy();
+    expect(missionLink.textContent).toContain("Open mission");
+    // Button styling applied through the slot (visible affordance, not bare text links).
+    expect(issueLink.className).toContain("inline-flex");
+    expect(missionLink.className).toContain("inline-flex");
   });
 
   it("preserves draft and focuses an announced mutation error", async () => {

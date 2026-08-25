@@ -14,6 +14,8 @@
 //     자연어 comment/stdout 은 절대 파싱하지 않는다.
 
 import type { Db } from "@paperclipai/db";
+import { and, eq, like, ne } from "drizzle-orm";
+import { operatorDecisions } from "@paperclipai/db";
 import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
 
@@ -231,9 +233,10 @@ export type EnsureQaSourceDefectCardResult =
   | { readonly outcome: "failed"; readonly message: string };
 
 /**
- * [멱등 생성] requestKey 로 replay 처리된다(동일 requestHash → replayed). hash 충돌(다른 generation
- *   콘텐츠 — 희귀)은 conflict 로 반환하고 caller 가 로그/final 처리한다. 실패는 예외를 던지지 않고
- *   failed 로 반환한다 — 재작업 라우팅 자체는 카드 실패로 좌우되지 않는다(fail-closed 는 caller 책임).
+ * [멱등 생성 + 중복 방지] requestKey 로 replay 처리되고(동일 requestHash → replayed), 같은
+ *   (workflowRun, producer) 의 이전 iteration 카드가 아직 pending 이면 cancel 로 대체한다 —
+ *   운영자는 항상 해당 조건의 최신 카드 1장만 본다(2026-08-25 GAZ 3중 복제 사고 대응).
+ *   hash 충돌(다른 generation 콘텐츠 — 희귀)은 conflict 로 반환. 실패는 failed 로 반환한다.
  */
 export async function ensureQaSourceDefectOwnerCard(input: {
   readonly db: Db;
@@ -249,8 +252,23 @@ export async function ensureQaSourceDefectOwnerCard(input: {
   readonly linkIssueId: string | null;
 }): Promise<EnsureQaSourceDefectCardResult> {
   const createInput = buildCardCreateInput(input);
+  const write = operatorDecisionWriteService(input.db);
+
+  // [supersede] 같은 (run, producer) 의 다른 requestKey 중 아직 pending 인 카드를 취소한다.
+  //   cancel 은 기존 쓰기 서비스 경로(감사 로그 동반)를 그대로 쓴다 — 직접 UPDATE 금지.
+  const staleRows = await input.db.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
+    eq(operatorDecisions.companyId, input.companyId),
+    eq(operatorDecisions.sourceType, QA_SOURCE_DEFECT_CARD_SOURCE_TYPE),
+    eq(operatorDecisions.status, "pending"),
+    like(operatorDecisions.sourceId, `${input.workflowRunId}:${input.producerStepId}:%`),
+    ne(operatorDecisions.requestKey, createInput.requestKey),
+  ));
+  for (const stale of staleRows) {
+    await write.cancel(stale.id, { type: "user", id: "system" });
+  }
+
   try {
-    const result = await operatorDecisionWriteService(input.db).create(
+    const result = await write.create(
       input.companyId,
       createInput,
       { type: "user", id: "system" },

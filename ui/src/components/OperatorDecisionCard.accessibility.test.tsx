@@ -1,8 +1,13 @@
 // @vitest-environment node
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
 import { OperatorDecisionCard } from "./OperatorDecisionCard";
+
+vi.mock("../lib/router", () => ({
+  Link: ({ children, to, className }: { children: ReactNode; to: string; className?: string }) => <a href={to} className={className}>{children}</a>,
+}));
 
 const decision: OperatorDecisionView = {
   id: "decision-a",
@@ -47,6 +52,9 @@ const decision: OperatorDecisionView = {
   },
   result: null,
   issueId: null,
+  issueIdentifier: null,
+  issueTitle: null,
+  missionTitle: null,
   continuationMode: "none",
   requestedBy: null,
   resolvedByUserId: null,
@@ -67,6 +75,32 @@ describe("OperatorDecisionCard accessibility", () => {
     expect(html).toContain('role="alert"');
     expect(html).toContain("<textarea");
     expect(html).toContain('for="operator-decision-decision-a-comment"');
+  });
+
+  it("keeps sentence line breaks readable in the human review packet", () => {
+    const html = renderToStaticMarkup(<OperatorDecisionCard decision={{
+      ...decision,
+      definition: {
+        ...decision.definition,
+        humanReview: {
+          ...decision.definition.humanReview!,
+          interpretation: "첫 문장입니다.\n둘째 문장입니다.",
+          evidence: [{
+            label: "QA 판정",
+            href: "/issues/issue-9",
+            location: "workflow run x",
+            description: "- [source_data] 결함 1\n- [source_data] 결함 2",
+          }],
+        },
+      },
+    }} onResolve={vi.fn()} />);
+    expect(html).toContain("whitespace-pre-line");
+  });
+
+  it("does not render the markdown description when a human review packet exists", () => {
+    const html = renderToStaticMarkup(<OperatorDecisionCard decision={decision} onResolve={vi.fn()} />);
+    expect(html).not.toContain("Choose safely</p>");
+    expect(html).toContain("무엇을 판단하나요?");
   });
 
   it("renders external evidence with safe new-window attributes and no HTML injection", () => {

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { ExternalLink } from "lucide-react";
 import type {
   OperatorDecisionAction,
   OperatorDecisionView,
 } from "@paperclipai/shared/types/operator-decision";
 import type { ResolveOperatorDecisionInput } from "../api/operator-decisions";
 import { timeAgo } from "../lib/timeAgo";
+import { Link } from "../lib/router";
 import { cn } from "../lib/utils";
+import { Button } from "./ui/button";
 import { HumanReviewPacket } from "./HumanReviewPacket";
 
 interface OperatorDecisionCardProps {
@@ -92,7 +95,17 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
 
   return (
     <article className="border border-border bg-card p-4" aria-labelledby={`operator-decision-${decision.id}-heading`}>
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      {(decision.missionTitle || decision.issueIdentifier || decision.issueTitle) && (
+        <div data-operator-decision-context className="mb-2 flex flex-col gap-0.5 border-b border-border pb-2 text-xs">
+          {decision.missionTitle && <span className="text-muted-foreground">미션: {decision.missionTitle}</span>}
+          {(decision.issueIdentifier || decision.issueTitle) && (
+            <span className="font-medium text-foreground">
+              이슈: {decision.issueIdentifier ?? ""}{decision.issueIdentifier && decision.issueTitle ? " — " : ""}{decision.issueTitle ?? ""}
+            </span>
+          )}
+        </div>
+      )}
+      <div data-operator-decision-meta className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span className="font-semibold uppercase text-foreground">{decision.priority}</span>
         <span>Requested by {sourceLabel(decision)}</span>
         <span>{timeAgo(decision.createdAt)}</span>
@@ -105,16 +118,31 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       >
         {decision.title}
       </h2>
-      <p id={descriptionId} className="mt-1 text-sm text-muted-foreground">{decision.description}</p>
+      {/* 판단 카드(humanReview)가 있으면 마크다운 description 은 중복 — 표시하지 않는다. */}
+      {!decision.definition.humanReview && (
+        <p id={descriptionId} className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{decision.description}</p>
+      )}
 
       <HumanReviewPacket packet={decision.definition.humanReview ?? null} />
 
-      <div className="mt-3 flex flex-wrap gap-3 text-xs">
-        {decision.issueId && <a href={`/issues/${decision.issueId}`}>Open linked work</a>}
-        {decision.sourceContext.missionId && <a href={`/missions/${decision.sourceContext.missionId}`}>Open mission</a>}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {decision.issueId && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/issues/${decision.issueId}`}>Open linked work<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
+          </Button>
+        )}
+        {decision.sourceContext.missionId && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/missions/${decision.sourceContext.missionId}`}>Open mission<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
+          </Button>
+        )}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-3 text-xs">
         {decision.sourceContext.artifactRefs.map((ref) => (
           ref.uri.startsWith("http:") || ref.uri.startsWith("https:") || ref.uri.startsWith("/")
-            ? <a key={ref.uri} href={ref.uri} target={ref.uri.startsWith("/") ? undefined : "_blank"} rel={ref.uri.startsWith("/") ? undefined : "noreferrer"}>{ref.label}</a>
+            ? (ref.uri.startsWith("/")
+                ? <Link key={ref.uri} to={ref.uri}>{ref.label}</Link>
+                : <a key={ref.uri} href={ref.uri} target="_blank" rel="noreferrer">{ref.label}</a>)
             : <span key={ref.uri}>{ref.label}</span>
         ))}
       </div>

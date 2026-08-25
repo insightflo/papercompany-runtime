@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { companies, createDb, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
+import { agents, companies, createDb, issues, missions, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { operatorDecisionReadService } from "../services/operator-decisions-read.js";
 
@@ -30,6 +30,9 @@ describeDb("operator decision read service", () => {
   beforeEach(async () => {
     await db.delete(operatorDecisionContinuations);
     await db.delete(operatorDecisions);
+    await db.delete(issues);
+    await db.delete(missions);
+    await db.delete(agents);
     await db.delete(companies);
     companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Read", issuePrefix: `R${companyId.slice(0, 4)}` });
@@ -63,6 +66,34 @@ describeDb("operator decision read service", () => {
     expect(second.data.map((item) => item.id)).toEqual([low.id]);
     await expect(service.list(companyId, { view: "history", limit: 2, cursor: first.page.nextCursor! }))
       .rejects.toBeDefined();
+  });
+
+  it("projects linked issue and mission labels onto the view for operator cards", async () => {
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "owner", role: "mission_owner", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: agentId, title: "2026-08-25 gazua-evening", status: "active" });
+    const [issue] = await db.insert(issues).values({
+      companyId, missionId, title: "[Unblock] GAZ-1350: 미국시장 시그널 해석", status: "blocked", assigneeAgentId: agentId,
+    }).returning({ id: issues.id, identifier: issues.identifier });
+
+    const linked = await insertDecision({ issueId: issue!.id });
+    const unlinked = await insertDecision({});
+    const service = operatorDecisionReadService(db);
+
+    await expect(service.getById(linked.id)).resolves.toMatchObject({
+      issueIdentifier: issue!.identifier,
+      issueTitle: "[Unblock] GAZ-1350: 미국시장 시그널 해석",
+      missionTitle: "2026-08-25 gazua-evening",
+    });
+    await expect(service.getById(unlinked.id)).resolves.toMatchObject({
+      issueIdentifier: null,
+      issueTitle: null,
+      missionTitle: null,
+    });
   });
 
   it("returns explicit nullable view fields and company isolation", async () => {

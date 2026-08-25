@@ -206,6 +206,15 @@ export async function loadOperatorDecisionProjection(
   now = new Date(),
 ): Promise<{ view: OperatorDecisionView; attention: boolean; continuationUpdatedAt: Date | null }> {
   const continuation = await loadContinuationProjection(db, row.id, now);
+  // [display-only] 카드 상단 노출용 링크된 이슈/미션 이름표(rule 8: 표시 전용).
+  const linkedIssue = row.issueId
+    ? await db.select({ identifier: issues.identifier, title: issues.title, missionId: issues.missionId })
+      .from(issues).where(eq(issues.id, row.issueId)).then((rows) => rows[0] ?? null)
+    : null;
+  const linkedMission = linkedIssue?.missionId
+    ? await db.select({ title: missions.title }).from(missions)
+      .where(eq(missions.id, linkedIssue.missionId)).then((rows) => rows[0] ?? null)
+    : null;
   const requestedBy = row.requestedByAgentId
     ? { type: "agent" as const, id: row.requestedByAgentId }
     : row.requestedByUserId
@@ -228,6 +237,9 @@ export async function loadOperatorDecisionProjection(
       definition: row.definition,
       result: row.result,
       issueId: row.issueId,
+      issueIdentifier: linkedIssue?.identifier ?? null,
+      issueTitle: linkedIssue?.title ?? null,
+      missionTitle: linkedMission?.title ?? null,
       continuationMode: row.continuationMode as OperatorDecisionView["continuationMode"],
       requestedBy,
       resolvedByUserId: row.resolvedByUserId,

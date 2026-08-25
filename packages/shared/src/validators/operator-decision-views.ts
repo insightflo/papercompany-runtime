@@ -61,6 +61,11 @@ export const operatorDecisionViewSchema = z.object({
   definition: operatorDecisionDefinitionSchema,
   result: operatorDecisionResultSchema.nullable(),
   issueId: z.string().nullable(),
+  /** Operator-facing labels for the linked issue/mission — lets the pending card
+   *  header say WHICH mission/issue the decision belongs to without extra lookups. */
+  issueIdentifier: z.string().nullable(),
+  issueTitle: z.string().nullable(),
+  missionTitle: z.string().nullable(),
   continuationMode: continuationModeEnum,
   requestedBy: requestedBySchema,
   resolvedByUserId: z.string().nullable(),
