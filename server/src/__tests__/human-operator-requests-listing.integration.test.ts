@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agents, companies, createDb, issues, missions } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
@@ -185,4 +186,46 @@ describePg("listCompanyHumanOperatorRequests source routing", () => {
     expect(requests[0]!.issueId).toBe(ownerIssueId);
   });
 
+  it("builds a Korean structured operator-card summary from payload structured fields", async () => {
+    const { ownerIssueId } = await seedOwnerUnblockRequest({ ownerStatus: "blocked", sourceStatus: "done" });
+    // seedOwnerUnblockRequest 는 최소 payload 만 넣으므로, 카드 요약 검증용 필드를 직접 보강한다.
+    const [row] = await db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityId, ownerIssueId)));
+    await db
+      .update(activityLog)
+      .set({
+        details: {
+          missionId: (await db.select({ missionId: issues.missionId }).from(issues).where(eq(issues.id, ownerIssueId)))[0]!.missionId,
+          issueId: ownerIssueId,
+          decisionEventId: randomUUID(),
+          decision: "escalate",
+          issueTitle: "[Unblock] GAZ-1350: 2026-08-25 미국시장 시그널 해석",
+          issueIdentifier: "GAZ-1352",
+          reason: "Mission blocker escalated: the accepted reassign event 423304dd-9f5b-4c88-b4c5-7c17d67865ab did not materialize.",
+          nextAction: "Assign the idle research agent and dispatch its workflow wakeup.",
+          evidence: "source=GAZ-1350; failed-run-count=2",
+          actorType: "agent",
+          actorId: "agent-1",
+        },
+      })
+      .where(eq(activityLog.id, row!.id));
+
+    const requests = await listCompanyHumanOperatorRequests(db, { companyId });
+
+    expect(requests).toHaveLength(1);
+    const lines = requests[0]!.summary.split("\n");
+    expect(lines[0]).toMatch(/^무엇이: /);
+    expect(lines[0]).toContain("미션 Human operator routing mission");
+    expect(lines[0]).toContain("이슈 GAZ-1352 — [Unblock] GAZ-1350");
+    expect(lines[1]).toMatch(/^왜 막힘: /);
+    expect(lines[1]).not.toContain("Mission blocker escalated");
+    expect(lines[1]).toContain("423304dd");
+    expect(lines[1]).not.toContain("423304dd-9f5b-4c88-b4c5-7c17d67865ab");
+    expect(lines[2]).toMatch(/^운영자 할 일: /);
+    expect(lines[2]).toContain("Assign the idle research agent");
+    expect(lines[3]).toMatch(/^근거: /);
+    expect(lines[3]).toContain("failed-run-count=2");
+  });
 });
