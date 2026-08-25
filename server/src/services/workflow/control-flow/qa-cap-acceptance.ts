@@ -80,7 +80,14 @@ function isFreshAcceptance(observedAt: Date | null, producerCompletedAt: Date | 
  *   A newer QA heartbeat/wakeup (re-dispatch) after the verdict supersedes it => the verdict is
  *   no longer the current execution and must NOT qualify. Comments/prose never participate.
  */
-async function isLatestQaExecution(db: Db, qaIssueId: string, qaStepRunId: string, verdictHeartbeatRunId: string | null): Promise<boolean> {
+/**
+ * [execution freshness] the official verdict's submitting heartbeat run must EQUAL the LATEST
+ *   heartbeat run for this QA issue that is joined to a wakeup carrying this QA step run id.
+ *   A newer QA heartbeat/wakeup (re-dispatch) after the verdict supersedes it => the verdict is
+ *   no longer the current execution and must NOT qualify. Comments/prose never participate.
+ *   (qa-remediation pass 도 동일 기준을 재사용한다 — 여기서 export.)
+ */
+export async function isLatestQaExecution(db: Db, qaIssueId: string, qaStepRunId: string, verdictHeartbeatRunId: string | null): Promise<boolean> {
   if (!verdictHeartbeatRunId) return false;
   const latest = await db
     .select({ id: heartbeatRuns.id })

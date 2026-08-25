@@ -10,9 +10,14 @@ import {
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
-import { workflowNonblockingAcceptanceSchema, workflowVerdictFindingsSchema } from "@paperclipai/shared";
+import {
+  workflowNonblockingAcceptanceSchema,
+  workflowQaRemediationsSchema,
+  workflowVerdictFindingsSchema,
+} from "@paperclipai/shared";
 import type {
   WorkflowNonblockingAcceptance,
+  WorkflowQaRemediations,
   WorkflowValidationVerdictPayload,
   WorkflowValidationVerdictValue,
   WorkflowVerdictFinding,
@@ -170,6 +175,7 @@ export async function recordWorkflowValidationVerdict(input: {
   readonly sourceText?: string | null;
   readonly nonblockingAcceptance?: WorkflowNonblockingAcceptance | null;
   readonly findings?: readonly WorkflowVerdictFinding[] | null;
+  readonly remediations?: WorkflowQaRemediations | null;
 }): Promise<WorkflowValidationLedgerResult> {
   const context = await resolveWorkflowValidationContext(input.db, input.issue, { mode: "record" });
   if (!context.isCandidate || !context.workflowRunId || !context.workflowStepRunId) {
@@ -185,6 +191,11 @@ export async function recordWorkflowValidationVerdict(input: {
   const findings = input.findings && input.findings.length > 0 && input.verdict === "request_changes"
     ? workflowVerdictFindingsSchema.parse(input.findings)
     : null;
+  // [qa mechanical remediation] remediations 도 request_changes 와만 공존한다(스키마 refine 보장).
+  //   heartbeat/comment 경로는 이 필드를 넘기지 않으므로 기계적 수정 지시는 오직 공식 workflow API 만 제출 가능.
+  const remediations = input.remediations && input.verdict === "request_changes"
+    ? workflowQaRemediationsSchema.parse(input.remediations)
+    : null;
   const boundedReason = typeof input.sourceText === "string" && input.sourceText.trim().length > 0
     ? input.sourceText.trim().slice(0, 4000)
     : null;
@@ -198,6 +209,7 @@ export async function recordWorkflowValidationVerdict(input: {
     ...(boundedReason ? { reason: boundedReason } : {}),
     ...(acceptance ? { nonblockingAcceptance: acceptance } : {}),
     ...(findings ? { findings } : {}),
+    ...(remediations ? { remediations } : {}),
   } satisfies WorkflowValidationVerdictPayload;
   const sourceKey = input.heartbeatRunId
     ? `run:${input.heartbeatRunId}`
@@ -450,5 +462,65 @@ export async function loadLatestNonblockingAcceptance(input: {
     observedAt: row.createdAt ?? null,
     workflowStepRunId: row.workflowStepRunId ?? null,
     heartbeatRunId: row.heartbeatRunId ?? null,
+  };
+}
+
+/**
+ * [qa mechanical remediation] 해당 QA issue 의 최신 공식 verdict event 에서 schema-validated
+ *   remediations 를 읽어 반환한다. loop-driver 의 remediation pass 가 사용하는 유일한 원천이다.
+ * [엄격 바인딩] nonblockingAcceptance/loadLatestNonblockingAcceptance 와 동일하게 오직 공식
+ *   workflow API 원천(reason="workflow_api") + heartbeatRunId non-null(이슈 스코프 확인)만 인정한다.
+ *   payload JSON 은 신뢰 불가 → schema 재검증, 실패 시 null. caller 가 observedAt/workflowStepRunId/
+ *   heartbeatRunId/sourceVerdictEventId 로 current-generation + exact QA step binding + 멱등 키를 판정한다.
+ */
+export async function loadLatestQaRemediations(input: {
+  readonly db: Pick<Db, "select">;
+  readonly companyId: string;
+  readonly issueId: string;
+}): Promise<{
+  readonly remediations: WorkflowQaRemediations;
+  readonly observedAt: Date | null;
+  readonly workflowStepRunId: string | null;
+  readonly heartbeatRunId: string | null;
+  /** remediation 멱등/감사가 참조할 원천 verdict event id(재적용 방지 키). */
+  readonly sourceVerdictEventId: string;
+} | null> {
+  // [execution freshness] load the LATEST official workflow_api verdict for the issue FIRST —
+  //   a newer official PASS (or a request_changes without remediations) is the current verdict
+  //   and must disqualify.
+  const row = await input.db
+    .select({
+      id: workflowTransitionEvents.id,
+      verdict: workflowTransitionEvents.verdict,
+      payload: workflowTransitionEvents.payload,
+      createdAt: workflowTransitionEvents.createdAt,
+      workflowStepRunId: workflowTransitionEvents.workflowStepRunId,
+      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+    })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, input.companyId),
+      eq(workflowTransitionEvents.issueId, input.issueId),
+      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      eq(workflowTransitionEvents.reason, "workflow_api"),
+      isNotNull(workflowTransitionEvents.heartbeatRunId),
+    ))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!row || row.verdict !== "request_changes") return null;
+  // [verdict authority] require a checked-out heartbeat run scoped to this QA issue.
+  if (!(await heartbeatRunScopedToIssue(input.db, row.heartbeatRunId, { companyId: input.companyId, issueId: input.issueId }))) {
+    return null;
+  }
+  const payload = asRecord(row.payload);
+  const parsed = workflowQaRemediationsSchema.safeParse(payload.remediations);
+  if (!parsed.success) return null;
+  return {
+    remediations: parsed.data,
+    observedAt: row.createdAt ?? null,
+    workflowStepRunId: row.workflowStepRunId ?? null,
+    heartbeatRunId: row.heartbeatRunId ?? null,
+    sourceVerdictEventId: row.id,
   };
 }

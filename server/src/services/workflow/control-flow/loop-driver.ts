@@ -50,6 +50,7 @@ import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rewo
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
 import { loadWorkflowApiFeedback, loadWorkflowApiFindings } from "../validation-verdict-ledger.js";
+import { tryQaRemediationPass } from "./qa-remediation.js";
 import { readCapBoostAmount, type StepIterationAttempt } from "./types.js";
 import {
   buildQaSourceDefectCardRequestKey,
@@ -87,11 +88,18 @@ export interface ApplyBackEdgeReworkInput {
    * producerCompletedAt 인 verdict 를 낼 때만 rework 를 일으킨다.
    */
   validationVerdictsByIssueId?: ReadonlyMap<string, { observedAt: Date | null } | undefined>;
+  /**
+   * [qa mechanical remediation] QA 스텝 재실행(wake) 콜백 — dag-engine 이 wakeExistingWorkflowStepIssue
+   * 를 래핑해 주입한다(순환 import 회피). 미제공 시 remediation pass 는 비활성(기존 재작업 경로만).
+   */
+  refireQaStep?: (qa: { stepId: string; stepRunId: string; issueId: string }) => Promise<boolean>;
 }
 
 export interface ApplyBackEdgeReworkResult {
   stepRuns: StepRun[];
   reworkedCount: number;
+  /** 기계적 remediation 으로 생산자 재실행 없이 해결된 producer 수(관측용). */
+  remediatedCount: number;
 }
 
 async function loadQaReworkFeedback(input: {
@@ -218,11 +226,12 @@ export async function applyBackEdgeReworkPass(
 ): Promise<ApplyBackEdgeReworkResult> {
   const { db, run, steps, predsByStepId } = input;
 
-  if (run.status === "cancelled") return { stepRuns: input.stepRuns, reworkedCount: 0 };
-  if (!workflowHasConditionalEdges(steps)) return { stepRuns: input.stepRuns, reworkedCount: 0 };
+  if (run.status === "cancelled") return { stepRuns: input.stepRuns, reworkedCount: 0, remediatedCount: 0 };
+  if (!workflowHasConditionalEdges(steps)) return { stepRuns: input.stepRuns, reworkedCount: 0, remediatedCount: 0 };
 
   const stepRunMap = new Map(input.stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
   let reworkedCount = 0;
+  let remediatedCount = 0;
 
   for (const step of steps) {
     // 이 step 이 back-edge 의 타겟(=rework 대상 producer) 인지. maxIterations≥1 동반만 유효.
@@ -321,6 +330,33 @@ export async function applyBackEdgeReworkPass(
     // cap: iteration_index(수행된 rework 수) 가 maxIterations+boost 에 도달하면 더 리셋하지 않는다(bounded).
     //   cap-exhausted → owner/replan 신호는 Patch 2 가 supervision 과 연결; 여기선 기존대로 terminal 유지.
     if (currentIteration >= maxIterations + capBoost) continue;
+
+    // [qa mechanical remediation] fresh 반려 QA 전원이 schema-validated remediations 를 동봉했고 결정론적
+    //   적용이 검증되면 생산자 재실행 없이 패치 + QA 스텝만 재실행한다(재작업 한도 미소모). 검증 실패/
+    //   remediations 미제출/하드블록 게이트/시도 상한 초과면 not_applicable → 아래 기존 재작업 경로로 폴백.
+    //   "waiting" = 해당 verdict 들은 이미 remediation 적용된 상태(재QA 대기 중) → 재작업도 스킵.
+    if (input.refireQaStep) {
+      const findingsByQaStepId = new Map<string, readonly WorkflowVerdictFinding[] | null>(
+        rejectedWithFindings.map((r) => [r.qaStepId, r.findings]),
+      );
+      const remediation = await tryQaRemediationPass({
+        db,
+        run,
+        steps,
+        producerStep: step,
+        producerRun: stepRun,
+        rejectedQas,
+        findingsByQaStepId,
+        refireQaStep: input.refireQaStep,
+      });
+      if (remediation.outcome === "applied") {
+        remediatedCount += 1;
+        continue;
+      }
+      if (remediation.outcome === "waiting") {
+        continue;
+      }
+    }
 
     const attempt: StepIterationAttempt = {
       iteration: currentIteration,
@@ -430,5 +466,5 @@ export async function applyBackEdgeReworkPass(
     predsByStepId,
     validationVerdictsByIssueId: input.validationVerdictsByIssueId,
   });
-  return { stepRuns: capResult.stepRuns, reworkedCount };
+  return { stepRuns: capResult.stepRuns, reworkedCount, remediatedCount };
 }
