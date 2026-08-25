@@ -30,6 +30,8 @@ export interface WorkflowDefinition {
   labelIds?: string[];
   projectId?: string | null;
   goalId?: string | null;
+  missionId?: string | null;
+  definitionHash?: string | null;
   createParentIssuePolicy?: string | null;
   executionMode: WorkflowExecutionMode | string | null;
   dynamicPlanBootstrapOnly?: boolean;
@@ -60,6 +62,8 @@ export interface CreateWorkflowDefinitionInput {
   labelIds?: string[];
   projectId?: string | null;
   goalId?: string | null;
+  missionId?: string | null;
+  definitionHash?: string | null;
   createParentIssuePolicy?: string | null;
   executionMode?: WorkflowExecutionMode | string | null;
   dynamicPlanBootstrapOnly?: boolean;
