@@ -13,6 +13,10 @@ import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-execution-placement.js";
+import {
+  normalizeMissionPlanDependencyGraph,
+  remapCanonicalDependenciesToStepIds,
+} from "./missions/mission-plan-dependency-graph.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 import {
   renderMissionPlanQaUnitContractLines,
@@ -958,8 +962,6 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     decisionHash,
     decision: collected.decision,
   };
-  await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "submitted" });
-
   if (!draftResult.ok) {
     await upsertMissionPlanDecisionSubmission({
       ...ledgerSubmission,
@@ -977,6 +979,32 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
 
+  // Dependency identity is validated before the first persistence, wakeup,
+  // delegation, or materialization effect. The canonical draft is the only
+  // dependency representation used downstream.
+  const initialDependencyGraph = normalizeMissionPlanDependencyGraph(
+    draftResult.draft.refs.selectedExecutionUnits,
+    draftResult.draft.steps,
+  );
+  if (!initialDependencyGraph.ok) {
+    return {
+      status: "invalid",
+      reason: "invalid_dependency_graph",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: initialDependencyGraph.diagnostics,
+    };
+  }
+  const initialCanonicalDraft: PlanRevisionDraft = {
+    ...draftResult.draft,
+    refs: {
+      ...draftResult.draft.refs,
+      selectedExecutionUnits: initialDependencyGraph.graph.units,
+    },
+    steps: initialDependencyGraph.graph.draftSteps,
+  };
+
   const [ownershipRow] = await db
     .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description })
     .from(missions)
@@ -993,6 +1021,44 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       candidates: planningCandidates,
     }),
   });
+  const service = missionPlanArtifactService(db);
+  const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
+  const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
+  const activePlanQa = readPlanQaRef(activePlan?.refs);
+  const persistedPendingUnits = activeOwnerDecision?.decisionHash === decisionHash && activePlanQa?.status === "pending"
+    ? readSelectedExecutionUnitsRef(activePlan?.refs)
+    : null;
+  const qaRecoveryBaselineUnits = persistedPendingUnits ?? initialCanonicalDraft.refs.selectedExecutionUnits;
+  const qaAssigneeRecovery = reselectUnavailableQaAssignees({
+    selectedExecutionUnits: qaRecoveryBaselineUnits,
+    runnableCandidates: planningCandidates,
+    excludedAgentIds: ownershipRow?.ownerAgentId ? [ownershipRow.ownerAgentId] : [],
+  });
+  // A persisted pending plan is untrusted input too; canonicalize it again so
+  // retry/recovery cannot bypass the same dependency gate.
+  const recoveredDependencyGraph = normalizeMissionPlanDependencyGraph(
+    qaAssigneeRecovery.units,
+    initialCanonicalDraft.steps,
+  );
+  if (!recoveredDependencyGraph.ok) {
+    return {
+      status: "invalid",
+      reason: "invalid_dependency_graph",
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: recoveredDependencyGraph.diagnostics,
+    };
+  }
+  const draftAfterQaAssigneeRecovery: PlanRevisionDraft = {
+    ...initialCanonicalDraft,
+    refs: {
+      ...initialCanonicalDraft.refs,
+      selectedExecutionUnits: recoveredDependencyGraph.graph.units,
+    },
+    steps: recoveredDependencyGraph.graph.draftSteps,
+  };
+
   if (!templateSelection.ok) {
     await upsertMissionPlanDecisionSubmission({
       ...ledgerSubmission,
@@ -1010,23 +1076,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
 
-  const service = missionPlanArtifactService(db);
-  const activePlan = await service.getActiveMissionPlan({ companyId, missionId });
-  const activeOwnerDecision = readOwnerPlanDecisionRef(activePlan?.refs);
-  const activePlanQa = readPlanQaRef(activePlan?.refs);
-  const persistedPendingUnits = activeOwnerDecision?.decisionHash === decisionHash && activePlanQa?.status === "pending"
-    ? readSelectedExecutionUnitsRef(activePlan?.refs)
-    : null;
-  const qaRecoveryBaselineUnits = persistedPendingUnits ?? draftResult.draft.refs.selectedExecutionUnits;
-  const qaAssigneeRecovery = reselectUnavailableQaAssignees({
-    selectedExecutionUnits: qaRecoveryBaselineUnits,
-    runnableCandidates: planningCandidates,
-    excludedAgentIds: ownershipRow?.ownerAgentId ? [ownershipRow.ownerAgentId] : [],
-  });
-  const draftAfterQaAssigneeRecovery = draftWithSelectedExecutionUnits(
-    draftResult.draft,
-    qaAssigneeRecovery.units,
-  );
+  await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "submitted" });
 
   const sourceValidationDiagnostics = await validateSelectedExecutionUnitSourceRefs({
     db,
@@ -1751,10 +1801,6 @@ function isCrossCompanyMissionUnit(unit: Record<string, unknown>): boolean {
   return CROSS_COMPANY_MISSION_SOURCE_TYPES.has(sourceType) || CROSS_COMPANY_MISSION_SOURCE_TYPES.has(kind);
 }
 
-function localSelectedExecutionUnits(units: Record<string, unknown>[]): Record<string, unknown>[] {
-  return units.filter((unit) => !isCrossCompanyMissionUnit(unit));
-}
-
 function draftWithSelectedExecutionUnits(draft: PlanRevisionDraft, selectedExecutionUnits: Record<string, unknown>[]): PlanRevisionDraft {
   return {
     ...draft,
@@ -1968,111 +2014,22 @@ function selectedUnitWorkflowToolNames(
   return toolNames;
 }
 
-function selectedUnitRefIds(unit: Record<string, unknown>): string[] {
-  const ids = [
-    toNonEmptyString(unit.id),
-    toNonEmptyString(unit.unitId),
-    toNonEmptyString(unit.stepId),
-  ];
-  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
-  ids.push(
-    toNonEmptyString(sourceRef?.id),
-    toNonEmptyString(sourceRef?.issueId),
-    toNonEmptyString(sourceRef?.stepId),
-  );
-  return Array.from(new Set(ids.filter((id): id is string => Boolean(id))));
-}
-
 function buildUnitStepIdMap(
   selectedUnits: Record<string, unknown>[],
   steps: WorkflowStep[],
 ): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const [index, unit] of selectedUnits.entries()) {
-    for (const id of selectedUnitRefIds(unit)) {
-      map.set(id, steps[index]!.id);
-    }
-  }
-  return map;
+  return new Map(selectedUnits.map((unit, index) => [toNonEmptyString(unit.id)!, steps[index]!.id]));
 }
 
-function planStepDependenciesByUnitId(draftSteps: (string | Record<string, unknown>)[]): Map<string, string[]> {
-  const dependenciesByUnitId = new Map<string, string[]>();
-  for (const step of draftSteps) {
-    if (!isPlainObject(step)) continue;
-
-    const unitIds = readStringArray(step.units).length > 0
-      ? readStringArray(step.units)
-      : [
-          toNonEmptyString(step.unitId),
-          toNonEmptyString(step.executionUnitId),
-          toNonEmptyString(step.selectedExecutionUnitId),
-          toNonEmptyString(step.id),
-        ].filter((id): id is string => Boolean(id));
-    if (unitIds.length === 0) continue;
-
-    const dependencies = Array.from(new Set([
-      ...readStringArray(step.dependencies),
-      ...readStringArray(step.dependsOn),
-      ...readStringArray(step.after),
-    ]));
-
-    for (const unitId of unitIds) {
-      dependenciesByUnitId.set(unitId, dependencies);
-    }
-  }
-  return dependenciesByUnitId;
-}
-
-function selectedUnitDependenciesByUnitId(selectedUnits: Record<string, unknown>[]): Map<string, string[]> {
-  const dependenciesByUnitId = new Map<string, string[]>();
-  for (const unit of selectedUnits) {
-    const dependencies = Array.from(new Set([
-      ...readStringArray(unit.dependencies),
-      ...readStringArray(unit.dependsOn),
-      ...readStringArray(unit.after),
-    ]));
-    if (dependencies.length === 0) continue;
-
-    for (const unitId of selectedUnitRefIds(unit)) {
-      dependenciesByUnitId.set(unitId, dependencies);
-    }
-  }
-  return dependenciesByUnitId;
-}
-
-function mergeDependencyMaps(...maps: Map<string, string[]>[]): Map<string, string[]> {
-  const merged = new Map<string, string[]>();
-  for (const map of maps) {
-    for (const [unitId, dependencies] of map) {
-      merged.set(unitId, Array.from(new Set([...(merged.get(unitId) ?? []), ...dependencies])));
-    }
-  }
-  return merged;
-}
-
-function applyPlanStepDependencies(
+function applyCanonicalDependencies(
   selectedUnits: Record<string, unknown>[],
   steps: WorkflowStep[],
-  draftSteps: (string | Record<string, unknown>)[],
 ): WorkflowStep[] {
-  const dependenciesByUnitId = mergeDependencyMaps(
-    selectedUnitDependenciesByUnitId(selectedUnits),
-    planStepDependenciesByUnitId(draftSteps),
+  const dependencyStepIds = remapCanonicalDependenciesToStepIds(
+    selectedUnits,
+    steps.map((step) => step.id),
   );
-  if (dependenciesByUnitId.size === 0) return steps;
-
-  const unitIdToStepId = buildUnitStepIdMap(selectedUnits, steps);
-  return steps.map((step, index) => {
-    const unit = selectedUnits[index]!;
-    const unitDependencies = selectedUnitRefIds(unit).flatMap((unitId) => dependenciesByUnitId.get(unitId) ?? []);
-    const dependencies = Array.from(new Set(unitDependencies.flatMap((unitId) => {
-      const stepId = unitIdToStepId.get(unitId);
-      return stepId && stepId !== step.id ? [stepId] : [];
-    })));
-
-    return dependencies.length > 0 ? { ...step, dependencies } : step;
-  });
+  return steps.map((step, index) => ({ ...step, dependencies: dependencyStepIds[index]! }));
 }
 
 function buildPaqoWorkflowSteps(
@@ -2080,16 +2037,14 @@ function buildPaqoWorkflowSteps(
   mission: typeof missions.$inferSelect,
   options: { researchWorkbenchAvailable?: boolean } = {},
 ): WorkflowStep[] {
-  const selectedUnits = draft.refs.selectedExecutionUnits;
-  const executableUnits = selectedUnits.filter((unit, index) => {
-    const rawTitle =
-      toNonEmptyString(unit.title)
-        ?? toNonEmptyString(unit.name)
-        ?? toNonEmptyString(unit.id)
-        ?? `Execution unit ${index + 1}`;
-    return isDeclaredStructuralUnit(unit)
-      || inferPaqoIssueGroup(unit, rawTitle) !== "oversight";
-  });
+  const dependencyGraph = normalizeMissionPlanDependencyGraph(
+    draft.refs.selectedExecutionUnits,
+    draft.steps,
+  );
+  if (!dependencyGraph.ok) {
+    throw new Error(`Invalid canonical mission-plan dependency graph: ${dependencyGraph.diagnostics.map((entry) => entry.message).join("; ")}`);
+  }
+  const executableUnits = dependencyGraph.graph.materializedUnits;
   const selectedSteps = executableUnits.map((unit, index) => {
     const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
     const assigneeAgentId =
@@ -2150,7 +2105,7 @@ function buildPaqoWorkflowSteps(
       ].filter(Boolean).join("\n"),
     } satisfies WorkflowStep;
   });
-  const plannedSteps = applyPlanStepDependencies(executableUnits, selectedSteps, draft.steps);
+  const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps);
   if (plannedSteps.length === 0) return [];
   // [Hybrid QA] Structural materialization passes (extracted):
   //   - toolArgs reference rewriting
@@ -2291,8 +2246,14 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   decisionHash: string;
   triggeredBy: string;
 }): Promise<void> {
-  const selectedExecutionUnits = localSelectedExecutionUnits(input.draft.refs.selectedExecutionUnits);
-  if (selectedExecutionUnits.length === 0) return;
+  const dependencyGraph = normalizeMissionPlanDependencyGraph(
+    input.draft.refs.selectedExecutionUnits,
+    input.draft.steps,
+  );
+  if (!dependencyGraph.ok) {
+    throw new Error(`Invalid canonical mission-plan dependency graph: ${dependencyGraph.diagnostics.map((entry) => entry.message).join("; ")}`);
+  }
+  if (dependencyGraph.graph.materializedUnits.length === 0) return;
 
   const mission = await input.db
     .select()
@@ -2302,10 +2263,9 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     .then((rows) => rows[0] ?? null);
   if (!mission) return;
 
-  const localDraft = draftWithSelectedExecutionUnits(input.draft, selectedExecutionUnits);
-  const workflowName = formatPaqoWorkflowName(localDraft, mission);
+  const workflowName = formatPaqoWorkflowName(input.draft, mission);
   const defaultPluginToolNames = new Set((await listDefaultWorkflowPluginAgentTools(input.db)).map((tool) => tool.name));
-  const steps = buildPaqoWorkflowSteps(localDraft, mission, {
+  const steps = buildPaqoWorkflowSteps(input.draft, mission, {
     researchWorkbenchAvailable: defaultPluginToolNames.has(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME),
   });
   if (steps.length === 0) return;
