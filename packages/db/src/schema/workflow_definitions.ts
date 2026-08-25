@@ -7,10 +7,13 @@ import {
   index,
   integer,
   boolean,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { goals } from "./goals.js";
 import { projects } from "./projects.js";
+import { missions } from "./missions.js";
 
 export const workflowDefinitions = pgTable(
   "workflow_definitions",
@@ -34,6 +37,11 @@ export const workflowDefinitions = pgTable(
     labelIds: jsonb("label_ids").$type<string[]>().notNull().default([]),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id, { onDelete: "set null" }),
+    // [목적] PAQO 정의 불변성(Stage 3): 정의가 어떤 미션에 귀속되는지 추적.
+    // [수정시 영향] PAQO 정의 재사용 판단(회사+미션+해시)이 이 컬럼을 기준으로 한다.
+    missionId: uuid("mission_id").references(() => missions.id, { onDelete: "set null" }),
+    // [목적] 정의 내용 해시. Stage 4 해싱 알고리즘 확정 전까지 null 허용(레거시는 null 유지).
+    definitionHash: text("definition_hash"),
     createParentIssuePolicy: text("create_parent_issue_policy"),
     executionMode: text("execution_mode"),
     dynamicPlanBootstrapOnly: boolean("dynamic_plan_bootstrap_only").notNull().default(false),
@@ -51,5 +59,10 @@ export const workflowDefinitions = pgTable(
     legacyPluginEntityIdIdx: index("idx_workflow_definitions_legacy_plugin_entity_id").on(
       table.legacyPluginEntityId,
     ),
+    paqoIdentityUq: uniqueIndex("workflow_definitions_paqo_identity_uq")
+      .on(table.companyId, table.missionId, table.definitionHash)
+      .where(
+        sql`${table.sourceKind} = 'paqo' AND ${table.missionId} IS NOT NULL AND ${table.definitionHash} IS NOT NULL`,
+      ),
   }),
 );

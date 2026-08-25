@@ -2155,15 +2155,23 @@ export function issueService(db: Db) {
           .then((rows) => rows[0] ?? null);
 
         if (!anchor) return [];
+        // Serialize the anchor timestamp explicitly: passing the raw JS Date into the
+        // sql`` template makes the postgres driver fail with ERR_INVALID_ARG_TYPE
+        // ("The \"string\" argument ... Received an instance of Date"), 500-ing the
+        // comments delta endpoint. An ISO string is compared after PG casts the
+        // parameter to timestamptz, which is lossless for UTC timestamps.
+        const anchorCreatedAt = anchor.createdAt instanceof Date
+          ? anchor.createdAt.toISOString()
+          : new Date(anchor.createdAt as string | number).toISOString();
         conditions.push(
           order === "asc"
             ? sql<boolean>`(
-                ${issueComments.createdAt} > ${anchor.createdAt}
-                OR (${issueComments.createdAt} = ${anchor.createdAt} AND ${issueComments.id} > ${anchor.id})
+                ${issueComments.createdAt} > ${anchorCreatedAt}
+                OR (${issueComments.createdAt} = ${anchorCreatedAt} AND ${issueComments.id} > ${anchor.id})
               )`
             : sql<boolean>`(
-                ${issueComments.createdAt} < ${anchor.createdAt}
-                OR (${issueComments.createdAt} = ${anchor.createdAt} AND ${issueComments.id} < ${anchor.id})
+                ${issueComments.createdAt} < ${anchorCreatedAt}
+                OR (${issueComments.createdAt} = ${anchorCreatedAt} AND ${issueComments.id} < ${anchor.id})
               )`,
         );
       }

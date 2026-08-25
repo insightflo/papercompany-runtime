@@ -108,3 +108,6 @@ scripts/setup-agent-config.sh
 .doc-review-cursor
 .superset/
 .gstack/
+
+# Local agent harness state (commandCode skills dir created on A1)
+.commandcode/
