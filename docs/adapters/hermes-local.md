@@ -26,3 +26,7 @@ The `hermes_local` adapter runs Hermes locally as a papercompany agent runtime.
 ## Environment Test
 
 The "Test Environment" check validates that the Hermes CLI is installed and accessible.
+
+## Model Listing
+
+`listModels` returns only models from **authenticated providers**, verified via Hermes' own `list_available_providers()` (same check as the `hermes model` picker), with an `auth.json` `credential_pool` fallback when the venv python is unavailable. Providers with no usable credentials (e.g. a revoked `openai-codex`) are hidden from the dropdown.
