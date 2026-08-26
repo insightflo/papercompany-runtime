@@ -71,11 +71,38 @@ export const workflowVerdictFindingsSchema = z.array(workflowVerdictFindingSchem
 
 export type WorkflowVerdictFinding = z.infer<typeof workflowVerdictFindingSchema>;
 
+/**
+ * [qa mechanical remediation] 기계적 수정 지시 v1 — string_replace 단일 연산.
+ *   verdict=request_changes 와 함께만 제출 가능. `find` 는 대상 파일 내에서 정확히 한 번
+ *   나타나야 적용되고(결정론적 위치 보장), `file` 은 생산자 등록 산출물 경로/디렉터리로 한정된다(엔진 판정).
+ *   자연어 reason 은 사람 표시용이며 절대 실행 권위가 아니다(rule 8) — 오직 이 구조 계약만 적용된다.
+ */
+export const WORKFLOW_REMEDIATION_FILE_MAX_LENGTH = 300;
+export const WORKFLOW_REMEDIATION_FIND_MAX_LENGTH = 2000;
+export const WORKFLOW_REMEDIATION_REPLACE_MAX_LENGTH = 8000;
+export const WORKFLOW_REMEDIATION_MAX_ITEMS = 20;
+
+export const workflowStringReplaceRemediationSchema = z
+  .object({
+    op: z.literal("string_replace"),
+    file: z.string().trim().min(1).max(WORKFLOW_REMEDIATION_FILE_MAX_LENGTH),
+    find: z.string().min(1).max(WORKFLOW_REMEDIATION_FIND_MAX_LENGTH),
+    replace: z.string().max(WORKFLOW_REMEDIATION_REPLACE_MAX_LENGTH),
+  })
+  .strict();
+
+export const workflowQaRemediationsSchema = z
+  .object({
+    items: z.array(workflowStringReplaceRemediationSchema).min(1).max(WORKFLOW_REMEDIATION_MAX_ITEMS),
+  })
+  .strict();
+
 export const workflowVerdictSubmitSchema = z.object({
   verdict: workflowValidationVerdictValueSchema,
   reason: z.string().trim().optional().nullable(),
   nonblockingAcceptance: workflowNonblockingAcceptanceSchema.optional(),
   findings: workflowVerdictFindingsSchema.optional(),
+  remediations: workflowQaRemediationsSchema.optional(),
 }).superRefine((value, ctx) => {
   // [qa-cap acceptance] nonblocking 분류는 request_changes verdict 와만 공존.
   if (value.nonblockingAcceptance && value.verdict !== "request_changes") {
@@ -91,6 +118,14 @@ export const workflowVerdictSubmitSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["findings"],
       message: "findings requires verdict=request_changes",
+    });
+  }
+  // [qa mechanical remediation] 기계적 수정 지시도 request_changes verdict 와만 공존.
+  if (value.remediations && value.verdict !== "request_changes") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["remediations"],
+      message: "remediations requires verdict=request_changes",
     });
   }
   // [verdict abstention] 보류 판정은 어떤 증거가 빠졌는지 reason 에 반드시 명시해야 한다.
@@ -120,6 +155,8 @@ export const workflowIssueCompleteSchema = z.object({
 
 export type WorkflowArtifactRegister = z.infer<typeof workflowArtifactRegisterSchema>;
 export type WorkflowNonblockingAcceptance = z.infer<typeof workflowNonblockingAcceptanceSchema>;
+export type WorkflowStringReplaceRemediation = z.infer<typeof workflowStringReplaceRemediationSchema>;
+export type WorkflowQaRemediations = z.infer<typeof workflowQaRemediationsSchema>;
 export type MissionPlanQaVerdictSubmit = z.infer<typeof missionPlanQaVerdictSubmitSchema>;
 export type MissionOwnerPlanDecisionSubmit = z.infer<typeof missionOwnerPlanDecisionSubmitSchema>;
 export type WorkflowVerdictSubmit = z.infer<typeof workflowVerdictSubmitSchema>;
