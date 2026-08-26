@@ -35,7 +35,7 @@ export type SelfImprovementAdoptionPlanEntry = {
 };
 
 export type SelfImprovementAdoptionPlannerDiagnostic = {
-  code: "candidate_not_accepted" | "gate_not_passed" | "unresolved_asset" | "multi_asset_patch" | "invalid_candidate_contract";
+  code: "candidate_not_accepted" | "gate_not_passed" | "unresolved_asset" | "multi_asset_patch" | "invalid_candidate_contract" | "tool_gap_not_auto_adoptable";
   message: string;
 };
 
@@ -97,6 +97,16 @@ export function buildSelfImprovementAdoptionPlan({
 
     if (!assetType || !assetRef || !proposedEdit || !gateOwner || !validationPlan || !pattern || !evidenceSource) {
       diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix} is missing required adoption planner fields` });
+      continue;
+    }
+
+    // [tool-gap] 신규 도구 제안은 유계 자동 채택 범위 밖 — accepted 로 표기돼도(계약 위반 방어)
+    //   드라이런 계획에 절대 올리지 않고 명시 진단으로 제외한다(무음 생략 금지).
+    if (assetType === "tool") {
+      diagnostics.push({
+        code: "tool_gap_not_auto_adoptable",
+        message: `${prefix} is a tool-gap proposal; new tool creation requires owner/gate review and is never auto-adopted`,
+      });
       continue;
     }
 

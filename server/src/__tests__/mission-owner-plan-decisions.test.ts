@@ -732,6 +732,68 @@ describe("buildMissionOwnerPlanRevisionDraft", () => {
     }
   });
 
+  it("accepts a tool-gap candidate with the full toolGap contract and preserves it in refs", () => {
+    const candidate = {
+      assetType: "tool",
+      assetRef: "text-similarity",
+      evidenceSource: ["issue:planning-1", { kind: "run", runId: "run-42" }],
+      pattern: "Answered similarity questions without a computation tool.",
+      toolGap: {
+        capability: "Jaccard/cosine similarity between two text files",
+        existingToolsTried: ["text_count", "shell"],
+      },
+      proposedEdit: { operation: "add", section: "text-similarity", content: "New tool proposal: deterministic similarity computation." },
+      validationPlan: "Run against two reference documents and compare scores.",
+      gateOwner: "peer:validator",
+      autoAdoptionResult: "queued_for_validation",
+    };
+
+    const result = buildMissionOwnerPlanRevisionDraft({
+      decision: { ...baseDecision, selfImprovementCandidates: [candidate] },
+      ...baseArgs,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        refs: expect.objectContaining({ selfImprovementCandidates: [candidate] }),
+      }),
+    });
+  });
+
+  it("rejects tool-gap candidates missing toolGap fields, using non-add operations, or claiming auto-adoption", () => {
+    const base = {
+      assetType: "tool",
+      assetRef: "text-similarity",
+      evidenceSource: ["issue:planning-1"],
+      pattern: "Answered similarity questions without a computation tool.",
+      proposedEdit: { operation: "add", section: "text-similarity" },
+      validationPlan: "Run against two reference documents.",
+      gateOwner: "peer:validator",
+      autoAdoptionResult: "queued_for_validation",
+    };
+    const invalidCandidates = [
+      { ...base }, // missing toolGap entirely
+      { ...base, toolGap: { capability: "similarity" } }, // missing existingToolsTried
+      { ...base, toolGap: { existingToolsTried: ["text_count"] } }, // missing capability
+      { ...base, toolGap: { capability: "  ", existingToolsTried: ["text_count"] } }, // blank capability
+      { ...base, toolGap: { capability: "similarity", existingToolsTried: [] } }, // empty tried list
+      { ...base, toolGap: { capability: "similarity", existingToolsTried: ["text_count"] }, proposedEdit: { operation: "replace", section: "text-similarity" } },
+      { ...base, toolGap: { capability: "similarity", existingToolsTried: ["text_count"] }, autoAdoptionResult: "accepted" },
+    ];
+
+    for (const candidate of invalidCandidates) {
+      const result = buildMissionOwnerPlanRevisionDraft({
+        decision: { ...baseDecision, selfImprovementCandidates: [candidate] },
+        ...baseArgs,
+      });
+      expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+      if (!result.ok) {
+        expect(result.diagnostics.some((d) => /selfImprovementCandidates\[0\]\.toolGap|toolGap is required|tool/i.test(d.message))).toBe(true);
+      }
+    }
+  });
+
   it("requires rejectedEditNote only when self-improvement candidates are rejected", () => {
     const validBaseCandidate = {
       assetType: "skill",
