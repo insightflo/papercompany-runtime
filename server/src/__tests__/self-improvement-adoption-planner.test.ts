@@ -86,4 +86,25 @@ describe("buildSelfImprovementAdoptionPlan", () => {
       { code: "multi_asset_patch", message: "selfImprovementCandidates[2] proposedEdit must target exactly one asset through top-level assetType + assetRef" },
     ]);
   });
+
+  it("never selects tool-gap candidates for adoption, even when marked accepted with a gate PASS", () => {
+    const candidate = {
+      assetType: "tool",
+      assetRef: "text-similarity",
+      evidenceSource: ["issue:planning-1"],
+      pattern: "Answered similarity questions without a computation tool.",
+      toolGap: { capability: "similarity computation", existingToolsTried: ["text_count"] },
+      proposedEdit: { operation: "add", section: "text-similarity" },
+      validationPlan: "Run against reference documents.",
+      gateOwner: "peer:validator",
+      autoAdoptionResult: "accepted",
+    };
+    const result = buildSelfImprovementAdoptionPlan({
+      candidates: [candidate],
+      assetRegistry: [{ assetType: "tool", assetRef: "text-similarity", resolvedRef: "tools/text_similarity.py" }],
+      gateVerdicts: [{ gateOwner: "peer:validator", verdict: "PASS" }],
+    });
+    expect(result.plan).toHaveLength(0);
+    expect(result.diagnostics.some((d) => d.code === "tool_gap_not_auto_adoptable")).toBe(true);
+  });
 });

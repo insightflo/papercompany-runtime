@@ -550,7 +550,7 @@ function validateDynamicMissionPlanning(decision: MissionOwnerPlanDecisionPayloa
   return Object.keys(dynamicMissionPlanning).length > 0 ? dynamicMissionPlanning : undefined;
 }
 
-const SELF_IMPROVEMENT_ASSET_TYPES = new Set(["skill", "rule", "kb", "workflow", "role_harness"]);
+const SELF_IMPROVEMENT_ASSET_TYPES = new Set(["skill", "rule", "kb", "workflow", "role_harness", "tool"]);
 const SELF_IMPROVEMENT_EDIT_OPERATIONS = new Set(["add", "delete", "replace"]);
 const SELF_IMPROVEMENT_RESULTS = new Set(["accepted", "rejected", "queued_for_validation", "repair_needed"]);
 
@@ -568,7 +568,7 @@ function validateSelfImprovementCandidateContract(
   if (!isNonEmptyString(candidate.assetType) || !SELF_IMPROVEMENT_ASSET_TYPES.has(candidate.assetType)) {
     diagnostics.push({
       code: "invalid_candidate_contract",
-      message: `${prefix}.assetType must be one of skill, rule, kb, workflow, role_harness`,
+      message: `${prefix}.assetType must be one of skill, rule, kb, workflow, role_harness, tool`,
     });
   }
   if (!isNonEmptyString(candidate.assetRef)) {
@@ -618,6 +618,42 @@ function validateSelfImprovementCandidateContract(
       code: "invalid_candidate_contract",
       message: `${prefix}.rejectedEditNote is required when autoAdoptionResult is rejected`,
     });
+  }
+  // [tool-gap candidate] 새 도구 제안 계약 — 유계 섹션 패치와 다른 세 가지 강제:
+  //   1) toolGap{capability, existingToolsTried} 로 "무슨 능력이 빠졌고 무엇을 시도했는지" 구조화.
+  //   2) operation 은 add 뿐(신규 도구 제안이므로 replace/delete 는 무의미).
+  //   3) autoAdoptionResult=accepted 금지 — 신규 도구 생성은 유계 자동 채택 범위 밖(오너/게이트 검토 전용).
+  if (candidate.assetType === "tool") {
+    const toolGap = candidate.toolGap;
+    if (!isPlainObject(toolGap)) {
+      diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.toolGap is required when assetType is tool` });
+    } else {
+      if (!isNonEmptyString(toolGap.capability)) {
+        diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.toolGap.capability must be a non-empty string` });
+      }
+      if (
+        !Array.isArray(toolGap.existingToolsTried)
+        || toolGap.existingToolsTried.length === 0
+        || !toolGap.existingToolsTried.every((item: unknown) => isNonEmptyString(item))
+      ) {
+        diagnostics.push({
+          code: "invalid_candidate_contract",
+          message: `${prefix}.toolGap.existingToolsTried must be a non-empty array of non-empty strings`,
+        });
+      }
+    }
+    if (isPlainObject(candidate.proposedEdit) && candidate.proposedEdit.operation !== "add") {
+      diagnostics.push({
+        code: "invalid_candidate_contract",
+        message: `${prefix}.proposedEdit.operation must be add for tool-gap candidates`,
+      });
+    }
+    if (candidate.autoAdoptionResult === "accepted") {
+      diagnostics.push({
+        code: "invalid_candidate_contract",
+        message: `${prefix}.autoAdoptionResult must not be accepted for tool-gap candidates; use queued_for_validation or rejected`,
+      });
+    }
   }
 }
 

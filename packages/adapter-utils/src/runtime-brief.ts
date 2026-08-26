@@ -473,6 +473,7 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     "3. `ready_to_plan`: emit the structured JSON block below.",
     "Do not mark the planning issue done until a structured plan decision has been posted and materialized as mission-level sibling issues, or the mission is explicitly completed with evidence and a final completion comment.",
     "Do not include `selfImprovementCandidates` unless every entry follows the full self-improvement candidate object contract.",
+    "Before improvising an answer that needs a missing capability, check existing tools/skills first; propose the gap as a `tool` assetType self-improvement candidate with `toolGap.capability` and `toolGap.existingToolsTried`.",
     "Accepted marker and JSON block:",
     "### Mission owner plan decision",
     "```json",
