@@ -56,6 +56,11 @@ export const agentWakeupRequests = pgTable(
     operatorDecisionIdempotencyUq: uniqueIndex("agent_wakeup_requests_operator_decision_idempotency_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} like 'operator-decision-wake:%'`),
+    // [provider 403 ladder] 스캐너 재실행/동시 실행 간 rung 중복 삽입 방지. skipped 포함 전 상태 대상 —
+    //   거부(skipped)도 시도 1회로 소진 처리해 같은 키 무한 재삽입 루프를 막는다.
+    provider403LadderIdempotencyUq: uniqueIndex("agent_wakeup_requests_provider403_ladder_idempotency_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} like 'provider403-ladder:%'`),
     workflowStepGenerationIdx: index("agent_wakeup_requests_workflow_step_generation_idx").on(
       table.workflowStepRunId,
       table.workflowExecutionGeneration,

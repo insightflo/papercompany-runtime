@@ -2,6 +2,7 @@ import type { Db } from "@paperclipai/db";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 import { reconcileWorkflow } from "./reconciler.js";
 import { recoverTerminalUnsettledRuns } from "../heartbeat-finalization/recovery.js";
+import { reconcileProvider403LadderWakeups } from "../heartbeat-provider403-ladder.js";
 
 export interface NativeWorkflowReconcilerLogger {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -79,6 +80,18 @@ export function createNativeWorkflowReconciler(
       const recoveredSettlements = await recoverTerminalUnsettledRuns(options.db, now);
       if (recoveredSettlements > 0) {
         log.info({ timeoutMinutes, recoveredSettlements }, "Native workflow reconciler recovered terminal-unsettled finalizations");
+      }
+      // [provider 403 ladder] 종단 403 지점의 bounded backoff scheduled wake. 실패해도 reconciler tick 은 깨지지 않는다.
+      try {
+        const ladder = await reconcileProvider403LadderWakeups(options.db, { now });
+        if (ladder.scheduled > 0) {
+          log.info({ scheduled: ladder.scheduled }, "Provider 403 backoff ladder wakeups scheduled");
+        }
+      } catch (error) {
+        log.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          "Provider 403 backoff ladder scan failed",
+        );
       }
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);

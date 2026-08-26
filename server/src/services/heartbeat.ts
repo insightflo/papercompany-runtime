@@ -186,7 +186,7 @@ const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
-const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
+export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 // [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
 //   done/completed/cancelled(canceled)/closed 는 재시도 무의미 → request failed 로 종료.
 const PROMOTED_REJECT_ISSUE_STATUSES = new Set(["done", "completed", "cancelled", "canceled", "closed", "wontfix"]);

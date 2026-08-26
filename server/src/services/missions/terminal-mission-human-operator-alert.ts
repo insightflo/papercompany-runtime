@@ -115,6 +115,8 @@ export type TerminalMissionHumanOperatorCommentInput = {
    *  Raw error payloads are never included — only counts. */
   retryAttempts?: number | null;
   retryMaxRetries?: number | null;
+  /** [provider 403 ladder] 소진된 scheduled 재시도 요약(구조화). 표시 텍스트는 이 값에서만 파생. */
+  provider403Ladder?: { attempts: number; delaysMin: number[] } | null;
 };
 
 
@@ -140,6 +142,9 @@ export function buildTerminalMissionHumanOperatorComment(
   if (input.retryAttempts != null && input.retryAttempts > 0) {
     const max = input.retryMaxRetries ?? 0;
     evidenceParts.push(`retry-exhausted=${input.retryAttempts}/${max}`);
+  }
+  if (input.provider403Ladder && input.provider403Ladder.attempts > 0) {
+    evidenceParts.push(`provider403-retries=${input.provider403Ladder.attempts}/${input.provider403Ladder.delaysMin.join("/")}`);
   }
   evidenceParts.push("continuation=none");
   const evidence = sanitizeToken(evidenceParts.join("; "), EVIDENCE_MAX);
@@ -181,6 +186,7 @@ export type EmitTerminalMissionHumanOperatorInput = {
   failedRuns: readonly TerminalMissionFailedRun[];
   retryAttempts?: number | null;
   retryMaxRetries?: number | null;
+  provider403Ladder?: { attempts: number; delaysMin: number[] } | null;
 };
 
 export type EmitTerminalMissionHumanOperatorResult = { emitted: boolean; reason: string };
@@ -216,6 +222,7 @@ export async function emitTerminalMissionHumanOperatorReport(
     failedRuns: terminalFailedRuns,
     retryAttempts: input.retryAttempts,
     retryMaxRetries: input.retryMaxRetries,
+    provider403Ladder: input.provider403Ladder ?? null,
   });
   const sanitizedFailedRunsPayload = terminalFailedRuns
     .slice(0, FAILED_RUN_AGGREGATE_MAX)
@@ -259,6 +266,7 @@ export async function emitTerminalMissionHumanOperatorReport(
           ownerActionIssueId: input.issue.id,
           workflowRunId: input.workflowRunId,
           failedRuns: sanitizedFailedRunsPayload,
+          ...(input.provider403Ladder ? { provider403Ladder: input.provider403Ladder } : {}),
           status: "reported",
         },
       })
