@@ -38,11 +38,8 @@ function HumanOperatorRow({ request }: { request: MissionHumanOperatorRequest })
           </div>
           <div>
             <h2 className="text-sm font-semibold text-foreground">{request.title}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">{request.summary}</p>
-          </div>
-          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-            <span>Mission: {request.missionTitle}</span>
-            <span>Issue: {request.issueId ? request.issueId.slice(0, 8) : "mission"}</span>
+            {/* 요약은 서버가 구조화한 다중 줄바꿈 텍스트(무엇이/왜 막힘/할 일)다. */}
+            <p className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{request.summary}</p>
           </div>
         </div>
         <Button asChild variant="outline" size="sm" className="w-full shrink-0 lg:w-auto">

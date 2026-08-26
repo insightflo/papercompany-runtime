@@ -3,6 +3,7 @@ import { activityLog, issues, missions } from "@paperclipai/db";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { GovernanceThreadEvent } from "./governance-thread.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION, type HumanOperatorRequestPayload } from "./human-operator-alert-events.js";
+import { formatOperatorDecisionSummary } from "./operator-card-summary.js";
 
 const DEFAULT_REQUEST_LIMIT = 50;
 const MAX_CANDIDATE_REQUESTS = 250;
@@ -32,13 +33,18 @@ function asPayload(value: unknown): HumanOperatorRequestPayload | null {
   return record as HumanOperatorRequestPayload;
 }
 
-function compactSummary(payload: HumanOperatorRequestPayload): string {
-  return [
-    payload.decision === "request_input" ? "Human/operator input requested" : "Mission blocker escalated",
-    payload.reason,
-    payload.nextAction,
-    payload.evidence,
-  ].filter((value): value is string => Boolean(value?.trim())).join(": ").slice(0, 280);
+function compactSummary(payload: HumanOperatorRequestPayload, missionTitle: string): string {
+  // [display-only] 구조화된 payload 필드로 한국어 운영자 카드 요약을 만든다. rule 8: 표시 전용.
+  return formatOperatorDecisionSummary({
+    decision: payload.decision,
+    missionTitle,
+    issueTitle: payload.issueTitle,
+    issueIdentifier: payload.issueIdentifier,
+    issueId: payload.issueId,
+    reason: payload.reason,
+    nextAction: payload.nextAction,
+    evidence: payload.evidence,
+  });
 }
 
 function isOpenIssueStatus(status: string): boolean {
@@ -146,7 +152,7 @@ export async function listCompanyHumanOperatorRequests(
       sourceRef: { type: "activity_log", id: row.activityId, table: "activity_log" },
       eventType: "owner_diagnosis",
       title,
-      summary: compactSummary(payload),
+      summary: compactSummary(payload, row.missionTitle),
       timestamp,
       severity: payload.decision === "escalate" ? "blocked" : "attention",
       ...(actor ? { actor } : {}),
