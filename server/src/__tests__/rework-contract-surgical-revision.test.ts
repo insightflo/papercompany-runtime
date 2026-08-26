@@ -23,9 +23,9 @@ const SURGICAL_MARKER = "Revise surgically";
 
 function build() {
   return buildWorkflowReworkContract({
-    producerStepId: "build-beginner-html-report",
+    producerStepId: "produce-final-output",
     qaFeedbacks: [
-      { qaStepId: "validate-html-report", qaIssueId: "RES-100", feedback: "internal term exposed in index.html" },
+      { qaStepId: "qa-validate-output", qaIssueId: "RES-100", feedback: "internal artifact path exposed in the output" },
     ],
     currentIteration: 0,
     maxIterations: 2,
@@ -51,15 +51,27 @@ describe("workflow rework contract: surgical revision directive", () => {
     expect(index).toBeLessThan(BRIEF_COMPACT_MAX_ACTIONS);
   });
 
-  it("the surgical directive says: edit prior products in place, only flagged + directly affected parts, no rewrite from scratch", () => {
+  it("the surgical directive is domain-neutral: edit prior products in place, only flagged + dependent parts, no rebuild from scratch", () => {
     const contract = build();
     const surgical = contract.requiredActions.find((action) => action.includes(SURGICAL_MARKER));
     expect(surgical).toBeDefined();
     expect(surgical!).toMatch(/prior registered work products/i);
     expect(surgical!).toMatch(/only what the QA feedback flags/i);
-    expect(surgical!).toMatch(/directly affect/i);
-    expect(surgical!).toMatch(/unaffected content/i);
-    expect(surgical!).toMatch(/not regenerate|no rewrite|do not rewrite|without rewriting from scratch/i);
+    expect(surgical!).toMatch(/directly depend on it|directly depend/i);
+    expect(surgical!).toMatch(/unaffected parts/i);
+    expect(surgical!).toMatch(/do not rebuild from scratch|do not rewrite from scratch/i);
+  });
+
+  it("keeps engine-level contract strings free of document-only vocabulary (generic agent-team system)", () => {
+    const contract = build();
+    const comment = renderWorkflowReworkComment(contract);
+    const surfaces = [...contract.requiredActions, comment];
+    for (const surface of surfaces) {
+      // 문서 전용 어휘(TOC/목차/섹션/표)는 정의 레벨 지침에만 허용 — 엔진 계약은 전 워크플로 공통이다.
+      expect(surface).not.toMatch(/TOC|table of contents/i);
+      expect(surface).not.toMatch(/\bsections\b/i);
+      expect(surface).not.toMatch(/index\.html|report\.md|발행|publish/i);
+    }
   });
 
   it("preserves the non-regression required actions (primary instruction, no premature close, verify existing artifact)", () => {
@@ -72,12 +84,12 @@ describe("workflow rework contract: surgical revision directive", () => {
   it("renders a full surgical-revision section in the producer issue comment (untruncated guidance)", () => {
     const comment = renderWorkflowReworkComment(build());
     expect(comment).toContain("### How to apply this rework (surgical revision)");
-    expect(comment).toMatch(/load the current artifact and edit it/i);
-    expect(comment).toMatch(/do not rebuild the deliverable from scratch/i);
-    expect(comment).toMatch(/parts those changes directly affect/i);
-    expect(comment).toMatch(/summaries.*table of contents.*cross-references|summaries.*TOC.*cross-references/is);
-    expect(comment).toMatch(/Keep unaffected sections exactly as they are/i);
-    expect(comment).toMatch(/wholesale rewrite that discards accepted content is itself a rework failure/i);
+    expect(comment).toMatch(/load the current output and edit it in place/i);
+    expect(comment).toMatch(/do not regenerate the work product from scratch/i);
+    expect(comment).toMatch(/directly depends on the changed part/i);
+    expect(comment).toMatch(/derived values, aggregates, summaries, indexes, or references/i);
+    expect(comment).toMatch(/Keep unaffected parts exactly as they are/i);
+    expect(comment).toMatch(/wholesale rewrite that discards accepted work is itself a rework failure/i);
   });
 
   it("round-trips the surgical directive through readWorkflowReworkContract", () => {
