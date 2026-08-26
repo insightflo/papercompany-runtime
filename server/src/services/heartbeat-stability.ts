@@ -166,3 +166,39 @@ export function stepTimeoutSignalsFromStep(step: {
     isQaStep: isQaLikeStep(step),
   };
 }
+
+// [provider 403 ladder] 일시적 provider 403(auth/forbidden·quota) 실패가 기존 자동 재시작 계기
+//   소진 후에도 방치되지 않도록 하는 bounded backoff 사다리 노브. 근거(2026-08-25 gazua-evening
+//   mission 50fc2476 run 64c1b0bf): 403 종단 후 ~45분 무관한 주기 wake까지 정체.
+export const DEFAULT_PROVIDER_403_RETRY_DELAYS_MIN = [5, 15, 30];
+export const DEFAULT_PROVIDER_403_LADDER_REASON_CODES = [
+  "PROVIDER_AUTH_OR_FORBIDDEN_403",
+  "PROVIDER_QUOTA_OR_AUTH_403",
+];
+
+function readPositiveIntCsv(raw: string): number[] {
+  return raw
+    .split(",")
+    .map((token) => Number.parseInt(token.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+/** provider 403 사다리 간격(분). unset=기본 5/15/30, ""/0/off/garbage=비활성화, CSV=커스텀. */
+export function resolveProvider403RetryDelaysMin(env: NodeJS.ProcessEnv = process.env): number[] {
+  const raw = env.PAPERCLIP_PROVIDER_403_RETRY_DELAYS_MIN;
+  if (raw === undefined || raw === null) return [...DEFAULT_PROVIDER_403_RETRY_DELAYS_MIN];
+  const trimmed = raw.trim();
+  if (trimmed === "" || trimmed === "0" || ["off", "none"].includes(trimmed.toLowerCase())) return [];
+  const parsed = readPositiveIntCsv(trimmed);
+  return parsed.length > 0 ? parsed : [];
+}
+
+/** 사다리 진입 reasonCode 집합. unset=기본 403 2종, ""/0/off/none=비활성화, CSV=교체. */
+export function resolveProvider403LadderReasonCodes(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.PAPERCLIP_PROVIDER_403_RETRY_REASON_CODES;
+  if (raw === undefined || raw === null) return [...DEFAULT_PROVIDER_403_LADDER_REASON_CODES];
+  const trimmed = raw.trim();
+  if (trimmed === "" || trimmed === "0" || ["off", "none"].includes(trimmed.toLowerCase())) return [];
+  const parsed = trimmed.split(",").map((token) => token.trim().toUpperCase()).filter((token) => token.length > 0);
+  return Array.from(new Set(parsed));
+}

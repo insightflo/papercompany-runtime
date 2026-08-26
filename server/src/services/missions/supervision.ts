@@ -52,6 +52,7 @@ import {
   summarizeWorkflowRetryExhaustion,
 } from "./terminal-mission-human-operator-alert.js";
 import { loadTerminalValidationVerdicts } from "./terminal-mission-workflow-continuation.js";
+import { summarizeProvider403LadderForMission } from "../heartbeat-provider403-ladder.js";
 import { selectTerminalWorkflowAuthoritySource } from "./terminal-mission-authority-source.js";
 export { selectTerminalWorkflowAuthoritySource };
 
@@ -643,6 +644,7 @@ export function createSupervision({ db, deps, ownerActions }: {
           failedRuns: input.group.failedRuns,
           retryAttempts: retrySummary?.retryAttempts ?? null,
           retryMaxRetries: retrySummary?.retryMaxRetries ?? null,
+          provider403Ladder: await summarizeProvider403LadderForMission(db, mission.companyId, mission.id),
         });
         if (emitted.emitted) {
           findings.push(`terminal_mission_human_operator_request_emitted: ${ownerAction.identifier ?? ownerAction.id} terminal snapshot of ${input.group.failedRuns.length} failed run(s); no executable continuation remains`);
