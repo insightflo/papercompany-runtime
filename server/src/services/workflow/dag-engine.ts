@@ -55,6 +55,7 @@ import {
 } from "./control-flow/edge-condition.js";
 import { hasDisallowedCycle } from "./control-flow/cycle-validator.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
+import { cancelResolvedQaSourceDefectOwnerCards } from "./qa-source-defect-owner-card.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 import { applyStructuralGatePass } from "./control-flow/structural-gate-rework.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
@@ -3718,6 +3719,20 @@ export async function syncWorkflowRunState(
   }
 
   const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns);
+  // [qa source-defect card cleanup] 상황 해소(런 종결/이후 generation 통과)로 무효가 된 pending
+  //   원천결함 오너 카드를 자동 cancel 한다(감사 로그 동반). 실패해도 sync 를 깨뜨리지 않는다.
+  //   failed 종결은 카드가 여전히 유효한 에스컬레이션이므로 정리 대상이 아니다(모듈 내부 판정).
+  try {
+    await cancelResolvedQaSourceDefectOwnerCards({
+      db,
+      companyId: context.run.companyId,
+      run: { id: updatedRun.id, status: updatedRun.status },
+      steps: context.steps,
+      stepRuns,
+    });
+  } catch {
+    // swallowed: card cleanup must never break workflow sync.
+  }
   await recordWorkflowStepStatusTransitions(db, {
     companyId: context.run.companyId,
     missionId: context.run.missionId,
