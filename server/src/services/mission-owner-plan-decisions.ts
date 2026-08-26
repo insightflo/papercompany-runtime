@@ -7,7 +7,7 @@ import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 import { renderRevisionContextLines } from "./missions/mission-planning-description.js";
 import { missionDelegationService } from "./mission-delegations.js";
-import { workflowService } from "./workflow/engine.js";
+import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-definition-identity.js";
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
@@ -2233,10 +2233,8 @@ async function ensureCrossCompanyDelegationsForMissionOwnerPlan(input: {
     .where(eq(missionPlanArtifacts.id, activePlan.id));
 }
 
-function workflowStepsAreEqual(left: WorkflowStep[], right: WorkflowStep[]): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
+// [Stage 4] legacy in-place step comparison removed: PAQO definitions are
+// immutable now; identity is the canonical content hash, not name+equality.
 async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   db: Db;
   companyId: string;
@@ -2269,20 +2267,15 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     researchWorkbenchAvailable: defaultPluginToolNames.has(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME),
   });
   if (steps.length === 0) return;
-  const [existingDefinition] = await input.db
-    .select()
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.companyId, input.companyId), eq(workflowDefinitions.name, workflowName)))
-    .limit(1);
-  const definition = existingDefinition
-    ? workflowStepsAreEqual(existingDefinition.stepsJson as WorkflowStep[], steps)
-      ? existingDefinition
-      : await workflowService.updateDefinition(input.db, existingDefinition.id, { steps })
-    : await workflowService.createDefinition(input.db, {
-      companyId: input.companyId,
-      name: workflowName,
-      steps,
-    });
+  // [Stage 4] Immutable PAQO definition lifecycle: hash-based identity lookup,
+  // create-only revisions, race-safe via the partial unique index. Existing
+  // definitions (including legacy null-hash rows) are never updated in place.
+  const definition = await findOrCreateImmutablePaqoWorkflowDefinition(input.db, {
+    companyId: input.companyId,
+    missionId: input.missionId,
+    name: workflowName,
+    steps,
+  });
   if (!definition) return;
 
   const [existingRun] = await input.db

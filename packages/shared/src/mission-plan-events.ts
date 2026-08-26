@@ -1,4 +1,4 @@
-import type { WorkflowNonblockingAcceptance, WorkflowValidationVerdictValue, WorkflowVerdictFinding } from "./validators/workflow-agent-api.js";
+import type { WorkflowNonblockingAcceptance, WorkflowQaRemediations, WorkflowValidationVerdictValue, WorkflowVerdictFinding } from "./validators/workflow-agent-api.js";
 
 export type MissionPlanQaVerdictValue = "pass" | "request_changes";
 
@@ -33,6 +33,9 @@ export interface WorkflowValidationVerdictPayload {
   /** [qa defect layer] 공식 request_changes verdict 의 구조화 결함 항목(원천/산출물 계층 태그).
  *   loop-driver 계층 라우팅이 읽는다 — 자연어 comment 는 라우팅 권위가 될 수 없다. */
   findings?: WorkflowVerdictFinding[];
+  /** [qa mechanical remediation] 공식 request_changes verdict 의 기계적 수정 지시(string_replace 목록).
+ *   loop-driver remediation pass 가 읽는다 — 적용 권위는 이 구조 계약뿐이다(rule 8). */
+  remediations?: WorkflowQaRemediations;
 }
 
 export interface WorkflowTransitionEventPayload {

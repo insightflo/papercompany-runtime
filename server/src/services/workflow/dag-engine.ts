@@ -3522,6 +3522,27 @@ export async function syncWorkflowRunState(
       stepRuns,
       predsByStepId: reworkPredsByStepId,
       validationVerdictsByIssueId,
+      // [qa mechanical remediation] QA 스텝 재실행(wake) 주입 — loop-driver 는 dag-engine 을 import
+      //   하지 않으므로 여기서 래핑한다. 기존 validation-recheck 와 동일한 wake 경로/조건을 재사용해
+      //   재발행 세션 강제(fresh session)로 현재 산출물만 재검증한다.
+      refireQaStep: async (qa) => {
+        const stepDef = context.steps.find((s) => s.id === qa.stepId);
+        if (!stepDef || !qa.issueId) return false;
+        const qaRun = stepRuns.find((sr) => sr.id === qa.stepRunId);
+        return wakeExistingWorkflowStepIssue({
+          db,
+          run: context.run,
+          definition: context.definition,
+          step: stepDef,
+          stepRunId: qa.stepRunId,
+          stepRunMetadata: qaRun?.metadata,
+          issueId: qa.issueId,
+          allowCompletedIssue: true,
+          allowBlockedIssue: true,
+          forceFreshSession: true,
+          idempotencyKey: `qa-remediation-refire:${context.run.id}:${qa.stepRunId}`,
+        });
+      },
     });
     stepRuns = reworkResult.stepRuns;
   }

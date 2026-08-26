@@ -155,6 +155,8 @@ export async function createWorkflowDefinition(
     labelIds: input.labelIds ?? [],
     projectId: input.projectId ?? null,
     goalId: input.goalId ?? null,
+    missionId: input.missionId ?? null,
+    definitionHash: input.definitionHash ?? null,
     createParentIssuePolicy: input.createParentIssuePolicy ?? null,
     executionMode,
     dynamicPlanBootstrapOnly: input.dynamicPlanBootstrapOnly ?? false,

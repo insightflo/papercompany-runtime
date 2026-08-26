@@ -2009,7 +2009,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(stepRuns.find((stepRun) => stepRun.stepId === validator!.id)?.issueId).toBeNull();
   });
 
-  it("refreshes an existing PAQO workflow definition when PLAN steps change", async () => {
+  it("creates a new immutable PAQO definition when PLAN steps change, leaving the legacy definition untouched", async () => {
     const { companyId, ownerAgentId, otherAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     const staleDefinitionId = randomUUID();
     await db.insert(workflowDefinitions).values({
@@ -2076,9 +2076,32 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .select()
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.name, "PAQO WBS: Validate stale PAQO definition"));
-    expect(paqoDefinitions).toHaveLength(1);
-    expect(paqoDefinitions[0]!.id).toBe(staleDefinitionId);
-    const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ id: string; name: string; dependencies: string[] }>;
+    // [Stage 4] immutability: the legacy null-hash definition is never updated;
+    // the changed plan materializes as a NEW hashed source_kind='paqo' definition.
+    expect(paqoDefinitions).toHaveLength(2);
+    const legacy = paqoDefinitions.find((row) => row.id === staleDefinitionId)!;
+    const immutable = paqoDefinitions.find((row) => row.id !== staleDefinitionId)!;
+    expect(legacy.stepsJson).toEqual([
+      {
+        id: "action-stale",
+        name: "[ACTION] Stale action",
+        agentId: ownerAgentId,
+        dependencies: [],
+      },
+      {
+        id: "qa-stale",
+        name: "[QA] Verify mission result",
+        agentId: ownerAgentId,
+        dependencies: ["action-stale"],
+      },
+    ]);
+    expect(legacy.missionId).toBeNull();
+    expect(legacy.definitionHash).toBeNull();
+    expect(legacy.sourceKind).toBeNull();
+    expect(immutable.sourceKind).toBe("paqo");
+    expect(immutable.missionId).toBe(missionId);
+    expect(immutable.definitionHash).toMatch(/^[0-9a-f]{64}$/);
+    const paqoSteps = immutable.stepsJson as Array<{ id: string; name: string; dependencies: string[] }>;
     const research = paqoSteps.find((step) => step.name === "[ACTION] Research A");
     const synthesis = paqoSteps.find((step) => step.name === "[ACTION] Synthesize B");
     expect(research?.dependencies).toEqual([]);
