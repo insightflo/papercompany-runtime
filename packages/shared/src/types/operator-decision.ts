@@ -120,6 +120,10 @@ export interface OperatorDecisionView {
   definition: OperatorDecisionDefinition;
   result: OperatorDecisionResult | null;
   issueId: string | null;
+  /** Operator-facing labels for the linked issue/mission — pending card header context. */
+  issueIdentifier: string | null;
+  issueTitle: string | null;
+  missionTitle: string | null;
   continuationMode: OperatorDecisionContinuationMode;
   requestedBy: { type: "agent" | "user"; id: string } | null;
   resolvedByUserId: string | null;

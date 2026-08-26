@@ -1,9 +1,10 @@
 import type { HumanReviewPacket as HumanReviewPacketValue } from "@paperclipai/shared";
 import { AlertTriangle, ArrowUpRight, CheckCircle2, HelpCircle, XCircle } from "lucide-react";
+import { Link } from "../lib/router";
 
 function SourceLink({ href, children }: { href: string; children: React.ReactNode }) {
   return href.startsWith("/")
-    ? <a href={href} className="inline-flex items-center gap-1 font-medium">{children}<ArrowUpRight className="h-3 w-3" /></a>
+    ? <Link to={href} className="inline-flex items-center gap-1 font-medium">{children}<ArrowUpRight className="h-3 w-3" /></Link>
     : <a href={href} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium">{children}<ArrowUpRight className="h-3 w-3" /></a>;
 }
 
@@ -19,11 +20,11 @@ export function HumanReviewPacket({ packet }: { packet: HumanReviewPacketValue |
   return (
     <section className="mt-3 space-y-4 border border-border bg-background p-4" data-testid="human-review-packet">
       <div><p className="text-xs font-semibold text-muted-foreground">무엇을 판단하나요?</p><h3 className="mt-1 text-base font-semibold">{packet.decisionSubject}</h3></div>
-      <div><p className="text-xs font-semibold text-muted-foreground">현재 해석</p><p className="mt-1 text-sm">{packet.interpretation}</p></div>
+      <div><p className="text-xs font-semibold text-muted-foreground">현재 해석</p><p className="mt-1 whitespace-pre-line text-sm">{packet.interpretation}</p></div>
       <div>
         <p className="text-xs font-semibold text-muted-foreground">판단 근거와 원본 위치</p>
         <ul className="mt-2 space-y-2">{packet.evidence.map((item) => <li key={`${item.href}:${item.location}`} className="border-l-2 border-primary/40 pl-3 text-sm">
-          <SourceLink href={item.href}>{item.label}</SourceLink><p className="mt-0.5 text-xs text-muted-foreground">원본 위치: {item.location}</p>{item.description && <p className="mt-0.5 text-xs">{item.description}</p>}
+          <SourceLink href={item.href}>{item.label}</SourceLink><p className="mt-0.5 text-xs text-muted-foreground">원본 위치: {item.location}</p>{item.description && <p className="mt-0.5 whitespace-pre-line text-xs">{item.description}</p>}
         </li>)}</ul>
       </div>
       <div className="grid gap-2 md:grid-cols-3">

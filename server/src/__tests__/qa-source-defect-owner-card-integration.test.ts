@@ -295,4 +295,45 @@ describeDb("qa source-defect layer routing + owner card", () => {
     expect(continuation!.issueId).toBe(seed.oversightIssueId);
     expect(continuation!.state).toBe("pending");
   });
+
+  it("(e) supersede: a newer iteration replaces earlier pending cards — never duplicate pending cards", async () => {
+    const seed = await seedScenario(db, FINDINGS_SOURCE_ONLY);
+    const base = {
+      db,
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      workflowRunId: seed.runId,
+      producerStepId: "produce",
+      maxIterations: 3,
+      findings: FINDINGS_SOURCE_ONLY,
+      qaRefs: [{ qaStepId: "qa-validate", qaIssueId: seed.qaIssueId }],
+      linkIssueId: seed.oversightIssueId,
+    };
+
+    const iter0 = await ensureQaSourceDefectOwnerCard({ ...base, iteration: 0 });
+    expect(iter0.outcome).toBe("created");
+    const iter1 = await ensureQaSourceDefectOwnerCard({ ...base, iteration: 1 });
+    expect(iter1.outcome).toBe("created");
+
+    // The older pending card is superseded (cancelled), only the newest stays pending.
+    const cards = await db.select().from(operatorDecisions).where(and(
+      eq(operatorDecisions.companyId, seed.companyId),
+      eq(operatorDecisions.sourceType, "workflow_qa_rejection"),
+    ));
+    expect(cards).toHaveLength(2);
+    const byIteration = new Map(cards.map((card) => [card.requestKey.split(":").pop(), card.status]));
+    expect(byIteration.get("0")).toBe("cancelled");
+    expect(byIteration.get("1")).toBe("pending");
+
+    // Replay of the newest iteration must not cancel itself or create a third card.
+    const replay = await ensureQaSourceDefectOwnerCard({ ...base, iteration: 1 });
+    expect(replay.outcome).toBe("replayed");
+    expect(replay.decisionId).toBe(iter1.decisionId);
+    const pendingCount = await db.select().from(operatorDecisions).where(and(
+      eq(operatorDecisions.companyId, seed.companyId),
+      eq(operatorDecisions.sourceType, "workflow_qa_rejection"),
+      eq(operatorDecisions.status, "pending"),
+    ));
+    expect(pendingCount).toHaveLength(1);
+  });
 });

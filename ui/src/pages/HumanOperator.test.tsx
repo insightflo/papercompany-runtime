@@ -19,7 +19,7 @@ const pending: OperatorDecisionView = {
     selection: null, comment: { mode: "disabled", label: null, placeholder: null, maxLength: 0 },
     approvedScope: [], forbiddenScope: [],
   },
-  result: null, issueId: null, continuationMode: "none", requestedBy: null,
+  result: null, issueId: null, issueIdentifier: null, issueTitle: null, missionTitle: null, continuationMode: "none", requestedBy: null,
   resolvedByUserId: null, resolvedAt: null, cancelledAt: null,
   createdAt: "2026-07-29T10:00:00.000Z", updatedAt: "2026-07-29T10:00:00.000Z", continuation: null,
 };
