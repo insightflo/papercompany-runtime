@@ -253,7 +253,7 @@ export function operatorDecisionWriteService(db: Db) {
     return { decision, applied, continuation: decision.continuation };
   }
 
-  async function cancel(id: string, actor: OperatorDecisionActor) {
+  async function cancel(id: string, actor: OperatorDecisionActor, reason?: string) {
     const before = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, id))
       .then((rows) => rows[0] ?? null);
     if (!before) throw notFound("Operator decision not found");
@@ -279,6 +279,7 @@ export function operatorDecisionWriteService(db: Db) {
           cancelledByActorType: actor.type,
           cancelledByActorId: actor.id,
           cancelledAt: now.toISOString(),
+          ...(reason ? { reason } : {}),
         },
       });
     });

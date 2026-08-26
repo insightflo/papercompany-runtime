@@ -16,6 +16,7 @@
 import type { Db } from "@paperclipai/db";
 import { and, eq, like, ne } from "drizzle-orm";
 import { operatorDecisions } from "@paperclipai/db";
+import { resolveEdges, type EdgeBearingStep } from "./control-flow/edge-condition.js";
 import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
 
@@ -264,7 +265,7 @@ export async function ensureQaSourceDefectOwnerCard(input: {
     ne(operatorDecisions.requestKey, createInput.requestKey),
   ));
   for (const stale of staleRows) {
-    await write.cancel(stale.id, { type: "user", id: "system" });
+    await write.cancel(stale.id, { type: "user", id: "system" }, "qa_source_defect_card_superseded_by_newer_generation");
   }
 
   try {
@@ -279,4 +280,92 @@ export async function ensureQaSourceDefectOwnerCard(input: {
     if (/conflict/iu.test(message)) return { outcome: "conflict", message };
     return { outcome: "failed", message };
   }
+}
+
+
+/** 정리 판정에 필요한 최소 stepRun 구조(구조적 호환). */
+interface CleanupStepRun {
+  readonly stepId: string;
+  readonly status: string;
+  readonly iterationIndex?: number | null;
+}
+
+interface CleanupStepRunRow {
+  stepId: string;
+  status: string;
+  iterationIndex: number | null;
+}
+
+/** sourceId(`${runId}:${producerStepId}:${iteration}`) 을 (runId, producerStepId, iteration) 로 분해. */
+function parseSourceId(sourceId: string): { runId: string; producerStepId: string; iteration: number } | null {
+  const first = sourceId.indexOf(":");
+  const last = sourceId.lastIndexOf(":");
+  if (first <= 0 || last <= first) return null;
+  const iteration = Number.parseInt(sourceId.slice(last + 1), 10);
+  if (!Number.isInteger(iteration) || iteration < 0) return null;
+  return { runId: sourceId.slice(0, first), producerStepId: sourceId.slice(first + 1, last), iteration };
+}
+
+/**
+ * [상황 해소 자동 취소] pending 원천결함 카드가 더 이상 의미 없는 조건에서 자동 cancel 한다(감사 로그 동반).
+ *   (1) 런 completed/cancelled 종결 — 카드가 묻는 조치 대상 런이 이미 끝남. failed 는 제외:
+ *       실패 종결은 카드가 여전히 유효한 에스컬레이션이므로 오너 판단을 유지한다.
+ *   (2) 런 진행 중 — 카드가 지적한 generation 이후의 생산자 generation 이 completed 이고 해당
+ *       producer 의 모든 백엣지 QA 가 completed(통과) 로 확정된 경우. QA 가 failed 면 최신 반려
+ *       처리(신규 카드/재작업)가 진행 중일 수 있으므로 건드리지 않는다(fail-closed).
+ * [규칙 7-8] 새 실행 경로 없음 — 기존 write.cancel(감사 로그)만 호출. 자연어는 판단에 쓰지 않고
+ *   stepRun 상태(구조 원천)만으로 판정한다. 호출부(dag-engine sync)는 try/catch 로 감싼다.
+ */
+export async function cancelResolvedQaSourceDefectOwnerCards(input: {
+  readonly db: Db;
+  readonly companyId: string;
+  readonly run: { readonly id: string; readonly status: string };
+  readonly steps: ReadonlyArray<EdgeBearingStep>;
+  readonly stepRuns: ReadonlyArray<CleanupStepRunRow>;
+}): Promise<{ cancelled: number }> {
+  const write = operatorDecisionWriteService(input.db);
+  const pending = await input.db.select({ id: operatorDecisions.id, sourceId: operatorDecisions.sourceId }).from(operatorDecisions).where(and(
+    eq(operatorDecisions.companyId, input.companyId),
+    eq(operatorDecisions.sourceType, QA_SOURCE_DEFECT_CARD_SOURCE_TYPE),
+    eq(operatorDecisions.status, "pending"),
+    like(operatorDecisions.sourceId, `${input.run.id}:%`),
+  ));
+  if (pending.length === 0) return { cancelled: 0 };
+
+  const runTerminalResolved = input.run.status === "completed" || input.run.status === "cancelled";
+  const stepRunByStepId = new Map(input.stepRuns.map((row) => [row.stepId, row]));
+
+  let cancelled = 0;
+  for (const card of pending) {
+    const parsed = parseSourceId(card.sourceId ?? "");
+    if (!parsed || parsed.runId !== input.run.id) continue;
+
+    let reason: string | null = null;
+    if (runTerminalResolved) {
+      reason = `run_${input.run.status}`;
+    } else {
+      // 진행 중 런: 이후 generation 통과로 완전히 대체됐는지만 판정(구조 원천만 사용).
+      const producer = stepRunByStepId.get(parsed.producerStepId);
+      if (!producer) continue;
+      if ((producer.iterationIndex ?? 0) <= parsed.iteration) continue;
+      if (producer.status !== "completed") continue;
+      const producerDef = input.steps.find((step) => step.id === parsed.producerStepId);
+      if (!producerDef) continue;
+      const qaStepIds = resolveEdges(producerDef)
+        .filter((edge) => edge.isBackEdge === true)
+        .map((edge) => edge.stepId);
+      if (qaStepIds.length === 0) continue;
+      const allQaPassed = qaStepIds.every((qaStepId) => stepRunByStepId.get(qaStepId)?.status === "completed");
+      if (!allQaPassed) continue;
+      reason = "superseded_generation_passed";
+    }
+
+    try {
+      await write.cancel(card.id, { type: "user", id: "system" }, `qa_source_defect_card_${reason}`);
+      cancelled += 1;
+    } catch {
+      // 동시 해소/충돌은 다음 sync 에 재시도된다 — 정리가 sync 를 깨뜨리지 않는다.
+    }
+  }
+  return { cancelled };
 }
