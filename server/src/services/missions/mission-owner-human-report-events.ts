@@ -1,5 +1,6 @@
 import type { ExtractedMissionOwnerDecision } from "./mission-owner-recovery-events.js";
 import type { GovernanceThreadActor, GovernanceThreadEvent } from "./governance-thread.js";
+import { formatOperatorDecisionSummary } from "./operator-card-summary.js";
 
 type LegacyMissionOwnerDecisionComment = {
   id: string;
@@ -30,12 +31,15 @@ function decisionTimestamp(value: Date | string | null): string {
   return Number.isNaN(date.getTime()) ? "1970-01-01T00:00:00.000Z" : date.toISOString();
 }
 
-function compactDecisionText(...values: Array<string | undefined>): string {
-  return values
-    .map((value) => value?.trim())
-    .filter((value): value is string => Boolean(value))
-    .join(" | ")
-    .slice(0, 280);
+function decisionSummary(input: {
+  decision: "request_input" | "escalate";
+  issueId: string;
+  reason?: string;
+  nextAction?: string;
+  evidence?: string;
+}): string {
+  // [display-only] 구조화된 결정 필드로 한국어 운영자 카드 요약. rule 8: 표시 전용.
+  return formatOperatorDecisionSummary(input);
 }
 
 export function missionOwnerHumanReportEvents(input: {
@@ -51,13 +55,16 @@ export function missionOwnerHumanReportEvents(input: {
     const decision = record.decision;
     if (decision.decision !== "request_input" && decision.decision !== "escalate") return [];
 
-    const detail = compactDecisionText(decision.reason, decision.nextAction, decision.evidence);
     const decisionLabel = decision.decision === "request_input"
       ? "Human/operator input requested"
       : "Mission blocker escalated";
-    const summary = detail
-      ? `${decisionLabel}: ${detail}`
-      : `${decisionLabel}; unresolved mission blocker needs human/operator decision.`;
+    const summary = decisionSummary({
+      decision: decision.decision,
+      issueId: record.issueId,
+      reason: decision.reason,
+      nextAction: decision.nextAction,
+      evidence: decision.evidence,
+    });
     // The durable transition event is the authority and primary source. A linked
     // comment is display-only evidence, never the source of this diagnosis.
     const sourceRef: GovernanceThreadEvent["sourceRef"] = {

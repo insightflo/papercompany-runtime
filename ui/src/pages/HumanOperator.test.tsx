@@ -49,7 +49,11 @@ vi.mock("@tanstack/react-query", () => ({
       return { data: { data: [attention], page: { nextCursor: null } }, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
     }
     return {
-      data: [{ id: "request-1", severity: "attention", missionStatus: "active", timestamp: "2026-07-29T10:00:00Z", title: "Mission request", summary: "Need input", missionTitle: "Mission", missionId: "mission-1", issueId: null }],
+      data: [{
+        id: "request-1", severity: "attention", missionStatus: "active", timestamp: "2026-07-29T10:00:00Z", title: "Mission request",
+        summary: "무엇이: 미션 Mission · 이슈 RES-3638 — Draft\n왜 막힘: the source issue is blocked\n운영자 할 일: assign the idle agent",
+        missionTitle: "Mission", missionId: "mission-1", issueId: null,
+      }],
       isLoading: false, isFetching: false, error: null, refetch: vi.fn(),
     };
   },
@@ -74,6 +78,15 @@ describe("HumanOperator", () => {
     expect(pendingIndex).toBeLessThan(attentionIndex);
     expect(attentionIndex).toBeLessThan(automationIndex);
     expect(automationIndex).toBeLessThan(requestIndex);
+  });
+
+  it("renders the structured request summary with preserved line breaks", () => {
+    const html = renderToStaticMarkup(<HumanOperator />);
+    expect(html).toContain("whitespace-pre-line");
+    expect(html).toContain("무엇이: 미션 Mission · 이슈 RES-3638 — Draft");
+    expect(html).toContain("왜 막힘: the source issue is blocked");
+    expect(html).toContain("운영자 할 일: assign the idle agent");
+    expect(html).not.toContain("Issue: "); // raw issue UUID line removed from the card
   });
 
   it("counts pending cards plus existing requests without counting attention", () => {
