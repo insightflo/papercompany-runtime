@@ -812,6 +812,11 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     return { missionId: mission.id, oversightIssueId: oversightIssue.id, planId: activePlan?.id ?? null };
   }
 
+  function readToolStepAttemptCount(stepRun: typeof workflowStepRuns.$inferSelect): number {
+    const retryCount = typeof stepRun.retryCount === "number" ? stepRun.retryCount : 0;
+    return 1 + Math.max(0, retryCount);
+  }
+
   async function reopenAppliedToolStepRecoveryIfRetryFailed(input: {
     issue: IssueRow;
     mission: MissionRow;
@@ -821,6 +826,11 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   }): Promise<boolean> {
     if (input.issue.status !== "done" || input.stepRun.status !== "failed") return false;
     await issueService(db).update(input.issue.id, { status: "todo" });
+    // [진단 강제] 같은 실패가 반복됐다는 건 이전 복구 액션이 원인을 못 다룬 것.
+    // 2026-08-27 gazua-evening 2: 오너가 “생산자 재작업→재시도”를 반복했으나 원인은
+    // 정의의 toolArgs 누락이었다. 반복 실패 시 원인 좁히기 절차를 코멘트로 강제한다.
+    const attempts = readToolStepAttemptCount(input.stepRun);
+    const identicalRepeat = attempts >= 2;
     await issueService(db).addComment(
       input.issue.id,
       [
@@ -829,8 +839,17 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         `Step: ${input.stepId}`,
         `Step run: ${input.stepRun.id}`,
         `Failed at: ${input.stepRun.completedAt?.toISOString() ?? new Date().toISOString()}`,
+        `Recorded failed attempts: ${attempts}`,
         "",
         "The completed recovery action was applied through the unified workflow engine, but the tool step failed again. Reopening this recovery issue so the mission owner can diagnose the latest failure before another retry.",
+        ...(identicalRepeat ? [
+          "",
+          "**Repeated failure — diagnose before another retry.** The same step has now failed more than once. Before any further action:",
+          "1. Check `toolInvocationArgs` in the evidence below: empty `{}` means the workflow definition itself lacks toolArgs (a definition defect you cannot fix — escalate with the exact missing field).",
+          "2. Verify the expected artifact actually exists (registered work products) before blaming the producer.",
+          "3. Compare the failing tool's invocation with a previously successful run of the same workflow.",
+          "A retry without a stated root cause and a reason it will now change the outcome will just repeat this failure.",
+        ] : []),
       ].join("\n"),
       { agentId: input.mission.ownerAgentId },
     );

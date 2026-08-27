@@ -59,12 +59,18 @@ export function isIssueLessToolWorkflowStep(step: WorkflowStep | Record<string, 
 export function toolStepFailureEvidence(stepRun: typeof workflowStepRuns.$inferSelect): string[] {
   const metadata = isRecord(stepRun.metadata) ? stepRun.metadata : {};
   const toolResult = isRecord(metadata.toolResult) ? metadata.toolResult : {};
+  const toolInvocation = isRecord(metadata.toolInvocation) ? metadata.toolInvocation : {};
+  // [오너 진단 키] 실제 디스패치된 도구 인자. 빈 {}도 명시적으로 노출한다 —
+  // 2026-08-27 gazua-evening 2 사고: 인자 없는 호출이 원인이었으나 오너 카드에 안 보여
+  // “생산자 문제”로 오진단. 인자 가시성이 원인 좁히기의 출발점.
+  const invocationArgsRecorded = Object.prototype.hasOwnProperty.call(toolInvocation, "args");
   const values = [
     ["exitCode", toolResult.exitCode],
     ["error", toolResult.error],
     ["stderr", toolResult.stderr],
     ["stdout", toolResult.stdout],
     ["toolName", toolResult.toolName],
+    ["toolInvocationArgs", invocationArgsRecorded ? (JSON.stringify(toolInvocation.args) ?? undefined) : undefined],
     ["lastDispatchErrorSummary", stepRun.lastDispatchErrorSummary],
   ];
   return values
