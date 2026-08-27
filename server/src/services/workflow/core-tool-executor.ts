@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
-import { agentToolGrants, agents, heartbeatRuns, issues, toolDefinitions, workflowStepRuns } from "@paperclipai/db";
+import { agentToolGrants, agents, heartbeatRuns, issues, toolDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { executeRemoteWorkflowTool, type CoreWorkflowToolRemoteDeps } from "./remote-tool-executor.js";
@@ -95,6 +95,46 @@ export async function resolveRunStepEnv(db: Db, runId: string): Promise<Record<s
     PAPERCLIP_WORKFLOW_STEP_ID: stepRun.stepId,
     PAPERCLIP_MISSION_ID: issue.missionId,
   };
+  if (paths?.stepOutputDir) env.PAPERCLIP_STEP_OUTPUT_DIR = paths.stepOutputDir;
+  return env;
+}
+
+/**
+ * 네이티브 tool-step 경로용 step env: 워크플로우 런의 미션 귀속을 조회해
+ * PAPERCLIP_STEP_OUTPUT_DIR을 계산한다(heartbeat 경로 resolveRunStepEnv와 동일 규칙).
+ * 런이 없거나 미션이 없으면 RUN_ID/STEP_ID만 반환 — 기존 동작 유지(graceful).
+ */
+export async function resolveWorkflowRunStepEnv(
+  db: Db,
+  input: {
+    companyId: string;
+    workflowRunId: string;
+    stepId: string;
+  },
+): Promise<Record<string, string>> {
+  const env: Record<string, string> = {
+    PAPERCLIP_WORKFLOW_RUN_ID: input.workflowRunId,
+    PAPERCLIP_STEP_ID: input.stepId,
+  };
+
+  const run = await db
+    .select({ missionId: workflowRuns.missionId })
+    .from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.id, input.workflowRunId),
+      eq(workflowRuns.companyId, input.companyId),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!run?.missionId) return env;
+
+  env.PAPERCLIP_MISSION_ID = run.missionId;
+  const paths = await resolveMissionWorkProductPaths(db, {
+    companyId: input.companyId,
+    missionId: run.missionId,
+    workflowRunId: input.workflowRunId,
+    stepId: input.stepId,
+  });
   if (paths?.stepOutputDir) env.PAPERCLIP_STEP_OUTPUT_DIR = paths.stepOutputDir;
   return env;
 }
