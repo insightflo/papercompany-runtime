@@ -703,6 +703,10 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
             : missions.createdAt;
 
     const order = filter.sortOrder === "desc" ? desc(sortColumn) : asc(sortColumn);
+    // [목적] 동순위(타이) 안정 tiebreaker — 워크플로 종료 스윕이 여러 미션을 같은 밀리초에
+    // 갱신하면 ORDER BY 키만으로는 매 조회마다 순서가 흔들린다(실측 2026-08-27).
+    // createdAt desc → id desc로 확정적 순서를 보장한다.
+    const orderClauses = [order, desc(missions.createdAt), desc(missions.id)];
 
     let rows: MissionRow[];
     if (filter.limit !== undefined && filter.offset !== undefined) {
@@ -710,7 +714,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         .select()
         .from(missions)
         .where(and(...conditions))
-        .orderBy(order)
+        .orderBy(...orderClauses)
         .limit(filter.limit)
         .offset(filter.offset);
     } else if (filter.limit !== undefined) {
@@ -718,21 +722,21 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         .select()
         .from(missions)
         .where(and(...conditions))
-        .orderBy(order)
+        .orderBy(...orderClauses)
         .limit(filter.limit);
     } else if (filter.offset !== undefined) {
       rows = await db
         .select()
         .from(missions)
         .where(and(...conditions))
-        .orderBy(order)
+        .orderBy(...orderClauses)
         .offset(filter.offset);
     } else {
       rows = await db
         .select()
         .from(missions)
         .where(and(...conditions))
-        .orderBy(order);
+        .orderBy(...orderClauses);
     }
 
     const reconciledRows = await Promise.all(rows.map((mission) => ownerActions.reconcileMissionStatusFromWorkflowRuns(mission)));

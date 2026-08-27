@@ -5223,6 +5223,85 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]);
   });
 
+  it("breaks updatedAt ties deterministically (newer createdAt first, then id desc)", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const tiedUpdatedAt = new Date("2026-08-27T04:26:53.970Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Tie Sort Mission Company",
+      issuePrefix: `TS${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Tie Sort Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    // 동일 updatedAt 타이: createdAt도 같으면 id desc로, createdAt이 다르면 최신 createdAt 우선.
+    // 삽입 순서(id 0000 먼저, ffff 나중; 오래 만든 것 먼저)와 기대 순서를 반대로 놓아
+    // tiebreaker 없는 현재 구현이 힙 순서(삽입 순)를 반환하면 실패하도록 만든다.
+    await db.insert(missions).values([
+      {
+        id: "00000000-0000-4000-8000-000000000000",
+        companyId,
+        ownerAgentId,
+        title: "Tie same-created low-id",
+        status: "active",
+        createdAt: new Date("2026-08-20T00:00:00.000Z"),
+        updatedAt: tiedUpdatedAt,
+      },
+      {
+        id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        companyId,
+        ownerAgentId,
+        title: "Tie same-created high-id",
+        status: "active",
+        createdAt: new Date("2026-08-20T00:00:00.000Z"),
+        updatedAt: tiedUpdatedAt,
+      },
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        companyId,
+        ownerAgentId,
+        title: "Tie newer-created",
+        status: "active",
+        createdAt: new Date("2026-08-26T00:00:00.000Z"),
+        updatedAt: tiedUpdatedAt,
+      },
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        companyId,
+        ownerAgentId,
+        title: "Distinct newer updatedAt",
+        status: "active",
+        createdAt: new Date("2026-08-19T00:00:00.000Z"),
+        updatedAt: new Date("2026-08-27T04:32:03.615Z"),
+      },
+    ]);
+
+    const result = await missionService(db).list({
+      companyId,
+      sortBy: "updatedAt",
+      sortOrder: "desc",
+    });
+
+    expect(result.map((mission) => mission.title)).toEqual([
+      "Distinct newer updatedAt",
+      "Tie newer-created",
+      "Tie same-created high-id",
+      "Tie same-created low-id",
+    ]);
+  });
+
   it("interprets date-only mission filters as local-day boundaries", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
