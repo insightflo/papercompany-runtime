@@ -21,7 +21,7 @@ type IssueRow = typeof issues.$inferSelect;
 
 export type WorkflowApiIssue = Pick<
   IssueRow,
-  "id" | "companyId" | "missionId" | "projectId" | "originKind" | "title" | "startedAt"
+  "id" | "companyId" | "missionId" | "projectId" | "originKind" | "title" | "startedAt" | "status"
 >;
 
 export type WorkflowApiActor = {
@@ -343,6 +343,19 @@ export async function completeWorkflowIssue(input: {
       agentId: input.actor.agentId ?? undefined,
       userId: input.actor.actorType === "user" ? input.actor.actorId : undefined,
     });
+  }
+  // [GAZ 저녁3 4f8cfacb 이중완료] Already-done issue: complete idempotently WITHOUT
+  //   re-stamping completedAt/updatedAt. A duplicate completion (queued-wakeup
+  //   revival → second workflow/complete) used to move completedAt forward and
+  //   permanently invalidate downstream structural-gate producer tokens. The
+  //   run-state sync still runs so a crash between the first update and its sync
+  //   heals; it cannot restamp because the issue row is untouched. Rework
+  //   reopen-then-complete passes status !== done and keeps the normal path.
+  if (input.issue.status === "done") {
+    const [current] = await input.db.select().from(issues).where(eq(issues.id, input.issue.id)).limit(1);
+    if (!current) throw notFound("Issue not found");
+    await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
+    return current;
   }
   const updated = await svc.update(input.issue.id, {
     status: "done",

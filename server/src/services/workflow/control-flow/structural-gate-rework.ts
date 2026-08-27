@@ -13,7 +13,7 @@
 
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, workflowStepRuns } from "@paperclipai/db";
+import { issueComments, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { resolveEdges } from "./edge-condition.js";
 import {
   buildWorkflowReworkContract,
@@ -24,11 +24,16 @@ import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from ".
 import { isStructuralGateStep, readStructuralGateProducerToken, sameStructuralGateProducerToken, type StructuralGateStep } from "./structural-gate.js";
 import { isQaLikeStep } from "../../workflow-step-role.js";
 import { loadStructuralGateVerdictByRequest, type StructuralGateVerdictRecord } from "./structural-gate-ledger.js";
+import { findStaleStructuralGateRequeues } from "./structural-semantic-readiness.js";
 import { QA_REWORK_DEFAULT_MAX_ITERATIONS } from "../../missions/workflow-qa-rework.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 const TERMINAL = new Set(["completed", "failed", "skipped"]);
 const GATE_CLEAR_KEYS = ["toolInvocation", "toolResult", "toolQueue", "cacheHit", "concurrencyBlocked", "controlFlowSkipped", "retentionDeleted"];
+// Stale-evidence requeue clears the captured producer token and any verdict
+// metadata too, so the redispatch captures a FRESH token and no stale PASS
+// evidence can survive into the new attempt.
+const GATE_STALE_REQUEUE_CLEAR_KEYS = [...GATE_CLEAR_KEYS, "structuralGateProducerToken", "structuralGateVerdict"];
 // Clear stale dispatch + verdict/tool metadata on a semantic QA reset so old
 // completion evidence (request id, timestamps, error, verdict metadata) cannot
 // leak into the new generation. Mirrors the gate-retry clean-pending surface.
@@ -320,4 +325,104 @@ export async function applyStructuralGatePass(input: {
     return { stepRuns: refreshed, reworkedCount };
   }
   return { stepRuns, reworkedCount: 0 };
+}
+
+// [GAZ 저녁3 4f8cfacb 무음 교착] A completed structural gate whose PASS evidence
+//   (dispatch-time producer token / verdict observedAt) predates the producer's
+//   CURRENT same-iteration completion blocks pending QA-like steps forever:
+//   evaluateSemanticStructuralReadiness recomputes the expected token from the
+//   producer's current completedAt and never matches, so createWorkflowStepIssue
+//   silently returns null every sync. Reset such gates to pending (CAS) so the
+//   launch loop redispatches them with a fresh request id + fresh token, and
+//   record the structured finding in workflow_transition_events. Rework
+//   generations (iteration bump) stay owned by applyStructuralGatePass above.
+export async function requeueStaleStructuralGatesForBlockedQa(input: {
+  db: Db; run: LoopRun; steps: readonly ReworkableStep[]; stepRuns: StepRun[];
+}): Promise<{ stepRuns: StepRun[]; requeuedCount: number }> {
+  const { db, run, steps, stepRuns } = input;
+  if (run.status === "cancelled") return { stepRuns, requeuedCount: 0 };
+
+  const findings = await findStaleStructuralGateRequeues({
+    db,
+    companyId: run.companyId,
+    workflowRunId: run.id,
+    steps,
+    stepRuns,
+  });
+  if (findings.length === 0) return { stepRuns, requeuedCount: 0 };
+
+  let requeuedCount = 0;
+  for (const finding of findings) {
+    const gateRun = stepRuns.find((sr) => sr.id === finding.gateStepRunId);
+    if (!gateRun || gateRun.status !== "completed") continue;
+
+    const meta = gateRun.metadata && typeof gateRun.metadata === "object" && !Array.isArray(gateRun.metadata)
+      ? { ...(gateRun.metadata as Record<string, unknown>) }
+      : {};
+    for (const key of GATE_STALE_REQUEUE_CLEAR_KEYS) delete meta[key];
+    meta.structuralGateProducerGeneration = finding.producerIterationIndex;
+
+    // CAS: tight match on the exact observed snapshot so a newer callback or
+    // generation (different status/iteration/requestId) survives untouched.
+    const casConditions = [
+      eq(workflowStepRuns.id, gateRun.id),
+      eq(workflowStepRuns.status, gateRun.status),
+      eq(workflowStepRuns.iterationIndex, gateRun.iterationIndex ?? 0),
+    ];
+    if (gateRun.lastDispatchRequestId) {
+      casConditions.push(eq(workflowStepRuns.lastDispatchRequestId, gateRun.lastDispatchRequestId));
+    } else {
+      casConditions.push(isNull(workflowStepRuns.lastDispatchRequestId));
+    }
+
+    const cas = await db.update(workflowStepRuns).set({
+      status: "pending",
+      startedAt: null,
+      completedAt: null,
+      lastDispatchAttemptAt: null,
+      lastDispatchAcceptedAt: null,
+      lastDispatchErrorAt: null,
+      lastDispatchErrorSummary: null,
+      lastDispatchRequestId: null,
+      metadata: meta,
+    }).where(and(...casConditions)).returning({ id: workflowStepRuns.id });
+    if (cas.length === 0) continue; // CAS failed — another sync won
+    requeuedCount += 1;
+
+    // Structured finding, deduped per (gate, exact producer completion): a
+    // later, different stale completion logs a new event; repeated syncs before
+    // redispatch do not spam.
+    await db.insert(workflowTransitionEvents).values({
+      companyId: run.companyId,
+      missionId: run.missionId ?? null,
+      workflowRunId: run.id,
+      workflowStepRunId: gateRun.id,
+      issueId: null,
+      eventType: "workflow_gate_requeue",
+      layer: "workflow_validation",
+      fromStatus: "completed",
+      toStatus: "pending",
+      decision: "requeue_stale_structural_gate",
+      reason: "Structural gate PASS evidence predates the producer's current same-iteration completion; the blocked QA step could never launch. Gate reset for a fresh deterministic re-run.",
+      reasonCode: "stale_producer_recompletion",
+      idempotencyKey: `structural-gate-stale-requeue:${run.companyId}:${gateRun.id}:${finding.producerCompletedAt}`,
+      payload: {
+        kind: "structural_gate_stale_requeue",
+        qaStepId: finding.qaStepId,
+        gateStepId: finding.gateStepId,
+        producerStepId: finding.producerStepId,
+        producerIterationIndex: finding.producerIterationIndex,
+        producerCompletedAt: finding.producerCompletedAt,
+        previousRequestId: finding.requestId,
+        gateEvidenceCompletedAt: finding.gateEvidenceCompletedAt,
+        verdictObservedAt: finding.verdictObservedAt,
+      },
+    }).onConflictDoNothing();
+  }
+
+  if (requeuedCount > 0) {
+    const refreshed = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
+    return { stepRuns: refreshed, requeuedCount };
+  }
+  return { stepRuns, requeuedCount: 0 };
 }

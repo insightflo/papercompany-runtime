@@ -28,7 +28,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
-import { registerWorkflowArtifact, submitWorkflowVerdict, type WorkflowApiActor } from "../services/workflow/agent-api.js";
+import { completeWorkflowIssue, registerWorkflowArtifact, submitWorkflowVerdict, type WorkflowApiActor } from "../services/workflow/agent-api.js";
 import { hasWorkflowValidationCompletionLedger } from "../services/workflow/validation-verdict-ledger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -706,6 +706,30 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     expect(step?.status).toBe("completed");
     const [ownerRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     expect(ownerRun?.status).toBe("running");
+  });
+
+  it("completeWorkflowIssue is idempotent on an already-done issue: no completedAt re-stamp, comment still allowed", async () => {
+    // [GAZ 저녁3 4f8cfacb] Double completion used to re-stamp completedAt,
+    // which invalidated downstream structural-gate producer tokens. A duplicate
+    // complete on an already-done issue must keep the original completedAt.
+    const issue = await seedWorkflowIssue({ stepId: "produce-report-final", title: "Produce final report" });
+    const firstCompletedAt = new Date("2026-07-06T01:00:00.000Z");
+    await db.update(issues).set({ status: "done", completedAt: firstCompletedAt }).where(eq(issues.id, issue.id));
+    const [doneIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));
+
+    const actor: WorkflowApiActor = { actorType: "agent", actorId: randomUUID(), agentId: null, runId: null };
+    const updated = await completeWorkflowIssue({
+      db,
+      issue: doneIssue,
+      actor,
+      data: { comment: "duplicate completion after queued wakeup revival" },
+    });
+
+    expect(updated.status).toBe("done");
+    const [after] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(after.completedAt?.toISOString()).toBe(firstCompletedAt.toISOString());
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id));
+    expect(comments.some((row) => row.body.includes("duplicate completion"))).toBe(true);
   });
 
   it("does not allow mission owner unblock delegation to submit workflow verdicts", async () => {
