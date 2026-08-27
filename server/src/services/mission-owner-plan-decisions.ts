@@ -31,6 +31,7 @@ import {
   validateDeclaredStructuralPlan,
   rewriteStepToolArgs,
 } from "./missions/structural-materialization.js";
+import { fillStructuralValidatorToolArgs } from "./missions/structural-materialization.js";
 import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
 import { type ValidationVerdict } from "./validation-verdict.js";
@@ -2068,7 +2069,7 @@ function applyCanonicalDependencies(
   return steps.map((step, index) => ({ ...step, dependencies: dependencyStepIds[index]! }));
 }
 
-function buildPaqoWorkflowSteps(
+export function buildPaqoWorkflowSteps(
   draft: PlanRevisionDraft,
   mission: typeof missions.$inferSelect,
   options: { researchWorkbenchAvailable?: boolean } = {},
@@ -2148,6 +2149,9 @@ function buildPaqoWorkflowSteps(
   //   - scoped prompt injection for all QA downstream of structural gates
   const unitIdToStepId = buildUnitStepIdMap(executableUnits, plannedSteps);
   rewriteStepToolArgs(plannedSteps, unitIdToStepId);
+  // [실행 가능성 보증] 인자 없는 structural tool 스텝은 실행 시 반드시 실패한다(2026-08-27 gazua-evening 2).
+  // 표준 검증 인자 자동 채움 → 불가능하면 fail-closed 거부.
+  fillStructuralValidatorToolArgs(plannedSteps);
   validateStructuralTopology(plannedSteps as Parameters<typeof validateStructuralTopology>[0]);
 
   // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.

@@ -109,6 +109,38 @@ export function rewriteToolArgsStepReferences(
 
 // --- Post-materialization passes ---
 
+const STRUCTURAL_VALIDATOR_DEFAULT_ARGS_TOOL = /^validate-/;
+
+/**
+ * structural 검증 tool 스텝에 toolArgs가 비어 있으면 표준 검증 인자를 자동 채운다:
+ * 의존이 정확히 1개(검증 대상 생산자)일 때 dir={$steps.<생산자>.workProductDir}, glob=*.html.
+ * 인자 없는 tool 스텝은 실행 시 반드시 실패하므로(2026-08-27 gazua-evening 2 사고),
+ * 채울 수 없는 경우는 fail-closed로 계획 물리화를 거부한다 — 계획 유닛에 toolArgs를 선언하게 한다.
+ */
+export function fillStructuralValidatorToolArgs(steps: Step[]): void {
+  const stepIds = new Set(steps.map((step) => step.id));
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
+    if (step.type !== "tool" || step.qaType !== "structural") continue;
+    const declared = step.toolArgs as Record<string, unknown> | undefined;
+    if (declared && typeof declared === "object" && Object.keys(declared).length > 0) continue;
+    const toolName = step.toolNames?.[0] ?? "";
+    const dependencies = step.dependencies ?? [];
+    const producerStepId = dependencies.length === 1 && stepIds.has(dependencies[0]!) ? dependencies[0]! : null;
+    if (STRUCTURAL_VALIDATOR_DEFAULT_ARGS_TOOL.test(toolName) && producerStepId) {
+      steps[i] = {
+        ...step,
+        toolArgs: { dir: `{$steps.${producerStepId}.workProductDir}`, glob: "*.html" },
+      };
+      continue;
+    }
+    throw new Error(
+      `Invalid structural unit "${step.name ?? step.id}" (stepId=${step.id}): structural tool steps require toolArgs `
+      + `(e.g. dir: {$steps.<producer>.workProductDir}). Declare toolArgs on the plan unit or narrow the gate to a single producer.`,
+    );
+  }
+}
+
 /** Rewrites toolArgs references using the unit→step ID map. */
 export function rewriteStepToolArgs(
   plannedSteps: Step[],
