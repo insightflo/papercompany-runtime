@@ -167,4 +167,188 @@ describeEmbeddedPostgres("workflow tool step args", () => {
       payload: '{"chapters":[1,2]}',
     });
   });
+
+  it("falls back to metadata.toolResult.artifactPath for native tool steps without issues (case D)", async () => {
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const publishIssueId = null;
+    const artifactPath = "/srv/papercompany/projects/research-company/produced_work/missions/m1/runs/r1/steps/publish/manual-onboarding-publish-result.json";
+    const steps = [
+      { id: "publish-onboarding-manual", dependencies: [], toolNames: ["manual-onboarding-publish"], toolArgs: {} },
+      {
+        id: "verify-publish",
+        dependencies: ["publish-onboarding-manual"],
+        toolNames: ["manual-onboarding-verify"],
+        toolArgs: {
+          publishResultPath: "{$steps.publish-onboarding-manual.workProductPath}",
+          publishResultDir: "{$steps.publish-onboarding-manual.workProductDir}",
+          siblingAssets: "{$steps.publish-onboarding-manual.siblingAssetsDir}",
+        },
+      },
+    ];
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Native Fallback Co",
+      issuePrefix: `NF${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const workflowId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "youtube-report", stepsJson: steps });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      status: "running",
+      runDate: "2026-08-27",
+    });
+    await db.insert(workflowStepRuns).values([
+      // native tool step: no issue_id, artifact only in step-run metadata.toolResult
+      {
+        workflowRunId: runId,
+        stepId: "publish-onboarding-manual",
+        issueId: publishIssueId,
+        status: "completed",
+        metadata: {
+          toolResult: {
+            requestId: "req-1",
+            toolName: "manual-onboarding-publish",
+            success: true,
+            stdout: "{}",
+            stderr: null,
+            exitCode: 0,
+            error: null,
+            completedAt: "2026-08-27T00:00:00.000Z",
+            artifactPath,
+          },
+        },
+      },
+      { workflowRunId: runId, stepId: "verify-publish", status: "pending" },
+    ]);
+
+    const args = await resolveWorkflowToolStepArgs({
+      db,
+      run: { id: runId, companyId, runDate: "2026-08-27" },
+      step: steps[1]!,
+      workflowSteps: steps,
+    });
+
+    expect(args).toEqual({
+      publishResultPath: artifactPath,
+      publishResultDir: path.dirname(artifactPath),
+      siblingAssets: path.join(path.dirname(artifactPath), "assets"),
+    });
+  });
+
+  it("prefers the issueWorkProducts path over the metadata fallback when both exist (case E)", async () => {
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const producerIssueId = randomUUID();
+    const registeredPath = "/srv/papercompany/registered/build/index.html";
+    const metadataOnlyPath = "/srv/papercompany/metadata-only/build/other.html";
+    const steps = [
+      { id: "build-html", dependencies: [], agentId: randomUUID(), toolNames: [] },
+      {
+        id: "publish",
+        dependencies: ["build-html"],
+        toolNames: ["manual-onboarding-publish"],
+        toolArgs: { sourceHtmlPath: "{$steps.build-html.workProductPath}" },
+      },
+    ];
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Fallback Priority Co",
+      issuePrefix: `FP${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const workflowId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "mixed", stepsJson: steps });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      status: "running",
+      runDate: "2026-08-27",
+    });
+    await db.insert(issues).values({ id: producerIssueId, companyId, title: "Build HTML" });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "build-html",
+        issueId: producerIssueId,
+        status: "completed",
+        metadata: { toolResult: { artifactPath: metadataOnlyPath } },
+      },
+      { workflowRunId: runId, stepId: "publish", status: "pending" },
+    ]);
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: producerIssueId,
+      title: "index.html",
+      type: "document",
+      provider: "local_file",
+      status: "active",
+      isPrimary: true,
+      metadata: { path: registeredPath },
+    });
+
+    const args = await resolveWorkflowToolStepArgs({
+      db,
+      run: { id: runId, companyId, runDate: "2026-08-27" },
+      step: steps[1]!,
+      workflowSteps: steps,
+    });
+
+    expect(args).toEqual({ sourceHtmlPath: registeredPath });
+  });
+
+  it("still errors when a native tool step has no artifactPath and no workProduct (case F)", async () => {
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const steps = [
+      { id: "publish-onboarding-manual", dependencies: [], toolNames: ["manual-onboarding-publish"], toolArgs: {} },
+      {
+        id: "verify-publish",
+        dependencies: ["publish-onboarding-manual"],
+        toolNames: ["manual-onboarding-verify"],
+        toolArgs: { publishResultPath: "{$steps.publish-onboarding-manual.workProductPath}" },
+      },
+    ];
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "No Artifact Co",
+      issuePrefix: `NA${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const workflowId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "youtube-report", stepsJson: steps });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      status: "running",
+      runDate: "2026-08-27",
+    });
+    await db.insert(workflowStepRuns).values([
+      {
+        workflowRunId: runId,
+        stepId: "publish-onboarding-manual",
+        status: "completed",
+        metadata: { toolResult: { success: true, exitCode: 0 } },
+      },
+      { workflowRunId: runId, stepId: "verify-publish", status: "pending" },
+    ]);
+
+    await expect(resolveWorkflowToolStepArgs({
+      db,
+      run: { id: runId, companyId, runDate: "2026-08-27" },
+      step: steps[1]!,
+      workflowSteps: steps,
+    })).rejects.toThrow('could not resolve an active local workProduct for ancestor step "publish-onboarding-manual"');
+  });
 });

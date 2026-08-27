@@ -75,6 +75,33 @@ export async function resolveWorkflowToolStepArgs(input: {
     const localPath = resolveWorkProductLocalFilePath(product);
     if (localPath) pathsByStepId.set(product.stepId, path.resolve(localPath));
   }
+
+  // 네이티브 tool 스텝 폴백: issue 없이 실행된 스텝은 위 조인에 걸리지 않는다.
+  // 툴 실행기가 기록한 스텝 런 metadata.toolResult.artifactPath(구조화 DB 레코드)를
+  // 그대로 사용한다. 최신 완료 런 우선 — 재시도 시 metadata가 덮어쓰기된 최신 값 유지.
+  const unresolvedStepIds = Array.from(references).filter((stepId) => !pathsByStepId.has(stepId));
+  if (unresolvedStepIds.length > 0) {
+    const stepRunRows = await input.db
+      .select({ stepId: workflowStepRuns.stepId, metadata: workflowStepRuns.metadata })
+      .from(workflowStepRuns)
+      .where(and(
+        eq(workflowStepRuns.workflowRunId, input.run.id),
+        inArray(workflowStepRuns.stepId, unresolvedStepIds),
+      ))
+      .orderBy(desc(workflowStepRuns.completedAt), desc(workflowStepRuns.id));
+    for (const row of stepRunRows) {
+      if (pathsByStepId.has(row.stepId)) continue;
+      const toolResult = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+        ? (row.metadata as Record<string, unknown>).toolResult
+        : null;
+      const artifactPath = toolResult && typeof toolResult === "object" && !Array.isArray(toolResult)
+        ? (toolResult as Record<string, unknown>).artifactPath
+        : null;
+      if (typeof artifactPath === "string" && artifactPath.trim().length > 0) {
+        pathsByStepId.set(row.stepId, path.resolve(artifactPath.trim()));
+      }
+    }
+  }
   for (const stepId of references) {
     if (!pathsByStepId.has(stepId)) {
       throw new Error(`Workflow tool step "${input.step.id}" could not resolve an active local workProduct for ancestor step "${stepId}".`);
