@@ -1339,6 +1339,81 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(workflowRun?.status).toBe("running");
   });
 
+  it("renders {$runMetadata.<key>} tokens in step name and description from run metadata", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const stepId = "summarize-video";
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run-1" });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Run Metadata Workflow",
+      issuePrefix: `RW${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Run Metadata Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "YouTube Summary",
+      stepsJson: [
+        {
+          id: stepId,
+          name: "Summarize {$runMetadata.videoId}",
+          agentId,
+          dependencies: [],
+          description: "Input URL: {$runMetadata.url} on {$runDate}; missing stays {$runMetadata.notDeclared}",
+        },
+      ],
+    });
+
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      triggerSource: "manual",
+      status: "pending",
+      runDate: "2026-08-27",
+      metadata: { videoId: "dQw4w9WgXcQ", url: "https://example.com/watch?v=dQw4w9WgXcQ" },
+    });
+
+    const result = await executeWorkflowRun(db, runId);
+
+    expect(result.status).toBe("running");
+    const stepRun = await db
+      .select()
+      .from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, runId))
+      .then((rows) => rows.find((row) => row.stepId === stepId) ?? null);
+    expect(stepRun?.issueId).toBeTruthy();
+
+    const createdIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, stepRun!.issueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(createdIssue?.title).toBe("Summarize dQw4w9WgXcQ");
+    expect(createdIssue?.description).toContain(
+      "Input URL: https://example.com/watch?v=dQw4w9WgXcQ on 2026-08-27; missing stays {$runMetadata.notDeclared}",
+    );
+  });
+
   it("injects deliverable + registration contract only for workProduct steps (graphWorkProductRequired=true)", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

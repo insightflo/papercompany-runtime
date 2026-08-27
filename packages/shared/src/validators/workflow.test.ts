@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { workflowStepDefinitionSchema } from "./workflow.js";
+import { createWorkflowDefinitionSchema, workflowStepDefinitionSchema } from "./workflow.js";
 
 describe("workflowStepDefinitionSchema retry fields", () => {
   it("accepts valid fixed backoff with delay and jitter", () => {
@@ -75,5 +75,42 @@ describe("workflowStepDefinitionSchema retry fields", () => {
       maxRetries: 9999,
     });
     expect(result.success).toBe(true);
+  });
+});
+
+describe("createWorkflowDefinitionSchema runInputs", () => {
+  const base = { name: "youtube-summary", steps: [] };
+
+  it("accepts valid runInputs declarations and trims nothing silently", () => {
+    const parsed = createWorkflowDefinitionSchema.parse({
+      ...base,
+      runInputs: [
+        { key: "url", label: "YouTube URL", required: true, placeholder: "https://..." },
+        { key: "video_id" },
+      ],
+    });
+    expect(parsed.runInputs).toHaveLength(2);
+    expect(parsed.runInputs?.[0]).toMatchObject({ key: "url", required: true });
+    expect(parsed.runInputs?.[1]).toMatchObject({ key: "video_id" });
+  });
+
+  it("accepts omitted runInputs (backward compat)", () => {
+    expect(createWorkflowDefinitionSchema.parse(base).runInputs).toBeUndefined();
+  });
+
+  it("rejects invalid key patterns", () => {
+    expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs: [{ key: "bad-key" }] })).toThrow();
+    expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs: [{ key: "" }] })).toThrow();
+    expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs: [{ key: "a".repeat(41) }] })).toThrow();
+    expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs: [{ key: "한글키" }] })).toThrow();
+  });
+
+  it("rejects more than 5 runInputs", () => {
+    const runInputs = Array.from({ length: 6 }, (_, index) => ({ key: `k${index}` }));
+    expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs })).toThrow();
+  });
+
+  it("rejects unknown fields in a run input", () => {
+    expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs: [{ key: "url", oops: true }] })).toThrow();
   });
 });

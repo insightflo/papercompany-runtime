@@ -10,6 +10,13 @@ import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 /**
  * A workflow definition defines a DAG of steps to execute.
  */
+export interface WorkflowRunInput {
+  key: string;
+  label?: string;
+  required?: boolean;
+  placeholder?: string;
+}
+
 export interface WorkflowDefinition {
   id: string;
   companyId: string;
@@ -35,6 +42,7 @@ export interface WorkflowDefinition {
   createParentIssuePolicy?: string | null;
   executionMode: WorkflowExecutionMode | string | null;
   dynamicPlanBootstrapOnly?: boolean;
+  runInputs?: WorkflowRunInput[];
   source?: string | null;
   sourceKind?: string | null;
   legacyPluginEntityId?: string | null;
@@ -67,6 +75,7 @@ export interface CreateWorkflowDefinitionInput {
   createParentIssuePolicy?: string | null;
   executionMode?: WorkflowExecutionMode | string | null;
   dynamicPlanBootstrapOnly?: boolean;
+  runInputs?: WorkflowRunInput[];
   source?: string | null;
   sourceKind?: string | null;
   legacyPluginEntityId?: string | null;
