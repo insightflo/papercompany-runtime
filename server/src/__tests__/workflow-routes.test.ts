@@ -649,6 +649,94 @@ describe("workflow routes", () => {
     expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "workflow_run.created" }));
   });
 
+  it("derives declared runInputs from submitted metadata before triggering (youtu.be, watch?v=, shorts)", async () => {
+    mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({
+      runInputs: [
+        { key: "url", label: "YouTube URL", required: true },
+        { key: "videoId", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
+      ],
+    }));
+    mockWorkflowService.trigger.mockResolvedValue({
+      runId: RUN_ID, workflowId: WORKFLOW_ID, missionId: null, status: "running", completedAt: null, stepRuns: [],
+    });
+
+    const forms = [
+      "https://youtu.be/dQw4w9WgXcQ",
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://www.youtube.com/shorts/dQw4w9WgXcQ?si=abc",
+    ];
+    for (const url of forms) {
+      const res = await request(createApp())
+        .post(`/api/workflows/${WORKFLOW_ID}/runs`)
+        .send({ triggeredBy: "board", metadata: { url } });
+      expect(res.status).toBe(201);
+    }
+
+    expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(3);
+    for (const [index] of forms.entries()) {
+      expect(mockWorkflowService.trigger).toHaveBeenNthCalledWith(index + 1, expect.anything(), expect.objectContaining({
+        metadata: { url: forms[index], videoId: "dQw4w9WgXcQ" },
+      }));
+    }
+  });
+
+  it("keeps a user-provided derived run input value instead of overwriting it", async () => {
+    mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({
+      runInputs: [
+        { key: "url", required: true },
+        { key: "videoId", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
+      ],
+    }));
+    mockWorkflowService.trigger.mockResolvedValue({
+      runId: RUN_ID, workflowId: WORKFLOW_ID, missionId: null, status: "running", completedAt: null, stepRuns: [],
+    });
+
+    const res = await request(createApp())
+      .post(`/api/workflows/${WORKFLOW_ID}/runs`)
+      .send({ triggeredBy: "board", metadata: { url: "https://youtu.be/dQw4w9WgXcQ", videoId: "custom12345_" } });
+
+    expect(res.status).toBe(201);
+    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      metadata: { url: "https://youtu.be/dQw4w9WgXcQ", videoId: "custom12345_" },
+    }));
+  });
+
+  it("returns 400 when a required derived run input cannot be extracted", async () => {
+    mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({
+      runInputs: [
+        { key: "url", required: true },
+        { key: "videoId", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
+      ],
+    }));
+
+    const res = await request(createApp())
+      .post(`/api/workflows/${WORKFLOW_ID}/runs`)
+      .send({ triggeredBy: "board", metadata: { url: "https://example.com/not-youtube" } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("videoId could not be derived from url; check the URL format");
+    expect(mockWorkflowService.trigger).not.toHaveBeenCalled();
+  });
+
+  it("returns 422 when a definition declares deriveFrom against an unknown input", async () => {
+    mockWorkflowService.createDefinition.mockRejectedValue(
+      new Error('Invalid workflow runInputs: input "videoId" deriveFrom references unknown input "url"'),
+    );
+
+    const res = await request(createApp())
+      .post(`/api/companies/${COMPANY_ID}/workflows`)
+      .send({
+        name: "Broken derive",
+        steps: [{ id: "step-1", title: "Summarize" }],
+        runInputs: [
+          { key: "videoId", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
+        ],
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain('deriveFrom references unknown input "url"');
+  });
+
   it("returns run detail with step-run telemetry", async () => {
     const res = await request(createApp()).get(`/api/workflow-runs/${RUN_ID}`);
 

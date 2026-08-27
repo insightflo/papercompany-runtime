@@ -181,11 +181,20 @@ const optionalStringArraySchema = z.preprocess(
   z.array(z.string()).optional(),
 );
 
+export const workflowRunInputDeriveFromSchema = z.object({
+  input: z.string().min(1),
+  extract: z.enum(["youtubeVideoId"]),
+}).strict();
+
 export const workflowRunInputSchema = z.object({
   key: z.string().regex(/^[A-Za-z0-9_]{1,40}$/),
   label: z.string().optional(),
   required: z.boolean().optional(),
   placeholder: z.string().optional(),
+  // [목적] 실행 입력의 서버 파생 선언. extract는 고정 명명 추출기 레지스트리만 허용한다 —
+  // 정의에 임의 정규식을 저장하지 않는다(ReDoS·실행권위 방어). 소스 키 존재 검증은
+  // 저장 시점 도메인 검증(engine validateRunInputDeclarations)이 담당한다.
+  deriveFrom: workflowRunInputDeriveFromSchema.optional(),
 }).strict();
 
 export type WorkflowRunInput = z.infer<typeof workflowRunInputSchema>;
