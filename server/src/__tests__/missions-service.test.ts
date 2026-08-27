@@ -5302,6 +5302,62 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]);
   });
 
+  it("does not re-stamp updatedAt when reconciling an already-settled workflow mission (read path stays read-only)", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const runCompletedAt = new Date("2026-08-27T02:39:53.000Z");
+    const settledUpdatedAt = new Date("2026-08-27T02:39:53.000Z");
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Noop Reconcile Company",
+      issuePrefix: `NR${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: ownerAgentId,
+      companyId,
+      name: "Noop Reconcile Owner",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "youtube-report", stepsJson: [] });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId,
+      title: "2026-08-27 youtube-report",
+      description: "Created automatically for workflow run: run-1",
+      status: "completed",
+      startedAt: new Date("2026-08-27T01:52:23.000Z"),
+      completedAt: runCompletedAt,
+      updatedAt: settledUpdatedAt,
+    });
+    await db.insert(workflowRuns).values({
+      id: randomUUID(),
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "board",
+      status: "completed",
+      startedAt: new Date("2026-08-27T01:52:23.000Z"),
+      completedAt: runCompletedAt,
+      runDate: "2026-08-27",
+    });
+
+    await missionService(db).list({ companyId, sortBy: "updatedAt", sortOrder: "desc" });
+    await missionService(db).list({ companyId, sortBy: "updatedAt", sortOrder: "desc" });
+
+    const [row] = await db.select({ updatedAt: missions.updatedAt }).from(missions).where(eq(missions.id, missionId));
+    expect(row?.updatedAt.getTime()).toBe(settledUpdatedAt.getTime());
+  });
+
   it("interprets date-only mission filters as local-day boundaries", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();

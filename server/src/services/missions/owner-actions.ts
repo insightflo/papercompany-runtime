@@ -238,12 +238,16 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       }
 
       const nextStatus: MissionStatus = cancelledWorkflowRunStatuses.has(latestStatus) ? "cancelled" : "completed";
-      const completedAt = latestRun.completedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? new Date();
-      const updates: Partial<MissionRow> = {
-        status: nextStatus,
-        completedAt,
-        updatedAt: new Date(),
-      };
+      // [목적] 이미 같은 상태로 정산된 미션의 노오퍼레이션 재기록 방지 — 읽기 경로(list/감독
+      // 스윕) reconcile이 updated_at을 매번 새로 찍어 "Recently updated" 순서를 흔들었다.
+      // 상태/완료시각에 실제 변화가 있을 때만 쓴다(완료시각 원천은 런 기록 우선).
+      const runSettledAt = latestRun.completedAt ?? latestRun.startedAt ?? latestRun.createdAt ?? null;
+      const completedAt = runSettledAt ?? mission.completedAt ?? new Date();
+      const updates: Partial<MissionRow> = {};
+      if (mission.status !== nextStatus) updates.status = nextStatus;
+      if (mission.completedAt?.getTime() !== completedAt.getTime()) updates.completedAt = completedAt;
+      if (Object.keys(updates).length === 0) return mission;
+      updates.updatedAt = new Date();
       await db.update(missions).set(updates).where(eq(missions.id, mission.id));
 
       const updatedMission = {
