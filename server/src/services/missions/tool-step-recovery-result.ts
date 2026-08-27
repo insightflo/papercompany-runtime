@@ -48,6 +48,25 @@ function isWorkflowApiRegistration(details: Record<string, unknown> | null, work
   return details?.workProductId === workProductId;
 }
 
+async function findMissionScopedIssueByRef(
+  db: Db,
+  companyId: string,
+  missionId: string,
+  targetRef: string,
+): Promise<RecoveryScopeIssue | null> {
+  if (!targetRef) return null;
+  const rows = await db
+    .select({ id: issues.id, identifier: issues.identifier })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, companyId),
+      eq(issues.missionId, missionId),
+    ));
+  return rows.find((row) =>
+    targetRef === normalizedRef(row.id) || targetRef === normalizedRef(row.identifier),
+  ) ?? null;
+}
+
 export async function loadAuthorizedNativeToolStepRecovery(input: {
   readonly db: Db;
   readonly companyId: string;
@@ -74,13 +93,17 @@ export async function loadAuthorizedNativeToolStepRecovery(input: {
   const targetRef = normalizedRef(
     decisionRecord.decision.reworkTargetRef ?? decisionRecord.decision.sourceIssueRef,
   );
-  const scopes = [
+  // [스코프] owner action 이슈/원천 이슈 외에, 같은 미션(companyId+missionId) 내 이슈도 targetRef 로
+  // 지정할 수 있다. 실제 운영에서 recover_artifact 판단은 산출물이 등록된 생산자 이슈(워크플로우 스텝
+  // 이슈)를 reworkTargetRef 로 지정하며, 그 이슈는 recovery/source 이슈가 아닌 경우가 있다.
+  // 스코프 확장 이후에도 동일한 fail-closed 검증이 그대로 따른다: 대상 이슈의 active workProduct +
+  // issue.workflow_artifact_registered 공식 등록 활동 로그 매칭(+ workProduct 조인의 미션 스코프).
+  const targetIssue = [
     input.ownerActionIssue,
     ...(input.sourceIssue ? [input.sourceIssue] : []),
-  ];
-  const targetIssue = scopes.find((scope) =>
+  ].find((scope) =>
     targetRef === normalizedRef(scope.id) || targetRef === normalizedRef(scope.identifier),
-  );
+  ) ?? await findMissionScopedIssueByRef(input.db, input.companyId, input.missionId, targetRef);
   if (!targetIssue) return null;
 
   const workProducts = await input.db

@@ -157,7 +157,10 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
       applyOwnerDecisionActions: true,
     });
   }
-  async function submitRecoverArtifactDecision(scenario: ToolRecoveryScenario) {
+  async function submitRecoverArtifactDecision(
+    scenario: ToolRecoveryScenario,
+    options?: { readonly reworkTargetRef?: string },
+  ) {
     const [recoveryIssue] = await db
       .select({ missionId: issues.missionId, originId: issues.originId })
       .from(issues)
@@ -184,18 +187,22 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
     await recordMissionOwnerDecision({
       db,
       issue: { id: scenario.recoveryIssueId, companyId: scenario.companyId, missionId: recoveryIssue.missionId },
-      submission: { decision: "recover_artifact", sourceIssueRef: scenario.recoveryIssueId },
+      submission: {
+        decision: "recover_artifact",
+        sourceIssueRef: scenario.recoveryIssueId,
+        ...(options?.reworkTargetRef ? { reworkTargetRef: options.reworkTargetRef } : {}),
+      },
       sourceIssueId: recoveryIssue.originId,
       heartbeatRunId,
     });
   }
 
-  async function registerWorkflowArtifact(scenario: ToolRecoveryScenario) {
+  async function registerWorkflowArtifact(scenario: ToolRecoveryScenario, issueId = scenario.recoveryIssueId) {
     const workProductId = randomUUID();
     await db.insert(issueWorkProducts).values({
       id: workProductId,
       companyId: scenario.companyId,
-      issueId: scenario.recoveryIssueId,
+      issueId,
       type: "file",
       provider: "local",
       title: "Recovered stockflow",
@@ -210,9 +217,52 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
       actorId: "workflow-agent-api",
       action: "issue.workflow_artifact_registered",
       entityType: "issue",
-      entityId: scenario.recoveryIssueId,
+      entityId: issueId,
       details: { workProductId },
     });
+  }
+
+  // Producer issue = the workflow step issue the recovered artifact was registered on. It is a
+  // mission peer of the recovery (owner action) issue, not the recovery/source issue itself.
+  async function seedMissionProducerIssue(
+    scenario: ToolRecoveryScenario,
+    options: { readonly missionScope: "same" | "other"; readonly identifier?: string },
+  ): Promise<string> {
+    const [recoveryIssue] = await db
+      .select({ missionId: issues.missionId })
+      .from(issues)
+      .where(eq(issues.id, scenario.recoveryIssueId))
+      .limit(1);
+    if (!recoveryIssue?.missionId) throw new Error("recovery scenario is missing mission scope");
+    const [mission] = await db
+      .select({ ownerAgentId: missions.ownerAgentId })
+      .from(missions)
+      .where(eq(missions.id, recoveryIssue.missionId))
+      .limit(1);
+    if (!mission) throw new Error("recovery scenario is missing mission owner");
+    let producerMissionId = recoveryIssue.missionId;
+    if (options.missionScope === "other") {
+      producerMissionId = randomUUID();
+      await db.insert(missions).values({
+        id: producerMissionId,
+        companyId: scenario.companyId,
+        ownerAgentId: mission.ownerAgentId,
+        title: "Producer issue other mission",
+        status: "active",
+      });
+    }
+    const producerIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: producerIssueId,
+      companyId: scenario.companyId,
+      missionId: producerMissionId,
+      assigneeAgentId: mission.ownerAgentId,
+      originKind: "workflow_step",
+      status: "done",
+      title: "Collect US stockflow (producer)",
+      ...(options.identifier ? { identifier: options.identifier } : {}),
+    });
+    return producerIssueId;
   }
 
   it("does not authorize a comment-only recovery claim when an active workProduct exists", async () => {
@@ -241,6 +291,71 @@ describeEmbeddedPostgres("mission owner issue-less tool recovery result", () => 
       expect.objectContaining({ type: "native_tool_step_recovery_result", artifactPath: scenario.artifactPath }),
     ]));
     expect(stepRuns.find((stepRun) => stepRun.id === scenario.stepRunId)?.status).toBe("completed");
+  });
+
+  it("completes a failed tool step when recover_artifact reworkTargetRef points at the mission producer issue holding the registered workProduct", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: true });
+    const producerIssueId = await seedMissionProducerIssue(scenario, { missionScope: "same" });
+    await submitRecoverArtifactDecision(scenario, { reworkTargetRef: producerIssueId });
+    await registerWorkflowArtifact(scenario, producerIssueId);
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+
+    const result = await runSupervision(scenario.companyId);
+    const { stepRuns } = await loadToolRecoveryScenarioRows(db, scenario);
+
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_recovery_result", artifactPath: scenario.artifactPath }),
+    ]));
+    expect(stepRuns.find((stepRun) => stepRun.id === scenario.stepRunId)?.status).toBe("completed");
+  });
+
+  it("matches the mission producer issue by identifier for recover_artifact reworkTargetRef", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: true });
+    const producerIssueId = await seedMissionProducerIssue(scenario, { missionScope: "same", identifier: "TRP-0007" });
+    await submitRecoverArtifactDecision(scenario, { reworkTargetRef: "trp-0007" });
+    await registerWorkflowArtifact(scenario, producerIssueId);
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+
+    const result = await runSupervision(scenario.companyId);
+    const { stepRuns } = await loadToolRecoveryScenarioRows(db, scenario);
+
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_recovery_result", artifactPath: scenario.artifactPath }),
+    ]));
+    expect(stepRuns.find((stepRun) => stepRun.id === scenario.stepRunId)?.status).toBe("completed");
+  });
+
+  it("rejects recover_artifact when reworkTargetRef points at an issue outside the recovery mission", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: true });
+    const producerIssueId = await seedMissionProducerIssue(scenario, { missionScope: "other" });
+    await submitRecoverArtifactDecision(scenario, { reworkTargetRef: producerIssueId });
+    await registerWorkflowArtifact(scenario, producerIssueId);
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+
+    const result = await runSupervision(scenario.companyId);
+
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_retry", stepRunId: scenario.stepRunId }),
+    ]));
+    expect(result.missions[0]?.appliedActions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_recovery_result" }),
+    ]));
+  });
+
+  it("rejects recover_artifact when the mission producer issue has no official registered workProduct", async () => {
+    const scenario = await seedRecoveryScenario({ artifactExists: true });
+    const producerIssueId = await seedMissionProducerIssue(scenario, { missionScope: "same" });
+    await submitRecoverArtifactDecision(scenario, { reworkTargetRef: producerIssueId });
+    setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
+
+    const result = await runSupervision(scenario.companyId);
+
+    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_retry", stepRunId: scenario.stepRunId }),
+    ]));
+    expect(result.missions[0]?.appliedActions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "native_tool_step_recovery_result" }),
+    ]));
   });
 
   it("retries when the structured recover_artifact decision has no official workProduct", async () => {

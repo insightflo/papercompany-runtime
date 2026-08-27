@@ -1435,7 +1435,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             }
           }
           if (currentToolStepRow.stepRun.status === "failed" && !authorizedRecovery) {
-            findings.push(`tool_step_recovery_result_missing_evidence: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}; latest structured recover_artifact decision targeting the current/source scope and an official Workflow API workProduct are required`);
+            findings.push(`tool_step_recovery_result_missing_evidence: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}; latest structured recover_artifact decision targeting a mission-scoped issue (recovery/source or a same-mission producer issue) and an official Workflow API workProduct are required`);
           }
           if (await hasRecoveryIdempotency(db, mission.companyId, retryIdempotencyKey)) {
             if (currentToolStepRow.stepRun.status === "failed") {
