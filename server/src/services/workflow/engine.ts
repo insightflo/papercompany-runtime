@@ -10,6 +10,7 @@ import { agents, companies } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
+import { validateRunInputDeclarations } from "./run-input-derivations.js";
 import { resetFailedControlNodesForResume } from "./control-flow/control-node-executor.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
@@ -279,6 +280,7 @@ export const workflowService = {
     if (!validation.valid) {
       throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
     }
+    validateRunInputDeclarations(input.runInputs);
     await assertWorkflowToolReadiness(db, input.companyId, steps);
 
     return createWorkflowDefinition(db, { ...input, steps });
@@ -318,6 +320,10 @@ export const workflowService = {
       if (!existing) return null;
       await assertWorkflowToolReadiness(db, existing.companyId, steps);
       updates = { ...updates, steps };
+    }
+    // runInputs는 배열 패치 시 전체 교체이므로 새 배열 단위로 선언 무결성 검증.
+    if (updates.runInputs) {
+      validateRunInputDeclarations(updates.runInputs);
     }
 
     return updateWorkflowDefinition(db, id, updates);

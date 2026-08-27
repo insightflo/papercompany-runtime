@@ -114,3 +114,48 @@ describe("createWorkflowDefinitionSchema runInputs", () => {
     expect(() => createWorkflowDefinitionSchema.parse({ ...base, runInputs: [{ key: "url", oops: true }] })).toThrow();
   });
 });
+
+describe("workflowRunInputSchema deriveFrom", () => {
+  const base = { name: "youtube-report", steps: [] };
+
+  it("accepts a named-extractor deriveFrom declaration", () => {
+    const parsed = createWorkflowDefinitionSchema.parse({
+      ...base,
+      runInputs: [
+        { key: "url", label: "YouTube URL", required: true },
+        { key: "videoId", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
+      ],
+    });
+    expect(parsed.runInputs?.[1]).toMatchObject({
+      key: "videoId",
+      deriveFrom: { input: "url", extract: "youtubeVideoId" },
+    });
+  });
+
+  it("rejects unknown extractor names", () => {
+    expect(() => createWorkflowDefinitionSchema.parse({
+      ...base,
+      runInputs: [
+        { key: "url" },
+        { key: "videoId", deriveFrom: { input: "url", extract: "evilRegex" } },
+      ],
+    })).toThrow();
+    expect(() => createWorkflowDefinitionSchema.parse({
+      ...base,
+      runInputs: [
+        { key: "url" },
+        { key: "videoId", deriveFrom: { input: "url", extract: "youtubeVideoId", pattern: ".*" } },
+      ],
+    })).toThrow();
+  });
+
+  it("rejects deriveFrom with an empty source input reference", () => {
+    expect(() => createWorkflowDefinitionSchema.parse({
+      ...base,
+      runInputs: [
+        { key: "url" },
+        { key: "videoId", deriveFrom: { input: "", extract: "youtubeVideoId" } },
+      ],
+    })).toThrow();
+  });
+});

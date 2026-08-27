@@ -7,7 +7,7 @@ describe("collectWorkflowRunInputs", () => {
       [{ key: "url", label: "YouTube URL", required: true, placeholder: "https://..." }],
       () => "https://example.com/watch?v=abc",
     );
-    expect(result).toEqual({ status: "ready", metadata: { url: "https://example.com/watch?v=abc" } });
+    expect(result).toEqual({ status: "ready", metadata: { url: "https://example.com/watch?v=abc" }, derivedNote: null });
   });
 
   it("treats required as true by default and aborts on empty required input", () => {
@@ -23,7 +23,7 @@ describe("collectWorkflowRunInputs", () => {
       ],
       (message) => (message === "url" ? "https://example.com" : ""),
     );
-    expect(result).toEqual({ status: "ready", metadata: { url: "https://example.com" } });
+    expect(result).toEqual({ status: "ready", metadata: { url: "https://example.com" }, derivedNote: null });
   });
 
   it("returns cancelled when the prompt is dismissed", () => {
@@ -54,6 +54,38 @@ describe("collectWorkflowRunInputs", () => {
       [{ key: "url" }, { key: "lang" }],
       (message) => answers[message] ?? "",
     );
-    expect(result).toEqual({ status: "ready", metadata: { url: "https://example.com", lang: "ko" } });
+    expect(result).toEqual({ status: "ready", metadata: { url: "https://example.com", lang: "ko" }, derivedNote: null });
+  });
+
+  it("skips prompting for derived inputs and reports a derivation note", () => {
+    const prompts: string[] = [];
+    const result = collectWorkflowRunInputs(
+      [
+        { key: "url", label: "유튜브 URL", required: true },
+        { key: "videoId", label: "영상 ID", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
+      ],
+      (message) => {
+        prompts.push(message);
+        return "https://youtu.be/dQw4w9WgXcQ";
+      },
+    );
+    expect(prompts).toEqual(["유튜브 URL"]);
+    expect(result).toEqual({
+      status: "ready",
+      metadata: { url: "https://youtu.be/dQw4w9WgXcQ" },
+      derivedNote: "영상 ID 값은 자동으로 추출됩니다",
+    });
+  });
+
+  it("omits the derivation note when no derived inputs are declared", () => {
+    const result = collectWorkflowRunInputs(
+      [{ key: "url", required: true }],
+      () => "https://example.com",
+    );
+    expect(result).toEqual({
+      status: "ready",
+      metadata: { url: "https://example.com" },
+      derivedNote: null,
+    });
   });
 });

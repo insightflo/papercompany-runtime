@@ -17,6 +17,7 @@ import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
+import { applyRunInputDerivations } from "../services/workflow/run-input-derivations.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
 import {
@@ -26,7 +27,7 @@ import {
   syncToolRegistryToolsToCore,
 } from "../services/workflow/tool-catalog.js";
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
-import { conflict, notFound, unauthorized, unprocessable } from "../errors.js";
+import { badRequest, conflict, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { QA_REWORK_CAP_BOOST_KEY } from "../services/workflow/control-flow/types.js";
 
@@ -186,6 +187,9 @@ function translateWorkflowDomainError(error: unknown): never {
   }
 
   if (error.message.startsWith("Invalid workflow DAG:")) {
+    throw unprocessable(error.message);
+  }
+  if (error.message.startsWith("Invalid workflow runInputs:")) {
     throw unprocessable(error.message);
   }
   if (error.message.startsWith("Workflow definition not found:") || error.message.startsWith("Workflow run not found:")) {
@@ -467,8 +471,20 @@ export function workflowRoutes(db: Db) {
       throw notFound("Workflow definition not found");
     }
     const triggeredBy = req.body.triggeredBy ?? (req.actor.type === "agent" ? "agent" : "board");
+    // [runInputs 파생] 선언된 파생 입력(deriveFrom)은 서버가 소스 값에서 계산해 채운다.
+    // 사용자 제공값 우선, 추출 실패+필수 입력은 400. 큐/런 실행 의미 변화 없음(순수 메타데이터 채움).
+    const derivation = applyRunInputDerivations(
+      definition.runInputs,
+      (req.body.metadata && typeof req.body.metadata === "object" && !Array.isArray(req.body.metadata))
+        ? req.body.metadata as Record<string, unknown>
+        : undefined,
+    );
+    if (derivation.status === "error") {
+      throw badRequest(derivation.message);
+    }
     const result = await workflowDomainCall(() => workflowService.trigger(db, {
       ...req.body,
+      ...(definition.runInputs && definition.runInputs.length > 0 ? { metadata: derivation.metadata } : {}),
       workflowId,
       companyId: definition.companyId,
       triggeredBy,

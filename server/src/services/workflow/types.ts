@@ -15,6 +15,7 @@ export interface WorkflowRunInput {
   label?: string;
   required?: boolean;
   placeholder?: string;
+  deriveFrom?: { input: string; extract: "youtubeVideoId" };
 }
 
 export interface WorkflowDefinition {

@@ -27,6 +27,7 @@ export type WorkflowRunInputOption = {
   label?: string;
   required?: boolean;
   placeholder?: string;
+  deriveFrom?: { input: string; extract: string };
 };
 
 export type WorkflowOverviewData = {

@@ -337,6 +337,9 @@ export function DefinitionsTable({
         return;
       }
       metadata = collection.metadata;
+      if (collection.derivedNote) {
+        setTableNotice({ tone: "info", message: collection.derivedNote });
+      }
     }
     try {
       const result = await runWorkflow({ companyId, workflowId: workflow.id, ...(metadata ? { metadata } : {}) }) as Record<string, unknown> | null | undefined;
