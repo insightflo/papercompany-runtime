@@ -22,6 +22,13 @@ export type WorkflowToolGrant = {
   toolName: string;
 };
 
+export type WorkflowRunInputOption = {
+  key: string;
+  label?: string;
+  required?: boolean;
+  placeholder?: string;
+};
+
 export type WorkflowOverviewData = {
   projects?: ProjectOption[];
   labels?: LabelOption[];
@@ -45,6 +52,7 @@ export type WorkflowOverviewData = {
     createParentIssuePolicy?: CreateParentIssuePolicy;
     executionMode?: string;
     dynamicPlanBootstrapOnly?: boolean;
+    runInputs?: WorkflowRunInputOption[];
     legacyMetadata?: Record<string, unknown>;
     steps: Array<{
       id: string;

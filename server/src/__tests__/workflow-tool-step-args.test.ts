@@ -112,4 +112,59 @@ describeEmbeddedPostgres("workflow tool step args", () => {
       sourceAssetDir: path.join(path.dirname(sourceHtmlPath), "assets"),
     });
   });
+
+  it("renders {$runMetadata.<key>} tokens from run metadata and keeps unresolved tokens", async () => {
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const steps = [
+      {
+        id: "summarize",
+        dependencies: [],
+        toolNames: ["manual-onboarding-summarize"],
+        toolArgs: {
+          url: "{$runMetadata.url}",
+          missing: "{$runMetadata.notDeclared}",
+          count: "count={$runMetadata.count}",
+          payload: "{$runMetadata.payload}",
+        },
+      },
+    ];
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Run Metadata Args",
+      issuePrefix: `RM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const workflowId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "youtube-summary", stepsJson: steps });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "board",
+      status: "running",
+      runDate: "2026-08-27",
+      metadata: { url: "https://example.com/watch?v=abc", count: 3, payload: { chapters: [1, 2] } },
+    });
+
+    const args = await resolveWorkflowToolStepArgs({
+      db,
+      run: {
+        id: runId,
+        companyId,
+        runDate: "2026-08-27",
+        metadata: { url: "https://example.com/watch?v=abc", count: 3, payload: { chapters: [1, 2] } },
+      },
+      step: steps[0]!,
+      workflowSteps: steps,
+    });
+
+    expect(args).toEqual({
+      url: "https://example.com/watch?v=abc",
+      missing: "{$runMetadata.notDeclared}",
+      count: "count=3",
+      payload: '{"chapters":[1,2]}',
+    });
+  });
 });

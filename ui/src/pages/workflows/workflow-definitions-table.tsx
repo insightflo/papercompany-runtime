@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState, type JSX } from "react";
 import { buildManualRunFeedback, findNewRunId, manualRunUnavailableMessage } from "./run-feedback.js";
+import { collectWorkflowRunInputs } from "./workflow-run-inputs.js";
 import type { WorkflowRunDrawerMode } from "./workflow-runs.js";
 import { jsonToSteps, stepsToJson, type StepDraft } from "./step-draft.js";
 import { applyStepRunsToGraphSteps, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphRunDebugSummary, type WorkflowGraphNavigatorFilter } from "./workflow-graph.js";
@@ -317,8 +318,28 @@ export function DefinitionsTable({
     const beforeRunIds = new Set([...activeRuns, ...recentRuns].map((run) => run.id));
     setPendingWorkflowId(workflow.id);
     clearTableFeedback();
+    const runInputs = workflow.runInputs ?? [];
+    let metadata: Record<string, string> | undefined;
+    if (runInputs.length > 0) {
+      const collection = collectWorkflowRunInputs(runInputs, (message, defaultValue) => window.prompt(message, defaultValue));
+      if (collection.status === "cancelled") {
+        setTableError("");
+        setTableNotice({ tone: "info", message: "실행 입력이 취소되어 실행하지 않았습니다." });
+        onManualRunStarted(null);
+        setPendingWorkflowId(null);
+        return;
+      }
+      if (collection.status === "missing_required") {
+        setTableNotice(null);
+        setTableError(`필수 실행 입력이 비어 있습니다: ${collection.label} (${collection.key})`);
+        onManualRunStarted(null);
+        setPendingWorkflowId(null);
+        return;
+      }
+      metadata = collection.metadata;
+    }
     try {
-      const result = await runWorkflow({ companyId, workflowId: workflow.id }) as Record<string, unknown> | null | undefined;
+      const result = await runWorkflow({ companyId, workflowId: workflow.id, ...(metadata ? { metadata } : {}) }) as Record<string, unknown> | null | undefined;
       const runId = typeof result?.runId === "string" ? result.runId : typeof result?.id === "string" ? result.id : null;
       const highlightedRunId = findNewRunId(beforeRunIds, runId, activeRuns, recentRuns);
       onManualRunStarted(highlightedRunId);

@@ -11,6 +11,7 @@ import { eq, and, desc, sql } from "drizzle-orm";
 import type {
   WorkflowDefinition,
   WorkflowRun,
+  WorkflowRunInput,
   WorkflowRunSlot,
   WorkflowStepRun,
   WorkflowStepExecutionContract,
@@ -30,6 +31,12 @@ function normalizeStringArray(value: unknown): string[] {
 
 function normalizeMetadata(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function normalizeRunInputs(value: unknown): WorkflowRunInput[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is WorkflowRunInput =>
+    item !== null && typeof item === "object" && typeof (item as { key?: unknown }).key === "string" && (item as { key: string }).key.length > 0);
 }
 
 function mapWorkflowDefinition(def: typeof workflowDefinitions.$inferSelect): WorkflowDefinition {
@@ -57,6 +64,7 @@ function mapWorkflowDefinition(def: typeof workflowDefinitions.$inferSelect): Wo
     createParentIssuePolicy: def.createParentIssuePolicy,
     executionMode: def.executionMode ?? inferWorkflowExecutionMode(def.name, steps),
     dynamicPlanBootstrapOnly: def.dynamicPlanBootstrapOnly,
+    runInputs: normalizeRunInputs(def.runInputs),
     source: def.source ?? "native",
     sourceKind: def.sourceKind ?? "workflow",
     legacyPluginEntityId: def.legacyPluginEntityId,
@@ -160,6 +168,7 @@ export async function createWorkflowDefinition(
     createParentIssuePolicy: input.createParentIssuePolicy ?? null,
     executionMode,
     dynamicPlanBootstrapOnly: input.dynamicPlanBootstrapOnly ?? false,
+    runInputs: input.runInputs ?? [],
     source: input.source ?? "native",
     sourceKind: input.sourceKind ?? "workflow",
     legacyPluginEntityId: input.legacyPluginEntityId ?? null,

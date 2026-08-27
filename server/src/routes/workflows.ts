@@ -133,6 +133,7 @@ function workflowDefinitionForUi(
     createParentIssuePolicy: definition.createParentIssuePolicy ?? undefined,
     executionMode: definition.executionMode ?? undefined,
     dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly ?? false,
+    runInputs: definition.runInputs ?? [],
     legacyMetadata: definition.legacyMetadata ?? {},
     createdAt: definition.createdAt.toISOString(),
     updatedAt: definition.updatedAt.toISOString(),

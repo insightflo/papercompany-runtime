@@ -15,9 +15,22 @@ type WorkflowArgRun = {
   id: string;
   companyId: string;
   runDate?: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 const STEP_ARTIFACT_TOKEN = /\{\$steps\.([A-Za-z0-9_-]+)\.(workProductPath|workProductDir|siblingAssetsDir)\}/g;
+const RUN_METADATA_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
+
+/**
+ * 문자열이 아닌 run metadata 값을 템플릿 치환 문자열로 변환.
+ * undefined(키 부재와 동급)는 null을 반환해 호출자가 토큰을 유지하게 한다.
+ */
+export function stringifyWorkflowRunMetadataValue(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value === "string") return value;
+  const json = JSON.stringify(value);
+  return typeof json === "string" ? json : null;
+}
 
 export async function resolveWorkflowToolStepArgs(input: {
   db: Db;
@@ -26,8 +39,9 @@ export async function resolveWorkflowToolStepArgs(input: {
   workflowSteps: WorkflowArgStep[];
 }): Promise<unknown> {
   const args = input.step.toolArgs ?? {};
+  const runMetadata = input.run.metadata ?? {};
   const references = collectArtifactReferences(args);
-  if (references.size === 0) return renderTemplates(args, input.run.runDate ?? "", new Map());
+  if (references.size === 0) return renderTemplates(args, input.run.runDate ?? "", new Map(), runMetadata);
 
   const ancestors = collectAncestorStepIds(input.step.id, input.workflowSteps);
   for (const stepId of references) {
@@ -67,7 +81,7 @@ export async function resolveWorkflowToolStepArgs(input: {
     }
   }
 
-  return renderTemplates(args, input.run.runDate ?? "", pathsByStepId);
+  return renderTemplates(args, input.run.runDate ?? "", pathsByStepId, runMetadata);
 }
 
 function collectArtifactReferences(value: unknown, result = new Set<string>()): Set<string> {
@@ -97,7 +111,7 @@ function collectAncestorStepIds(currentStepId: string, steps: WorkflowArgStep[])
   return ancestors;
 }
 
-function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<string, string>): unknown {
+function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
   if (typeof value === "string") {
     return value
       .replaceAll("{$runDate}", runDate)
@@ -108,11 +122,16 @@ function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<str
         if (field === "workProductPath") return workProductPath;
         if (field === "siblingAssetsDir") return path.join(path.dirname(workProductPath), "assets");
         return path.dirname(workProductPath);
+      })
+      .replace(RUN_METADATA_TOKEN, (token, key: string) => {
+        if (!Object.prototype.hasOwnProperty.call(runMetadata, key)) return token;
+        const rendered = stringifyWorkflowRunMetadataValue(runMetadata[key]);
+        return rendered === null ? token : rendered;
       });
   }
-  if (Array.isArray(value)) return value.map((item) => renderTemplates(item, runDate, pathsByStepId));
+  if (Array.isArray(value)) return value.map((item) => renderTemplates(item, runDate, pathsByStepId, runMetadata));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderTemplates(item, runDate, pathsByStepId)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderTemplates(item, runDate, pathsByStepId, runMetadata)]));
   }
   return value;
 }

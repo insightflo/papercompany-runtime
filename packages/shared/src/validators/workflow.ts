@@ -181,6 +181,15 @@ const optionalStringArraySchema = z.preprocess(
   z.array(z.string()).optional(),
 );
 
+export const workflowRunInputSchema = z.object({
+  key: z.string().regex(/^[A-Za-z0-9_]{1,40}$/),
+  label: z.string().optional(),
+  required: z.boolean().optional(),
+  placeholder: z.string().optional(),
+}).strict();
+
+export type WorkflowRunInput = z.infer<typeof workflowRunInputSchema>;
+
 export const createWorkflowDefinitionSchema = z.object({
   name: z.string().min(1),
   description: z.string().nullable().optional(),
@@ -199,6 +208,7 @@ export const createWorkflowDefinitionSchema = z.object({
   createParentIssuePolicy: z.string().nullable().optional(),
   executionMode: workflowExecutionModeSchema.nullable().optional(),
   dynamicPlanBootstrapOnly: z.boolean().optional(),
+  runInputs: z.array(workflowRunInputSchema).max(5).optional(),
   source: z.string().nullable().optional(),
   sourceKind: z.string().nullable().optional(),
   legacyMetadata: metadataSchema.optional(),

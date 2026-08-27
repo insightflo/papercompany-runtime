@@ -76,7 +76,7 @@ import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
-import { resolveWorkflowToolStepArgs } from "./tool-step-args.js";
+import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue } from "./tool-step-args.js";
 import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
@@ -2364,12 +2364,22 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+const RUN_METADATA_TEXT_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
+
 function renderWorkflowRunTextTemplate(
   value: string,
   run: typeof workflowRuns.$inferSelect,
 ): string {
   const runDate = run.runDate ?? "";
-  return value.replaceAll("{$runDate}", runDate).replaceAll("{$date}", runDate);
+  const runMetadata = run.metadata ?? {};
+  return value
+    .replaceAll("{$runDate}", runDate)
+    .replaceAll("{$date}", runDate)
+    .replace(RUN_METADATA_TEXT_TOKEN, (token, key: string) => {
+      if (!Object.prototype.hasOwnProperty.call(runMetadata, key)) return token;
+      const rendered = stringifyWorkflowRunMetadataValue(runMetadata[key]);
+      return rendered === null ? token : rendered;
+    });
 }
 
 function getMetadataRecord(value: unknown, key: string): Record<string, unknown> {

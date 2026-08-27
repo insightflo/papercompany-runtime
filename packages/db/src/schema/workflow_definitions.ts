@@ -45,6 +45,9 @@ export const workflowDefinitions = pgTable(
     createParentIssuePolicy: text("create_parent_issue_policy"),
     executionMode: text("execution_mode"),
     dynamicPlanBootstrapOnly: boolean("dynamic_plan_bootstrap_only").notNull().default(false),
+    // [목적] 수동 실행 시 보드에서 수집할 실행 입력 선언({$runMetadata.<key>} 템플릿으로 스텝에 주입).
+    // [수정시 영향] UI 실행 폼과 runMetadata 템플릿 치환 키의 원천. 없으면 즉시 실행(기존 동작).
+    runInputs: jsonb("run_inputs").$type<unknown[]>().notNull().default([]),
     source: text("source"),
     sourceKind: text("source_kind"),
     legacyPluginEntityId: uuid("legacy_plugin_entity_id"),
