@@ -240,6 +240,91 @@ describeDispatchDb("http workflow tool core dispatch", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("rejects a plain http url without allowInsecureUrl with 422 and does not call the remote", async () => {
+    const { companyId, agentId } = await seedCompanyAgent("Insecure Rejected");
+    const toolId = randomUUID();
+    await db.insert(toolDefinitions).values({
+      id: toolId,
+      companyId,
+      name: "collect-http",
+      description: "http scout",
+      adapterType: "http",
+      adapterConfig: { ...ADAPTER_CONFIG, url: "http://n8n.example.test/webhook/daily-tech-scout" },
+    });
+    await db.insert(agentToolGrants).values({ companyId, agentId, toolId, grantedBy: "board" });
+    const fetchImpl = vi.fn(async () => makeFetchResponse(200, { result: RESULT, artifact: ARTIFACT })) as unknown as FetchLike;
+    const result = await executeCoreWorkflowTool({
+      db,
+      companyId,
+      agentId,
+      toolName: "collect-http",
+      parameters: { limit: 1 },
+      requestId: "dispatch-insecure-rejected",
+      remoteDeps: { fetchImpl, resolveSecretValue: async () => SECRET_VALUE },
+    });
+    expect(result.status).toBe(422);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("dispatches a plain http url when adapterConfig.allowInsecureUrl is true", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "http-dispatch-wp-"));
+    workDirs.push(workDir);
+    const { companyId, agentId: ownerAgentId } = await seedCompanyAgent("Insecure Allowed", workDir);
+    const operatorAgentId = randomUUID();
+    const toolId = randomUUID();
+    const missionId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const stepId = "collect";
+
+    await db.insert(agents).values({
+      id: operatorAgentId,
+      companyId,
+      name: "Scout Operator",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "scout mission" });
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "scout" });
+    await db.insert(workflowRuns).values({ id: runId, workflowId, companyId, missionId, status: "running", triggeredBy: "test" });
+    await db.insert(toolDefinitions).values({
+      id: toolId,
+      companyId,
+      name: "collect-http",
+      description: "http scout",
+      adapterType: "http",
+      adapterConfig: {
+        ...ADAPTER_CONFIG,
+        url: "http://n8n.example.test/webhook/daily-tech-scout",
+        allowInsecureUrl: true,
+      },
+    });
+    await db.insert(agentToolGrants).values({ companyId, agentId: operatorAgentId, toolId, grantedBy: "board" });
+
+    const fetchImpl = vi.fn(async () => makeFetchResponse(200, { result: RESULT, artifact: ARTIFACT })) as unknown as FetchLike;
+    const result = await executeCoreWorkflowTool({
+      db,
+      companyId,
+      agentId: operatorAgentId,
+      toolName: "collect-http",
+      parameters: { limit: 2 },
+      requestId: "dispatch-insecure-allowed",
+      workflowRunId: runId,
+      stepId,
+      remoteDeps: { fetchImpl, resolveSecretValue: async () => SECRET_VALUE },
+    });
+
+    expect(result.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalled();
+    expect(vi.mocked(fetchImpl).mock.calls[0]?.[0]).toBe("http://n8n.example.test/webhook/daily-tech-scout");
+    const rawPath = join(workDir, "missions", missionId, "runs", runId, "steps", stepId, "raw-tech-scout.json");
+    expect(existsSync(rawPath)).toBe(true);
+  });
+
   it("preserves a 500 remote failure for an http tool", async () => {
     const { companyId, agentId } = await seedCompanyAgent("Remote Fail");
     const toolId = randomUUID();

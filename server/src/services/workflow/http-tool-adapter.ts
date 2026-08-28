@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CoreWorkflowToolExecutionResult } from "./core-tool-executor.js";
 
@@ -84,7 +84,61 @@ type ResponseContract = {
   artifactField: string;
   artifactFileName: string;
   artifactPathResultField: string;
+  assertions: ResponseAssertion[];
 };
+
+/** [GAZ 2026-08-28 미션 5c687c6b] Declarative fail-closed checks on the remote
+ *   tool's RESULT body. A remote endpoint answering HTTP 200 with a body that
+ *   violates its own machine contract (e.g. staging "success" with bytes:null
+ *   and no staged file) must fail the step instead of silently completing it. */
+type ResponseAssertion =
+  | { field: string; kind: "equals"; expected: boolean | number | string }
+  | { field: string; kind: "positiveNumber" }
+  | { field: string; kind: "existingFile" };
+
+function resolveResponseAssertions(raw: unknown): ResponseAssertion[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return null;
+  const assertions: ResponseAssertion[] = [];
+  for (const item of raw) {
+    const entry = readObject(item);
+    const field = nonEmptyString(entry.field);
+    if (!field) return null;
+    const hasEquals = "equals" in entry;
+    const type = nonEmptyString(entry.type);
+    if (hasEquals && type) return null; // exactly one of equals/type
+    if (hasEquals) {
+      const expected = entry.equals;
+      if (typeof expected !== "boolean" && typeof expected !== "number" && typeof expected !== "string") {
+        return null;
+      }
+      assertions.push({ field, kind: "equals", expected });
+      continue;
+    }
+    if (type === "positiveNumber" || type === "existingFile") {
+      assertions.push({ field, kind: type });
+      continue;
+    }
+    return null;
+  }
+  return assertions;
+}
+
+function describeExpectation(assertion: ResponseAssertion): string {
+  if (assertion.kind === "equals") return `must equal ${JSON.stringify(assertion.expected)}`;
+  if (assertion.kind === "positiveNumber") return "must be a finite number > 0";
+  return "must be an absolute path to an existing non-empty file";
+}
+
+async function isExistingNonEmptyFile(value: string): Promise<boolean> {
+  if (!path.isAbsolute(value)) return false;
+  try {
+    const info = await stat(value);
+    return info.isFile() && info.size > 0;
+  } catch {
+    return false;
+  }
+}
 
 function resolveResponseContract(response: unknown): ResponseContract | null {
   const cfg = readObject(response);
@@ -92,17 +146,19 @@ function resolveResponseContract(response: unknown): ResponseContract | null {
   const artifactField = nonEmptyString(cfg.artifactField);
   const artifactFileName = nonEmptyString(cfg.artifactFileName);
   const artifactPathResultField = nonEmptyString(cfg.artifactPathResultField);
+  const assertions = resolveResponseAssertions(cfg.assertions);
   if (
     !resultField ||
     !artifactField ||
     !artifactFileName ||
     !artifactPathResultField ||
+    assertions === null ||
     path.basename(artifactFileName) !== artifactFileName ||
     artifactFileName.includes(path.sep)
   ) {
     return null;
   }
-  return { resultField, artifactField, artifactFileName, artifactPathResultField };
+  return { resultField, artifactField, artifactFileName, artifactPathResultField, assertions };
 }
 
 export async function executeHttpWorkflowTool(
@@ -113,8 +169,16 @@ export async function executeHttpWorkflowTool(
   const config = readObject(input.adapterConfig);
 
   const url = nonEmptyString(config.url);
-  if (!url || !isAbsoluteHttpsUrl(url)) {
-    return invalidConfig(toolName, `Workflow tool "${toolName}" requires an absolute https url`);
+  if (!url || !isAbsoluteHttpUrl(url)) {
+    return invalidConfig(toolName, `Workflow tool "${toolName}" requires an absolute http(s) url`);
+  }
+  // allowInsecureUrl is an explicit operator opt-in recorded in the tool's adapterConfig:
+  // the tool definition author must set it to true to permit plain http targets.
+  if (config.allowInsecureUrl !== true && !isAbsoluteHttpsUrl(url)) {
+    return invalidConfig(
+      toolName,
+      `Workflow tool "${toolName}" requires an absolute https url (set adapterConfig "allowInsecureUrl" to true to allow http)`,
+    );
   }
 
   const method = nonEmptyString(config.method)?.toUpperCase();
@@ -222,6 +286,27 @@ export async function executeHttpWorkflowTool(
   }
 
   const baseResult = readObject(resultValue);
+  // Fail-closed result contract: assert the remote tool's declared machine
+  // checks AFTER persisting the raw artifact so violated responses keep their
+  // evidence for diagnosis while the step fails instead of falsely completing.
+  for (const assertion of responseContract.assertions) {
+    const actual = baseResult[assertion.field];
+    let passed = false;
+    if (assertion.kind === "equals") {
+      passed = actual === assertion.expected;
+    } else if (assertion.kind === "positiveNumber") {
+      passed = typeof actual === "number" && Number.isFinite(actual) && actual > 0;
+    } else {
+      const candidate = nonEmptyString(actual);
+      passed = candidate !== null && await isExistingNonEmptyFile(candidate);
+    }
+    if (!passed) {
+      return remoteFailure(
+        toolName,
+        `Workflow tool "${toolName}" response contract violated: field "${assertion.field}" ${describeExpectation(assertion)} (request id: ${input.requestId}); raw response retained at ${artifactPath}`,
+      );
+    }
+  }
   const data = { ...baseResult, [responseContract.artifactPathResultField]: artifactPath };
   return {
     status: 200,
@@ -257,6 +342,15 @@ export async function persistArtifact(stepOutputDir: string, fileName: string, a
 function isAbsoluteHttpsUrl(value: string): boolean {
   try {
     return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "https:" || protocol === "http:";
   } catch {
     return false;
   }
