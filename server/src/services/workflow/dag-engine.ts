@@ -58,7 +58,7 @@ import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { cancelResolvedQaSourceDefectOwnerCards } from "./qa-source-defect-owner-card.js";
 import { closeResolvedWorkflowUnblocks } from "./resolved-unblock-closeout.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
-import { applyStructuralGatePass } from "./control-flow/structural-gate-rework.js";
+import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from "./control-flow/structural-gate-rework.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
@@ -1417,15 +1417,17 @@ async function resetUnlaunchedTerminalStepRuns(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  // controlFlowSkipped sentinel: IF false-branch 로 skip 된 step 은 리셋에서 제외한다.
-  // 그렇지 않으면 매 sync 마다 skipped→pending→(skip pass)→skipped 로 flap 하며 finalize 가
-  // allStepsTerminal 에 수렴하지 못해 60min reconciler kill(가즈아 hang 회귀)을 유발한다.
+  // controlFlowSkipped/failureCascadeSkipped sentinel: IF false-branch 로 skip 된 step 과
+  // 60min reconciler 가 kill 한 step(failureCascadeSkipped, 가즈아 저녁3 4f8cfacb 플랩)
+  // 은 리셋에서 제외한다. 그렇지 않으면 매 sync 마다 skipped→pending→(skip pass)→skipped 로
+  // flap 하며 finalize 가 allStepsTerminal 에 수렴하지 못해 런 상태 진동을 유발한다.
   const unlaunchedTerminal = stepRuns.filter((stepRun) =>
     (stepRun.status === "skipped" || stepRun.status === "failed")
     && stepRun.issueId == null
     && stepRun.startedAt == null
     && stepRun.lastDispatchAttemptAt == null
     && normalizeRecord(stepRun.metadata).controlFlowSkipped !== true
+    && normalizeRecord(stepRun.metadata).failureCascadeSkipped !== true
   );
   if (unlaunchedTerminal.length === 0) return stepRuns;
 
@@ -3572,6 +3574,23 @@ export async function syncWorkflowRunState(
       stepRuns,
     });
     stepRuns = structuralResult.stepRuns;
+  }
+
+  // [GAZ 저녁3 4f8cfacb] stale structural gate requeue — 위 rework pass 와 같은
+  //   게이트 수명 주기 계열: producer 가 같은 iteration 안에서 이중완료(completedAt 재스탬프)
+  //   되면, 그 전 토큰으로 PASS 한 completed 게이트는 영구히 낡은 증거가 되어 pending QA-like
+  //   스텝의 createWorkflowIssue 가 매 sync 무음 null 을 반환한다(런 38fb7ef5 무발사 교착).
+  //   해당 게이트를 CAS 로 pending 리셋+구조화 파인딩 기록 → 아래 launch loop 가 새 requestId/
+  //   새 토큰으로 재파견해 결정적 validator 가 재검증한다. iteration 이 오르는 rework 세대는
+  //   위 applyStructuralGatePass 소관이라 여기선 같은 iteration 형태만 다룬다(fail-closed).
+  if (context.run.status !== "cancelled" && context.steps.some(isStructuralGateStep)) {
+    const requeueResult = await requeueStaleStructuralGatesForBlockedQa({
+      db,
+      run: context.run,
+      steps: context.steps,
+      stepRuns,
+    });
+    stepRuns = requeueResult.stepRuns;
   }
 
   // [Workflow Retry] After recovery/rework passes settle, atomically schedule
