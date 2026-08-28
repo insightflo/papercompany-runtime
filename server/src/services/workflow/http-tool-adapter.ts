@@ -113,8 +113,16 @@ export async function executeHttpWorkflowTool(
   const config = readObject(input.adapterConfig);
 
   const url = nonEmptyString(config.url);
-  if (!url || !isAbsoluteHttpsUrl(url)) {
-    return invalidConfig(toolName, `Workflow tool "${toolName}" requires an absolute https url`);
+  if (!url || !isAbsoluteHttpUrl(url)) {
+    return invalidConfig(toolName, `Workflow tool "${toolName}" requires an absolute http(s) url`);
+  }
+  // allowInsecureUrl is an explicit operator opt-in recorded in the tool's adapterConfig:
+  // the tool definition author must set it to true to permit plain http targets.
+  if (config.allowInsecureUrl !== true && !isAbsoluteHttpsUrl(url)) {
+    return invalidConfig(
+      toolName,
+      `Workflow tool "${toolName}" requires an absolute https url (set adapterConfig "allowInsecureUrl" to true to allow http)`,
+    );
   }
 
   const method = nonEmptyString(config.method)?.toUpperCase();
@@ -257,6 +265,15 @@ export async function persistArtifact(stepOutputDir: string, fileName: string, a
 function isAbsoluteHttpsUrl(value: string): boolean {
   try {
     return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "https:" || protocol === "http:";
   } catch {
     return false;
   }
