@@ -40,3 +40,19 @@ export function collectWorkflowRunInputs(
     : null;
   return { status: "ready", metadata, derivedNote };
 }
+
+export type ManualRunLabelCollection =
+  | { status: "ready"; runLabel: string | null }
+  | { status: "cancelled" };
+
+/**
+ * [manual run label] 수동 실행 “실행명”은 입력변수(runInputs)와 구분되는 실행 차원의 이름이다.
+ * 값이 있으면 runLabel 로 전송되어 미션명에 접미되고, 비우면 생략된다.
+ * 취소(null) → cancelled (실행 중단, 실행 입력 취소와 동일 규칙).
+ */
+export function collectManualRunLabel(prompt: WorkflowRunInputPrompt): ManualRunLabelCollection {
+  const value = prompt("실행명 (선택) — 미션명에 붙어 같은 날 반복 실행을 구분합니다. 비우면 생략", "");
+  if (value === null) return { status: "cancelled" };
+  const trimmed = value.trim();
+  return { status: "ready", runLabel: trimmed === "" ? null : trimmed };
+}

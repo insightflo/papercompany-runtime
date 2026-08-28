@@ -89,3 +89,22 @@ describe("collectWorkflowRunInputs", () => {
     });
   });
 });
+
+describe("collectManualRunLabel", () => {
+  it("returns the trimmed label when entered", async () => {
+    const { collectManualRunLabel } = await import("./workflow-run-inputs.js");
+    const result = collectManualRunLabel(() => "  짧은 목줄 AI 코딩  ");
+    expect(result).toEqual({ status: "ready", runLabel: "짧은 목줄 AI 코딩" });
+  });
+
+  it("returns a null label for empty or whitespace-only input", async () => {
+    const { collectManualRunLabel } = await import("./workflow-run-inputs.js");
+    expect(collectManualRunLabel(() => "")).toEqual({ status: "ready", runLabel: null });
+    expect(collectManualRunLabel(() => "   ")).toEqual({ status: "ready", runLabel: null });
+  });
+
+  it("returns cancelled when the prompt is dismissed", async () => {
+    const { collectManualRunLabel } = await import("./workflow-run-inputs.js");
+    expect(collectManualRunLabel(() => null)).toEqual({ status: "cancelled" });
+  });
+});

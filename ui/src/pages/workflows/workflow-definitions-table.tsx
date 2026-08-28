@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState, type JSX } from "react";
 import { buildManualRunFeedback, findNewRunId, manualRunUnavailableMessage } from "./run-feedback.js";
-import { collectWorkflowRunInputs } from "./workflow-run-inputs.js";
+import { collectManualRunLabel, collectWorkflowRunInputs } from "./workflow-run-inputs.js";
 import type { WorkflowRunDrawerMode } from "./workflow-runs.js";
 import { jsonToSteps, stepsToJson, type StepDraft } from "./step-draft.js";
 import { applyStepRunsToGraphSteps, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphRunDebugSummary, type WorkflowGraphNavigatorFilter } from "./workflow-graph.js";
@@ -319,6 +319,17 @@ export function DefinitionsTable({
     setPendingWorkflowId(workflow.id);
     clearTableFeedback();
     const runInputs = workflow.runInputs ?? [];
+    // [manual run label] 실행명(선택)은 입력변수와 구분해 가장 먼저 받는다.
+    //   값이 있으면 runLabel 로 전송되어 미션명에 접미된다. 취소 → 실행 중단.
+    const labelCollection = collectManualRunLabel((message, defaultValue) => window.prompt(message, defaultValue));
+    if (labelCollection.status === "cancelled") {
+      setTableError("");
+      setTableNotice({ tone: "info", message: "실행이 취소되었습니다." });
+      onManualRunStarted(null);
+      setPendingWorkflowId(null);
+      return;
+    }
+    const manualRunLabel = labelCollection.runLabel;
     let metadata: Record<string, string> | undefined;
     if (runInputs.length > 0) {
       const collection = collectWorkflowRunInputs(runInputs, (message, defaultValue) => window.prompt(message, defaultValue));
@@ -342,7 +353,7 @@ export function DefinitionsTable({
       }
     }
     try {
-      const result = await runWorkflow({ companyId, workflowId: workflow.id, ...(metadata ? { metadata } : {}) }) as Record<string, unknown> | null | undefined;
+      const result = await runWorkflow({ companyId, workflowId: workflow.id, ...(manualRunLabel ? { runLabel: manualRunLabel } : {}), ...(metadata ? { metadata } : {}) }) as Record<string, unknown> | null | undefined;
       const runId = typeof result?.runId === "string" ? result.runId : typeof result?.id === "string" ? result.id : null;
       const highlightedRunId = findNewRunId(beforeRunIds, runId, activeRuns, recentRuns);
       onManualRunStarted(highlightedRunId);

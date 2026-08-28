@@ -126,13 +126,18 @@ function formatDateKeyInTimezone(date: Date, timezone: string): string | null {
 
 function formatWorkflowMissionTitle(
   workflowName: string,
-  input: { runDate?: string | null; timezone?: string | null },
+  input: { runDate?: string | null; timezone?: string | null; runLabel?: string | null },
   now = new Date(),
 ): string {
   const yyyyMmDd = typeof input.runDate === "string" && input.runDate.trim().length > 0
     ? input.runDate.trim()
     : (input.timezone ? formatDateKeyInTimezone(now, input.timezone) : null) ?? now.toISOString().slice(0, 10);
-  return `${yyyyMmDd} ${workflowName}`;
+  // [manual run label] 수동 실행 대화상자의 실행명(runLabel)은 미션명에 접미되어 같은 날
+  //   같은 워크플로우의 반복 실행을 구분한다. 없음/공백이면 기존 포맷 그대로(스케줄 무변화).
+  const runLabel = typeof input.runLabel === "string" ? input.runLabel.trim() : "";
+  const base = `${yyyyMmDd} ${workflowName}`;
+  if (!runLabel) return base;
+  return `${base} — ${runLabel.slice(0, 120)}`;
 }
 
 async function resolveWorkflowMissionOwnerAgentId(
@@ -181,7 +186,7 @@ async function ensureMissionForWorkflowRun(
   const mission = await missionService(db).create({
     companyId: input.companyId,
     ownerAgentId,
-    title: formatWorkflowMissionTitle(workflow.name, { runDate: input.runDate, timezone }),
+    title: formatWorkflowMissionTitle(workflow.name, { runDate: input.runDate, timezone, runLabel: input.runLabel }),
     description: `Created automatically for workflow run: ${workflow.name}`,
     status: "active",
     source: "workflow",
