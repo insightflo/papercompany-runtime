@@ -2,6 +2,7 @@ packages:
   - packages/*
   - packages/adapters/*
   - packages/plugins/*
+  - '!packages/plugins/pc-bridge'
   - packages/plugins/examples/*
   - server
   - ui
