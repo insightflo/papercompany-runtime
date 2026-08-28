@@ -481,28 +481,14 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       .limit(1);
     if (!ownerRow) throw notFound(`Agent not found: ${input.ownerAgentId}`);
 
-    if (missionSource === "workflow" && (input.status ?? "planning") === "active") {
-      const existingActiveWorkflowMission = await db
-        .select({ id: missions.id })
-        .from(missions)
-        .where(and(
-          eq(missions.companyId, input.companyId),
-          eq(missions.title, input.title),
-          input.description == null ? isNull(missions.description) : eq(missions.description, input.description),
-          eq(missions.status, "active"),
-        ))
-        .orderBy(asc(missions.createdAt), asc(missions.id))
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-
-      if (existingActiveWorkflowMission) {
-        const existingMission = await getById(existingActiveWorkflowMission.id);
-        if (existingMission.status === "active") {
-          await ownerActions.ensureMainExecutorOversightIssue(existingMission, input.title);
-          return getById(existingActiveWorkflowMission.id);
-        }
-      }
-    }
+    // [GAZ 2026-08-28 bce2fa1f] The April-era same-title active-mission reuse is
+    //   removed. It was a duplicate-SCHEDULED-run suppressor from the plugin era
+    //   (title = runDate + workflow name), but scheduled duplicates are already
+    //   prevented upstream (workflow run slot claim + active-run/mission guards
+    //   in engine.trigger/claimScheduledRun), so the only effect left was gluing
+    //   intentional manual re-runs (different inputs, e.g. different URLs) onto
+    //   the day's still-active mission and interleaving their issues. Every
+    //   workflow trigger now gets its own mission.
 
     // Create mission
     const [mission] = await db
