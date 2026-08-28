@@ -5047,7 +5047,13 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
   });
 
-  it("reuses an existing active workflow mission with the same company, title, and workflow description", async () => {
+  it("creates a separate active mission for every workflow trigger (no same-title active-mission reuse)", async () => {
+    // [GAZ 2026-08-28 bce2fa1f] Legacy April-era dedupe used to glue a second
+    // same-day trigger onto the day's still-ACTIVE mission (title = runDate +
+    // workflow name, inputs invisible), interleaving multiple runs' issues in
+    // one mission. Duplicate SCHEDULED runs are prevented upstream (slot claim
+    // + active-run/mission guards), so mission create must not reuse — every
+    // trigger gets its own mission.
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
 
@@ -5086,8 +5092,16 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       .from(missions)
       .where(eq(missions.companyId, companyId));
 
-    expect(second.id).toBe(first.id);
-    expect(missionRows).toHaveLength(1);
+    expect(second.id).not.toBe(first.id);
+    expect(missionRows).toHaveLength(2);
+    // Each mission keeps exactly one main-executor oversight issue of its own.
+    const oversightRows = await db
+      .select({ missionId: issues.missionId })
+      .from(issues)
+      .where(eq(issues.companyId, companyId))
+      .where(eq(issues.originKind, "mission_main_executor_oversight"));
+    expect(oversightRows).toHaveLength(2);
+    expect(new Set(oversightRows.map((row) => row.missionId)).size).toBe(2);
   });
 
   it("does not reuse a workflow mission that reconciles to terminal from linked workflow runs", async () => {
