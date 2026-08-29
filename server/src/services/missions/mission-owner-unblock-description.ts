@@ -56,7 +56,7 @@ export function buildMainExecutorBrief(input: {
 export function buildMissionOwnerUnblockDescription(
   mission: MissionOwnerDescriptionMission,
   blockedIssue: MissionOwnerDescriptionIssue,
-  options: { governanceEvidence?: string[]; missionExecutionDigest?: string[]; language?: SystemLanguage } = {},
+  options: { governanceEvidence?: string[]; missionExecutionDigest?: string[]; relatedKnowledgePatterns?: Array<{ id: string; title: string }>; language?: SystemLanguage } = {},
 ): string {
   const language = options.language ?? "en";
   const sourceLabel = blockedIssue.identifier ?? blockedIssue.id;
@@ -66,6 +66,10 @@ export function buildMissionOwnerUnblockDescription(
   const governanceEvidence = (options.governanceEvidence ?? [])
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+  const relatedPatterns = (options.relatedKnowledgePatterns ?? [])
+    .filter((pattern) => pattern && typeof pattern.id === "string" && pattern.id.trim() !== "" && typeof pattern.title === "string" && pattern.title.trim() !== "")
+    .slice(0, 3)
+    .map((pattern) => ({ id: pattern.id.trim(), title: pattern.title.trim() }));
   return [
     buildMissionOwnerActionMarker({
       missionId: mission.id,
@@ -87,6 +91,17 @@ export function buildMissionOwnerUnblockDescription(
       ? ["Mission execution digest:", ...missionExecutionDigest.map((line) => `- ${line}`)].join("\n")
       : prose(language, "owner_unblock_digest_unavailable"),
     "",
+    // [관련 사고 패턴 — 방아쇠 표면] 제목+카드 id 요약 라인만 주입(본문 주입 금지 계약).
+    //   오너는 GET으로 전체 카드를 조회하고, 스킬 패치가 재발을 막는다면 채택 루프로 간다.
+    ...(relatedPatterns.length > 0
+      ? [
+        `Related incident patterns (${relatedPatterns.length}) — prior structural failures in this company that may match this mission:`,
+        ...relatedPatterns.map((pattern) => `- ${pattern.title} (card id: ${pattern.id})`),
+        "Fetch the full card before narrowing the cause: GET /api/companies/{companyId}/knowledge-patterns?q=<keywords from the title> — check symptoms, root cause, and what worked.",
+        "If a matching card means a bounded company skill patch would prevent recurrence, adopt it through the self-improvement loop: POST /api/companies/{companyId}/self-improvement-adoptions/dry-run, then /apply with the card cited in evidenceSource. Do not hand-edit skill markdown.",
+        "",
+      ]
+      : []),
     buildMainExecutorBrief({
       missionGoal: mission.title,
       currentSituation: `Source issue ${sourceLabel} is ${blockedIssue.status}; original assignee is ${blockedIssue.assigneeAgentId ?? "unassigned"}.`,

@@ -260,3 +260,58 @@ describe("mission owner recovery comments", () => {
     expect(enRetry).toContain("Owner requested source issue retry.");
   });
 });
+
+// [관련 사고 패턴 방아쇠] 오너 언블록 서술에 카드 요약 라인(제목+id)만 주입되는지.
+//   본문(symptoms/rootCause) 주입 금지 — 설계 계약(변경 3).
+describe("owner unblock description related knowledge patterns section", () => {
+  const mission = { id: "mission-1", title: "저녁 미션 QA 무발사" };
+  const blockedIssue = {
+    id: "source-1",
+    identifier: "SRC-1",
+    title: "QA 스텝 pending 지속",
+    status: "blocked",
+    assigneeAgentId: "worker-1",
+  };
+
+  it("renders title + card id summary lines and the adoption loop trigger", () => {
+    const description = buildMissionOwnerUnblockDescription(mission, blockedIssue, {
+      relatedKnowledgePatterns: [
+        { id: "card-1", title: "구조 게이트 토큰 불일치로 QA 스텝 무발사" },
+      ],
+    });
+
+    expect(description).toContain("Related incident patterns (1)");
+    expect(description).toContain("- 구조 게이트 토큰 불일치로 QA 스텝 무발사 (card id: card-1)");
+    expect(description).toContain("GET /api/companies/{companyId}/knowledge-patterns?q=");
+    expect(description).toContain("self-improvement-adoptions/dry-run");
+    expect(description).toContain("Do not hand-edit skill markdown.");
+    // 본문 주입 금지 불변식 — 카드 symptoms/rootCause/whatWorked 내용은 요청하지 않는 한 없어야 한다.
+    expect(description).not.toContain("이중완료");
+    expect(description).not.toContain("런 running 유지");
+    expect(description).not.toContain("whatWorked:");
+  });
+
+  it("omits the section entirely when no related patterns are provided", () => {
+    const description = buildMissionOwnerUnblockDescription(mission, blockedIssue, {});
+    expect(description).not.toContain("Related incident patterns");
+    expect(description).not.toContain("self-improvement-adoptions/dry-run");
+  });
+
+  it("caps at 3 patterns and drops malformed entries", () => {
+    const description = buildMissionOwnerUnblockDescription(mission, blockedIssue, {
+      relatedKnowledgePatterns: [
+        { id: "card-1", title: "하나" },
+        { id: "card-2", title: "둘" },
+        { id: "card-3", title: "셋" },
+        { id: "card-4", title: "넷" },
+        { id: "card-", title: "빈 id" },
+        { id: "card-5", title: "  " },
+      ],
+    });
+    expect(description).toContain("Related incident patterns (3)");
+    expect(description).toContain("(card id: card-1)");
+    expect(description).toContain("(card id: card-3)");
+    expect(description).not.toContain("card-4");
+    expect(description).not.toContain("card-5");
+  });
+});
