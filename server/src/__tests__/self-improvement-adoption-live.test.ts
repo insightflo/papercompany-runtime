@@ -9,6 +9,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { selfImprovementAdoptionService } from "../services/self-improvement-adoption.js";
+import { findRelatedKnowledgePatterns } from "../services/missions/mission-owner-related-patterns.js";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
 import { selfImprovementAdoptionsRoutes } from "../routes/self-improvement-adoptions.js";
 import { errorHandler } from "../middleware/index.js";
@@ -237,5 +238,17 @@ describeEP("self-improvement adoption live wiring (planner→executor→ledger)"
       .post(`/api/companies/${companyId}/self-improvement-adoptions/apply`)
       .send({ candidates: [candidate()], gateVerdicts: passVerdicts });
     expect(forbidden.status).toBe(403);
+  });
+
+  it("finds related knowledge patterns for the owner unblock trigger (company-scoped)", async () => {
+    const related = await findRelatedKnowledgePatterns(db, companyId, [
+      "저녁 미션 QA 스텝 무발사 — workflow run 실패",
+    ]);
+    expect(related.map((entry) => entry.id)).toEqual([patternId]);
+
+    const foreign = await findRelatedKnowledgePatterns(db, otherCompanyId, [
+      "저녁 미션 QA 스텝 무발사 — workflow run 실패",
+    ]);
+    expect(foreign).toEqual([]);
   });
 });

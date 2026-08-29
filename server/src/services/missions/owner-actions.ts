@@ -15,6 +15,7 @@ import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
+import { findRelatedKnowledgePatterns } from "./mission-owner-related-patterns.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines } from "./mission-execution-candidates.js";
@@ -576,6 +577,18 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       logger.warn({ err: error, missionId: mission.id, blockedIssueId: blockedIssue.id }, "Failed to build mission execution digest for owner unblock issue");
       missionExecutionDigest = ["Mission execution digest could not be built; inspect workflow runs, step runs, work products, and source issue comments manually."];
     }
+    let relatedKnowledgePatterns: Array<{ id: string; title: string }> = [];
+    try {
+      // [관련 사고 패턴 방아쇠] 이번 미션 제목·막힌 이슈 제목으로 회사 위키 카드를 골라
+      //   오너 결정 표면에 요약 라인으로 띄운다. 실패해도 언블록 생성은 계속된다.
+      relatedKnowledgePatterns = await findRelatedKnowledgePatterns(db, mission.companyId, [
+        mission.title,
+        blockedIssue.title,
+        ...missionExecutionDigest,
+      ]);
+    } catch (error) {
+      logger.warn({ err: error, missionId: mission.id, blockedIssueId: blockedIssue.id }, "Failed to find related knowledge patterns for owner unblock issue");
+    }
     const ownerActionLanguage = await loadCompanySystemLanguage(db, mission.companyId);
     const unblockParentId = blockedIssue.parentId ? undefined : blockedIssue.id;
     const unblockIssue = await createMissionOwnerActionIssue(mission.companyId, {
@@ -583,6 +596,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       description: buildMissionOwnerUnblockDescription(mission, blockedIssue, {
         governanceEvidence: options.governanceEvidence,
         missionExecutionDigest,
+        relatedKnowledgePatterns,
         language: ownerActionLanguage,
       }),
       missionId: mission.id,
