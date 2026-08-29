@@ -3,6 +3,7 @@ import { issues, type Db } from "@paperclipai/db";
 import { logActivity } from "../activity-log.js";
 import { issueService } from "../issues.js";
 import { RECOVERY_UNBLOCK_ORIGIN_KIND } from "../missions/recovery-ownership-guard.js";
+import { ensureMissionKnowledgeCompileIssueSafe } from "../missions/mission-knowledge-compile.js";
 
 interface ResolvedUnblockCloseoutInput {
   db: Db;
@@ -75,6 +76,19 @@ export async function closeResolvedWorkflowUnblocks(input: ResolvedUnblockCloseo
         sourceStatus: "done",
         previousStatus: unblock.status,
         nextStatus: "done",
+        workflowRunId: run.id,
+      },
+    });
+
+    // [생산층 방아쇠 — fail-open] 회복 종결 직후, 아직 활동 중인 미션이면 사고 패턴
+    //   카드 등록 유계 이슈를 만든다(중복/카드 존재/미션 종결 시 스킵). 이 흐름은
+    //   컴파일 이슈 실패로 영향받지 않는다(실행통제 의미 불변).
+    await ensureMissionKnowledgeCompileIssueSafe(db, {
+      companyId: run.companyId,
+      missionId: run.missionId,
+      refs: {
+        unblockIssueId: unblock.id,
+        sourceIssueId: unblock.originId,
         workflowRunId: run.id,
       },
     });
