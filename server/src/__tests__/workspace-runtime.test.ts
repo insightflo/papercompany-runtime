@@ -870,6 +870,14 @@ describe("ensureRuntimeServicesForRun", () => {
     const response = await fetch(services[0]!.url!);
     expect(await response.text()).toBe("ok");
 
+    // [누수 수정] manual stop-policy 서비스는 release로 죽지 않는다(제품 설계 — 운영자 관리).
+    //   이 테스트가 실행마다 node -e 서버를 1개씩 영구 누수(2026-08-29 25개 고아 프로세스 실측)하므로
+    //   형제 워크스페이스 기준으로 명시 정지해 정리한다.
+    await stopRuntimeServicesForExecutionWorkspace({
+      executionWorkspaceId: "execution-workspace-sibling",
+      workspaceCwd: siblingWorkspaceRoot,
+    });
+
     await releaseRuntimeServicesForRun(runId);
     leasedRunIds.delete(runId);
   }, 20_000);
