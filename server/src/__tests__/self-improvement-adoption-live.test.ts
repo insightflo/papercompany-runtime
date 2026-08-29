@@ -136,7 +136,7 @@ describeEP("self-improvement adoption live wiring (planner→executor→ledger)"
       companyId,
       candidates: [candidate()],
       gateVerdicts: passVerdicts,
-      actorId: "operator-adoption",
+      actor: { type: "board" },
     });
 
     expect(result.diagnostics).toEqual([]);
@@ -174,7 +174,7 @@ describeEP("self-improvement adoption live wiring (planner→executor→ledger)"
       companyId,
       candidates: [candidate({ proposedEdit: { operation: "add", section: "Validation checklist", content: `- ${"x".repeat(9_000)}` } })],
       gateVerdicts: passVerdicts,
-      actorId: "operator-adoption",
+      actor: { type: "board" },
     });
 
     expect(result.applied).toHaveLength(0);
@@ -238,6 +238,72 @@ describeEP("self-improvement adoption live wiring (planner→executor→ledger)"
       .post(`/api/companies/${companyId}/self-improvement-adoptions/apply`)
       .send({ candidates: [candidate()], gateVerdicts: passVerdicts });
     expect(forbidden.status).toBe(403);
+  });
+
+  it("materializes peer gate verdicts: hash-scoped, anti-self-certification, agent inline rejection", async () => {
+    const svc = selfImprovementAdoptionService(db);
+    const { agents: agentsTable } = await import("@paperclipai/db");
+    const peerAgentId = randomUUID();
+    const ownerAgentId2 = randomUUID();
+    await db.insert(agentsTable).values([
+      { id: peerAgentId, companyId, name: "Peer Validator", role: "reviewer", status: "active", adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: ownerAgentId2, companyId, name: "Adoption Submitter", role: "owner", status: "active", adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+
+    const dry = await svc.dryRun({ companyId, candidates: [candidate()] });
+    expect(dry.candidateHashes).toHaveLength(1);
+    const hash = dry.candidateHashes[0]!;
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // 에이전트 인라인 판정 거부.
+    await expect(svc.apply({
+      companyId,
+      candidates: [candidate()],
+      gateVerdicts: passVerdicts,
+      actor: { type: "agent", agentId: ownerAgentId2 },
+    })).rejects.toThrow(/must not inline gate verdicts/);
+
+    // 판정 없는 에이전트 apply → gate_not_passed.
+    const noVerdict = await svc.apply({
+      companyId,
+      candidates: [candidate()],
+      actor: { type: "agent", agentId: ownerAgentId2 },
+    });
+    expect(noVerdict.applied).toHaveLength(0);
+    expect(noVerdict.diagnostics.map((d) => d.code)).toContain("gate_not_passed");
+
+    // 자기 인증 — 제출자 본인이 남긴 PASS는 무효.
+    await svc.recordGateVerdict({ companyId, gateOwner: "peer:validator", candidateHash: hash, verdict: "PASS", createdByAgentId: ownerAgentId2 });
+    const selfCert = await svc.apply({
+      companyId,
+      candidates: [candidate()],
+      actor: { type: "agent", agentId: ownerAgentId2 },
+    });
+    expect(selfCert.applied).toHaveLength(0);
+    expect(selfCert.diagnostics.map((d) => d.code)).toContain("gate_not_passed");
+
+    // 피어(다른 에이전트) 판정 → 통과 + 실제 패치.
+    await svc.recordGateVerdict({ companyId, gateOwner: "peer:validator", candidateHash: hash, verdict: "PASS", createdByAgentId: peerAgentId });
+    const approved = await svc.apply({
+      companyId,
+      candidates: [candidate()],
+      actor: { type: "agent", agentId: ownerAgentId2 },
+    });
+    expect(approved.applied).toHaveLength(1);
+    expect(await currentMarkdown()).toContain("- 게이트 토큰 불일치 재검");
+
+    // 해시 스코프 — 내용이 달라진 후보(해시 불일치)에는 같은 판정이 적용되지 않는다.
+    const changed = await svc.apply({
+      companyId,
+      candidates: [candidate({ proposedEdit: { operation: "add", section: "Validation checklist", content: "- 다른 패치" } })],
+      actor: { type: "agent", agentId: ownerAgentId2 },
+    });
+    expect(changed.applied).toHaveLength(0);
+    expect(changed.diagnostics.map((d) => d.code)).toContain("gate_not_passed");
+
+    // 형식 검증.
+    await expect(svc.recordGateVerdict({ companyId, gateOwner: "x", candidateHash: "nothash", verdict: "PASS", createdByAgentId: peerAgentId })).rejects.toThrow(/candidateHash/);
+    await expect(svc.recordGateVerdict({ companyId, gateOwner: "x", candidateHash: hash, verdict: "MAYBE", createdByAgentId: peerAgentId })).rejects.toThrow(/PASS or FAIL/);
   });
 
   it("finds related knowledge patterns for the owner unblock trigger (company-scoped)", async () => {

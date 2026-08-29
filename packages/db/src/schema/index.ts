@@ -66,6 +66,7 @@ export { companyWorkProductStorages } from "./company_work_product_storages.js";
 export { companyDataStorages } from "./company_data_storages.js";
 export { companySkills } from "./company_skills.js";
 export { companyKnowledgePatterns } from "./company_knowledge_patterns.js";
+export { adoptionGateVerdicts } from "./adoption_gate_verdicts.js";
 export { plugins } from "./plugins.js";
 export { pluginConfig } from "./plugin_config.js";
 export { pluginCompanySettings } from "./plugin_company_settings.js";

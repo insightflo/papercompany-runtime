@@ -180,3 +180,36 @@ describe("buildSelfImprovementAdoptionPlan", () => {
     ]);
   });
 });
+
+// [판정 실체화] 해시 스코프 판정 — 다른 후보 해시를 향한 PASS는 이 후보에 적용되지 않는다.
+describe("hash-scoped gate verdicts", () => {
+  it("applies a verdict only to the candidate whose hash matches, and global verdicts still work", () => {
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    const result = buildSelfImprovementAdoptionPlan({
+      candidates: [acceptedCandidate, { ...acceptedCandidate, assetRef: "second-skill" }],
+      candidateHashes: [hashA, hashB],
+      assetRegistry: [
+        { assetType: "skill", assetRef: "research-news-synthesis", resolvedRef: "skills/research-news-synthesis/SKILL.md" },
+        { assetType: "skill", assetRef: "second-skill", resolvedRef: "skills/second-skill/SKILL.md" },
+      ],
+      gateVerdicts: [
+        { gateOwner: "peer:validator", verdict: "PASS", candidateHash: hashA },
+        { gateOwner: "peer:other", verdict: "PASS", candidateHash: "c".repeat(64) },
+      ],
+    });
+
+    expect(result.plan.map((entry) => entry.asset.assetRef)).toEqual(["research-news-synthesis"]);
+    expect(result.diagnostics.some((d) => d.code === "gate_not_passed")).toBe(true);
+  });
+
+  it("does not authorize unknown-hash candidates with hash-scoped verdicts (fail closed)", () => {
+    const result = buildSelfImprovementAdoptionPlan({
+      candidates: [acceptedCandidate],
+      gateVerdicts: [{ gateOwner: "peer:validator", verdict: "PASS", candidateHash: "d".repeat(64) }],
+      assetRegistry: [{ assetType: "skill", assetRef: "research-news-synthesis", resolvedRef: "skills/research-news-synthesis/SKILL.md" }],
+    });
+    expect(result.plan).toHaveLength(0);
+    expect(result.diagnostics.map((d) => d.code)).toEqual(["gate_not_passed"]);
+  });
+});

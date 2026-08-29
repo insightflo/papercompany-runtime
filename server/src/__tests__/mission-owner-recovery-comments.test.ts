@@ -294,7 +294,8 @@ describe("owner unblock description related knowledge patterns section", () => {
   it("omits the section entirely when no related patterns are provided", () => {
     const description = buildMissionOwnerUnblockDescription(mission, blockedIssue, {});
     expect(description).not.toContain("Related incident patterns");
-    expect(description).not.toContain("self-improvement-adoptions/dry-run");
+    // 섹션 전용 트리거 문구(기본 체크리스트 줄에는 없는 안내)도 함께 없어야 한다.
+    expect(description).not.toContain("prior structural failures in this company that may match this mission");
   });
 
   it("caps at 3 patterns and drops malformed entries", () => {
