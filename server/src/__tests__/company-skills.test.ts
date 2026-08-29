@@ -6,6 +6,7 @@ import { companySkillCreateSchema } from "@paperclipai/shared";
 import {
   discoverProjectWorkspaceSkillDirectories,
   findMissingLocalSkillIds,
+  mergeImportedSkillMetadata,
   parseSkillImportSourceInput,
   readLocalSkillImportFromDirectory,
 } from "../services/company-skills.js";
@@ -230,5 +231,32 @@ describe("missing local skill reconciliation", () => {
     ]);
 
     expect(missingIds).toEqual(["skill-1"]);
+  });
+});
+
+// [Phase 2 — impact 원장 병합 규칙] 재가져오기(replace)가 채택 원장을 지우지 않는지.
+//   원장(metadata.impact)은 실행 중 기록되는 런타임 소유 데이터 — 소스 동기화가 계승해야 한다.
+describe("mergeImportedSkillMetadata impact ledger preservation", () => {
+  const ledger = [{ adoptedFrom: "pattern-1", adoptedAt: "2026-08-29T00:00:00.000Z", validation: { verdict: "PASS" } }];
+
+  it("preserves the existing impact ledger when incoming metadata has no impact key", () => {
+    const merged = mergeImportedSkillMetadata({ impact: ledger }, { sourceKind: "catalog" });
+    expect(merged).toEqual({ sourceKind: "catalog", impact: ledger });
+  });
+
+  it("lets incoming metadata explicitly carry its own impact", () => {
+    const incomingImpact = [{ adoptedFrom: "pattern-2", adoptedAt: "2026-08-30T00:00:00.000Z", validation: {} }];
+    const merged = mergeImportedSkillMetadata({ impact: ledger }, { impact: incomingImpact });
+    expect(merged.impact).toEqual(incomingImpact);
+  });
+
+  it("does not invent an impact ledger when neither side has one", () => {
+    expect(mergeImportedSkillMetadata(null, { sourceKind: "github" })).toEqual({ sourceKind: "github" });
+    expect(mergeImportedSkillMetadata(null, null)).toEqual({});
+  });
+
+  it("ignores a non-array existing impact value", () => {
+    const merged = mergeImportedSkillMetadata({ impact: "corrupt" }, { sourceKind: "catalog" });
+    expect(merged).toEqual({ sourceKind: "catalog" });
   });
 });

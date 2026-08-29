@@ -32,10 +32,19 @@ export type SelfImprovementAdoptionPlanEntry = {
   gateOwner: string;
   evidenceSource: unknown[];
   pattern: string;
+  /** [Phase 2] evidenceSource가 참조하는 지식 위키 패턴 카드 id — impact 원장의 adoptedFrom 원천. */
+  evidencePatternIds: string[];
 };
 
 export type SelfImprovementAdoptionPlannerDiagnostic = {
-  code: "candidate_not_accepted" | "gate_not_passed" | "unresolved_asset" | "multi_asset_patch" | "invalid_candidate_contract" | "tool_gap_not_auto_adoptable";
+  code:
+    | "candidate_not_accepted"
+    | "gate_not_passed"
+    | "unresolved_asset"
+    | "multi_asset_patch"
+    | "invalid_candidate_contract"
+    | "tool_gap_not_auto_adoptable"
+    | "unresolved_evidence_pattern";
   message: string;
 };
 
@@ -75,6 +84,26 @@ function proposedEditTargetsMultipleAssets(proposedEdit: Record<string, unknown>
     return proposedEdit.assetRef !== topLevelAssetRef;
   }
   return false;
+}
+
+// [Phase 2 지식 위키 연결] evidenceSource에서 패턴 카드 참조를 뽑는다.
+//   허용 형태: 문자열 "knowledge_pattern:<id>" 또는 객체 {type: "knowledge_pattern", id}.
+//   참조가 있으면 반드시 레지스트리에서 정확히 1건으로 해석되어야 한다(fail-closed).
+function extractEvidencePatternIds(evidenceSource: unknown[]): { patternIds: string[]; malformedEntry: boolean } {
+  const patternIds = new Set<string>();
+  let malformedEntry = false;
+  for (const entry of evidenceSource) {
+    if (typeof entry === "string") {
+      const match = /^knowledge_pattern:(\S+)$/.exec(entry.trim());
+      if (match) patternIds.add(match[1]!);
+      continue;
+    }
+    if (isRecord(entry) && entry.type === "knowledge_pattern") {
+      if (isNonEmptyString(entry.id)) patternIds.add(entry.id.trim());
+      else malformedEntry = true;
+    }
+  }
+  return { patternIds: Array.from(patternIds), malformedEntry };
 }
 
 export function buildSelfImprovementAdoptionPlan({
@@ -149,6 +178,25 @@ export function buildSelfImprovementAdoptionPlan({
       });
     }
 
+    // [Phase 2] 패턴 카드 참조 검증 — 지식 위키에서 온 제안은 카드 id가 회사 레지스트리에서
+    //   정확히 1건으로 해석되어야 채택 계획에 오른다. 형식 하자는 계약 위반, 미해석은 fail-closed.
+    const { patternIds: evidencePatternIds, malformedEntry } = extractEvidencePatternIds(evidenceSource);
+    if (malformedEntry) {
+      diagnostics.push({
+        code: "invalid_candidate_contract",
+        message: `${prefix}.evidenceSource knowledge_pattern entries require a non-empty id`,
+      });
+    }
+    for (const patternId of evidencePatternIds) {
+      const patternAsset = resolveAsset(assetRegistry, "knowledge_pattern", patternId);
+      if (patternAsset === null) {
+        diagnostics.push({
+          code: "unresolved_evidence_pattern",
+          message: `${prefix} references knowledge_pattern ${patternId} which does not resolve to exactly one registry entry`,
+        });
+      }
+    }
+
     if (diagnostics.length !== candidateDiagnosticsStart || asset === null) {
       continue;
     }
@@ -165,6 +213,7 @@ export function buildSelfImprovementAdoptionPlan({
       gateOwner,
       evidenceSource,
       pattern,
+      evidencePatternIds,
     });
   }
 

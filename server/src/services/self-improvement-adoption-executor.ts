@@ -20,6 +20,18 @@ export type SelfImprovementAdoptionValidationRunner = (
   input: SelfImprovementAdoptionValidationInput,
 ) => Promise<SelfImprovementAdoptionValidationResult>;
 
+// [Phase 2 — impact 원장] 채택 적용 성공 후 지식 위키 패턴에서 온 제안이면
+//   company_skills.metadata.impact 등 자산별 원장에 기록하는 주입 훅.
+//   실패는 무음이 아니라 impact_record_failed 진단으로 노출된다.
+export type SelfImprovementAdoptionImpactRecorderInput = {
+  entry: SelfImprovementAdoptionPlanEntry;
+  validation: SelfImprovementAdoptionValidationResult;
+};
+
+export type SelfImprovementAdoptionImpactRecorder = (
+  input: SelfImprovementAdoptionImpactRecorderInput,
+) => Promise<void>;
+
 export type SelfImprovementAdoptionAppliedEntry = {
   candidateIndex: number;
   assetRef: string;
@@ -28,6 +40,8 @@ export type SelfImprovementAdoptionAppliedEntry = {
   section: string;
   validationVerdict: "PASS";
   applied: true;
+  /** [Phase 2] 이 채택의 근거가 된 지식 위키 패턴 카드 id — impact 원장 adoptedFrom 원천. */
+  adoptedFromPatternIds: string[];
 };
 
 export type SelfImprovementAdoptionExecutorDiagnostic = {
@@ -37,7 +51,8 @@ export type SelfImprovementAdoptionExecutorDiagnostic = {
     | "unsupported_operation"
     | "section_not_found"
     | "validation_failed"
-    | "asset_write_failed";
+    | "asset_write_failed"
+    | "impact_record_failed";
   candidateIndex: number;
   message: string;
 };
@@ -46,6 +61,7 @@ export type ApplySelfImprovementAdoptionPlanInput = {
   plan: SelfImprovementAdoptionPlanEntry[];
   assetStore: SelfImprovementAdoptionAssetStore;
   validationRunner: SelfImprovementAdoptionValidationRunner;
+  impactRecorder?: SelfImprovementAdoptionImpactRecorder;
 };
 
 export type ApplySelfImprovementAdoptionPlanResult = {
@@ -155,6 +171,7 @@ export async function applySelfImprovementAdoptionPlan({
   plan,
   assetStore,
   validationRunner,
+  impactRecorder,
 }: ApplySelfImprovementAdoptionPlanInput): Promise<ApplySelfImprovementAdoptionPlanResult> {
   const applied: SelfImprovementAdoptionAppliedEntry[] = [];
   const diagnostics: SelfImprovementAdoptionExecutorDiagnostic[] = [];
@@ -209,6 +226,29 @@ export async function applySelfImprovementAdoptionPlan({
       continue;
     }
 
+    // [Phase 2] 지식 위키 패턴에서 온 채택은 impact 원장 기록이 계약의 일부 —
+    //   기록 누락/실패를 무음 넘기지 않는다(자산 기록은 이미 적용됨, 원장 누락만 진단 노출).
+    const patternIds = entry.evidencePatternIds ?? [];
+    if (patternIds.length > 0) {
+      if (!impactRecorder) {
+        diagnostics.push({
+          code: "impact_record_failed",
+          candidateIndex,
+          message: `candidate ${candidateIndex} adopted from knowledge pattern(s) ${patternIds.join(", ")} but no impact recorder was configured`,
+        });
+      } else {
+        try {
+          await impactRecorder({ entry, validation });
+        } catch (error) {
+          diagnostics.push({
+            code: "impact_record_failed",
+            candidateIndex,
+            message: `candidate ${candidateIndex} impact recording failed for ${entry.asset.resolvedRef}: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
+    }
+
     applied.push({
       candidateIndex,
       assetRef: entry.asset.assetRef,
@@ -217,6 +257,7 @@ export async function applySelfImprovementAdoptionPlan({
       section: entry.proposedEdit.section,
       validationVerdict: "PASS",
       applied: true,
+      adoptedFromPatternIds: patternIds,
     });
   }
 
