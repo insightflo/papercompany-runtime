@@ -14,6 +14,7 @@ export { approvalRoutes } from "./approvals.js";
 export { secretRoutes } from "./secrets.js";
 export { costRoutes } from "./costs.js";
 export { agentWikiRoutes } from "./agent-wiki.js";
+export { knowledgePatternsRoutes } from "./knowledge-patterns.js";
 export { activityRoutes } from "./activity.js";
 export { dashboardRoutes } from "./dashboard.js";
 export { sidebarBadgeRoutes } from "./sidebar-badges.js";
