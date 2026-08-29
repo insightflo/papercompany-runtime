@@ -48,7 +48,7 @@ export function buildMissionKnowledgeCompileDescription(input: {
     "Search before writing: GET /api/companies/{companyId}/knowledge-patterns?q=<keywords> — supersede (supersedeId) instead of duplicating.",
     "",
     "If a bounded company skill patch would prevent recurrence, adopt it through the self-improvement loop after recording the card:",
-    "POST /api/companies/{companyId}/self-improvement-adoptions/dry-run, then /apply with the card cited in evidenceSource (collect a peer gate verdict first). Do not hand-edit skill markdown.",
+    "POST /api/companies/{companyId}/self-improvement-adoptions/dry-run with the candidate citing the card in evidenceSource, have the peer validator record its verdict on the returned candidateHash (POST /api/companies/{companyId}/self-improvement-adoptions/verdicts {gateOwner, candidateHash, verdict}), then POST .../self-improvement-adoptions/apply. Do not hand-edit skill markdown.",
     "",
     "After recording the card (or deciding there is no recurring pattern), close this issue (status done). Comments are display-only; the card record and the issue status are the authority.",
   ].join("\n");

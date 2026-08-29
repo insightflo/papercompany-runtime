@@ -13,9 +13,10 @@
 //   - 모든 적용·원장 기록은 activity_log로 남는다.
 // [소비] routes/self-improvement-adoptions.ts (보드 + 회사 스코프 에이전트 키).
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { activityLog, companySkills } from "@paperclipai/db";
+import { activityLog, adoptionGateVerdicts, companySkills } from "@paperclipai/db";
 import { unprocessable } from "../errors.js";
 import { companySkillService, parseFrontmatterMarkdown } from "./company-skills.js";
 import {
@@ -41,6 +42,27 @@ const GATE_VERDICTS_MAX = 100;
 const PATTERN_REGISTRY_LIMIT = 200;
 /** 유계 패치 크기 상한 — 한 번의 채택이 스킬을 8KB 이상 부풀리면 기계적 게이트 실패. */
 const MAX_PATCH_GROWTH_CHARS = 8192;
+/** 등록 판정 신선도 — 그보다 오래된 PASS는 재검 없이 재사용 불가. */
+const VERDICT_FRESHNESS_MS = 7 * 24 * 60 * 60 * 1000;
+
+export type AdoptionApplyActor = {
+  type: "board" | "agent";
+  agentId?: string | null;
+};
+
+/** 후보 패치의 정규 해시 — 판정 원장이 후보 내용에 묶이는 기준(키 순서 고정). */
+export function adoptionCandidateHash(candidate: Record<string, unknown>): string {
+  const proposedEdit = candidate && typeof candidate.proposedEdit === "object" && candidate.proposedEdit !== null && !Array.isArray(candidate.proposedEdit)
+    ? candidate.proposedEdit as Record<string, unknown>
+    : {};
+  return createHash("sha256").update(JSON.stringify({
+    assetType: candidate.assetType,
+    assetRef: candidate.assetRef,
+    operation: proposedEdit.operation,
+    section: proposedEdit.section,
+    content: proposedEdit.content ?? null,
+  })).digest("hex");
+}
 
 export type SelfImprovementAdoptionApplyResult = {
   applied: SelfImprovementAdoptionAppliedEntry[];
@@ -53,6 +75,92 @@ function stableFrontmatter(markdown: string) {
 
 export function selfImprovementAdoptionService(db: Db) {
   const skillSvc = companySkillService(db);
+
+  /** [판정 실체화] 피어/검증자가 후보 해시에 묶은 판정을 내구 원장에 기록한다. */
+  async function recordGateVerdict(input: {
+    companyId: string;
+    gateOwner: unknown;
+    candidateHash: unknown;
+    verdict: unknown;
+    note?: unknown;
+    createdByAgentId: string | null;
+  }): Promise<typeof adoptionGateVerdicts.$inferSelect> {
+    const gateOwner = typeof input.gateOwner === "string" ? input.gateOwner.trim() : "";
+    if (!gateOwner || gateOwner.length > 100) {
+      throw unprocessable("gate verdict gateOwner must be a non-empty string (max 100 chars)");
+    }
+    const candidateHash = typeof input.candidateHash === "string" ? input.candidateHash.trim().toLowerCase() : "";
+    if (!/^[0-9a-f]{64}$/.test(candidateHash)) {
+      throw unprocessable("gate verdict candidateHash must be a 64-char hex sha256 (from dry-run)");
+    }
+    const verdict = String(input.verdict ?? "");
+    if (!["PASS", "FAIL"].includes(verdict)) {
+      throw unprocessable("gate verdict must be PASS or FAIL");
+    }
+    const note = typeof input.note === "string" && input.note.trim() ? input.note.trim().slice(0, 500) : null;
+
+    const [row] = await db
+      .insert(adoptionGateVerdicts)
+      .values({
+        companyId: input.companyId,
+        gateOwner,
+        candidateHash,
+        verdict,
+        ...(note ? { note } : {}),
+        createdByAgentId: input.createdByAgentId,
+      })
+      .returning();
+
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: "system",
+      actorId: input.createdByAgentId ?? "operator-adoption",
+      action: "adoption_gate_verdict.recorded",
+      entityType: "adoption_gate_verdict",
+      entityId: row!.id,
+      details: { gateOwner, candidateHash, verdict },
+    });
+    return row!;
+  }
+
+  /** 후보별 해시 계산 — dry-run/apply 양쪽이 같은 기준으로 쓴다. */
+  function hashCandidates(candidates: SelfImprovementCandidate[]): string[] {
+    return candidates.map((candidate) => adoptionCandidateHash(candidate as Record<string, unknown>));
+  }
+
+  /** [에이전트 경로] 판정 원장에서 후보별 PASS 해석 — 자기 인증 차단(제출자 ≠ 판정자) + 신선도. */
+  async function resolveRegisteredVerdicts(input: {
+    companyId: string;
+    candidateHashes: string[];
+    candidates: SelfImprovementCandidate[];
+    submitterAgentId: string | null;
+  }): Promise<AdoptionGateVerdict[]> {
+    const cutoff = new Date(Date.now() - VERDICT_FRESHNESS_MS);
+    const rows = input.candidateHashes.length > 0
+      ? await db
+        .select()
+        .from(adoptionGateVerdicts)
+        .where(and(
+          eq(adoptionGateVerdicts.companyId, input.companyId),
+          inArray(adoptionGateVerdicts.candidateHash, input.candidateHashes),
+          eq(adoptionGateVerdicts.verdict, "PASS"),
+        ))
+      : [];
+    const fresh = rows.filter((row) => row.createdAt >= cutoff);
+
+    const verdicts: AdoptionGateVerdict[] = [];
+    for (let index = 0; index < input.candidates.length; index += 1) {
+      const candidate = input.candidates[index]!;
+      const hash = input.candidateHashes[index]!;
+      const gateOwner = typeof candidate.gateOwner === "string" ? candidate.gateOwner : "";
+      const qualifies = fresh.some((row) =>
+        row.candidateHash === hash
+        && row.gateOwner === gateOwner
+        && (row.createdByAgentId == null || row.createdByAgentId !== input.submitterAgentId));
+      if (qualifies) verdicts.push({ gateOwner, verdict: "PASS", candidateHash: hash });
+    }
+    return verdicts;
+  }
 
   /** 후보/판정 입력 형태 검증 — 계약 위반은 422로 실패 닫힘(무음 무시 금지). */
   function validateInputs(candidates: unknown, gateVerdicts: unknown): {
@@ -163,23 +271,46 @@ export function selfImprovementAdoptionService(db: Db) {
   }
 
   return {
-    /** 읽기 전용 드라이런 — 계획과 진단만 반환한다. */
-    async dryRun(input: { companyId: string; candidates: unknown; gateVerdicts: unknown }): Promise<BuildSelfImprovementAdoptionPlanResult> {
-      const { candidates, gateVerdicts } = validateInputs(input.candidates, input.gateVerdicts);
+    /** 읽기 전용 드라이런 — 계획/진단/후보 해시(판정 원장용)만 반환한다. */
+    async dryRun(input: { companyId: string; candidates: unknown; gateVerdicts?: unknown }): Promise<BuildSelfImprovementAdoptionPlanResult & { candidateHashes: string[] }> {
+      const { candidates, gateVerdicts } = validateInputs(input.candidates, input.gateVerdicts ?? [{ gateOwner: "dry-run", verdict: "PASS" }]);
+      const candidateHashes = hashCandidates(candidates);
       const assetRegistry = await buildAssetRegistry(input.companyId);
-      return buildSelfImprovementAdoptionPlan({ candidates, assetRegistry, gateVerdicts });
+      const planned = buildSelfImprovementAdoptionPlan({ candidates, assetRegistry, gateVerdicts, candidateHashes });
+      return { ...planned, candidateHashes };
     },
 
-    /** 실제 적용 — 게이트 PASS + 유계 패치 통과만 스킬에 기록, 원장/활동로그 남김. */
+    /** 실제 적용 — 게이트 PASS + 유계 패치 통과만 스킬에 기록, 원장/활동로그 남긴다.
+     *  판정 출처 분리(자기 인증 차단):
+     *  - 보드: 운영자 권한으로 인라인 판정 허용(기존 계약).
+     *  - 에이전트: 인라인 판정 거부 — 판정 원장의 해시 묶음 PASS만 인정(제출자≠판정자, 7일 신선도). */
     async apply(input: {
       companyId: string;
       candidates: unknown;
-      gateVerdicts: unknown;
-      actorId: string;
-    }): Promise<SelfImprovementAdoptionApplyResult> {
-      const { candidates, gateVerdicts } = validateInputs(input.candidates, input.gateVerdicts);
+      gateVerdicts?: unknown;
+      actor: AdoptionApplyActor;
+    }): Promise<SelfImprovementAdoptionApplyResult & { candidateHashes: string[] }> {
+      if (input.actor.type === "agent" && input.gateVerdicts != null) {
+        throw unprocessable("agent callers must not inline gate verdicts; peers record verdicts via POST /self-improvement-adoptions/verdicts");
+      }
+      const actorId = input.actor.type === "agent" ? input.actor.agentId ?? "agent-adoption" : "operator-adoption";
+      const { candidates } = validateInputs(input.candidates, input.actor.type === "board" ? input.gateVerdicts : [{ gateOwner: "registry", verdict: "PASS" }]);
+      const candidateHashes = hashCandidates(candidates);
+
+      let gateVerdicts: AdoptionGateVerdict[];
+      if (input.actor.type === "agent") {
+        gateVerdicts = await resolveRegisteredVerdicts({
+          companyId: input.companyId,
+          candidateHashes,
+          candidates,
+          submitterAgentId: input.actor.agentId ?? null,
+        });
+      } else {
+        gateVerdicts = (Array.isArray(input.gateVerdicts) ? input.gateVerdicts : []) as AdoptionGateVerdict[];
+      }
+
       const assetRegistry = await buildAssetRegistry(input.companyId);
-      const planned = buildSelfImprovementAdoptionPlan({ candidates, assetRegistry, gateVerdicts });
+      const planned = buildSelfImprovementAdoptionPlan({ candidates, assetRegistry, gateVerdicts, candidateHashes });
 
       const writtenSkillIds = new Map<string, string>();
       const executed = await applySelfImprovementAdoptionPlan({
@@ -195,7 +326,7 @@ export function selfImprovementAdoptionService(db: Db) {
         await db.insert(activityLog).values({
           companyId: input.companyId,
           actorType: "system",
-          actorId: input.actorId,
+          actorId,
           action: "company_skill.adoption_applied",
           entityType: "company_skill",
           entityId: skillId,
@@ -209,7 +340,9 @@ export function selfImprovementAdoptionService(db: Db) {
         });
       }
 
-      return { applied: executed.applied, diagnostics: [...planned.diagnostics, ...executed.diagnostics] };
+      return { applied: executed.applied, diagnostics: [...planned.diagnostics, ...executed.diagnostics], candidateHashes };
     },
+
+    recordGateVerdict,
   };
 }

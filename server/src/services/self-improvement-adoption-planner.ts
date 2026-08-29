@@ -18,6 +18,9 @@ export type AdoptionAssetRegistryEntry = {
 export type AdoptionGateVerdict = {
   gateOwner: string;
   verdict: string;
+  /** [판정 실체화] 후보 해시에 묶인 판정 — 해당 해시의 후보에만 적용된다.
+   *  없으면 gateOwner 전역 판정(보드 인라인 호환). */
+  candidateHash?: string;
 };
 
 export type SelfImprovementAdoptionPlanEntry = {
@@ -52,6 +55,8 @@ export type BuildSelfImprovementAdoptionPlanInput = {
   candidates: SelfImprovementCandidate[];
   assetRegistry: AdoptionAssetRegistryEntry[];
   gateVerdicts: AdoptionGateVerdict[];
+  /** candidates와 평행한 후보 해시 배열(선택) — 해시 스코프 판정 매칭에 쓰인다. */
+  candidateHashes?: (string | null)[];
 };
 
 export type BuildSelfImprovementAdoptionPlanResult = {
@@ -67,8 +72,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasCurrentPass(gateVerdicts: AdoptionGateVerdict[], gateOwner: string) {
-  return gateVerdicts.some((gateVerdict) => gateVerdict.gateOwner === gateOwner && gateVerdict.verdict === "PASS");
+function hasCurrentPass(gateVerdicts: AdoptionGateVerdict[], gateOwner: string, candidateHash: string | null) {
+  return gateVerdicts.some((gateVerdict) => {
+    if (gateVerdict.gateOwner !== gateOwner || gateVerdict.verdict !== "PASS") return false;
+    // 해시 스코프 판정은 해시가 알려져 있고 일치할 때만 적용(실패 닫힘).
+    if (typeof gateVerdict.candidateHash === "string") {
+      return candidateHash !== null && gateVerdict.candidateHash === candidateHash;
+    }
+    return true;
+  });
 }
 
 function resolveAsset(assetRegistry: AdoptionAssetRegistryEntry[], assetType: string, assetRef: string) {
@@ -110,12 +122,14 @@ export function buildSelfImprovementAdoptionPlan({
   candidates,
   assetRegistry,
   gateVerdicts,
+  candidateHashes,
 }: BuildSelfImprovementAdoptionPlanInput): BuildSelfImprovementAdoptionPlanResult {
   const plan: SelfImprovementAdoptionPlanEntry[] = [];
   const diagnostics: SelfImprovementAdoptionPlannerDiagnostic[] = [];
 
   for (const [candidateIndex, candidate] of candidates.entries()) {
     const prefix = `selfImprovementCandidates[${candidateIndex}]`;
+    const candidateHash = candidateHashes?.[candidateIndex] ?? null;
     const assetType = isNonEmptyString(candidate.assetType) ? candidate.assetType : null;
     const assetRef = isNonEmptyString(candidate.assetRef) ? candidate.assetRef : null;
     const proposedEdit = isRecord(candidate.proposedEdit) ? candidate.proposedEdit : null;
@@ -156,7 +170,7 @@ export function buildSelfImprovementAdoptionPlan({
 
     const candidateDiagnosticsStart = diagnostics.length;
 
-    if (!hasCurrentPass(gateVerdicts, gateOwner)) {
+    if (!hasCurrentPass(gateVerdicts, gateOwner, candidateHash)) {
       diagnostics.push({
         code: "gate_not_passed",
         message: `${prefix} gateOwner ${gateOwner} does not have a current PASS verdict`,
