@@ -30,6 +30,8 @@ export interface RecordFailureInput {
   solution: string;
   errorCode?: string | null;
   stepId?: string | null;
+  /** 'agent' = 에이전트 행동 교정 교훈(주입 대상). 'ops' = 인프라 카운터(기본, 주입 금지). */
+  audience?: "agent" | "ops";
 }
 
 export interface SearchRelevantInput {
@@ -69,6 +71,7 @@ export async function recordFailure(db: Db, input: RecordFailureInput): Promise<
         stepId: input.stepId ?? null,
         status: "active",
         frequency: 1,
+        audience: input.audience ?? "ops",
         lastSeenAt: now,
         createdAt: now,
         updatedAt: now,
@@ -88,6 +91,8 @@ export async function recordFailure(db: Db, input: RecordFailureInput): Promise<
           stepId: input.stepId ?? null,
           cause: input.cause,
           solution: input.solution,
+          // 주입 대상 분류도 최신 검출 지점의 판단으로 갱신(잘못 분류됐던 교훈이 올바르게 재분류됨).
+          audience: input.audience ?? "ops",
           // 재발 → 이전 해결(resolved)/종료(closed) 상태 무효화, 다시 활성 교훈으로.
           status: "active",
           resolvedAt: null,
@@ -105,14 +110,26 @@ export async function recordFailure(db: Db, input: RecordFailureInput): Promise<
   }
 }
 
+/** 주입 신선도 창(일). 이 창 안에 재발한 교훈만 주입한다 — markResolved가 실제로는
+ *   거의 호출되지 않아도, 재발이 멈춘 교훈은 자연히 주입에서 빠진다(자가 치유). */
+export const WIKI_INJECTION_FRESH_DAYS = 14;
+
+function boundedText(value: string, max: number): string {
+  const trimmed = value.trim();
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max - 1)}…`;
+}
+
 /**
  * [목적] formatWikiLessons — searchRelevant 결과를 adapter prompt에 주입할 한국어 섹션으로 변환.
  *   빈 배열이면 null 반환(주입 생략 — 빈 교훈 블록이 prompt를 오염시키지 않도록).
+ *   [컨텍스트 비대 방어 G8] 라인당 길이 상한(pattern 60 + solution 240자)으로 주입 크기를 묶는다.
  * [출력] "## 과거 실패 교훈 (자동 생성 ...)" 섹션 문자열, 또는 null.
  */
 export function formatWikiLessons(entries: AgentWikiEntry[]): string | null {
   if (entries.length === 0) return null;
-  const lines = entries.map((entry) => `- [${entry.frequency}회 누적] ${entry.pattern}: ${entry.solution}`);
+  const lines = entries.map((entry) =>
+    `- [${entry.frequency}회 누적] ${boundedText(entry.pattern, 60)}: ${boundedText(entry.solution, 240)}`,
+  );
   return `## 과거 실패 교훈 (자동 생성 — 같은 실수 방지)\n${lines.join("\n")}`;
 }
 
@@ -127,10 +144,18 @@ export function agentWikiService(db: Db) {
      */
     searchRelevant: async (input: SearchRelevantInput): Promise<AgentWikiEntry[]> => {
       const limit = input.limit ?? 5;
+      // [주입 게이트] 세 조건을 모두 통과한 교훈만 주입한다:
+      //   ① audience='agent' — 에이전트가 행동으로 실천 가능한 교훈만(인프라 카운터 제외,
+      //      WikiSkill ablation: 실행 불가능한 지식 주입은 역효과)
+      //   ② 신선도 창 — 최근 재발한 교훈만(재발이 멈추면 주입도 멈춘다)
+      //   ③ frequency desc — 그중 가장 빈번한 것부터
+      const freshSince = new Date(Date.now() - WIKI_INJECTION_FRESH_DAYS * 24 * 60 * 60 * 1000);
       const conditions = [
         eq(agentWikiEntries.companyId, input.companyId),
         eq(agentWikiEntries.agentId, input.agentId),
         eq(agentWikiEntries.status, "active"),
+        eq(agentWikiEntries.audience, "agent"),
+        gte(agentWikiEntries.lastSeenAt, freshSince),
       ];
       if (input.stepId) {
         conditions.push(eq(agentWikiEntries.stepId, input.stepId));

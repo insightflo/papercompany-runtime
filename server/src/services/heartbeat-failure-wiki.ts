@@ -7,7 +7,7 @@ type FailureClassification = {
   readonly reasonCode: string;
 };
 
-type WikiLesson = Pick<RecordFailureInput, "pattern" | "cause" | "solution" | "errorCode">;
+type WikiLesson = Pick<RecordFailureInput, "pattern" | "cause" | "solution" | "errorCode" | "audience">;
 
 export function buildHeartbeatFailureWikiLesson(input: {
   readonly classification: FailureClassification;
@@ -23,6 +23,7 @@ export function buildHeartbeatFailureWikiLesson(input: {
       cause: "에이전트가 허용된 파일 경로 없이 rg/find/tree 같은 검색 명령을 실행해 Step Input Manifest 런타임 정책이 실행을 차단함.",
       solution: "저장소나 디렉터리를 검색하지 않는다. 현재 단계 출력 파일 또는 런타임에 등록된 선행 workProduct의 정확한 파일 경로만 검색한다. 디렉터리, 와일드카드, 파일명만 지정한 경로, 셸 변수 경로는 사용하지 않는다.",
       errorCode: "step_input_manifest_guardrail",
+      audience: "agent",
     };
   }
 
@@ -36,6 +37,7 @@ export function buildHeartbeatFailureWikiLesson(input: {
       cause: "adapter 실행이 실패해 run 종료. opencode models discovery timeout(20s), command 시작 실패(ENOENT), adapter 내부 에러 등.",
       solution: "opencode models timeout은 retry+stale serve로 완화. 반복 시 adapter command, PATH, 인증, 리소스를 점검하고 command 부재는 adapter 설정에서 수정한다.",
       errorCode: "adapter_failed",
+      audience: "ops",
     };
   }
 
@@ -64,6 +66,7 @@ export function classifyWorkProductFailure(input: {
         cause: `에이전트가 현재 실행에 할당된 산출물 루트 밖의 경로 ${outsidePaths.length}개를 workProduct로 선언함.`,
         solution: "실행 카드의 assigned output directory 아래에 산출물을 만들고 그 정확한 절대경로를 Workflow API에 등록한다. 이전 실행, agent workspace, 임의 프로젝트 경로의 파일은 재사용하지 않는다.",
         errorCode: "workproduct_path_outside_allowed_root",
+        audience: "agent",
       },
     };
   }

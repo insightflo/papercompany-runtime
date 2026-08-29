@@ -37,6 +37,10 @@ export const agentWikiEntries = pgTable(
     stepId: text("step_id"),
     frequency: integer("frequency").notNull().default(1),
     status: text("status").notNull().default("active"), // active | resolved | closed
+    // [주입 게이트] 'agent' = 에이전트가 행동으로 실천 가능한 교훈(프롬프트 주입 대상),
+    //   'ops' = 인프라/어댑터 실패 카운터(대시보드 전용, 주입 금지). 기본 'ops' — 분류 못 받은
+    //   새 패턴은 주입되지 않는다(fail-closed, WikiSkill ablation: 실행 불가능 지식 주입은 역효과).
+    audience: text("audience").notNull().default("ops"),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
