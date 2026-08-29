@@ -47,6 +47,7 @@ describe("buildSelfImprovementAdoptionPlan", () => {
         gateOwner: "peer:validator",
         evidenceSource: ["issue:planning-1"],
         pattern: "Repeatedly missed source freshness labels.",
+        evidencePatternIds: [],
       },
     ]);
     expect(result.diagnostics).toEqual([
@@ -106,5 +107,76 @@ describe("buildSelfImprovementAdoptionPlan", () => {
     });
     expect(result.plan).toHaveLength(0);
     expect(result.diagnostics.some((d) => d.code === "tool_gap_not_auto_adoptable")).toBe(true);
+  });
+
+  // [Phase 2 — 지식 위키 연결] evidenceSource의 knowledge_pattern 참조는
+  //   회사 레지스트리(knowledge_pattern 자산)에서 정확히 1건으로 해석되어야 한다.
+  it("carries resolved knowledge pattern ids on plan entries referenced through string or object evidence", () => {
+    const patternId = "11111111-2222-3333-4444-555555555555";
+    const result = buildSelfImprovementAdoptionPlan({
+      candidates: [
+        { ...acceptedCandidate, evidenceSource: [`knowledge_pattern:${patternId}`, "issue:planning-1"] },
+        {
+          ...acceptedCandidate,
+          assetRef: "second-skill",
+          evidenceSource: [{ type: "knowledge_pattern", id: patternId, note: "저녁3 스톨 근본원인" }],
+        },
+      ],
+      assetRegistry: [
+        { assetType: "skill", assetRef: "research-news-synthesis", resolvedRef: "skills/research-news-synthesis/SKILL.md" },
+        { assetType: "skill", assetRef: "second-skill", resolvedRef: "skills/second-skill/SKILL.md" },
+        { assetType: "knowledge_pattern", assetRef: patternId, resolvedRef: patternId },
+      ],
+      gateVerdicts: [{ gateOwner: "peer:validator", verdict: "PASS" }],
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.plan.map((entry) => entry.evidencePatternIds)).toEqual([[patternId], [patternId]]);
+  });
+
+  it("fails closed when a referenced knowledge pattern does not resolve to exactly one registry entry", () => {
+    const missingPatternId = "aaaaaaaa-0000-0000-0000-000000000001";
+    const ambiguousPatternId = "aaaaaaaa-0000-0000-0000-000000000002";
+    const result = buildSelfImprovementAdoptionPlan({
+      candidates: [
+        { ...acceptedCandidate, evidenceSource: [{ type: "knowledge_pattern", id: missingPatternId }] },
+        { ...acceptedCandidate, assetRef: "second-skill", evidenceSource: [`knowledge_pattern:${ambiguousPatternId}`] },
+      ],
+      assetRegistry: [
+        { assetType: "skill", assetRef: "research-news-synthesis", resolvedRef: "skills/research-news-synthesis/SKILL.md" },
+        { assetType: "skill", assetRef: "second-skill", resolvedRef: "skills/second-skill/SKILL.md" },
+        { assetType: "knowledge_pattern", assetRef: ambiguousPatternId, resolvedRef: ambiguousPatternId },
+        { assetType: "knowledge_pattern", assetRef: ambiguousPatternId, resolvedRef: `${ambiguousPatternId}#dupe` },
+      ],
+      gateVerdicts: [{ gateOwner: "peer:validator", verdict: "PASS" }],
+    });
+
+    expect(result.plan).toEqual([]);
+    expect(result.diagnostics).toEqual([
+      {
+        code: "unresolved_evidence_pattern",
+        message: `selfImprovementCandidates[0] references knowledge_pattern ${missingPatternId} which does not resolve to exactly one registry entry`,
+      },
+      {
+        code: "unresolved_evidence_pattern",
+        message: `selfImprovementCandidates[1] references knowledge_pattern ${ambiguousPatternId} which does not resolve to exactly one registry entry`,
+      },
+    ]);
+  });
+
+  it("rejects malformed knowledge pattern evidence entries as contract violations", () => {
+    const result = buildSelfImprovementAdoptionPlan({
+      candidates: [{ ...acceptedCandidate, evidenceSource: [{ type: "knowledge_pattern" }] }],
+      assetRegistry: [{ assetType: "skill", assetRef: "research-news-synthesis", resolvedRef: "skills/research-news-synthesis/SKILL.md" }],
+      gateVerdicts: [{ gateOwner: "peer:validator", verdict: "PASS" }],
+    });
+
+    expect(result.plan).toEqual([]);
+    expect(result.diagnostics).toEqual([
+      {
+        code: "invalid_candidate_contract",
+        message: "selfImprovementCandidates[0].evidenceSource knowledge_pattern entries require a non-empty id",
+      },
+    ]);
   });
 });

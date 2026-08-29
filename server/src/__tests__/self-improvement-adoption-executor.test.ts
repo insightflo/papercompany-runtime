@@ -19,6 +19,7 @@ const basePlanEntry: SelfImprovementAdoptionPlanEntry = {
   gateOwner: "peer:validator",
   evidenceSource: ["issue:planning-1"],
   pattern: "Repeatedly missed source freshness labels.",
+  evidencePatternIds: [],
 };
 
 function makeMemoryAssetStore(initial: Record<string, string>) {
@@ -70,6 +71,7 @@ describe("applySelfImprovementAdoptionPlan", () => {
         section: "Validation checklist",
         validationVerdict: "PASS",
         applied: true,
+        adoptedFromPatternIds: [],
       },
     ]);
     expect(assetStore.writes).toHaveLength(1);
@@ -110,6 +112,89 @@ describe("applySelfImprovementAdoptionPlan", () => {
         code: "validation_failed",
         candidateIndex: 1,
         message: "candidate 1 validation did not PASS: Focused replay failed",
+      },
+    ]);
+  });
+
+  // [Phase 2 — impact 원장] 패턴 카드에서 온 채택은 적용 성공 후
+  //   impactRecorder가 호출되고 applied에 adoptedFromPatternIds가 남는다.
+  it("records adoption impact through the injected recorder for pattern-backed entries", async () => {
+    const patternId = "11111111-2222-3333-4444-555555555555";
+    const assetStore = makeMemoryAssetStore({
+      "skills/research-news-synthesis/SKILL.md": "# Research News Synthesis\n\n## Validation checklist\n- Check title.\n",
+    });
+    const impactCalls: Array<{ resolvedRef: string; patternIds: string[] }> = [];
+
+    const result = await applySelfImprovementAdoptionPlan({
+      plan: [{ ...basePlanEntry, evidencePatternIds: [patternId] }],
+      assetStore,
+      validationRunner: async () => ({ verdict: "PASS" }),
+      impactRecorder: async ({ entry }) => {
+        impactCalls.push({ resolvedRef: entry.asset.resolvedRef, patternIds: entry.evidencePatternIds });
+      },
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(impactCalls).toEqual([
+      { resolvedRef: "skills/research-news-synthesis/SKILL.md", patternIds: [patternId] },
+    ]);
+    expect(result.applied[0]?.adoptedFromPatternIds).toEqual([patternId]);
+  });
+
+  it("surfaces impact_record_failed diagnostics instead of silently skipping ledger writes", async () => {
+    const patternId = "11111111-2222-3333-4444-555555555555";
+    const assetStore = makeMemoryAssetStore({
+      "skills/research-news-synthesis/SKILL.md": "# Research News Synthesis\n\n## Validation checklist\n- Check title.\n",
+      "skills/throwing-skill/SKILL.md": "# Throwing\n\n## Validation checklist\n- Keep.\n",
+    });
+
+    const result = await applySelfImprovementAdoptionPlan({
+      plan: [
+        { ...basePlanEntry, evidencePatternIds: [patternId] },
+        {
+          ...basePlanEntry,
+          candidateIndex: 1,
+          asset: { assetType: "skill", assetRef: "throwing-skill", resolvedRef: "skills/throwing-skill/SKILL.md" },
+          evidencePatternIds: [patternId],
+        },
+      ],
+      assetStore,
+      validationRunner: async () => ({ verdict: "PASS" }),
+      impactRecorder: async ({ entry }) => {
+        if (entry.asset.resolvedRef.includes("throwing")) throw new Error("ledger db down");
+      },
+    });
+
+    // 자산 패치는 이미 적용됨 — 원장 누락만 진단으로 노출(롤백 아님, 무음도 아님).
+    expect(assetStore.writes).toHaveLength(2);
+    expect(result.applied).toHaveLength(2);
+    expect(result.diagnostics).toEqual([
+      {
+        code: "impact_record_failed",
+        candidateIndex: 1,
+        message: "candidate 1 impact recording failed for skills/throwing-skill/SKILL.md: ledger db down",
+      },
+    ]);
+  });
+
+  it("reports impact_record_failed when pattern-backed entries have no impact recorder configured", async () => {
+    const assetStore = makeMemoryAssetStore({
+      "skills/research-news-synthesis/SKILL.md": "# Research News Synthesis\n\n## Validation checklist\n- Check title.\n",
+    });
+
+    const result = await applySelfImprovementAdoptionPlan({
+      plan: [{ ...basePlanEntry, evidencePatternIds: ["11111111-2222-3333-4444-555555555555"] }],
+      assetStore,
+      validationRunner: async () => ({ verdict: "PASS" }),
+    });
+
+    expect(result.applied).toHaveLength(1);
+    expect(result.diagnostics).toEqual([
+      {
+        code: "impact_record_failed",
+        candidateIndex: 0,
+        message:
+          "candidate 0 adopted from knowledge pattern(s) 11111111-2222-3333-4444-555555555555 but no impact recorder was configured",
       },
     ]);
   });

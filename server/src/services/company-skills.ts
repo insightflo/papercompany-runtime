@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companySkills } from "@paperclipai/db";
+import { activityLog, companySkills } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference, writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import type { PaperclipSkillEntry } from "@paperclipai/adapter-utils/server-utils";
 import type {
@@ -1134,6 +1134,21 @@ function getSkillMeta(skill: CompanySkill): SkillSourceMeta {
   return isPlainRecord(skill.metadata) ? skill.metadata as SkillSourceMeta : {};
 }
 
+// [Phase 2 — impact 원장 병합 규칙] 재가져오기(replace)는 incoming 메타데이터로
+//   덮어쓰지만, incoming에 impact 키가 없으면 기존 채택 원장을 계승한다.
+//   원장은 실행 중 기록되는 런타임 소유 데이터 — 소스 동기화가 지우면 안 된다.
+export function mergeImportedSkillMetadata(
+  existingMetadata: Record<string, unknown> | null,
+  incomingMetadata: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...(incomingMetadata ?? {}) };
+  const existingImpact = existingMetadata && Array.isArray(existingMetadata.impact) ? existingMetadata.impact : null;
+  if (existingImpact && !Array.isArray(merged.impact)) {
+    merged.impact = existingImpact;
+  }
+  return merged;
+}
+
 function resolveSkillReference(
   skills: CompanySkill[],
   reference: string,
@@ -2204,7 +2219,7 @@ export function companySkillService(db: Db) {
       }
 
       const metadata = {
-        ...(skill.metadata ?? {}),
+        ...mergeImportedSkillMetadata(existing?.metadata ?? null, isPlainRecord(skill.metadata) ? skill.metadata : null),
         skillKey: skill.key,
       };
       const values = {
@@ -2239,6 +2254,53 @@ export function companySkillService(db: Db) {
       out.push(toCompanySkill(row));
     }
     return out;
+  }
+
+  // [Phase 2 — 지식 위키 → 스킬 채택 impact 원장] 자기개선 실행기의 impactRecorder가
+  //   호출하는 기록 경로. company_skills.metadata.impact 배열에
+  //   {adoptedFrom: patternId, adoptedAt, validation}를 append 한다.
+  //   위키 카드는 append-only(불변)이고 스킬은 롤백 가능 — 비대칭 유지(설계 계약).
+  async function recordAdoptionImpact(
+    companyId: string,
+    skillRef: string,
+    input: { adoptedFrom: unknown; validation?: unknown },
+  ): Promise<CompanySkill | null> {
+    const adoptedFrom = typeof input.adoptedFrom === "string" ? input.adoptedFrom.trim() : "";
+    if (!adoptedFrom) {
+      throw unprocessable("impact adoptedFrom must be a non-empty knowledge pattern id");
+    }
+    const validation = isPlainRecord(input.validation) ? input.validation : {};
+    // 키(slug 경로) 참조가 uuid 컬럼 조회로 새어 들어가 PG 파싱 오류가 나지 않게,
+    // id 폴백은 uuid 형태일 때만 시도한다.
+    const looksLikeUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(skillRef);
+    const skill = (await getByKey(companyId, skillRef))
+      ?? (looksLikeUuid ? await getById(skillRef) : null);
+    if (!skill || skill.companyId !== companyId) return null;
+
+    const existingMeta = isPlainRecord(skill.metadata) ? skill.metadata : {};
+    const existingImpact = Array.isArray(existingMeta.impact)
+      ? existingMeta.impact.filter((entry): entry is Record<string, unknown> => isPlainRecord(entry))
+      : [];
+    const impact = [...existingImpact, { adoptedFrom, adoptedAt: new Date().toISOString(), validation }];
+
+    const row = await db
+      .update(companySkills)
+      .set({ metadata: { ...existingMeta, impact }, updatedAt: new Date() })
+      .where(and(eq(companySkills.id, skill.id), eq(companySkills.companyId, companyId)))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!row) return null;
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "system",
+      actorId: "self-improvement-adoption",
+      action: "company_skill.impact_recorded",
+      entityType: "company_skill",
+      entityId: skill.id,
+      details: { adoptedFrom, skillKey: skill.key },
+    });
+    return toCompanySkill(row);
   }
 
   async function importFromSource(companyId: string, source: string): Promise<CompanySkillImportResult> {
@@ -2338,6 +2400,7 @@ export function companySkillService(db: Db) {
     updateFile,
     createLocalSkill,
     deleteSkill,
+    recordAdoptionImpact,
     importFromSource,
     scanProjectWorkspaces,
     importPackageFiles,

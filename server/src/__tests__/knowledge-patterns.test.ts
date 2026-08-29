@@ -161,3 +161,15 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
     expect(crossCompany.status).toBe(403);
   });
 });
+
+// [Phase 2 — 자기개선 연결] 순수 변환 헬퍼(EP 불필요): 검색 결과 카드 → planner 레지스트리.
+describe("knowledgePatternAdoptionRegistryEntries (pure)", () => {
+  it("maps pattern cards to knowledge_pattern registry entries keyed by card id", async () => {
+    const { knowledgePatternAdoptionRegistryEntries } = await import("../services/knowledge-patterns.js");
+    expect(knowledgePatternAdoptionRegistryEntries([{ id: "card-1" }, { id: "card-2" }])).toEqual([
+      { assetType: "knowledge_pattern", assetRef: "card-1", resolvedRef: "card-1" },
+      { assetType: "knowledge_pattern", assetRef: "card-2", resolvedRef: "card-2" },
+    ]);
+    expect(knowledgePatternAdoptionRegistryEntries([])).toEqual([]);
+  });
+});

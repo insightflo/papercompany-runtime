@@ -12,6 +12,7 @@
 import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companyKnowledgePatterns, activityLog } from "@paperclipai/db";
+import type { AdoptionAssetRegistryEntry } from "./self-improvement-adoption-planner.js";
 
 export type KnowledgePatternKind = "failure_mode" | "success_recipe" | "constraint";
 export type KnowledgePatternSource = "mission_owner_compile" | "agent_candidate" | "operator";
@@ -27,6 +28,15 @@ const TAGS_MAX = 8;
 const EVIDENCE_MAX = 10;
 
 export type KnowledgePattern = typeof companyKnowledgePatterns.$inferSelect;
+
+// [Phase 2 — 자기개선 연결] 검색된 패턴 카드를 adoption planner의 assetRegistry
+//   엔트리(knowledge_pattern 자산)로 변환한다. 호출자는 회사 스코프 검색 결과만
+//   넘겨야 한다(규칙 1) — 플래너는 레지스트리 등재 여부로 참조 해석을 판정한다.
+export function knowledgePatternAdoptionRegistryEntries(
+  cards: Array<Pick<KnowledgePattern, "id">>,
+): AdoptionAssetRegistryEntry[] {
+  return cards.map((card) => ({ assetType: "knowledge_pattern", assetRef: card.id, resolvedRef: card.id }));
+}
 
 function readTrimmed(value: unknown, field: string, max: number, required: boolean): string | null {
   if (value == null) {
