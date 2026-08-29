@@ -439,7 +439,7 @@ function parseYamlFrontmatter(raw: string): Record<string, unknown> {
   return isPlainRecord(parsed.value) ? parsed.value : {};
 }
 
-function parseFrontmatterMarkdown(raw: string): { frontmatter: Record<string, unknown>; body: string } {
+export function parseFrontmatterMarkdown(raw: string): { frontmatter: Record<string, unknown>; body: string } {
   const normalized = raw.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---\n")) {
     return { frontmatter: {}, body: normalized.trim() };
