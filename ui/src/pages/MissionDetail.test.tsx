@@ -162,6 +162,7 @@ vi.mock("../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "company-1" }),
 }));
 
+vi.mock("../context/DialogContext", () => ({ useDialog: () => ({ openNewMission: vi.fn() }) }));
 vi.mock("../context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }),
 }));
@@ -233,6 +234,7 @@ vi.mock("@/components/ui/separator", () => ({
 
 vi.mock("lucide-react", () => ({
   Rocket: () => <span>Rocket</span>,
+  RotateCcw: () => <span>RotateCcw</span>,
   ListTree: () => <span>ListTree</span>,
   GitBranch: () => <span>GitBranch</span>,
   RefreshCw: () => <span>RefreshCw</span>,

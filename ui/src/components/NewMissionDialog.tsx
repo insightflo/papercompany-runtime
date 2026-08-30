@@ -28,7 +28,7 @@ const statusOptions: { value: MissionStatus; label: string }[] = [
 ];
 
 export function NewMissionDialog() {
-  const { newMissionOpen, closeNewMission } = useDialog();
+  const { newMissionOpen, closeNewMission, newMissionDefaults } = useDialog();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState("");
@@ -61,6 +61,15 @@ export function NewMissionDialog() {
     if (!newMissionOpen || ownerAgentId || !agents || agents.length === 0) return;
     setOwnerAgentId(agents[0]!.id);
   }, [agents, newMissionOpen, ownerAgentId]);
+
+  // [수정 요청 미션] 사전 채움 값 반영 — 다이얼로그가 열릴 때 1회.
+  useEffect(() => {
+    if (!newMissionOpen || !newMissionDefaults) return;
+    if (newMissionDefaults.title) setTitle(newMissionDefaults.title);
+    if (newMissionDefaults.description) setDescription(newMissionDefaults.description);
+    if (newMissionDefaults.ownerAgentId) setOwnerAgentId(newMissionDefaults.ownerAgentId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newMissionOpen, newMissionDefaults]);
 
   const createMission = useMutation({
     mutationFn: (data: { title: string; description?: string; status: MissionStatus; ownerAgentId: string; projectId?: string }) =>

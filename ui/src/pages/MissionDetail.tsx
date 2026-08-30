@@ -6,6 +6,8 @@ import { activityApi } from "../api/activity";
 import type { ActivityEvent } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
+import { useDialog } from "../context/DialogContext";
+import { buildMissionRevisionPrefill } from "../lib/missionRevisionRequest";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -14,7 +16,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
-import { GitBranch, ListTree, RefreshCw, Rocket, Settings, User } from "lucide-react";
+import { GitBranch, ListTree, RefreshCw, RotateCcw, Rocket, Settings, User } from "lucide-react";
 import { MissionIssueTree } from "../components/MissionIssueTree";
 import { MissionIssueInspector } from "../components/MissionIssueInspector";
 import { MissionExecutionOverview } from "../components/MissionExecutionOverview";
@@ -358,7 +360,8 @@ function MissionExecutionRulesPanel({ plan, auditEvents = [] }: { plan?: Mission
 export function MissionDetail() {
   const { missionId } = useParams<{ missionId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
+  const { openNewMission } = useDialog();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [selectedIssueId, setSelectedIssueIdState] = useState<string | null>(() => searchParams.get("issue"));
@@ -378,6 +381,13 @@ export function MissionDetail() {
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
+  });
+
+  // [수정 요청 미션] 원본 최종 산출물 URL 수집용 — MissionExecutionOverview와 동일 소스.
+  const { data: revisionRunData } = useQuery({
+    queryKey: queryKeys.missions.workflowRuns(missionId!),
+    queryFn: () => missionsApi.listWorkflowRuns(missionId!),
+    enabled: !!missionId,
   });
 
   const { data: missionActivity, isFetching: isMissionActivityFetching } = useQuery({
@@ -507,6 +517,24 @@ export function MissionDetail() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() => {
+            // [수정 요청 미션] 원본 맥락(링크·산출물·오너)을 사전 채운 신규 미션 생성 다이얼로그.
+            openNewMission(
+              buildMissionRevisionPrefill({
+                mission: { id: mission.id, title: mission.title, ownerAgentId: mission.ownerAgentId },
+                workflowRuns: revisionRunData ?? [],
+                origin: window.location.origin,
+                issuePrefix: selectedCompany?.issuePrefix,
+              }),
+            );
+          }}
+        >
+          <RotateCcw className="mr-1 h-3.5 w-3.5" /> 수정 요청
+        </Button>
         {STATUS_OPTIONS.filter((s) => s.value !== mission.status).map((s) => (
           <Button
             key={s.value}
