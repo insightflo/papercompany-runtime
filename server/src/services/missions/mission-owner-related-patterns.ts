@@ -9,56 +9,12 @@
 //   - 회사 스코프 검색 결과만 대상(규칙 1). 점수는 결정론적 토큰/태그 중복 — LLM 없음.
 
 import type { Db } from "@paperclipai/db";
-import { knowledgePatternsService, type KnowledgePattern } from "../knowledge-patterns.js";
+import { knowledgePatternsService } from "../knowledge-patterns.js";
+import { selectRelatedKnowledgePatterns, type RelatedKnowledgePattern } from "../knowledge-pattern-relevance.js";
 
 const CANDIDATE_POOL_LIMIT = 50;
-const DEFAULT_RESULT_LIMIT = 3;
-const MIN_RELEVANCE_SCORE = 2;
-const TAG_MATCH_SCORE = 3;
 
-export type RelatedKnowledgePattern = {
-  id: string;
-  title: string;
-  score: number;
-};
-
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s-]+/gu, " ")
-    .split(/\s+/)
-    .filter((token) => token.length >= 2);
-}
-
-/** 결정론적 관련도: 스코프태그 직접命中 + 문맥 토큰 중복(제목·증상·근본원인에서). */
-export function selectRelatedKnowledgePatterns(
-  cards: Array<Pick<KnowledgePattern, "id" | "title" | "symptoms" | "rootCause" | "scopeTags">>,
-  contextTexts: string[],
-  limit: number = DEFAULT_RESULT_LIMIT,
-): RelatedKnowledgePattern[] {
-  const contextTokens = new Set(tokenize(contextTexts.join(" ")));
-  if (contextTokens.size === 0) return [];
-
-  const scored = cards.map((card) => {
-    const cardTokens = new Set([
-      ...tokenize(`${card.title ?? ""} ${card.symptoms ?? ""} ${card.rootCause ?? ""}`),
-      ...(card.scopeTags ?? []).map((tag) => tag.toLowerCase()),
-    ]);
-    let score = 0;
-    for (const tag of card.scopeTags ?? []) {
-      if (contextTokens.has(tag.toLowerCase())) score += TAG_MATCH_SCORE;
-    }
-    for (const token of cardTokens) {
-      if (token.length >= 2 && contextTokens.has(token)) score += 1;
-    }
-    return { id: card.id, title: card.title, score };
-  });
-
-  return scored
-    .filter((entry) => entry.score >= MIN_RELEVANCE_SCORE)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, Math.max(1, limit));
-}
+export { selectRelatedKnowledgePatterns, type RelatedKnowledgePattern };
 
 /** 회사 스코프 카드 검색 → 관련 카드 선택. 실패 시 빈 배열(오너 액션 생성은 계속). */
 export async function findRelatedKnowledgePatterns(

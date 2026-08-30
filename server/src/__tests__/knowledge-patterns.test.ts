@@ -125,6 +125,62 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
     await expect(svc.create(sampleCard({ title: "길다".repeat(200) }))).rejects.toThrow();
   });
 
+  it("routes: POST returns non-blocking similarExisting hints for near-duplicate cards and skips them for supersede", async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = {
+        type: "board", source: "board_key", companyId, companyIds: [companyId], isInstanceAdmin: false,
+        actorId: "board-user", agentId: null,
+      };
+      next();
+    });
+    app.use("/api", knowledgePatternsRoutes(db));
+    app.use(errorHandler);
+
+    const first = await request(app)
+      .post(`/api/companies/${companyId}/knowledge-patterns`)
+      .send({
+        kind: "failure_mode",
+        title: "구조 게이트 토큰 불일치로 QA 스텝 무발사",
+        summary: "이중완료가 게이트 토큰과 영구 불일치를 만든다.",
+        evidence: [],
+        scopeTags: ["workflow", "structural-gate"],
+        source: "operator",
+      });
+    expect(first.status).toBe(201);
+    // 이 파일의 선행 테스트가 같은 회사에 카드를 남기므로 힌트 내용은 단정하지 않는다(배열 형태만).
+    expect(Array.isArray(first.body.similarExisting)).toBe(true);
+
+    // 근접 중복 — 태그+토큰 중복으로 기존 카드 발견 → 비차단 힌트.
+    const similar = await request(app)
+      .post(`/api/companies/${companyId}/knowledge-patterns`)
+      .send({
+        kind: "failure_mode",
+        title: "게이트 토큰 불일치 — workflow 재발 사고",
+        summary: "같은 부류의 재발.",
+        evidence: [],
+        scopeTags: ["workflow"],
+        source: "operator",
+      });
+    expect(similar.status).toBe(201);
+    expect(similar.body.similarExisting.map((entry: { id: string }) => entry.id)).toContain(first.body.id);
+
+    // supersede 제출에는 힌트를 계산하지 않는다.
+    const supersede = await request(app)
+      .post(`/api/companies/${companyId}/knowledge-patterns`)
+      .send({
+        kind: "failure_mode",
+        title: "정정: 토큰 불일치의 근본은 completedAt 재스탬프",
+        summary: "정정 카드.",
+        evidence: [],
+        source: "operator",
+        supersedeId: first.body.id,
+      });
+    expect(supersede.status).toBe(201);
+    expect(supersede.body.similarExisting).toEqual([]);
+  });
+
   it("routes: board actor can create/search; cross-company agent is forbidden", async () => {
     const app = express();
     app.use(express.json());

@@ -80,6 +80,23 @@ describeEP("ensureMissionKnowledgeCompileIssue (trigger-side dedup and skip rule
 
   const refs = { unblockIssueId: "unblock-1", sourceIssueId: "source-1", workflowRunId: "run-1" };
 
+  it("renders the failure-context digest section when a digest is provided", () => {
+    const description = buildMissionKnowledgeCompileDescription({
+      missionId: "mission-1",
+      missionTitle: "저녁 미션",
+      refs: { unblockIssueId: "u", sourceIssueId: "s", workflowRunId: "r" },
+      missionExecutionDigest: ["Workflow run: gazua-evening status=failed", "  ", ""],
+    });
+    expect(description).toContain("Failure context (mission execution digest at recovery):");
+    expect(description).toContain("- Workflow run: gazua-evening status=failed");
+    const without = buildMissionKnowledgeCompileDescription({
+      missionId: "mission-1",
+      missionTitle: "저녁 미션",
+      refs: { unblockIssueId: "u", sourceIssueId: "s", workflowRunId: "r" },
+    });
+    expect(without).not.toContain("Failure context");
+  });
+
   it("creates a bounded compile issue for an active mission, then dedups and respects card existence and terminal missions", async () => {
     const first = await ensureMissionKnowledgeCompileIssue(db, { companyId, missionId, refs });
     expect(first.created).toBe(true);
@@ -103,6 +120,25 @@ describeEP("ensureMissionKnowledgeCompileIssue (trigger-side dedup and skip rule
     const terminal = await ensureMissionKnowledgeCompileIssue(db, { companyId, missionId: terminalMissionId, refs });
     expect(terminal.created).toBe(false);
     expect(terminal.reason).toBe("mission_completed");
+  });
+
+  it("embeds a real execution digest when the source issue exists", async () => {
+    const otherMissionId = randomUUID();
+    await db.insert(missions).values({ id: otherMissionId, companyId, ownerAgentId, title: "다이제스트 미션", description: "저녁 리포트 생산 미션", status: "active" });
+    const { issues: issuesTable } = await import("@paperclipai/db");
+    const [sourceIssue] = await db.insert(issuesTable).values({
+      companyId, missionId: otherMissionId, title: "막혔던 원천 이슈", status: "done",
+    }).returning();
+
+    const result = await ensureMissionKnowledgeCompileIssue(db, {
+      companyId,
+      missionId: otherMissionId,
+      refs: { unblockIssueId: "u2", sourceIssueId: sourceIssue!.id, workflowRunId: "r2" },
+    });
+    expect(result.created).toBe(true);
+    const [row] = await db.select().from(issuesTable).where(eq(issuesTable.id, result.issueId!));
+    expect(row!.description).toContain("Failure context (mission execution digest at recovery):");
+    expect(row!.description).toContain("저녁 리포트 생산 미션");
   });
 
   it("skips creation when a pattern card already references the mission", async () => {
