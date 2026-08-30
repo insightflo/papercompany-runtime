@@ -5,13 +5,15 @@
 //   위키는 CORE(heartbeat hook → recordFailure 축적 → adapter 실행 전 prompt 주입)이므로
 //   plugin이 아닌 독립 메뉴로 노출한다.
 // [외부 연결] agentWikiApi → GET /api/companies/:id/agent-wiki.
-import { useMemo, useState, type ReactElement } from "react";
+import { Fragment, useMemo, useState, type ReactElement } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Brain } from "lucide-react";
 import { agentWikiApi } from "../api/agentWiki";
+import { knowledgePatternsApi, type KnowledgePatternCardDto } from "../api/knowledgePatterns";
 import { useCompany } from "../context/CompanyContext";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "../lib/utils";
 
 const DAY_OPTIONS = [7, 14, 30];
@@ -95,6 +97,128 @@ function AgentWikiTimeseries({ points }: { points: { day: string; errorCode: str
   );
 }
 
+
+const KIND_STYLE: Record<string, string> = {
+  failure_mode: "bg-red-500/15 text-red-400",
+  success_recipe: "bg-emerald-500/15 text-emerald-400",
+  constraint: "bg-blue-500/15 text-blue-400",
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  mission_owner_compile: "오너 컴파일",
+  agent_candidate: "에이전트 제안",
+  operator: "운영자",
+};
+
+function PatternCardsSection({ companyId }: { companyId: string }) {
+  const [q, setQ] = useState("");
+  const [includeSuperseded, setIncludeSuperseded] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["knowledge-patterns", companyId, q, includeSuperseded],
+    queryFn: () => knowledgePatternsApi.list(companyId, { q, includeSuperseded }),
+  });
+
+  const patterns = data?.patterns ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">🗂️ 사고→패턴 카드 ({patterns.length})</CardTitle>
+        <CardDescription>
+          오너/운영자가 큐레이션한 사고 패턴 원장(append-only). 실행 프롬프트에 주입되지 않고
+          진단·기획 시점에만 소비됩니다 — 위 자가학습 교훈(자동 주입)과는 별개 층입니다.
+        </CardDescription>
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="제목·증상·근본원인 검색"
+            className="h-8 w-64"
+          />
+          <Button variant={includeSuperseded ? "default" : "outline"} size="sm" onClick={() => setIncludeSuperseded((v) => !v)}>
+            대체 이력 포함
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">불러오는 중…</p>
+        ) : isError ? (
+          <p className="text-sm text-red-400">조회 실패: {(error as Error)?.message ?? "unknown"}</p>
+        ) : patterns.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">등록된 패턴 카드가 없습니다.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="px-2 py-2">종류</th>
+                  <th className="px-2 py-2">제목 / 요약</th>
+                  <th className="px-2 py-2">태그</th>
+                  <th className="px-2 py-2">출처</th>
+                  <th className="px-2 py-2">생성(KST)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {patterns.map((card: KnowledgePatternCardDto) => {
+                  const createdKst = new Date(card.createdAt).toLocaleString("sv-SE", { timeZone: "Asia/Seoul" });
+                  const superseded = !!card.supersededById;
+                  const expanded = expandedId === card.id;
+                  return (
+                    <Fragment key={card.id}>
+                      <tr
+                        className={cn("cursor-pointer border-b align-top hover:bg-muted/40", superseded && "opacity-60")}
+                        onClick={() => setExpandedId(expanded ? null : card.id)}
+                      >
+                        <td className="px-2 py-2">
+                          <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", KIND_STYLE[card.kind] ?? "bg-zinc-500/15 text-zinc-400")}>
+                            {card.kind}
+                          </span>
+                          {superseded ? <div className="mt-1 text-[10px] text-muted-foreground">대체됨</div> : null}
+                        </td>
+                        <td className="max-w-[420px] px-2 py-2 font-medium">
+                          {card.title}
+                          <div className="text-[11px] font-normal text-muted-foreground">{card.summary}</div>
+                        </td>
+                        <td className="px-2 py-2 text-xs text-muted-foreground">
+                          {card.scopeTags.length > 0 ? card.scopeTags.map((t) => `#${t}`).join(" ") : "-"}
+                        </td>
+                        <td className="px-2 py-2 text-xs text-muted-foreground">{SOURCE_LABEL[card.source] ?? card.source}</td>
+                        <td className="px-2 py-2 text-xs text-muted-foreground">{createdKst}</td>
+                      </tr>
+                      {expanded ? (
+                        <tr className="border-b bg-muted/20">
+                          <td colSpan={5} className="px-4 py-3 text-xs">
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <div><span className="font-semibold text-amber-400">증상</span><div className="text-muted-foreground">{card.symptoms ?? "-"}</div></div>
+                              <div><span className="font-semibold text-amber-400">근본원인</span><div className="text-muted-foreground">{card.rootCause ?? "-"}</div></div>
+                              <div><span className="font-semibold text-emerald-400">해결/통한 것</span><div className="text-muted-foreground">{card.whatWorked ?? "-"}</div></div>
+                              <div>
+                                <span className="font-semibold text-blue-400">증거 참조</span>
+                                <div className="text-muted-foreground">
+                                  {card.evidence.length === 0 ? "-" : card.evidence.map((ref, i) => (
+                                    <div key={i}>{ref.type}:{ref.id}{ref.note ? ` (${ref.note})` : ""}</div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AgentWiki() {
   const { selectedCompanyId } = useCompany();
   const [days, setDays] = useState(14);
@@ -150,6 +274,8 @@ export function AgentWiki() {
               </Card>
             ))}
           </div>
+
+          <PatternCardsSection companyId={selectedCompanyId} />
 
           <Card>
             <CardHeader>
