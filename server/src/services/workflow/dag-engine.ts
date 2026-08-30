@@ -7,9 +7,9 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
-import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import {
@@ -2784,11 +2784,116 @@ async function startIssueLessToolStepRun(input: {
   return true;
 }
 
+// [orphan-claim reaper] claim 은 프로세스 내 실행기가 소유한다. 런타임 재시작/크래시로 실행기가
+//   증발하면 claim 은 완료도 실패도 못 받는다(타임아웃 타이머도 프로세스 내부에서 사라짐).
+//   판정: issue-less 툴 스텝 running + lastDispatchAcceptedAt NOT NULL + error 없음 +
+//   claim 나이 > 도구 timeoutMs + grace (최소 MIN_AGE). 실패 처리는 큐 프로세서의 기존
+//   failToolStepRunWithDispatchError + syncWorkflowRunState 경로를 그대로 재사용한다.
+//   2026-08-30 사고(미션 17f36958): 배포 검증 재시작 6초 전에 claim 된 stage-youtube-video 가
+//   3시간+ running 방치 — 감지(사다리 7회)는 됐지만 회복 통로가 없었다. 이 회수기가 그 끝을 맡는다.
+const DEFAULT_ORPHANED_TOOL_CLAIM_TIMEOUT_MS = 10 * 60_000;
+const ORPHANED_TOOL_CLAIM_GRACE_MS = 5 * 60_000;
+const ORPHANED_TOOL_CLAIM_MIN_AGE_MS = 15 * 60_000;
+
+async function resolveWorkflowToolStepClaimTimeoutMs(
+  db: Db,
+  companyId: string,
+  toolName: string,
+): Promise<number> {
+  let rows = await db
+    .select({ adapterConfig: toolDefinitions.adapterConfig })
+    .from(toolDefinitions)
+    .where(and(
+      eq(toolDefinitions.companyId, companyId),
+      eq(toolDefinitions.name, toolName),
+    ))
+    .limit(1);
+  if (rows.length === 0) {
+    rows = await db
+      .select({ adapterConfig: toolDefinitions.adapterConfig })
+      .from(toolDefinitions)
+      .where(eq(toolDefinitions.name, toolName))
+      .limit(1);
+  }
+  const timeoutMs = rows[0]?.adapterConfig?.timeoutMs;
+  return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : DEFAULT_ORPHANED_TOOL_CLAIM_TIMEOUT_MS;
+}
+
+export async function reconcileOrphanedWorkflowToolStepClaims(
+  db: Db,
+  options: { limit?: number; now?: Date } = {},
+): Promise<{ orphanedCount: number; skippedCount: number }> {
+  const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+  const now = options.now ?? new Date();
+  const minAgeCutoff = new Date(now.getTime() - ORPHANED_TOOL_CLAIM_MIN_AGE_MS);
+  const candidateRows = await db
+    .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+    .where(and(
+      eq(workflowRuns.status, "running"),
+      eq(workflowStepRuns.status, "running"),
+      isNull(workflowStepRuns.issueId),
+      isNull(workflowStepRuns.lastDispatchErrorAt),
+      isNotNull(workflowStepRuns.lastDispatchAcceptedAt),
+      isNotNull(workflowStepRuns.lastDispatchRequestId),
+      lte(workflowStepRuns.lastDispatchAcceptedAt, minAgeCutoff),
+    ))
+    .orderBy(asc(workflowStepRuns.lastDispatchAcceptedAt))
+    .limit(limit);
+
+  let orphanedCount = 0;
+  let skippedCount = 0;
+  for (const row of candidateRows) {
+    const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
+    const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+    if (!step || !isIssueLessToolStep(step)) {
+      skippedCount += 1;
+      continue;
+    }
+    const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
+    const requestId = readMetadataString(invocation.requestId)
+      ?? readMetadataString(row.stepRun.lastDispatchRequestId);
+    const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
+    const acceptedAtMs = row.stepRun.lastDispatchAcceptedAt instanceof Date
+      ? row.stepRun.lastDispatchAcceptedAt.getTime()
+      : new Date(row.stepRun.lastDispatchAcceptedAt as unknown as string).getTime();
+    if (!requestId || !toolName || !Number.isFinite(acceptedAtMs)) {
+      skippedCount += 1;
+      continue;
+    }
+    const timeoutMs = await resolveWorkflowToolStepClaimTimeoutMs(db, row.run.companyId, toolName);
+    const ageMs = now.getTime() - acceptedAtMs;
+    if (ageMs < timeoutMs + ORPHANED_TOOL_CLAIM_GRACE_MS) {
+      skippedCount += 1;
+      continue;
+    }
+    await failToolStepRunWithDispatchError({
+      db,
+      step,
+      stepRun: row.stepRun,
+      now,
+      requestId,
+      toolName,
+      args: Object.prototype.hasOwnProperty.call(invocation, "args") ? invocation.args : null,
+      error: `Workflow tool step claim orphaned: no completion since claim at ${new Date(acceptedAtMs).toISOString()} (age ${Math.round(ageMs / 1000)}s exceeded timeout ${timeoutMs}ms + ${ORPHANED_TOOL_CLAIM_GRACE_MS}ms grace). Executor restart or stuck dispatch; failed by orphan-claim reaper so onFailure/rerun recovery can proceed.`,
+      provenance: { run: row.run, source: "workflow_tool_queue" },
+    });
+    await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
+    orphanedCount += 1;
+  }
+  return { orphanedCount, skippedCount };
+}
+
 export async function processQueuedWorkflowToolStepRuns(
   db: Db,
   options: { limit?: number; now?: Date } = {},
 ): Promise<WorkflowToolStepQueueDispatchResult> {
   const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+  const orphanReconcile = await reconcileOrphanedWorkflowToolStepClaims(db, { ...options, limit });
   const queuedRows = await db
     .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
     .from(workflowStepRuns)
@@ -2808,8 +2913,8 @@ export async function processQueuedWorkflowToolStepRuns(
   const result: WorkflowToolStepQueueDispatchResult = {
     claimedCount: 0,
     executedCount: 0,
-    failedCount: 0,
-    skippedCount: 0,
+    failedCount: orphanReconcile.orphanedCount,
+    skippedCount: orphanReconcile.skippedCount,
   };
 
   for (const row of queuedRows) {
