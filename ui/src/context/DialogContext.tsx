@@ -16,6 +16,13 @@ interface NewGoalDefaults {
   parentId?: string;
 }
 
+// [수정 요청 미션] 미션 생성 다이얼로그 사전 채움 값 — MissionDetail의 수정 요청 버튼이 사용.
+interface NewMissionDefaults {
+  title?: string;
+  description?: string;
+  ownerAgentId?: string;
+}
+
 interface OnboardingOptions {
   initialStep?: 1 | 2 | 3 | 4;
   companyId?: string;
@@ -34,7 +41,8 @@ interface DialogContextValue {
   openNewGoal: (defaults?: NewGoalDefaults) => void;
   closeNewGoal: () => void;
   newMissionOpen: boolean;
-  openNewMission: () => void;
+  newMissionDefaults: NewMissionDefaults;
+  openNewMission: (defaults?: NewMissionDefaults) => void;
   closeNewMission: () => void;
   newAgentOpen: boolean;
   openNewAgent: () => void;
@@ -54,6 +62,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   const [newGoalOpen, setNewGoalOpen] = useState(false);
   const [newGoalDefaults, setNewGoalDefaults] = useState<NewGoalDefaults>({});
   const [newMissionOpen, setNewMissionOpen] = useState(false);
+  const [newMissionDefaults, setNewMissionDefaults] = useState<NewMissionDefaults>({});
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingOptions, setOnboardingOptions] = useState<OnboardingOptions>({});
@@ -86,12 +95,15 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     setNewGoalDefaults({});
   }, []);
 
-  const openNewMission = useCallback(() => {
+  // [수정 요청 미션] 원본 미션 맥락(제목/설명/오너)을 사전 채움 — openNewIssue(defaults) 패턴과 동일.
+  const openNewMission = useCallback((defaults: NewMissionDefaults = {}) => {
+    setNewMissionDefaults(defaults);
     setNewMissionOpen(true);
   }, []);
 
   const closeNewMission = useCallback(() => {
     setNewMissionOpen(false);
+    setNewMissionDefaults({});
   }, []);
 
   const openNewAgent = useCallback(() => {
@@ -127,6 +139,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
         openNewGoal,
         closeNewGoal,
         newMissionOpen,
+        newMissionDefaults,
         openNewMission,
         closeNewMission,
         newAgentOpen,

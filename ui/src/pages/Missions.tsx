@@ -308,7 +308,7 @@ export function Missions() {
           </div>
         </div>
 
-        <Button size="sm" variant="outline" onClick={openNewMission}>
+        <Button size="sm" variant="outline" onClick={() => openNewMission()}>
           <Plus className="h-3.5 w-3.5 mr-1.5" />
           New Mission
         </Button>
