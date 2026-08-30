@@ -16,6 +16,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { activityLog, companyKnowledgePatterns, issues, missions, type Db } from "@paperclipai/db";
 import { issueService } from "../issues.js";
 import { logger } from "../../middleware/logger.js";
+import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 
 export const MISSION_KNOWLEDGE_COMPILE_ORIGIN_KIND = "mission_knowledge_compile";
 
@@ -31,14 +32,21 @@ export function buildMissionKnowledgeCompileDescription(input: {
   missionId: string;
   missionTitle: string;
   refs: MissionKnowledgeCompileRefs;
+  missionExecutionDigest?: string[];
 }): string {
   const { missionId, missionTitle, refs } = input;
+  const digest = (input.missionExecutionDigest ?? [])
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
   return [
     "Mission incident knowledge compile — bounded: at most one pattern card, or close with no card.",
     "",
     `Mission id: ${missionId}`,
     `Mission title: ${missionTitle}`,
     `Recovered from: unblock issue ${refs.unblockIssueId} (source issue ${refs.sourceIssueId} reached done; workflow run ${refs.workflowRunId}).`,
+    ...(digest.length > 0
+      ? ["", "Failure context (mission execution digest at recovery):", ...digest.map((line) => `- ${line}`)]
+      : []),
     "",
     "Conservative rule: submit a card ONLY if the verified root cause was structural (likely to recur beyond this mission). One-off or already-permanently-fixed failures → close this issue with a short comment instead; an empty wiki is better than a polluted one.",
     "",
@@ -59,7 +67,7 @@ export async function ensureMissionKnowledgeCompileIssue(
   input: { companyId: string; missionId: string; refs: MissionKnowledgeCompileRefs },
 ): Promise<{ created: boolean; reason: string; issueId: string | null }> {
   const [mission] = await db
-    .select({ id: missions.id, title: missions.title, status: missions.status, ownerAgentId: missions.ownerAgentId })
+    .select({ id: missions.id, companyId: missions.companyId, title: missions.title, description: missions.description, status: missions.status, ownerAgentId: missions.ownerAgentId })
     .from(missions)
     .where(and(eq(missions.id, input.missionId), eq(missions.companyId, input.companyId)))
     .limit(1);
@@ -91,12 +99,28 @@ export async function ensureMissionKnowledgeCompileIssue(
     .limit(1);
   if (existingIssue) return { created: false, reason: "issue_exists", issueId: existingIssue.id };
 
+  // [Digester 유사] 회복 시점 실패 문맥을 다이제스트로 실어준다(실패 시 생략 — 이슈 생성은 계속).
+  let missionExecutionDigest: string[] = [];
+  try {
+    const [sourceIssue] = await db
+      .select({ id: issues.id, identifier: issues.identifier, status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(and(eq(issues.id, input.refs.sourceIssueId), eq(issues.companyId, input.companyId)))
+      .limit(1);
+    if (sourceIssue) {
+      missionExecutionDigest = await buildMissionExecutionDigest(db, { mission, blockedIssue: sourceIssue });
+    }
+  } catch (error) {
+    logger.warn({ err: error, missionId: input.missionId }, "failed to build execution digest for knowledge compile issue");
+  }
+
   const issue = await issueService(db).create(input.companyId, {
     assigneeAgentId: mission.ownerAgentId,
     description: buildMissionKnowledgeCompileDescription({
       missionId: mission.id,
       missionTitle: mission.title,
       refs: input.refs,
+      missionExecutionDigest,
     }),
     missionId: mission.id,
     originKind: MISSION_KNOWLEDGE_COMPILE_ORIGIN_KIND,

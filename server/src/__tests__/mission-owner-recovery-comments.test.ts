@@ -291,6 +291,12 @@ describe("owner unblock description related knowledge patterns section", () => {
     expect(description).not.toContain("whatWorked:");
   });
 
+  it("renders the ruled-out alternatives guard line in the diagnosis checklist", () => {
+    const description = buildMissionOwnerUnblockDescription(mission, blockedIssue, {});
+    expect(description).toContain("considered and RULED OUT with evidence");
+    expect(description).toContain("unanimous agreement without an explicit exclusion list");
+  });
+
   it("omits the section entirely when no related patterns are provided", () => {
     const description = buildMissionOwnerUnblockDescription(mission, blockedIssue, {});
     expect(description).not.toContain("Related incident patterns");

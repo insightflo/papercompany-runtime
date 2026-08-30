@@ -38,6 +38,18 @@ export function knowledgePatternsRoutes(db: Db) {
     const actor = req.actor;
     const sourceFromActor = actor.type === "agent" ? "mission_owner_compile" : "operator";
     const bodySource = typeof req.body?.source === "string" && req.body.source.trim() ? req.body.source.trim() : sourceFromActor;
+    const supersedeId = typeof req.body?.supersedeId === "string" && req.body.supersedeId.trim() ? req.body.supersedeId.trim() : null;
+
+    // [중복 힌트 — 비차단] supersede가 아니면 등록 전 유사카드를 계산해 응답에 실는다.
+    //   근접 중복은 supersedeId로 정정 발행을 유도한다(위키 오염 방지 — EvoHarness compaction).
+    const similarExisting = supersedeId ? [] : await svc.findSimilar({
+      companyId,
+      title: typeof req.body?.title === "string" ? req.body.title : "",
+      symptoms: typeof req.body?.symptoms === "string" ? req.body.symptoms : null,
+      rootCause: typeof req.body?.rootCause === "string" ? req.body.rootCause : null,
+      scopeTags: Array.isArray(req.body?.scopeTags) ? req.body.scopeTags.filter((tag: unknown): tag is string => typeof tag === "string") : [],
+    }).catch(() => []);
+
     const card = await svc.create({
       companyId,
       kind: req.body?.kind,
@@ -50,9 +62,9 @@ export function knowledgePatternsRoutes(db: Db) {
       scopeTags: req.body?.scopeTags,
       source: bodySource,
       createdByAgentId: actor.type === "agent" ? actor.agentId ?? null : null,
-      supersedeId: typeof req.body?.supersedeId === "string" && req.body.supersedeId.trim() ? req.body.supersedeId.trim() : null,
+      supersedeId,
     });
-    res.status(201).json(card);
+    res.status(201).json({ ...card, similarExisting });
   });
 
   return router;

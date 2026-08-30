@@ -13,6 +13,7 @@ import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companyKnowledgePatterns, activityLog } from "@paperclipai/db";
 import type { AdoptionAssetRegistryEntry } from "./self-improvement-adoption-planner.js";
+import { selectRelatedKnowledgePatterns, type RelatedKnowledgePattern } from "./knowledge-pattern-relevance.js";
 
 export type KnowledgePatternKind = "failure_mode" | "success_recipe" | "constraint";
 export type KnowledgePatternSource = "mission_owner_compile" | "agent_candidate" | "operator";
@@ -80,6 +81,21 @@ function readTags(value: unknown): string[] {
 
 export function knowledgePatternsService(db: Db) {
   return {
+    /** [중복 힌트 — EvoHarness compaction 교훈] 새 카드와 유사한 기존 카드 상위 3건.
+     *  supersede 대상 후보 제안용 비차단 힌트(superseded 제외 풀에서 스코프태그+토큰 중복). */
+    findSimilar: async (input: {
+      companyId: string;
+      title: string;
+      symptoms?: string | null;
+      rootCause?: string | null;
+      scopeTags?: readonly string[];
+    }): Promise<RelatedKnowledgePattern[]> => {
+      const cards = await knowledgePatternsService(db).search({ companyId: input.companyId, limit: 50 });
+      return selectRelatedKnowledgePatterns(
+        cards,
+        [input.title, input.symptoms ?? "", input.rootCause ?? "", ...(input.scopeTags ?? [])],
+      );
+    },
     /** append-only 생성. supersedeId가 있으면 같은 회사의 기존 카드를 대체 체인으로 연결한다. */
     create: async (input: {
       companyId: string;
