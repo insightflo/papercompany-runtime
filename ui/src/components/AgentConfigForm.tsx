@@ -1339,7 +1339,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     {tv && (
                       <div>
                         <span className="font-medium">Session threshold:</span>{" "}
-                        <span className={tv.verdict === "raise" || tv.verdict === "raise_borderline" ? "text-amber-600 dark:text-amber-300" : ""}>
+                        <span className={tv.verdict === "raise" ? "text-amber-600 dark:text-amber-300" : ""}>
                           {tv.verdict}
                         </span>
                         {tv.suggestedTokens ? ` → ${tv.suggestedTokens.toLocaleString("en-US")} tokens` : ""}

@@ -52,6 +52,35 @@ describe("agent fit evaluator rules", () => {
     expect(intraRun.suggestedTokens).toBeNull();
   });
 
+  it("Sherlock case: p90 ≫ threshold with churn is intra-run growth (keep_info), never a raise", () => {
+    // 오폭 회귀 방지: p90 254만 / 임계 30만 / churn 79% — 과거 규칙은 280만 상향을 제안했다.
+    const verdict = recommendSessionThreshold({
+      adapterType: "commandcode_local", threshold: 300_000,
+      floorTok: 100_000, p50Tok: 1_368_284, p90Tok: 2_544_344,
+      runs: 86, sessions: 68,
+    });
+    expect(verdict.verdict).toBe("keep_info");
+    expect(verdict.suggestedTokens).toBeNull();
+  });
+
+  it("modest p90 excess with churn stays keep (rotation is the guard working), thrash still raises", () => {
+    const modest = recommendSessionThreshold({
+      adapterType: "commandcode_local", threshold: 300_000,
+      floorTok: 100_000, p50Tok: 250_000, p90Tok: 380_000,
+      runs: 40, sessions: 30,
+    });
+    expect(modest.verdict).toBe("keep");
+    expect(modest.suggestedTokens).toBeNull();
+
+    const thrash = recommendSessionThreshold({
+      adapterType: "commandcode_local", threshold: 300_000,
+      floorTok: 296_000, p50Tok: 320_000, p90Tok: 350_000,
+      runs: 25, sessions: 24,
+    });
+    expect(thrash.verdict).toBe("raise");
+    expect(thrash.suggestedTokens).toBeGreaterThanOrEqual(296_000 * 1.5);
+  });
+
   it("marks adapter-managed session types as not applicable", () => {
     const verdict = recommendSessionThreshold({
       adapterType: "claude_local", threshold: 2_000_000,
