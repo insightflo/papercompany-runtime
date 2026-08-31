@@ -32,12 +32,14 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
       autoRestartDevServerWhenIdle: parsed.data.autoRestartDevServerWhenIdle ?? false,
       enableHeartbeatFinalizationV1: parsed.data.enableHeartbeatFinalizationV1 ?? false,
+      enableKnowledgePatternInjection: parsed.data.enableKnowledgePatternInjection ?? false,
     };
   }
   return {
     enableIsolatedWorkspaces: false,
     autoRestartDevServerWhenIdle: false,
     enableHeartbeatFinalizationV1: false,
+    enableKnowledgePatternInjection: false,
   };
 }
 

@@ -454,6 +454,7 @@ export async function getWorkflowStepExecutionContractForIssue(
     workflowId: row.run.workflowId,
     missionId: row.run.missionId,
     stepId: row.stepRun.stepId,
+    stepRunId: row.stepRun.id,
     stepName: step?.name ?? row.stepRun.stepId,
     toolNames,
     toolArgs: (step as { toolArgs?: unknown } | undefined)?.toolArgs ?? {},

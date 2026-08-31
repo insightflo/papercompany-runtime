@@ -43,6 +43,9 @@ export const companyKnowledgePatterns = pgTable(
     defectSignature: text("defect_signature"),
     // draft = 자동 생성 초안(주입/검색 기본 제외, 사람 승인 필요) / active = 승인됨(기본값).
     status: text("status").notNull().default("active"),
+    // [P2 주입 게이트 — fail-closed] 'agent'로 큐레이션된 카드만 실행 프롬프트 주입 대상.
+    //   기본 'ops' = 주입 없음(WikiSkill ablation 역효과 방지 — agent_wiki_entries.audience와 동일 원칙).
+    audience: text("audience").notNull().default("ops"),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     supersededById: uuid("superseded_by_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

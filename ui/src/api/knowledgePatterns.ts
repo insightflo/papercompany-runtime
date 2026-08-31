@@ -43,7 +43,8 @@ export const knowledgePatternsApi = {
     const query = params.toString();
     return api.get<KnowledgePatternsResponse>(`/companies/${companyId}/knowledge-patterns${query ? `?${query}` : ""}`);
   },
-  /** 자동 초안(draft) 카드 승인 — draft→active. 사람(보드) 전용. */
-  approve: (companyId: string, patternId: string): Promise<{ card: KnowledgePatternCardDto }> =>
-    api.post<{ card: KnowledgePatternCardDto }>(`/companies/${companyId}/knowledge-patterns/${patternId}/approve`, {}),
+  /** 자동 초안(draft) 카드 승인 — draft→active. 사람(보드) 전용.
+   *  audience='agent'는 승인과 동시에 주입 대상으로 큐레이션(측정 롤아웃 대상). */
+  approve: (companyId: string, patternId: string, audience?: "agent" | "ops"): Promise<{ card: KnowledgePatternCardDto }> =>
+    api.post<{ card: KnowledgePatternCardDto }>(`/companies/${companyId}/knowledge-patterns/${patternId}/approve`, audience ? { audience } : {}),
 };
