@@ -30,7 +30,7 @@ const DEFAULT_SESSION_THRESHOLD_TOKENS = 2_000_000;
 const ADAPTER_MANAGED_SESSION_TYPES = new Set(["claude_local", "codex_local", "hermes_local"]);
 
 export interface AgentFitThresholdVerdict {
-  verdict: "raise" | "raise_borderline" | "keep" | "keep_info" | "na";
+  verdict: "raise" | "keep" | "keep_info" | "na";
   reason: string;
   suggestedTokens: number | null;
 }
@@ -100,6 +100,12 @@ export function recommendSessionThreshold(input: {
   }
   const t = input.threshold;
   const rotationRatio = input.sessions / Math.max(input.runs, 1);
+  // [2026-08-31 수정 — Sherlock 2.8M 오폭 사례] 유일한 정당한 상향 트리거는 스래시뿐:
+  //   새 세션 바닥값(부트스트랩 하한)이 임계에 근접하면 매런 회전으로 연속성이 없다.
+  //   p90≥임계+churn 로 상향 제안하던 규칙은 제거 — 로트 완화 배치에서 세션이 임계를
+  //   넘어 회전하는 건 장치가 의도대로 작동하는 것이지 임계가 너무 낮은 게 아니다.
+  //   (오판 사례: p90 254만/임계 30만 → 280만 제안 — 이는 로트 가드를 사실상 해제하는
+  //   처방이었고, p90≫1.5×임계인 실행 내부 증식 케이스였다.)
   if (input.floorTok >= 0.8 * t) {
     return {
       verdict: "raise",
@@ -107,23 +113,16 @@ export function recommendSessionThreshold(input: {
       suggestedTokens: roundUpTo(input.floorTok * 1.5, 10_000),
     };
   }
-  if (input.p90Tok >= t && rotationRatio >= 0.5) {
-    return {
-      verdict: "raise_borderline",
-      reason: `p90 (${input.p90Tok.toLocaleString("en-US")}) ≥ threshold with session churn ${Math.round(rotationRatio * 100)}%.`,
-      suggestedTokens: roundUpTo(input.p90Tok * 1.1, 10_000),
-    };
-  }
   if (input.p90Tok > t * 1.5) {
     return {
       verdict: "keep_info",
-      reason: `p90 (${input.p90Tok.toLocaleString("en-US")}) > 1.5× threshold — single-run intra-session growth; run splitting, not a threshold fix.`,
+      reason: `p90 (${input.p90Tok.toLocaleString("en-US")}) > 1.5× threshold — single-run intra-session growth; run splitting, not a threshold fix. Session churn ${Math.round(rotationRatio * 100)}% is the guard rotating as intended.`,
       suggestedTokens: null,
     };
   }
   return {
     verdict: "keep",
-    reason: `Healthy: floor ${input.floorTok.toLocaleString("en-US")} / p50 ${input.p50Tok.toLocaleString("en-US")} / p90 ${input.p90Tok.toLocaleString("en-US")} vs threshold ${t.toLocaleString("en-US")}.`,
+    reason: `Healthy: floor ${input.floorTok.toLocaleString("en-US")} / p50 ${input.p50Tok.toLocaleString("en-US")} / p90 ${input.p90Tok.toLocaleString("en-US")} vs threshold ${t.toLocaleString("en-US")}${input.p90Tok >= t ? `; sessions crossing the threshold rotate as intended (churn ${Math.round(rotationRatio * 100)}%)` : ""}.`,
     suggestedTokens: null,
   };
 }
