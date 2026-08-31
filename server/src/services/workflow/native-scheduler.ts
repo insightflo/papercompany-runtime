@@ -6,10 +6,15 @@ import {
 } from "./scheduler-candidates.js";
 import { workflowService } from "./engine.js";
 import { processQueuedWorkflowToolStepRuns, type WorkflowToolStepQueueDispatchResult } from "./dag-engine.js";
+import {
+  AGENT_FIT_REFRESH_INTERVAL_MS,
+  refreshAgentFitProfiles,
+} from "../agent-fit-evaluator.js";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000;
 const DEFAULT_TOOL_STEP_QUEUE_INTERVAL_MS = 10_000;
+const DEFAULT_FIT_PROFILE_INTERVAL_MS = AGENT_FIT_REFRESH_INTERVAL_MS;
 
 export type NativeWorkflowSchedulerMode = "shadow" | "active";
 
@@ -63,6 +68,7 @@ export interface CreateNativeWorkflowSchedulerOptions {
     db: Db,
     options?: { limit?: number; now?: Date },
   ) => Promise<WorkflowToolStepQueueDispatchResult>;
+  refreshFitProfiles?: (db: Db, options?: { now?: Date }) => Promise<{ updatedCount: number; skippedFreshCount: number }>;
   logger?: NativeWorkflowSchedulerLogger;
 }
 
@@ -86,9 +92,12 @@ export function createNativeWorkflowScheduler(
   const listCandidates = options.listCandidates ?? listDueScheduledWorkflowCandidates;
   const claimScheduledRun = options.claimScheduledRun ?? workflowService.claimScheduledRun;
   const dispatchQueuedToolSteps = options.dispatchQueuedToolSteps ?? processQueuedWorkflowToolStepRuns;
+  const refreshFitProfiles = options.refreshFitProfiles ?? refreshAgentFitProfiles;
   const log = options.logger ?? defaultLogger;
   let interval: ReturnType<typeof setInterval> | null = null;
   let toolStepQueueInterval: ReturnType<typeof setInterval> | null = null;
+  let fitProfileInterval: ReturnType<typeof setInterval> | null = null;
+  let fitProfileTickInFlight = false;
   let tickInFlight = false;
   let toolStepQueueTickInFlight = false;
   let tickCount = 0;
@@ -128,6 +137,29 @@ export function createNativeWorkflowScheduler(
       return { claimedCount: 0, executedCount: 0, failedCount: 1, skippedCount: 0 };
     } finally {
       toolStepQueueTickInFlight = false;
+    }
+  }
+
+  async function dispatchFitProfileRefresh(now = new Date()): Promise<void> {
+    if (options.mode !== "active") return;
+    if (fitProfileTickInFlight) return;
+    fitProfileTickInFlight = true;
+    try {
+      const result = await refreshFitProfiles(options.db, { now });
+      if (result.updatedCount > 0) {
+        log.info({
+          mode: options.mode,
+          updatedCount: result.updatedCount,
+          skippedFreshCount: result.skippedFreshCount,
+        }, "Native scheduler refreshed agent fit profiles");
+      }
+    } catch (error) {
+      log.warn({
+        mode: options.mode,
+        err: error instanceof Error ? error.message : String(error),
+      }, "Native scheduler agent fit profile refresh failed (observation lane, non-fatal)");
+    } finally {
+      fitProfileTickInFlight = false;
     }
   }
 
@@ -260,6 +292,13 @@ export function createNativeWorkflowScheduler(
           });
         }, toolStepQueueIntervalMs);
         toolStepQueueInterval.unref?.();
+        // [agent fit observation] 런 종료 후 수 분 내 자동 누계·제안 계산 (metadata 관찰 전용,
+        //   실패해도 어떤 실행 경로에도 영향 없음).
+        void dispatchFitProfileRefresh();
+        fitProfileInterval = setInterval(() => {
+          void dispatchFitProfileRefresh();
+        }, DEFAULT_FIT_PROFILE_INTERVAL_MS);
+        fitProfileInterval.unref?.();
       }
     },
     stop() {
@@ -270,6 +309,10 @@ export function createNativeWorkflowScheduler(
       if (toolStepQueueInterval) {
         clearInterval(toolStepQueueInterval);
         toolStepQueueInterval = null;
+      }
+      if (fitProfileInterval) {
+        clearInterval(fitProfileInterval);
+        fitProfileInterval = null;
       }
       log.info({ mode: options.mode }, "Native workflow scheduler stopped");
     },
