@@ -1,4 +1,5 @@
 import type { Db } from "@paperclipai/db";
+import { sql } from "drizzle-orm";
 import {
   listDueScheduledWorkflowCandidates,
   type ComputeDueScheduledWorkflowCandidatesOptions,
@@ -35,6 +36,7 @@ export interface NativeWorkflowSchedulerState {
   lastToolStepClaimedCount: number;
   lastToolStepExecutedCount: number;
   lastToolStepFailedCount: number;
+  fitProfileArmed: boolean;
 }
 
 export interface NativeWorkflowScheduler {
@@ -69,6 +71,8 @@ export interface CreateNativeWorkflowSchedulerOptions {
     options?: { limit?: number; now?: Date },
   ) => Promise<WorkflowToolStepQueueDispatchResult>;
   refreshFitProfiles?: (db: Db, options?: { now?: Date }) => Promise<{ updatedCount: number; skippedFreshCount: number }>;
+  /** [agent fit activity gate] 런 활동 지표(저렴한 프로브). 기본: heartbeat_runs count+max(updated_at). */
+  readRunActivitySignature?: (db: Db) => Promise<string>;
   logger?: NativeWorkflowSchedulerLogger;
 }
 
@@ -93,11 +97,15 @@ export function createNativeWorkflowScheduler(
   const claimScheduledRun = options.claimScheduledRun ?? workflowService.claimScheduledRun;
   const dispatchQueuedToolSteps = options.dispatchQueuedToolSteps ?? processQueuedWorkflowToolStepRuns;
   const refreshFitProfiles = options.refreshFitProfiles ?? refreshAgentFitProfiles;
+  const readRunActivitySignature = options.readRunActivitySignature ?? defaultReadRunActivitySignature;
   const log = options.logger ?? defaultLogger;
   let interval: ReturnType<typeof setInterval> | null = null;
   let toolStepQueueInterval: ReturnType<typeof setInterval> | null = null;
   let fitProfileInterval: ReturnType<typeof setInterval> | null = null;
   let fitProfileTickInFlight = false;
+  // [activity-driven fit scheduler] 런 활동 서명 — 런이 있으면 10분 스케줄 유지,
+  //   한 주기 동안 새 런이 없으면 스케줄 자기중단(disarm), 다음 런 활동이 재가동(arm).
+  let fitProfileActivitySignature: string | null = null;
   let tickInFlight = false;
   let toolStepQueueTickInFlight = false;
   let tickCount = 0;
@@ -140,11 +148,51 @@ export function createNativeWorkflowScheduler(
     }
   }
 
+  async function defaultReadRunActivitySignature(db: Db): Promise<string> {
+    const result = await db.execute(sql`SELECT count(*)::text AS c, COALESCE(max(updated_at)::text, '') AS m FROM heartbeat_runs`);
+    const rows = (result as unknown as { rows?: Record<string, unknown>[] }).rows ?? (result as unknown as Record<string, unknown>[]);
+    const row = rows[0] ?? {};
+    return `${row.c ?? "0"}:${row.m ?? ""}`;
+  }
+
+  function armFitProfileInterval(): void {
+    if (fitProfileInterval) return;
+    fitProfileInterval = setInterval(() => {
+      void dispatchFitProfileRefresh();
+    }, DEFAULT_FIT_PROFILE_INTERVAL_MS);
+    fitProfileInterval.unref?.();
+  }
+
+  function disarmFitProfileInterval(): void {
+    if (fitProfileInterval) {
+      clearInterval(fitProfileInterval);
+      fitProfileInterval = null;
+    }
+  }
+
   async function dispatchFitProfileRefresh(now = new Date()): Promise<void> {
     if (options.mode !== "active") return;
     if (fitProfileTickInFlight) return;
     fitProfileTickInFlight = true;
     try {
+      const signature = await readRunActivitySignature(options.db);
+      // 부트스트랩: 첫 관찰은 서명만 확보하고 즉시 평가(재시작 후 따라잡기).
+      if (fitProfileActivitySignature === null) {
+        fitProfileActivitySignature = signature;
+        const result = await refreshFitProfiles(options.db, { now });
+        if (result.updatedCount > 0) {
+          log.info({ mode: options.mode, updatedCount: result.updatedCount, skippedFreshCount: result.skippedFreshCount }, "Native scheduler refreshed agent fit profiles (bootstrap)");
+        }
+        return;
+      }
+      // [run-driven on/off] 이번 주기에 새 런 활동이 없으면 스케줄을 끈다 — 불필요한 스케줄 실행 방지.
+      //   재가동은 메인 틱(60s)의 활동 프로브가 담당한다.
+      if (signature === fitProfileActivitySignature) {
+        disarmFitProfileInterval();
+        log.info({ mode: options.mode }, "Native scheduler agent fit profile schedule disarmed (no run activity since last evaluation)");
+        return;
+      }
+      fitProfileActivitySignature = signature;
       const result = await refreshFitProfiles(options.db, { now });
       if (result.updatedCount > 0) {
         log.info({
@@ -218,6 +266,20 @@ export function createNativeWorkflowScheduler(
         }
 
         toolStepQueueResult = await dispatchToolStepQueue(now);
+
+        // [agent fit re-arm] 런 활동이 생겼는데 fit 스케줄이 꺼져 있으면 다시 켠다.
+        //   (fit 틱 자신은 조용한 주기에 자기자신을 끈다 — 런이 스케줄을 켜고 끈다.)
+        if (!fitProfileInterval) {
+          try {
+            const signature = await readRunActivitySignature(options.db);
+            if (fitProfileActivitySignature === null || signature !== fitProfileActivitySignature) {
+              armFitProfileInterval();
+              void dispatchFitProfileRefresh();
+            }
+          } catch {
+            // 활동 프로브 실패는 재가동 스킵 — 다음 틱이 재시도
+          }
+        }
 
         lastClaimedCount = claimedCount;
         lastSkippedCount = skippedCount;
@@ -293,12 +355,9 @@ export function createNativeWorkflowScheduler(
         }, toolStepQueueIntervalMs);
         toolStepQueueInterval.unref?.();
         // [agent fit observation] 런 종료 후 수 분 내 자동 누계·제안 계산 (metadata 관찰 전용,
-        //   실패해도 어떤 실행 경로에도 영향 없음).
+        //   실패해도 어떤 실행 경로에도 영향 없음). 활동 구동: 조용하면 자기중단.
+        armFitProfileInterval();
         void dispatchFitProfileRefresh();
-        fitProfileInterval = setInterval(() => {
-          void dispatchFitProfileRefresh();
-        }, DEFAULT_FIT_PROFILE_INTERVAL_MS);
-        fitProfileInterval.unref?.();
       }
     },
     stop() {
@@ -310,10 +369,7 @@ export function createNativeWorkflowScheduler(
         clearInterval(toolStepQueueInterval);
         toolStepQueueInterval = null;
       }
-      if (fitProfileInterval) {
-        clearInterval(fitProfileInterval);
-        fitProfileInterval = null;
-      }
+      disarmFitProfileInterval();
       log.info({ mode: options.mode }, "Native workflow scheduler stopped");
     },
     tick,
@@ -329,6 +385,7 @@ export function createNativeWorkflowScheduler(
         lastToolStepClaimedCount,
         lastToolStepExecutedCount,
         lastToolStepFailedCount,
+        fitProfileArmed: fitProfileInterval !== null,
       };
     },
   };
