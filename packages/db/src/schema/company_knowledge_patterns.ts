@@ -17,7 +17,9 @@ import { companies } from "./companies.js";
 //   audience 게이트와 동일 원칙).
 // [불변식] append-only — 앱 계층이 insert/select만 노출하고 수정은 supersede 체인으로만
 //   대체한다(새 카드 발행 + 이전 카드의 superseded_by_id 갱신). 실패한 지식도 남아 다음
-//   진단이 같은 실수를 반복하지 않게 한다.
+//   진단이 같은 실수를 반복하지 않게 한다. 유일한 예외적 상태 전이: draft→active 승인
+//   (사람이 자동 초안 카드를 검토·활성화 — 내용 불변, status 필드만 전이).
+//   status='draft'(자동 초안, 승인 전) | 'active'(기존 전체 + 승인된 초안).
 // [외부 연결] FK: companies(cascade) / agents(set null, 컴파일한 오너 에이전트).
 //   service: server/src/services/knowledge-patterns.ts. routes: routes/knowledge-patterns.ts.
 // [수정시 주의] 스키마 변경 시 수기 마이그레이션 규약 준수(journal drift — 0096 참조).
@@ -35,7 +37,12 @@ export const companyKnowledgePatterns = pgTable(
     rootCause: text("root_cause"),
     whatWorked: text("what_worked"),
     scopeTags: text("scope_tags").array().notNull().default([]),
-    source: text("source").notNull(), // mission_owner_compile | agent_candidate | operator
+    source: text("source").notNull(), // mission_owner_compile | agent_candidate | operator | auto_rework_draft
+    // [P1 자동 초안] 기계적 QA 교정(remediation)이 동일 결함 서명 2회째 감지됐을 때의 서명 해시.
+    //   사람이 만든 카드는 null. (company_id, defect_signature) 부분 유일 인덱스로 초안 중복 방지.
+    defectSignature: text("defect_signature"),
+    // draft = 자동 생성 초안(주입/검색 기본 제외, 사람 승인 필요) / active = 승인됨(기본값).
+    status: text("status").notNull().default("active"),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     supersededById: uuid("superseded_by_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

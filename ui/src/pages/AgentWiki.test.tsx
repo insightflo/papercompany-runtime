@@ -7,6 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 //   "자동 주입되는 자가학습 교훈"과 "주입 없는 큐레이션 카드"의 층 구분이 드러나는지.
 //   정적 마크업 렌더로 검증(레포 규약) — 클릭 확장은 초기 마크업에 detail이 없음으로 확인.
 vi.mock("@tanstack/react-query", () => ({
+  useQueryClient: () => ({ invalidateQueries: () => undefined }),
+  useMutation: ({ mutationFn, onSuccess }: { mutationFn: (input: unknown) => Promise<unknown>; onSuccess?: () => void }) => ({
+    mutate: () => undefined,
+    isPending: false,
+    isError: false,
+    mutationFn,
+    onSuccess,
+  }),
   useQuery: ({ queryKey }: { queryKey: readonly unknown[] }) => {
     if (queryKey[0] === "knowledge-patterns") {
       return {
@@ -23,6 +31,8 @@ vi.mock("@tanstack/react-query", () => ({
             whatWorked: "게이트 CAS 재큐 + 재검증",
             scopeTags: ["workflow", "structural-gate"],
             source: "mission_owner_compile",
+            status: "active",
+            defectSignature: null,
             createdByAgentId: null,
             supersededById: null,
             createdAt: "2026-08-29T12:00:00.000Z",
@@ -61,8 +71,8 @@ describe("AgentWiki pattern cards section", () => {
     expect(markup).toContain("failure_mode");
   });
 
-  it("keeps the layer distinction visible: curated cards are not auto-injected", () => {
-    expect(markup).toContain("실행 프롬프트에 주입되지 않고");
+  it("keeps the layer distinction visible: curated cards are not auto-injected (gated + measured rollout only)", () => {
+    expect(markup).toContain("실행 프롬프트 주입은 별도 계약(게이트+측정 롤아웃)으로만");
     expect(markup).toContain("자동 주입");
   });
 

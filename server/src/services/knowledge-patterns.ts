@@ -3,11 +3,13 @@
 // [파일 목적] 사고→패턴 지식 위키 서비스 — company_knowledge_patterns 테이블의
 //   append-only 큐레이션 카드 생성/검색. 설계: artifacts doc/plans/2026-08-28-incident-pattern-knowledge-wiki.md
 // [불변식]
-//   - append-only: 수정 API 없음. 대체는 supersedeId로 새 카드 발행 + 이전 카드 링크 갱신.
+//   - append-only: 내용(title/summary/evidence 등) 수정 API 없음. 대체는 supersedeId로 새 카드 발행
+//     + 이전 카드 링크 갱신. 유일한 상태 전이는 approve(자동 초안 draft→active)뿐 — 내용 불변.
 //   - 회사 스코프 필수(규칙 1). 검색/대체 대상은 같은 회사로 제한.
 //   - 구조화 레코드만 권위(규칙 8) — evidence는 {type,id,note} 배열, 프로즈 파싱 없음.
 //   - 생성 시 activity log 기록.
-// [소비] 미션 오너 진단/기획 검색, 자기개선 근거 참조. 실행 프롬프트 주입 금지(계약).
+// [소비] 미션 오너 진단/기획 검색, 자기개선 근거 참조. draft 초안은 검색 기본 제외(승인 전 무측).
+//   실행 프롬프트 주입은 별도 계약(관련도+게이트+측정 롤아웃 — knowledge-pattern-injection)으로만.
 
 import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -16,10 +18,12 @@ import type { AdoptionAssetRegistryEntry } from "./self-improvement-adoption-pla
 import { selectRelatedKnowledgePatterns, type RelatedKnowledgePattern } from "./knowledge-pattern-relevance.js";
 
 export type KnowledgePatternKind = "failure_mode" | "success_recipe" | "constraint";
-export type KnowledgePatternSource = "mission_owner_compile" | "agent_candidate" | "operator";
+export type KnowledgePatternSource = "mission_owner_compile" | "agent_candidate" | "operator" | "auto_rework_draft";
+export const KNOWLEDGE_PATTERN_STATUS_DRAFT = "draft";
+export const KNOWLEDGE_PATTERN_STATUS_ACTIVE = "active";
 
 const KINDS: readonly string[] = ["failure_mode", "success_recipe", "constraint"];
-const SOURCES: readonly string[] = ["mission_owner_compile", "agent_candidate", "operator"];
+const SOURCES: readonly string[] = ["mission_owner_compile", "agent_candidate", "operator", "auto_rework_draft"];
 const EVIDENCE_TYPES: readonly string[] = ["mission", "workflow_run", "issue", "transition_event", "pr", "heartbeat_run"];
 
 const TITLE_MAX = 200;
@@ -174,19 +178,103 @@ export function knowledgePatternsService(db: Db) {
       return card;
     },
 
-    /** 검색 — superseded 기본 제외. kind/tags/q(제목·요약·증상·근본원인 ILIKE) 필터. */
+    /** [P1 자동 초안 — 반복 QA 기계 교정] 동일 결함 서명 반복 감지 시 failure_mode 초안 카드 생성.
+     *  append-only 유지: 초안은 새 insert이고 유일한 상태 전이는 approve(draft→active)뿐이다.
+     *  (company_id, defect_signature) 부분 유일 인덱스로 중복 초안 방지 — 충돌 시 {card: null}.
+     *  초안은 검색/주입 기본 제외(status='draft')라 승인 전까지 소비 면에서 무측. */
+    createAutoReworkDraft: async (input: {
+      companyId: string;
+      signature: string;
+      title: string;
+      summary: string;
+      symptoms?: string | null;
+      whatWorked?: string | null;
+      evidence?: Array<Record<string, unknown>>;
+    }): Promise<{ card: KnowledgePattern | null }> => {
+      const signature = input.signature.trim();
+      if (!signature) throw new Error("knowledge pattern auto draft requires a defect signature");
+      const title = readTrimmed(input.title, "title", TITLE_MAX, true)!;
+      const summary = readTrimmed(input.summary, "summary", SUMMARY_MAX, true)!;
+      const evidence = readEvidence(input.evidence);
+      const symptoms = readTrimmed(input.symptoms, "symptoms", TEXT_MAX, false);
+      const whatWorked = readTrimmed(input.whatWorked, "whatWorked", TEXT_MAX, false);
+
+      const [card] = await db
+        .insert(companyKnowledgePatterns)
+        .values({
+          companyId: input.companyId,
+          kind: "failure_mode",
+          title,
+          summary,
+          evidence,
+          ...(symptoms ? { symptoms } : {}),
+          whatWorked: whatWorked ?? null,
+          scopeTags: ["qa-remediation"],
+          source: "auto_rework_draft",
+          defectSignature: signature,
+          status: KNOWLEDGE_PATTERN_STATUS_DRAFT,
+        })
+        .onConflictDoNothing()
+        .returning();
+
+      if (!card) return { card: null };
+      await db.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: "system",
+        actorId: "knowledge-patterns",
+        action: "knowledge_pattern.auto_draft",
+        entityType: "knowledge_pattern",
+        entityId: card.id,
+        details: { kind: "failure_mode", title, source: "auto_rework_draft", defectSignature: signature },
+      });
+      return { card };
+    },
+
+    /** [P1 승인] 자동 초안 draft→active 전이. 유일하게 허용된 status 변경이며 내용은 불변.
+     *  회사 스코프 강제 + 초안이 아니면(이미 active/대상 없음) 예외. */
+    approve: async (input: { companyId: string; id: string }): Promise<KnowledgePattern> => {
+      const [updated] = await db
+        .update(companyKnowledgePatterns)
+        .set({ status: KNOWLEDGE_PATTERN_STATUS_ACTIVE })
+        .where(and(
+          eq(companyKnowledgePatterns.id, input.id),
+          eq(companyKnowledgePatterns.companyId, input.companyId),
+          eq(companyKnowledgePatterns.status, KNOWLEDGE_PATTERN_STATUS_DRAFT),
+        ))
+        .returning();
+      if (!updated) {
+        throw new Error("knowledge pattern draft not found (already active or belongs to another company)");
+      }
+      await db.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: "system",
+        actorId: "knowledge-patterns",
+        action: "knowledge_pattern.approved",
+        entityType: "knowledge_pattern",
+        entityId: updated.id,
+        details: { source: updated.source, defectSignature: updated.defectSignature },
+      });
+      return updated;
+    },
+
+    /** 검색 — superseded 기본 제외. kind/tags/q(제목·요약·증상·근본원인 ILIKE) 필터.
+     *  draft 초안은 기본 제외(includeDrafts=true일 때만 노출 — 승인 화면 전용). */
     search: async (input: {
       companyId: string;
       kind?: string | null;
       tags?: readonly string[] | null;
       q?: string | null;
       includeSuperseded?: boolean;
+      includeDrafts?: boolean;
       limit?: number;
     }): Promise<KnowledgePattern[]> => {
       const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
       const conditions = [eq(companyKnowledgePatterns.companyId, input.companyId)];
       if (!input.includeSuperseded) {
         conditions.push(isNull(companyKnowledgePatterns.supersededById));
+      }
+      if (!input.includeDrafts) {
+        conditions.push(eq(companyKnowledgePatterns.status, KNOWLEDGE_PATTERN_STATUS_ACTIVE));
       }
       if (input.kind && KINDS.includes(input.kind)) {
         conditions.push(eq(companyKnowledgePatterns.kind, input.kind));

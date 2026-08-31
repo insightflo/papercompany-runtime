@@ -216,6 +216,59 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
       .send({ kind: "constraint", title: "x", summary: "x", evidence: [], source: "operator" });
     expect(crossCompany.status).toBe(403);
   });
+
+  // [P1] 자동 초안 라우팅: 에이전트 키는 draft 미노출, 승인은 보드 전용(403/404 매핑 포함).
+  it("routes: drafts visible to board only; approve is board-only and maps missing drafts to 404", async () => {
+    const svc = knowledgePatternsService(db);
+    const { card } = await svc.createAutoReworkDraft({
+      companyId,
+      signature: `route-sig-${randomUUID()}`,
+      title: "라우트 초안 카드",
+      summary: "승인 라우팅 검증용 자동 초안.",
+    });
+    expect(card).not.toBeNull();
+
+    const agentApp = express();
+    agentApp.use(express.json());
+    agentApp.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = {
+        type: "agent", companyId, agentId: ownerAgentId, runId: null,
+      };
+      next();
+    });
+    agentApp.use("/api", knowledgePatternsRoutes(db));
+    agentApp.use(errorHandler);
+
+    const agentList = await request(agentApp).get(`/api/companies/${companyId}/knowledge-patterns`);
+    expect(agentList.status).toBe(200);
+    expect(agentList.body.patterns.some((c: { id: string }) => c.id === card!.id)).toBe(false);
+
+    const agentApprove = await request(agentApp).post(`/api/companies/${companyId}/knowledge-patterns/${card!.id}/approve`);
+    expect(agentApprove.status).toBe(403);
+
+    const boardApp = express();
+    boardApp.use(express.json());
+    boardApp.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = {
+        type: "board", source: "board_key", companyId, companyIds: [companyId], isInstanceAdmin: false,
+        actorId: "board-user", agentId: null,
+      };
+      next();
+    });
+    boardApp.use("/api", knowledgePatternsRoutes(db));
+    boardApp.use(errorHandler);
+
+    const boardList = await request(boardApp).get(`/api/companies/${companyId}/knowledge-patterns`);
+    expect(boardList.status).toBe(200);
+    expect(boardList.body.patterns.some((c: { id: string; status: string }) => c.id === card!.id && c.status === "draft")).toBe(true);
+
+    const approve = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${card!.id}/approve`);
+    expect(approve.status).toBe(200);
+    expect(approve.body.card.status).toBe("active");
+
+    const reApprove = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${card!.id}/approve`);
+    expect(reApprove.status).toBe(404);
+  });
 });
 
 // [Phase 2 — 자기개선 연결] 순수 변환 헬퍼(EP 불필요): 검색 결과 카드 → planner 레지스트리.

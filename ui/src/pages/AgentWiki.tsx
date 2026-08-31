@@ -6,7 +6,7 @@
 //   plugin이 아닌 독립 메뉴로 노출한다.
 // [외부 연결] agentWikiApi → GET /api/companies/:id/agent-wiki.
 import { Fragment, useMemo, useState, type ReactElement } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Brain } from "lucide-react";
 import { agentWikiApi } from "../api/agentWiki";
 import { knowledgePatternsApi, type KnowledgePatternCardDto } from "../api/knowledgePatterns";
@@ -108,27 +108,41 @@ const SOURCE_LABEL: Record<string, string> = {
   mission_owner_compile: "오너 컴파일",
   agent_candidate: "에이전트 제안",
   operator: "운영자",
+  auto_rework_draft: "자동 초안",
 };
 
 function PatternCardsSection({ companyId }: { companyId: string }) {
   const [q, setQ] = useState("");
   const [includeSuperseded, setIncludeSuperseded] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["knowledge-patterns", companyId, q, includeSuperseded],
     queryFn: () => knowledgePatternsApi.list(companyId, { q, includeSuperseded }),
   });
 
+  // [P1] 자동 초안 승인 — 사람 전용 활성화 경로. 성공 시 카드 목록 재조회.
+  const approveMutation = useMutation({
+    mutationFn: (patternId: string) => knowledgePatternsApi.approve(companyId, patternId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["knowledge-patterns", companyId] });
+    },
+  });
+
   const patterns = data?.patterns ?? [];
+  const draftCount = patterns.filter((card) => card.status === "draft").length;
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">🗂️ 사고→패턴 카드 ({patterns.length})</CardTitle>
+        <CardTitle className="text-base">
+          🗂️ 사고→패턴 카드 ({patterns.length}){draftCount > 0 ? <span className="ml-2 text-xs font-semibold text-amber-400">초안 {draftCount}건 승인 대기</span> : null}
+        </CardTitle>
         <CardDescription>
-          오너/운영자가 큐레이션한 사고 패턴 원장(append-only). 실행 프롬프트에 주입되지 않고
-          진단·기획 시점에만 소비됩니다 — 위 자가학습 교훈(자동 주입)과는 별개 층입니다.
+          오너/운영자가 큐레이션한 사고 패턴 원장(append-only). 기계 교정 반복 감지 시 자동 초안이
+          생성되며 사람 승인 전까지는 검색·주입 어디에도 쓰이지 않습니다. 실행 프롬프트 주입은 별도
+          계약(게이트+측정 롤아웃)으로만 — 위 자가학습 교훈(자동 주입)과는 별개 층입니다.
         </CardDescription>
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <Input
@@ -165,6 +179,7 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
                 {patterns.map((card: KnowledgePatternCardDto) => {
                   const createdKst = new Date(card.createdAt).toLocaleString("sv-SE", { timeZone: "Asia/Seoul" });
                   const superseded = !!card.supersededById;
+                  const isDraft = card.status === "draft";
                   const expanded = expandedId === card.id;
                   return (
                     <Fragment key={card.id}>
@@ -176,6 +191,7 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
                           <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", KIND_STYLE[card.kind] ?? "bg-zinc-500/15 text-zinc-400")}>
                             {card.kind}
                           </span>
+                          {isDraft ? <div className="mt-1 text-[10px] font-semibold text-amber-400">초안(승인 대기)</div> : null}
                           {superseded ? <div className="mt-1 text-[10px] text-muted-foreground">대체됨</div> : null}
                         </td>
                         <td className="max-w-[420px] px-2 py-2 font-medium">
@@ -185,7 +201,26 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
                         <td className="px-2 py-2 text-xs text-muted-foreground">
                           {card.scopeTags.length > 0 ? card.scopeTags.map((t) => `#${t}`).join(" ") : "-"}
                         </td>
-                        <td className="px-2 py-2 text-xs text-muted-foreground">{SOURCE_LABEL[card.source] ?? card.source}</td>
+                        <td className="px-2 py-2 text-xs text-muted-foreground">
+                          {SOURCE_LABEL[card.source] ?? card.source}
+                          {isDraft ? (
+                            <div className="mt-1">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-6 px-2 text-[11px]"
+                                disabled={approveMutation.isPending}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  approveMutation.mutate(card.id);
+                                }}
+                              >
+                                승인
+                              </Button>
+                              {approveMutation.isError ? <div className="mt-1 text-[10px] text-red-400">승인 실패</div> : null}
+                            </div>
+                          ) : null}
+                        </td>
                         <td className="px-2 py-2 text-xs text-muted-foreground">{createdKst}</td>
                       </tr>
                       {expanded ? (
