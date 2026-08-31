@@ -1318,6 +1318,43 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   />
                 </Field>
               )}
+              {(() => {
+                // [agent fit observation] core가 주기적으로 자동 계산한 제안 (agent-model-fit 코어편입).
+                //   읽기전용 — 실제 변경은 항상 사람이 위 필드/모델 설정에서 승인.
+                const fit = (!isCreate && props.agent.metadata && typeof props.agent.metadata === "object"
+                  ? (props.agent.metadata as Record<string, unknown>).fitProfile : null) as {
+                  computedAt?: string; windowDays?: number; runs?: number;
+                  thresholdVerdict?: { verdict?: string; reason?: string; suggestedTokens?: number | null };
+                  modelVerdict?: { verdict?: string; reasons?: string[] };
+                } | null;
+                if (!fit?.computedAt) return null;
+                const tv = fit.thresholdVerdict;
+                const mv = fit.modelVerdict;
+                const ageHours = Math.max(0, Math.round((Date.now() - new Date(fit.computedAt).getTime()) / 3_600_000));
+                return (
+                  <div className="rounded-md border border-primary/20 bg-primary/5 p-3 text-xs space-y-1">
+                    <div className="font-medium text-muted-foreground">
+                      Auto fit proposal (last {fit.windowDays ?? 14}d · {fit.runs ?? "?"} runs · {ageHours}h ago · proposals only, human approves changes)
+                    </div>
+                    {tv && (
+                      <div>
+                        <span className="font-medium">Session threshold:</span>{" "}
+                        <span className={tv.verdict === "raise" || tv.verdict === "raise_borderline" ? "text-amber-600 dark:text-amber-300" : ""}>
+                          {tv.verdict}
+                        </span>
+                        {tv.suggestedTokens ? ` → ${tv.suggestedTokens.toLocaleString("en-US")} tokens` : ""}
+                        {tv.reason ? <span className="text-muted-foreground"> — {tv.reason}</span> : null}
+                      </div>
+                    )}
+                    {mv && mv.verdict && (
+                      <div>
+                        <span className="font-medium">Model tier:</span> {mv.verdict}
+                        {mv.reasons?.[0] ? <span className="text-muted-foreground"> — {mv.reasons[0]}</span> : null}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </CollapsibleSection>
           </div>
