@@ -328,6 +328,14 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
+  // [session rotation] nested heartbeat key — overlay wins, original falls back.
+  // Kept whole-object so sibling sessionCompaction keys (maxSessionRuns 등) are never dropped.
+  const sessionCompaction = !isCreate
+    ? {
+      ...((heartbeat.sessionCompaction as Record<string, unknown> | undefined) ?? {}),
+      ...((overlay.heartbeat.sessionCompaction as Record<string, unknown> | undefined) ?? {}),
+    }
+    : {};
 
   const adapterType = isCreate
     ? props.values.adapterType
@@ -1292,6 +1300,24 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   className={inputClass}
                 />
               </Field>
+              {/* [session rotation threshold] runtime-managed adapters only — claude/codex/hermes
+                  manage context natively and the runtime never rotates their sessions. */}
+              {adapterType !== "claude_local" && adapterType !== "codex_local" && adapterType !== "hermes_local" && (
+                <Field
+                  label="Session rotation limit (tokens)"
+                  hint="Rotate to a fresh session when the last run's raw input reaches this many tokens. 0 = adapter default (2,000,000). Lower it for context-heavy agents, e.g. 300000."
+                >
+                  <DraftNumberInput
+                    value={Number(sessionCompaction.maxRawInputTokens ?? 0)}
+                    onCommit={(v) => mark("heartbeat", "sessionCompaction", {
+                      ...sessionCompaction,
+                      maxRawInputTokens: Math.max(0, Math.floor(v)),
+                    })}
+                    immediate
+                    className={inputClass}
+                  />
+                </Field>
+              )}
             </div>
           </CollapsibleSection>
           </div>
