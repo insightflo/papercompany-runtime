@@ -24,6 +24,7 @@ import path from "node:path";
 import { and, count, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowTransitionEvents, workflowStepRuns } from "@paperclipai/db";
+import { logger } from "../../../middleware/logger.js";
 import type { WorkflowQaRemediations, WorkflowVerdictFinding } from "@paperclipai/shared";
 import type { EdgeBearingStep } from "./edge-condition.js";
 import { isStructuralGateStep } from "./structural-gate.js";
@@ -31,6 +32,7 @@ import { isDeliveryReadbackStep } from "../delivery-verification-gate.js";
 import { loadLatestQaRemediations } from "../validation-verdict-ledger.js";
 import { loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { isLatestQaExecution } from "./qa-cap-acceptance.js";
+import { captureMechanicalReworkPatterns, computeDefectSignature } from "./knowledge-draft-capture.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 
@@ -306,6 +308,8 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
         sourceVerdictEventId: qa.sourceVerdictEventId,
         appliedAt: nowIso,
         items: qa.remediations.items,
+        // [P1 결함 서명] 동일 교정 반복 감지용 머신 생성 해시(knowledge-draft-capture 규약 v1).
+        signatures: qa.remediations.items.map((item) => computeDefectSignature(item.find, item.replace)),
         ...(writeError ? { writeError } : {}),
       },
     }).onConflictDoNothing();
@@ -314,5 +318,24 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
   if (writeError) {
     return { outcome: "not_applicable", detail: `remediation write failed: ${writeError}` };
   }
+
+  // [P1 지식 초안 캡처 — 비차단] 모든 제어 판정/기록이 끝난 뒤의 부수 기록. 실패해도
+  //   applied 반환과 재작업 경로는 절대 바뀌지 않는다(규칙 7 — 실행통제 영향 0).
+  try {
+    for (const qa of qualified) {
+      await captureMechanicalReworkPatterns({
+        db,
+        companyId: run.companyId,
+        remediationEventType: QA_REMEDIATION_EVENT_TYPE,
+        producerStepId: input.producerStep.id,
+        qaStepId: qa.qaRun.stepId,
+        sourceVerdictEventId: qa.sourceVerdictEventId,
+        items: qa.remediations.items,
+      });
+    }
+  } catch (error) {
+    logger.warn({ err: error, runId: run.id }, "knowledge-draft-capture non-blocking failure");
+  }
+
   return { outcome: "applied", detail: `${qualified.length} qa remediated without producer rework` };
 }

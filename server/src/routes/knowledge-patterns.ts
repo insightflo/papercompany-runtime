@@ -8,25 +8,30 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
-import { assertCompanyAccess } from "./authz.js";
+import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { notFound } from "../errors.js";
 
 export function knowledgePatternsRoutes(db: Db) {
   const router = Router();
   const svc = knowledgePatternsService(db);
 
-  // GET /api/companies/:companyId/knowledge-patterns?kind=&tags=a,b&q=&includeSuperseded=
+  // GET /api/companies/:companyId/knowledge-patterns?kind=&tags=a,b&q=&includeSuperseded=&includeDrafts=
+  //   draft 초안은 보드(승인 주체)에만 기본 노출. 에이전트 키는 active 카드만 본다(승인 전 무측).
   router.get("/companies/:companyId/knowledge-patterns", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const tags = typeof req.query.tags === "string" && req.query.tags.trim()
       ? req.query.tags.split(",").map((tag) => tag.trim()).filter(Boolean)
       : null;
+    const isBoard = req.actor.type !== "agent";
+    const includeDrafts = isBoard && req.query.includeDrafts !== "false";
     const patterns = await svc.search({
       companyId,
       kind: typeof req.query.kind === "string" ? req.query.kind : null,
       tags,
       q: typeof req.query.q === "string" ? req.query.q : null,
       includeSuperseded: req.query.includeSuperseded === "true",
+      includeDrafts,
     });
     res.json({ patterns });
   });
@@ -65,6 +70,26 @@ export function knowledgePatternsRoutes(db: Db) {
       supersedeId,
     });
     res.status(201).json({ ...card, similarExisting });
+  });
+
+  // POST /api/companies/:companyId/knowledge-patterns/:patternId/approve — 보드 전용.
+  //   [P1] 자동 초안(source='auto_rework_draft', status='draft') 카드의 draft→active 승인.
+  //   사람 승인이 유일한 활성화 경로(기계 초안은 스스로 active가 될 수 없다).
+  router.post("/companies/:companyId/knowledge-patterns/:patternId/approve", async (req, res, next) => {
+    try {
+      assertBoard(req);
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const card = await svc.approve({ companyId, id: req.params.patternId as string });
+      res.json({ card });
+    } catch (error) {
+      // 서비스가 "초안 없음(이미 active/타회사)"을 일반 Error로 던진다 → 404 매핑.
+      if (error instanceof Error && error.message.includes("draft not found")) {
+        next(notFound("Knowledge pattern draft not found"));
+        return;
+      }
+      next(error);
+    }
   });
 
   return router;
