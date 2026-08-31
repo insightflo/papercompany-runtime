@@ -189,6 +189,8 @@ export interface WorkflowStepExecutionContract {
   workflowId: string;
   missionId: string | null;
   stepId: string;
+  /** [P2 측정 롤아웃] 이 계약이 바인딩된 stepRun 행 id — 군 기록/조인의 앵커. */
+  stepRunId: string;
   stepName: string;
   toolNames: string[];
   toolArgs: unknown;

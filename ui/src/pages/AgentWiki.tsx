@@ -122,9 +122,10 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
     queryFn: () => knowledgePatternsApi.list(companyId, { q, includeSuperseded }),
   });
 
-  // [P1] 자동 초안 승인 — 사람 전용 활성화 경로. 성공 시 카드 목록 재조회.
+  // [P1/P2] 자동 초안 승인 — 사람 전용 활성화 경로. audience='agent'면 주입 큐레이션 동반.
   const approveMutation = useMutation({
-    mutationFn: (patternId: string) => knowledgePatternsApi.approve(companyId, patternId),
+    mutationFn: (input: { id: string; audience?: "agent" | "ops" }) =>
+      knowledgePatternsApi.approve(companyId, input.id, input.audience),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["knowledge-patterns", companyId] });
     },
@@ -204,7 +205,7 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
                         <td className="px-2 py-2 text-xs text-muted-foreground">
                           {SOURCE_LABEL[card.source] ?? card.source}
                           {isDraft ? (
-                            <div className="mt-1">
+                            <div className="mt-1 flex gap-1">
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -212,10 +213,23 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
                                 disabled={approveMutation.isPending}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  approveMutation.mutate(card.id);
+                                  approveMutation.mutate({ id: card.id, audience: undefined });
                                 }}
                               >
                                 승인
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-6 px-2 text-[11px] text-blue-400"
+                                disabled={approveMutation.isPending}
+                                title="승인과 동시에 스텝 디스패치 주입 대상으로 큐레이션(측정 롤아웃)"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  approveMutation.mutate({ id: card.id, audience: "agent" });
+                                }}
+                              >
+                                승인+주입
                               </Button>
                               {approveMutation.isError ? <div className="mt-1 text-[10px] text-red-400">승인 실패</div> : null}
                             </div>

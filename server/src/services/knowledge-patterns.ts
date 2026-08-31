@@ -230,12 +230,25 @@ export function knowledgePatternsService(db: Db) {
       return { card };
     },
 
-    /** [P1 승인] 자동 초안 draft→active 전이. 유일하게 허용된 status 변경이며 내용은 불변.
-     *  회사 스코프 강제 + 초안이 아니면(이미 active/대상 없음) 예외. */
-    approve: async (input: { companyId: string; id: string }): Promise<KnowledgePattern> => {
+    /** [P1 승인 + P2 주입 큐레이션] 자동 초안 draft→active 전이. 유일하게 허용된 status 변경이며
+     *  카드 내용은 불변. audience는 사람이 승인 시에만 'agent'로 지정 가능(기본 'ops' 유지 =
+     *  주입 없음). fail-closed — 주입은 명시적 사람 선택일 때만 열린다. */
+    approve: async (input: {
+      companyId: string;
+      id: string;
+      /** 승인과 동시에 주입 대상으로 큐레이션('agent'). 미지정 시 'ops'(주입 없음). */
+      audience?: string | null;
+    }): Promise<KnowledgePattern> => {
+      const audience = input.audience == null || input.audience === "" ? null : String(input.audience);
+      if (audience != null && audience !== "agent" && audience !== "ops") {
+        throw new Error("knowledge pattern audience must be 'agent' or 'ops'");
+      }
       const [updated] = await db
         .update(companyKnowledgePatterns)
-        .set({ status: KNOWLEDGE_PATTERN_STATUS_ACTIVE })
+        .set({
+          status: KNOWLEDGE_PATTERN_STATUS_ACTIVE,
+          ...(audience ? { audience } : {}),
+        })
         .where(and(
           eq(companyKnowledgePatterns.id, input.id),
           eq(companyKnowledgePatterns.companyId, input.companyId),
@@ -252,7 +265,7 @@ export function knowledgePatternsService(db: Db) {
         action: "knowledge_pattern.approved",
         entityType: "knowledge_pattern",
         entityId: updated.id,
-        details: { source: updated.source, defectSignature: updated.defectSignature },
+        details: { source: updated.source, defectSignature: updated.defectSignature, audience: updated.audience },
       });
       return updated;
     },

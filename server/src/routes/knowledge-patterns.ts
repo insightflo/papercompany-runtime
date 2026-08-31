@@ -6,6 +6,8 @@
 // [외부 연결] consumer: 미션 오너 감독 루프(진단 체크리스트 안내), 보드. db는 app.ts가 주입.
 
 import { Router } from "express";
+import { and, eq, sql } from "drizzle-orm";
+import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
@@ -80,7 +82,8 @@ export function knowledgePatternsRoutes(db: Db) {
       assertBoard(req);
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
-      const card = await svc.approve({ companyId, id: req.params.patternId as string });
+      const audience = typeof req.body?.audience === "string" && req.body.audience.trim() ? req.body.audience.trim() : null;
+      const card = await svc.approve({ companyId, id: req.params.patternId as string, audience });
       res.json({ card });
     } catch (error) {
       // 서비스가 "초안 없음(이미 active/타회사)"을 일반 Error로 던진다 → 404 매핑.
@@ -90,6 +93,44 @@ export function knowledgePatternsRoutes(db: Db) {
       }
       next(error);
     }
+  });
+
+  // GET /api/companies/:companyId/knowledge-pattern-injection-report — 보드 전용.
+  //   [P2 측정 롤아웃] 주입 실험 군 배정이 기록된 스텝런의 군별 성공률 원장 집계.
+  //   성공률 정의(표시용): 종료(terminal) 스텝런 중 completed 비율. 이 수치는 관측용이며
+  //   실행 판정에 쓰이지 않는다(규칙 8 — 프로즈/표면을 권위로 읽지 않는다).
+  router.get("/companies/:companyId/knowledge-pattern-injection-report", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const rows = await db
+      .select({
+        group: sql<string>`(${workflowStepRuns.metadata} -> 'knowledgePatternInjection' ->> 'group')`,
+        total: sql<number>`count(*)::int`,
+        completed: sql<number>`count(*) filter (where ${workflowStepRuns.status} = 'completed')::int`,
+        failed: sql<number>`count(*) filter (where ${workflowStepRuns.status} = 'failed')::int`,
+        cancelled: sql<number>`count(*) filter (where ${workflowStepRuns.status} = 'cancelled')::int`,
+        terminal: sql<number>`count(*) filter (where ${workflowStepRuns.status} in ('completed', 'failed', 'cancelled'))::int`,
+        firstDecidedAt: sql<string | null>`min((${workflowStepRuns.metadata} -> 'knowledgePatternInjection' ->> 'decidedAt')::timestamptz)`,
+      })
+      .from(workflowStepRuns)
+      .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+      .where(and(
+        eq(workflowRuns.companyId, companyId),
+        sql`${workflowStepRuns.metadata} -> 'knowledgePatternInjection' is not null`,
+      ))
+      .groupBy(sql`(${workflowStepRuns.metadata} -> 'knowledgePatternInjection' ->> 'group')`);
+    const groups = rows.map((row) => ({
+      group: row.group === "injection" ? "injection" : "control",
+      total: Number(row.total),
+      completed: Number(row.completed),
+      failed: Number(row.failed),
+      cancelled: Number(row.cancelled),
+      terminal: Number(row.terminal),
+      completionRate: Number(row.terminal) > 0 ? Number(row.completed) / Number(row.terminal) : null,
+      firstDecidedAt: row.firstDecidedAt,
+    }));
+    res.json({ groups });
   });
 
   return router;
