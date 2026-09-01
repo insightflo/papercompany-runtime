@@ -409,7 +409,7 @@ describeEmbeddedPostgres("mission owner planning context", () => {
 
     expect(context.planningIssueId).toBeNull();
     expect(context.activePlan).toEqual({ available: false });
-    expect(context.executionSourceSnapshot).toEqual({ missionId: seeded.missionId, companyId: seeded.companyId, units: [] });
+    expect(context.executionSourceSnapshot).toEqual({ missionId: seeded.missionId, companyId: seeded.companyId, units: [], runtimes: [] });
     expect(context.workflowCandidates).toEqual([]);
     expect(context.ruleRefs).toEqual([]);
     expect(context.kbRefs).toEqual([]);

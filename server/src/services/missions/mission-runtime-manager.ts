@@ -520,6 +520,104 @@ export async function listRecentMissionHandoffs(db: Db, input: {
 export const MISSION_RUNTIME_BUSY_REAP_GRACE_MS_DEFAULT = 5 * 60 * 1000;
 export const MISSION_RUNTIME_BUSY_REAP_SWEEP_LIMIT = 50;
 
+/**
+ * [백킹 런 판정 — 회수기·라이브니스 표시 공용 원천]
+ * runtime의 busy를 뒷받침하는 비종료(queued/running) heartbeat run 존재 여부.
+ * 1) runtime.currentIssueId와 같은 이슈의 런
+ * 2) 같은 미션 소속 이슈의 런(미션 중복 실행 방지와 정합 유지)
+ * 3) 이슈 없는 런만 있을 때: currentIssueId가 없는 busy는 이 런일 수 있으므로 보호
+ */
+export async function hasBackingHeartbeatRun(db: Db, runtime: {
+  agentId: string;
+  missionId: string;
+  currentIssueId: string | null;
+}): Promise<boolean> {
+  const activeRuns = await db
+    .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.agentId, runtime.agentId),
+      inArray(heartbeatRuns.status, ["queued", "running"]),
+    ))
+    .limit(20);
+
+  if (activeRuns.length === 0) return false;
+  if (runtime.currentIssueId && activeRuns.some((run) => run.issueId === runtime.currentIssueId)) {
+    return true;
+  }
+  const runIssueIds = activeRuns
+    .map((run) => run.issueId)
+    .filter((issueId): issueId is string => typeof issueId === "string" && issueId.length > 0);
+  if (runIssueIds.length === 0) {
+    // 비종료 런이 있지만 이슈가 없는 런(시스템 실행)만 있을 때: currentIssueId가 없는
+    // busy는 이 런일 수 있으므로 건드리지 않는다.
+    return !runtime.currentIssueId;
+  }
+  const siblingRuns = await db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(
+      inArray(issues.id, runIssueIds),
+      eq(issues.missionId, runtime.missionId),
+    ))
+    .limit(1);
+  return siblingRuns.length > 0;
+}
+
+/**
+ * [백킹 런 상세 — 라이브니스 표시용] 판정은 hasBackingHeartbeatRun과 같은 기준으로
+ * 우선순위(같은 이슈 > 같은 미션 형제 이슈)로 대표 런을 골라 상세를 반환한다.
+ */
+export async function findBackingHeartbeatRunDetail(db: Db, runtime: {
+  agentId: string;
+  missionId: string;
+  currentIssueId: string | null;
+}): Promise<{
+  id: string;
+  status: string;
+  issueId: string | null;
+  startedAt: Date | null;
+  updatedAt: Date;
+} | null> {
+  const activeRuns = await db
+    .select({
+      id: heartbeatRuns.id,
+      status: heartbeatRuns.status,
+      issueId: heartbeatRuns.issueId,
+      startedAt: heartbeatRuns.startedAt,
+      updatedAt: heartbeatRuns.updatedAt,
+    })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.agentId, runtime.agentId),
+      inArray(heartbeatRuns.status, ["queued", "running"]),
+    ))
+    .orderBy(desc(heartbeatRuns.updatedAt))
+    .limit(20);
+  if (activeRuns.length === 0) return null;
+
+  const sameIssue = runtime.currentIssueId
+    ? activeRuns.find((run) => run.issueId === runtime.currentIssueId) ?? null
+    : null;
+  if (sameIssue) return sameIssue;
+
+  const runIssueIds = activeRuns
+    .map((run) => run.issueId)
+    .filter((issueId): issueId is string => typeof issueId === "string" && issueId.length > 0);
+  if (runIssueIds.length === 0) {
+    return !runtime.currentIssueId ? activeRuns[0] ?? null : null;
+  }
+  const siblingIssueIds = new Set((await db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(
+      inArray(issues.id, runIssueIds),
+      eq(issues.missionId, runtime.missionId),
+    ))
+    .limit(20)).map((row) => row.id));
+  return activeRuns.find((run) => run.issueId && siblingIssueIds.has(run.issueId)) ?? null;
+}
+
 export interface ReapedMissionRuntime {
   runtimeId: string;
   companyId: string;
@@ -579,38 +677,7 @@ export async function reapStaleBusyMissionRuntimes(db: Db, opts?: {
     .limit(MISSION_RUNTIME_BUSY_REAP_SWEEP_LIMIT);
 
   for (const runtime of busyRuntimes) {
-    const activeRuns = await db
-      .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId })
-      .from(heartbeatRuns)
-      .where(and(
-        eq(heartbeatRuns.agentId, runtime.agentId),
-        inArray(heartbeatRuns.status, ["queued", "running"]),
-      ))
-      .limit(20);
-
-    let backed = activeRuns.some((run) => runtime.currentIssueId && run.issueId === runtime.currentIssueId);
-    if (!backed && activeRuns.length > 0) {
-      // currentIssueId가 없거나 다른 이슈의 런이 실행 중일 때: 같은 미션 소속 이슈의 런은
-      // 이 busy를 뒷받침하는 것으로 본다(미션 중복 실행 방지와 정합 유지).
-      const runIssueIds = activeRuns
-        .map((run) => run.issueId)
-        .filter((issueId): issueId is string => typeof issueId === "string" && issueId.length > 0);
-      if (runIssueIds.length > 0) {
-        const siblingRuns = await db
-          .select({ id: issues.id })
-          .from(issues)
-          .where(and(
-            inArray(issues.id, runIssueIds),
-            eq(issues.missionId, runtime.missionId),
-          ))
-          .limit(1);
-        backed = siblingRuns.length > 0;
-      } else {
-        // 비종료 런이 있지만 이슈가 없는 런(시스템 실행)만 있을 때: currentIssueId가 없는
-        // busy는 이 런일 수 있으므로 건드리지 않는다.
-        backed = !runtime.currentIssueId;
-      }
-    }
+    const backed = await hasBackingHeartbeatRun(db, runtime);
     if (backed) {
       result.skippedActiveRun += 1;
       continue;

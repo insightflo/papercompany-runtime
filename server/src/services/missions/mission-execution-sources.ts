@@ -1,6 +1,11 @@
 import type { Db } from "@paperclipai/db";
 import { pluginEntities, workflowRuns } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { missionAgentRuntimes, agents, issues } from "@paperclipai/db";
+import {
+  MISSION_RUNTIME_BUSY_REAP_GRACE_MS_DEFAULT,
+  findBackingHeartbeatRunDetail,
+} from "./mission-runtime-manager.js";
 
 export type MissionExecutionUnitKind =
   | "native_workflow_run"
@@ -53,6 +58,37 @@ export interface MissionExecutionSourceSnapshot {
   missionId: string;
   companyId: string;
   units: MissionExecutionUnit[];
+  /** [런타임 라이브니스 — 2026-09-01 표시 개선] 활성 미션 런타임의 실행 중 인 상세. */
+  runtimes: MissionRuntimeLivenessEntry[];
+}
+
+export interface MissionRuntimeLivenessEntry {
+  runtimeId: string;
+  agentId: string;
+  agentName: string | null;
+  adapterType: string;
+  workspaceKey: string;
+  status: string;
+  currentIssueId: string | null;
+  currentIssueIdentifier: string | null;
+  runCount: number;
+  lastRunStatus: string | null;
+  lastError: string | null;
+  /** busy 상태일 때 now−updatedAt (ms). */
+  busySinceMs: number | null;
+  /** busy를 뒷받침하는 비종료(queued/running) 런 상세(없으면 null). */
+  backingRun: {
+    id: string;
+    status: string;
+    issueId: string | null;
+    startedAt: Date | null;
+    updatedAt: Date;
+    elapsedMs: number;
+    /** 런 row 마지막 갱신 후 경과 (execution_stale 판정 표시용). */
+    idleMs: number;
+  } | null;
+  /** busy + 백킹 런 없음 + grace 경과 — 회수기가 idle로 전환 예정. */
+  staleBusy: boolean;
 }
 
 export interface NativeWorkflowRunExecutionSource {
@@ -115,6 +151,8 @@ export interface MapPluginWorkflowStepRunExecutionUnitContext {
 export interface ListMissionExecutionSourceSnapshotsInput {
   companyId: string;
   missionIds: string[];
+  /** 라이브니스 경과 계산 기준 시각(기본 now). */
+  now?: Date;
 }
 
 function asTrimmedString(value: unknown): string | null {
@@ -335,6 +373,7 @@ export async function listMissionExecutionSourceSnapshots(
         missionId,
         companyId: input.companyId,
         units: [],
+        runtimes: [],
       } satisfies MissionExecutionSourceSnapshot,
     ]),
   ) as Record<string, MissionExecutionSourceSnapshot>;
@@ -470,5 +509,87 @@ export async function listMissionExecutionSourceSnapshots(
     });
   }
 
+  await attachMissionRuntimeLiveness(db, snapshots, input.companyId, input.now ?? new Date());
+
   return snapshots;
+}
+
+/**
+ * [런타임 라이브니스 부착 — 2026-09-01 표시 개선]
+ * 감독/거버넌스/오너 회복 판단이 "busy인데 PID가 비어 있다 → 죽음"으로 오판하지 않도록,
+ * 활성 런타임마다 백킹 런(비종료 heartbeat run) 상세를 스냅샷에 남긴다.
+ * process_pid는 이 디스패치 경로에서 기록되지 않으므로 PID는 사망 판단 근거가 아니다.
+ */
+async function attachMissionRuntimeLiveness(
+  db: Db,
+  snapshots: Record<string, MissionExecutionSourceSnapshot>,
+  companyId: string,
+  now: Date,
+): Promise<void> {
+  const missionIds = Object.keys(snapshots);
+  if (missionIds.length === 0) return;
+
+  const rows = await db
+    .select({
+      runtime: missionAgentRuntimes,
+      agentName: agents.name,
+    })
+    .from(missionAgentRuntimes)
+    .innerJoin(agents, eq(missionAgentRuntimes.agentId, agents.id))
+    .where(and(
+      eq(missionAgentRuntimes.companyId, companyId),
+      inArray(missionAgentRuntimes.missionId, missionIds),
+      inArray(missionAgentRuntimes.status, ["starting", "ready", "busy", "idle"]),
+    ))
+    .orderBy(sql`${missionAgentRuntimes.updatedAt} desc`)
+    .limit(60);
+
+  const currentIssueIds = Array.from(new Set(
+    rows.map((row) => row.runtime.currentIssueId).filter((id): id is string => Boolean(id)),
+  ));
+  const identifierByIssueId = new Map<string, string>();
+  if (currentIssueIds.length > 0) {
+    const issueRows = await db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(inArray(issues.id, currentIssueIds))
+      .limit(currentIssueIds.length);
+    for (const issue of issueRows) {
+      if (issue.identifier) identifierByIssueId.set(issue.id, issue.identifier);
+    }
+  }
+
+  for (const { runtime, agentName } of rows) {
+    const snapshot = snapshots[runtime.missionId];
+    if (!snapshot) continue;
+    const busy = runtime.status === "busy";
+    const busySinceMs = busy ? Math.max(0, now.getTime() - runtime.updatedAt.getTime()) : null;
+    const backing = busy ? await findBackingHeartbeatRunDetail(db, runtime) : null;
+    snapshot.runtimes.push({
+      runtimeId: runtime.id,
+      agentId: runtime.agentId,
+      agentName,
+      adapterType: runtime.adapterType,
+      workspaceKey: runtime.workspaceKey,
+      status: runtime.status,
+      currentIssueId: runtime.currentIssueId ?? null,
+      currentIssueIdentifier: runtime.currentIssueId ? identifierByIssueId.get(runtime.currentIssueId) ?? null : null,
+      runCount: runtime.runCount,
+      lastRunStatus: runtime.lastRunStatus ?? null,
+      lastError: runtime.lastError ?? null,
+      busySinceMs,
+      backingRun: backing
+        ? {
+          id: backing.id,
+          status: backing.status,
+          issueId: backing.issueId,
+          startedAt: backing.startedAt,
+          updatedAt: backing.updatedAt,
+          elapsedMs: Math.max(0, now.getTime() - (backing.startedAt?.getTime() ?? backing.updatedAt.getTime())),
+          idleMs: Math.max(0, now.getTime() - backing.updatedAt.getTime()),
+        }
+        : null,
+      staleBusy: busy && !backing && (busySinceMs ?? 0) >= MISSION_RUNTIME_BUSY_REAP_GRACE_MS_DEFAULT,
+    });
+  }
 }

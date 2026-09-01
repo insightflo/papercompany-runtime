@@ -16,7 +16,7 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import { and, eq, inArray, or } from "drizzle-orm";
-import type { MissionExecutionUnit, MissionExecutionStatus } from "./mission-execution-sources.js";
+import type { MissionExecutionUnit, MissionExecutionStatus, MissionRuntimeLivenessEntry } from "./mission-execution-sources.js";
 import { listMissionExecutionSourceSnapshots, normalizeMissionExecutionStatus } from "./mission-execution-sources.js";
 import { missionOwnerHumanReportEvents } from "./mission-owner-human-report-events.js";
 import { loadMissionOwnerDecisions } from "./mission-owner-recovery-ledger.js";
@@ -39,7 +39,9 @@ export type GovernanceThreadEventType =
   | "tool_result"
   | "compact_error"
   | "owner_diagnosis"
-  | "evidence_missing";
+  | "evidence_missing"
+  | "runtime_busy"
+  | "runtime_stale_busy";
 
 export type GovernanceThreadSourceType =
   | "mission"
@@ -58,7 +60,8 @@ export type GovernanceThreadSourceType =
   | "approval"
   | "approval_comment"
   | "issue_approval"
-  | "workflow_transition_event";
+  | "workflow_transition_event"
+  | "mission_agent_runtime";
 
 export type GovernanceThreadSourceRef = {
   type: GovernanceThreadSourceType;
@@ -144,6 +147,7 @@ const SOURCE_PRIORITY: Record<GovernanceThreadSourceType, number> = {
   heartbeat_run: 20,
   agent_wakeup_request: 21,
   workflow_transition_event: 22,
+  mission_agent_runtime: 23,
   approval: 30,
   issue_approval: 31,
   approval_comment: 32,
@@ -382,6 +386,65 @@ function stepEventForStatus(status: MissionExecutionStatus): {
   }
 }
 
+function minutesRounded(ms: number): number {
+  return Math.round(ms / 60000);
+}
+
+/**
+ * [런타임 라이브니스 → 거버넌스 이벤트]
+ * - runtime_busy: busy + 백킹 런 있음 — 정상 대기. 경과/갱신 시각 포함.
+ * - runtime_stale_busy: busy + 백킹 런 없음 — 회수기가 grace 내 idle 전환 예정.
+ * idle 런타임은 잡음이므로 이벤트를 내지 않는다.
+ */
+export function mapRuntimeLivenessToGovernanceEvents(
+  runtime: MissionRuntimeLivenessEntry,
+  input: { missionId: string; companyId: string; now?: Date },
+): GovernanceThreadEvent[] {
+  if (runtime.status !== "busy") return [];
+  const nowIso = (input.now ?? new Date()).toISOString();
+  const scope = {
+    missionId: input.missionId,
+    ...(runtime.currentIssueId ? { issueId: runtime.currentIssueId } : {}),
+    ...(runtime.backingRun ? { heartbeatRunId: runtime.backingRun.id } : {}),
+  };
+  const sourceRef = { type: "mission_agent_runtime" as const, id: runtime.runtimeId, table: "mission_agent_runtimes" };
+  const agentLabel = runtime.agentName ?? runtime.agentId.slice(0, 8);
+  const issueLabel = runtime.currentIssueIdentifier ?? runtime.currentIssueId?.slice(0, 8) ?? "-";
+
+  if (runtime.backingRun) {
+    const run = runtime.backingRun;
+    return [{
+      id: `runtime_busy:mission_agent_runtime:${runtime.runtimeId}:${run.id}`,
+      companyId: input.companyId,
+      scope,
+      sourceRef,
+      eventType: "runtime_busy",
+      title: `Mission agent runtime busy — heartbeat run in flight`,
+      summary: `에이전트 ${agentLabel} 런타임이 ${issueLabel} 작업 중: 런 ${run.id.slice(0, 8)} ${run.status}, 경과 ${minutesRounded(run.elapsedMs)}분 (런 갱신 ${minutesRounded(run.idleMs)}분 전). 백킹 런이 있으므로 정상 대기 — process_pid는 이 경로에서 기록되지 않아 사망 판단 근거가 아니다.`,
+      timestamp: nowIso,
+      severity: "info",
+      actor: { type: "agent", id: runtime.agentId },
+    }];
+  }
+
+  if (!runtime.staleBusy) {
+    // grace 창 내 — 아직 회수 대상 아님. 잡음 방지를 위해 이벤트 생략.
+    return [];
+  }
+  return [{
+    id: `runtime_stale_busy:mission_agent_runtime:${runtime.runtimeId}`,
+    companyId: input.companyId,
+    scope,
+    sourceRef,
+    eventType: "runtime_stale_busy",
+    title: `Mission agent runtime busy without backing run`,
+    summary: `에이전트 ${agentLabel} 런타임이 busy ${minutesRounded(runtime.busySinceMs ?? 0)}분째 백킹 런 없이 유지 중 — stale-busy 회수기가 5분 grace 경과 시 idle로 전환하고 끊긴 이슈를 재웨이크한다. 수동 개입 불필요.`,
+    timestamp: nowIso,
+    severity: "attention",
+    actor: { type: "agent", id: runtime.agentId },
+  }];
+}
+
 export function mapExecutionUnitToGovernanceEvents(unit: MissionExecutionUnit): GovernanceThreadEvent[] {
   const sourceRef = mapExecutionSourceRef(unit);
   const scope = mapExecutionScope(unit);
@@ -585,6 +648,15 @@ export async function listMissionGovernanceThread(
   const executionSnapshots = await listMissionExecutionSourceSnapshots(db, { companyId: input.companyId, missionIds: [input.missionId] });
   const executionUnits = executionSnapshots[input.missionId]?.units ?? [];
   for (const unit of executionUnits) events.push(...mapExecutionUnitToGovernanceEvents(unit));
+  // [런타임 라이브니스 — 2026-09-01 표시 개선] busy 런타임의 실제 실행 상태를 거버넌스에
+  // 노출한다. 백킹 런이 있으면 "정상 대기"(PID 미기록은 사망 근거 아님), 없으면
+  // "고착 예정 — 회수기가 grace 내 idle 전환"을 표시해 오판 진단을 차단한다.
+  for (const runtime of executionSnapshots[input.missionId]?.runtimes ?? []) {
+    events.push(...mapRuntimeLivenessToGovernanceEvents(runtime, {
+      missionId: input.missionId,
+      companyId: input.companyId,
+    }));
+  }
 
   const nativeRunIds = executionUnits
     .filter((unit) => unit.kind === "native_workflow_run")

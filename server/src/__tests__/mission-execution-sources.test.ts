@@ -4,6 +4,8 @@ import {
   agents,
   companies,
   createDb,
+  issues,
+  missionAgentRuntimes,
   missions,
   pluginEntities,
   plugins,
@@ -313,11 +315,28 @@ describe("mission execution source snapshots", () => {
     ];
 
     let pluginEntityQueryCount = 0;
+    const emptyChain = () => ({
+      orderBy() {
+        return {
+          limit() {
+            return Promise.resolve([]);
+          },
+        };
+      },
+    });
     const db = {
       select() {
         return {
           from(table: unknown) {
             return {
+              innerJoin() {
+                return {
+                  where() {
+                    // mission_agent_runtimes 조인 쿼리 — 라이브니스 부착용 모킹(항시 빈 결과).
+                    return emptyChain();
+                  },
+                };
+              },
               where() {
                 if (table === workflowRuns) {
                   return Promise.resolve(nativeRuns);
@@ -328,6 +347,10 @@ describe("mission execution source snapshots", () => {
                   return Promise.resolve(
                     pluginEntityQueryCount === 1 ? pluginRunEntities : pluginStepRunEntities,
                   );
+                }
+
+                if (table === missionAgentRuntimes || table === issues) {
+                  return emptyChain();
                 }
 
                 throw new Error("Unexpected table in mission execution source test");

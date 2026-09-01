@@ -7075,6 +7075,7 @@ describe("heartbeat context budget preflight", () => {
           missionId: fixture.missionId,
           companyId: fixture.companyId,
           units: [],
+          runtimes: [],
         },
         ruleRefs: [],
         workflowCandidates: [],
