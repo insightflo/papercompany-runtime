@@ -112,7 +112,9 @@ export type MissionGovernanceThreadEventType =
   | "tool_result"
   | "compact_error"
   | "owner_diagnosis"
-  | "evidence_missing";
+  | "evidence_missing"
+  | "runtime_busy"
+  | "runtime_stale_busy";
 
 export type MissionGovernanceThreadSourceType =
   | "mission"
@@ -130,7 +132,9 @@ export type MissionGovernanceThreadSourceType =
   | "mission_plan_artifact"
   | "approval"
   | "approval_comment"
-  | "issue_approval";
+  | "issue_approval"
+  | "workflow_transition_event"
+  | "mission_agent_runtime";
 
 export type MissionGovernanceThreadSeverity = "info" | "attention" | "blocked" | "failed" | "approved" | "completed";
 
