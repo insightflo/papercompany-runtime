@@ -25,6 +25,7 @@ export interface KnowledgePatternCardDto {
   scopeTags: string[];
   source: string;
   status: string;
+  audience: string;
   defectSignature: string | null;
   createdByAgentId: string | null;
   supersededById: string | null;
@@ -47,4 +48,7 @@ export const knowledgePatternsApi = {
    *  audience='agent'는 승인과 동시에 주입 대상으로 큐레이션(측정 롤아웃 대상). */
   approve: (companyId: string, patternId: string, audience?: "agent" | "ops"): Promise<{ card: KnowledgePatternCardDto }> =>
     api.post<{ card: KnowledgePatternCardDto }>(`/companies/${companyId}/knowledge-patterns/${patternId}/approve`, audience ? { audience } : {}),
+  /** 주입 큐레이션 토글 — audience만 변경(내용 불변). 사람(보드) 전용. */
+  curateAudience: (companyId: string, patternId: string, audience: "agent" | "ops"): Promise<{ card: KnowledgePatternCardDto }> =>
+    api.post<{ card: KnowledgePatternCardDto }>(`/companies/${companyId}/knowledge-patterns/${patternId}/audience`, { audience }),
 };

@@ -270,6 +270,32 @@ export function knowledgePatternsService(db: Db) {
       return updated;
     },
 
+    /** [P2 주입 큐레이션] 사람(보드)이 카드의 audience를 지정한다 — 내용 불변, 주입 자격 플래그만 변경.
+     *  draft/active 모두 가능(승인 전 주입 예약 포함). 기본 'ops' = 주입 없음(fail-closed). */
+    curateAudience: async (input: { companyId: string; id: string; audience: string }): Promise<KnowledgePattern> => {
+      if (input.audience !== "agent" && input.audience !== "ops") {
+        throw new Error("knowledge pattern audience must be 'agent' or 'ops'");
+      }
+      const [updated] = await db
+        .update(companyKnowledgePatterns)
+        .set({ audience: input.audience })
+        .where(and(eq(companyKnowledgePatterns.id, input.id), eq(companyKnowledgePatterns.companyId, input.companyId)))
+        .returning();
+      if (!updated) {
+        throw new Error("knowledge pattern not found (belongs to another company)");
+      }
+      await db.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: "system",
+        actorId: "knowledge-patterns",
+        action: "knowledge_pattern.audience_curated",
+        entityType: "knowledge_pattern",
+        entityId: updated.id,
+        details: { audience: updated.audience, status: updated.status },
+      });
+      return updated;
+    },
+
     /** 검색 — superseded 기본 제외. kind/tags/q(제목·요약·증상·근본원인 ILIKE) 필터.
      *  draft 초안은 기본 제외(includeDrafts=true일 때만 노출 — 승인 화면 전용). */
     search: async (input: {

@@ -269,6 +269,52 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
     const reApprove = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${card!.id}/approve`);
     expect(reApprove.status).toBe(404);
   });
+
+  // [P2] 주입 큐레이션 토글: 보드만 가능, active/draft 모두 가능, 잘못된 값은 400.
+  it("routes: board-only audience curation on active and draft cards; invalid value maps to 400", async () => {
+    const svc = knowledgePatternsService(db);
+    const created = await svc.create({
+      companyId, kind: "failure_mode", title: "주입 토글 대상 카드", summary: "active 카드 큐레이션 검증",
+      evidence: [], scopeTags: [], source: "operator",
+    });
+
+    const boardApp = express();
+    boardApp.use(express.json());
+    boardApp.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = {
+        type: "board", source: "board_key", companyId, companyIds: [companyId], isInstanceAdmin: false,
+        actorId: "board-user", agentId: null,
+      };
+      next();
+    });
+    boardApp.use("/api", knowledgePatternsRoutes(db));
+    boardApp.use(errorHandler);
+
+    const allow = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${created.id}/audience`).send({ audience: "agent" });
+    expect(allow.status).toBe(200);
+    expect(allow.body.card.audience).toBe("agent");
+
+    const revoke = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${created.id}/audience`).send({ audience: "ops" });
+    expect(revoke.status).toBe(200);
+    expect(revoke.body.card.audience).toBe("ops");
+
+    const invalid = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${created.id}/audience`).send({ audience: "everyone" });
+    expect(invalid.status).toBe(400);
+
+    const missing = await request(boardApp).post(`/api/companies/${companyId}/knowledge-patterns/${randomUUID()}/audience`).send({ audience: "agent" });
+    expect(missing.status).toBe(404);
+
+    const agentApp = express();
+    agentApp.use(express.json());
+    agentApp.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = { type: "agent", companyId, agentId: ownerAgentId, runId: null };
+      next();
+    });
+    agentApp.use("/api", knowledgePatternsRoutes(db));
+    agentApp.use(errorHandler);
+    const agentCurate = await request(agentApp).post(`/api/companies/${companyId}/knowledge-patterns/${created.id}/audience`).send({ audience: "agent" });
+    expect(agentCurate.status).toBe(403);
+  });
 });
 
 // [Phase 2 — 자기개선 연결] 순수 변환 헬퍼(EP 불필요): 검색 결과 카드 → planner 레지스트리.

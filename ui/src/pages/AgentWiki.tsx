@@ -131,6 +131,15 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
     },
   });
 
+  // [P2] 주입 큐레이션 토글 — audience만 변경(내용 불변).
+  const audienceMutation = useMutation({
+    mutationFn: (input: { id: string; audience: "agent" | "ops" }) =>
+      knowledgePatternsApi.curateAudience(companyId, input.id, input.audience),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["knowledge-patterns", companyId] });
+    },
+  });
+
   const patterns = data?.patterns ?? [];
   const draftCount = patterns.filter((card) => card.status === "draft").length;
 
@@ -232,6 +241,25 @@ function PatternCardsSection({ companyId }: { companyId: string }) {
                                 승인+주입
                               </Button>
                               {approveMutation.isError ? <div className="mt-1 text-[10px] text-red-400">승인 실패</div> : null}
+                            </div>
+                          ) : !superseded ? (
+                            <div className="mt-1 flex items-center gap-1">
+                              <span className={cn("text-[10px] font-semibold", card.audience === "agent" ? "text-blue-400" : "text-muted-foreground")}>
+                                {card.audience === "agent" ? "주입: 허용" : "주입: 끔"}
+                              </span>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-6 px-2 text-[11px]"
+                                disabled={audienceMutation.isPending}
+                                title="스텝 디스패치 주입 대상 토글(측정 롤아웃 — 절반만 주입됩니다)"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  audienceMutation.mutate({ id: card.id, audience: card.audience === "agent" ? "ops" : "agent" });
+                                }}
+                              >
+                                {card.audience === "agent" ? "주입 해제" : "주입 허용"}
+                              </Button>
                             </div>
                           ) : null}
                         </td>
