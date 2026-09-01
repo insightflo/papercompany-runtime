@@ -32,6 +32,7 @@ vi.mock("@tanstack/react-query", () => ({
             scopeTags: ["workflow", "structural-gate"],
             source: "mission_owner_compile",
             status: "active",
+            audience: "ops",
             defectSignature: null,
             createdByAgentId: null,
             supersededById: null,
@@ -74,6 +75,8 @@ describe("AgentWiki pattern cards section", () => {
   it("keeps the layer distinction visible: curated cards are not auto-injected (gated + measured rollout only)", () => {
     expect(markup).toContain("실행 프롬프트 주입은 별도 계약(게이트+측정 롤아웃)으로만");
     expect(markup).toContain("자동 주입");
+    // [P2 주입 큐레이션] active 카드에는 주입 토글이 노출된다.
+    expect(markup).toContain("주입 허용");
   });
 
   it("collapses card detail by default (symptoms/rootCause not in initial markup)", () => {

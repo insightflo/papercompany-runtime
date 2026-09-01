@@ -11,7 +11,7 @@ import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
-import { notFound } from "../errors.js";
+import { badRequest, notFound } from "../errors.js";
 
 export function knowledgePatternsRoutes(db: Db) {
   const router = Router();
@@ -131,6 +131,30 @@ export function knowledgePatternsRoutes(db: Db) {
       firstDecidedAt: row.firstDecidedAt,
     }));
     res.json({ groups });
+  });
+
+  // POST /api/companies/:companyId/knowledge-patterns/:patternId/audience — 보드 전용.
+  //   [P2] 주입 큐레이션: audience='agent'|'ops'. 내용은 불변, 주입 자격 플래그만 변경
+  //   (draft/active 모두 가능 — 승인 전 주입 예약도 허용).
+  router.post("/companies/:companyId/knowledge-patterns/:patternId/audience", async (req, res, next) => {
+    try {
+      assertBoard(req);
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const audience = typeof req.body?.audience === "string" ? req.body.audience.trim() : "";
+      if (audience !== "agent" && audience !== "ops") {
+        next(badRequest("audience must be 'agent' or 'ops'"));
+        return;
+      }
+      const card = await svc.curateAudience({ companyId, id: req.params.patternId as string, audience });
+      res.json({ card });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("not found")) {
+        next(notFound("Knowledge pattern not found"));
+        return;
+      }
+      next(error);
+    }
   });
 
   return router;
