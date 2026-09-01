@@ -23,6 +23,13 @@ export type MissionAgentRuntimeStateJson = {
   workspaceKey?: string | null;
   stopReason?: string | null;
   processTermination?: Array<{ id: string; attempted: boolean; error?: string }>;
+  /** [busy 고착 회수기 2026-09-01] 백킹 런 없이 고착된 busy를 idle로 회수한 기록. */
+  busyReaper?: {
+    reapedAt: string;
+    graceMs: number;
+    previousStatus: string;
+    previousCurrentIssueId: string | null;
+  };
 };
 
 export const missionAgentRuntimes = pgTable(

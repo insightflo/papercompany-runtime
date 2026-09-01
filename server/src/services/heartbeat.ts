@@ -143,6 +143,7 @@ import {
   completeMissionAgentRuntimeRun,
   markMissionRuntimeBootstrapInjected,
   persistMissionIssueHandoff,
+  reapStaleBusyMissionRuntimes as reapStaleBusyMissionRuntimesCore,
   updateMissionRollingStateFromHandoff,
 } from "./missions/mission-runtime-manager.js";
 import { compileMissionRunContext } from "./missions/mission-context-compiler.js";
@@ -5564,6 +5565,50 @@ export function heartbeatService(db: Db) {
 
     return { finalized: finalizedRunIds.length, runIds: finalizedRunIds };
   }
+  // [mission-runtime busy 고착 회수기 wrapper] 코어 스윕은 mission-runtime-manager 참조.
+  // 여기서는 (a) 회수된 이슈 웨이크업 재요청, (b) 위키 패턴 기록(비차단), (c) 로그만 담당한다.
+  async function reapStaleBusyMissionRuntimes(opts?: {
+    graceMs?: number;
+    now?: Date;
+  }): Promise<{ reaped: number; skippedActiveRun: number; skippedTerminalMission: number; casLost: number }> {
+    const summary = await reapStaleBusyMissionRuntimesCore(db, {
+      ...(opts?.graceMs !== undefined ? { graceMs: opts.graceMs } : {}),
+      ...(opts?.now ? { now: opts.now } : {}),
+      onReaped: async (reaped) => {
+        try {
+          await enqueueWakeup(reaped.agentId, {
+            source: "automation",
+            contextSnapshot: { issueId: reaped.issueId ?? undefined },
+            reason: "retry_stale_busy_runtime",
+          });
+        } catch (err) {
+          logger.warn({ err, agentId: reaped.agentId, issueId: reaped.issueId }, "busy reaper: wakeup re-request failed");
+        }
+        fireWikiRecord(wikiSvc, {
+          companyId: reaped.companyId,
+          agentId: reaped.agentId,
+          missionId: reaped.missionId,
+          pattern: "mission 런타임 busy 고착 (백킹 런 없음)",
+          cause: "beginMissionAgentRuntimeRun이 busy로 표시한 뒤 completeMissionAgentRuntimeRun 완료 처리가 누락되어(서버 크래시 타이밍 등) 런타임이 새 이슈를 받지 못함.",
+          solution: "recovery lane 회수기가 busy→idle 전환(CAS)하고 끊긴 이슈 웨이크업을 재요청했다. 재발 시 완료 처리 누락 경로(런 종료 처리 예외)를 추적할 것.",
+          errorCode: "stale_busy_runtime_reaped",
+        }, reaped.runtimeId);
+      },
+    });
+    if (summary.reaped.length > 0) {
+      logger.warn(
+        { reaped: summary.reaped.map((entry) => ({ runtimeId: entry.runtimeId, agentId: entry.agentId, issueId: entry.issueId })),
+          skippedActiveRun: summary.skippedActiveRun, casLost: summary.casLost },
+        "mission runtime stale-busy reaper recovered runtimes",
+      );
+    }
+    return {
+      reaped: summary.reaped.length,
+      skippedActiveRun: summary.skippedActiveRun,
+      skippedTerminalMission: summary.skippedTerminalMission,
+      casLost: summary.casLost,
+    };
+  }
   async function resumeQueuedRuns(agentId?: string) {
     if (agentId) {
       await startNextQueuedRunForAgent(agentId);
@@ -10310,6 +10355,8 @@ export function heartbeatService(db: Db) {
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+
+    reapStaleBusyMissionRuntimes,
 
     resumeQueuedRuns,
 

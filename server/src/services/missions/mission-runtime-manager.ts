@@ -1,10 +1,12 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  heartbeatRuns,
   missionAgentRuntimes,
   missionIssueHandoffs,
   missionRollingState,
   missions,
+  issues,
   type MissionIssueHandoffEvidenceRef,
   type MissionIssueHandoffJson,
   type MissionRollingStateJson,
@@ -513,4 +515,164 @@ export async function listRecentMissionHandoffs(db: Db, input: {
     .where(and(eq(missionIssueHandoffs.companyId, input.companyId), eq(missionIssueHandoffs.missionId, input.missionId)))
     .orderBy(desc(missionIssueHandoffs.createdAt))
     .limit(input.limit ?? 10);
+}
+
+export const MISSION_RUNTIME_BUSY_REAP_GRACE_MS_DEFAULT = 5 * 60 * 1000;
+export const MISSION_RUNTIME_BUSY_REAP_SWEEP_LIMIT = 50;
+
+export interface ReapedMissionRuntime {
+  runtimeId: string;
+  companyId: string;
+  missionId: string;
+  agentId: string;
+  issueId: string | null;
+}
+
+export interface ReapStaleBusyMissionRuntimesResult {
+  reaped: ReapedMissionRuntime[];
+  skippedActiveRun: number;
+  skippedTerminalMission: number;
+  casLost: number;
+}
+
+/**
+ * [mission-runtime busy 고착 회수기 — 2026-09-01]
+ *
+ * mission_agent_runtimes.status='busy'는 beginMissionAgentRuntimeRun(디스패치 준비)에서
+ * 설정되고 completeMissionAgentRuntimeRun(하트비트 런 종료 처리)에서만 해제된다. 완료 처리가
+ * 누락되는 경로(서버 크래시 타이밍, 종료 처리 예외 등)에 빠지면 busy가 영구 고착되어 해당
+ * 미션 에이전트 런타임이 새 이슈를 받지 못한다("같은 죽음의 반복" 사고군).
+ *
+ * 이 회수기는 recovery lane에서 주기적으로 돌며:
+ * 1) busy 상태가 grace(기본 5분) 이상 경과했고
+ * 2) 그 busy를 뒷받침하는 비종료(queued/running) heartbeat run이 없으며
+ *    (runtime.currentIssueId가 있으면 같은 이슈의 런, 없으면 해당 에이전트의 아무 비종료 런,
+ *     같은 미션 소속 이슈의 런도 뒷받침으로 인정)
+ * 3) CAS(id+status+updatedAt 일치)로만 busy→idle 전환한다.
+ *
+ * 판정 의미 불변(규칙 7): 실행 중인 런의 판정/큐/상태를 건드리지 않는다. 회수는 런타임
+ * 예약(bookkeeping) 행만 idle로 돌리고, 끊긴 이슈는 onReaped 콜백(웨이크업 재요청)로
+ * 정상 디스패치 경로를 타게 한다. 동시 완료와 겹치면 CAS가 지므로 완료의 기록이 이긴다.
+ */
+export async function reapStaleBusyMissionRuntimes(db: Db, opts?: {
+  now?: Date;
+  graceMs?: number;
+  onReaped?: (input: ReapedMissionRuntime) => Promise<void> | void;
+}): Promise<ReapStaleBusyMissionRuntimesResult> {
+  const now = opts?.now ?? new Date();
+  const graceMs = opts?.graceMs ?? MISSION_RUNTIME_BUSY_REAP_GRACE_MS_DEFAULT;
+  const cutoff = new Date(now.getTime() - graceMs);
+  const result: ReapStaleBusyMissionRuntimesResult = {
+    reaped: [],
+    skippedActiveRun: 0,
+    skippedTerminalMission: 0,
+    casLost: 0,
+  };
+
+  const busyRuntimes = await db
+    .select()
+    .from(missionAgentRuntimes)
+    .where(and(
+      eq(missionAgentRuntimes.status, "busy"),
+      lt(missionAgentRuntimes.updatedAt, cutoff),
+    ))
+    .limit(MISSION_RUNTIME_BUSY_REAP_SWEEP_LIMIT);
+
+  for (const runtime of busyRuntimes) {
+    const activeRuns = await db
+      .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.agentId, runtime.agentId),
+        inArray(heartbeatRuns.status, ["queued", "running"]),
+      ))
+      .limit(20);
+
+    let backed = activeRuns.some((run) => runtime.currentIssueId && run.issueId === runtime.currentIssueId);
+    if (!backed && activeRuns.length > 0) {
+      // currentIssueId가 없거나 다른 이슈의 런이 실행 중일 때: 같은 미션 소속 이슈의 런은
+      // 이 busy를 뒷받침하는 것으로 본다(미션 중복 실행 방지와 정합 유지).
+      const runIssueIds = activeRuns
+        .map((run) => run.issueId)
+        .filter((issueId): issueId is string => typeof issueId === "string" && issueId.length > 0);
+      if (runIssueIds.length > 0) {
+        const siblingRuns = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(
+            inArray(issues.id, runIssueIds),
+            eq(issues.missionId, runtime.missionId),
+          ))
+          .limit(1);
+        backed = siblingRuns.length > 0;
+      } else {
+        // 비종료 런이 있지만 이슈가 없는 런(시스템 실행)만 있을 때: currentIssueId가 없는
+        // busy는 이 런일 수 있으므로 건드리지 않는다.
+        backed = !runtime.currentIssueId;
+      }
+    }
+    if (backed) {
+      result.skippedActiveRun += 1;
+      continue;
+    }
+
+    let missionTerminal = false;
+    if (runtime.missionId) {
+      const [mission] = await db
+        .select({ status: missions.status })
+        .from(missions)
+        .where(eq(missions.id, runtime.missionId))
+        .limit(1);
+      missionTerminal = TERMINAL_MISSION_STATUSES.has(mission?.status ?? "");
+    }
+
+    const previousState = runtime.stateJson
+      && typeof runtime.stateJson === "object"
+      && !Array.isArray(runtime.stateJson)
+      ? { ...(runtime.stateJson as Record<string, unknown>) }
+      : {};
+    const updated = await db
+      .update(missionAgentRuntimes)
+      .set({
+        status: "idle",
+        currentIssueId: null,
+        lastError: `stale_busy_reaped: no queued/running heartbeat run backed this runtime for over ${Math.round(graceMs / 1000)}s`,
+        stateJson: {
+          ...previousState,
+          busyReaper: {
+            reapedAt: now.toISOString(),
+            graceMs,
+            previousStatus: "busy",
+            previousCurrentIssueId: runtime.currentIssueId,
+          },
+        },
+        updatedAt: now,
+      })
+      .where(and(
+        eq(missionAgentRuntimes.id, runtime.id),
+        eq(missionAgentRuntimes.status, "busy"),
+        eq(missionAgentRuntimes.updatedAt, runtime.updatedAt),
+      ))
+      .returning({ id: missionAgentRuntimes.id });
+    if (updated.length === 0) {
+      // 동시 완료(completeMissionAgentRuntimeRun)가 이겼거나 상태가 이미 바뀜 — 개입 없음.
+      result.casLost += 1;
+      continue;
+    }
+
+    const reaped: ReapedMissionRuntime = {
+      runtimeId: runtime.id,
+      companyId: runtime.companyId,
+      missionId: runtime.missionId,
+      agentId: runtime.agentId,
+      issueId: runtime.currentIssueId ?? null,
+    };
+    result.reaped.push(reaped);
+    if (!missionTerminal && runtime.currentIssueId) {
+      await opts?.onReaped?.(reaped);
+    } else if (missionTerminal) {
+      result.skippedTerminalMission += 1;
+    }
+  }
+  return result;
 }
