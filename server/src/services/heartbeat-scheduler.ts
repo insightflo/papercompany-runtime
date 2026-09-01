@@ -5,6 +5,10 @@ type HeartbeatSchedulerHeartbeat = {
     activeExecutionTimeoutMs?: number;
     queuedStaleThresholdMs?: number;
   }): Promise<unknown>;
+  reapStaleBusyMissionRuntimes(opts?: {
+    graceMs?: number;
+    now?: Date;
+  }): Promise<unknown>;
   resumeQueuedRuns(): Promise<unknown>;
 };
 
@@ -146,6 +150,14 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
         activeExecutionTimeoutMs,
         queuedStaleThresholdMs,
       });
+    }
+    // [mission-runtime busy 고착 회수기] 백킹 런 없이 busy로 남은 미션 런타임을 회수한다.
+    // reapOrphanedRuns 직후에 실행: run 회수(실행_stale 등)로 백킹이 사라진 busy도 같은
+    // 스윕에서 풀리게 한다. 실패해도 recovery lane 의 나머지(resumeQueuedRuns)는 계속된다.
+    try {
+      await opts.heartbeat.reapStaleBusyMissionRuntimes();
+    } catch (err) {
+      opts.logger.error({ err }, "mission runtime stale-busy reaper failed; continuing recovery lane");
     }
     await opts.heartbeat.resumeQueuedRuns();
   };
