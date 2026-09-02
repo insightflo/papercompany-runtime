@@ -14,29 +14,26 @@
 export interface ToolResultTruthInput {
   success: boolean;
   data?: unknown;
-  error?: string | null;
+  error?: string;
   exitCode?: number | null;
   isStructuralGate: boolean;
 }
 
-export interface ToolResultTruthResult {
+/** Fields to override on the completion input. Empty object = keep as-is. */
+export type ToolResultTruthOverride = {
   success: boolean;
-  error?: string | null;
-  exitCode?: number | null;
-}
+  error: string;
+  exitCode: number;
+} | Record<string, never>;
 
-export function applyMachineContractTruth(input: ToolResultTruthInput): ToolResultTruthResult {
-  if (input.isStructuralGate || !input.success) {
-    return { success: input.success, error: input.error ?? null, exitCode: input.exitCode ?? null };
-  }
+export function applyMachineContractTruth(input: ToolResultTruthInput): ToolResultTruthOverride {
+  if (input.isStructuralGate || !input.success) return {};
   const data = input.data;
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return { success: input.success, error: input.error ?? null, exitCode: input.exitCode ?? null };
-  }
-  if ((data as Record<string, unknown>).ok !== false) {
-    return { success: input.success, error: input.error ?? null, exitCode: input.exitCode ?? null };
-  }
-  const toolError = (data as Record<string, unknown>).error;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+  const record = data as Record<string, unknown>;
+  if (record.ok !== false) return {};
+
+  const toolError = record.error;
   return {
     success: false,
     error: input.error
