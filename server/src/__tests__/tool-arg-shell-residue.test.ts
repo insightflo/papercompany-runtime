@@ -34,3 +34,16 @@ describe("stripShellEscapeResidue", () => {
     });
   });
 });
+import { runMonthFromRunDate } from "../services/workflow/tool-step-args.ts";
+
+describe("runMonthFromRunDate ({$runMonth} token)", () => {
+  it("extracts YYYYMM from a normal run date", () => {
+    expect(runMonthFromRunDate("2026-09-03")).toBe("202609");
+    expect(runMonthFromRunDate("2026-08-31")).toBe("202608");
+  });
+  it("returns null for malformed dates so the raw token stays visible", () => {
+    expect(runMonthFromRunDate("")).toBeNull();
+    expect(runMonthFromRunDate("20260903")).toBeNull();
+    expect(runMonthFromRunDate("not-a-date")).toBeNull();
+  });
+});

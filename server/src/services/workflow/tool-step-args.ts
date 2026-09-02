@@ -161,11 +161,21 @@ export function stripShellEscapeResidue(value: unknown): unknown {
   return value;
 }
 
+/**
+ * [runMonth — 2026-09-03] runDate(YYYY-MM-DD)에서 월 폴더용 YYYYMM 추출.
+ * 파싱 실패 시 null — 렌더러는 원문 토큰을 그대로 둔다(렌더 실패보다 눈에 보이는 실패).
+ */
+export function runMonthFromRunDate(runDate: string): string | null {
+  const match = /^(\d{4})-(\d{2})/.exec(runDate);
+  return match ? `${match[1]}${match[2]}` : null;
+}
+
 function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
   if (typeof value === "string") {
     return stripShellEscapeResidue(value
       .replaceAll("{$runDate}", runDate)
       .replaceAll("{$date}", runDate)
+      .replaceAll("{$runMonth}", runMonthFromRunDate(runDate) ?? "{$runMonth}")
       .replace(STEP_ARTIFACT_TOKEN, (token, stepId: string, field: string) => {
         const workProductPath = pathsByStepId.get(stepId);
         if (!workProductPath) return token;
