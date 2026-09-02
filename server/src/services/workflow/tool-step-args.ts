@@ -138,9 +138,32 @@ function collectAncestorStepIds(currentStepId: string, steps: WorkflowArgStep[])
   return ancestors;
 }
 
+/**
+ * [arg hygiene — 2026-09-02] bash ANSI-C 이스케이프 잔여 정화.
+ * 오너/에이전트가 셸 오류 메시지에서 복사한 경로가 `$'/srv/...'` 또는 `$/srv/...` 형태로
+ * 인자에 섞여 들어오면 도구가 존재하지 않는 경로(`$/...`)를 열다 실패한다(2026-08-29/31
+ * enqueue-naver-publish 오염 2건, 25.6분 현수). `$/`·`$'`로 시작하는 문자열 값은
+ * 정상 경로/값으로 존재할 수 없으므로 선행 `$`를 제거한다.
+ */
+export function stripShellEscapeResidue(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.startsWith("$/") || value.startsWith("$'")) return value.slice(1);
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item) => stripShellEscapeResidue(item));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = stripShellEscapeResidue(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
 function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
   if (typeof value === "string") {
-    return value
+    return stripShellEscapeResidue(value
       .replaceAll("{$runDate}", runDate)
       .replaceAll("{$date}", runDate)
       .replace(STEP_ARTIFACT_TOKEN, (token, stepId: string, field: string) => {
@@ -154,7 +177,7 @@ function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<str
         if (!Object.prototype.hasOwnProperty.call(runMetadata, key)) return token;
         const rendered = stringifyWorkflowRunMetadataValue(runMetadata[key]);
         return rendered === null ? token : rendered;
-      });
+      }));
   }
   if (Array.isArray(value)) return value.map((item) => renderTemplates(item, runDate, pathsByStepId, runMetadata));
   if (value && typeof value === "object") {

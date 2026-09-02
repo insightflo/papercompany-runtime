@@ -76,8 +76,9 @@ import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
-import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue } from "./tool-step-args.js";
+import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue, stripShellEscapeResidue } from "./tool-step-args.js";
 import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
+import { applyMachineContractTruth } from "./tool-result-truth.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { validateWorkflowControlNodes } from "./control-flow/control-node-validation.js";
@@ -2938,8 +2939,10 @@ export async function processQueuedWorkflowToolStepRuns(
     const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
     const requestId = readMetadataString(invocation.requestId) ?? readMetadataString(row.stepRun.lastDispatchRequestId);
     const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
+    // [arg hygiene] 저장된 인자 재사용 시에도 셸 이스케이프 잔여($/, $')를 정화한다 —
+    // 렌더 직후 값과 동일한 위생 보장(2026-09-02 enqueue 오염 사고).
     const args = Object.prototype.hasOwnProperty.call(invocation, "args")
-      ? invocation.args
+      ? stripShellEscapeResidue(invocation.args)
       : await resolveWorkflowToolStepArgs({
         db,
         run: row.run,
@@ -3184,6 +3187,18 @@ export async function completeWorkflowToolStepFromResult(
   // [Hybrid QA] Structural gate callback guard and verdict handling (extracted).
   const stepForGuard = normalizeWorkflowStepsForExecution(row.definition.stepsJson)
     .find((candidate) => candidate.id === row.stepRun.stepId);
+  // [tool truth — 2026-09-02] 기계 계약 실패(data.ok===false)는 success=true여도 실패로 기록.
+  // 구조 게이트는 verdict 원장 계약상 제외. 상세: tool-result-truth.ts
+  input = {
+    ...input,
+    ...applyMachineContractTruth({
+      success: input.success,
+      data: input.data,
+      error: input.error,
+      exitCode: input.exitCode,
+      isStructuralGate: isStructuralGateStep(stepForGuard),
+    }),
+  };
   if (shouldRejectStructuralCallback(stepForGuard, input.requestId, row.stepRun.lastDispatchRequestId)) {
     return null;
   }
