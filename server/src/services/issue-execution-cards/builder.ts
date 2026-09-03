@@ -3,6 +3,7 @@ import { ARTIFACT_MARKER, extractProseIssueContract } from "./prose-markers.js";
 import { sha256Text } from "./hash.js";
 import { defaultMissionSearchScopes, normalizeMissionSearchScopes } from "../runtime-search-scopes.js";
 import { resolveWorkflowQaContract } from "../workflow/workflow-qa-type.js";
+import { normalizeWorkflowStepContract } from "../workflow/step-contract.js";
 
 type WorkflowCardStep = {
   id: string;
@@ -11,6 +12,7 @@ type WorkflowCardStep = {
   qaType?: unknown;
   allowedSearchScopes?: unknown;
   searchScopes?: unknown;
+  contract?: unknown;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -69,6 +71,7 @@ export function buildWorkflowIssueExecutionCard(input: {
 }): IssueExecutionCardJson {
   const prose = extractProseIssueContract(input.description);
   const qaContract = resolveWorkflowQaContract(input.step.qaType);
+  const stepContract = normalizeWorkflowStepContract(input.step.contract);
   const requiresWorkProduct = input.step.graphWorkProductRequired === true || prose.workProductRequired;
   const requiresVerdict = input.isQaStep || prose.workflowVerdictRequired;
   const allowedSearchScopes = normalizeMissionSearchScopes(
@@ -129,6 +132,8 @@ export function buildWorkflowIssueExecutionCard(input: {
         ? allowedSearchScopes
         : defaultMissionSearchScopes(),
     },
+    // [B안 스텝 계약] 발주 시점 계약 스냅샷 — 빈 항목은 정규화로 제거되고, 전부 비면 필드 생략.
+    ...(stepContract ? { stepContract } : {}),
     evidenceRefs,
     preservedProseMarkers: prose.preservedMarkers,
     source: {

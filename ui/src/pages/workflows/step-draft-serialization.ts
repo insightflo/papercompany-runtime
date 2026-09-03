@@ -25,6 +25,7 @@ export function stepsToJson(drafts: StepDraft[]): unknown[] {
     };
     delete step.conditionGroup;
     delete step.completionReason;
+    delete step.contract;
     if (d.type === "if") {
       delete step.agentId;
       delete step.agentName;
@@ -104,6 +105,21 @@ export function stepsToJson(drafts: StepDraft[]): unknown[] {
     if (safeText(d.graphOutputSchema)) step.graphOutputSchema = safeText(d.graphOutputSchema);
     if (d.graphWorkProductRequired) step.graphWorkProductRequired = true;
     if (safeText(d.graphWorkProductPattern)) step.graphWorkProductPattern = safeText(d.graphWorkProductPattern);
+    const contractItems = (value: string): string[] =>
+      safeText(value).split("\n").map((line) => line.trim()).filter(Boolean);
+    const contractPreconditions = contractItems(d.contractPreconditions);
+    const contractPostconditions = contractItems(d.contractPostconditions);
+    const contractUndefinedBehaviors = contractItems(d.contractUndefinedBehaviors);
+    if (
+      d.type !== "if" && d.type !== "complete" &&
+      contractPreconditions.length + contractPostconditions.length + contractUndefinedBehaviors.length > 0
+    ) {
+      step.contract = {
+        ...(contractPreconditions.length > 0 ? { preconditions: contractPreconditions } : {}),
+        ...(contractPostconditions.length > 0 ? { postconditions: contractPostconditions } : {}),
+        ...(contractUndefinedBehaviors.length > 0 ? { undefinedBehaviors: contractUndefinedBehaviors } : {}),
+      };
+    }
     const graphResourceRefs = safeCsv(d.graphResourceRefs);
     if (graphResourceRefs.length > 0) step.graphResourceRefs = Array.from(new Set(graphResourceRefs));
     const graphSecretRefs = safeCsv(d.graphSecretRefs);
@@ -199,6 +215,7 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       "graphOutputSchema",
       "graphWorkProductRequired",
       "graphWorkProductPattern",
+      "contract",
       "graphResourceRefs",
       "graphSecretRefs",
       "graphPositionX",
@@ -230,6 +247,14 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
     const rawGraphEdgeMetadata = raw.graphEdgeMetadata && typeof raw.graphEdgeMetadata === "object" && !Array.isArray(raw.graphEdgeMetadata)
       ? raw.graphEdgeMetadata as WorkflowGraphEdgeMetadataRecord
       : {};
+    const rawContract = raw.contract && typeof raw.contract === "object" && !Array.isArray(raw.contract)
+      ? raw.contract as Record<string, unknown>
+      : {};
+    const contractLines = (key: string): string => Array.isArray(rawContract[key])
+      ? (rawContract[key] as unknown[])
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .join("\n")
+      : "";
     return {
       id: s.id,
       title: s.title,
@@ -294,6 +319,9 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       graphOutputSchema: typeof raw.graphOutputSchema === "string" ? raw.graphOutputSchema : "",
       graphWorkProductRequired: raw.graphWorkProductRequired === true || raw.graphWorkProductRequired === "true",
       graphWorkProductPattern: typeof raw.graphWorkProductPattern === "string" ? raw.graphWorkProductPattern : "",
+      contractPreconditions: contractLines("preconditions"),
+      contractPostconditions: contractLines("postconditions"),
+      contractUndefinedBehaviors: contractLines("undefinedBehaviors"),
       graphResourceRefs: Array.isArray(raw.graphResourceRefs)
         ? (raw.graphResourceRefs as string[]).join(", ")
         : typeof raw.graphResourceRefs === "string"

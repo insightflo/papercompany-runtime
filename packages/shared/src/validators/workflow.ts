@@ -1,6 +1,37 @@
 import { z } from "zod";
 import { workflowConditionGroupSchema } from "./workflow-condition.js";
 
+/**
+ * [purpose] Step dispatch contract — 사전조건/사후조건/미정의동작 구조 레코드.
+ * 정의 시점(owner/plan)에 작성되고 발주 시 이슈 지침·실행카드·QA 루브릭에 전달된다.
+ * [care] 규칙 8 — 계약 항목은 사람/소유자 작성 지침·검증 기준일 뿐, 실행 통제 권위가 아니다.
+ * 런타임 코드는 계약 텍스트를 파싱해 성패/재시도/완료를 판정해서는 안 된다.
+ */
+const workflowStepContractSectionSchema = z.array(
+  z.string().trim().min(1).max(1000),
+).max(20);
+
+export const workflowStepContractSchema = z
+  .object({
+    preconditions: workflowStepContractSectionSchema.optional(),
+    postconditions: workflowStepContractSectionSchema.optional(),
+    undefinedBehaviors: workflowStepContractSectionSchema.optional(),
+  })
+  .strict()
+  .superRefine((contract, ctx) => {
+    const hasContent = [contract.preconditions, contract.postconditions, contract.undefinedBehaviors]
+      .some((section) => (section?.length ?? 0) > 0);
+    if (!hasContent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["contract"],
+        message: "contract must declare at least one non-empty section (preconditions/postconditions/undefinedBehaviors)",
+      });
+    }
+  });
+
+export type WorkflowStepContract = z.infer<typeof workflowStepContractSchema>;
+
 const nullableUuidSchema = z.string().uuid().nullable();
 const nullableDateTimeStringSchema = z.string().datetime().nullable();
 const metadataSchema = z.record(z.unknown()).default({});
@@ -53,12 +84,16 @@ export const workflowStepDefinitionSchema = z.object({
   graphRetryDelaySeconds: z.number().int().nonnegative().optional(),
   graphRetryBackoff: z.enum(["fixed", "linear", "exponential"]).optional(),
   graphRetryJitter: z.boolean().optional(),
+  contract: workflowStepContractSchema.optional(),
 })
   .passthrough()
   .superRefine((step, ctx) => {
     const nodeType = typeof step.type === "string" ? step.type : undefined;
     const hasConditionGroup = step.conditionGroup !== undefined;
     const hasCompletionReason = step.completionReason !== undefined;
+    if (step.contract !== undefined && (nodeType === "if" || nodeType === "complete")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["contract"], message: "contract is only allowed on executable steps, not if/complete control nodes" });
+    }
     if (nodeType === "if") {
       if (!hasConditionGroup) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["conditionGroup"], message: "IF step requires conditionGroup" });
