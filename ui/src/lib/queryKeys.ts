@@ -93,6 +93,7 @@ export const queryKeys = {
     issues: (id: string) => ["missions", "detail", id, "issues"] as const,
     workflowRuns: (id: string) => ["missions", "detail", id, "workflow-runs"] as const,
     governanceThread: (id: string) => ["missions", "detail", id, "governance-thread"] as const,
+    decisionLog: (id: string) => ["missions", "detail", id, "decision-log"] as const,
     humanOperatorRequests: (companyId: string) => ["missions", companyId, "human-operator-requests"] as const,
     delegations: (id: string) => ["missions", "detail", id, "delegations"] as const,
     activity: (id: string) => ["missions", "activity", id] as const,

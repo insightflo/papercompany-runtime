@@ -1,0 +1,124 @@
+// @vitest-environment node
+
+import { describe, expect, it, vi } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MissionDecisionLogPanel } from "./MissionDecisionLogPanel";
+
+let scenario: "populated" | "empty" | "loading" | "error" = "populated";
+
+vi.mock("@tanstack/react-query", () => ({
+  useQuery: () => {
+    if (scenario === "loading") {
+      return { data: undefined, isLoading: true, error: null };
+    }
+
+    if (scenario === "error") {
+      return { data: undefined, isLoading: false, error: new Error("decision log unavailable") };
+    }
+
+    if (scenario === "empty") {
+      return {
+        data: {
+          missionId: "mission-1",
+          revision: 0,
+          updatedAt: null,
+          decisions: [],
+          stateMarkdown: "",
+        },
+        isLoading: false,
+        error: null,
+      };
+    }
+
+    return {
+      data: {
+        missionId: "mission-1",
+        revision: 3,
+        updatedAt: "2026-09-05T01:00:00.000Z",
+        decisions: [
+          {
+            id: "D-1",
+            summary: "Docker postgres for dev",
+            status: "retired",
+            supersedes: null,
+            handoffId: "h0",
+            updatedAt: "2026-09-05T00:00:00.000Z",
+          },
+          {
+            id: "D-2",
+            summary: "PGlite everywhere",
+            status: "confirmed",
+            supersedes: "D-1",
+            handoffId: null,
+            updatedAt: "2026-09-05T01:00:00.000Z",
+          },
+          {
+            id: "D-3",
+            summary: "Try neon fork",
+            status: "under_review",
+            supersedes: null,
+            handoffId: null,
+            updatedAt: "2026-09-05T01:00:00.000Z",
+          },
+        ],
+        stateMarkdown: "# Mission State",
+      },
+      isLoading: false,
+      error: null,
+    };
+  },
+}));
+
+vi.mock("lucide-react", () => ({
+  Scale: () => null,
+  AlertTriangle: () => null,
+}));
+
+import { MissionDecisionLogPanel as Panel } from "./MissionDecisionLogPanel";
+
+function render() {
+  return renderToStaticMarkup(<Panel missionId="mission-1" />);
+}
+
+describe("MissionDecisionLogPanel", () => {
+  it("renders decision records with status, supersedes chains, and provenance", () => {
+    scenario = "populated";
+    const html = render();
+
+    expect(html).toContain("Mission Decision Log");
+    expect(html).toContain("D-1");
+    expect(html).toContain("Docker postgres for dev");
+    expect(html).toContain("retired");
+    expect(html).toContain("D-2");
+    expect(html).toContain("PGlite everywhere");
+    expect(html).toContain("confirmed");
+    expect(html).toContain("supersedes D-1");
+    expect(html).toContain("D-3");
+    expect(html).toContain("under_review");
+    // 개요 카드: 총 3, 확정 1, 검토 중 1.
+    expect(html).toContain("3");
+  });
+
+  it("renders an empty state with the producer hint when no decisions exist", () => {
+    scenario = "empty";
+    const html = render();
+
+    expect(html).toContain("No decisions recorded yet");
+    expect(html).toContain("decision-reports");
+  });
+
+  it("renders a loading state", () => {
+    scenario = "loading";
+    const html = render();
+
+    expect(html).toContain("Loading mission decision log");
+  });
+
+  it("surfaces load failures instead of silently hiding the panel", () => {
+    scenario = "error";
+    const html = render();
+
+    expect(html).toContain("text-destructive");
+    expect(html).toContain("decision log unavailable");
+  });
+});

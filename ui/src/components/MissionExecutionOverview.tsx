@@ -5,6 +5,7 @@ import { AlertTriangle, BookOpen, Bot, GitBranch, Wrench } from "lucide-react";
 import { agentsApi } from "../api/agents";
 import { missionsApi, type MissionDetailItem, type MissionOwnerActionExplanationStatus } from "../api/missions";
 import { MissionGovernanceThreadPanel } from "./MissionGovernanceThreadPanel";
+import { MissionDecisionLogPanel } from "./MissionDecisionLogPanel";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 import { openWorkProductInBrowser } from "../lib/workProductOpen";
@@ -264,6 +265,8 @@ export function MissionExecutionOverview({ missionId, mission }: MissionExecutio
       </div>
 
       <MissionGovernanceThreadPanel missionId={missionId} />
+
+      <MissionDecisionLogPanel missionId={missionId} />
 
       <section className="rounded-md border border-border p-4 space-y-3" aria-label="Mission owner status">
         <div className="flex flex-wrap items-start justify-between gap-3">

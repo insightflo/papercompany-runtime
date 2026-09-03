@@ -418,8 +418,14 @@ export function missionRoutes(db: Db) {
     const mission = await svc.getById(req.params.id);
     assertCompanyAccess(req, mission.companyId);
     const log = await getMissionDecisionLog(db, { missionId: mission.id });
-    if (!log) throw notFound("Mission decision log not found");
-    res.json(log);
+    // 롤링 상태 행이 아직 없으면 404 대신 빈 뷰 — “기록 없음”은 오류가 아니다(UI/에이전트 소비 단순화).
+    res.json(log ?? {
+      missionId: mission.id,
+      revision: 0,
+      updatedAt: null,
+      decisions: [],
+      stateMarkdown: "",
+    });
   });
 
   /**
