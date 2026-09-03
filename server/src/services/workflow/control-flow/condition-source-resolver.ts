@@ -15,11 +15,13 @@ import { open as fsOpen } from "node:fs/promises";
 import { and, desc, eq, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts, workflowStepRuns } from "@paperclipai/db";
-import type { WorkflowConditionSource } from "@paperclipai/shared";
+import type { WorkflowConditionSource, WorkflowToolJsonSource } from "@paperclipai/shared";
 import type { ConditionalEdge } from "./types.js";
 import { resolveWorkProductLocalFilePath } from "../../work-products.js";
+import { secretService } from "../../secrets.js";
 
-const ERROR_PREFIX = "Workflow IF condition failed:";
+export const WORKFLOW_IF_CONDITION_ERROR_PREFIX = "Workflow IF condition failed:";
+const ERROR_PREFIX = WORKFLOW_IF_CONDITION_ERROR_PREFIX;
 const MAX_CONDITION_SOURCE_BYTES = 1024 * 1024; // 1 MiB hard cap.
 const READ_CHUNK_SIZE = Math.min(64 * 1024, MAX_CONDITION_SOURCE_BYTES);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -35,9 +37,27 @@ function fail(message: string): never {
   throw new Error(`${ERROR_PREFIX} ${message}`);
 }
 
+/** Builds the fail-closed error every IF condition failure must carry. */
+export function workflowConditionFailure(message: string): never {
+  fail(message);
+}
+
 /** Stable internal key for a source so the executor can look up the resolved root. */
 export function workflowConditionSourceKey(source: WorkflowConditionSource): string {
-  return `${source.stepId}\u0000${source.title}\u0000${source.path}`;
+  if (source.kind === "tool_json") {
+    return `tool_json\u0000${source.stepId}\u0000${source.toolName}\u0000${stableStringify(source.parameters)}\u0000${source.path}`;
+  }
+  return `work_product_json\u0000${source.stepId}\u0000${source.title}\u0000${source.path}`;
+}
+
+/** Deterministic JSON string with sorted object keys (canonical tool-source dedupe key). */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
 }
 
 function buildForwardPredecessors(steps: ReadonlyArray<ConditionResolverStep>): Map<string, Set<string>> {
@@ -129,9 +149,111 @@ type CandidateRow = {
   path: string;
 };
 
+export type CurrentWorkProductCandidate = { path: string; updatedAt: Date };
+
 /**
- * Resolves each condition source to its parsed JSON root. Returns a Map keyed by
- * workflowConditionSourceKey(source). The same (stepId, title) file is read only once.
+ * Resolves the single current-attempt local work-product candidate for one
+ * (stepId, title) condition source, applying the freshness/ranking rules used at
+ * gate evaluation. Fail-closed: a foreign run, non-ancestor step, archived product,
+ * stale prior-attempt artifact, or ambiguous equal-rank duplicate throws.
+ * Shared by IF evaluation and resume-time verdict staleness checks.
+ */
+export async function selectCurrentWorkProductCandidate(input: {
+  db: Db;
+  run: { id: string; companyId: string };
+  ifStepId: string;
+  workflowSteps: ReadonlyArray<ConditionResolverStep>;
+  stepId: string;
+  title: string;
+}): Promise<CurrentWorkProductCandidate> {
+  const { stepId, title } = input;
+  const knownStepIds = new Set(input.workflowSteps.map((step) => step.id));
+  const ancestors = collectForwardAncestors(input.ifStepId, input.workflowSteps);
+
+  if (stepId === input.ifStepId) {
+    fail(`IF step "${input.ifStepId}" cannot read its own output as a condition source`);
+  }
+  if (!knownStepIds.has(stepId)) {
+    fail(`condition source step "${stepId}" does not exist in the workflow`);
+  }
+  if (!ancestors.has(stepId)) {
+    fail(`condition source step "${stepId}" is not a forward ancestor of IF step "${input.ifStepId}"`);
+  }
+
+  const rows = await input.db
+    .select({
+      startedAt: workflowStepRuns.startedAt,
+      id: issueWorkProducts.id,
+      isPrimary: issueWorkProducts.isPrimary,
+      updatedAt: issueWorkProducts.updatedAt,
+      provider: issueWorkProducts.provider,
+      metadata: issueWorkProducts.metadata,
+      url: issueWorkProducts.url,
+    })
+    .from(workflowStepRuns)
+    .innerJoin(issueWorkProducts, eq(workflowStepRuns.issueId, issueWorkProducts.issueId))
+    .where(and(
+      eq(workflowStepRuns.workflowRunId, input.run.id),
+      eq(workflowStepRuns.stepId, stepId),
+      eq(workflowStepRuns.status, "completed"),
+      eq(issueWorkProducts.companyId, input.run.companyId),
+      eq(issueWorkProducts.title, title),
+      not(eq(issueWorkProducts.status, "archived")),
+    ))
+    .orderBy(
+      desc(issueWorkProducts.isPrimary),
+      desc(issueWorkProducts.updatedAt),
+      desc(issueWorkProducts.id),
+    );
+
+  if (rows.length === 0) {
+    fail(`no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`);
+  }
+  const attemptStartedAt = rows[0]!.startedAt;
+  if (!attemptStartedAt) {
+    // A completed producer without an attempt start time cannot establish artifact
+    // freshness; fail closed rather than accept every (possibly stale) artifact.
+    fail(`producer step "${stepId}" is completed but has no attempt start time; cannot establish work-product freshness`);
+  }
+
+  // Keep only current-attempt, local, path-resolvable candidates. Prior-attempt artifacts
+  // (updatedAt before the current completed attempt started) are stale and ignored.
+  const candidates: CandidateRow[] = [];
+  for (const row of rows) {
+    if (row.provider !== "local" && row.provider !== "local_file") continue;
+    if (row.updatedAt.getTime() < attemptStartedAt.getTime()) continue;
+    const localPath = resolveWorkProductLocalFilePath({ metadata: row.metadata, url: row.url });
+    if (!localPath) continue;
+    candidates.push({ id: row.id, isPrimary: row.isPrimary, updatedAt: row.updatedAt, path: localPath });
+  }
+
+  if (candidates.length === 0) {
+    fail(`no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`);
+  }
+
+  candidates.sort((a, b) => (
+    Number(b.isPrimary) - Number(a.isPrimary)
+    || b.updatedAt.getTime() - a.updatedAt.getTime()
+    || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
+  ));
+  const chosen = candidates[0]!;
+  const tiedAtTop = candidates.some(
+    (row, index) => index > 0
+      && row.isPrimary === chosen.isPrimary
+      && row.updatedAt.getTime() === chosen.updatedAt.getTime(),
+  );
+  if (tiedAtTop) {
+    fail(`ambiguous work product "${title}" for step "${stepId}": multiple equally ranked current candidates`);
+  }
+
+  return { path: chosen.path, updatedAt: chosen.updatedAt };
+}
+
+/**
+ * Resolves each condition source to its parsed JSON root. `work_product_json` sources
+ * are read from the server-local work-product file; `tool_json` sources are measured
+ * live through the injected tool executor (server-side execution). Returns a Map keyed
+ * by workflowConditionSourceKey(source).
  */
 export async function resolveWorkflowConditionSources(input: {
   db: Db;
@@ -139,101 +261,60 @@ export async function resolveWorkflowConditionSources(input: {
   ifStep: ConditionResolverStep;
   workflowSteps: ReadonlyArray<ConditionResolverStep>;
   sources: ReadonlyArray<WorkflowConditionSource>;
+  resolveToolJsonSource?: (source: WorkflowToolJsonSource) => Promise<unknown>;
 }): Promise<Map<string, unknown>> {
-  const knownStepIds = new Set(input.workflowSteps.map((step) => step.id));
   const ancestors = collectForwardAncestors(input.ifStep.id, input.workflowSteps);
   const out = new Map<string, unknown>();
 
-  // Deduplicate by (stepId, title); multiple paths over the same product read once.
+  // Deduplicate work-product sources by (stepId, title); the same file is read once.
   const uniquePairs = new Map<string, { stepId: string; title: string }>();
   for (const source of input.sources) {
+    if (source.kind === "tool_json") continue;
     const pairKey = `${source.stepId}\u0000${source.title}`;
     if (!uniquePairs.has(pairKey)) uniquePairs.set(pairKey, { stepId: source.stepId, title: source.title });
   }
 
   for (const { stepId, title } of uniquePairs.values()) {
-    if (stepId === input.ifStep.id) {
-      fail(`IF step "${input.ifStep.id}" cannot read its own output as a condition source`);
-    }
-    if (!knownStepIds.has(stepId)) {
-      fail(`condition source step "${stepId}" does not exist in the workflow`);
-    }
-    if (!ancestors.has(stepId)) {
-      fail(`condition source step "${stepId}" is not a forward ancestor of IF step "${input.ifStep.id}"`);
-    }
-
-    const rows = await input.db
-      .select({
-        startedAt: workflowStepRuns.startedAt,
-        id: issueWorkProducts.id,
-        isPrimary: issueWorkProducts.isPrimary,
-        updatedAt: issueWorkProducts.updatedAt,
-        provider: issueWorkProducts.provider,
-        metadata: issueWorkProducts.metadata,
-        url: issueWorkProducts.url,
-      })
-      .from(workflowStepRuns)
-      .innerJoin(issueWorkProducts, eq(workflowStepRuns.issueId, issueWorkProducts.issueId))
-      .where(and(
-        eq(workflowStepRuns.workflowRunId, input.run.id),
-        eq(workflowStepRuns.stepId, stepId),
-        eq(workflowStepRuns.status, "completed"),
-        eq(issueWorkProducts.companyId, input.run.companyId),
-        eq(issueWorkProducts.title, title),
-        not(eq(issueWorkProducts.status, "archived")),
-      ))
-      .orderBy(
-        desc(issueWorkProducts.isPrimary),
-        desc(issueWorkProducts.updatedAt),
-        desc(issueWorkProducts.id),
-      );
-
-    if (rows.length === 0) {
-      fail(`no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`);
-    }
-    const attemptStartedAt = rows[0]!.startedAt;
-    if (!attemptStartedAt) {
-      // A completed producer without an attempt start time cannot establish artifact
-      // freshness; fail closed rather than accept every (possibly stale) artifact.
-      fail(`producer step "${stepId}" is completed but has no attempt start time; cannot establish work-product freshness`);
-    }
-
-    // Keep only current-attempt, local, path-resolvable candidates. Prior-attempt artifacts
-    // (updatedAt before the current completed attempt started) are stale and ignored.
-    const candidates: CandidateRow[] = [];
-    for (const row of rows) {
-      if (row.provider !== "local" && row.provider !== "local_file") continue;
-      if (row.updatedAt.getTime() < attemptStartedAt.getTime()) continue;
-      const localPath = resolveWorkProductLocalFilePath({ metadata: row.metadata, url: row.url });
-      if (!localPath) continue;
-      candidates.push({ id: row.id, isPrimary: row.isPrimary, updatedAt: row.updatedAt, path: localPath });
-    }
-
-    if (candidates.length === 0) {
-      fail(`no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`);
-    }
-
-    candidates.sort((a, b) => (
-      Number(b.isPrimary) - Number(a.isPrimary)
-      || b.updatedAt.getTime() - a.updatedAt.getTime()
-      || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
-    ));
-    const chosen = candidates[0]!;
-    const tiedAtTop = candidates.some(
-      (row, index) => index > 0
-        && row.isPrimary === chosen.isPrimary
-        && row.updatedAt.getTime() === chosen.updatedAt.getTime(),
-    );
-    if (tiedAtTop) {
-      fail(`ambiguous work product "${title}" for step "${stepId}": multiple equally ranked current candidates`);
-    }
-
+    const chosen = await selectCurrentWorkProductCandidate({
+      db: input.db,
+      run: input.run,
+      ifStepId: input.ifStep.id,
+      workflowSteps: input.workflowSteps,
+      stepId,
+      title,
+    });
     const parsed = await readBoundedJsonFile(chosen.path, title);
 
     for (const source of input.sources) {
-      if (source.stepId === stepId && source.title === title) {
+      if (source.kind !== "tool_json" && source.stepId === stepId && source.title === title) {
         out.set(workflowConditionSourceKey(source), parsed);
       }
+    }
+  }
+
+  // Group tool sources by (toolName, canonical parameters): equal groups execute once,
+  // then the measured root is stored under every member's own key (paths may differ).
+  const toolGroups = new Map<string, WorkflowToolJsonSource[]>();
+  for (const source of input.sources) {
+    if (source.kind !== "tool_json") continue;
+    const groupKey = `${source.toolName}\u0000${stableStringify(source.parameters)}`;
+    const group = toolGroups.get(groupKey);
+    if (group) group.push(source);
+    else toolGroups.set(groupKey, [source]);
+  }
+
+  for (const groupSources of toolGroups.values()) {
+    const representative = groupSources[0]!;
+    if (!ancestors.has(representative.stepId)) {
+      fail(`condition source step "${representative.stepId}" is not a forward ancestor of IF step "${input.ifStep.id}"`);
+    }
+    const executor = input.resolveToolJsonSource;
+    if (!executor) {
+      fail(`tool source "${representative.toolName}" cannot be executed in this context`);
+    }
+    const data = await executor(representative);
+    for (const source of groupSources) {
+      out.set(workflowConditionSourceKey(source), data);
     }
   }
 

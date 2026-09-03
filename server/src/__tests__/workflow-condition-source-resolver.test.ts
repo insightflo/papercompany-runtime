@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   getEmbeddedPostgresTestSupport,
 } from "./helpers/embedded-postgres.js";
@@ -185,5 +185,116 @@ describeEmbeddedPostgres("workflow condition source resolver", () => {
     }
     expect(message.startsWith(ERR_PREFIX)).toBe(true);
     expect(message).not.toContain(secret);
+  });
+});
+
+describeEmbeddedPostgres("workflow condition source resolver — tool_json sources", () => {
+  let fixture!: ResolverFixture;
+  let tmp!: TempFileRegistry;
+
+  beforeAll(async () => {
+    fixture = await startResolverFixture();
+    tmp = new TempFileRegistry();
+  }, 60_000);
+  afterAll(async () => {
+    tmp.cleanup();
+    await fixture.cleanup();
+  });
+  afterEach(() => {
+    tmp.cleanup();
+    tmp = new TempFileRegistry();
+  });
+
+  const toolSource = (overrides: Partial<{ kind: "tool_json"; stepId: string; toolName: string; parameters: Record<string, unknown>; path: string }> = {}) => ({
+    kind: "tool_json" as const,
+    stepId: "producer",
+    toolName: "shorts-storage-list",
+    parameters: { action: "list", prefix: "shorts/runs/r1/clips/" },
+    path: "$.count",
+    ...overrides,
+  });
+
+  async function producerRun(): Promise<{ runId: string; issueId: string }> {
+    const runId = await createResolverRun(fixture);
+    const issueId = await createProducerStep(fixture, { runId, stepId: "producer" });
+    return { runId, issueId };
+  }
+
+  it("resolves a tool_json source through the injected executor", async () => {
+    const { runId } = await producerRun();
+    const executor = vi.fn().mockResolvedValue({ count: 22, total_bytes: 123456 });
+    const map = await resolveWorkflowConditionSources({
+      db: fixture.db,
+      run: { id: runId, companyId: fixture.companyId },
+      ifStep: { id: "if-1", dependencies: ["validator"] },
+      workflowSteps: RESOLVER_TOPOLOGY,
+      sources: [toolSource()],
+      resolveToolJsonSource: executor,
+    });
+    expect(executor).toHaveBeenCalledTimes(1);
+    expect(executor.mock.calls[0]![0].toolName).toBe("shorts-storage-list");
+    expect(map.get(workflowConditionSourceKey(toolSource()))).toEqual({ count: 22, total_bytes: 123456 });
+  });
+
+  it("rejects a tool source whose stepId is not a forward ancestor", async () => {
+    const { runId } = await producerRun();
+    const executor = vi.fn().mockResolvedValue({ count: 1 });
+    await expect(resolveWorkflowConditionSources({
+      db: fixture.db,
+      run: { id: runId, companyId: fixture.companyId },
+      ifStep: { id: "if-1", dependencies: ["validator"] },
+      workflowSteps: RESOLVER_TOPOLOGY,
+      sources: [toolSource({ stepId: "unrelated" })],
+      resolveToolJsonSource: executor,
+    })).rejects.toThrow(ERR_PREFIX);
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no tool executor is injected", async () => {
+    const { runId } = await producerRun();
+    await expect(resolveWorkflowConditionSources({
+      db: fixture.db,
+      run: { id: runId, companyId: fixture.companyId },
+      ifStep: { id: "if-1", dependencies: ["validator"] },
+      workflowSteps: RESOLVER_TOPOLOGY,
+      sources: [toolSource()],
+    })).rejects.toThrow(ERR_PREFIX);
+  });
+
+  it("deduplicates equal tool sources into a single executor call", async () => {
+    const { runId } = await producerRun();
+    const executor = vi.fn().mockResolvedValue({ count: 5 });
+    const map = await resolveWorkflowConditionSources({
+      db: fixture.db,
+      run: { id: runId, companyId: fixture.companyId },
+      ifStep: { id: "if-1", dependencies: ["validator"] },
+      workflowSteps: RESOLVER_TOPOLOGY,
+      sources: [toolSource(), toolSource({ path: "$.total_bytes" })],
+      resolveToolJsonSource: executor,
+    });
+    expect(executor).toHaveBeenCalledTimes(1);
+    expect(map.get(workflowConditionSourceKey(toolSource()))).toEqual({ count: 5 });
+    expect(map.get(workflowConditionSourceKey(toolSource({ path: "$.total_bytes" })))).toEqual({ count: 5 });
+  });
+
+  it("treats distinct parameters as distinct tool calls", async () => {
+    const { runId } = await producerRun();
+    const executor = vi.fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 2 });
+    const map = await resolveWorkflowConditionSources({
+      db: fixture.db,
+      run: { id: runId, companyId: fixture.companyId },
+      ifStep: { id: "if-1", dependencies: ["validator"] },
+      workflowSteps: RESOLVER_TOPOLOGY,
+      sources: [
+        toolSource({ parameters: { action: "list", prefix: "shorts/runs/r1/clips/" } }),
+        toolSource({ parameters: { action: "list", prefix: "shorts/runs/r2/clips/" } }),
+      ],
+      resolveToolJsonSource: executor,
+    });
+    expect(executor).toHaveBeenCalledTimes(2);
+    expect(map.get(workflowConditionSourceKey(toolSource({ parameters: { action: "list", prefix: "shorts/runs/r1/clips/" } })))).toEqual({ count: 1 });
+    expect(map.get(workflowConditionSourceKey(toolSource({ parameters: { action: "list", prefix: "shorts/runs/r2/clips/" } })))).toEqual({ count: 2 });
   });
 });

@@ -47,7 +47,8 @@ function fail(message: string): never {
 }
 
 function describeSource(source: WorkflowConditionSource): string {
-  return `path "${source.path}" (source step "${source.stepId}", work product "${source.title}")`;
+  const ref = source.kind === "tool_json" ? `tool "${source.toolName}"` : `work product "${source.title}"`;
+  return `path "${source.path}" (source step "${source.stepId}", ${ref})`;
 }
 
 /**

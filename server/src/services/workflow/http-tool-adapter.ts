@@ -81,7 +81,8 @@ function resolveHeaderAuth(auth: unknown): HeaderAuth | null {
 
 type ResponseContract = {
   resultField: string;
-  artifactField: string;
+  /** Present only for artifact-producing tools. Absent => data-only tool. */
+  artifactField: string | null;
   artifactFileName: string;
   artifactPathResultField: string;
   assertions: ResponseAssertion[];
@@ -147,18 +148,22 @@ function resolveResponseContract(response: unknown): ResponseContract | null {
   const artifactFileName = nonEmptyString(cfg.artifactFileName);
   const artifactPathResultField = nonEmptyString(cfg.artifactPathResultField);
   const assertions = resolveResponseAssertions(cfg.assertions);
-  if (
-    !resultField ||
-    !artifactField ||
-    !artifactFileName ||
-    !artifactPathResultField ||
-    assertions === null ||
-    path.basename(artifactFileName) !== artifactFileName ||
-    artifactFileName.includes(path.sep)
-  ) {
-    return null;
+  if (!resultField || assertions === null) return null;
+  if (artifactField !== null) {
+    // Artifact-producing tool: all artifact fields are required together.
+    if (
+      !artifactFileName ||
+      !artifactPathResultField ||
+      path.basename(artifactFileName) !== artifactFileName ||
+      artifactFileName.includes(path.sep)
+    ) {
+      return null;
+    }
+    return { resultField, artifactField, artifactFileName, artifactPathResultField, assertions };
   }
-  return { resultField, artifactField, artifactFileName, artifactPathResultField, assertions };
+  // Data-only tool: no artifact fields declared, no artifact handling.
+  if (artifactFileName || artifactPathResultField) return null;
+  return { resultField, artifactField: null, artifactFileName: "", artifactPathResultField: "", assertions };
 }
 
 export async function executeHttpWorkflowTool(
@@ -262,8 +267,29 @@ export async function executeHttpWorkflowTool(
 
   const envRecord = readObject(envelope);
   const resultValue = envRecord[responseContract.resultField];
+  if (resultValue === undefined) {
+    return remoteFailure(toolName, `Workflow tool "${toolName}" remote response is missing required fields`);
+  }
+  const baseResult = readObject(resultValue);
+
+  if (responseContract.artifactField === null) {
+    // Data-only tool: the declared result body IS the machine result. No artifact
+    // persistence and no step output directory are involved.
+    const assertionFailure = await checkResponseAssertions(toolName, responseContract.assertions, baseResult, input.requestId);
+    if (assertionFailure) return remoteFailure(toolName, assertionFailure);
+    return {
+      status: 200,
+      body: {
+        content: JSON.stringify(baseResult),
+        data: baseResult,
+        tool: toolName,
+        source: "core",
+      },
+    };
+  }
+
   const artifactValue = envRecord[responseContract.artifactField];
-  if (resultValue === undefined || artifactValue === undefined) {
+  if (artifactValue === undefined) {
     return remoteFailure(toolName, `Workflow tool "${toolName}" remote response is missing required fields`);
   }
 
@@ -285,11 +311,34 @@ export async function executeHttpWorkflowTool(
     );
   }
 
-  const baseResult = readObject(resultValue);
   // Fail-closed result contract: assert the remote tool's declared machine
   // checks AFTER persisting the raw artifact so violated responses keep their
   // evidence for diagnosis while the step fails instead of falsely completing.
-  for (const assertion of responseContract.assertions) {
+  const assertionFailure = await checkResponseAssertions(toolName, responseContract.assertions, baseResult, input.requestId);
+  if (assertionFailure) {
+    return remoteFailure(toolName, `${assertionFailure}; raw response retained at ${artifactPath}`);
+  }
+
+  const data = { ...baseResult, [responseContract.artifactPathResultField]: artifactPath };
+  return {
+    status: 200,
+    body: {
+      content: JSON.stringify(data),
+      data,
+      tool: toolName,
+      source: "core",
+    },
+  };
+}
+
+/** Applies the tool's declared fail-closed machine checks to its result body. */
+async function checkResponseAssertions(
+  toolName: string,
+  assertions: ResponseAssertion[],
+  baseResult: Record<string, unknown>,
+  requestId: string,
+): Promise<string | null> {
+  for (const assertion of assertions) {
     const actual = baseResult[assertion.field];
     let passed = false;
     if (assertion.kind === "equals") {
@@ -301,22 +350,10 @@ export async function executeHttpWorkflowTool(
       passed = candidate !== null && await isExistingNonEmptyFile(candidate);
     }
     if (!passed) {
-      return remoteFailure(
-        toolName,
-        `Workflow tool "${toolName}" response contract violated: field "${assertion.field}" ${describeExpectation(assertion)} (request id: ${input.requestId}); raw response retained at ${artifactPath}`,
-      );
+      return `Workflow tool "${toolName}" response contract violated: field "${assertion.field}" ${describeExpectation(assertion)} (request id: ${requestId})`;
     }
   }
-  const data = { ...baseResult, [responseContract.artifactPathResultField]: artifactPath };
-  return {
-    status: 200,
-    body: {
-      content: JSON.stringify(data),
-      data,
-      tool: toolName,
-      source: "core",
-    },
-  };
+  return null;
 }
 
 export function redactSecret(value: string, secret: string): string {

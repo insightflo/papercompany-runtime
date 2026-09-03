@@ -18,8 +18,10 @@ import type { WorkflowExecutionContext, WorkflowStep } from "../dag-engine.js";
 import { evaluateWorkflowConditionGroup } from "./condition-evaluator.js";
 import {
   resolveWorkflowConditionSources,
+  selectCurrentWorkProductCandidate,
   workflowConditionSourceKey,
 } from "./condition-source-resolver.js";
+import { executeWorkflowConditionToolSource } from "./condition-tool-source.js";
 
 type WorkflowStepRunRow = typeof workflowStepRuns.$inferSelect;
 
@@ -62,6 +64,18 @@ async function evaluateIfNode(input: {
     ifStep: input.step,
     workflowSteps: input.context.steps,
     sources,
+    // tool_json sources are measured by the server itself (server-held secrets), so an
+    // agent-authored work product cannot fabricate the measured storage reality.
+    resolveToolJsonSource: (source) => executeWorkflowConditionToolSource({
+      db: input.db,
+      companyId: input.context.run.companyId,
+      runId: input.context.run.id,
+      ifStepId: input.step.id,
+      workflowSteps: input.context.steps,
+      source,
+      runDate: input.context.run.runDate ?? null,
+      runMetadata: input.context.run.metadata ?? null,
+    }),
   });
   const evaluation = evaluateWorkflowConditionGroup({
     group,
@@ -73,7 +87,9 @@ async function evaluateIfNode(input: {
     evaluatedAt: input.evaluatedAt.toISOString(),
     conditionCount: group.conditions.length,
     combinator: group.combinator,
-    sourceSummary: sources.map(({ stepId, title, path }) => ({ stepId, title, path })),
+    sourceSummary: sources.map((source) => source.kind === "tool_json"
+      ? { kind: source.kind, stepId: source.stepId, toolName: source.toolName, path: source.path }
+      : { kind: source.kind, stepId: source.stepId, title: source.title, path: source.path }),
   });
 }
 
@@ -198,4 +214,97 @@ export async function resetFailedControlNodesForResume(input: {
       .where(eq(workflowStepRuns.id, row.id));
   }
   return failedControlRuns.length;
+}
+
+/**
+ * [목적] resume 시 verdict 가 stale 해진 완료된 IF control node 를 pending 으로 리셋해 재평가한다.
+ *   run9 RCA: producer 산물이 재등록(수정)되어도 완료된 IF 노드는 영구 재평가 불가 → 하류 skip 스티키
+ *   → run 이 조기 completed. stale 판정은 기계적 신선도 비교다: gate 평가 시점(controlNodeResult
+ *   .evaluatedAt) 이후에 소스 work product 의 현재 후보가 갱신되었다면 verdict 는 폐기한다.
+ *   tool_json 소스는 평가 시점에 라이브 실측이므로 stale 대상이 아니다.
+ * [안전] stale 여부가 확립 불가하면(소스 후보 조회 실패 등) 리셋하지 않는다 — 보수적으로 유지.
+ *   리셋된 노드는 executeWorkflowControlNode 의 CAS 로 재평가되며, 재평가가 다시 실패하면 run 은
+ *   실패한다(idempotent). tool/issue step 은 건드리지 않는다(범위 한정).
+ */
+export async function resetStaleIfControlNodesForResume(input: {
+  db: Db;
+  companyId: string;
+  workflowRunId: string;
+  steps: WorkflowStep[];
+}): Promise<number> {
+  const ifStepById = new Map(
+    input.steps.filter((step) => step.type === "if").map((step) => [step.id, step]),
+  );
+  if (ifStepById.size === 0) return 0;
+
+  const completedIfRuns = await input.db
+    .select({ id: workflowStepRuns.id, stepId: workflowStepRuns.stepId, metadata: workflowStepRuns.metadata })
+    .from(workflowStepRuns)
+    .where(and(
+      eq(workflowStepRuns.workflowRunId, input.workflowRunId),
+      eq(workflowStepRuns.status, "completed"),
+      isNull(workflowStepRuns.issueId),
+      inArray(workflowStepRuns.stepId, Array.from(ifStepById.keys())),
+    ));
+  if (completedIfRuns.length === 0) return 0;
+
+  let resetCount = 0;
+  for (const row of completedIfRuns) {
+    const step = ifStepById.get(row.stepId);
+    if (!step) continue;
+    const parsedResult = workflowIfControlResultSchema.safeParse(
+      normalizeRecord(row.metadata).controlNodeResult,
+    );
+    if (!parsedResult.success) continue;
+    const evaluatedAtMs = Date.parse(parsedResult.data.evaluatedAt);
+    if (!Number.isFinite(evaluatedAtMs)) continue;
+
+    const parsedGroup = workflowConditionGroupSchema.safeParse(step.conditionGroup);
+    if (!parsedGroup.success) continue;
+    const workProductSources = parsedGroup.data.conditions
+      .map((condition) => condition.source)
+      .filter((source): source is Extract<typeof source, { kind: "work_product_json" }> => source.kind === "work_product_json");
+    const uniquePairs = new Map(workProductSources.map((source) => [`${source.stepId}\u0000${source.title}`, source]));
+    if (uniquePairs.size === 0) continue;
+
+    let stale = false;
+    for (const source of uniquePairs.values()) {
+      try {
+        const candidate = await selectCurrentWorkProductCandidate({
+          db: input.db,
+          run: { id: input.workflowRunId, companyId: input.companyId },
+          ifStepId: step.id,
+          workflowSteps: input.steps,
+          stepId: source.stepId,
+          title: source.title,
+        });
+        if (candidate.updatedAt.getTime() > evaluatedAtMs) {
+          stale = true;
+          break;
+        }
+      } catch {
+        // Freshness cannot be established — keep the existing verdict (conservative).
+        continue;
+      }
+    }
+    if (!stale) continue;
+
+    const metadata = normalizeRecord(row.metadata);
+    delete metadata.controlNodeResult;
+    delete metadata.controlNodeError;
+    await input.db
+      .update(workflowStepRuns)
+      .set({
+        status: "pending",
+        startedAt: null,
+        completedAt: null,
+        dispatchReadyAt: null,
+        lastDispatchErrorAt: null,
+        lastDispatchErrorSummary: null,
+        metadata,
+      })
+      .where(eq(workflowStepRuns.id, row.id));
+    resetCount += 1;
+  }
+  return resetCount;
 }

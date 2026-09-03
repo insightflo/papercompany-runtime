@@ -14,6 +14,11 @@ import { z } from "zod";
 /** Maximum number of conditions allowed in a single IF condition group. */
 export const WORKFLOW_IF_MAX_CONDITIONS = 20;
 
+/** IF condition source kinds. `tool_json` measures live machine truth via a server-executed workflow tool. */
+export const WORKFLOW_IF_SOURCE_KINDS = ["work_product_json", "tool_json"] as const;
+
+export type WorkflowConditionSourceKind = (typeof WORKFLOW_IF_SOURCE_KINDS)[number];
+
 /**
  * Restricted JSON-path grammar for IF sources. Rooted at `$`, then a chain of
  * `.identifier` (object key) or `[index]` (non-negative integer) segments. No wildcards,
@@ -75,23 +80,65 @@ function pathReferencesPrototypeKey(path: string): boolean {
     .some((segment) => FORBIDDEN_PATH_SEGMENTS.has(segment));
 }
 
-export const workflowConditionSourceSchema = z
+const workflowConditionSourceBase = {
+  stepId: z.string().trim().min(1).max(120),
+  path: z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(WORKFLOW_IF_JSON_PATH_PATTERN, "Workflow IF source path must match the restricted JSON-path grammar"),
+};
+
+/** Agent/runner-registered local work-product JSON, parsed from the server-local file. */
+const workflowWorkProductJsonSourceSchema = z
   .object({
     kind: z.literal("work_product_json"),
-    stepId: z.string().trim().min(1).max(120),
+    ...workflowConditionSourceBase,
     title: z.string().trim().min(1).max(255),
-    path: z
-      .string()
-      .min(1)
-      .max(1024)
-      .regex(WORKFLOW_IF_JSON_PATH_PATTERN, "Workflow IF source path must match the restricted JSON-path grammar"),
   })
-  .strict()
-  .refine((source) => !pathReferencesPrototypeKey(source.path), {
-    message: "Workflow IF source path must not reference prototype or constructor segments",
+  .strict();
+
+/**
+ * Live measurement through a registered workflow tool executed by the server itself
+ * (server-held secrets; agent-authored JSON cannot fabricate the outcome). `parameters`
+ * supports the same templating tokens as tool-step args (ancestor work-product refs,
+ * run metadata, runDate).
+ */
+const workflowToolJsonSourceSchema = z
+  .object({
+    kind: z.literal("tool_json"),
+    ...workflowConditionSourceBase,
+    toolName: z.string().trim().min(1).max(120),
+    parameters: z.record(z.unknown()).default({}),
+  })
+  .strict();
+
+export const workflowConditionSourceSchema = z
+  .discriminatedUnion("kind", [
+    workflowWorkProductJsonSourceSchema,
+    workflowToolJsonSourceSchema,
+  ])
+  .superRefine((source, ctx) => {
+    if (pathReferencesPrototypeKey(source.path)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["path"],
+        message: "Workflow IF source path must not reference prototype or constructor segments",
+      });
+    }
   });
 
+export type WorkflowWorkProductJsonSource = z.infer<typeof workflowWorkProductJsonSourceSchema>;
+export type WorkflowToolJsonSource = z.infer<typeof workflowToolJsonSourceSchema>;
 export type WorkflowConditionSource = z.infer<typeof workflowConditionSourceSchema>;
+
+/**
+ * Schema-level guard shared by both source kinds: the JSON path must not reference
+ * prototype/constructor segments (the evaluator re-checks at evaluation time).
+ */
+export function conditionSourcePathReferencesPrototypeKey(source: WorkflowConditionSource): boolean {
+  return pathReferencesPrototypeKey(source.path);
+}
 
 const dateTimeStringSchema = z.string().datetime({ offset: true });
 
@@ -139,6 +186,13 @@ export const workflowConditionSchema = z
   })
   .strict()
   .superRefine((condition, ctx) => {
+    if (conditionSourcePathReferencesPrototypeKey(condition.source)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["source", "path"],
+        message: "Workflow IF source path must not reference prototype or constructor segments",
+      });
+    }
     const allowed = WORKFLOW_CONDITION_OPERATORS[condition.dataType];
     if (!(allowed as readonly string[]).includes(condition.operator)) {
       ctx.addIssue({
@@ -185,13 +239,23 @@ export const workflowConditionGroupSchema = z
 
 export type WorkflowConditionGroup = z.infer<typeof workflowConditionGroupSchema>;
 
+/**
+ * Persisted per-condition source summary in IF control-node results. Backward
+ * compatible: legacy records carry `title` only (work_product_json); tool sources
+ * carry `toolName`. Exactly one of the two must be present.
+ */
 const workflowConditionSourceSummarySchema = z
   .object({
+    kind: z.enum(WORKFLOW_IF_SOURCE_KINDS).optional(),
     stepId: z.string().min(1),
-    title: z.string().min(1),
     path: z.string().min(1),
+    title: z.string().min(1).optional(),
+    toolName: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .refine((summary) => Boolean(summary.title) !== Boolean(summary.toolName), {
+    message: "exactly one of title or toolName is required",
+  });
 
 export const workflowIfControlResultSchema = z
   .object({

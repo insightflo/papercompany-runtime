@@ -375,3 +375,132 @@ describeDispatchDb("http workflow tool core dispatch", () => {
     expect(result.body.data).toEqual({ ok: true });
   });
 });
+
+describe("executeHttpWorkflowTool — data-only response contract", () => {
+  const DATA_ONLY_CONFIG = {
+    url: "https://n8n.example.test/webhook/shorts-storage",
+    method: "POST",
+    timeoutMs: 5000,
+    auth: {
+      type: "header",
+      headerName: "X-Papercompany-Webhook-Key",
+      secretId: "secret-1",
+      version: "latest",
+    },
+    response: {
+      resultField: "result",
+      assertions: [{ field: "ok", equals: true }],
+    },
+  };
+
+  function baseDeps(fetchImpl: FetchLike) {
+    return { fetchImpl, resolveSecretValue: async () => SECRET_VALUE };
+  }
+
+  it("returns the declared result body as machine data without artifact handling", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      makeFetchResponse(200, { result: { ok: true, count: 22, total_bytes: 1234 } }),
+    );
+    const result = await executeHttpWorkflowTool(
+      {
+        companyId: "c1",
+        toolName: "shorts-storage-list",
+        parameters: { action: "list", prefix: "shorts/runs/r1/clips/" },
+        requestId: "req-data-only-1",
+        stepOutputDir: null,
+        adapterConfig: DATA_ONLY_CONFIG,
+      },
+      baseDeps(fetchImpl as unknown as FetchLike),
+    );
+    expect(result.status).toBe(200);
+    expect((result.body as { data?: unknown }).data).toEqual({ ok: true, count: 22, total_bytes: 1234 });
+    const [, init] = fetchImpl.mock.calls[0]!;
+    expect((init as RequestInit).body).toBe(
+      JSON.stringify({ action: "list", prefix: "shorts/runs/r1/clips/" }),
+    );
+  });
+
+  it("fails closed when a declared assertion is violated (data-only)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      makeFetchResponse(200, { result: { ok: false, count: 0 } }),
+    );
+    const result = await executeHttpWorkflowTool(
+      {
+        companyId: "c1",
+        toolName: "shorts-storage-list",
+        parameters: {},
+        requestId: "req-data-only-2",
+        stepOutputDir: null,
+        adapterConfig: DATA_ONLY_CONFIG,
+      },
+      baseDeps(fetchImpl as unknown as FetchLike),
+    );
+    expect(result.status).toBe(500);
+    expect((result.body as { error?: string }).error).toContain("response contract violated");
+  });
+
+  it("fails closed when the declared result field is missing", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(makeFetchResponse(200, { unexpected: {} }));
+    const result = await executeHttpWorkflowTool(
+      {
+        companyId: "c1",
+        toolName: "shorts-storage-list",
+        parameters: {},
+        requestId: "req-data-only-3",
+        stepOutputDir: null,
+        adapterConfig: DATA_ONLY_CONFIG,
+      },
+      baseDeps(fetchImpl as unknown as FetchLike),
+    );
+    expect(result.status).toBe(500);
+    expect((result.body as { error?: string }).error).toContain("missing required fields");
+  });
+
+  it("rejects a mixed contract (artifactField without artifact fields) as invalid config", async () => {
+    const fetchImpl = vi.fn();
+    const result = await executeHttpWorkflowTool(
+      {
+        companyId: "c1",
+        toolName: "mixed-tool",
+        parameters: {},
+        requestId: "req-data-only-4",
+        stepOutputDir: null,
+        adapterConfig: {
+          ...DATA_ONLY_CONFIG,
+          response: { resultField: "result", artifactField: "artifact" },
+        },
+      },
+      baseDeps(fetchImpl as unknown as FetchLike),
+    );
+    expect(result.status).toBe(422);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps requiring a step output dir for artifact-producing tools", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      makeFetchResponse(200, { result: { ok: true }, artifact: { any: "payload" } }),
+    );
+    const artifactConfig = {
+      ...DATA_ONLY_CONFIG,
+      response: {
+        resultField: "result",
+        artifactField: "artifact",
+        artifactFileName: "result.json",
+        artifactPathResultField: "rawPath",
+      },
+    };
+    const result = await executeHttpWorkflowTool(
+      {
+        companyId: "c1",
+        toolName: "artifact-tool",
+        parameters: {},
+        requestId: "req-data-only-5",
+        stepOutputDir: null,
+        adapterConfig: artifactConfig,
+      },
+      baseDeps(fetchImpl as unknown as FetchLike),
+    );
+    expect(result.status).toBe(500);
+    expect((result.body as { error?: string }).error).toContain("step output directory");
+  });
+});

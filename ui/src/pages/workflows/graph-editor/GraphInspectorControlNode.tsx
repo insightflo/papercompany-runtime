@@ -7,6 +7,7 @@ import {
   type WorkflowConditionDataType,
   type WorkflowConditionGroup,
   type WorkflowConditionOperator,
+  type WorkflowConditionSource,
 } from "@paperclipai/shared";
 import type { StepDraft } from "../step-draft.js";
 import {
@@ -48,6 +49,29 @@ export function addWorkflowCondition(group: WorkflowConditionGroup, sourceStepId
 export function removeWorkflowCondition(group: WorkflowConditionGroup, index: number): WorkflowConditionGroup {
   if (group.conditions.length <= 1) return group;
   return { ...group, conditions: group.conditions.filter((_, conditionIndex) => conditionIndex !== index) };
+}
+
+/** Switches a condition source kind while keeping the shared step/path context. */
+export function switchConditionSourceKind(
+  source: WorkflowConditionSource,
+  kind: WorkflowConditionSource["kind"],
+): WorkflowConditionSource {
+  if (source.kind === kind) return source;
+  return kind === "tool_json"
+    ? { kind: "tool_json", stepId: source.stepId, toolName: "", parameters: {}, path: source.path }
+    : { kind: "work_product_json", stepId: source.stepId, title: "", path: source.path };
+}
+
+function withWorkProductTitle(source: WorkflowConditionSource, title: string): WorkflowConditionSource {
+  return source.kind === "work_product_json" ? { ...source, title } : source;
+}
+
+function withToolName(source: WorkflowConditionSource, toolName: string): WorkflowConditionSource {
+  return source.kind === "tool_json" ? { ...source, toolName } : source;
+}
+
+function withToolParameters(source: WorkflowConditionSource, parameters: Record<string, unknown>): WorkflowConditionSource {
+  return source.kind === "tool_json" ? { ...source, parameters } : source;
 }
 
 export function updateWorkflowCondition(
@@ -170,14 +194,50 @@ export function GraphInspectorControlNode({
             </select>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
               <div style={{ display: "grid", gap: "4px" }}>
-                <FieldLabel help="Exact registered JSON work-product title from the selected step.">Work product title</FieldLabel>
-                <input style={inputStyle} value={condition.source.title} placeholder="decision.json" onChange={(event) => updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { source: { ...condition.source, title: event.target.value } }) })} />
+                <FieldLabel help="work product JSON reads an agent-registered file; tool JSON is measured by the server through a registered workflow tool (anti-fabrication).">Source kind</FieldLabel>
+                <select
+                  style={selectStyle}
+                  aria-label="Source kind"
+                  value={condition.source.kind}
+                  onChange={(event) => updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { source: switchConditionSourceKind(condition.source, event.target.value as WorkflowConditionSource["kind"]) }) })}
+                >
+                  <option value="work_product_json">work product JSON</option>
+                  <option value="tool_json">tool JSON (server-measured)</option>
+                </select>
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Restricted path such as $.status or $.items[0].id.">JSON path</FieldLabel>
                 <input style={inputStyle} value={condition.source.path} placeholder="$.status" onChange={(event) => updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { source: { ...condition.source, path: event.target.value } }) })} />
               </div>
             </div>
+            {condition.source.kind === "work_product_json" ? (
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Exact registered JSON work-product title from the selected step.">Work product title</FieldLabel>
+                <input style={inputStyle} value={condition.source.title} placeholder="decision.json" onChange={(event) => updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { source: withWorkProductTitle(condition.source, event.target.value) }) })} />
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: "4px" }}>
+                <FieldLabel help="Registered workflow tool executed by the server with server-held secrets. Data-only HTTP tools only.">Tool name</FieldLabel>
+                <input style={inputStyle} value={condition.source.toolName} placeholder="shorts-storage-list" onChange={(event) => updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { source: withToolName(condition.source, event.target.value) }) })} />
+                <FieldLabel help="Optional JSON object passed to the tool; supports tool-step arg tokens (ancestor work products, run metadata).">Parameters JSON</FieldLabel>
+                <textarea
+                  style={inputStyle}
+                  rows={3}
+                  aria-label="Tool parameters JSON"
+                  value={JSON.stringify(condition.source.parameters, null, 2)}
+                  onChange={(event) => {
+                    try {
+                      const parsed = JSON.parse(event.target.value) as unknown;
+                      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { source: withToolParameters(condition.source, parsed as Record<string, unknown>) }) });
+                      }
+                    } catch {
+                      // Ignore invalid intermediate JSON while typing.
+                    }
+                  }}
+                />
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: unary ? "1fr 1fr" : "1fr 1fr 1fr", gap: "6px" }}>
               <select style={selectStyle} aria-label="Data type" value={condition.dataType} onChange={(event) => updateSelected({ conditionGroup: updateWorkflowCondition(group, index, { dataType: event.target.value as WorkflowConditionDataType }) })}>
                 {Object.keys(WORKFLOW_CONDITION_OPERATORS).map((dataType) => <option key={dataType} value={dataType}>{dataType}</option>)}
