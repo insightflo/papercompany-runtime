@@ -145,4 +145,20 @@ describe("mission decision report routes", () => {
       expect.objectContaining({ missionId: "mission-1" }),
     );
   });
+
+  it("GET /missions/:id/decision-log returns an empty view instead of 404 when no rolling state exists", async () => {
+    mockDecisionReports.getMissionDecisionLog.mockResolvedValue(null);
+
+    const res = await request(createApp())
+      .get("/api/missions/mission-1/decision-log");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      missionId: "mission-1",
+      revision: 0,
+      updatedAt: null,
+      decisions: [],
+      stateMarkdown: "",
+    });
+  });
 });

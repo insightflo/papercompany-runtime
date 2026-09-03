@@ -110,6 +110,25 @@ export interface MissionWorkflowRun {
   progress: MissionWorkflowRunProgress;
 }
 
+export type MissionDecisionStatus = "confirmed" | "under_review" | "retired";
+
+export interface MissionDecisionRecord {
+  id: string;
+  summary: string;
+  status: MissionDecisionStatus;
+  supersedes?: string | null;
+  handoffId?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface MissionDecisionLogResponse {
+  missionId: string;
+  revision: number;
+  updatedAt: string | null;
+  decisions: MissionDecisionRecord[];
+  stateMarkdown: string;
+}
+
 export type MissionGovernanceThreadEventType =
   | "status_changed"
   | "assignment_changed"
@@ -424,6 +443,7 @@ export const missionsApi = {
       { amount, ...(reason ? { reason } : {}) },
     ),
   getGovernanceThread: (id: string) => api.get<MissionGovernanceThreadResponse>(`/missions/${id}/governance-thread`),
+  getDecisionLog: (id: string) => api.get<MissionDecisionLogResponse>(`/missions/${id}/decision-log`),
   listHumanOperatorRequests: (companyId: string) =>
     api.get<MissionHumanOperatorRequest[]>(`/companies/${companyId}/missions/human-operator-requests`),
   create: (companyId: string, data: CreateMissionInput) =>
