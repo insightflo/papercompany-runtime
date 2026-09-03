@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
 import express from "express";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { agentRoutes } from "../routes/agents.js";
 import type { HeartbeatRunAttention } from "@paperclipai/shared";
@@ -242,5 +246,103 @@ describe("heartbeat-runs bounded read routes", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].agentId).toBe("agent-1");
+  });
+});
+
+describe("heartbeat-run file-view freshness route", () => {
+  const sha256Of = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  it("compares the run's recorded file views against the current workspace", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-freshness-"));
+    tempDirs.push(root);
+    await fs.writeFile(path.join(root, "stable.ts"), "stable", "utf8");
+    await fs.writeFile(path.join(root, "changed.ts"), "rewritten", "utf8");
+    const originalHash = sha256Of("original");
+
+    mockHeartbeatService.getRun.mockResolvedValue({
+      ...runRow,
+      id: "run-1",
+      contextSnapshot: {
+        paperclipWorkspace: { cwd: root },
+        paperclipFileViews: [
+          {
+            workspaceId: "ws-1",
+            relativePath: "stable.ts",
+            source: "wake_comment",
+            exists: true,
+            contentHash: sha256Of("stable"),
+          },
+          {
+            workspaceId: "ws-1",
+            relativePath: "changed.ts",
+            source: "wake_comment",
+            exists: true,
+            contentHash: originalHash,
+          },
+          {
+            workspaceId: "ws-1",
+            relativePath: "gone.ts",
+            source: "wake_comment",
+            exists: true,
+            contentHash: sha256Of("bye"),
+          },
+        ],
+      },
+    });
+
+    const res = await request(createApp()).get("/api/heartbeat-runs/run-1/file-view-freshness");
+
+    expect(res.status).toBe(200);
+    expect(res.body.workspaceCwd).toBe(root);
+    expect(res.body.freshness).toEqual([
+      {
+        relativePath: "stable.ts",
+        status: "current",
+        recordedContentHash: sha256Of("stable"),
+        currentContentHash: sha256Of("stable"),
+      },
+      {
+        relativePath: "changed.ts",
+        status: "stale",
+        recordedContentHash: originalHash,
+        currentContentHash: sha256Of("rewritten"),
+      },
+      {
+        relativePath: "gone.ts",
+        status: "missing",
+        recordedContentHash: sha256Of("bye"),
+        currentContentHash: null,
+      },
+    ]);
+  });
+
+  it("returns 404 when the run does not exist", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue(null);
+    const res = await request(createApp()).get("/api/heartbeat-runs/run-404/file-view-freshness");
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Heartbeat run not found");
+  });
+
+  it("denies access to another company's run", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({ ...runRow, companyId: "company-2" });
+    const res = await request(createApp()).get("/api/heartbeat-runs/run-1/file-view-freshness");
+    expect(res.status).toBe(403);
+  });
+
+  it("returns empty freshness when the snapshot has no workspace cwd or views", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({
+      ...runRow,
+      contextSnapshot: {
+        paperclipFileViews: [{ relativePath: "a.ts", exists: true, contentHash: "x" }],
+      },
+    });
+    const res = await request(createApp()).get("/api/heartbeat-runs/run-1/file-view-freshness");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ runId: "run-1", workspaceCwd: null, freshness: [] });
   });
 });

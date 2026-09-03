@@ -1,4 +1,5 @@
 import type { WorkflowConditionGroup } from "../validators/workflow-condition.js";
+import type { WorkflowStepContract } from "../validators/workflow.js";
 
 export type WorkflowDefinitionStatus = "active" | "paused" | "archived";
 export type WorkflowExecutionMode = "static_dag" | "dynamic_owner_plan";
@@ -65,6 +66,11 @@ export interface WorkflowStepDefinition {
   graphWorkProductPattern?: string;
   graphResourceRefs?: string[];
   graphSecretRefs?: string[];
+  /**
+   * 스텝 발주 계약 — 사전조건/사후조건/미정의동작 구조 레코드(정의 시점 작성).
+   * 발주 시 이슈 지침·이슈 실행카드·QA 루브릭에 전달된다. 실행 통제 권위는 아니다(규칙 8).
+   */
+  contract?: WorkflowStepContract;
 }
 
 export interface WorkflowDefinitionDto {

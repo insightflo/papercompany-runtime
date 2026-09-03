@@ -144,6 +144,7 @@ import {
   markMissionRuntimeBootstrapInjected,
   persistMissionIssueHandoff,
   reapStaleBusyMissionRuntimes as reapStaleBusyMissionRuntimesCore,
+  resolveMissionDecisionLogPointer,
   updateMissionRollingStateFromHandoff,
 } from "./missions/mission-runtime-manager.js";
 import { compileMissionRunContext } from "./missions/mission-context-compiler.js";
@@ -3731,6 +3732,7 @@ export function heartbeatService(db: Db) {
     agent: typeof agents.$inferSelect;
     sessionId: string | null;
     issueId: string | null;
+    missionId?: string | null;
   }): Promise<SessionCompactionDecision> {
     const { agent, sessionId, issueId } = input;
     if (!sessionId) {
@@ -3832,12 +3834,21 @@ export function heartbeatService(db: Db) {
       readNonEmptyString(latestSummary?.message) ??
       readNonEmptyString(latestRun.error);
 
+    // [A안] 세션 회전 시 결정원장 포인터(미션+판번호)를 실어 다음 세션이
+    // 권위 있는 구조 레코드(mission_rolling_state)를 찾게 한다. 표시용 맥락일 뿐.
+    const decisionLogPointer = input.missionId
+      ? await resolveMissionDecisionLogPointer(db, input.missionId)
+      : null;
+
     const handoffMarkdown = [
       "Paperclip session handoff:",
       `- Previous session: ${sessionId}`,
       issueId ? `- Issue: ${issueId}` : "",
       `- Rotation reason: ${reason}`,
       latestTextSummary ? `- Last run summary: ${latestTextSummary}` : "",
+      decisionLogPointer
+        ? `- Mission decision log: mission ${decisionLogPointer.missionId} rolling state revision ${decisionLogPointer.revision} (authoritative decision statuses: confirmed/under_review/retired)`
+        : "",
       "Continue from the current task state. Rebuild only the minimum context you need.",
     ]
       .filter(Boolean)
@@ -3848,6 +3859,8 @@ export function heartbeatService(db: Db) {
       issueId,
       rotationReason: reason,
       lastRunSummaryText: latestTextSummary ?? null,
+      // 원장이 실제로 존재할 때만 필드가 실린다(없으면 기존 형태 유지).
+      missionDecisionLogPointer: decisionLogPointer ?? undefined,
     });
 
     return {
@@ -7000,6 +7013,7 @@ export function heartbeatService(db: Db) {
           agent,
           sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
           issueId,
+          missionId,
         });
     if (issueScopedRawSessionResume.rotate) {
       context.paperclipSessionRotationReason = issueScopedRawSessionResume.reason;
@@ -7437,6 +7451,10 @@ export function heartbeatService(db: Db) {
         hasResumableSession = false;
         context.paperclipSessionRotationReason = "context_budget_preflight";
         context.paperclipPreviousSessionId = previousSessionId;
+        // [A안] 컨텍스트 예산 회전에서도 결정원장 포인터(미션+판번호)를 실어 보낸다.
+        const budgetDecisionLogPointer = missionId
+          ? await resolveMissionDecisionLogPointer(db, missionId)
+          : null;
         context.paperclipSessionHandoffMarkdown = [
           "# Session Handoff",
           "",
@@ -7445,6 +7463,11 @@ export function heartbeatService(db: Db) {
           `Issue ID: ${issueId ?? "none"}`,
           "",
           contextBudgetPreflight.reason ?? "Context budget preflight blocked resumed session.",
+          ...(budgetDecisionLogPointer
+            ? [
+                `Mission decision log: mission ${budgetDecisionLogPointer.missionId} rolling state revision ${budgetDecisionLogPointer.revision} (authoritative decision statuses: confirmed/under_review/retired)`,
+              ]
+            : []),
         ].join("\n");
         context.paperclipSessionHandoff = {
           version: 1,
@@ -7452,6 +7475,7 @@ export function heartbeatService(db: Db) {
           issueId,
           rotationReason: "context_budget_preflight",
           lastRunSummaryText: contextBudgetPreflight.reason,
+          ...(budgetDecisionLogPointer ? { missionDecisionLogPointer: budgetDecisionLogPointer } : {}),
         };
         refreshStepInputManifest(context, taskKey);
         contextBudgetPreflight = await evaluateContextBudgetPreflight({
@@ -7911,6 +7935,10 @@ export function heartbeatService(db: Db) {
             handoffId: handoff.id,
             status,
             summaryText,
+            // [A안] 지속화된 핸드오프 행의 구조화된 결정 델타를 롤링 상태 결정 로그로
+            // 병합한다. 런타임 생성 handoffJson에는 결정이 없으므로 오늘은 undefined —
+            // 결정을 실은 생산자(향후 에이전트 제출 경로)가 생기면 자동으로 흐른다.
+            decisionUpdates: handoff.handoffJson?.decisionUpdates ?? undefined,
             inputTokens: normalizedUsage?.inputTokens ?? null,
             outputTokens: normalizedUsage?.outputTokens ?? null,
             costCents: missionRuntimeCostCents(adapterResult.costUsd),

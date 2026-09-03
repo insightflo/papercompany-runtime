@@ -5154,6 +5154,7 @@ describe("heartbeat context budget preflight", () => {
         relativePath: "src/server.ts",
         source: "wake_comment",
         exists: false,
+        contentHash: null,
       },
     ]);
     const persistedContext = finalized.contextSnapshot ?? {};

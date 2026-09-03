@@ -101,4 +101,39 @@ describe("Workflows editor serialization — stale assignee (AREA-1)", () => {
       expect(out.graphResourceRefs).toEqual(["kb:market-rules", "file:brief"]);
       expect(out.graphSecretRefs).toEqual(["secret:api-token"]);
     });
+
+    it("hydrates a step contract into first-class draft fields and strips it from extra", () => {
+      const drafts = jsonToSteps([step({
+        contract: {
+          preconditions: ["Data source brief is registered"],
+          postconditions: ["Report registers a workProduct"],
+          undefinedBehaviors: ["If the source is unreachable the content is undefined — report blocked"],
+        },
+      })]);
+      expect(drafts[0].contractPreconditions).toBe("Data source brief is registered");
+      expect(drafts[0].contractPostconditions).toBe("Report registers a workProduct");
+      expect(drafts[0].contractUndefinedBehaviors).toBe("If the source is unreachable the content is undefined — report blocked");
+      expect(drafts[0].extra).not.toHaveProperty("contract");
+    });
+
+    it("round-trips an edited step contract as a normalized contract object", () => {
+      const drafts = jsonToSteps([step({
+        contract: { postconditions: ["existing"] },
+      })]);
+      drafts[0].contractPreconditions = "Upstream brief exists\n\n  \nSecond precondition";
+      const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+      expect(out.contract).toEqual({
+        preconditions: ["Upstream brief exists", "Second precondition"],
+        postconditions: ["existing"],
+      });
+    });
+
+    it("drops the contract entirely when every section is cleared", () => {
+      const drafts = jsonToSteps([step({
+        contract: { postconditions: ["existing"] },
+      })]);
+      drafts[0].contractPostconditions = "";
+      const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+      expect(out).not.toHaveProperty("contract");
+    });
   });

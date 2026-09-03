@@ -14,6 +14,7 @@ import { issues } from "./issues.js";
 import { agents } from "./agents.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { missionSessions } from "./mission_sessions.js";
+import type { MissionDecisionStatus } from "./mission_rolling_state.js";
 
 export type MissionIssueHandoffEvidenceRef = {
   type: string;
@@ -23,11 +24,25 @@ export type MissionIssueHandoffEvidenceRef = {
   description?: string;
 };
 
+/**
+ * [결정 갱신 — A안 2026-09-05] 핸드오프가 롤링 상태 결정 로그에 반영할 구조화된
+ * 델타. 자연어 파싱 금지(규칙 8): 생산자는 이 구조로만 결정을 전달한다.
+ * - id: 결정 id (기존 id 면 갱신, 새 id 면 추가 — 새 추가에는 summary 필수)
+ * - status/supersedes 생략 시 기존값 유지, 신규 생성 시 under_review 기본
+ */
+export type MissionIssueHandoffDecisionUpdate = {
+  id: string;
+  summary?: string;
+  status?: MissionDecisionStatus;
+  supersedes?: string | null;
+};
+
 export type MissionIssueHandoffJson = {
   issueGoal?: string;
   inputContextUsed?: string[];
   actionsTaken?: string[];
   decisionsMade?: string[];
+  decisionUpdates?: MissionIssueHandoffDecisionUpdate[];
   outputArtifact?: string | null;
   evidence?: MissionIssueHandoffEvidenceRef[];
   importantCaveats?: string[];
