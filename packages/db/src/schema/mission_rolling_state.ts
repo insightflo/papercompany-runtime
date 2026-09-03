@@ -13,11 +13,35 @@ import { companies } from "./companies.js";
 import { missions } from "./missions.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 
+/**
+ * [결정 지위 — A안 2026-09-05] 미션 결정 로그의 수명주기 지위.
+ * 규칙 8: 이 지위는 다음 에이전트에게 맥락을 전달하는 표시용 상태일 뿐, 실행 통제
+ * (retry/complete/branch/QA 판정)의 권위가 아니다. 스텝 성패의 진실원은 엔진의
+ * run/issue 상태 그대로다. 어떤 실행 통제 코드도 이 필드를 읽어 판단해서는 안 된다.
+ */
+export type MissionDecisionStatus = "confirmed" | "under_review" | "retired";
+
+/**
+ * [결정 레코드 — A안] 롤링 상태가 유지하는 결정 로그 항목.
+ * - supersedes: 이 결정이 대체한 이전 결정 id (대체링크). 대체된 결정은 retired 로
+ *   로그에 남는다(폐기된 결정까지 붙들어야 지금이 보인다 — 온톨로지 논문).
+ * - handoffId/updatedAt: 이 상태를 쓴 핸드오프 출처(근거 추적용).
+ */
+export type MissionRollingDecisionRecord = {
+  id: string;
+  summary: string;
+  status: MissionDecisionStatus;
+  supersedes?: string | null;
+  handoffId?: string | null;
+  updatedAt?: string | null;
+};
+
 export type MissionRollingStateJson = {
   missionGoal?: string | null;
   currentPlan?: string | null;
   completedIssues?: Array<{ issueId: string; summary: string; handoffId?: string }>;
   activeDecisions?: string[];
+  decisions?: MissionRollingDecisionRecord[];
   knownConstraints?: string[];
   openQuestions?: string[];
   blockers?: string[];

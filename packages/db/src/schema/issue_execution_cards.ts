@@ -56,6 +56,16 @@ export type IssueExecutionCardJson = {
     requiredKnowledgeNames: string[];
     allowedSearchScopes?: string[];
   };
+  /**
+   * 스텝 발주 계약 — 사전조건/사후조건/미정의동작 구조 레코드(정의 시점 작성, 발주 시 스냅샷).
+   * additive-optional: 기존 카드 행은 이 필드 없이 그대로 유효하다.
+   * 지침·QA 검증 기준일 뿐 실행 통제 권위가 아니다(규칙 8).
+   */
+  stepContract?: {
+    preconditions?: string[];
+    postconditions?: string[];
+    undefinedBehaviors?: string[];
+  } | null;
   evidenceRefs: Array<{
     type: string;
     id?: string;

@@ -626,6 +626,8 @@ export {
   workflowDefinitionStatusSchema,
   workflowExecutionModeSchema,
   workflowStepDefinitionSchema,
+  workflowStepContractSchema,
+  type WorkflowStepContract,
   workflowDefinitionSchema,
   workflowRunSchema,
   workflowStepRunSchema,

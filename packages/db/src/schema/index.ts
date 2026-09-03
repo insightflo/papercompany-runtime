@@ -87,10 +87,13 @@ export {
   missionIssueHandoffs,
   type MissionIssueHandoffEvidenceRef,
   type MissionIssueHandoffJson,
+  type MissionIssueHandoffDecisionUpdate,
 } from "./mission_issue_handoffs.js";
 export {
   missionRollingState,
   type MissionRollingStateJson,
+  type MissionDecisionStatus,
+  type MissionRollingDecisionRecord,
 } from "./mission_rolling_state.js";
 export {
   missionAgentRuntimes,
