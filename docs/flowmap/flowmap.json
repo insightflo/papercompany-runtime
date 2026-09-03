@@ -1,0 +1,646 @@
+{
+  "meta": {
+    "project": "papercompany-runtime",
+    "title": "Papercompany Runtime Flowmap",
+    "subtitle": "AI-agent company control plane — core execution flows",
+    "last_analyzed_commit": "8ac7371c53a000a910b4c014d942b26f4744c6e6",
+    "basis": "agent code trace of server/ui/packages sources at init (2026-09-04); node.file = repository-relative evidence path",
+    "note": "Scoped to core execution control (mission lifecycle, workflow engine, IF branches, QA rework loops, heartbeat runtime, supervision, tools, board view). Peripheral surfaces (company portability, costs/finance, hermes-chat, knowledge wiki/patterns, settings/auth screens, research-workbench & n8n plugins, example plugins) are intentionally excluded to keep the execution-control picture legible."
+  },
+  "layers": [
+    {
+      "id": "l-ui",
+      "label": "보드 UI",
+      "color": "#38bdf8"
+    },
+    {
+      "id": "l-api",
+      "label": "API 라우트",
+      "color": "#818cf8"
+    },
+    {
+      "id": "l-svc",
+      "label": "미션·감독 서비스",
+      "color": "#a78bfa"
+    },
+    {
+      "id": "l-engine",
+      "label": "워크플로 엔진",
+      "color": "#f472b6"
+    },
+    {
+      "id": "l-runtime",
+      "label": "에이전트 런타임·도구",
+      "color": "#fbbf24"
+    },
+    {
+      "id": "l-db",
+      "label": "DB",
+      "color": "#94a3b8"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "ui-missions-page",
+      "label": "Missions 페이지",
+      "desc": "미션 생성/목록",
+      "layer": "l-ui",
+      "file": "ui/src/pages/Missions.tsx"
+    },
+    {
+      "id": "ui-mission-detail",
+      "label": "Mission 상세",
+      "desc": "미션 화면 (Execution Flow 탭 포함)",
+      "layer": "l-ui",
+      "file": "ui/src/pages/MissionDetail.tsx"
+    },
+    {
+      "id": "ui-dag-panel",
+      "label": "실행흐름 DAG 패널",
+      "desc": "IF 분기·rework 루프 렌더 + flowmap 내보내기",
+      "layer": "l-ui",
+      "file": "ui/src/components/WorkflowDagPanel.tsx"
+    },
+    {
+      "id": "ui-missions-api",
+      "label": "missions API 클라이언트",
+      "layer": "l-ui",
+      "file": "ui/src/api/missions.ts"
+    },
+    {
+      "id": "api-missions",
+      "label": "mission 라우트",
+      "desc": "board/agent 양쪽 진입점, 회사 경계 검사",
+      "layer": "l-api",
+      "file": "server/src/routes/missions.ts"
+    },
+    {
+      "id": "api-workflows",
+      "label": "workflow 라우트",
+      "desc": "정의/런 조회·재개·취소",
+      "layer": "l-api",
+      "file": "server/src/routes/workflows.ts"
+    },
+    {
+      "id": "api-authz",
+      "label": "라우트 인가·에이전트 키",
+      "desc": "actor 검사 + agent JWT/API 키",
+      "layer": "l-api",
+      "file": "server/src/routes/authz.ts"
+    },
+    {
+      "id": "svc-missions",
+      "label": "미션 서비스",
+      "desc": "수명주기·이슈 트리·run 투영·flowmap 내보내기 조립",
+      "layer": "l-svc",
+      "file": "server/src/services/missions.ts"
+    },
+    {
+      "id": "svc-supervision",
+      "label": "미션 감독",
+      "desc": "stale 탐지·소유자 결정·조치 적용",
+      "layer": "l-svc",
+      "file": "server/src/services/missions/supervision.ts"
+    },
+    {
+      "id": "svc-heartbeat",
+      "label": "하트비트 서비스",
+      "desc": "런 이벤트·타임아웃·고아 런타임 리퍼",
+      "layer": "l-svc",
+      "file": "server/src/services/heartbeat.ts"
+    },
+    {
+      "id": "svc-heartbeat-scheduler",
+      "label": "하트비트 스케줄러",
+      "desc": "timer/routine/recovery 레인 틱",
+      "layer": "l-svc",
+      "file": "server/src/services/heartbeat-scheduler.ts"
+    },
+    {
+      "id": "svc-runtime-manager",
+      "label": "미션 런타임 관리자",
+      "desc": "미션 스코프 CLI 런타임 bootstrap/terminal-stop",
+      "layer": "l-svc",
+      "file": "server/src/services/missions/mission-runtime-manager.ts"
+    },
+    {
+      "id": "svc-workflow-progress",
+      "label": "run 진행 투영",
+      "desc": "steps 정규화(conditionalDependencies 포함)·progress 집계",
+      "layer": "l-svc",
+      "file": "server/src/services/missions/workflow-progress.ts"
+    },
+    {
+      "id": "svc-flowmap-export",
+      "label": "flowmap 내보내기",
+      "desc": "run → flowmap JSON → 고정 렌더러 단일 HTML",
+      "layer": "l-svc",
+      "file": "server/src/services/missions/mission-flowmap-export.ts"
+    },
+    {
+      "id": "eng-scheduler",
+      "label": "native 워크플로 스케줄러",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/native-scheduler.ts"
+    },
+    {
+      "id": "eng-engine",
+      "label": "워크플로 엔진",
+      "desc": "런 실행·재개·큐 발파",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/engine.ts"
+    },
+    {
+      "id": "eng-dag",
+      "label": "DAG 엔진",
+      "desc": "스텝 활성화 판정·툴 스텝 큐",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/dag-engine.ts"
+    },
+    {
+      "id": "eng-reconciler",
+      "label": "리컨실러",
+      "desc": "이슈 상태 → 런 상태 동기화",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/reconciler.ts"
+    },
+    {
+      "id": "eng-wakeups",
+      "label": "런어블 스텝 웨이크업",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/runnable-step-wakeups-reconciler.ts"
+    },
+    {
+      "id": "eng-store",
+      "label": "워크플로 스토어",
+      "desc": "정의 stepsJson 정규화 적재",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/workflow-store.ts"
+    },
+    {
+      "id": "eng-edge-cond",
+      "label": "edge 조건 리졸버",
+      "desc": "legacy+conditionalDependencies 통합 해석",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/control-flow/edge-condition.ts"
+    },
+    {
+      "id": "eng-control-node",
+      "label": "컨트롤 노드 실행기 (IF)",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/control-flow/control-node-executor.ts"
+    },
+    {
+      "id": "eng-cond-eval",
+      "label": "조건 평가기",
+      "desc": "conditionGroup 평가 (work_product/tool_json 소스)",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/control-flow/condition-evaluator.ts"
+    },
+    {
+      "id": "eng-loop-driver",
+      "label": "루프 드라이버",
+      "desc": "QA 반려 back-edge 재발화",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/control-flow/loop-driver.ts"
+    },
+    {
+      "id": "eng-step-reset",
+      "label": "스텝 리셋",
+      "desc": "rework 대상 스텝 초기화",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/control-flow/step-reset.ts"
+    },
+    {
+      "id": "eng-qa-cap",
+      "label": "QA 상한 수용",
+      "desc": "maxIterations 도달 시 cap-acceptance",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/control-flow/qa-cap-acceptance.ts"
+    },
+    {
+      "id": "eng-verdict-ledger",
+      "label": "검증 버딧 원장",
+      "layer": "l-engine",
+      "file": "server/src/services/workflow/validation-verdict-ledger.ts"
+    },
+    {
+      "id": "rt-tool-catalog",
+      "label": "도구 카탈로그",
+      "layer": "l-runtime",
+      "file": "server/src/services/workflow/tool-catalog.ts"
+    },
+    {
+      "id": "rt-core-tools",
+      "label": "코어 도구 실행기",
+      "layer": "l-runtime",
+      "file": "server/src/services/workflow/core-tool-executor.ts"
+    },
+    {
+      "id": "rt-remote-tools",
+      "label": "원격 도구 실행기",
+      "layer": "l-runtime",
+      "file": "server/src/services/workflow/remote-tool-executor.ts"
+    },
+    {
+      "id": "rt-tool-truth",
+      "label": "도구 결과 진실 기록",
+      "desc": "tool_json IF 소스의 데이터 원천",
+      "layer": "l-runtime",
+      "file": "server/src/services/workflow/tool-result-truth.ts"
+    },
+    {
+      "id": "rt-adapters",
+      "label": "에이전트 CLI 어댑터",
+      "desc": "process/http 실행 (claude/codex/hermes local)",
+      "layer": "l-runtime",
+      "file": "server/src/adapters/index.ts"
+    },
+    {
+      "id": "rt-delivery-gate",
+      "label": "전달 검증 게이트",
+      "desc": "산출물 전달 검증(readback)",
+      "layer": "l-runtime",
+      "file": "server/src/services/workflow/delivery-verification-gate.ts"
+    },
+    {
+      "id": "db-schema",
+      "label": "drizzle 스키마",
+      "layer": "l-db",
+      "file": "packages/db/src/schema/index.ts"
+    },
+    {
+      "id": "db-client",
+      "label": "DB 클라이언트",
+      "layer": "l-db",
+      "file": "packages/db/src/index.ts"
+    }
+  ],
+  "flows": [
+    {
+      "id": "mission-lifecycle",
+      "group": "미션",
+      "title": "미션 수명주기",
+      "summary": "생성 → 슈퍼바이저/오너 배정 → 이슈 트리 → 상태 전이",
+      "steps": [
+        {
+          "from": "ui-missions-page",
+          "to": "ui-missions-api",
+          "call": "create mission"
+        },
+        {
+          "from": "ui-missions-api",
+          "to": "api-missions",
+          "call": "POST /companies/:id/missions"
+        },
+        {
+          "from": "api-missions",
+          "to": "api-authz",
+          "call": "assertCompanyAccess"
+        },
+        {
+          "from": "api-missions",
+          "to": "svc-missions",
+          "call": "missionService.create"
+        },
+        {
+          "from": "svc-missions",
+          "to": "db-client",
+          "call": "insert mission + owner agent"
+        },
+        {
+          "from": "ui-mission-detail",
+          "to": "ui-missions-api",
+          "call": "mission detail + issue tree query"
+        },
+        {
+          "from": "api-missions",
+          "to": "svc-missions",
+          "call": "getById / getIssueTree"
+        },
+        {
+          "from": "svc-missions",
+          "to": "db-schema",
+          "call": "select missions/issues/workflow runs"
+        }
+      ]
+    },
+    {
+      "id": "step-activation",
+      "group": "워크플로 엔진",
+      "title": "스텝 활성화",
+      "summary": "스케줄러 틱 → 런 발파 → 런어블 판정 → 스텝 실행",
+      "steps": [
+        {
+          "from": "eng-scheduler",
+          "to": "eng-engine",
+          "call": "tick workflowService"
+        },
+        {
+          "from": "eng-engine",
+          "to": "eng-dag",
+          "call": "activate runnable steps"
+        },
+        {
+          "from": "eng-scheduler",
+          "to": "eng-dag",
+          "call": "processQueuedWorkflowToolStepRuns"
+        },
+        {
+          "from": "eng-dag",
+          "to": "eng-edge-cond",
+          "call": "resolveEdges (deps + conditional)"
+        },
+        {
+          "from": "eng-dag",
+          "to": "eng-wakeups",
+          "call": "runnable step wakeups"
+        },
+        {
+          "from": "eng-reconciler",
+          "to": "eng-engine",
+          "call": "issue 상태 → 런 상태 동기화 (native-reconciler.reconcileWorkflow)"
+        },
+        {
+          "from": "eng-wakeups",
+          "to": "db-schema",
+          "call": "step run rows + wakeup requests"
+        },
+        {
+          "from": "eng-store",
+          "to": "eng-dag",
+          "call": "normalizeWorkflowStepsForExecution(정의 stepsJson)"
+        }
+      ]
+    },
+    {
+      "id": "if-branch",
+      "group": "워크플로 엔진",
+      "title": "IF 조건 분기 (컨트롤 노드)",
+      "summary": "type:if 스텝 평가 → condition_true/false 경로 활성화, 재개 시 stale 평가 재판정",
+      "steps": [
+        {
+          "from": "eng-dag",
+          "to": "eng-control-node",
+          "call": "activate type:if step"
+        },
+        {
+          "from": "eng-control-node",
+          "to": "eng-cond-eval",
+          "call": "evaluate conditionGroup"
+        },
+        {
+          "from": "eng-cond-eval",
+          "to": "eng-control-node",
+          "call": "outcome: condition_true|condition_false"
+        },
+        {
+          "from": "eng-control-node",
+          "to": "eng-edge-cond",
+          "call": "branch edge gate"
+        },
+        {
+          "from": "eng-edge-cond",
+          "to": "eng-wakeups",
+          "state": "cond",
+          "stateLabel": "TRUE/FALSE",
+          "note": "두 갈래 모두 정상 경로 — outcome 에 따라 해당 분기 스텝만 웨이크업"
+        },
+        {
+          "from": "eng-engine",
+          "to": "eng-control-node",
+          "call": "resume 시 resetStaleIfControlNodesForResume (stale IF 재판정)"
+        }
+      ]
+    },
+    {
+      "id": "qa-rework-loop",
+      "group": "워크플로 엔진",
+      "title": "QA 재작업 루프",
+      "summary": "QA 반려 → back-edge 재발화 → 생산자 리셋 → 상한 도달 시 cap-acceptance",
+      "steps": [
+        {
+          "from": "eng-engine",
+          "to": "eng-loop-driver",
+          "call": "applyBackEdgeReworkPass"
+        },
+        {
+          "from": "eng-loop-driver",
+          "to": "eng-edge-cond",
+          "call": "qa_request_changes back-edge gate"
+        },
+        {
+          "from": "eng-loop-driver",
+          "to": "eng-step-reset",
+          "call": "reset producer step"
+        },
+        {
+          "from": "eng-step-reset",
+          "to": "eng-wakeups",
+          "call": "re-dispatch rework"
+        },
+        {
+          "from": "eng-loop-driver",
+          "to": "eng-qa-cap",
+          "call": "maxIterations 도달"
+        },
+        {
+          "from": "eng-qa-cap",
+          "to": "eng-verdict-ledger",
+          "call": "cap-acceptance verdict 기록"
+        },
+        {
+          "from": "ui-dag-panel",
+          "to": "ui-missions-api",
+          "call": "grantQaReworkCapBoost (운영자 상한 부스트)"
+        }
+      ]
+    },
+    {
+      "id": "heartbeat-lifecycle",
+      "group": "런타임·감독",
+      "title": "하트비트 생명주기",
+      "summary": "런타임 bootstrap → 하트비트 이벤트 → 타임아웃/고아 회수(reaper)",
+      "steps": [
+        {
+          "from": "svc-missions",
+          "to": "svc-runtime-manager",
+          "call": "bootstrap mission CLI runtime"
+        },
+        {
+          "from": "svc-runtime-manager",
+          "to": "rt-adapters",
+          "call": "spawn agent CLI process"
+        },
+        {
+          "from": "rt-adapters",
+          "to": "svc-heartbeat",
+          "call": "heartbeat run events"
+        },
+        {
+          "from": "svc-heartbeat-scheduler",
+          "to": "svc-heartbeat",
+          "call": "timer/routine/recovery 틱"
+        },
+        {
+          "from": "svc-heartbeat",
+          "to": "svc-runtime-manager",
+          "call": "reap orphaned/stale-busy runtimes"
+        },
+        {
+          "from": "svc-heartbeat",
+          "to": "db-schema",
+          "call": "heartbeat runs + events persist"
+        }
+      ]
+    },
+    {
+      "id": "mission-supervision",
+      "group": "런타임·감독",
+      "title": "미션 감독 루프",
+      "summary": "stale 탐지 → 소유자 결정 파싱 → 조치(재시도/언블록/에스컬레이션)",
+      "steps": [
+        {
+          "from": "svc-heartbeat",
+          "to": "svc-supervision",
+          "call": "stale/timeout 단서 전달"
+        },
+        {
+          "from": "svc-supervision",
+          "to": "svc-supervision",
+          "call": "runMainExecutorSupervision (findings 정규화)"
+        },
+        {
+          "from": "svc-supervision",
+          "to": "svc-missions",
+          "call": "소유자 결정 → unblock/oversight 이슈 생성"
+        },
+        {
+          "from": "svc-missions",
+          "to": "db-client",
+          "call": "insert oversight issues"
+        },
+        {
+          "from": "svc-supervision",
+          "to": "svc-heartbeat",
+          "call": "owner action 시 agent wakeup"
+        }
+      ]
+    },
+    {
+      "id": "agent-dispatch",
+      "group": "런타임·감독",
+      "title": "에이전트 배차·산출물 검증",
+      "summary": "스텝 이슈 배차 → CLI 실행 → 산출물 전달 검증 → 완료 게이트",
+      "steps": [
+        {
+          "from": "eng-wakeups",
+          "to": "rt-adapters",
+          "call": "assign + dispatch step issue"
+        },
+        {
+          "from": "rt-adapters",
+          "to": "db-schema",
+          "call": "이슈 코멘트·실행 결과 기록"
+        },
+        {
+          "from": "eng-dag",
+          "to": "rt-delivery-gate",
+          "call": "산출물 전달 검증 (readback)"
+        },
+        {
+          "from": "rt-delivery-gate",
+          "to": "db-schema",
+          "call": "registered artifacts"
+        }
+      ]
+    },
+    {
+      "id": "tool-execution",
+      "group": "런타임·감독",
+      "title": "도구 실행",
+      "summary": "도구 참조 검증 → 코어/원격 실행 → 결과 진실 기록 → IF 소스 환류",
+      "steps": [
+        {
+          "from": "eng-engine",
+          "to": "rt-tool-catalog",
+          "call": "assertWorkflowToolReferencesSelectable"
+        },
+        {
+          "from": "eng-engine",
+          "to": "rt-core-tools",
+          "call": "execute workflow tool step"
+        },
+        {
+          "from": "rt-core-tools",
+          "to": "rt-remote-tools",
+          "call": "원격 도구 라우팅"
+        },
+        {
+          "from": "rt-core-tools",
+          "to": "rt-tool-truth",
+          "call": "도구 결과 진실 기록"
+        },
+        {
+          "from": "eng-cond-eval",
+          "to": "rt-tool-truth",
+          "call": "IF tool_json 소스 읽기 (반대류 데이터 환류)",
+          "note": "tool_json 조건은 에이전트 텍스트가 아니라 이 진실 기록만 근거로 쓴다"
+        }
+      ]
+    },
+    {
+      "id": "mission-board-view",
+      "group": "보드 UI",
+      "title": "미션 실행흐름 화면·flowmap 내보내기",
+      "summary": "Execution Flow 그래프(IF 분기 표현) + 단일 HTML 흐름도 내보내기",
+      "steps": [
+        {
+          "from": "ui-mission-detail",
+          "to": "ui-dag-panel",
+          "call": "Execution Flow 탭"
+        },
+        {
+          "from": "ui-dag-panel",
+          "to": "ui-missions-api",
+          "call": "listWorkflowRuns"
+        },
+        {
+          "from": "ui-missions-api",
+          "to": "api-missions",
+          "call": "GET /missions/:id/workflow-runs"
+        },
+        {
+          "from": "api-missions",
+          "to": "svc-missions",
+          "call": "listWorkflowRuns"
+        },
+        {
+          "from": "svc-missions",
+          "to": "svc-workflow-progress",
+          "call": "steps 정규화 + progress 집계"
+        },
+        {
+          "from": "svc-workflow-progress",
+          "to": "db-schema",
+          "call": "runs/stepRuns/issues/workProducts 조인"
+        },
+        {
+          "from": "ui-dag-panel",
+          "to": "api-missions",
+          "call": "GET workflow-runs/:runId/flowmap (다운로드)"
+        },
+        {
+          "from": "api-missions",
+          "to": "svc-flowmap-export",
+          "call": "buildMissionRunFlowmapHtml"
+        },
+        {
+          "from": "svc-flowmap-export",
+          "to": "svc-flowmap-export",
+          "call": "build → validate → render (고정 렌더러 인라인)"
+        }
+      ]
+    }
+  ]
+}
