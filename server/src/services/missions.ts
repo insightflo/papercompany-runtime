@@ -37,6 +37,7 @@ import {
 } from "./missions/mission-owner-recovery-explanations.js";
 import { normalizeWorkflowStepsForExecution } from "./workflow/dag-engine.js";
 import { normalizeConditionalEdges, readCapBoostAmount } from "./workflow/control-flow/types.js";
+import { buildMissionRunFlowmap, readVendoredFlowmapTemplate, renderFlowmapHtml } from "./missions/mission-flowmap-export.js";
 import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
 import { asStringArray, asTrimmedString, isMissionDateOnlyFilter, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
@@ -1413,6 +1414,19 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     return [...nativeDetails, ...pluginDetails].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
   }
 
+  /**
+   * [목적] 미션의 특정 workflow run 을 repo-flowmap 고정 렌더러 단일 HTML 로 내보낸다(안 A 흡수).
+   * [주의] 읽기 전용 — 검증(validateFlowmap)을 통과한 문서만 렌더한다. 실행제어 코드 개입 없음.
+   */
+  async function buildMissionRunFlowmapHtml(missionId: string, runId: string): Promise<string> {
+    assertMissionId(missionId);
+    const runs = await listWorkflowRuns(missionId);
+    const run = runs.find((candidate) => candidate.id === runId);
+    if (!run) throw notFound(`Workflow run not found: ${runId}`);
+    const flowmap = buildMissionRunFlowmap(run, { missionId });
+    return renderFlowmapHtml(flowmap, readVendoredFlowmapTemplate());
+  }
+
   return {
     create,
     getById,
@@ -1425,6 +1439,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     listAgents,
     getIssueTree,
     listWorkflowRuns,
+    buildMissionRunFlowmapHtml,
     ensureMainExecutorUnblockIssue: ownerActions.ensureMainExecutorUnblockIssue,
     ensureMainExecutorOversightIssue: ownerActions.ensureMainExecutorOversightIssue,
     ensureMissionExecutionPlan: ownerActions.ensureMissionExecutionPlan,

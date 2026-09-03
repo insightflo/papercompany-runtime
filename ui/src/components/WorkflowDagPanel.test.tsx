@@ -328,6 +328,13 @@ describe("WorkflowDagPanel", () => {
     expect(html).toContain("Hold for review");
   });
 
+  it("shows a flowmap export download link for the active run in graph mode", () => {
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
+
+    expect(html).toContain("Export flowmap");
+    expect(html).toContain('href="/api/missions/mission-1/workflow-runs/run-1/flowmap"');
+  });
+
   it("renders rework back-edge loops as curved amber edges with iteration cap", () => {
     const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
 

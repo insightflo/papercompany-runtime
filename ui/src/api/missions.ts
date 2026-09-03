@@ -415,6 +415,9 @@ export const missionsApi = {
   listAgents: (id: string) => api.get<MissionAgentEntry[]>(`/missions/${id}/agents`),
   listIssues: (id: string) => api.get<Issue[]>(`/missions/${id}/issues`),
   listWorkflowRuns: (id: string) => api.get<MissionWorkflowRun[]>(`/missions/${id}/workflow-runs`),
+  /** 미션 workflow run flowmap 단일 HTML 다운로드 경로(동일 출처 /api — 다운로드 앵커 href 용). */
+  workflowRunFlowmapDownloadPath: (missionId: string, runId: string) =>
+    `/api/missions/${missionId}/workflow-runs/${runId}/flowmap`,
   grantQaReworkCapBoost: (stepRunId: string, amount: number, reason?: string) =>
     api.post<{ stepRunId: string; stepId: string; amount: number; metadata: Record<string, unknown> }>(
       `/workflow-step-runs/${stepRunId}/qa-rework-cap-boost`,
