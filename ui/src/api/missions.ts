@@ -48,12 +48,28 @@ export interface MissionWorkflowStepWorkProduct {
   createdAt: string;
 }
 
+/** control-flow 조건부 edge(IF 분기/rework loop). legacy dependencies[] 는 when:"success" 와 동일 의미. */
+export interface MissionWorkflowConditionalDependency {
+  stepId: string;
+  when?:
+    | "success"
+    | "failure"
+    | "qa_request_changes"
+    | "always"
+    | "condition_true"
+    | "condition_false"
+    | (string & {});
+  isBackEdge?: boolean;
+  maxIterations?: number;
+}
+
 export interface MissionWorkflowStep {
   stepId: string;
   name: string;
   type: "agent" | "tool";
   agentId: string;
   dependencies: string[];
+  conditionalDependencies?: MissionWorkflowConditionalDependency[];
   description: string | null;
   toolNames: string[];
   knowledgeBaseIds: string[];

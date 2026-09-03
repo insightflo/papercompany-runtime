@@ -87,10 +87,114 @@ vi.mock("@tanstack/react-query", () => ({
                 startedAt: null,
                 completedAt: null,
               },
+              {
+                stepId: "gate",
+                name: "Quality gate (IF)",
+                type: "agent",
+                agentId: "",
+                dependencies: ["review"],
+                conditionalDependencies: [],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: null,
+                issue: null,
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                stepId: "onTrue",
+                name: "Publish",
+                type: "agent",
+                agentId: "",
+                dependencies: [],
+                conditionalDependencies: [{ stepId: "gate", when: "condition_true" }],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: null,
+                issue: null,
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                stepId: "onFalse",
+                name: "Hold for review",
+                type: "agent",
+                agentId: "",
+                dependencies: [],
+                conditionalDependencies: [{ stepId: "gate", when: "condition_false" }],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: null,
+                issue: null,
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                stepId: "onFail",
+                name: "Escalate on failure",
+                type: "agent",
+                agentId: "",
+                dependencies: [],
+                conditionalDependencies: [{ stepId: "gate", when: "failure" }],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: null,
+                issue: null,
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                stepId: "fix",
+                name: "Apply rework",
+                type: "agent",
+                agentId: "",
+                dependencies: ["onTrue"],
+                conditionalDependencies: [
+                  { stepId: "qa", when: "qa_request_changes", isBackEdge: true, maxIterations: 3 },
+                ],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: null,
+                issue: null,
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
+              {
+                stepId: "qa",
+                name: "QA check",
+                type: "agent",
+                agentId: "",
+                dependencies: ["fix"],
+                conditionalDependencies: [],
+                description: null,
+                toolNames: [],
+                knowledgeBaseIds: [],
+                status: "pending",
+                issueId: null,
+                issue: null,
+                workProducts: [],
+                startedAt: null,
+                completedAt: null,
+              },
             ],
             progress: {
-              totalSteps: 2,
-              pendingSteps: 1,
+              totalSteps: 7,
+              pendingSteps: 6,
               runningSteps: 1,
               completedSteps: 0,
               failedSteps: 0,
@@ -202,5 +306,45 @@ describe("WorkflowDagPanel", () => {
     expect(html).toContain("<line");
     // draft stays the entry step (column 0); review is the downstream node.
     expect(html).toContain("Entry");
+  });
+
+  it("renders conditional IF branch edges with labels in graph mode", () => {
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
+
+    // IF forward edges: dashed conditional (true/false) + dashed failure edges exist.
+    expect(html).toContain('stroke-dasharray="6 4"');
+    expect(html).toContain('stroke-dasharray="3 4"');
+    // Branch labels rendered on the edges.
+    expect(html).toContain(">true<");
+    expect(html).toContain(">false<");
+    expect(html).toContain(">failure<");
+    // Only the root step is an entry — conditional-only inbound steps are NOT entries.
+    expect((html.match(/>Entry</g) ?? []).length).toBe(1);
+    // The branch point is marked with an IF badge.
+    expect(html).toContain(">IF<");
+    // Branch targets render as nodes downstream of the gate.
+    expect(html.indexOf("Quality gate (IF)")).toBeGreaterThan(0);
+    expect(html).toContain("Publish");
+    expect(html).toContain("Hold for review");
+  });
+
+  it("renders rework back-edge loops as curved amber edges with iteration cap", () => {
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" />);
+
+    // qa --(request_changes)--> fix back-edge: dashed loop path with cap label.
+    expect(html).toContain('stroke-dasharray="8 3 2 3"');
+    expect(html).toContain("rework ×3");
+    expect(html).toContain("<path");
+  });
+
+  it("shows IF conditions in text mode dependency lines", () => {
+    const html = renderToStaticMarkup(<WorkflowDagPanel missionId="mission-1" defaultMode="text" />);
+
+    expect(html).toContain("IF true:");
+    expect(html).toContain("IF false:");
+    expect(html).toContain("on failure:");
+    expect(html).toContain("rework ×3");
+    // Conditional-only inbound steps must not be labelled as entry steps.
+    expect((html.match(/>Entry step</g) ?? []).length).toBe(1);
   });
 });

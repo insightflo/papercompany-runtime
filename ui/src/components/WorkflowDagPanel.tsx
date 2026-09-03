@@ -5,6 +5,7 @@ import {
   missionsApi,
   type MissionAgentEntry,
   type MissionAgentRole,
+  type MissionWorkflowConditionalDependency,
   type MissionWorkflowRun,
   type MissionWorkflowStep,
   type MissionWorkflowStepWorkProduct,
@@ -303,6 +304,14 @@ function WorkflowStepRow({
   const dependencyNames = step.dependencies.map(
     (dependencyId) => steps.find((candidate) => candidate.stepId === dependencyId)?.name ?? dependencyId,
   );
+  const conditionalNames = forwardConditionalDependencies(step).map(
+    (edge) => describeConditionalDependency(edge, steps),
+  );
+  const backEdgeNames = backEdgeDependencies(step).map((edge) => {
+    const name = steps.find((candidate) => candidate.stepId === edge.stepId)?.name ?? edge.stepId;
+    return `rework ×${edge.maxIterations ?? "?"}: ${name}`;
+  });
+  const hasForwardDependencies = dependencyNames.length > 0 || conditionalNames.length > 0;
   const assignee = getStepAssignee(step, agentMap);
   const workProducts = step.workProducts ?? [];
   const [boostAmount, setBoostAmount] = useState(1);
@@ -375,7 +384,16 @@ function WorkflowStepRow({
               )}
               <span>Assignee: {assignee.label}</span>
             </span>
-            {dependencyNames.length > 0 ? <span>Depends on: {dependencyNames.join(", ")}</span> : <span>Entry step</span>}
+            {hasForwardDependencies ? (
+              <span>Depends on: {[...dependencyNames, ...conditionalNames].join(", ")}</span>
+            ) : backEdgeNames.length > 0 ? (
+              <span>Rework loop target</span>
+            ) : (
+              <span>Entry step</span>
+            )}
+            {backEdgeNames.length > 0 ? (
+              <span className="text-amber-600 dark:text-amber-400">{backEdgeNames.join(", ")}</span>
+            ) : null}
           </div>
           {hasReworkCap && capExhausted && stepRunId ? (
             <div className="mt-1 flex flex-wrap items-center gap-2 rounded border border-red-500/30 bg-red-500/5 px-2 py-1.5">
@@ -524,13 +542,25 @@ const GRAPH_ROW_HEIGHT = 96;
 const GRAPH_NODE_MIN_WIDTH = 180;
 const GRAPH_NODE_MAX_WIDTH = 240;
 const GRAPH_COLUMN_MIN_GAP = 32;
+// back-edge(rework loop) arc 가 지나갈 상단 여백.
+const GRAPH_BACK_EDGE_HEADROOM = 44;
 
 // [목적] step.dependencies 기반 topological level 계산(0 = entry). cycle/미존재 dep 방어.
 // [출력] stepId -> level. dep 없으면 0, 있으면 max(dep level)+1.
+// [주의] IF 조건분기(conditionalDependencies 의 forward edge)도 level 계산에 포함한다.
+//   조건 전용으로 진입하는 step 이 level 0 으로 평탄화되어 Entry 로 오표시되는 버그 방지.
+//   back-edge(rework loop)는 순환 구조라 level 계산에서 제외 — 그래프 배치는 forward-only.
 function computeStepLevels(steps: MissionWorkflowStep[]): Map<string, number> {
   const byId = new Map(steps.map((step) => [step.stepId, step]));
   const levels = new Map<string, number>();
   const visiting = new Set<string>();
+  const inboundForwardDepIds = (step: MissionWorkflowStep): string[] =>
+    Array.from(
+      new Set([
+        ...step.dependencies,
+        ...forwardConditionalDependencies(step).map((edge) => edge.stepId),
+      ]),
+    );
   const resolve = (id: string): number => {
     if (levels.has(id)) return levels.get(id)!;
     const step = byId.get(id);
@@ -544,7 +574,7 @@ function computeStepLevels(steps: MissionWorkflowStep[]): Map<string, number> {
       return 0;
     }
     visiting.add(id);
-    const knownDeps = step.dependencies.filter((depId) => byId.has(depId));
+    const knownDeps = inboundForwardDepIds(step).filter((depId) => byId.has(depId));
     const level = knownDeps.length === 0 ? 0 : Math.max(...knownDeps.map((depId) => resolve(depId))) + 1;
     visiting.delete(id);
     levels.set(id, level);
@@ -552,6 +582,60 @@ function computeStepLevels(steps: MissionWorkflowStep[]): Map<string, number> {
   };
   steps.forEach((step) => resolve(step.stepId));
   return levels;
+}
+
+// [목적] 조건부 의존성 중 forward edge(IF 분기)만 추출. back-edge(loop) 제외.
+function forwardConditionalDependencies(step: MissionWorkflowStep): MissionWorkflowConditionalDependency[] {
+  return (step.conditionalDependencies ?? []).filter((edge) => edge.isBackEdge !== true);
+}
+
+// [목적] 조건부 의존성 중 back-edge(QA rework loop)만 추출.
+function backEdgeDependencies(step: MissionWorkflowStep): MissionWorkflowConditionalDependency[] {
+  return (step.conditionalDependencies ?? []).filter((edge) => edge.isBackEdge === true);
+}
+
+// [목적] 조건부 forward edge 의 시각 스타일. 워크플로 편집기 그래프와 동일한 시각 언어 사용.
+//   conditional(true/false/always) = sky 점선, failure = red 점선, rework loop = amber 점선.
+//   when:"success"/undefined 는 legacy dependencies 와 동일 의미이므로 null(기본 실선).
+type DagEdgeStyle = { stroke: string; dash: string | undefined; label: string; markerId: string };
+
+function conditionalEdgeStyle(when: string | undefined): DagEdgeStyle | null {
+  switch (when) {
+    case "condition_true":
+      return { stroke: "#38bdf8", dash: "6 4", label: "true", markerId: "wf-dag-arrow-conditional" };
+    case "condition_false":
+      return { stroke: "#38bdf8", dash: "6 4", label: "false", markerId: "wf-dag-arrow-conditional" };
+    case "always":
+      return { stroke: "#38bdf8", dash: "6 4", label: "always", markerId: "wf-dag-arrow-conditional" };
+    case "failure":
+      return { stroke: "#f87171", dash: "3 4", label: "failure", markerId: "wf-dag-arrow-failure" };
+    case "qa_request_changes":
+      return { stroke: "#fbbf24", dash: "8 3 2 3", label: "request changes", markerId: "wf-dag-arrow-loop" };
+    default:
+      return null;
+  }
+}
+
+// [목적] text 모드/step 상세에서 조건부 의존성을 사람이 읽는 문구로 변환.
+function describeConditionalDependency(
+  edge: MissionWorkflowConditionalDependency,
+  steps: MissionWorkflowStep[],
+): string {
+  const name = steps.find((candidate) => candidate.stepId === edge.stepId)?.name ?? edge.stepId;
+  switch (edge.when) {
+    case "condition_true":
+      return `IF true: ${name}`;
+    case "condition_false":
+      return `IF false: ${name}`;
+    case "failure":
+      return `on failure: ${name}`;
+    case "always":
+      return `always after: ${name}`;
+    case "qa_request_changes":
+      return `rework from: ${name}`;
+    default:
+      return `after success: ${name}`;
+  }
 }
 
 function useElementWidth<T extends HTMLElement>() {
@@ -611,6 +695,14 @@ function WorkflowRunGraph({
   const runningRun = runs.find((run) => run.status === "running");
   const run = runs.find((candidate) => candidate.id === selectedRunId) ?? runningRun ?? runs[0];
 
+  const branchPointStepIds = new Set(
+    run.steps.flatMap((step) =>
+      forwardConditionalDependencies(step)
+        .filter((edge) => edge.when === "condition_true" || edge.when === "condition_false")
+        .map((edge) => edge.stepId),
+    ),
+  );
+
   const levels = computeStepLevels(run.steps);
   const maxLevel = run.steps.length === 0 ? 0 : Math.max(0, ...run.steps.map((step) => levels.get(step.stepId) ?? 0));
   const columns: MissionWorkflowStep[][] = Array.from({ length: maxLevel + 1 }, () => []);
@@ -642,23 +734,72 @@ function WorkflowRunGraph({
     ? 0
     : Math.max(GRAPH_COLUMN_MIN_GAP, (graphWidth - nodeWidth * columnCount) / (columnCount - 1));
   const columnStride = nodeWidth + columnGap;
-  const graphHeight = numRows * GRAPH_ROW_HEIGHT;
+  // back-edge(rework loop) arc 를 담기 위한 상단 여백. back-edge 가 있으면 노드 전체를 아래로 민다.
+  const stepBackEdges = run.steps.flatMap((step) =>
+    backEdgeDependencies(step).map((edge) => ({ edge, targetStepId: step.stepId })),
+  );
+  const backEdgeHeadroom = stepBackEdges.length > 0 ? GRAPH_BACK_EDGE_HEADROOM : 0;
+  const graphHeight = backEdgeHeadroom + numRows * GRAPH_ROW_HEIGHT;
 
-  const edges: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+  const plainEdgeKeys = new Set<string>();
+  const edges: Array<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    style: DagEdgeStyle | null;
+  }> = [];
   run.steps.forEach((step) => {
     const target = positionByKey.get(`${run.id}:${step.stepId}`);
     if (!target) return;
-    step.dependencies.forEach((dependencyId) => {
+    const pushForwardEdge = (dependencyId: string, style: DagEdgeStyle | null) => {
       const source = positionByKey.get(`${run.id}:${dependencyId}`);
       if (!source) return;
       edges.push({
         x1: source.col * columnStride + nodeWidth,
-        y1: source.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
+        y1: backEdgeHeadroom + source.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
         x2: target.col * columnStride,
-        y2: target.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
+        y2: backEdgeHeadroom + target.row * GRAPH_ROW_HEIGHT + GRAPH_ROW_HEIGHT / 2,
+        style,
       });
+    };
+    step.dependencies.forEach((dependencyId) => {
+      plainEdgeKeys.add(`${dependencyId}->${step.stepId}`);
+      pushForwardEdge(dependencyId, null);
+    });
+    forwardConditionalDependencies(step).forEach((edge) => {
+      const style = conditionalEdgeStyle(edge.when);
+      if (!style) {
+        // when:"success"/undefined 는 legacy dependencies 와 동일 의미 — 같은 src->tgt 평범 edge 가 이미 있으면 생략(중복 방지)
+        if (plainEdgeKeys.has(`${edge.stepId}->${step.stepId}`)) return;
+        plainEdgeKeys.add(`${edge.stepId}->${step.stepId}`);
+        pushForwardEdge(edge.stepId, null);
+        return;
+      }
+      pushForwardEdge(edge.stepId, style);
     });
   });
+
+  // back-edge 는 상단 여백을 지나는 arc 로 그린다(레이아웃은 forward-only 유지).
+  const backEdgeArcs = stepBackEdges
+    .map(({ edge, targetStepId }) => {
+      const sourcePos = positionByKey.get(`${run.id}:${edge.stepId}`);
+      const targetPos = positionByKey.get(`${run.id}:${targetStepId}`);
+      if (!sourcePos || !targetPos) return null;
+      const sx = sourcePos.col * columnStride + nodeWidth / 2;
+      const sy = backEdgeHeadroom + sourcePos.row * GRAPH_ROW_HEIGHT;
+      const tx = targetPos.col * columnStride + nodeWidth / 2;
+      const ty = backEdgeHeadroom + targetPos.row * GRAPH_ROW_HEIGHT;
+      const arcControlY = Math.max(8, Math.round(backEdgeHeadroom * 0.45));
+      return {
+        key: `${run.id}:back:${edge.stepId}->${targetStepId}`,
+        path: `M ${sx} ${sy} C ${sx} ${arcControlY}, ${tx} ${arcControlY}, ${tx} ${ty}`,
+        labelX: (sx + tx) / 2,
+        labelY: arcControlY + 3,
+        label: `rework ×${edge.maxIterations ?? "?"}`,
+      };
+    })
+    .filter((arc): arc is NonNullable<typeof arc> => arc !== null);
 
   const selectedStep = selectedStepId ? run.steps.find((step) => step.stepId === selectedStepId) ?? null : null;
 
@@ -734,23 +875,83 @@ function WorkflowRunGraph({
               viewBox={`0 0 ${graphWidth} ${graphHeight}`}
               aria-hidden="true"
             >
+              <defs>
+                <marker id="wf-dag-arrow-default" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="currentColor" />
+                </marker>
+                <marker id="wf-dag-arrow-conditional" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#38bdf8" />
+                </marker>
+                <marker id="wf-dag-arrow-failure" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#f87171" />
+                </marker>
+                <marker id="wf-dag-arrow-loop" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#fbbf24" />
+                </marker>
+              </defs>
               {edges.map((edge, index) => (
-                <line
-                  key={index}
-                  x1={edge.x1}
-                  y1={edge.y1}
-                  x2={edge.x2}
-                  y2={edge.y2}
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                />
+                <g key={`edge-${index}`}>
+                  <line
+                    x1={edge.x1}
+                    y1={edge.y1}
+                    x2={edge.x2}
+                    y2={edge.y2}
+                    stroke={edge.style ? edge.style.stroke : "currentColor"}
+                    strokeWidth={1.5}
+                    strokeDasharray={edge.style?.dash}
+                    markerEnd={`url(#wf-dag-arrow-${
+                      edge.style ? edge.style.markerId.replace("wf-dag-arrow-", "") : "default"
+                    })`}
+                  />
+                  {edge.style?.label ? (
+                    <text
+                      x={(edge.x1 + edge.x2) / 2}
+                      y={(edge.y1 + edge.y2) / 2 - 5}
+                      fill={edge.style.stroke}
+                      fontSize="10"
+                      fontWeight="700"
+                      textAnchor="middle"
+                      stroke="var(--background, #ffffff)"
+                      strokeWidth={3}
+                      paintOrder="stroke"
+                    >
+                      {edge.style.label}
+                    </text>
+                  ) : null}
+                </g>
+              ))}
+              {backEdgeArcs.map((arc) => (
+                <g key={arc.key}>
+                  <path
+                    d={arc.path}
+                    fill="none"
+                    stroke="#fbbf24"
+                    strokeWidth={1.5}
+                    strokeDasharray="8 3 2 3"
+                    markerEnd="url(#wf-dag-arrow-loop)"
+                  />
+                  <text
+                    x={arc.labelX}
+                    y={arc.labelY}
+                    fill="#fbbf24"
+                    fontSize="10"
+                    fontWeight="700"
+                    textAnchor="middle"
+                    stroke="var(--background, #ffffff)"
+                    strokeWidth={3}
+                    paintOrder="stroke"
+                  >
+                    {arc.label}
+                  </text>
+                </g>
               ))}
             </svg>
             {run.steps.map((step) => {
               const position = positionByKey.get(`${run.id}:${step.stepId}`);
               if (!position) return null;
               const assignee = getStepAssignee(step, agentMap);
-              const isEntry = step.dependencies.length === 0;
+              const isEntry = step.dependencies.length === 0 && forwardConditionalDependencies(step).length === 0;
+              const isBranchPoint = branchPointStepIds.has(step.stepId);
               const isSelected = selectedStepId === step.stepId;
               const tone = STEP_STATUS_TONE[step.status] ?? STEP_STATUS_TONE.pending;
               const emphasis =
@@ -773,7 +974,7 @@ function WorkflowRunGraph({
                   )}
                   style={{
                     left: position.col * columnStride,
-                    top: position.row * GRAPH_ROW_HEIGHT,
+                    top: backEdgeHeadroom + position.row * GRAPH_ROW_HEIGHT,
                     width: nodeWidth,
                   }}
                 >
@@ -784,6 +985,9 @@ function WorkflowRunGraph({
                   <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
                     <span className="uppercase tracking-wide">{formatStatusLabel(step.status)}</span>
                     {isEntry ? <span className="rounded border border-border px-1">Entry</span> : null}
+                    {isBranchPoint ? (
+                      <span className="rounded border border-sky-500/60 px-1 text-sky-700 dark:text-sky-300">IF</span>
+                    ) : null}
                     <span className="truncate">{assignee.label}</span>
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
