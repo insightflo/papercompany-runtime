@@ -7,12 +7,15 @@ import {
   missionRollingState,
   missions,
   issues,
+  type MissionIssueHandoffDecisionUpdate,
   type MissionIssueHandoffEvidenceRef,
   type MissionIssueHandoffJson,
+  type MissionRollingDecisionRecord,
   type MissionRollingStateJson,
 } from "@paperclipai/db";
 import { sha256Text } from "../issue-execution-cards/hash.js";
 import { truncateHandoffText } from "./handoff-text-cap.js";
+import type { SessionHandoffDecisionLogPointer } from "../session-handoff-artifact.js";
 
 export const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const MISSION_RUNTIME_WORK_BLOCKING_STATUSES = new Set(["completed", "cancelled", "paused"]);
@@ -265,6 +268,12 @@ export function capHandoffJsonText(json: MissionIssueHandoffJson | undefined): M
   if (Array.isArray(capped.actionsTaken)) {
     capped.actionsTaken = capped.actionsTaken.map((item) => truncateHandoffText(String(item)));
   }
+  if (Array.isArray(capped.decisionUpdates)) {
+    capped.decisionUpdates = capped.decisionUpdates.map((update) => ({
+      ...update,
+      summary: typeof update?.summary === "string" ? truncateHandoffText(update.summary) : update?.summary,
+    }));
+  }
   return capped;
 }
 
@@ -277,6 +286,7 @@ export function buildMissionIssueHandoffMarkdown(input: {
   issueGoal?: string | null;
   summaryText?: string | null;
   decisions?: string[];
+  decisionUpdates?: MissionIssueHandoffDecisionUpdate[];
   caveats?: string[];
   remainingWork?: string[];
   evidenceRefs?: MissionIssueHandoffEvidenceRef[];
@@ -302,7 +312,17 @@ export function buildMissionIssueHandoffMarkdown(input: {
     truncateHandoffText(input.summaryText) || "See heartbeat run result/log excerpts.",
     "",
     "## Decisions Made",
-    ...(input.decisions?.length ? input.decisions.map((item) => `- ${item}`) : ["- No explicit decisions captured."]),
+    ...(input.decisionUpdates?.length
+      ? input.decisionUpdates
+          .filter((update) => typeof update?.id === "string" && update.id.trim().length > 0)
+          .map((update) => {
+            const label = update.status ? `[${update.status}] ` : "";
+            const supersedes = update.supersedes ? ` (supersedes ${update.supersedes})` : "";
+            return `- ${label}${update.id}: ${update.summary ?? "(no summary)"}${supersedes}`;
+          })
+      : input.decisions?.length
+        ? input.decisions.map((item) => `- ${item}`)
+        : ["- No explicit decisions captured."]),
     "",
     "## Evidence",
     ...evidence,
@@ -369,11 +389,77 @@ export async function persistMissionIssueHandoff(db: Db, input: {
   return handoff;
 }
 
-function mergeRollingState(previous: MissionRollingStateJson, input: {
+export const MISSION_DECISION_LOG_CAP = 50;
+
+/**
+ * [결정 로그 결정론 병합 — A안 2026-09-05]
+ * 핸드오프의 구조화된 decisionUpdates 를 롤링 상태 결정 로그에 반영한다.
+ * 병합은 런타임이 결정론적으로 수행한다(SKILL.state 분업: 모델은 제안만, 병합은
+ * 결정론 런타임). 순서 규칙:
+ * - 유효하지 않은 항목(빈 id, summary 없는 신규 생성)은 결정론적으로 버린다.
+ * - 기존 id: 주어진 필드만 갱신(status/summary/supersedes), 출처 handoffId/updatedAt 최신화.
+ * - 신규 id: under_review 기본으로 추가.
+ * - supersedes 로 지목된 기존 결정은 retired 로 전환되고 로그에 남는다
+ *   (폐기된 결정까지 붙들어야 지금이 보인다).
+ * - 상한 MISSION_DECISION_LOG_CAP(50) — 오래된 순서로 잘린다.
+ * 규칙 8: 결과는 다음 에이전트 맥락 전달용 상태일 뿐, 실행 통제가 이를 읽지 않는다.
+ */
+export function mergeDecisionRecords(
+  previous: MissionRollingDecisionRecord[] | undefined,
+  updates: MissionIssueHandoffDecisionUpdate[] | undefined,
+  input: { handoffId: string; now: Date },
+): MissionRollingDecisionRecord[] {
+  if (!updates || updates.length === 0) {
+    return previous ?? [];
+  }
+  const merged: MissionRollingDecisionRecord[] = (previous ?? []).map((record) => ({ ...record }));
+  const byId = new Map(merged.map((record) => [record.id, record]));
+
+  for (const update of updates) {
+    const id = typeof update?.id === "string" ? update.id.trim() : "";
+    if (!id) continue;
+    const summary = typeof update.summary === "string" && update.summary.trim().length > 0
+      ? update.summary.trim()
+      : undefined;
+    const existing = byId.get(id);
+    if (!existing) {
+      if (!summary) continue;
+      const record: MissionRollingDecisionRecord = {
+        id,
+        summary,
+        status: update.status ?? "under_review",
+        supersedes: update.supersedes ?? null,
+        handoffId: input.handoffId,
+        updatedAt: input.now.toISOString(),
+      };
+      merged.push(record);
+      byId.set(id, record);
+    } else {
+      if (summary) existing.summary = summary;
+      if (update.status) existing.status = update.status;
+      if (update.supersedes !== undefined) existing.supersedes = update.supersedes;
+      existing.handoffId = input.handoffId;
+      existing.updatedAt = input.now.toISOString();
+    }
+    if (update.supersedes) {
+      const superseded = byId.get(update.supersedes);
+      if (superseded && superseded.id !== id) {
+        superseded.status = "retired";
+        superseded.handoffId = input.handoffId;
+        superseded.updatedAt = input.now.toISOString();
+      }
+    }
+  }
+
+  return merged.slice(-MISSION_DECISION_LOG_CAP);
+}
+
+export function mergeRollingState(previous: MissionRollingStateJson, input: {
   issueId: string | null;
   handoffId: string;
   status: string;
   summaryText?: string | null;
+  decisionUpdates?: MissionIssueHandoffDecisionUpdate[];
   createdAt: Date;
 }): MissionRollingStateJson {
   const completedIssues = [...(previous.completedIssues ?? [])];
@@ -393,10 +479,16 @@ function mergeRollingState(previous: MissionRollingStateJson, input: {
       createdAt: input.createdAt.toISOString(),
     },
   ].slice(-50);
+  const decisions = mergeDecisionRecords(
+    previous.decisions,
+    input.decisionUpdates,
+    { handoffId: input.handoffId, now: input.createdAt },
+  );
   return {
     ...previous,
     completedIssues: completedIssues.slice(-50),
     handoffIndex,
+    ...(decisions.length > 0 || (previous.decisions ?? []).length > 0 ? { decisions } : {}),
     blockers: input.status === "failed" || input.status === "timed_out"
       ? [...(previous.blockers ?? []), `Run handoff ${input.handoffId} ended with ${input.status}`].slice(-20)
       : previous.blockers,
@@ -425,6 +517,12 @@ export function buildMissionStateMarkdown(input: {
     "## Active Decisions",
     ...(state.activeDecisions?.length ? state.activeDecisions.map((item) => `- ${item}`) : ["- None captured."]),
     "",
+    "## Decision Log",
+    ...(state.decisions?.length
+      ? state.decisions.map((item) =>
+          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}`)
+      : ["- None captured."]),
+    "",
     "## Known Constraints",
     ...(state.knownConstraints?.length ? state.knownConstraints.map((item) => `- ${item}`) : ["- None captured."]),
     "",
@@ -447,6 +545,7 @@ export async function updateMissionRollingStateFromHandoff(db: Db, input: {
   handoffId: string;
   status: string;
   summaryText?: string | null;
+  decisionUpdates?: MissionIssueHandoffDecisionUpdate[];
   inputTokens?: number | null;
   outputTokens?: number | null;
   costCents?: number | null;
@@ -463,6 +562,7 @@ export async function updateMissionRollingStateFromHandoff(db: Db, input: {
     handoffId: input.handoffId,
     status: input.status,
     summaryText: input.summaryText,
+    decisionUpdates: input.decisionUpdates,
     createdAt: now,
   });
   const stateMarkdown = buildMissionStateMarkdown({ missionId: input.missionId, state: nextState });
@@ -515,6 +615,24 @@ export async function listRecentMissionHandoffs(db: Db, input: {
     .where(and(eq(missionIssueHandoffs.companyId, input.companyId), eq(missionIssueHandoffs.missionId, input.missionId)))
     .orderBy(desc(missionIssueHandoffs.createdAt))
     .limit(input.limit ?? 10);
+}
+
+/**
+ * [결정원장 포인터 — A안] 세션 회전 핸드오프가 권위 있는 결정 로그를
+ * '미션 + 판번호(revision)'로 가리키게 하는 조회. 롤링 상태 행이 없으면 null.
+ * 규칙 8: 포인터는 맥락 전달용 표시물 — 소비자는 구조 레코드를 읽어야 하며
+ * 이 포인터 자체를 실행 판단 근거로 쓰지 않는다.
+ */
+export async function resolveMissionDecisionLogPointer(
+  db: Db,
+  missionId: string,
+): Promise<SessionHandoffDecisionLogPointer | null> {
+  const [row] = await db
+    .select({ revision: missionRollingState.revision })
+    .from(missionRollingState)
+    .where(eq(missionRollingState.missionId, missionId))
+    .limit(1);
+  return row ? { missionId, revision: row.revision } : null;
 }
 
 export const MISSION_RUNTIME_BUSY_REAP_GRACE_MS_DEFAULT = 5 * 60 * 1000;
