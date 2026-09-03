@@ -41,7 +41,9 @@ export async function resolveWorkflowToolStepArgs(input: {
   const args = input.step.toolArgs ?? {};
   const runMetadata = input.run.metadata ?? {};
   const references = collectArtifactReferences(args);
-  if (references.size === 0) return renderTemplates(args, input.run.runDate ?? "", new Map(), runMetadata);
+  if (references.size === 0) {
+    return renderTemplates(args, input.run.runDate ?? "", input.run.id, new Map(), runMetadata);
+  }
 
   const ancestors = collectAncestorStepIds(input.step.id, input.workflowSteps);
   for (const stepId of references) {
@@ -108,7 +110,7 @@ export async function resolveWorkflowToolStepArgs(input: {
     }
   }
 
-  return renderTemplates(args, input.run.runDate ?? "", pathsByStepId, runMetadata);
+  return renderTemplates(args, input.run.runDate ?? "", input.run.id, pathsByStepId, runMetadata);
 }
 
 function collectArtifactReferences(value: unknown, result = new Set<string>()): Set<string> {
@@ -170,11 +172,12 @@ export function runMonthFromRunDate(runDate: string): string | null {
   return match ? `${match[1]}${match[2]}` : null;
 }
 
-function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
+function renderTemplates(value: unknown, runDate: string, runId: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
   if (typeof value === "string") {
     return stripShellEscapeResidue(value
       .replaceAll("{$runDate}", runDate)
       .replaceAll("{$date}", runDate)
+      .replaceAll("{$workflowRunId}", runId)
       .replaceAll("{$runMonth}", runMonthFromRunDate(runDate) ?? "{$runMonth}")
       .replace(STEP_ARTIFACT_TOKEN, (token, stepId: string, field: string) => {
         const workProductPath = pathsByStepId.get(stepId);
@@ -189,9 +192,9 @@ function renderTemplates(value: unknown, runDate: string, pathsByStepId: Map<str
         return rendered === null ? token : rendered;
       }));
   }
-  if (Array.isArray(value)) return value.map((item) => renderTemplates(item, runDate, pathsByStepId, runMetadata));
+  if (Array.isArray(value)) return value.map((item) => renderTemplates(item, runDate, runId, pathsByStepId, runMetadata));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderTemplates(item, runDate, pathsByStepId, runMetadata)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderTemplates(item, runDate, runId, pathsByStepId, runMetadata)]));
   }
   return value;
 }
