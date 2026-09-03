@@ -11,7 +11,7 @@ import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
-import { resetFailedControlNodesForResume } from "./control-flow/control-node-executor.js";
+import { resetFailedControlNodesForResume, resetStaleIfControlNodesForResume } from "./control-flow/control-node-executor.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { missionService } from "../missions.js";
@@ -502,6 +502,14 @@ export const workflowService = {
     //   리셋해 현 상태로 다시 평가되게 한다.
     await resetFailedControlNodesForResume({
       db,
+      workflowRunId: run.id,
+      steps: normalizeWorkflowStepsForExecution(workflow.steps),
+    });
+    // [run9 RCA] 완료된 IF 노드도 verdict 입력(소스 work product)이 평가 시점보다 새로 갱신됐으면
+    //   stale 로 보고 pending 리셋 후 재평가한다 — producer 수정 후에도 skip 스티키가 영구화되지 않게.
+    await resetStaleIfControlNodesForResume({
+      db,
+      companyId: input.companyId,
       workflowRunId: run.id,
       steps: normalizeWorkflowStepsForExecution(workflow.steps),
     });

@@ -352,3 +352,33 @@ describeEmbeddedPostgres("workflow tool step args", () => {
     })).rejects.toThrow('could not resolve an active local workProduct for ancestor step "publish-onboarding-manual"');
   });
 });
+
+describe("{$workflowRunId} token", () => {
+  it("renders the current workflow run id inside tool args", async () => {
+    const runId = randomUUID();
+    const steps = [
+      {
+        id: "clips-gate-consumer",
+        dependencies: [],
+        toolNames: ["shorts-storage-list"],
+        toolArgs: {
+          action: "list",
+          prefix: "shorts/runs/{$workflowRunId}/clips/",
+          keep: "{$runMetadata.missing}",
+        },
+      },
+    ];
+    const args = await resolveWorkflowToolStepArgs({
+      // No ancestor artifact references => the DB is never queried on this path.
+      db: {} as Parameters<typeof resolveWorkflowToolStepArgs>[0]["db"],
+      run: { id: runId, companyId: randomUUID(), runDate: "2026-09-05" },
+      step: steps[0]!,
+      workflowSteps: steps,
+    });
+    expect(args).toEqual({
+      action: "list",
+      prefix: `shorts/runs/${runId}/clips/`,
+      keep: "{$runMetadata.missing}",
+    });
+  });
+});

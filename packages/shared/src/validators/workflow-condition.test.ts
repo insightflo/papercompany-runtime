@@ -7,6 +7,7 @@ import {
   workflowConditionSchema,
   workflowConditionSourceSchema,
   workflowControlNodeResultSchema,
+  workflowIfControlResultSchema,
   type WorkflowConditionOperator,
 } from "./workflow-condition.js";
 import { workflowStepDefinitionSchema } from "./workflow.js";
@@ -338,5 +339,90 @@ describe("exports surface", () => {
     const operatorLiteral: WorkflowConditionOperator = parsed.operator;
     expect(["equals", "not_equals"]).toContain(operatorLiteral);
     expect(parsed.operator).toBe("equals");
+  });
+});
+
+describe("workflowConditionSourceSchema — tool_json", () => {
+  const validToolSource = {
+    kind: "tool_json" as const,
+    stepId: "flow-clips",
+    toolName: "shorts-storage-list",
+    parameters: { action: "list", prefix: "shorts/runs/r1/clips/" },
+    path: "$.count",
+  };
+
+  it("accepts a canonical tool_json source", () => {
+    expect(workflowConditionSourceSchema.parse(validToolSource)).toEqual(validToolSource);
+  });
+
+  it("defaults parameters to an empty object", () => {
+    const parsed = workflowConditionSourceSchema.parse({
+      kind: "tool_json",
+      stepId: "s",
+      toolName: "t",
+      path: "$.count",
+    });
+    expect(parsed.kind).toBe("tool_json");
+    if (parsed.kind === "tool_json") expect(parsed.parameters).toEqual({});
+  });
+
+  it("rejects a tool_json source with a prototype JSON path", () => {
+    expect(() =>
+      workflowConditionSourceSchema.parse({ ...validToolSource, path: "$.constructor" }),
+    ).toThrow();
+  });
+
+  it("rejects an empty toolName", () => {
+    expect(() => workflowConditionSourceSchema.parse({ ...validToolSource, toolName: "  " })).toThrow();
+  });
+
+  it("rejects a tool_json source with non-object parameters", () => {
+    expect(() =>
+      workflowConditionSourceSchema.parse({ ...validToolSource, parameters: [1, 2] }),
+    ).toThrow();
+  });
+});
+
+describe("workflowConditionSourceSummarySchema — persisted IF result summaries", () => {
+  const baseResult = {
+    nodeType: "if",
+    outcome: "condition_true",
+    evaluatedAt: "2026-09-05T00:00:00.000Z",
+    conditionCount: 1,
+    combinator: "all",
+  };
+
+  it("parses a legacy source summary without kind (title only)", () => {
+    const parsed = workflowIfControlResultSchema.parse({
+      ...baseResult,
+      sourceSummary: [{ stepId: "p", title: "decision.json", path: "$.status" }],
+    });
+    expect(parsed.sourceSummary[0]?.title).toBe("decision.json");
+  });
+
+  it("parses a tool source summary with kind and toolName", () => {
+    const parsed = workflowIfControlResultSchema.parse({
+      ...baseResult,
+      sourceSummary: [{ kind: "tool_json", stepId: "p", toolName: "shorts-storage-list", path: "$.count" }],
+    });
+    expect(parsed.sourceSummary[0]?.toolName).toBe("shorts-storage-list");
+  });
+
+  it("rejects a summary with both title and toolName", () => {
+    expect(() =>
+      workflowIfControlResultSchema.parse({
+        ...baseResult,
+        sourceSummary: [{ stepId: "p", title: "t", toolName: "x", path: "$.a" }],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a summary with neither title nor toolName", () => {
+    expect(() =>
+      workflowIfControlResultSchema.parse({
+        ...baseResult,
+        sourceSummary: [{ stepId: "p", path: "$.a" }],
+      }),
+    ).toThrow();
   });
 });
