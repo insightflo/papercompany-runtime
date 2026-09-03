@@ -662,5 +662,22 @@ export function missionRoutes(db: Db) {
     res.json(runs);
   });
 
+  /**
+   * GET /missions/:id/workflow-runs/:runId/flowmap
+   *
+   * Export one workflow run as a single-file interactive flowmap HTML
+   * (repo-flowmap fixed renderer; IF branches + rework loops as cond edges).
+   * Read-only download — board/operator context, company access enforced.
+   */
+  router.get("/missions/:id/workflow-runs/:runId/flowmap", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+
+    const html = await svc.buildMissionRunFlowmapHtml(req.params.id, req.params.runId);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="mission-${req.params.id}-flowmap.html"`);
+    res.send(html);
+  });
+
   return router;
 }

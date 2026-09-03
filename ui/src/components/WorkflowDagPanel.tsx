@@ -811,14 +811,24 @@ function WorkflowRunGraph({
             <p className="text-sm font-medium truncate">{run.workflowName ?? "Unnamed workflow"}</p>
             <p className="text-xs text-muted-foreground font-mono truncate">{run.id}</p>
           </div>
-          <span
-            className={cn(
-              "text-xs rounded border px-2 py-1 uppercase tracking-wide",
-              RUN_STATUS_TONE[run.status] ?? RUN_STATUS_TONE.pending,
-            )}
-          >
-            {formatStatusLabel(run.status)}
-          </span>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "text-xs rounded border px-2 py-1 uppercase tracking-wide",
+                RUN_STATUS_TONE[run.status] ?? RUN_STATUS_TONE.pending,
+              )}
+            >
+              {formatStatusLabel(run.status)}
+            </span>
+            <a
+              href={missionsApi.workflowRunFlowmapDownloadPath(missionId, run.id)}
+              download
+              className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/30"
+              title="Download this run as a single-file interactive flowmap HTML (IF branches + rework loops included)"
+            >
+              Export flowmap
+            </a>
+          </div>
         </div>
         <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
           <span>Triggered by: {run.triggeredBy}</span>
