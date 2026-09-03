@@ -140,6 +140,73 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
     }));
   });
 
+  it("records the step dispatch contract in the execution card as a structured field", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run" });
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Step Contract Co",
+      issuePrefix: "SCC",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Producer",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "Step contract workflow",
+      stepsJson: [
+        {
+          id: "produce",
+          name: "Produce artifact",
+          agentId,
+          dependencies: [],
+          description: "Create the report.",
+          graphWorkProductRequired: true,
+          contract: {
+            preconditions: ["Upstream brief exists", "", "  "],
+            postconditions: ["Report registers a workProduct"],
+            undefinedBehaviors: ["If the data source is unreachable the content is undefined — report blocked"],
+          },
+        },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+
+    await executeWorkflowRun(db, runId);
+
+    const [issue] = await db.select().from(issues).where(eq(issues.originRunId, runId));
+    if (!issue) throw new Error("workflow issue was not created");
+    const [card] = await db.select().from(issueExecutionCards).where(eq(issueExecutionCards.issueId, issue.id));
+    if (!card) throw new Error("execution card was not created");
+
+    // Structured record: trimmed, empty items dropped, exact sections preserved.
+    expect(card.cardJson.stepContract).toEqual({
+      preconditions: ["Upstream brief exists"],
+      postconditions: ["Report registers a workProduct"],
+      undefinedBehaviors: ["If the data source is unreachable the content is undefined — report blocked"],
+    });
+  });
+
   it("resyncs a workflow issue execution card when the issue contract changes", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -212,5 +279,59 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
       workflowDefinitionId: workflowId,
       stepId: "publish",
     });
+  });
+
+  it("omits stepContract from the execution card when the step declares no contract", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    heartbeatWakeup.mockResolvedValue({ id: "queued-run" });
+    await db.insert(companies).values({
+      id: companyId,
+      name: "No Contract Co",
+      issuePrefix: "NCC",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Producer",
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId,
+      name: "No contract workflow",
+      stepsJson: [{
+        id: "publish",
+        name: "Publish artifact",
+        agentId,
+        dependencies: [],
+        description: "Publish the page.",
+        graphWorkProductRequired: false,
+      }],
+    });
+    await db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      companyId,
+      triggeredBy: "system",
+      status: "pending",
+    });
+    await executeWorkflowRun(db, runId);
+
+    const [issue] = await db.select().from(issues).where(eq(issues.originRunId, runId));
+    if (!issue) throw new Error("workflow issue was not created");
+    const [card] = await db.select().from(issueExecutionCards).where(eq(issueExecutionCards.issueId, issue.id));
+    if (!card) throw new Error("execution card was not created");
+
+    expect(card.cardJson.stepContract).toBeUndefined();
   });
 });

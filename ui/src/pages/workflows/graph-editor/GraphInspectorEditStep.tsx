@@ -140,6 +140,41 @@ export function GraphInspectorEditStep({
                 </div>
                 </Fragment>
               )}
+              {selectedStep.type === "agent" ? (
+              <div key="edit-step-contract" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", ...mutedTextStyle, fontSize: "11px", fontWeight: 700 }}>
+                  Step contract
+                  <HelpIcon label="Owner-recorded preconditions, postconditions, and undefined behaviors. Dispatched to the assigned agent as structured guidance and surfaced to QA graders. Guidance only — not an execution-control authority." />
+                </span>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="One item per line. The agent verifies each before starting and reports blocked when unmet.">Preconditions</FieldLabel>
+                  <textarea
+                    style={{ ...textareaStyle, minHeight: "44px" }}
+                    value={selectedStep.contractPreconditions}
+                    placeholder={"Upstream brief is registered\nData source reachable"}
+                    onChange={(event) => updateSelectedDataFlow({ contractPreconditions: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="One item per line. Must hold when the agent marks the step complete; QA judges the workProduct against them.">Postconditions</FieldLabel>
+                  <textarea
+                    style={{ ...textareaStyle, minHeight: "44px" }}
+                    value={selectedStep.contractPostconditions}
+                    placeholder={"Report file exists in the output directory\nReport registers a workProduct"}
+                    onChange={(event) => updateSelectedDataFlow({ contractPostconditions: event.target.value })}
+                  />
+                </div>
+                <div style={{ display: "grid", gap: "4px" }}>
+                  <FieldLabel help="One item per line. Situations where the outcome is NOT guaranteed — the agent must stop and report blocked instead of guessing.">Undefined behaviors</FieldLabel>
+                  <textarea
+                    style={{ ...textareaStyle, minHeight: "44px" }}
+                    value={selectedStep.contractUndefinedBehaviors}
+                    placeholder={"If the data source is unreachable, content is undefined — report blocked"}
+                    onChange={(event) => updateSelectedDataFlow({ contractUndefinedBehaviors: event.target.value })}
+                  />
+                </div>
+              </div>
+              ) : null}
               {selectedStep.type === "agent" || selectedStep.type === "tool" ? (
               <Fragment key="agent-tool-runtime-fields">
               <div key="edit-runtime-contract" style={{ display: "grid", gap: "6px", paddingTop: "8px", borderTop: "1px solid var(--border, #334155)" }}>

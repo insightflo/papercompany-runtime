@@ -58,6 +58,9 @@ export type StepDraft = {
   graphOutputSchema: string;
   graphWorkProductRequired: boolean;
   graphWorkProductPattern: string;
+  contractPreconditions: string;
+  contractPostconditions: string;
+  contractUndefinedBehaviors: string;
   graphResourceRefs: string;
   graphSecretRefs: string;
   graphPositionX: string | number;
