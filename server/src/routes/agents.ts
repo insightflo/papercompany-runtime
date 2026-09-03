@@ -54,6 +54,7 @@ import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { evaluateFileViewFreshness } from "../services/context-safe-file-views.js";
 import { runClaudeLogin } from "@paperclipai/adapter-claude-local/server";
 import {
   DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
@@ -2320,6 +2321,30 @@ export function agentRoutes(db: Db) {
     const executionWorkspaceId = asNonEmptyString(context?.executionWorkspaceId);
     const operations = await workspaceOperations.listForRun(runId, executionWorkspaceId);
     res.json(redactCurrentUserValue(operations, await getCurrentUserRedactionOptions()));
+  });
+
+  // Reads the file views recorded in the run's context snapshot (with their
+  // machine-generated content fingerprints) and compares them against the
+  // current files in the run's workspace. Read-only diagnostic surface: it does
+  // not gate execution and never parses agent-authored prose.
+  router.get("/heartbeat-runs/:runId/file-view-freshness", async (req, res) => {
+    const runId = req.params.runId as string;
+    const run = await heartbeat.getRun(runId);
+    if (!run) {
+      res.status(404).json({ error: "Heartbeat run not found" });
+      return;
+    }
+    assertCompanyAccess(req, run.companyId);
+
+    const context = asRecord(run.contextSnapshot);
+    const workspaceCwd = asNonEmptyString(asRecord(context?.paperclipWorkspace)?.cwd);
+    const freshness = workspaceCwd
+      ? await evaluateFileViewFreshness({
+          views: context?.paperclipFileViews,
+          workspaceCwd,
+        })
+      : [];
+    res.json({ runId, workspaceCwd, freshness });
   });
 
   router.get("/workspace-operations/:operationId/log", async (req, res) => {
