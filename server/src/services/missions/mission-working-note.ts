@@ -22,6 +22,14 @@ export type PaperclipMissionWorkingNoteContext = {
 export const MISSION_WORKING_NOTE_INSTRUCTIONS = [
   "Read this working.md before acting on mission-scoped work.",
   "Update it with mission-relevant current status, evidence, decisions, open questions, and next steps.",
+  // [SKILL.state] 상태파일은 재작성 not append — 원시 로그·대화·초안은 상태가 아니다(O(T) 유지).
+  "When updating, rewrite the sections in place instead of appending; raw logs, chat transcripts, and draft outputs do not belong in this file.",
+  // [SKILL.state] 선별 보존 — 믿음/진척/경험 아니면 로그로. 무엇을 남기는지가 본체.
+  "Keep only beliefs, progress, and reusable experience; anything else belongs in run logs, issue comments, or workProducts.",
+  // 결정 수명주기: 지위+대체 링크. 폐기된 결정까지 잔류해야 현재가 보인다.
+  "Record each decision with a status (confirmed, under_review, or retired); when a decision replaces an earlier one, keep the old entry retired with a pointer to its replacement.",
+  // 파일 인용 지문 — 이후 실행이 낡은 증거를 판별할 수 있게(content hash와 호환되는 일반 표현).
+  "When citing files as evidence, record the path with a content hash (for example sha256) so later runs can detect stale references.",
   "Do not treat working.md as a final deliverable; official outputs must still be registered as workProducts.",
 ];
 
@@ -64,6 +72,7 @@ function buildInitialMissionWorkingNote(input: {
     "- No status recorded yet.",
     "",
     "## Decisions",
+    "- Format: one line per decision — status: confirmed | under_review | retired + what it supersedes.",
     "- No decisions recorded yet.",
     "",
     "## Evidence",

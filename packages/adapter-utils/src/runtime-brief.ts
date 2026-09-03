@@ -467,6 +467,7 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     "Dynamic workflow means reducing uncertainty with evidence gates, not adding subagents or parallelism by default.",
     "Paperclip child issues are the delegation mechanism for mission work; internal local-agent delegation is not a replacement for out-of-scope work.",
     "Report slice completion separately from end-to-end completion.",
+    "When planning steps, declare each step's expected precondition and postcondition so execution and QA verify against the declared contract instead of re-deriving intent.",
     "Choose exactly one branch:",
     "1. `research_needed`: name missing evidence and the intended delegation/escalation path.",
     "2. `blocked`: name the missing input, authority, runtime path, or escalation path.",

@@ -101,6 +101,29 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).not.toContain("full registered report Markdown");
   });
 
+  it("asks owner planning to declare step pre/postconditions for contract-based QA", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipStepInputManifest: {
+        inputs: {
+          missionOwnerPlanningContext: {
+            available: true,
+            missionId: "mission-1",
+            planningIssueId: "issue-plan-1",
+            activePlanAvailable: false,
+            selectedExecutionUnitCount: 0,
+            executionSourceUnitCount: 0,
+            planningDossierGapCount: 0,
+            planningDossierSevereGapCount: 0,
+          },
+        },
+      },
+    });
+
+    expect(brief).toContain("Owner planning protocol:");
+    // [스텝 계약] 계획 단계에서 사전/사후조건을 선언하게 해야 QA가 의도 재유추 대신 계약으로 검증한다.
+    expect(brief).toContain("precondition and postcondition");
+  });
+
   it("surfaces exact workflow tool-call contract and recent controller comments", () => {
     const brief = buildPaperclipRuntimeBrief({
       paperclipWorkflowStepToolContract: {
