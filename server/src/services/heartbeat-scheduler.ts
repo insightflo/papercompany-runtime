@@ -9,6 +9,9 @@ type HeartbeatSchedulerHeartbeat = {
     graceMs?: number;
     now?: Date;
   }): Promise<unknown>;
+  reapStalledIssueExecutionLocks(opts?: {
+    limit?: number;
+  }): Promise<unknown>;
   resumeQueuedRuns(): Promise<unknown>;
 };
 
@@ -158,6 +161,13 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
       await opts.heartbeat.reapStaleBusyMissionRuntimes();
     } catch (err) {
       opts.logger.error({ err }, "mission runtime stale-busy reaper failed; continuing recovery lane");
+    }
+    // [issue 실행잠금 고착 회수기] terminal 실패 run 에 잠긴 채 남은 in_progress 이슈를
+    // 표준 실패 경로로 회수한다. 실패해도 recovery lane 의 나머지(resumeQueuedRuns)는 계속된다.
+    try {
+      await opts.heartbeat.reapStalledIssueExecutionLocks();
+    } catch (err) {
+      opts.logger.error({ err }, "issue execution lock reaper failed; continuing recovery lane");
     }
     await opts.heartbeat.resumeQueuedRuns();
   };

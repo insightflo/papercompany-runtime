@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, gte, inArray, lt, lte, not, notLike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
 import {
@@ -5609,6 +5609,156 @@ export function heartbeatService(db: Db) {
       casLost: summary.casLost,
     };
   }
+  // [issue 실행잠금 고착 회수기] terminal 실패 run 을 여전히 execution lock(checkout/execution
+  // run)으로 가리키는 in_progress 이슈를 표준 실패 경로로 회수한다. 부실 assignment wakeup
+  // (이슈 미연결)으로 발사된 run 안에서 이슈가 checkout 되고 process_lost 재시도 chain 이
+  // linkage 없이 죽으면, 기존 release 경로는 "내 run id 와 연결된 이슈"만 찾으므로 이슈도
+  // 스텝도 아무도 종결하지 못한다(tts 스톨 사고 2026-09-03, 미션 ac97255c). 살아있는 후계
+  // 런(retry/fallback/issue-linked)이 없을 때만 발동하고, 실제 상태 전환은 기존
+  // releaseIssueExecutionAndPromote 표준 경로(이슈 blocked + 실패 comment + 감사로그 +
+  // 워크플로 스텝 failed 전파)가 담당한다.
+  async function reapStalledIssueExecutionLocks(opts?: {
+    limit?: number;
+  }): Promise<{
+    reaped: number;
+    skippedLiveLock: number;
+    skippedLiveSuccessor: number;
+    skippedLiveIssueRun: number;
+    skipped: number;
+  }> {
+    const limit = opts?.limit ?? 100;
+    const terminalFailureStatuses = ["failed", "timed_out", "cancelled"];
+    const liveStatuses = ["queued", "running"];
+    let reaped = 0;
+    let skippedLiveLock = 0;
+    let skippedLiveSuccessor = 0;
+    let skippedLiveIssueRun = 0;
+    let skipped = 0;
+
+    const candidates = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.status, "in_progress"),
+          or(isNotNull(issues.executionRunId), isNotNull(issues.checkoutRunId)),
+        ),
+      )
+      .limit(limit);
+
+    for (const issue of candidates) {
+      try {
+        const lockRunIds = Array.from(
+          new Set([issue.executionRunId, issue.checkoutRunId].filter(
+            (runId): runId is string => Boolean(runId),
+          )),
+        );
+        if (lockRunIds.length === 0) continue;
+        const lockRuns = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, lockRunIds));
+        if (lockRuns.length !== lockRunIds.length) {
+          // dangling lock(참조 run 없음)은 다른 계열 — 여기서 건드리지 않는다.
+          skipped++;
+          continue;
+        }
+        const lockRunById = new Map(lockRuns.map((run) => [run.id, run]));
+        // guard 1: 모든 lock 참조가 terminal 실패 상태여야 한다(하나라도 live/succeeded 면 skip).
+        if (lockRuns.some((run) => !terminalFailureStatuses.includes(run.status))) {
+          skippedLiveLock++;
+          continue;
+        }
+        // guard 2: 후계 retry/fallback 런이 살아있으면 skip(재시도 chain 이 작업을 이어받는 중).
+        const liveSuccessors = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(
+            and(
+              inArray(heartbeatRuns.retryOfRunId, lockRunIds),
+              inArray(heartbeatRuns.status, liveStatuses),
+            ),
+          )
+          .limit(1);
+        if (liveSuccessors.length > 0) {
+          skippedLiveSuccessor++;
+          continue;
+        }
+        // guard 3: 이슈에 연결된 살아있는 run 이 있으면 skip(엔진이 인지한 실행 채택 중).
+        const liveIssueRuns = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(
+            and(
+              eq(heartbeatRuns.issueId, issue.id),
+              inArray(heartbeatRuns.status, liveStatuses),
+            ),
+          )
+          .limit(1);
+        if (liveIssueRuns.length > 0) {
+          skippedLiveIssueRun++;
+          continue;
+        }
+        const holderRun = lockRunById.get(issue.executionRunId ?? "") ?? lockRunById.get(issue.checkoutRunId ?? "");
+        if (!holderRun) {
+          skipped++;
+          continue;
+        }
+        // 표준 차단 분기(terminal_run_failure)는 assignee 일치를 요구한다.
+        if (issue.assigneeAgentId !== holderRun.agentId) {
+          skipped++;
+          continue;
+        }
+        await releaseIssueExecutionAndPromote(holderRun, { skipLocked: true });
+        const [after] = await db
+          .select({
+            status: issues.status,
+            checkoutRunId: issues.checkoutRunId,
+            executionRunId: issues.executionRunId,
+          })
+          .from(issues)
+          .where(eq(issues.id, issue.id))
+          .limit(1);
+        const transitioned = after !== undefined && (
+          after.status !== "in_progress" ||
+          after.checkoutRunId !== issue.checkoutRunId ||
+          after.executionRunId !== issue.executionRunId
+        );
+        if (transitioned) {
+          reaped++;
+          // [스텝 전파] 이슈가 blocked 로 전환됐으면 연결 워크플로 스텝도 즉시 failed 로
+          // 전파한다(표준 post-tx 동기화와 동일 호출). 실패해도 회수 자체는 유지한다.
+          try {
+            const { workflowService } = await import("./workflow/engine.js");
+            await workflowService.syncRunStatusForIssue(db, issue.id, "heartbeat_promotion");
+          } catch (err) {
+            logger.warn({ err, issueId: issue.id }, "issue execution lock reaper: workflow sync after recovery failed");
+          }
+          logger.warn(
+            {
+              issueId: issue.id,
+              holderRunId: holderRun.id,
+              holderStatus: holderRun.status,
+              holderErrorCode: holderRun.errorCode,
+              nextStatus: after?.status,
+            },
+            "issue execution lock reaper recovered stalled issue via standard failure path",
+          );
+        } else {
+          skipped++;
+        }
+      } catch (err) {
+        // per-issue isolation: 한 이슈 회수 실패가 스윕 전체를 멈추지 않게 한다.
+        logger.warn({ err, issueId: issue.id }, "issue execution lock reaper: per-issue failure; continuing sweep");
+        skipped++;
+      }
+    }
+
+    return { reaped, skippedLiveLock, skippedLiveSuccessor, skippedLiveIssueRun, skipped };
+  }
   async function resumeQueuedRuns(agentId?: string) {
     if (agentId) {
       await startNextQueuedRunForAgent(agentId);
@@ -10357,6 +10507,8 @@ export function heartbeatService(db: Db) {
     reapOrphanedRuns,
 
     reapStaleBusyMissionRuntimes,
+
+    reapStalledIssueExecutionLocks,
 
     resumeQueuedRuns,
 
