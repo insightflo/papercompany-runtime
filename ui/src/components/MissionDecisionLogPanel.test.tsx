@@ -97,6 +97,9 @@ describe("MissionDecisionLogPanel", () => {
     expect(html).toContain("under_review");
     // 개요 카드: 총 3, 확정 1, 검토 중 1.
     expect(html).toContain("3");
+    // stateMarkdown 접기 섹션: 제목 + 마크다운 원문 스니펫.
+    expect(html).toContain("Mission state (markdown)");
+    expect(html).toContain("# Mission State");
   });
 
   it("renders an empty state with the producer hint when no decisions exist", () => {
@@ -105,6 +108,8 @@ describe("MissionDecisionLogPanel", () => {
 
     expect(html).toContain("No decisions recorded yet");
     expect(html).toContain("decision-reports");
+    // stateMarkdown 이 빈 문자열이면 접기 섹션 자체가 렌더링되지 않는다.
+    expect(html).not.toContain("Mission state (markdown)");
   });
 
   it("renders a loading state", () => {
