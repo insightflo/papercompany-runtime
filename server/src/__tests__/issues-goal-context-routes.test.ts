@@ -231,6 +231,7 @@ describe("issue goal context routes", () => {
         relativePath: "src/server.ts",
         source: "wake_comment",
         exists: false,
+        contentHash: null,
       },
     ]);
   });
