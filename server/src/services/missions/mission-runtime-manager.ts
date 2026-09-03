@@ -407,7 +407,7 @@ export const MISSION_DECISION_LOG_CAP = 50;
 export function mergeDecisionRecords(
   previous: MissionRollingDecisionRecord[] | undefined,
   updates: MissionIssueHandoffDecisionUpdate[] | undefined,
-  input: { handoffId: string; now: Date },
+  input: { handoffId: string | null; now: Date },
 ): MissionRollingDecisionRecord[] {
   if (!updates || updates.length === 0) {
     return previous ?? [];

@@ -31,6 +31,10 @@ import { listMissionGovernanceThread } from "../services/missions/governance-thr
 import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
 import { loadMissionRuntimeSnapshot } from "../services/missions/mission-runtime-snapshot.js";
 import { getMissionRecoveryAdvice } from "../services/missions/mission-recovery-advice.js";
+import {
+  applyMissionDecisionReports,
+  getMissionDecisionLog,
+} from "../services/missions/mission-decision-reports.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
 export function missionRoutes(db: Db) {
@@ -398,6 +402,56 @@ export function missionRoutes(db: Db) {
         targetCompanyId,
         targetMissionId: result.targetMission.id,
         sourceIssueId: result.sourceIssue.id,
+      },
+    });
+
+    res.status(201).json(result);
+  });
+
+  /**
+   * GET /missions/:id/decision-log
+   *
+   * Read the mission rolling-state decision log (A안 #193 소비면).
+   * 규칙 8: 표시·맥락 전달용 상태일 뿐, 실행 통제가 이를 읽지 않는다.
+   */
+  router.get("/missions/:id/decision-log", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+    const log = await getMissionDecisionLog(db, { missionId: mission.id });
+    if (!log) throw notFound("Mission decision log not found");
+    res.json(log);
+  });
+
+  /**
+   * POST /missions/:id/decision-reports
+   *
+   * [결정 보고 API — A안 후속 생산자] 에이전트/보드가 구조화된 결정 보고를 제출하면
+   * 런타임이 결정론적으로 롤링 상태 결정 로그에 병합한다. 입력은 zod 계약 검증(422).
+   */
+  router.post("/missions/:id/decision-reports", async (req, res) => {
+    const mission = await svc.getById(req.params.id);
+    assertCompanyAccess(req, mission.companyId);
+
+    const result = await applyMissionDecisionReports(db, {
+      companyId: mission.companyId,
+      missionId: mission.id,
+      updates: (req.body ?? {}).updates,
+    });
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: mission.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "mission.decisions.reported",
+      entityType: "mission",
+      entityId: mission.id,
+      details: {
+        appliedUpdates: result.appliedUpdates,
+        revision: result.revision,
+        decisionIds: result.decisions.map((record) => record.id).slice(0, 20),
       },
     });
 

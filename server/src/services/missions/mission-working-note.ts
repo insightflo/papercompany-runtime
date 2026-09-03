@@ -30,6 +30,8 @@ export const MISSION_WORKING_NOTE_INSTRUCTIONS = [
   "Record each decision with a status (confirmed, under_review, or retired); when a decision replaces an earlier one, keep the old entry retired with a pointer to its replacement.",
   // 파일 인용 지문 — 이후 실행이 낡은 증거를 판별할 수 있게(content hash와 호환되는 일반 표현).
   "When citing files as evidence, record the path with a content hash (for example sha256) so later runs can detect stale references.",
+  // 결정 보고 API — 미션 결정은 working.md 스크래치가 아니라 결정 로그가 기록이다.
+  "Report mission-level decisions (new, changed, confirmed, or retired) via POST /api/missions/{missionId}/decision-reports with updates [{id, summary, status, supersedes}]; the mission decision log is the record.",
   "Do not treat working.md as a final deliverable; official outputs must still be registered as workProducts.",
 ];
 

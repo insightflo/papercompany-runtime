@@ -711,10 +711,22 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       ? `- Mission rules: ${Number(missionPlan.ruleRefCount ?? 0)} refs${missionPlanRuleNames.length > 0 ? ` — ${missionPlanRuleNames.join(", ")}` : ""}${missionPlanRuleModes.length > 0 ? ` (${missionPlanRuleModes.join(", ")})` : ""}`
       : null;
   const missionWorkingNotePath = asString(missionWorkingNote?.path);
-  const missionWorkingNoteLine =
+  const missionWorkingNoteInstructionLines = Array.isArray(missionWorkingNote?.instructions)
+    ? missionWorkingNote.instructions.filter((line): line is string => typeof line === "string" && line.trim().length > 0)
+    : [];
+  const missionWorkingNoteMissionId = asString(missionWorkingNote?.missionId);
+  // [SKILL.state] working note 지침을 brief 에 렌더링해 에이전트 프롬프트에 실제로 도달하게 한다.
+  // + 결정 보고 API 포인터(결정 로그 소비/생산 완결).
+  const missionWorkingNoteLines: string[] =
     missionWorkingNote?.available === true && missionWorkingNotePath
-      ? `- Mission working note: ${missionWorkingNotePath} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`
-      : null;
+      ? [
+          `- Mission working note: ${missionWorkingNotePath} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`,
+          ...missionWorkingNoteInstructionLines.map((line) => `- ${line}`),
+          missionWorkingNoteMissionId
+            ? `- Mission decision log: report mission-level decisions via POST /api/missions/${missionWorkingNoteMissionId}/decision-reports with updates [{id, summary, status, supersedes}]; statuses confirmed/under_review/retired.`
+            : null,
+        ].filter((line): line is string => line !== null)
+      : [];
   const missionOwnerPlanningContextLine = buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext);
 
   const guardrailLine =
@@ -790,7 +802,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlanExecutionUnitsLine,
     missionPlanSelectedUnitsLine,
     missionPlanRulesLine,
-    missionWorkingNoteLine,
+    ...missionWorkingNoteLines,
     missionOwnerPlanningContextLine,
     ...workflowReworkContractLines,
     ...qaCapAcceptanceLines,

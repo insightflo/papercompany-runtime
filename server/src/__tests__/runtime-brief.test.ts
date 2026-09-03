@@ -523,6 +523,11 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Mission working note: /paperclip/mission-working-notes/company-1/mission-1/working.md");
     expect(brief).toContain("shared scratch context");
     expect(brief).toContain("not a final workProduct");
+    // [SKILL.state] working note 지침이 brief 에 렌더링되어 에이전트 프롬프트에 도달한다.
+    expect(brief).toContain("- Read this working.md before acting on mission-scoped work.");
+    expect(brief).toContain("- Do not treat working.md as a final deliverable; official outputs must still be registered as workProducts.");
+    // 결정 보고 API 포인터(소비/생산 완결).
+    expect(brief).toContain("Mission decision log: report mission-level decisions via POST /api/missions/mission-1/decision-reports");
     expect(brief).toContain("Owner planning protocol:");
     expect(brief).toContain("Produce a Mission Planning Assessment before acting beyond status discovery.");
     expect(brief).toContain("Missing tool/runtime-service assets do not prove that the Paperclip worker runtime is down.");
