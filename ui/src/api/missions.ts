@@ -129,6 +129,19 @@ export interface MissionDecisionLogResponse {
   stateMarkdown: string;
 }
 
+/** [규칙 8] board(운영자) 결정 기록 작성 payload. 결정 로그는 맥락 상태 기록일 뿐 실행 통제 권한이 아니다. */
+export interface MissionDecisionReportPayload {
+  updates: Array<{
+    /** 결정 id (필수, 1-100자) */
+    id: string;
+    /** 요약 (1-2000자) */
+    summary?: string;
+    status?: MissionDecisionStatus;
+    /** 이 결정이 대체하는 기존 결정 id (선택) */
+    supersedes?: string;
+  }>;
+}
+
 export type MissionGovernanceThreadEventType =
   | "status_changed"
   | "assignment_changed"
@@ -444,6 +457,8 @@ export const missionsApi = {
     ),
   getGovernanceThread: (id: string) => api.get<MissionGovernanceThreadResponse>(`/missions/${id}/governance-thread`),
   getDecisionLog: (id: string) => api.get<MissionDecisionLogResponse>(`/missions/${id}/decision-log`),
+  reportDecisions: (id: string, data: MissionDecisionReportPayload) =>
+    api.post<MissionDecisionLogResponse>(`/missions/${id}/decision-reports`, data),
   listHumanOperatorRequests: (companyId: string) =>
     api.get<MissionHumanOperatorRequest[]>(`/companies/${companyId}/missions/human-operator-requests`),
   create: (companyId: string, data: CreateMissionInput) =>

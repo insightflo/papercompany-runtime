@@ -101,6 +101,8 @@ vi.mock("@tanstack/react-query", () => ({
         error: null,
       };
     }),
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
+  useMutation: () => ({ isPending: false, mutate: vi.fn() }),
 }));
 
 vi.mock("../context/CompanyContext", () => ({
