@@ -104,6 +104,11 @@ import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
+import {
+  FILE_VIEW_STALENESS_ROTATION_REASON,
+  evaluateSessionFileStaleness,
+  parseFileViewStalenessRotationPolicy,
+} from "./file-view-session-staleness.js";
 import { evaluateRuntimeBroadScanHook } from "./runtime-broad-scan-hook.js";
 import { buildRuntimeSearchPathPermissions } from "./runtime-search-path-permissions.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
@@ -7498,6 +7503,64 @@ export function heartbeatService(db: Db) {
           ),
           { code: "context_budget_exceeded" },
         );
+      }
+      // [file-view staleness] 재개 세션의 직전 run 컨텍스트 스냅샷에 기록된 파일 뷰가
+      //   현재 워크스페이스와 어긋나면(변경/삭제) 같은 세션 메모리로 실행하지 않고
+      //   핸드오프와 함께 새 세션으로 회전한다. 하드 블록이 아니라 회전이며,
+      //   판정은 머신 생성 해시 비교(file_view_session_staleness)뿐이다.
+      if (hasResumableSession && parseFileViewStalenessRotationPolicy(agent.runtimeConfig).enabled) {
+        const fileViewStaleness = await evaluateSessionFileStaleness(db, {
+          agentId: agent.id,
+          resumedSessionId: runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null,
+          currentRunId: run.id,
+          fallbackWorkspaceCwd: executionWorkspace.cwd,
+        });
+        if (fileViewStaleness.rotate) {
+          const previousSessionId = runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null;
+          runtimeForAdapter.sessionId = null;
+          runtimeForAdapter.sessionParams = null;
+          runtimeForAdapter.sessionDisplayId = null;
+          hasResumableSession = false;
+          context.paperclipSessionRotationReason = FILE_VIEW_STALENESS_ROTATION_REASON;
+          context.paperclipPreviousSessionId = previousSessionId;
+          // [A안] 파일 뷰 스테일 회전에서도 결정원장 포인터(미션+판번호)를 실어 보낸다.
+          const stalenessDecisionLogPointer = missionId
+            ? await resolveMissionDecisionLogPointer(db, missionId)
+            : null;
+          const stalenessReasonText =
+            fileViewStaleness.reason ?? "Recorded files changed since the last run in this session.";
+          context.paperclipSessionHandoffMarkdown = [
+            "# Session Handoff",
+            "",
+            `Previous session: ${previousSessionId ?? "unknown"}`,
+            `Rotation reason: ${FILE_VIEW_STALENESS_ROTATION_REASON}`,
+            `Issue ID: ${issueId ?? "none"}`,
+            "",
+            stalenessReasonText,
+            ...(fileViewStaleness.staleFiles.length > 0
+              ? [
+                  "",
+                  "Changed files:",
+                  ...fileViewStaleness.staleFiles.map((entry) => `- ${entry.relativePath} (${entry.status})`),
+                ]
+              : []),
+            ...(stalenessDecisionLogPointer
+              ? [
+                  "",
+                  `Mission decision log: mission ${stalenessDecisionLogPointer.missionId} rolling state revision ${stalenessDecisionLogPointer.revision} (authoritative decision statuses: confirmed/under_review/retired)`,
+                ]
+              : []),
+          ].join("\n");
+          context.paperclipSessionHandoff = {
+            version: 1,
+            previousSessionId,
+            issueId,
+            rotationReason: FILE_VIEW_STALENESS_ROTATION_REASON,
+            lastRunSummaryText: stalenessReasonText,
+            ...(stalenessDecisionLogPointer ? { missionDecisionLogPointer: stalenessDecisionLogPointer } : {}),
+          };
+          refreshStepInputManifest(context, taskKey);
+        }
       }
       const stepInputManifestGuard = await evaluateStepInputManifestGuard({
         adapterConfig: runtimeConfig,
