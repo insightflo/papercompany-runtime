@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createWorkflowDefinitionSchema, workflowStepDefinitionSchema } from "./workflow.js";
+import { createWorkflowDefinitionSchema, workflowStepContractSchema, workflowStepDefinitionSchema } from "./workflow.js";
 
 describe("workflowStepDefinitionSchema retry fields", () => {
   it("accepts valid fixed backoff with delay and jitter", () => {
@@ -281,5 +281,64 @@ describe("workflowRunInputSchema deriveFrom", () => {
         { key: "videoId", deriveFrom: { input: "", extract: "youtubeVideoId" } },
       ],
     })).toThrow();
+  });
+});
+
+describe("workflowStepContractSchema machineChecks", () => {
+  const validFileExists = { kind: "file_exists", path: "out/report.html" };
+  const validFileGlob = { kind: "file_glob", dir: "out/assets", glob: "*.png", minCount: 2 };
+  const validMinSize = { kind: "min_size_bytes", path: "out/report.html", minBytes: 0 };
+  const validSha = { kind: "content_sha256", path: "out/report.html", sha256: "a".repeat(64) };
+
+  it("accepts a contract with ONLY machineChecks (non-empty via machineChecks)", () => {
+    const result = workflowStepContractSchema.safeParse({ machineChecks: [validFileExists] });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts all four check kinds and applies minCount default", () => {
+    const result = workflowStepContractSchema.parse({
+      machineChecks: [validFileExists, validFileGlob, validMinSize, validSha],
+    });
+    expect(result.machineChecks).toHaveLength(4);
+    expect(result.machineChecks![1]).toMatchObject({ kind: "file_glob", minCount: 2 });
+    const defaulted = workflowStepContractSchema.parse({
+      machineChecks: [{ kind: "file_glob", dir: "d", glob: "*.html" }],
+    });
+    expect(defaulted.machineChecks![0]).toMatchObject({ minCount: 1 });
+  });
+
+  it("still rejects a contract with no sections and no machineChecks", () => {
+    expect(workflowStepContractSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("rejects more than 20 checks", () => {
+    const machineChecks = Array.from({ length: 21 }, () => validFileExists);
+    expect(workflowStepContractSchema.safeParse({ machineChecks }).success).toBe(false);
+  });
+
+  it("rejects malformed check entries", () => {
+    expect(workflowStepContractSchema.safeParse({ machineChecks: [{ kind: "file_exists" }] }).success).toBe(false);
+    expect(workflowStepContractSchema.safeParse({ machineChecks: [{ kind: "file_exists", path: "" }] }).success).toBe(false);
+    expect(workflowStepContractSchema.safeParse({
+      machineChecks: [{ kind: "file_glob", dir: "d", glob: "x", minCount: 0 }],
+    }).success).toBe(false);
+    expect(workflowStepContractSchema.safeParse({
+      machineChecks: [{ kind: "min_size_bytes", path: "p", minBytes: -1 }],
+    }).success).toBe(false);
+    expect(workflowStepContractSchema.safeParse({
+      machineChecks: [{ kind: "content_sha256", path: "p", sha256: "nothex" }],
+    }).success).toBe(false);
+    expect(workflowStepContractSchema.safeParse({
+      machineChecks: [{ kind: "unknown_kind", path: "p" }],
+    }).success).toBe(false);
+    expect(workflowStepContractSchema.safeParse({ machineChecks: ["not-an-object"] }).success).toBe(false);
+  });
+
+  it("accepts machineChecks via workflowStepDefinitionSchema contract", () => {
+    const result = workflowStepDefinitionSchema.safeParse({
+      id: "step-mc",
+      contract: { machineChecks: [validSha] },
+    });
+    expect(result.success).toBe(true);
   });
 });

@@ -11,15 +11,56 @@ const workflowStepContractSectionSchema = z.array(
   z.string().trim().min(1).max(1000),
 ).max(20);
 
+/**
+ * [purpose] 기계 검증 술어 — 구조 게이트(structural gate) 스텝이 코드로 실행하는
+ * 결정론적 사후조건 선언. kind 로 판별되는 유니언 스키마.
+ * [care] 규칙 8 — 실행 권위는 이 레코드를 materializer 가 toolArgs 로 복사한
+ * 구조화 값에만 있다. 런타임은 contract.machineChecks 를 실행 권위로 읽지 않고,
+ * 자연어 사후조건 텍스트를 파싱하지도 않는다.
+ */
+const machineCheckPathSchema = z.string().trim().min(1).max(500);
+const sha256HexSchema = z.string().trim().regex(/^[0-9a-fA-F]{64}$/u);
+
+export const machineStepCheckSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("file_exists"),
+    path: machineCheckPathSchema,
+  }),
+  z.object({
+    kind: z.literal("file_glob"),
+    dir: machineCheckPathSchema,
+    glob: z.string().trim().min(1).max(200),
+    minCount: z.number().int().min(1).default(1),
+  }),
+  z.object({
+    kind: z.literal("min_size_bytes"),
+    path: machineCheckPathSchema,
+    minBytes: z.number().int().min(0),
+  }),
+  z.object({
+    kind: z.literal("content_sha256"),
+    path: machineCheckPathSchema,
+    sha256: sha256HexSchema,
+  }),
+]);
+
+export type WorkflowStepMachineCheck = z.infer<typeof machineStepCheckSchema>;
+
 export const workflowStepContractSchema = z
   .object({
     preconditions: workflowStepContractSectionSchema.optional(),
     postconditions: workflowStepContractSectionSchema.optional(),
     undefinedBehaviors: workflowStepContractSectionSchema.optional(),
+    machineChecks: z.array(machineStepCheckSchema).max(20).optional(),
   })
   .strict()
   .superRefine((contract, ctx) => {
-    const hasContent = [contract.preconditions, contract.postconditions, contract.undefinedBehaviors]
+    const hasContent = [
+      contract.preconditions,
+      contract.postconditions,
+      contract.undefinedBehaviors,
+      contract.machineChecks,
+    ]
       .some((section) => (section?.length ?? 0) > 0);
     if (!hasContent) {
       ctx.addIssue({

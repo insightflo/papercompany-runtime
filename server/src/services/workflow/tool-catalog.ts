@@ -4,6 +4,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { toolService } from "../tools/registry.js";
 import { notFound } from "../../errors.js";
 import type { WorkflowStep } from "./dag-engine.js";
+import { STEP_MACHINE_CHECKS_TOOL } from "./step-machine-checks.js";
 import { listDefaultWorkflowPluginAgentTools } from "./plugin-agent-tools.js";
 
 const TOOL_REGISTRY_PLUGIN_KEY = "insightflo.tool-registry";
@@ -573,7 +574,7 @@ export async function assertWorkflowToolReferencesSelectable(
       ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
       : [];
     return names
-      .filter((toolName) => toolName !== "delegate_to_company")
+      .filter((toolName) => toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL)
       .map((toolName) => ({
         toolName,
         step: step as WorkflowStepWithToolSelection,

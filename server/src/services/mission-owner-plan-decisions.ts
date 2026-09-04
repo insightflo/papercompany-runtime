@@ -11,6 +11,8 @@ import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-def
 import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { createWorkflowRun } from "./workflow/workflow-store.js";
+import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
+import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-execution-placement.js";
 import {
@@ -2070,6 +2072,64 @@ function applyCanonicalDependencies(
   return steps.map((step, index) => ({ ...step, dependencies: dependencyStepIds[index]! }));
 }
 
+/**
+ * [machine-check gates] contract.machineChecks 를 선언한 생산자 스텝 뒤에 결정론적
+ * 검증 gate 스텝을 물리화한다. gate 는 이슈 없는 structural tool 스텝(예약 toolName,
+ * agentId 없음)으로, dag-engine 이 registry 없이 in-process 실행한다.
+ *
+ * 의존 리와이어링은 항상 가산(additive): P 의 모든 직계 의존자는 P 를 유지하고 gate M 를
+ * 추가로 기다린다. 이유 — (1) structural topology 규칙상 gate 에 의존하는 QA-like 스텝은
+ * 생산자도 함께 의존해야 하고, (2) 소비자 toolArgs 의 {$steps.P.…} 참조는 P 가 조상으로
+ * 남아야 resolveWorkflowToolStepArgs 가 통과한다. M 실패 시 완료되지 않으므로 하류는
+ * DAG 의존으로 자연 차단된다.
+ */
+function insertStepMachineCheckGates(steps: WorkflowStep[]): WorkflowStep[] {
+  const checksByProducerId = new Map<string, NonNullable<ReturnType<typeof normalizeWorkflowStepMachineChecks>>>();
+  for (const step of steps) {
+    const checks = normalizeWorkflowStepMachineChecks(
+      (step.contract as { machineChecks?: unknown } | undefined)?.machineChecks,
+    );
+    if (checks) checksByProducerId.set(step.id, checks);
+  }
+  if (checksByProducerId.size === 0) return steps;
+
+  const out: WorkflowStep[] = [];
+  for (const step of steps) {
+    out.push(step);
+    const checks = checksByProducerId.get(step.id);
+    if (!checks) continue;
+    out.push({
+      id: `${step.id}-mc`,
+      name: `[GATE] ${step.name} machine checks`,
+      agentId: "",
+      dependencies: [step.id],
+      graphWorkProductRequired: false,
+      type: "tool",
+      qaType: "structural",
+      toolNames: [STEP_MACHINE_CHECKS_TOOL],
+      toolArgs: {
+        producerStepId: step.id,
+        machineChecks: checks,
+      },
+      description: [
+        `Deterministic machine-check gate for producer "${step.name}".`,
+        "Runs the producer's declared machineChecks (file existence / glob / size / sha256) in-process with no LLM.",
+        "A failed predicate fails this gate step (existing retry machinery applies); downstream steps wait on it via DAG dependencies.",
+      ].join("\n"),
+    });
+  }
+
+  const gateIdByProducerId = new Map(Array.from(checksByProducerId.keys(), (id) => [id, `${id}-mc`]));
+  const gateIds = new Set(gateIdByProducerId.values());
+  return out.map((step) => {
+    if (gateIds.has(step.id)) return step;
+    const addedGates = step.dependencies
+      .filter((dependencyId) => gateIdByProducerId.has(dependencyId))
+      .map((dependencyId) => gateIdByProducerId.get(dependencyId)!);
+    return addedGates.length > 0 ? { ...step, dependencies: [...step.dependencies, ...addedGates] } : step;
+  });
+}
+
 export function buildPaqoWorkflowSteps(
   draft: PlanRevisionDraft,
   mission: typeof missions.$inferSelect,
@@ -2114,6 +2174,15 @@ export function buildPaqoWorkflowSteps(
     const skillRefs = readSelectedUnitSkillRefs(unit);
     const outcomeContractLines = renderMissionPlanUnitContractLines(unit);
     const stepContract = buildMissionPlanUnitStepContract(unit);
+    // [machine-check gates] 유닛의 구조화 machineChecks 를 계약에 첨부한다.
+    // 실행 권위는 materializer 가 gate 스텝 toolArgs 로 복사한 값에만 있다(규칙 8).
+    const unitMachineChecks = normalizeWorkflowStepMachineChecks(unit.machineChecks);
+    const stepContractWithChecks = (stepContract || unitMachineChecks)
+      ? {
+        ...(stepContract ?? {}),
+        ...(unitMachineChecks ? { machineChecks: unitMachineChecks } : {}),
+      }
+      : undefined;
     // [Hybrid QA] structural tool-only unit: materialize with no agentId so no
     //   LLM heartbeat runs. The gate executes as an issue-less tool step and
     //   must complete before semantic QA. assigneeAgentId stays as plan-time
@@ -2129,7 +2198,7 @@ export function buildPaqoWorkflowSteps(
       ...(toolNames.length > 0 ? { toolNames } : {}),
       ...(toolArgs !== undefined ? { toolArgs } : {}),
       ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
-      ...(stepContract ? { contract: stepContract } : {}),
+      ...(stepContractWithChecks ? { contract: stepContractWithChecks } : {}),
       ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : {}),
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
@@ -2147,19 +2216,21 @@ export function buildPaqoWorkflowSteps(
   });
   const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps);
   if (plannedSteps.length === 0) return [];
+  // [machine-check gates] machineChecks 가 있는 생산자 뒤에 structural gate 물리화.
+  const gatedSteps = insertStepMachineCheckGates(plannedSteps);
   // [Hybrid QA] Structural materialization passes (extracted):
   //   - toolArgs reference rewriting
   //   - scoped prompt injection for all QA downstream of structural gates
   const unitIdToStepId = buildUnitStepIdMap(executableUnits, plannedSteps);
-  rewriteStepToolArgs(plannedSteps, unitIdToStepId);
+  rewriteStepToolArgs(gatedSteps, unitIdToStepId);
   // [실행 가능성 보증] 인자 없는 structural tool 스텝은 실행 시 반드시 실패한다(2026-08-27 gazua-evening 2).
   // 표준 검증 인자 자동 채움 → 불가능하면 fail-closed 거부.
-  fillStructuralValidatorToolArgs(plannedSteps);
-  validateStructuralTopology(plannedSteps as Parameters<typeof validateStructuralTopology>[0]);
+  fillStructuralValidatorToolArgs(gatedSteps);
+  validateStructuralTopology(gatedSteps as Parameters<typeof validateStructuralTopology>[0]);
 
   // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.
   const isPublishPlan = /publish|deploy|manual-onboarding|게시|온보딩|release|배포/iu.test(
-    `${draft.missionGoal ?? ""} ${plannedSteps.map((s) => `${s.name} ${s.description ?? ""}`).join(" ")}`,
+    `${draft.missionGoal ?? ""} ${gatedSteps.map((s) => `${s.name} ${s.description ?? ""}`).join(" ")}`,
   );
   const unitOutcomeContractLines = renderMissionPlanQaUnitContractLines(
     executableUnits.map((unit, index) => ({
@@ -2172,7 +2243,7 @@ export function buildPaqoWorkflowSteps(
     id: `qa-${shortStableHash({ missionId: mission.id, actions: plannedSteps.map((step) => step.id), goal: draft.missionGoal })}`,
     name: "[QA] Verify mission result",
     agentId: mission.ownerAgentId,
-    dependencies: plannedSteps.map((step) => step.id),
+    dependencies: gatedSteps.map((step) => step.id),
     graphWorkProductRequired: false,
     description: [
       "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
@@ -2194,7 +2265,7 @@ export function buildPaqoWorkflowSteps(
   //   resolveProducerStepIdFromDag 에 위임(synthesizeQaReworkBackEdge 내부). forward dependencies[] 는 불변.
   //   합성 대상은 이 미션 최종 QA(qaStep) 단 하나 — 중간 단계 QA 회복은 runtime supervision 담당.
   return synthesizeQaReworkBackEdge(
-    [...plannedSteps, qaStep],
+    [...gatedSteps, qaStep],
     qaStep.id,
     undefined,
     { allowCapAcceptance: true },
