@@ -19,6 +19,7 @@ import {
 } from "./missions/mission-plan-dependency-graph.js";
 import { buildClarificationRequest, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent } from "./missions/mission-plan-qa.js";
 import {
+  buildMissionPlanUnitStepContract,
   renderMissionPlanQaUnitContractLines,
   renderMissionPlanUnitContractLines,
 } from "./missions/mission-plan-unit-contract.js";
@@ -2112,6 +2113,7 @@ export function buildPaqoWorkflowSteps(
     const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
     const skillRefs = readSelectedUnitSkillRefs(unit);
     const outcomeContractLines = renderMissionPlanUnitContractLines(unit);
+    const stepContract = buildMissionPlanUnitStepContract(unit);
     // [Hybrid QA] structural tool-only unit: materialize with no agentId so no
     //   LLM heartbeat runs. The gate executes as an issue-less tool step and
     //   must complete before semantic QA. assigneeAgentId stays as plan-time
@@ -2127,6 +2129,7 @@ export function buildPaqoWorkflowSteps(
       ...(toolNames.length > 0 ? { toolNames } : {}),
       ...(toolArgs !== undefined ? { toolArgs } : {}),
       ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
+      ...(stepContract ? { contract: stepContract } : {}),
       ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : {}),
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,

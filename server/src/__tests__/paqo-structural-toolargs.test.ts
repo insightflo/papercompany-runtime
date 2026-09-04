@@ -102,4 +102,45 @@ describe("buildPaqoWorkflowSteps structural toolArgs materialization", () => {
       glob: "*.html",
     });
   });
+
+  it("attaches derived contract postconditions for units with plan-field contract data and omits the contract key otherwise", () => {
+    const draft = {
+      missionGoal: "이브닝 리포트 재생성",
+      successCriteria: [],
+      refs: {
+        selectedExecutionUnits: [
+          {
+            id: "unit-with-contract",
+            title: "[ACTION] 리포트 생성",
+            assigneeAgentId: "44444444-4444-4444-8444-444444444444",
+            expectedOutput: "evening report html",
+            acceptanceCriteria: "summary table rendered",
+            sourceRef: { id: "unit-with-contract", type: "mission_plan_unit" },
+          },
+          {
+            id: "unit-without-contract",
+            title: "[ACTION] 정리 작업",
+            assigneeAgentId: "44444444-4444-4444-8444-444444444444",
+            sourceRef: { id: "unit-without-contract", type: "mission_plan_unit" },
+          },
+        ],
+      },
+      steps: [
+        { unitId: "unit-with-contract", dependencies: [] },
+        { unitId: "unit-without-contract", dependencies: [] },
+      ],
+    } as never;
+
+    const steps = buildPaqoWorkflowSteps(draft, mission, {});
+
+    const withContract = steps.find((step) => step.name.includes("리포트 생성"));
+    expect(withContract).toBeTruthy();
+    expect(withContract!.contract?.postconditions).toEqual([
+      "Expected output: evening report html",
+      "Acceptance criteria: summary table rendered",
+    ]);
+    const withoutContract = steps.find((step) => step.name.includes("정리 작업"));
+    expect(withoutContract).toBeTruthy();
+    expect("contract" in withoutContract!).toBe(false);
+  });
 });
