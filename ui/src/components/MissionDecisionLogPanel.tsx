@@ -128,6 +128,13 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
           ))}
         </ul>
       )}
+
+      {log?.stateMarkdown ? (
+        <details className="rounded border border-border/70 p-3">
+          <summary className="text-sm text-muted-foreground">Mission state (markdown)</summary>
+          <pre className="mt-2 overflow-x-auto text-sm text-muted-foreground">{log.stateMarkdown}</pre>
+        </details>
+      ) : null}
     </section>
   );
 }
