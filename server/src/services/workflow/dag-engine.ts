@@ -79,6 +79,7 @@ import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkP
 import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
 import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue, stripShellEscapeResidue } from "./tool-step-args.js";
 import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
+import { STEP_MACHINE_CHECKS_TOOL, evaluateStepMachineChecks, renderMachineCheckFailure } from "./step-machine-checks.js";
 import { applyMachineContractTruth } from "./tool-result-truth.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
@@ -225,6 +226,11 @@ type PersistedWorkflowStep = WorkflowStep & {
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
 
+/** [machine-check gates] Any residual renderable workflow token ({$steps.<id>.<field>},
+ * {$runMetadata.<key>}, {$runDate} …) inside a machineCheck path means the token was
+ * not resolved at queue time — the check must fail, never execute on a literal token. */
+const UNRESOLVED_WORKFLOW_TOKEN_RE = /\{\$(?:steps\.[^}]+|runMetadata\.[A-Za-z0-9_]+|runDate|date|workflowRunId|runMonth)\}/u;
+
 export type WorkflowToolStepExecutionRequest = {
   companyId: string;
   workflowRunId: string;
@@ -281,7 +287,7 @@ export function getWorkflowToolReferenceNames(steps: WorkflowStep[]): string[] {
       ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
       : []),
   ))
-    .filter((toolName) => toolName !== "delegate_to_company")
+    .filter((toolName) => toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL)
     .sort((a, b) => a.localeCompare(b));
 }
 
@@ -2804,7 +2810,7 @@ async function startIssueLessToolStepRun(input: {
     }
   }
 
-  if (toolName !== "delegate_to_company" && !workflowToolStepExecutor) {
+  if (toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL && !workflowToolStepExecutor) {
     await failToolStepRunWithDispatchError({
       db,
       step,
@@ -3118,6 +3124,52 @@ export async function processQueuedWorkflowToolStepRuns(
         } else {
           result.executedCount += 1;
         }
+        continue;
+      }
+
+      // [machine-check gates] Reserved in-process verifier: no registry row, no
+      // plugin dispatch, no tool executor. Deterministic code-level predicates
+      // run here; the verdict flows through the standard structural completion
+      // path (ledger row on pass, failed step + existing retry on failure).
+      if (toolName === STEP_MACHINE_CHECKS_TOOL) {
+        const gateArgs = args && typeof args === "object" && !Array.isArray(args)
+          ? args as Record<string, unknown>
+          : {};
+        const machinePaths = await resolveMissionWorkProductPaths(db, {
+          companyId: row.run.companyId,
+          missionId: row.run.missionId,
+          workflowRunId: row.run.id,
+          stepId: step.id,
+        });
+        const evaluation = await evaluateStepMachineChecks({
+          checks: gateArgs.machineChecks,
+          resolvePath: (tokened) => UNRESOLVED_WORKFLOW_TOKEN_RE.test(tokened) ? null : tokened,
+          workspaceCwd: machinePaths?.workProductRoot ?? process.cwd(),
+        });
+        const failure = evaluation.ok ? null : renderMachineCheckFailure(evaluation.results);
+        await completeWorkflowToolStepFromResult(db, {
+          companyId: row.run.companyId,
+          stepRunId: claimedStepRun.id,
+          requestId,
+          workflowRunId: row.run.id,
+          stepId: step.id,
+          toolName,
+          success: evaluation.ok,
+          stdout: JSON.stringify(evaluation),
+          ...(evaluation.ok ? {
+            data: {
+              ok: true,
+              verdict: "pass",
+              results: evaluation.results,
+              producerStepId: typeof gateArgs.producerStepId === "string" ? gateArgs.producerStepId : null,
+            },
+          } : {}),
+          stderr: failure ?? "",
+          exitCode: evaluation.ok ? 0 : 1,
+          ...(failure ? { error: failure } : {}),
+        });
+        if (evaluation.ok) result.executedCount += 1;
+        else result.failedCount += 1;
         continue;
       }
 

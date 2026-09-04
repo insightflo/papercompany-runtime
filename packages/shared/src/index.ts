@@ -627,6 +627,8 @@ export {
   workflowExecutionModeSchema,
   workflowStepDefinitionSchema,
   workflowStepContractSchema,
+  machineStepCheckSchema,
+  type WorkflowStepMachineCheck,
   type WorkflowStepContract,
   workflowDefinitionSchema,
   workflowRunSchema,

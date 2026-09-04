@@ -13,6 +13,7 @@ import { and, eq } from "drizzle-orm";
 import { listWorkflowToolCatalog } from "../tool-catalog.js";
 import type { StructuralGateStep } from "./structural-gate.js";
 import { isStructuralGateStep } from "./structural-gate.js";
+import { STEP_MACHINE_CHECKS_TOOL } from "../step-machine-checks.js";
 
 export { isStructuralGateStep };
 
@@ -40,6 +41,14 @@ export async function checkStructuralGateReadiness(input: {
     return { ready: false, errors: ["Structural gate must have exactly one toolName."] };
   }
   const toolName = toolNames[0]!;
+  // [machine-check gates] The reserved in-process verifier carries no tool
+  //   authority: it runs deterministic code-level predicates inside the server
+  //   with no registry row, no capability declaration, and no agent grant.
+  //   Shape checks (single toolName, empty agentId, topology) remain fully
+  //   active in validateStructuralGateReadinessForSteps.
+  if (toolName === STEP_MACHINE_CHECKS_TOOL) {
+    return { ready: true, errors: [] };
+  }
   const assigneeAgentId = (input.step as { assigneeAgentId?: string }).assigneeAgentId;
   if (!assigneeAgentId?.trim()) {
     return { ready: false, errors: ["Structural gate must declare assigneeAgentId as grant subject."] };
