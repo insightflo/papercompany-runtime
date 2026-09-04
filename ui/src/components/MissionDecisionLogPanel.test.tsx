@@ -7,6 +7,8 @@ import { MissionDecisionLogPanel } from "./MissionDecisionLogPanel";
 let scenario: "populated" | "empty" | "loading" | "error" = "populated";
 
 vi.mock("@tanstack/react-query", () => ({
+  useMutation: () => ({ isPending: false, mutate: vi.fn() }),
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   useQuery: () => {
     if (scenario === "loading") {
       return { data: undefined, isLoading: true, error: null };
@@ -100,6 +102,17 @@ describe("MissionDecisionLogPanel", () => {
     // stateMarkdown 접기 섹션: 제목 + 마크다운 원문 스니펫.
     expect(html).toContain("Mission state (markdown)");
     expect(html).toContain("# Mission State");
+    // board 작성 폼: 섹션 제목 + 4개 필드 라벨 + 제출 버튼.
+    expect(html).toContain("Record a decision");
+    expect(html).toContain("Decision id");
+    expect(html).toContain("Summary");
+    expect(html).toContain("Status");
+    expect(html).toContain("Supersedes");
+    expect(html).toContain("Record decision");
+    // Retire 버튼은 confirmed(D-2), under_review(D-3)에만 렌더링된다. retired(D-1) 제외.
+    expect(html.split("Retire").length - 1).toBe(2);
+    // 헤더 배지: 읽기 전용 → board 작성 가능 기록.
+    expect(html).toContain("board-authorable record");
   });
 
   it("renders an empty state with the producer hint when no decisions exist", () => {
@@ -108,6 +121,10 @@ describe("MissionDecisionLogPanel", () => {
 
     expect(html).toContain("No decisions recorded yet");
     expect(html).toContain("decision-reports");
+    // 빈 상태에서도 board 작성 폼과 배지가 보인다.
+    expect(html).toContain("Record a decision");
+    expect(html).toContain("Record decision");
+    expect(html).toContain("board-authorable record");
     // stateMarkdown 이 빈 문자열이면 접기 섹션 자체가 렌더링되지 않는다.
     expect(html).not.toContain("Mission state (markdown)");
   });

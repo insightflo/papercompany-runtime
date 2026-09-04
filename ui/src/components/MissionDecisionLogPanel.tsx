@@ -1,6 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Scale } from "lucide-react";
-import { missionsApi, type MissionDecisionRecord } from "../api/missions";
+import {
+  missionsApi,
+  type MissionDecisionRecord,
+  type MissionDecisionReportPayload,
+  type MissionDecisionStatus,
+} from "../api/missions";
 import { queryKeys } from "../lib/queryKeys";
 
 interface MissionDecisionLogPanelProps {
@@ -18,9 +24,10 @@ function formatDecisionDate(value: string | null | undefined) {
 }
 
 /**
- * [규칙 8] 결정 로그는 맥락 전달용 표시 상태다. 이 패널은 읽기 전용이며
- * 어떤 실행 통제 판단의 근거 UI도 아니다.
+ * [규칙 8] 결정 로그는 맥락 전달용 표시 상태다. board(운영자)는 이 패널에서 결정
+ * 기록을 작성/은퇴할 수 있지만, 로그 자체는 어떤 실행 통제 판단의 근거 UI도 아니다.
  */
+const fieldClass = "mt-1 w-full rounded border border-border bg-background px-2 py-1 text-sm";
 function statusClass(status: MissionDecisionRecord["status"]) {
   switch (status) {
     case "confirmed":
@@ -39,10 +46,34 @@ function provenanceLabel(record: MissionDecisionRecord) {
 }
 
 export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelProps) {
+  const queryClient = useQueryClient();
   const { data: log, isLoading, error } = useQuery({
     queryKey: queryKeys.missions.decisionLog(missionId),
     queryFn: () => missionsApi.getDecisionLog(missionId),
     enabled: !!missionId,
+  });
+
+  const [decisionId, setDecisionId] = useState("");
+  const [summary, setSummary] = useState("");
+  const [status, setStatus] = useState<MissionDecisionStatus>("confirmed");
+  const [supersedes, setSupersedes] = useState("");
+
+  const reportMutation = useMutation({
+    mutationFn: (payload: MissionDecisionReportPayload) => missionsApi.reportDecisions(missionId, payload),
+    onSuccess: async () => {
+      setDecisionId("");
+      setSummary("");
+      setStatus("confirmed");
+      setSupersedes("");
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missions.decisionLog(missionId) });
+    },
+  });
+
+  const retireMutation = useMutation({
+    mutationFn: (payload: MissionDecisionReportPayload) => missionsApi.reportDecisions(missionId, payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.missions.decisionLog(missionId) });
+    },
   });
 
   if (isLoading) {
@@ -87,7 +118,9 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
             </p>
           </div>
         </div>
-        <span className="rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">read-only</span>
+        <span className="rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">
+          board-authorable record
+        </span>
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -100,7 +133,7 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
 
       {decisions.length === 0 ? (
         <p className="rounded border border-border/70 p-3 text-sm text-muted-foreground">
-          No decisions recorded yet. Agents report decisions via POST /api/missions/{missionId}/decision-reports.
+          No decisions recorded yet. Agents and the board report decisions via POST /api/missions/{missionId}/decision-reports.
         </p>
       ) : (
         <ul className="space-y-2">
@@ -120,14 +153,119 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                 </div>
                 <span className={`text-xs font-medium ${statusClass(record.status)}`}>{record.status}</span>
               </div>
-              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span>{formatDecisionDate(record.updatedAt)}</span>
                 <span>{provenanceLabel(record)}</span>
+                {record.status === "confirmed" || record.status === "under_review" ? (
+                  <button
+                    type="button"
+                    disabled={retireMutation.isPending}
+                    onClick={() =>
+                      retireMutation.mutate({ updates: [{ id: record.id, status: "retired" }] })
+                    }
+                    className="rounded border border-border px-2 py-0.5 hover:bg-muted disabled:opacity-50"
+                  >
+                    Retire
+                  </button>
+                ) : null}
               </div>
             </li>
           ))}
         </ul>
       )}
+
+      {retireMutation.error ? (
+        <p className="text-sm text-destructive">
+          {retireMutation.error instanceof Error
+            ? retireMutation.error.message
+            : "Failed to retire the decision."}
+        </p>
+      ) : null}
+
+      <section className="rounded border border-border/70 p-3" aria-label="Record a decision">
+        <h4 className="text-sm font-medium">Record a decision</h4>
+        <form
+          className="mt-2 space-y-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!decisionId.trim() || !summary.trim()) return;
+            reportMutation.mutate({
+              updates: [
+                {
+                  id: decisionId.trim(),
+                  summary: summary.trim(),
+                  status,
+                  ...(supersedes.trim() ? { supersedes: supersedes.trim() } : {}),
+                },
+              ],
+            });
+          }}
+        >
+          <div>
+            <label htmlFor="decision-id-input" className="text-xs font-medium">Decision id</label>
+            <input
+              id="decision-id-input"
+              value={decisionId}
+              onChange={(event) => setDecisionId(event.target.value)}
+              placeholder="e.g. D-4"
+              required
+              maxLength={100}
+              className={fieldClass}
+            />
+          </div>
+          <div>
+            <label htmlFor="decision-summary-input" className="text-xs font-medium">Summary</label>
+            <textarea
+              id="decision-summary-input"
+              value={summary}
+              onChange={(event) => setSummary(event.target.value)}
+              placeholder="What was decided and why"
+              required
+              maxLength={2000}
+              rows={3}
+              className={fieldClass}
+            />
+          </div>
+          <div>
+            <label htmlFor="decision-status-input" className="text-xs font-medium">Status</label>
+            <select
+              id="decision-status-input"
+              value={status}
+              onChange={(event) => setStatus(event.target.value as MissionDecisionStatus)}
+              className={fieldClass}
+            >
+              <option value="under_review">under_review</option>
+              <option value="confirmed">confirmed</option>
+              <option value="retired">retired</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="decision-supersedes-input" className="text-xs font-medium">Supersedes</label>
+            <input
+              id="decision-supersedes-input"
+              value={supersedes}
+              onChange={(event) => setSupersedes(event.target.value)}
+              placeholder="Decision id this replaces (optional)"
+              maxLength={100}
+              className={fieldClass}
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={reportMutation.isPending}
+            className="rounded bg-primary px-3 py-1 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          >
+            Record decision
+          </button>
+        </form>
+        {reportMutation.error ? (
+          <p className="mt-2 text-sm text-destructive">
+            {reportMutation.error instanceof Error
+              ? reportMutation.error.message
+              : "Failed to record the decision."}
+          </p>
+        ) : null}
+      </section>
 
       {log?.stateMarkdown ? (
         <details className="rounded border border-border/70 p-3">
