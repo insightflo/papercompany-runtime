@@ -122,6 +122,9 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("Owner planning protocol:");
     // [스텝 계약] 계획 단계에서 사전/사후조건을 선언하게 해야 QA가 의도 재유추 대신 계약으로 검증한다.
     expect(brief).toContain("precondition and postcondition");
+    // [스텝 계약] 생산 유닛이 단계 계약 필드를 선언해 0/4064 계약 누락 문제를 프로토콜 표면에서 차단한다.
+    expect(brief).toContain("flow into the step's structured contract");
+    expect(brief).toContain("deterministic no-LLM gate steps");
   });
 
   it("surfaces exact workflow tool-call contract and recent controller comments", () => {
