@@ -440,8 +440,8 @@ function filterDecisionEvidenceRefs(value: unknown): NonNullable<MissionRollingD
 }
 
 /**
- * [결정 로그 결정론 병합 — A안 2026-09-05]
- * 핸드오프의 구조화된 decisionUpdates 를 롤링 상태 결정 로그에 반영한다.
+ * [결정 로그 결정론 병합 — A안 2026-09-05, 출처 보호 — 기능 3]
+ * 핸드오프/결정 보고의 구조화된 decisionUpdates 를 롤링 상태 결정 로그에 반영한다.
  * 병합은 런타임이 결정론적으로 수행한다(SKILL.state 분업: 모델은 제안만, 병합은
  * 결정론 런타임). 순서 규칙:
  * - 유효하지 않은 항목(빈 id, summary 없는 신규 생성)은 결정론적으로 버린다.
@@ -452,16 +452,27 @@ function filterDecisionEvidenceRefs(value: unknown): NonNullable<MissionRollingD
  * - supersedes 로 지목된 기존 결정은 retired 로 전환되고 로그에 남는다
  *   (폐기된 결정까지 붙들어야 지금이 보인다).
  * - 상한 MISSION_DECISION_LOG_CAP(50) — 오래된 순서로 잘린다.
+ * [출처 보호(기능 3)] input.source 는 배치 출처(생략 시 "handoff" 하위 호환 기본 —
+ * 호출부는 가능한 한 명시적으로 찍는다).
+ * - 스탬프: 신규/갱신에 성공한 기록은 배치 출처로 source 를 찍는다(board 배치가
+ *   non-board 기록을 갱신하면 source 가 board 로 재스탬프된다).
+ * - 보호: 기존 기록 source 가 "board" 고 배치 출처가 "agent"/"handoff" 면
+ *   status/summary/supersedes/evidenceRefs/handoffId/updatedAt 을 바꾸지 않고,
+ *   배치가 실은 필드만 lastConflictingProposal 단일 슬롯에 최신 제안으로 기록한다.
+ * - 은퇴 보호: non-board 배치의 supersedes 로는 board 기록을 retired 로 만들 수
+ *   없다(board 기록 은퇴는 board 배치 또는 board 출처 대체 체인뿐이다).
+ * - board 배치가 board 기록 갱신에 성공하면 lastConflictingProposal 을 지운다.
  * 규칙 8: 결과는 다음 에이전트 맥락 전달용 상태일 뿐, 실행 통제가 이를 읽지 않는다.
  */
 export function mergeDecisionRecords(
   previous: MissionRollingDecisionRecord[] | undefined,
   updates: MissionIssueHandoffDecisionUpdate[] | undefined,
-  input: { handoffId: string | null; now: Date },
+  input: { handoffId: string | null; now: Date; source?: "board" | "agent" | "handoff" },
 ): MissionRollingDecisionRecord[] {
   if (!updates || updates.length === 0) {
     return previous ?? [];
   }
+  const batchSource = input.source ?? "handoff";
   const merged: MissionRollingDecisionRecord[] = (previous ?? []).map((record) => ({ ...record }));
   const byId = new Map(merged.map((record) => [record.id, record]));
 
@@ -481,12 +492,25 @@ export function mergeDecisionRecords(
         supersedes: update.supersedes ?? null,
         handoffId: input.handoffId,
         updatedAt: input.now.toISOString(),
+        source: batchSource,
       };
       if (Array.isArray(update.evidenceRefs)) {
         record.evidenceRefs = filterDecisionEvidenceRefs(update.evidenceRefs);
       }
       merged.push(record);
       byId.set(id, record);
+    } else if (existing.source === "board" && batchSource !== "board") {
+      // [출처 보호] board 기록은 agent/handoff 배치가 침묵 속에 바꿀 수 없다.
+      // 배치가 실은 필드만 단일 슬롯(lastConflictingProposal, 최신 승리)에 기록하고
+      // 기록 본체(status/summary/supersedes/evidenceRefs/handoffId/updatedAt)는 그대로 둔다.
+      const proposal: NonNullable<MissionRollingDecisionRecord["lastConflictingProposal"]> = {
+        from: batchSource,
+        at: input.now.toISOString(),
+      };
+      if (summary) proposal.summary = summary;
+      if (update.status) proposal.status = update.status;
+      if (update.supersedes !== undefined) proposal.supersedes = update.supersedes;
+      existing.lastConflictingProposal = proposal;
     } else {
       if (summary) existing.summary = summary;
       if (update.status) existing.status = update.status;
@@ -496,10 +520,17 @@ export function mergeDecisionRecords(
       }
       existing.handoffId = input.handoffId;
       existing.updatedAt = input.now.toISOString();
+      existing.source = batchSource;
+      delete existing.lastConflictingProposal;
     }
     if (update.supersedes) {
       const superseded = byId.get(update.supersedes);
-      if (superseded && superseded.id !== id) {
+      // [은퇴 보호] non-board 배치의 supersedes 로는 board 기록을 retired 로 만들지 않는다.
+      if (
+        superseded &&
+        superseded.id !== id &&
+        !(superseded.source === "board" && batchSource !== "board")
+      ) {
         superseded.status = "retired";
         superseded.handoffId = input.handoffId;
         superseded.updatedAt = input.now.toISOString();
@@ -538,7 +569,7 @@ export function mergeRollingState(previous: MissionRollingStateJson, input: {
   const decisions = mergeDecisionRecords(
     previous.decisions,
     input.decisionUpdates,
-    { handoffId: input.handoffId, now: input.createdAt },
+    { handoffId: input.handoffId, now: input.createdAt, source: "handoff" },
   );
   return {
     ...previous,
@@ -588,7 +619,7 @@ export function buildMissionStateMarkdown(input: {
     "## Decision Log",
     ...(state.decisions?.length
       ? state.decisions.map((item) =>
-          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}${formatDecisionEvidenceSuffix(item)}`)
+          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}${formatDecisionEvidenceSuffix(item)}${item.source === "board" ? " · board" : ""}${item.lastConflictingProposal ? " · proposal pending" : ""}`)
       : ["- None captured."]),
     "",
     "## Known Constraints",

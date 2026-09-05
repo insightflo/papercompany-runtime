@@ -433,18 +433,21 @@ export function missionRoutes(db: Db) {
    *
    * [결정 보고 API — A안 후속 생산자] 에이전트/보드가 구조화된 결정 보고를 제출하면
    * 런타임이 결정론적으로 롤링 상태 결정 로그에 병합한다. 입력은 zod 계약 검증(422).
+   * [출처 스탬프 — 기능 3] 배치 출처는 클라이언트 payload 이 아니라 actor 로 판정한다
+   * (getActorInfo: agent 키=agent, 보드=user → board). payload 의 source 는 zod 가 폐기한다.
    */
   router.post("/missions/:id/decision-reports", async (req, res) => {
     const mission = await svc.getById(req.params.id);
     assertCompanyAccess(req, mission.companyId);
+    const actor = getActorInfo(req);
 
     const result = await applyMissionDecisionReports(db, {
       companyId: mission.companyId,
       missionId: mission.id,
       updates: (req.body ?? {}).updates,
+      source: actor.actorType === "agent" ? "agent" : "board",
     });
 
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: mission.companyId,
       actorType: actor.actorType,

@@ -52,6 +52,7 @@ describe("mergeDecisionRecords (deterministic decision-log merge)", () => {
         supersedes: null,
         handoffId: "handoff-1",
         updatedAt: T0.toISOString(),
+        source: "handoff",
       },
     ]);
   });
@@ -190,6 +191,14 @@ describe("mergeDecisionRecords (deterministic decision-log merge)", () => {
     ]);
   });
 
+  it("stamps the batch source onto newly created records", () => {
+    const merged = mergeDecisionRecords(undefined, [
+      { id: "D-1", summary: "Agent claim" },
+    ], { handoffId: null, now: T0, source: "agent" });
+
+    expect(merged[0]).toMatchObject({ id: "D-1", source: "agent", handoffId: null });
+  });
+
   it("caps the log at the last 50 records", () => {
     const previous: MissionRollingDecisionRecord[] = Array.from({ length: 50 }, (_, i) => ({
       id: `D-${i + 1}`,
@@ -206,6 +215,165 @@ describe("mergeDecisionRecords (deterministic decision-log merge)", () => {
     expect(merged).toHaveLength(50);
     expect(merged[0].id).toBe("D-2");
     expect(merged[49]).toMatchObject({ id: "D-51", summary: "Newest" });
+  });
+});
+
+const boardRecord: MissionRollingDecisionRecord = {
+  id: "D-B",
+  summary: "Board decision",
+  status: "confirmed",
+  supersedes: null,
+  handoffId: null,
+  updatedAt: T0.toISOString(),
+  source: "board",
+};
+
+describe("mergeDecisionRecords (board-source protection)", () => {
+  it("agent batch cannot modify a board record and records the conflicting proposal instead", () => {
+    const merged = mergeDecisionRecords([boardRecord], [
+      {
+        id: "D-B",
+        summary: "Agent override",
+        status: "retired",
+        supersedes: null,
+        evidenceRefs: [{ type: "issue", id: "issue-agent" }],
+      },
+    ], { handoffId: "handoff-1", now: T1, source: "agent" });
+
+    // board 필드는 그대로고, 배치가 실은 필드만 단일 슬롯 제안으로 기록된다.
+    expect(merged).toEqual([
+      {
+        id: "D-B",
+        summary: "Board decision",
+        status: "confirmed",
+        supersedes: null,
+        handoffId: null,
+        updatedAt: T0.toISOString(),
+        source: "board",
+        lastConflictingProposal: {
+          from: "agent",
+          summary: "Agent override",
+          status: "retired",
+          supersedes: null,
+          at: T1.toISOString(),
+        },
+      },
+    ]);
+  });
+
+  it("keeps only the latest conflicting proposal in a single slot (latest wins)", () => {
+    const merged = mergeDecisionRecords([boardRecord], [
+      { id: "D-B", summary: "First agent attempt" },
+      { id: "D-B", summary: "Second agent attempt", status: "under_review" },
+    ], { handoffId: "handoff-1", now: T1, source: "agent" });
+
+    expect(merged[0]).toMatchObject({ summary: "Board decision", status: "confirmed" });
+    expect(merged[0].lastConflictingProposal).toEqual({
+      from: "agent",
+      summary: "Second agent attempt",
+      status: "under_review",
+      at: T1.toISOString(),
+    });
+  });
+
+  it("handoff batch cannot modify a board record either and records a handoff proposal", () => {
+    const merged = mergeDecisionRecords([boardRecord], [
+      { id: "D-B", summary: "Handoff rewrite", status: "under_review" },
+    ], { handoffId: "handoff-9", now: T1, source: "handoff" });
+
+    expect(merged[0]).toMatchObject({
+      summary: "Board decision",
+      status: "confirmed",
+      handoffId: null,
+      updatedAt: T0.toISOString(),
+      source: "board",
+    });
+    expect(merged[0].lastConflictingProposal).toEqual({
+      from: "handoff",
+      summary: "Handoff rewrite",
+      status: "under_review",
+      at: T1.toISOString(),
+    });
+  });
+
+  it("a non-board batch cannot retire a board record via another update's supersedes", () => {
+    const merged = mergeDecisionRecords([boardRecord], [
+      { id: "D-2", summary: "New approach", status: "confirmed", supersedes: "D-B" },
+    ], { handoffId: "handoff-1", now: T1, source: "agent" });
+
+    expect(merged.find((d) => d.id === "D-B")).toMatchObject({ status: "confirmed" });
+    expect(merged.find((d) => d.id === "D-B")?.lastConflictingProposal).toBeUndefined();
+    expect(merged.find((d) => d.id === "D-2")).toMatchObject({
+      status: "confirmed",
+      supersedes: "D-B",
+      source: "agent",
+    });
+  });
+
+  it("board batch CAN update a board record and clears any pending proposal", () => {
+    const challenged: MissionRollingDecisionRecord = {
+      ...boardRecord,
+      lastConflictingProposal: { from: "agent", summary: "Agent counter", at: T1.toISOString() },
+    };
+    const merged = mergeDecisionRecords([challenged], [
+      { id: "D-B", summary: "Board revised", status: "under_review" },
+    ], { handoffId: null, now: T1, source: "board" });
+
+    expect(merged).toEqual([
+      {
+        id: "D-B",
+        summary: "Board revised",
+        status: "under_review",
+        supersedes: null,
+        handoffId: null,
+        updatedAt: T1.toISOString(),
+        source: "board",
+      },
+    ]);
+  });
+
+  it("board batch restamps a non-board record's source to board", () => {
+    const agentRecord: MissionRollingDecisionRecord = {
+      id: "D-A",
+      summary: "Agent claim",
+      status: "under_review",
+      supersedes: null,
+      handoffId: "handoff-0",
+      updatedAt: T0.toISOString(),
+      source: "agent",
+    };
+    const merged = mergeDecisionRecords([agentRecord], [
+      { id: "D-A", summary: "Board confirmed", status: "confirmed" },
+    ], { handoffId: null, now: T1, source: "board" });
+
+    expect(merged[0]).toMatchObject({
+      summary: "Board confirmed",
+      status: "confirmed",
+      source: "board",
+      handoffId: null,
+      updatedAt: T1.toISOString(),
+    });
+  });
+
+  it("non-board records keep today's overwrite behavior for agent and handoff batches", () => {
+    const agentRecord: MissionRollingDecisionRecord = {
+      ...boardRecord,
+      id: "D-A",
+      summary: "Agent claim",
+      status: "under_review",
+      handoffId: "handoff-0",
+      source: "agent",
+    };
+    const merged = mergeDecisionRecords([agentRecord], [
+      { id: "D-A", status: "confirmed" },
+    ], { handoffId: "handoff-1", now: T1, source: "handoff" });
+
+    expect(merged[0]).toMatchObject({
+      status: "confirmed",
+      summary: "Agent claim",
+      source: "handoff",
+      handoffId: "handoff-1",
+    });
   });
 });
 
@@ -311,6 +479,33 @@ describe("buildMissionStateMarkdown (decision log rendering)", () => {
     expect(markdown).toContain(
       "- [under_review] D-3: Wide evidence (evidence: heartbeat_run aaaaaaaa, issue bbbbbbbb, issue_comment cccccccc +2 more)",
     );
+  });
+
+  it("marks board-authored records and pending proposals in decision log lines", () => {
+    const markdown = buildMissionStateMarkdown({
+      missionId: "mission-1",
+      state: {
+        decisions: [
+          {
+            id: "D-1",
+            summary: "Board choice",
+            status: "confirmed",
+            supersedes: null,
+            handoffId: null,
+            updatedAt: T0.toISOString(),
+            source: "board",
+            lastConflictingProposal: { from: "agent", summary: "Agent counter", at: T1.toISOString() },
+          },
+          { id: "D-2", summary: "Agent claim", status: "under_review", supersedes: null, handoffId: null, updatedAt: T1.toISOString(), source: "agent" },
+          { id: "D-3", summary: "Legacy record", status: "confirmed", supersedes: null, handoffId: "h0", updatedAt: T0.toISOString() },
+        ],
+      },
+    });
+
+    expect(markdown).toContain("- [confirmed] D-1: Board choice · board · proposal pending");
+    // board 출처가 아닌 기록에는 마커가 붙지 않는다(행 끝까지 확인).
+    expect(markdown).toContain("- [under_review] D-2: Agent claim\n");
+    expect(markdown).toContain("- [confirmed] D-3: Legacy record\n");
   });
 
   it("shows none-captured when the state has no decisions", () => {

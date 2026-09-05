@@ -53,6 +53,7 @@ vi.mock("@tanstack/react-query", () => ({
             supersedes: "D-1",
             handoffId: null,
             updatedAt: "2026-09-05T01:00:00.000Z",
+            source: "board",
             evidenceRefs: [
               { type: "heartbeat_run", id: "0cf4a1b2c3d4e5f6a7b8" },
               { type: "issue", id: "70d8f2a1-1234-5678" },
@@ -65,6 +66,11 @@ vi.mock("@tanstack/react-query", () => ({
             supersedes: null,
             handoffId: null,
             updatedAt: "2026-09-05T01:00:00.000Z",
+            lastConflictingProposal: {
+              from: "agent",
+              summary: "Agent wants neon",
+              at: "2026-09-05T02:00:00.000Z",
+            },
           },
         ],
         stateMarkdown: "# Mission State",
@@ -107,6 +113,10 @@ describe("MissionDecisionLogPanel", () => {
     );
     expect(html).toContain("D-3");
     expect(html).toContain("under_review");
+    // board 출처 칩: source 가 "board" 인 기록 상태 옆에 board 칩이 렌더링된다.
+    expect(html).toContain(">board</span>");
+    // 미반영 제안 라인: lastConflictingProposal 이 있으면 출처 행 뒤에 muted 라인이 렌더링된다.
+    expect(html).toContain("proposal pending (agent)");
     // 개요 카드: 총 3, 확정 1, 검토 중 1.
     expect(html).toContain("3");
     // stateMarkdown 접기 섹션: 제목 + 마크다운 원문 스니펫.

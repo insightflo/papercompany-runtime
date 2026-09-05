@@ -59,14 +59,18 @@ export type MissionDecisionLogView = {
 
 /**
  * 결정 보고를 롤링 상태에 반영한다.
- * - 입력은 zod 계약으로 검증(실패=422, DB 미접촉).
+ * - 입력은 zod 계약으로 검증(실패=422, DB 미접촉). 클라이언트가 payload 에 넣은
+ *   source 는 zod 객체 파싱에서 폐기된다 — 출처는 라우트가 actor 로 판정해 별도
+ *   input.source 로만 들어온다.
  * - 병합은 기존 mergeDecisionRecords 재사용(신규 under_review 기본, supersedes→retired 잔류, cap 50).
+ * - input.source 는 배치 출처("board"|"agent"). 생략 시 mergeDecisionRecords 의
+ *   "handoff" 기본(방어적 최소 권한 — 기존 직접 보고 경로 하위 호환).
  * - 직접 보고 기록의 출처 handoffId 는 null(핸드오프가 아니라 API 보고).
  * - 실행 계정(totalRuns/lastRunId/토큰/비용)은 변경하지 않는다.
  */
 export async function applyMissionDecisionReports(
   db: Db,
-  input: { companyId: string; missionId: string; updates: unknown; now?: Date },
+  input: { companyId: string; missionId: string; updates: unknown; now?: Date; source?: "board" | "agent" | "handoff" },
 ): Promise<MissionDecisionReportResult> {
   const parsed = missionDecisionReportSchema.safeParse({ updates: input.updates });
   if (!parsed.success) {
@@ -86,6 +90,7 @@ export async function applyMissionDecisionReports(
   const decisions = mergeDecisionRecords(previousState.decisions, parsed.data.updates, {
     handoffId: null,
     now,
+    source: input.source ?? "handoff",
   });
   const nextState = { ...previousState, decisions };
   const stateMarkdown = buildMissionStateMarkdown({ missionId: input.missionId, state: nextState });
