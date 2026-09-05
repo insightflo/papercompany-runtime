@@ -9,6 +9,7 @@ export const DEFAULT_MISSION_PLAN_TEMPLATES = [
       "Record the search for contradictory, negative, or missing evidence, including when none is found.",
       "The synthesis must distinguish fact, inference, and uncertainty; independent QA must reject missing breadth, depth, or unaddressed skeptical findings.",
       "A research output consumed downstream is an official work product.",
+      "Declare expectedOutput / acceptanceCriteria / evidenceRequired on every producing unit so each materialized step carries a verifiable contract.",
     ].join("\n"),
   },
   {
@@ -19,6 +20,7 @@ export const DEFAULT_MISSION_PLAN_TEMPLATES = [
       "The producer must register the durable artifact as an official work product.",
       "Use a producer → artifact QA → final outcome review chain.",
       "Downstream units consume the producer through {$steps.<producer-unit-id>.workProductPath}.",
+      "Declare expectedOutput / acceptanceCriteria / evidenceRequired on every producing unit so each materialized step carries a verifiable contract.",
     ].join("\n"),
   },
   {

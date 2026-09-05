@@ -476,6 +476,8 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     "Do not include `selfImprovementCandidates` unless every entry follows the full self-improvement candidate object contract.",
     "Before improvising an answer that needs a missing capability, check existing tools/skills first; propose the gap as a `tool` assetType self-improvement candidate with `toolGap.capability` and `toolGap.existingToolsTried`.",
     "Tool/structural-gate execution units must declare concrete `toolArgs` (validators: `dir: {$steps.<producerUnitId>.workProductDir}`, `glob: *.html`); a tool step without args cannot execute and the plan will be rejected.",
+    "Producing execution units must declare `expectedOutput`, `acceptanceCriteria`, and `evidenceRequired` (each a string or string[]); these flow into the step's structured contract postconditions that dispatch guidance and QA scoring verify against.",
+    "Units may additionally declare `machineChecks` (file_exists / file_glob / min_size_bytes / content_sha256 predicates) to materialize deterministic no-LLM gate steps that fail when the evidence does not match.",
     "Accepted marker and JSON block:",
     "### Mission owner plan decision",
     "```json",
