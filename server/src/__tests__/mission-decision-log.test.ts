@@ -122,6 +122,74 @@ describe("mergeDecisionRecords (deterministic decision-log merge)", () => {
     expect(merged[0]).toMatchObject({ id: "D-1", status: "confirmed" });
   });
 
+  it("carries defensively-filtered evidenceRefs onto a newly created decision", () => {
+    const merged = mergeDecisionRecords(undefined, [
+      {
+        id: "D-1",
+        summary: "Use PGlite for dev",
+        evidenceRefs: [
+          { type: "issue", id: "issue-70d8f2a1", note: "  spike results  " },
+          { type: "pr", id: "pr-42", sha256: "ab".repeat(32) },
+        ],
+      },
+    ], { handoffId: "handoff-1", now: T0 });
+
+    expect(merged[0].evidenceRefs).toEqual([
+      { type: "issue", id: "issue-70d8f2a1", note: "spike results" },
+      { type: "pr", id: "pr-42", sha256: "ab".repeat(32) },
+    ]);
+  });
+
+  it("overwrites evidenceRefs when an update carries them and preserves them when absent", () => {
+    const previous: MissionRollingDecisionRecord[] = [
+      {
+        id: "D-1",
+        summary: "Draft approach",
+        status: "under_review",
+        supersedes: null,
+        handoffId: "h0",
+        updatedAt: T0.toISOString(),
+        evidenceRefs: [{ type: "run_log", id: "run-log-old" }],
+      },
+    ];
+
+    const overwritten = mergeDecisionRecords(previous, [
+      { id: "D-1", status: "confirmed", evidenceRefs: [{ type: "issue", id: "issue-new" }] },
+    ], { handoffId: "h1", now: T1 });
+    expect(overwritten[0].evidenceRefs).toEqual([{ type: "issue", id: "issue-new" }]);
+
+    const preserved = mergeDecisionRecords(overwritten, [
+      { id: "D-1", summary: "Clarified wording" },
+    ], { handoffId: "h2", now: T1 });
+    expect(preserved[0].evidenceRefs).toEqual([{ type: "issue", id: "issue-new" }]);
+  });
+
+  it("drops invalid evidence entries deterministically and caps evidenceRefs at 10", () => {
+    const updates = [
+      {
+        id: "D-1",
+        summary: "Filter evidence",
+        evidenceRefs: [
+          "not-an-object",
+          null,
+          { type: "warp_drive", id: "bad-type" },
+          { type: "issue", id: "   " },
+          { type: "issue", id: "x".repeat(201) },
+          { type: "issue", id: "ok-note", note: "n".repeat(301) },
+          { type: "issue", id: "ok-sha", sha256: "zz".repeat(32) },
+          { type: "issue", id: "issue-keep", note: "  trimmed  " },
+          ...Array.from({ length: 12 }, (_, i) => ({ type: "mission" as const, id: `m-${i + 1}` })),
+        ],
+      },
+    ] as unknown as MissionIssueHandoffDecisionUpdate[];
+
+    const merged = mergeDecisionRecords(undefined, updates, { handoffId: "h1", now: T0 });
+    expect(merged[0].evidenceRefs).toEqual([
+      { type: "issue", id: "issue-keep", note: "trimmed" },
+      ...Array.from({ length: 9 }, (_, i) => ({ type: "mission", id: `m-${i + 1}` })),
+    ]);
+  });
+
   it("caps the log at the last 50 records", () => {
     const previous: MissionRollingDecisionRecord[] = Array.from({ length: 50 }, (_, i) => ({
       id: `D-${i + 1}`,
@@ -199,6 +267,50 @@ describe("buildMissionStateMarkdown (decision log rendering)", () => {
     expect(markdown).toContain("- [retired] D-1: Docker postgres");
     expect(markdown).toContain("- [confirmed] D-2: PGlite everywhere (supersedes D-1)");
     expect(markdown).toContain("- [under_review] D-3: Try neon fork");
+  });
+
+  it("appends evidence refs with short ids and a +N more suffix when more than 3 remain", () => {
+    const markdown = buildMissionStateMarkdown({
+      missionId: "mission-1",
+      state: {
+        decisions: [
+          {
+            id: "D-2",
+            summary: "PGlite everywhere",
+            status: "confirmed",
+            supersedes: "D-1",
+            handoffId: "h1",
+            updatedAt: T1.toISOString(),
+            evidenceRefs: [
+              { type: "heartbeat_run", id: "0cf4a1b2c3d4e5f6" },
+              { type: "issue", id: "70d8f2a1-1234" },
+            ],
+          },
+          {
+            id: "D-3",
+            summary: "Wide evidence",
+            status: "under_review",
+            supersedes: null,
+            handoffId: "h1",
+            updatedAt: T1.toISOString(),
+            evidenceRefs: [
+              { type: "heartbeat_run", id: "aaaaaaaa-1" },
+              { type: "issue", id: "bbbbbbbb-2" },
+              { type: "issue_comment", id: "cccccccc-3" },
+              { type: "pr", id: "dddddddd-4" },
+              { type: "mission", id: "eeeeeeee-5" },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(markdown).toContain(
+      "- [confirmed] D-2: PGlite everywhere (supersedes D-1) (evidence: heartbeat_run 0cf4a1b2, issue 70d8f2a1)",
+    );
+    expect(markdown).toContain(
+      "- [under_review] D-3: Wide evidence (evidence: heartbeat_run aaaaaaaa, issue bbbbbbbb, issue_comment cccccccc +2 more)",
+    );
   });
 
   it("shows none-captured when the state has no decisions", () => {

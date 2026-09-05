@@ -53,6 +53,10 @@ vi.mock("@tanstack/react-query", () => ({
             supersedes: "D-1",
             handoffId: null,
             updatedAt: "2026-09-05T01:00:00.000Z",
+            evidenceRefs: [
+              { type: "heartbeat_run", id: "0cf4a1b2c3d4e5f6a7b8" },
+              { type: "issue", id: "70d8f2a1-1234-5678" },
+            ],
           },
           {
             id: "D-3",
@@ -95,6 +99,12 @@ describe("MissionDecisionLogPanel", () => {
     expect(html).toContain("PGlite everywhere");
     expect(html).toContain("confirmed");
     expect(html).toContain("supersedes D-1");
+    // 근거 참조 칩: D-2 의 evidenceRefs 가 출처 행 뒤에 shortId(8) 로 렌더링된다.
+    expect(html).toContain("evidence: heartbeat_run 0cf4a1b2, issue 70d8f2a1");
+    // title 속성은 전체 type:id 원문을 보존한다.
+    expect(html).toContain(
+      'title="heartbeat_run:0cf4a1b2c3d4e5f6a7b8, issue:70d8f2a1-1234-5678"',
+    );
     expect(html).toContain("D-3");
     expect(html).toContain("under_review");
     // 개요 카드: 총 3, 확정 1, 검토 중 1.

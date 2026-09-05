@@ -22,6 +22,20 @@ import { heartbeatRuns } from "./heartbeat_runs.js";
 export type MissionDecisionStatus = "confirmed" | "under_review" | "retired";
 
 /**
+ * [결정 근거 참조 — A안 후속 2026-09-05] 결정 로그 항목에 붙는 구조화된 근거 참조.
+ * 지식패턴 카드의 evidence({type,id,note}) 선례를 그대로 따른다. 규칙 8: 참조는
+ * 다음 에이전트/보드에게 근거를 전달하는 표시용 구조 데이터일 뿐, 실행 통제가
+ * 이를 읽어 판단하지 않는다. 자연어 파싱 없이 입력 시점에 구조화된다.
+ * - sha256: 참조 대상 아티팩트의 내용 해시(선택, 64 hex 소문자).
+ */
+export type MissionDecisionEvidenceRef = {
+  type: "heartbeat_run" | "issue" | "issue_comment" | "run_log" | "work_product" | "pr" | "mission";
+  id: string;
+  note?: string;
+  sha256?: string;
+};
+
+/**
  * [결정 레코드 — A안] 롤링 상태가 유지하는 결정 로그 항목.
  * - supersedes: 이 결정이 대체한 이전 결정 id (대체링크). 대체된 결정은 retired 로
  *   로그에 남는다(폐기된 결정까지 붙들어야 지금이 보인다 — 온톨로지 논문).
@@ -34,6 +48,7 @@ export type MissionRollingDecisionRecord = {
   supersedes?: string | null;
   handoffId?: string | null;
   updatedAt?: string | null;
+  evidenceRefs?: MissionDecisionEvidenceRef[];
 };
 
 export type MissionRollingStateJson = {

@@ -112,6 +112,23 @@ export interface MissionWorkflowRun {
 
 export type MissionDecisionStatus = "confirmed" | "under_review" | "retired";
 
+/** 결정 근거 참조. 서버 MissionDecisionEvidenceRef 와 동일 구조(지식패턴 evidence 선례). */
+export type MissionDecisionEvidenceRefType =
+  | "heartbeat_run"
+  | "issue"
+  | "issue_comment"
+  | "run_log"
+  | "work_product"
+  | "pr"
+  | "mission";
+
+export interface MissionDecisionEvidenceRef {
+  type: MissionDecisionEvidenceRefType;
+  id: string;
+  note?: string;
+  sha256?: string;
+}
+
 export interface MissionDecisionRecord {
   id: string;
   summary: string;
@@ -119,6 +136,7 @@ export interface MissionDecisionRecord {
   supersedes?: string | null;
   handoffId?: string | null;
   updatedAt?: string | null;
+  evidenceRefs?: MissionDecisionEvidenceRef[];
 }
 
 export interface MissionDecisionLogResponse {

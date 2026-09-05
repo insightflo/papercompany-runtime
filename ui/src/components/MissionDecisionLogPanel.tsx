@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Scale } from "lucide-react";
 import {
   missionsApi,
+  type MissionDecisionEvidenceRef,
   type MissionDecisionRecord,
   type MissionDecisionReportPayload,
   type MissionDecisionStatus,
@@ -43,6 +44,16 @@ function statusClass(status: MissionDecisionRecord["status"]) {
 
 function provenanceLabel(record: MissionDecisionRecord) {
   return record.handoffId ? `via handoff ${record.handoffId}` : "via decision report";
+}
+
+/** 근거 참조 표시용: shortId(8) 로 잘라 `type shortId` 를 쉼표로 연결한다(마크다운 렌더와 동일 규칙). */
+function evidenceRefsLabel(refs: MissionDecisionEvidenceRef[]) {
+  return refs.map((ref) => `${ref.type} ${ref.id.slice(0, 8)}`).join(", ");
+}
+
+/** title 속성용 전체 원문: `type:id` 를 쉼표로 연결한다. */
+function evidenceRefsFullTitle(refs: MissionDecisionEvidenceRef[]) {
+  return refs.map((ref) => `${ref.type}:${ref.id}`).join(", ");
 }
 
 export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelProps) {
@@ -156,6 +167,11 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span>{formatDecisionDate(record.updatedAt)}</span>
                 <span>{provenanceLabel(record)}</span>
+                {record.evidenceRefs?.length ? (
+                  <span title={evidenceRefsFullTitle(record.evidenceRefs)}>
+                    evidence: {evidenceRefsLabel(record.evidenceRefs)}
+                  </span>
+                ) : null}
                 {record.status === "confirmed" || record.status === "under_review" ? (
                   <button
                     type="button"
