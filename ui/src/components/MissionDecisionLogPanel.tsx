@@ -163,6 +163,14 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                   </p>
                 </div>
                 <span className={`text-xs font-medium ${statusClass(record.status)}`}>{record.status}</span>
+                {record.demotedByEvidence ? (
+                  <span
+                    className="rounded-full border border-amber-500/40 px-1.5 text-xs font-medium text-amber-600"
+                    title={`Demoted by machine evidence check: ${record.demotedByEvidence.mismatches.map((m) => `${m.type} ${m.id} (${m.current})`).join(", ")}`}
+                  >
+                    evidence stale
+                  </span>
+                ) : null}
                 {record.source === "board" ? <span className="rounded-full border border-border px-1.5 text-xs text-muted-foreground">board</span> : null}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">

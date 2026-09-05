@@ -15,6 +15,7 @@ import {
 } from "@paperclipai/db";
 import { sha256Text } from "../issue-execution-cards/hash.js";
 import { truncateHandoffText } from "./handoff-text-cap.js";
+import { applyMissionDecisionEvidenceStaleness } from "./mission-decision-evidence-staleness.js";
 import type { SessionHandoffDecisionLogPointer } from "../session-handoff-artifact.js";
 
 export const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
@@ -619,7 +620,7 @@ export function buildMissionStateMarkdown(input: {
     "## Decision Log",
     ...(state.decisions?.length
       ? state.decisions.map((item) =>
-          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}${formatDecisionEvidenceSuffix(item)}${item.source === "board" ? " · board" : ""}${item.lastConflictingProposal ? " · proposal pending" : ""}`)
+          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}${formatDecisionEvidenceSuffix(item)}${item.source === "board" ? " · board" : ""}${item.lastConflictingProposal ? " · proposal pending" : ""}${item.demotedByEvidence ? " · evidence stale" : ""}`)
       : ["- None captured."]),
     "",
     "## Known Constraints",
@@ -648,6 +649,12 @@ export async function updateMissionRollingStateFromHandoff(db: Db, input: {
   inputTokens?: number | null;
   outputTokens?: number | null;
   costCents?: number | null;
+  /**
+   * [근거 스테일 스윕 — 기능 2] 제공되면(비어 있지 않은 배열) 병합 후, 마크다운 렌더 전에
+   * confirmed 결정의 근거 파일 해시를 재검증해 입증된 불일치만 under_review 로 강등한다.
+   * 루트가 없으면 스윕은 no-op(fail-open)다.
+   */
+  evidenceVerifyRoots?: string[];
 }) {
   const now = new Date();
   const existing = await db
@@ -663,6 +670,13 @@ export async function updateMissionRollingStateFromHandoff(db: Db, input: {
     summaryText: input.summaryText,
     decisionUpdates: input.decisionUpdates,
     createdAt: now,
+  });
+  // [근거 스테일 스윕] 병합 후, 마크다운 렌더 전. 강등이 있으면 기계 판정 활동 로그도 남긴다.
+  nextState.decisions = await applyMissionDecisionEvidenceStaleness(db, {
+    companyId: input.companyId,
+    missionId: input.missionId,
+    decisions: nextState.decisions,
+    evidenceVerifyRoots: input.evidenceVerifyRoots,
   });
   const stateMarkdown = buildMissionStateMarkdown({ missionId: input.missionId, state: nextState });
 
