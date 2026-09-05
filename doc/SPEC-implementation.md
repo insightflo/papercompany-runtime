@@ -142,7 +142,16 @@ Both node types run without creating an issue, agent wakeup, heartbeat, or tool
 invocation. Their bounded result is stored in `workflow_step_runs.metadata` for
 idempotent resume. Missing, stale, ambiguous, malformed, foreign-run, or oversized
 condition evidence fails closed: the run fails and must never silently select the
-False branch. Topology validation rejects unlabeled IF outputs, condition sources
+False branch. One bounded exception exists for the closeout race: when a work-product
+condition source cannot be resolved (no registered current-attempt artifact, or a
+declared path value is missing/mistyped) and the producing ancestor issue completed
+within the gate work-product grace window (default 10 minutes,
+`WORKFLOW_GATE_WORK_PRODUCT_GRACE_MINUTES`, 0 disables), the IF node returns to a
+pending wait (`metadata.controlNodeGraceWait`) and is re-evaluated on the next
+sync/heartbeat/resume pass or by the native reconciler timer. Once the window passes,
+the node fails honestly; completed verdicts are never retroactively changed and
+tool-measured (`tool_json`) sources never wait. Topology validation rejects unlabeled
+IF outputs, condition sources
 that are not forward ancestors, Complete fan-out, and unsafe parallel convergence.
 
 

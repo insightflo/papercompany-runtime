@@ -18,6 +18,7 @@ export interface NativeWorkflowReconcilerState {
   lastDeadlockedRunsRecovered: number;
   lastStuckRunsRecovered: number;
   lastOrphanStepsCleaned: number;
+  lastGraceWaitingControlNodesReevaluated: number;
   lastError: string | null;
 }
 
@@ -51,6 +52,7 @@ export function createNativeWorkflowReconciler(
   let lastDeadlockedRunsRecovered = 0;
   let lastStuckRunsRecovered = 0;
   let lastOrphanStepsCleaned = 0;
+  let lastGraceWaitingControlNodesReevaluated = 0;
   let lastError: string | null = null;
 
   async function reconcile(now = new Date()): Promise<void> {
@@ -67,12 +69,14 @@ export function createNativeWorkflowReconciler(
       lastDeadlockedRunsRecovered = result.deadlockedRunsRecovered;
       lastStuckRunsRecovered = result.stuckRunsRecovered;
       lastOrphanStepsCleaned = result.orphanStepsCleaned;
+      lastGraceWaitingControlNodesReevaluated = result.graceWaitingControlNodesReevaluated;
       lastError = null;
       if (
         result.runnableStepWakeupsQueued > 0
         || result.deadlockedRunsRecovered > 0
         || result.stuckRunsRecovered > 0
         || result.orphanStepsCleaned > 0
+        || result.graceWaitingControlNodesReevaluated > 0
       ) {
         log.info({ timeoutMinutes, ...result }, "Native workflow reconciler cleaned up workflow state");
       }
@@ -125,6 +129,7 @@ export function createNativeWorkflowReconciler(
         lastDeadlockedRunsRecovered,
         lastStuckRunsRecovered,
         lastOrphanStepsCleaned,
+        lastGraceWaitingControlNodesReevaluated,
         lastError,
       };
     },

@@ -19,6 +19,7 @@ import {
   type WorkflowConditionGroup,
   type WorkflowConditionSource,
 } from "@paperclipai/shared";
+import { WorkProductConditionWaitableError } from "./waitable-condition-error.js";
 
 const ERROR_PREFIX = "Workflow IF condition failed:";
 /**
@@ -112,19 +113,34 @@ function toEpochMillis(value: unknown, source: WorkflowConditionSource): number 
   return ms;
 }
 
+function failTypeMismatch(condition: WorkflowCondition, message: string): never {
+  // Type mismatches on work-product sources can be a closeout race (registered
+  // placeholder / partially written artifact). They stay fail-closed errors but
+  // carry a typed marker so the executor can apply the bounded grace wait.
+  if (condition.source.kind === "work_product_json") {
+    throw new WorkProductConditionWaitableError(
+      `Workflow IF condition failed: ${message}`,
+      {
+      stepId: condition.source.stepId,
+      title: condition.source.title,
+    });
+  }
+  fail(message);
+}
+
 function assertLeftType(condition: WorkflowCondition, left: unknown): void {
   const { dataType, source } = condition;
   switch (dataType) {
     case "string":
-      if (typeof left !== "string") fail(`value at ${describeSource(source)} is not a string`);
+      if (typeof left !== "string") failTypeMismatch(condition, `value at ${describeSource(source)} is not a string`);
       return;
     case "number":
       if (typeof left !== "number" || !Number.isFinite(left)) {
-        fail(`value at ${describeSource(source)} is not a finite number`);
+        failTypeMismatch(condition, `value at ${describeSource(source)} is not a finite number`);
       }
       return;
     case "boolean":
-      if (typeof left !== "boolean") fail(`value at ${describeSource(source)} is not a boolean`);
+      if (typeof left !== "boolean") failTypeMismatch(condition, `value at ${describeSource(source)} is not a boolean`);
       return;
     case "date_time":
       toEpochMillis(left, source); // throws on non-datetime
