@@ -110,6 +110,7 @@ import {
   stripRetryTrackingOnSuccess,
   wakeIssueBackedRetryAndMarkDispatching,
 } from "./retry-launch-dispatch.js";
+import { isControlNodeGraceWaitBlockingDispatch } from "./control-flow/gate-work-product-grace.js";
 import { markRetryDispatching } from "./retry-dispatch-state.js";
 import { retryIssueLessToolWorkflowStepInternal } from "./retry-issue-less-manual.js";
 import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
@@ -2376,6 +2377,8 @@ function findRunnableSteps(
     if (step.triggerOn === "escalation") return false;
     const stepRun = stepRunMap.get(step.id);
     if (!stepRun || stepRun.status !== "pending") return false;
+    if (stepRun.issueId == null && step.type === "if"
+      && isControlNodeGraceWaitBlockingDispatch(stepRun.metadata, new Date())) return false;
     if (isRetryDelayBlockingDispatch(stepRun.metadata, new Date())) return false;
     return classifyStepActivation(step, predsByStepId).runnable;
   });

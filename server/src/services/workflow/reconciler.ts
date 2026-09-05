@@ -11,6 +11,7 @@ import { eq, and, lt, sql } from "drizzle-orm";
 import { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
 import { reconcileRunnableWorkflowStepWakeups } from "./runnable-step-wakeups-reconciler.js";
 import { reconcileDueWorkflowStepRetries, isStepRunAwaitingRetry } from "./retry-reconciler.js";
+import { reconcileGraceWaitingControlNodes } from "./grace-waiting-control-node-reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
 import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
 
@@ -23,6 +24,7 @@ export {
   type NativeWorkflowReconcilerState,
 } from "./native-reconciler.js";
 export { reconcileRunnableWorkflowStepWakeups } from "./runnable-step-wakeups-reconciler.js";
+export { reconcileGraceWaitingControlNodes } from "./grace-waiting-control-node-reconciler.js";
 export { reconcileDueWorkflowStepRetries } from "./retry-reconciler.js";
 
 /**
@@ -260,6 +262,7 @@ export async function reconcileWorkflow(
     deadlockedRunsRecovered: number;
     stuckRunsRecovered: number;
     orphanStepsCleaned: number;
+    graceWaitingControlNodesReevaluated: number;
   }> {
   const timeoutMinutes = options.timeoutMinutes ?? 60;
 
@@ -268,6 +271,7 @@ export async function reconcileWorkflow(
   const deadlockedResults = await reconcileDeadlockedWorkflowRuns(db);
   const stuckResults = await reconcileStuckWorkflowRuns(db, timeoutMinutes);
   const orphanStepsCleaned = await reconcileOrphanStepRuns(db);
+  const graceWaitResults = await reconcileGraceWaitingControlNodes(db);
 
   return {
     retryReconciliationsReleased: retryResults.filter((r) => r.action === "recovered").length,
@@ -275,5 +279,6 @@ export async function reconcileWorkflow(
     deadlockedRunsRecovered: deadlockedResults.filter((r) => r.action === "recovered").length,
     stuckRunsRecovered: stuckResults.filter((r) => r.action === "recovered").length,
     orphanStepsCleaned,
+    graceWaitingControlNodesReevaluated: graceWaitResults.filter((r) => r.action === "recovered").length,
   };
 }
