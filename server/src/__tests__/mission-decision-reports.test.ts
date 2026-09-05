@@ -38,6 +38,50 @@ describe("missionDecisionReportSchema (input contract)", () => {
     expect(() => missionDecisionReportSchema.parse({ updates: [] })).toThrow();
   });
 
+  it("accepts evidenceRefs with valid structured entries", () => {
+    const parsed = missionDecisionReportSchema.parse({
+      updates: [
+        {
+          id: "D-1",
+          summary: "Use PGlite",
+          evidenceRefs: [
+            { type: "heartbeat_run", id: "0cf4a1b2", note: "run 41" },
+            { type: "work_product", id: "wp-1", sha256: "ab".repeat(32) },
+          ],
+        },
+      ],
+    });
+    expect(parsed.updates[0].evidenceRefs).toHaveLength(2);
+  });
+
+  it("rejects invalid evidenceRefs: bad type, empty id, non-hex sha256, and more than 10 refs", () => {
+    expect(() =>
+      missionDecisionReportSchema.parse({
+        updates: [{ id: "D-1", evidenceRefs: [{ type: "warp_drive", id: "x" }] }],
+      }),
+    ).toThrow();
+    expect(() =>
+      missionDecisionReportSchema.parse({
+        updates: [{ id: "D-1", evidenceRefs: [{ type: "issue", id: "   " }] }],
+      }),
+    ).toThrow();
+    expect(() =>
+      missionDecisionReportSchema.parse({
+        updates: [{ id: "D-1", evidenceRefs: [{ type: "issue", id: "x", sha256: "zz".repeat(32) }] }],
+      }),
+    ).toThrow();
+    expect(() =>
+      missionDecisionReportSchema.parse({
+        updates: [
+          {
+            id: "D-1",
+            evidenceRefs: Array.from({ length: 11 }, (_, i) => ({ type: "issue" as const, id: `e-${i}` })),
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
   it("rejects more than 20 updates in one report", () => {
     const updates = Array.from({ length: 21 }, (_, i) => ({ id: `D-${i}` }));
     expect(() => missionDecisionReportSchema.parse({ updates })).toThrow();
@@ -95,6 +139,26 @@ describeEmbeddedPostgres("applyMissionDecisionReports (direct agent/board produc
     });
     return { companyId, missionId, agentId };
   }
+
+  it("persists evidenceRefs from a direct report and returns them via getMissionDecisionLog", async () => {
+    const { companyId, missionId } = await seedMission();
+    const evidenceRefs = [
+      { type: "heartbeat_run" as const, id: "0cf4a1b2c3d4e5f6", note: "run 41" },
+      { type: "issue" as const, id: "70d8f2a1-0000" },
+    ];
+
+    const result = await applyMissionDecisionReports(db, {
+      companyId,
+      missionId,
+      updates: [{ id: "D-1", summary: "PGlite everywhere", status: "confirmed", evidenceRefs }],
+    });
+
+    expect(result.decisions[0].evidenceRefs).toEqual(evidenceRefs);
+    expect(result.stateMarkdown).toContain("(evidence: heartbeat_run 0cf4a1b2, issue 70d8f2a1)");
+
+    const log = await getMissionDecisionLog(db, { missionId });
+    expect(log?.decisions[0].evidenceRefs).toEqual(evidenceRefs);
+  });
 
   it("creates the rolling state decision log from a direct report without handoff provenance", async () => {
     const { companyId, missionId, agentId } = await seedMission();

@@ -14,7 +14,7 @@ import { issues } from "./issues.js";
 import { agents } from "./agents.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { missionSessions } from "./mission_sessions.js";
-import type { MissionDecisionStatus } from "./mission_rolling_state.js";
+import type { MissionDecisionEvidenceRef, MissionDecisionStatus } from "./mission_rolling_state.js";
 
 export type MissionIssueHandoffEvidenceRef = {
   type: string;
@@ -35,6 +35,7 @@ export type MissionIssueHandoffDecisionUpdate = {
   summary?: string;
   status?: MissionDecisionStatus;
   supersedes?: string | null;
+  evidenceRefs?: MissionDecisionEvidenceRef[];
 };
 
 export type MissionIssueHandoffJson = {

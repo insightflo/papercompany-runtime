@@ -391,6 +391,54 @@ export async function persistMissionIssueHandoff(db: Db, input: {
 
 export const MISSION_DECISION_LOG_CAP = 50;
 
+const MISSION_DECISION_EVIDENCE_TYPES = [
+  "heartbeat_run",
+  "issue",
+  "issue_comment",
+  "run_log",
+  "work_product",
+  "pr",
+  "mission",
+] as const;
+const MISSION_DECISION_EVIDENCE_MAX = 10;
+
+/**
+ * 결정 근거 참조 배열을 결정론적으로 방어 필터링한다(지식패턴 evidence 선례와 동일한 자세).
+ * - 유효 항목만 유지: 객체 + 허용 type + 트림된 비어 있지 않은 id(≤200) + 선택 note(트림, ≤300)
+ *   + 선택 sha256(64 hex 소문자).
+ * - 유효하지 않은 항목은 예외 없이 버리고, 상한 10개를 넘으면 잘라낸다.
+ * 규칙 8: 참조는 표시/근거 전달용 구조 데이터일 뿐 실행 통제가 읽지 않는다.
+ */
+function filterDecisionEvidenceRefs(value: unknown): NonNullable<MissionRollingDecisionRecord["evidenceRefs"]> {
+  if (!Array.isArray(value)) return [];
+  const filtered: NonNullable<MissionRollingDecisionRecord["evidenceRefs"]> = [];
+  for (const entry of value) {
+    if (filtered.length >= MISSION_DECISION_EVIDENCE_MAX) break;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const candidate = entry as Record<string, unknown>;
+    const type = candidate.type;
+    if (typeof type !== "string" || !(MISSION_DECISION_EVIDENCE_TYPES as readonly string[]).includes(type)) continue;
+    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+    if (!id || id.length > 200) continue;
+    const ref: NonNullable<MissionRollingDecisionRecord["evidenceRefs"]>[number] = {
+      type: type as NonNullable<MissionRollingDecisionRecord["evidenceRefs"]>[number]["type"],
+      id,
+    };
+    if (candidate.note !== undefined) {
+      if (typeof candidate.note !== "string") continue;
+      const note = candidate.note.trim();
+      if (note.length > 300) continue;
+      if (note) ref.note = note;
+    }
+    if (candidate.sha256 !== undefined) {
+      if (typeof candidate.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(candidate.sha256)) continue;
+      ref.sha256 = candidate.sha256;
+    }
+    filtered.push(ref);
+  }
+  return filtered;
+}
+
 /**
  * [결정 로그 결정론 병합 — A안 2026-09-05]
  * 핸드오프의 구조화된 decisionUpdates 를 롤링 상태 결정 로그에 반영한다.
@@ -398,6 +446,8 @@ export const MISSION_DECISION_LOG_CAP = 50;
  * 결정론 런타임). 순서 규칙:
  * - 유효하지 않은 항목(빈 id, summary 없는 신규 생성)은 결정론적으로 버린다.
  * - 기존 id: 주어진 필드만 갱신(status/summary/supersedes), 출처 handoffId/updatedAt 최신화.
+ * - evidenceRefs: 업데이트가 배열로 제공되면 방어 필터링(filterDecisionEvidenceRefs) 후 기존값을
+ *   덮어쓰고, 없으면 기존 근거 참조를 그대로 유지한다. 신규 항목은 제공 시 함께 저장된다.
  * - 신규 id: under_review 기본으로 추가.
  * - supersedes 로 지목된 기존 결정은 retired 로 전환되고 로그에 남는다
  *   (폐기된 결정까지 붙들어야 지금이 보인다).
@@ -432,12 +482,18 @@ export function mergeDecisionRecords(
         handoffId: input.handoffId,
         updatedAt: input.now.toISOString(),
       };
+      if (Array.isArray(update.evidenceRefs)) {
+        record.evidenceRefs = filterDecisionEvidenceRefs(update.evidenceRefs);
+      }
       merged.push(record);
       byId.set(id, record);
     } else {
       if (summary) existing.summary = summary;
       if (update.status) existing.status = update.status;
       if (update.supersedes !== undefined) existing.supersedes = update.supersedes;
+      if (Array.isArray(update.evidenceRefs)) {
+        existing.evidenceRefs = filterDecisionEvidenceRefs(update.evidenceRefs);
+      }
       existing.handoffId = input.handoffId;
       existing.updatedAt = input.now.toISOString();
     }
@@ -495,6 +551,18 @@ export function mergeRollingState(previous: MissionRollingStateJson, input: {
   };
 }
 
+/**
+ * 결정 로그 행의 근거 참조 접미사. 최대 3개까지 `type shortId(8)` 로 렌더링하고
+ * 남은 개수는 ` +N more` 로 표시한다. 참조가 없으면 빈 문자열.
+ */
+function formatDecisionEvidenceSuffix(record: MissionRollingDecisionRecord): string {
+  const refs = record.evidenceRefs ?? [];
+  if (refs.length === 0) return "";
+  let rendered = refs.slice(0, 3).map((ref) => `${ref.type} ${ref.id.slice(0, 8)}`).join(", ");
+  if (refs.length > 3) rendered += ` +${refs.length - 3} more`;
+  return ` (evidence: ${rendered})`;
+}
+
 export function buildMissionStateMarkdown(input: {
   missionId: string;
   state: MissionRollingStateJson;
@@ -520,7 +588,7 @@ export function buildMissionStateMarkdown(input: {
     "## Decision Log",
     ...(state.decisions?.length
       ? state.decisions.map((item) =>
-          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}`)
+          `- [${item.status}] ${item.id}: ${item.summary}${item.supersedes ? ` (supersedes ${item.supersedes})` : ""}${formatDecisionEvidenceSuffix(item)}`)
       : ["- None captured."]),
     "",
     "## Known Constraints",

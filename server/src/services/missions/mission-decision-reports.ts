@@ -19,11 +19,19 @@ import { buildMissionStateMarkdown, mergeDecisionRecords } from "./mission-runti
  */
 export const MISSION_DECISION_REPORT_MAX_UPDATES = 20;
 
+const decisionEvidenceRefSchema = z.object({
+  type: z.enum(["heartbeat_run", "issue", "issue_comment", "run_log", "work_product", "pr", "mission"]),
+  id: z.string().trim().min(1).max(200),
+  note: z.string().trim().max(300).optional(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+});
+
 const decisionUpdateSchema = z.object({
   id: z.string().trim().min(1).max(100),
   summary: z.string().trim().min(1).max(2000).optional(),
   status: z.enum(["confirmed", "under_review", "retired"]).optional(),
   supersedes: z.string().trim().min(1).max(100).nullable().optional(),
+  evidenceRefs: z.array(decisionEvidenceRefSchema).max(10).optional(),
 });
 
 export const missionDecisionReportSchema = z.object({
