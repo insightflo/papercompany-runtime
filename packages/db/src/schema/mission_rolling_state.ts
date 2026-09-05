@@ -40,6 +40,12 @@ export type MissionDecisionEvidenceRef = {
  * - supersedes: 이 결정이 대체한 이전 결정 id (대체링크). 대체된 결정은 retired 로
  *   로그에 남는다(폐기된 결정까지 붙들어야 지금이 보인다 — 온톨로지 논문).
  * - handoffId/updatedAt: 이 상태를 쓴 핸드오프 출처(근거 추적용).
+ * - source: 이 기록을 마지막으로 성공적으로 쓴 배치 출처(기능 3, 출처 보호 병합).
+ *   board 기록은 agent/handoff 배치가 침묵 속에 바꿀 수 없다 — 병합 계약의 유일
+ *   권위는 mission-runtime-manager.mergeDecisionRecords 다.
+ * - lastConflictingProposal: board 기록에 대한 마지막 미반영 제안(단일 슬롯,
+ *   최신 제안 승리). agent/handoff 배치의 시도는 필드를 바꾸지 않고 여기에만 기록된다.
+ *   표시 전용(규칙 8): 실행 통제가 읽지 않는다.
  */
 export type MissionRollingDecisionRecord = {
   id: string;
@@ -49,6 +55,14 @@ export type MissionRollingDecisionRecord = {
   handoffId?: string | null;
   updatedAt?: string | null;
   evidenceRefs?: MissionDecisionEvidenceRef[];
+  source?: "board" | "agent" | "handoff";
+  lastConflictingProposal?: {
+    from: "agent" | "handoff";
+    summary?: string;
+    status?: string;
+    supersedes?: string | null;
+    at: string;
+  };
 };
 
 export type MissionRollingStateJson = {

@@ -163,10 +163,12 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                   </p>
                 </div>
                 <span className={`text-xs font-medium ${statusClass(record.status)}`}>{record.status}</span>
+                {record.source === "board" ? <span className="rounded-full border border-border px-1.5 text-xs text-muted-foreground">board</span> : null}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span>{formatDecisionDate(record.updatedAt)}</span>
                 <span>{provenanceLabel(record)}</span>
+                {record.lastConflictingProposal ? <span>proposal pending ({record.lastConflictingProposal.from})</span> : null}
                 {record.evidenceRefs?.length ? (
                   <span title={evidenceRefsFullTitle(record.evidenceRefs)}>
                     evidence: {evidenceRefsLabel(record.evidenceRefs)}

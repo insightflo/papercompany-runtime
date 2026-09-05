@@ -137,6 +137,16 @@ export interface MissionDecisionRecord {
   handoffId?: string | null;
   updatedAt?: string | null;
   evidenceRefs?: MissionDecisionEvidenceRef[];
+  /** [출처] 이 기록을 마지막으로 성공적으로 쓴 배치 출처. board 기록은 agent/handoff 배치가 침묵 속에 바꿀 수 없다. */
+  source?: "board" | "agent" | "handoff";
+  /** [출처 보호] board 기록에 대한 마지막 미반영 제안(단일 슬롯, 최신 제안 승리). 표시 전용. */
+  lastConflictingProposal?: {
+    from: "agent" | "handoff";
+    summary?: string;
+    status?: string;
+    supersedes?: string | null;
+    at: string;
+  };
 }
 
 export interface MissionDecisionLogResponse {

@@ -85,7 +85,7 @@ describe("mission decision report routes", () => {
     expect(res.body.revision).toBe(2);
     expect(mockDecisionReports.applyMissionDecisionReports).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ companyId: "company-1", missionId: "mission-1" }),
+      expect.objectContaining({ companyId: "company-1", missionId: "mission-1", source: "board" }),
     );
     expect(logActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -94,6 +94,31 @@ describe("mission decision report routes", () => {
         entityType: "mission",
         entityId: "mission-1",
       }),
+    );
+  });
+
+  it("stamps agent source for an agent-key actor in the same company", async () => {
+    mockDecisionReports.applyMissionDecisionReports.mockResolvedValue({
+      missionId: "mission-1",
+      revision: 2,
+      updatedAt: "2026-09-05T00:00:00.000Z",
+      appliedUpdates: 1,
+      decisions: [],
+      stateMarkdown: "# Mission State",
+    });
+
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+    }))
+      .post("/api/missions/mission-1/decision-reports")
+      .send({ updates: [{ id: "D-1", summary: "agent view" }] });
+
+    expect(res.status).toBe(201);
+    expect(mockDecisionReports.applyMissionDecisionReports).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ companyId: "company-1", missionId: "mission-1", source: "agent" }),
     );
   });
 
