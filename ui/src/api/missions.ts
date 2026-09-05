@@ -147,6 +147,17 @@ export interface MissionDecisionRecord {
     supersedes?: string | null;
     at: string;
   };
+  /** [근거 스테일 강등 — 기능 2] 기계 판정(sha256 대조)으로 confirmed 가 under_review 로 강등된 스탬프. 표시 전용. */
+  demotedByEvidence?: {
+    at: string;
+    previousStatus: "confirmed";
+    mismatches: Array<{
+      id: string;
+      type: string;
+      recordedSha256: string;
+      current: "changed" | "missing";
+    }>;
+  };
 }
 
 export interface MissionDecisionLogResponse {

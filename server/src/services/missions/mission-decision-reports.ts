@@ -4,6 +4,7 @@ import type { Db, MissionRollingDecisionRecord } from "@paperclipai/db";
 import { missionRollingState } from "@paperclipai/db";
 import { unprocessable } from "../../errors.js";
 import { buildMissionStateMarkdown, mergeDecisionRecords } from "./mission-runtime-manager.js";
+import { applyMissionDecisionEvidenceStaleness } from "./mission-decision-evidence-staleness.js";
 
 /**
  * [결정 보고 API — A안 후속 생산자 2026-09-05]
@@ -70,7 +71,7 @@ export type MissionDecisionLogView = {
  */
 export async function applyMissionDecisionReports(
   db: Db,
-  input: { companyId: string; missionId: string; updates: unknown; now?: Date; source?: "board" | "agent" | "handoff" },
+  input: { companyId: string; missionId: string; updates: unknown; now?: Date; source?: "board" | "agent" | "handoff"; evidenceVerifyRoots?: string[] },
 ): Promise<MissionDecisionReportResult> {
   const parsed = missionDecisionReportSchema.safeParse({ updates: input.updates });
   if (!parsed.success) {
@@ -92,7 +93,15 @@ export async function applyMissionDecisionReports(
     now,
     source: input.source ?? "handoff",
   });
-  const nextState = { ...previousState, decisions };
+  // [근거 스테일 스윕] 병합 후, 마크다운 렌더 전. 루트가 없으면(결정 보고 라우트는 워크스페이스가
+  // 없다) no-op(fail-open)이며, 강등이 있으면 기계 판정 활동 로그가 남는다.
+  const sweptDecisions = await applyMissionDecisionEvidenceStaleness(db, {
+    companyId: input.companyId,
+    missionId: input.missionId,
+    decisions,
+    evidenceVerifyRoots: input.evidenceVerifyRoots,
+  });
+  const nextState = { ...previousState, decisions: sweptDecisions };
   const stateMarkdown = buildMissionStateMarkdown({ missionId: input.missionId, state: nextState });
 
   const [row] = await db
@@ -124,7 +133,7 @@ export async function applyMissionDecisionReports(
     revision: row.revision,
     updatedAt: (row.updatedAt ?? now).toISOString(),
     appliedUpdates: parsed.data.updates.length,
-    decisions,
+    decisions: sweptDecisions ?? [],
     stateMarkdown,
   };
 }

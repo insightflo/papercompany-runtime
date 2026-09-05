@@ -1,7 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -17,6 +21,7 @@ import {
   resolveMissionDecisionLogPointer,
   updateMissionRollingStateFromHandoff,
 } from "../services/missions/mission-runtime-manager.js";
+import { applyMissionDecisionReports } from "../services/missions/mission-decision-reports.js";
 import type {
   MissionIssueHandoffDecisionUpdate,
   MissionRollingDecisionRecord,
@@ -673,5 +678,213 @@ describeEmbeddedPostgres("updateMissionRollingStateFromHandoff decision updates"
     });
 
     expect(await resolveMissionDecisionLogPointer(db, missionId)).toBeNull();
+  });
+});
+
+describeEmbeddedPostgres("evidence staleness sweep wiring (rolling-state merge paths)", () => {
+  let db!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-mission-decision-log-evidence-");
+    db = createDb(tempDb.connectionString);
+  }, 60_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(missionRollingState);
+    await db.delete(heartbeatRuns);
+    await db.delete(missions);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedMission(prefix: string) {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: `${prefix} Evidence Company`,
+      issuePrefix: `${prefix}${companyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: `${prefix} Evidence Agent`,
+      role: "operator",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(missions).values({
+      id: missionId,
+      companyId,
+      ownerAgentId: agentId,
+      title: `${prefix} evidence mission`,
+      status: "active",
+    });
+    return { companyId, agentId, missionId };
+  }
+
+  async function seedRun(companyId: string, agentId: string) {
+    await db.insert(heartbeatRuns).values({ companyId, agentId, status: "succeeded", invocationSource: "test" });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)).limit(1);
+    return run;
+  }
+
+  function confirmedDecision(id: string, refId: string, recordedSha256: string): MissionRollingDecisionRecord {
+    return {
+      id,
+      summary: "Spike says PGlite",
+      status: "confirmed",
+      supersedes: null,
+      handoffId: "handoff-0",
+      updatedAt: T0.toISOString(),
+      evidenceRefs: [{ type: "work_product", id: refId, sha256: recordedSha256 }],
+    };
+  }
+
+  it("demotes a confirmed decision with changed work_product evidence through updateMissionRollingStateFromHandoff and writes the evidence_stale activity row", async () => {
+    const { companyId, agentId, missionId } = await seedMission("EV1");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "evidence-wiring-"));
+    try {
+      const wpPath = path.join(root, "wp.txt");
+      await fs.writeFile(wpPath, "original contents");
+      const recordedSha256 = createHash("sha256").update("original contents").digest("hex");
+      await db.insert(missionRollingState).values({
+        companyId,
+        missionId,
+        stateJson: { decisions: [confirmedDecision("D-1", wpPath, recordedSha256)] },
+        stateMarkdown: "seed",
+      });
+      await fs.writeFile(wpPath, "rewritten contents");
+      const run = await seedRun(companyId, agentId);
+
+      const row = await updateMissionRollingStateFromHandoff(db, {
+        companyId,
+        missionId,
+        runId: run.id,
+        issueId: null,
+        handoffId: "handoff-1",
+        status: "succeeded",
+        summaryText: "run summary",
+        evidenceVerifyRoots: [root],
+      });
+
+      const demoted = row.stateJson.decisions?.find((d) => d.id === "D-1");
+      expect(demoted).toMatchObject({ status: "under_review" });
+      expect(demoted?.demotedByEvidence?.previousStatus).toBe("confirmed");
+      expect(demoted?.demotedByEvidence?.mismatches).toEqual([
+        { id: wpPath, type: "work_product", recordedSha256, current: "changed" },
+      ]);
+      expect(row.stateMarkdown).toContain("- [under_review] D-1: Spike says PGlite (evidence: work_product");
+      expect(row.stateMarkdown).toContain("· evidence stale");
+
+      const activities = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+      expect(activities).toHaveLength(1);
+      expect(activities[0]).toMatchObject({
+        actorType: "system",
+        action: "mission.decisions.evidence_stale",
+        entityType: "mission",
+        entityId: missionId,
+      });
+      expect(activities[0].details).toMatchObject({
+        demoted: [{ id: "D-1", mismatches: 1 }],
+        verifiedCount: 0,
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not demote or log when evidenceVerifyRoots is absent (fail-open no-op)", async () => {
+    const { companyId, agentId, missionId } = await seedMission("EV2");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "evidence-wiring-"));
+    try {
+      const wpPath = path.join(root, "wp.txt");
+      await fs.writeFile(wpPath, "original contents");
+      const recordedSha256 = createHash("sha256").update("original contents").digest("hex");
+      await db.insert(missionRollingState).values({
+        companyId,
+        missionId,
+        stateJson: { decisions: [confirmedDecision("D-1", wpPath, recordedSha256)] },
+        stateMarkdown: "seed",
+      });
+      await fs.writeFile(wpPath, "rewritten contents");
+      const run = await seedRun(companyId, agentId);
+
+      const row = await updateMissionRollingStateFromHandoff(db, {
+        companyId,
+        missionId,
+        runId: run.id,
+        issueId: null,
+        handoffId: "handoff-1",
+        status: "succeeded",
+        summaryText: "run summary",
+      });
+
+      expect(row.stateJson.decisions?.find((d) => d.id === "D-1")).toMatchObject({ status: "confirmed" });
+      expect(row.stateMarkdown).not.toContain("evidence stale");
+      const activities = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+      expect(activities).toHaveLength(0);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sweeps through applyMissionDecisionReports when roots are supplied, demoting a board-sourced record without touching provenance", async () => {
+    const { companyId, agentId, missionId } = await seedMission("EV3");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "evidence-wiring-"));
+    try {
+      const wpPath = path.join(root, "wp.txt");
+      await fs.writeFile(wpPath, "original contents");
+      const recordedSha256 = createHash("sha256").update("original contents").digest("hex");
+      await db.insert(missionRollingState).values({
+        companyId,
+        missionId,
+        stateJson: {
+          decisions: [
+            {
+              ...confirmedDecision("D-B", wpPath, recordedSha256),
+              source: "board" as const,
+              lastConflictingProposal: { from: "agent" as const, summary: "agent disagrees", at: T1.toISOString() },
+            },
+          ],
+        },
+        stateMarkdown: "seed",
+      });
+      await fs.writeFile(wpPath, "rewritten contents");
+
+      const result = await applyMissionDecisionReports(db, {
+        companyId,
+        missionId,
+        updates: [{ id: "D-NEW", summary: "Fresh board decision", status: "confirmed" }],
+        source: "board",
+        evidenceVerifyRoots: [root],
+      });
+
+      const demoted = result.decisions.find((d) => d.id === "D-B");
+      expect(demoted).toMatchObject({ status: "under_review", source: "board" });
+      expect(demoted?.demotedByEvidence?.mismatches).toEqual([
+        { id: wpPath, type: "work_product", recordedSha256, current: "changed" },
+      ]);
+      expect(demoted?.lastConflictingProposal).toEqual({ from: "agent", summary: "agent disagrees", at: T1.toISOString() });
+      expect(result.stateMarkdown).toContain("- [under_review] D-B: Spike says PGlite (evidence: work_product");
+      expect(result.stateMarkdown).toContain("· board · proposal pending · evidence stale");
+
+      const activities = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+      expect(activities).toHaveLength(1);
+      expect(activities[0]).toMatchObject({ action: "mission.decisions.evidence_stale", actorType: "system" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });

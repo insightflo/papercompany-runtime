@@ -36,6 +36,31 @@ export type MissionDecisionEvidenceRef = {
 };
 
 /**
+ * [근거 스테일 불일치 — 기능 2] 개별 근거 참조의 기계 판정 결과. 결정론적 해시
+ * 대조(sha256)에서만 생성된다. current: "changed"=파일은 있으나 해시 불일치,
+ * "missing"=파일 소실. 규칙 8: 자연어 판정 없음 — 해시 대조만이 판정 근거다.
+ */
+export type MissionDecisionEvidenceDemotionMismatch = {
+  id: string;
+  type: string;
+  recordedSha256: string;
+  current: "changed" | "missing";
+};
+
+/**
+ * [근거 스테일 강등 스탬프 — 기능 2] confirmed 결정이 기계 판정(결정론적 파일
+ * 해시 대조)으로 근거 스테일을 입증받으면 under_review 로 강등되고 이 스탬프가
+ * 붙는다. source/lastConflictingProposal 은 건드리지 않는다(행위자 덮어쓰기가
+ * 아니라 결정론적 근거 판정이다). 규칙 8: 표시/맥락 전달용일 뿐 실행 통제가
+ * 이를 읽어 판단하지 않는다. 이미 스탬프가 있는 기록은 재강등하지 않는다.
+ */
+export type MissionDecisionEvidenceDemotion = {
+  at: string;
+  previousStatus: "confirmed";
+  mismatches: MissionDecisionEvidenceDemotionMismatch[];
+};
+
+/**
  * [결정 레코드 — A안] 롤링 상태가 유지하는 결정 로그 항목.
  * - supersedes: 이 결정이 대체한 이전 결정 id (대체링크). 대체된 결정은 retired 로
  *   로그에 남는다(폐기된 결정까지 붙들어야 지금이 보인다 — 온톨로지 논문).
@@ -46,6 +71,7 @@ export type MissionDecisionEvidenceRef = {
  * - lastConflictingProposal: board 기록에 대한 마지막 미반영 제안(단일 슬롯,
  *   최신 제안 승리). agent/handoff 배치의 시도는 필드를 바꾸지 않고 여기에만 기록된다.
  *   표시 전용(규칙 8): 실행 통제가 읽지 않는다.
+ * - demotedByEvidence: 기능 2 근거 스테일 강등 스탬프(위 MissionDecisionEvidenceDemotion).
  */
 export type MissionRollingDecisionRecord = {
   id: string;
@@ -63,6 +89,7 @@ export type MissionRollingDecisionRecord = {
     supersedes?: string | null;
     at: string;
   };
+  demotedByEvidence?: MissionDecisionEvidenceDemotion;
 };
 
 export type MissionRollingStateJson = {

@@ -8002,6 +8002,7 @@ export function heartbeatService(db: Db) {
             // 병합한다. 런타임 생성 handoffJson에는 결정이 없으므로 오늘은 undefined —
             // 결정을 실은 생산자(향후 에이전트 제출 경로)가 생기면 자동으로 흐른다.
             decisionUpdates: handoff.handoffJson?.decisionUpdates ?? undefined,
+            evidenceVerifyRoots: [executionWorkspace.cwd],
             inputTokens: normalizedUsage?.inputTokens ?? null,
             outputTokens: normalizedUsage?.outputTokens ?? null,
             costCents: missionRuntimeCostCents(adapterResult.costUsd),
