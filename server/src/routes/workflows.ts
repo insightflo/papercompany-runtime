@@ -1,7 +1,10 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
-import { agents, issues, labels, projects, workflowStepRuns } from "@paperclipai/db";
-import { and, eq, inArray } from "drizzle-orm";
+import {
+  agents, issues, labels, projects, workflowStepRuns,
+  workflowWebhookConfigs, workflowWebhookDeliveries,
+} from "@paperclipai/db";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import {
   cancelWorkflowRunSchema,
   createWorkflowDefinitionSchema,
@@ -10,6 +13,9 @@ import {
   triggerWorkflowRunSchema,
   updateWorkflowDefinitionSchema,
   workflowToolGrantSchema,
+  workflowWebhookDisableResponseSchema,
+  workflowWebhookEnableResponseSchema,
+  workflowWebhookStatusResponseSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
@@ -20,6 +26,12 @@ import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.
 import { applyRunInputDerivations } from "../services/workflow/run-input-derivations.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
+import {
+  generateWebhookSecret,
+  webhookSecretLast4,
+  workflowWebhookSecretRef,
+} from "../services/workflow/workflow-webhook.js";
+import { secretService } from "../services/secrets.js";
 import {
   grantWorkflowToolToAgent,
   listWorkflowToolCatalog,
@@ -745,6 +757,149 @@ export function workflowRoutes(db: Db) {
     });
     const run = await workflowService.syncRunStatusForIssue(db, issue.id, "workflows_route");
     res.json({ issue: serializeValue(issue), run: serializeValue(run) });
+  });
+
+  // -----------------------------------------------------------------------
+  // Webhook management (board-only). Secret material is stored versioned via
+  // company secrets; it is echoed back exactly once per enable/rotate and is
+  // never written to activity details.
+  // -----------------------------------------------------------------------
+
+  router.post("/workflows/:workflowId/webhook", async (req, res) => {
+    const workflowId = req.params.workflowId as string;
+    const definition = await workflowService.getDefinition(db, workflowId);
+    if (!definition || !canAccessRecord(req, definition.companyId)) {
+      throw notFound("Workflow definition not found");
+    }
+    assertBoard(req);
+    const actor = actorForActivity(req);
+
+    const secretValue = generateWebhookSecret();
+    const secretRef = workflowWebhookSecretRef(workflowId);
+    const secrets = secretService(db);
+    const existingSecret = await secrets.getByName(definition.companyId, secretRef);
+    if (existingSecret) {
+      await secrets.rotate(existingSecret.id, { value: secretValue }, {
+        userId: actor.actorType === "user" ? actor.actorId : null,
+        agentId: actor.agentId,
+      });
+    } else {
+      await secrets.create(definition.companyId, {
+        name: secretRef,
+        provider: "local_encrypted",
+        value: secretValue,
+        description: "Workflow webhook signing secret",
+      }, {
+        userId: actor.actorType === "user" ? actor.actorId : null,
+        agentId: actor.agentId,
+      });
+    }
+
+    const last4 = webhookSecretLast4(secretValue);
+    const [existingConfig] = await db
+      .select()
+      .from(workflowWebhookConfigs)
+      .where(eq(workflowWebhookConfigs.workflowId, workflowId))
+      .limit(1);
+    if (existingConfig) {
+      await db
+        .update(workflowWebhookConfigs)
+        .set({ secretRef, enabled: true, secretLast4: last4, updatedAt: new Date() })
+        .where(eq(workflowWebhookConfigs.id, existingConfig.id));
+    } else {
+      await db.insert(workflowWebhookConfigs).values({
+        companyId: definition.companyId,
+        workflowId,
+        secretRef,
+        enabled: true,
+        secretLast4: last4,
+      });
+    }
+
+    const wasEnabled = existingConfig?.enabled === true;
+    await logActivity(db, {
+      companyId: definition.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: wasEnabled ? "workflow.webhook.rotated" : "workflow.webhook.enabled",
+      entityType: "workflow",
+      entityId: workflowId,
+      details: { secretRef },
+    });
+
+    const body = workflowWebhookEnableResponseSchema.parse({ secret: secretValue, last4, enabled: true });
+    res.status(200).json(body);
+  });
+
+  router.delete("/workflows/:workflowId/webhook", async (req, res) => {
+    const workflowId = req.params.workflowId as string;
+    const definition = await workflowService.getDefinition(db, workflowId);
+    if (!definition || !canAccessRecord(req, definition.companyId)) {
+      throw notFound("Workflow definition not found");
+    }
+    assertBoard(req);
+    const [config] = await db
+      .select()
+      .from(workflowWebhookConfigs)
+      .where(eq(workflowWebhookConfigs.workflowId, workflowId))
+      .limit(1);
+    if (!config) {
+      throw notFound("Workflow webhook is not configured");
+    }
+    await db
+      .update(workflowWebhookConfigs)
+      .set({ enabled: false, updatedAt: new Date() })
+      .where(eq(workflowWebhookConfigs.id, config.id));
+    // Delivery receipts are preserved for audit/replay history.
+    const actor = actorForActivity(req);
+    await logActivity(db, {
+      companyId: definition.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow.webhook.disabled",
+      entityType: "workflow",
+      entityId: workflowId,
+      details: { secretRef: config.secretRef },
+    });
+    const body = workflowWebhookDisableResponseSchema.parse({ enabled: false });
+    res.json(body);
+  });
+
+  router.get("/workflows/:workflowId/webhook", async (req, res) => {
+    const workflowId = req.params.workflowId as string;
+    const definition = await workflowService.getDefinition(db, workflowId);
+    if (!definition || !canAccessRecord(req, definition.companyId)) {
+      throw notFound("Workflow definition not found");
+    }
+    assertBoard(req);
+    const [config] = await db
+      .select()
+      .from(workflowWebhookConfigs)
+      .where(eq(workflowWebhookConfigs.workflowId, workflowId))
+      .limit(1);
+    if (!config) {
+      throw notFound("Workflow webhook is not configured");
+    }
+    const dayAgo = new Date(Date.now() - 24 * 3_600_000);
+    const [countRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(workflowWebhookDeliveries)
+      .where(
+        and(
+          eq(workflowWebhookDeliveries.workflowId, workflowId),
+          gte(workflowWebhookDeliveries.receivedAt, dayAgo),
+        ),
+      );
+    const body = workflowWebhookStatusResponseSchema.parse({
+      enabled: config.enabled,
+      last4: config.secretLast4,
+      deliveriesLast24h: countRow?.count ?? 0,
+    });
+    res.json(body);
   });
 
   return router;
