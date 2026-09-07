@@ -22,6 +22,12 @@ import {
   workflowConditionSourceKey,
 } from "./condition-source-resolver.js";
 import { executeWorkflowConditionToolSource } from "./condition-tool-source.js";
+import {
+  getGateWorkProductGraceRetrySeconds,
+  qualifiesForGateWorkProductGrace,
+  readControlNodeGraceWait,
+} from "./gate-work-product-grace.js";
+import { WorkProductConditionWaitableError } from "./waitable-condition-error.js";
 
 type WorkflowStepRunRow = typeof workflowStepRuns.$inferSelect;
 
@@ -131,6 +137,7 @@ export async function executeWorkflowControlNode(input: {
     const metadata = normalizeRecord(input.stepRun.metadata);
     metadata.controlNodeResult = result;
     delete metadata.controlNodeError;
+    delete metadata.controlNodeGraceWait;
     await input.db
       .update(workflowStepRuns)
       .set({
@@ -147,10 +154,57 @@ export async function executeWorkflowControlNode(input: {
         eq(workflowStepRuns.status, "running"),
       ));
   } catch (error) {
+    // [게이트 워크프로덕트 대기창] closeout 레이스(producer 완료 직후 등록/작성 지연)로 인한
+    // 해소 실패는, producer 스텝이 최근에 완료됐다면 즉시 실패 대신 pending-wait 로 돌린다.
+    // nextEvaluateAt 전까지 dispatch 가 차단되고(스핀 방지), heartbeat/sync/resume 또는
+    // reconciler 타이머가 다음 패스에서 재조회한다. 대기창이 지나면 아래 정직한 실패 경로로 간다.
+    if (input.step.type === "if" && error instanceof WorkProductConditionWaitableError) {
+      const now = new Date();
+      const graceApplies = await qualifiesForGateWorkProductGrace({
+        db: input.db,
+        workflowRunId: input.context.run.id,
+        sourceStepId: error.sourceStepId,
+        now,
+      });
+      if (graceApplies) {
+        const summary = safeErrorSummary(error);
+        const retrySeconds = getGateWorkProductGraceRetrySeconds();
+        const nextEvaluateAt = new Date(now.getTime() + retrySeconds * 1000);
+        const metadata = normalizeRecord(input.stepRun.metadata);
+        const previousWait = readControlNodeGraceWait(metadata);
+        metadata.controlNodeGraceWait = {
+          reason: summary,
+          since: previousWait?.since ?? now.toISOString(),
+          attempts: (previousWait?.attempts ?? 0) + 1,
+          nextEvaluateAt: nextEvaluateAt.toISOString(),
+        };
+        delete metadata.controlNodeResult;
+        delete metadata.controlNodeError;
+        await input.db
+          .update(workflowStepRuns)
+          .set({
+            status: "pending",
+            startedAt: input.stepRun.startedAt ?? null,
+            completedAt: null,
+            dispatchReadyAt: nextEvaluateAt,
+            lastDispatchErrorAt: null,
+            lastDispatchErrorSummary: null,
+            metadata,
+          })
+          .where(and(
+            eq(workflowStepRuns.id, input.stepRun.id),
+            eq(workflowStepRuns.workflowRunId, input.context.run.id),
+            eq(workflowStepRuns.status, "running"),
+          ));
+        return;
+      }
+    }
+
     const failedAt = new Date();
     const summary = safeErrorSummary(error);
     const metadata = normalizeRecord(input.stepRun.metadata);
     delete metadata.controlNodeResult;
+    delete metadata.controlNodeGraceWait;
     metadata.controlNodeError = { message: summary, failedAt: failedAt.toISOString() };
     await input.db
       .update(workflowStepRuns)
@@ -200,6 +254,7 @@ export async function resetFailedControlNodesForResume(input: {
     const metadata = normalizeRecord(row.metadata);
     delete metadata.controlNodeError;
     delete metadata.controlNodeResult;
+    delete metadata.controlNodeGraceWait;
     await input.db
       .update(workflowStepRuns)
       .set({
@@ -292,6 +347,7 @@ export async function resetStaleIfControlNodesForResume(input: {
     const metadata = normalizeRecord(row.metadata);
     delete metadata.controlNodeResult;
     delete metadata.controlNodeError;
+    delete metadata.controlNodeGraceWait;
     await input.db
       .update(workflowStepRuns)
       .set({

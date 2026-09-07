@@ -19,6 +19,7 @@ import type { WorkflowConditionSource, WorkflowToolJsonSource } from "@paperclip
 import type { ConditionalEdge } from "./types.js";
 import { resolveWorkProductLocalFilePath } from "../../work-products.js";
 import { secretService } from "../../secrets.js";
+import { WorkProductConditionWaitableError } from "./waitable-condition-error.js";
 
 export const WORKFLOW_IF_CONDITION_ERROR_PREFIX = "Workflow IF condition failed:";
 const ERROR_PREFIX = WORKFLOW_IF_CONDITION_ERROR_PREFIX;
@@ -207,7 +208,10 @@ export async function selectCurrentWorkProductCandidate(input: {
     );
 
   if (rows.length === 0) {
-    fail(`no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`);
+    throw new WorkProductConditionWaitableError(
+      `${ERROR_PREFIX} no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`,
+      { stepId, title },
+    );
   }
   const attemptStartedAt = rows[0]!.startedAt;
   if (!attemptStartedAt) {
@@ -228,7 +232,10 @@ export async function selectCurrentWorkProductCandidate(input: {
   }
 
   if (candidates.length === 0) {
-    fail(`no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`);
+    throw new WorkProductConditionWaitableError(
+      `${ERROR_PREFIX} no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`,
+      { stepId, title },
+    );
   }
 
   candidates.sort((a, b) => (
