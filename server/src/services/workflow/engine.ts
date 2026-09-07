@@ -6,7 +6,9 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { agents, companies } from "@paperclipai/db";
+import { agents, companies,
+  workflowRuns,
+} from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
@@ -246,6 +248,11 @@ async function findActiveScheduledWorkflowMissionRun(
   return null;
 }
 
+import { assertWorkflowChildDefinitionCycles } from "./workflow-child-execution.js";
+import { findChildStartIdentityForRun } from "./workflow-child-start-state.js";
+import { prepareManualChildResume } from "./workflow-child-manual-resume.js";
+import { repairWorkflowChildStartDiscovery } from "./workflow-child-discovery.js";
+
 async function assertWorkflowToolReadiness(
   db: Db,
   companyId: string,
@@ -287,6 +294,8 @@ export const workflowService = {
     }
     validateRunInputDeclarations(input.runInputs);
     await assertWorkflowToolReadiness(db, input.companyId, steps);
+    // [workflow child step] 정의 생성 시 workflow-step 타깃 체인 CYCLE DFS(자기참조 거부, diamond 허용).
+    await assertWorkflowChildDefinitionCycles(db, input.companyId, null, steps);
 
     return createWorkflowDefinition(db, { ...input, steps });
   },
@@ -324,6 +333,8 @@ export const workflowService = {
       const existing = await getWorkflowDefinitionById(db, id);
       if (!existing) return null;
       await assertWorkflowToolReadiness(db, existing.companyId, steps);
+      // [workflow child step] 정의 수정 시에도 CYCLE DFS(자기참조 거부, diamond 허용).
+      await assertWorkflowChildDefinitionCycles(db, existing.companyId, id, steps);
       updates = { ...updates, steps };
     }
     // runInputs는 배열 패치 시 전체 교체이므로 새 배열 단위로 선언 무결성 검증.
@@ -492,6 +503,65 @@ export const workflowService = {
     if (!workflow || workflow.companyId !== input.companyId) {
       throw new Error(`Workflow definition not found: ${existingRun.workflowId}`);
     }
+    // [cycle A §3 + cycle B F4] 자식 분류를 readiness/store resume 변이 "이전"에 발견한다. 판별자는
+    //   plain/linked/legacy/invalid-child 를 구분하고, 레거시 coherent claimed+nonnull 은 여기서 1회
+    //   수리 후 신선한 linked 신원으로 진행한다. invalid/수리 실패는 무차별 store resume/resets 없이
+    //   진실한 스냅숏으로 양보하고, plain/missing 만 기존 store resume 을 사용한다.
+    const childEntry = await repairWorkflowChildStartDiscovery(db, input.runId);
+    let detected: Awaited<ReturnType<typeof findChildStartIdentityForRun>> = null;
+    if (childEntry.kind === "yield") {
+      // invalid-child/경합/수리 불가 — 실행 재호출 준비 없이 ineligible 스냅숏만(fail-closed).
+      return executeWorkflowRun(db, input.runId, { intent: "manual-resume", preparedChildStartFence: undefined });
+    }
+    if (childEntry.kind === "proceed") {
+      detected = await findChildStartIdentityForRun(db, input.runId);
+      if (!detected) {
+        return executeWorkflowRun(db, input.runId, { intent: "manual-resume", preparedChildStartFence: undefined });
+      }
+    }
+    if (detected) {
+      // [cycle B F3] materialized(기존 행) 경로는 준비 트랜잭션 "이전에" 현재 정의 기준
+      //   readiness/구조 검증을 수행한다(검증 선행 플래그로 경합 시 busy 양보).
+      const [childRow] = await db
+        .select({ m: workflowRuns.childStartMaterializedAt })
+        .from(workflowRuns)
+        .where(eq(workflowRuns.id, input.runId))
+        .limit(1);
+      const materialized = childRow?.m != null;
+      if (materialized) {
+        await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
+      }
+      const prepared = await prepareManualChildResume(db, detected.identity, {
+        // [cycle B F3] 리셋은 준비 트랜잭션 안으로 이동한다(콜백은 txDb 만 받는다 — 외부 db 캡처 금지).
+        resetControls: (txDb) => {
+          resetFailedControlNodesForResume({
+            db: txDb,
+            workflowRunId: input.runId,
+            steps: normalizeWorkflowStepsForExecution(workflow.steps),
+          });
+          resetStaleIfControlNodesForResume({
+            db: txDb,
+            companyId: input.companyId,
+            workflowRunId: input.runId,
+            steps: normalizeWorkflowStepsForExecution(workflow.steps),
+          });
+        },
+        validatedMaterialized: materialized || undefined,
+      });
+      if (prepared.kind === "busy" || prepared.kind === "ineligible") {
+        // 경합/무자격 — 실행 재호출 없이 진실한 스냅숏만 반환한다(리셋/시작 부수효과 0).
+        return executeWorkflowRun(db, input.runId, { intent: "manual-resume", preparedChildStartFence: undefined });
+      }
+      if (prepared.kind === "native") {
+        // materialized 수동 resume — 네이티브 계속(초기화 없음, 시작 시각/영수증 불변).
+        return executeWorkflowRun(db, input.runId, { intent: "native-continuation" });
+      }
+      // owned(0행 재초기화) — 공급된 fence 로만 실행한다(토큰 연속성 보장).
+      return executeWorkflowRun(db, input.runId, {
+        intent: "manual-resume",
+        preparedChildStartFence: prepared.fence,
+      });
+    }
     await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
     const run = await resumeWorkflowRun(db, input.runId, input.companyId);
     if (!run) {
@@ -513,6 +583,8 @@ export const workflowService = {
       workflowRunId: run.id,
       steps: normalizeWorkflowStepsForExecution(workflow.steps),
     });
+    // [cycle A §3] 일반 run — 기존 store resume/readiness/control-reset 동작을 유지하고 intent 없이
+    //   실행한다(수동 의도는 링크 자식 경로 전용이다).
     return executeWorkflowRun(db, run.id);
   },
 

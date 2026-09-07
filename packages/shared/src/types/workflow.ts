@@ -30,6 +30,14 @@ export interface WorkflowStepDefinition {
   description?: string;
   dependsOn?: string[];
   dependencies?: string[];
+  /**
+   * workflow→workflow 자식 실행(n8n "Execute Workflow"). type:"workflow" 스텝이
+   * 같은 회사의 대상 워크플로우를 실행한다. targetWorkflowId 는 type==="workflow" 일 때 필수,
+   * wait 는 기본 true(자식 종말 대기), inputs 는 토큰 렌더 대상 문자열 인자(최대 20키).
+   */
+  targetWorkflowId?: string;
+  wait?: boolean;
+  inputs?: Record<string, string>;
   conditionalDependencies?: WorkflowConditionalDependency[];
   type?: string;
   conditionGroup?: WorkflowConditionGroup;
@@ -117,6 +125,9 @@ export interface WorkflowRunDto {
   runNumber: number | null;
   runLabel: string | null;
   parentIssueId: string | null;
+  parentRunId: string | null;
+  parentStepRunId: string | null;
+  rootRunId: string | null;
   scheduledSlotId: string | null;
   legacyPluginRunEntityId: string | null;
   metadata: Record<string, unknown>;

@@ -127,6 +127,19 @@ directly advance downstream steps after issue or agent-run events. Manual missio
 creation and plugin workflow creation are separate management surfaces that feed
 the same server-native workflow service.
 
+### 6.4.0.1 Workflow child-step start ownership (0101)
+
+Workflow→workflow child runs acquire a start lease (60s token + expiry, immutable
+five-minute deadline, materialization receipt) before readiness; only the lease
+owner may materialize child steps, and the receipt commits atomically with the
+step rows. Recovery re-acquires expired leases through the same fenced entry.
+Every newly claimed child invocation persists its requested wait mode in the
+same transaction as child admission; recovery and reuse read that durable value
+even if the workflow definition changes later. Rows created without an explicit
+wait value default to true; the original requested mode of legacy/mixed-data
+rows cannot be reconstructed reliably and is not backfilled — a legacy
+default-true row whose current definition says false continues as wait:true.
+
 The native DAG engine also owns two control-node types:
 
 - `if` evaluates one bounded `all`/`any` condition group against registered JSON

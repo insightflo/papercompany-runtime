@@ -13,6 +13,7 @@ const STEP_TYPE_LABELS: Record<StepDraft["type"], string> = {
   tool: "🔧 Tool",
   if: "⬦ IF",
   complete: "✓ Complete",
+  workflow: "🔗 Workflow",
 };
 
 const stepCardStyle: CSSProperties = {

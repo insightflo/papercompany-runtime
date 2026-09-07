@@ -9,7 +9,7 @@
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { and, eq, isNull } from "drizzle-orm";
-import { executeWorkflowRun } from "./dag-engine.js";
+import { executeWorkflowRunWithStartOutcome } from "./dag-engine.js";
 import { readControlNodeGraceWait } from "./control-flow/gate-work-product-grace.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
 import type { ReconciliationResult } from "./reconciler.js";
@@ -55,12 +55,39 @@ export async function reconcileGraceWaitingControlNodes(
         workflowRunId: runId,
       })) continue;
 
-      await executeWorkflowRun(db, runId);
-      results.push({
-        runId,
-        action: "recovered",
-        reason: `Re-evaluated grace-waiting control node ${runRow.stepId}`,
-      });
+      // [cycle B §7] 타입핑 결과로만 보고한다 — running 전용 거절(rejection)도 정확히 기록된다.
+      //   "native sync admitted" 는 sync 진입 사실이지 IF 판정 변화를 보장하지 않는다.
+      const startOutcome = await executeWorkflowRunWithStartOutcome(db, runId, { intent: "native-continuation" });
+      switch (startOutcome.kind) {
+        case "started":
+          results.push({
+            runId,
+            action: "recovered" as const,
+            reason: `Re-evaluated grace-waiting control node ${runRow.stepId} (native sync admitted)`,
+          });
+          break;
+        case "settled":
+          results.push({
+            runId,
+            action: "recovered" as const,
+            reason: "Own start-deadline settlement during grace reevaluation",
+          });
+          break;
+        case "materialized":
+          results.push({
+            runId,
+            action: "skipped" as const,
+            reason: "Native continuation yielded (already materialized)",
+          });
+          break;
+        default:
+          results.push({
+            runId,
+            action: "skipped" as const,
+            reason: `Native continuation yielded (${startOutcome.kind})`,
+          });
+          break;
+      }
     } catch (error) {
       results.push({
         runId,

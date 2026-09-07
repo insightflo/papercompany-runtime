@@ -259,7 +259,8 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       id: s.id,
       title: s.title,
       description: raw.description as string || "",
-      type: s.type === "tool" || s.type === "if" || s.type === "complete" ? s.type : "agent",
+      // [workflow child step] type:"workflow" 도 draft 로 보존 — 저장 시 agent 로 강등되지 않는다.
+      type: s.type === "tool" || s.type === "if" || s.type === "complete" || s.type === "workflow" ? s.type : "agent",
       conditionGroup: cloneWorkflowConditionGroup(raw.conditionGroup),
       completionReason: typeof raw.completionReason === "string" ? raw.completionReason : "",
       toolName: s.toolName || "",

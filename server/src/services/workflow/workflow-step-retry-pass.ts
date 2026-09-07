@@ -40,6 +40,10 @@ function supportedStepType(step: WorkflowStep): boolean {
     && step.toolNames.some((tool) => typeof tool === "string" && tool.trim().length > 0);
   if (stepType === "if" || stepType === "complete") return false;
   if (stepType === "" || stepType === "agent") return true;
+  // [workflow child fix P1-3] type:"workflow" 스텝도 기존 bounded retry 스케줄링을 탄다.
+  //   retry 스케줄은 failed→pending + retryCount+1 CAS 이고, 재 dispatch 시
+  //   dispatchWorkflowChildStep 의 세대 CAS(retryCount+1)가 새 자식을 정확히 1개 생성한다.
+  if (stepType === "workflow") return true;
   return stepType === "tool" && hasToolNames;
 }
 

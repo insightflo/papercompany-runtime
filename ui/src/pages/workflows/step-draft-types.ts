@@ -10,7 +10,7 @@ export type StepDraft = {
   id: string;
   title: string;
   description: string;
-  type: "agent" | "tool" | "if" | "complete";
+  type: "agent" | "tool" | "if" | "complete" | "workflow";
   conditionGroup: WorkflowConditionGroup;
   completionReason: string;
   toolName: string;

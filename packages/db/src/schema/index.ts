@@ -106,6 +106,7 @@ export {
 } from "./workflow_webhooks.js";
 export { workflowRunSlots } from "./workflow_run_slots.js";
 export { workflowRuns } from "./workflow_runs.js";
+export { workflowStepInvocations } from "./workflow_step_invocations.js";
 export { workflowStepRuns } from "./workflow_step_runs.js";
 export { workflowDelegations } from "./workflow_delegations.js";
 export { workflowResyncJobs } from "./workflow_resync_jobs.js";

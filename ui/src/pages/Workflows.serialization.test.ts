@@ -137,3 +137,32 @@ describe("Workflows editor serialization — stale assignee (AREA-1)", () => {
       expect(out).not.toHaveProperty("contract");
     });
   });
+
+describe("Workflows editor serialization — workflow child step round-trip", () => {
+  it("preserves targetWorkflowId, wait, and inputs through jsonToSteps → stepsToJson", () => {
+    // n8n "Execute Workflow" type:"workflow" 스텝. 편집기 전용 UI 필드가 아니므로
+    // extra bag 을 통해 load → save 라운드트립에서 유실되지 않아야 한다.
+    const drafts = jsonToSteps([step({
+      type: "workflow",
+      targetWorkflowId: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+      wait: false,
+      inputs: { q: "{$runDate}" },
+    })]);
+    expect(drafts[0].type).toBe("workflow");
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.type).toBe("workflow");
+    expect(out.targetWorkflowId).toBe("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
+    expect(out.wait).toBe(false);
+    expect(out.inputs).toEqual({ q: "{$runDate}" });
+  });
+
+  it("keeps wait/inputs in the extra bag and never routes them into agent/tool cleanup branches", () => {
+    const drafts = jsonToSteps([step({
+      type: "workflow",
+      targetWorkflowId: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+      wait: true,
+    })]);
+    expect(drafts[0].extra.targetWorkflowId).toBe("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
+    expect(drafts[0].extra.wait).toBe(true);
+  });
+});

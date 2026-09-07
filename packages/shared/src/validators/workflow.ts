@@ -95,6 +95,25 @@ export const workflowStepDefinitionSchema = z.object({
   description: z.string().optional(),
   dependsOn: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
+  // [workflow child step] n8n "Execute Workflow" — 같은 회사 대상 워크플로우 실행.
+  // targetWorkflowId 필수 여부는 type==="workflow" refine 에서 검증.
+  targetWorkflowId: optionalUuidSchema,
+  wait: z.boolean().optional(),
+  inputs: z
+    // [fix2 P2-7] 키 문자셋을 토큰 접근 문법({$childInputs.<key>})과 정합시킨다:
+    // [A-Za-z0-9_]+ 만 허용 — 렌더러가 개별 키로 접근 불가능한 키(customer-id 등)는
+    // 애초에 정의 단계에서 거부한다(런타임 fail-closed 와 동일 계약).
+    .record(z.string().regex(/^[A-Za-z0-9_]+$/u), z.string().max(500))
+    .optional()
+    .superRefine((value, ctx) => {
+      if (value && Object.keys(value).length > 20) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["inputs"],
+          message: "inputs accepts at most 20 keys",
+        });
+      }
+    }),
   type: z.enum(["agent", "tool", "if", "complete"]).or(z.string()).optional(),
   conditionGroup: workflowConditionGroupSchema.optional(),
   completionReason: z.string().trim().min(1).max(500).optional(),
@@ -132,6 +151,13 @@ export const workflowStepDefinitionSchema = z.object({
     const nodeType = typeof step.type === "string" ? step.type : undefined;
     const hasConditionGroup = step.conditionGroup !== undefined;
     const hasCompletionReason = step.completionReason !== undefined;
+    if (nodeType === "workflow" && (typeof step.targetWorkflowId !== "string" || step.targetWorkflowId.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["targetWorkflowId"],
+        message: "targetWorkflowId is required when type is \"workflow\"",
+      });
+    }
     if (step.contract !== undefined && (nodeType === "if" || nodeType === "complete")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["contract"], message: "contract is only allowed on executable steps, not if/complete control nodes" });
     }
@@ -202,6 +228,9 @@ export const workflowRunSchema = z.object({
   runNumber: z.number().int().nullable(),
   runLabel: z.string().nullable(),
   parentIssueId: nullableUuidSchema,
+  parentRunId: nullableUuidSchema,
+  parentStepRunId: nullableUuidSchema,
+  rootRunId: nullableUuidSchema,
   scheduledSlotId: nullableUuidSchema,
   legacyPluginRunEntityId: nullableUuidSchema,
   metadata: metadataSchema,
