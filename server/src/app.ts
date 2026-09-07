@@ -29,6 +29,10 @@ import { missionSearchRoutes } from "./routes/mission-search.js";
 import { workflowAgentApiRoutes } from "./routes/workflow-agent-api.js";
 import { workflowRoutes } from "./routes/workflows.js";
 import { srbWebhookRoutes } from "./routes/srb-webhook.js";
+import {
+  webhookRawBodyErrorHandler,
+  workflowWebhookRoutes,
+} from "./routes/workflow-webhooks.js";
 import { requireMaintenanceCompany } from "./middleware/company-kind-gate.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
@@ -206,6 +210,13 @@ export async function createApp(
 ) {
   const app = express();
 
+  // Workflow public webhook: raw-body parser MUST run before the global 10MB
+  // json parser so the 64KiB limit is enforced first (design review change 4).
+  app.use(
+    "/api/webhooks/workflows",
+    express.raw({ limit: "64kb", type: "application/json" }),
+    webhookRawBodyErrorHandler,
+  );
   app.use(express.json({
     limit: "10mb",
     verify: (req, _res, buf) => {
@@ -374,6 +385,7 @@ export async function createApp(
   api.use(missionRoutes(db));
   api.use(workflowAgentApiRoutes(db));
   api.use(workflowRoutes(db));
+  api.use(workflowWebhookRoutes(db));
   api.use(srbWebhookRoutes(db));
   api.use(executionWorkspaceRoutes(db));
   api.use(worktreeRoutes(db));

@@ -328,6 +328,15 @@ export {
 } from "./workflow.js";
 
 export {
+  workflowWebhookEnableResponseSchema,
+  workflowWebhookStatusResponseSchema,
+  workflowWebhookDisableResponseSchema,
+  type WorkflowWebhookEnableResponse,
+  type WorkflowWebhookStatusResponse,
+  type WorkflowWebhookDisableResponse,
+} from "./workflow-webhook.js";
+
+export {
   WORKFLOW_IF_MAX_CONDITIONS,
   WORKFLOW_IF_JSON_PATH_PATTERN,
   WORKFLOW_CONDITION_OPERATORS,
