@@ -157,6 +157,24 @@ describe("normalizeWorkflowRunInputs", () => {
 });
 
 describe("validateRunInputDeclarations (domain validator)", () => {
+  it.each<{ inputs: WorkflowRunInput[] }>([
+    { inputs: [{ key: "section", type: "radio", options: [{ value: "a", label: "A" }], default: "invalid" }] },
+    { inputs: [{ key: "same" }, { key: "same", type: "switch" }] },
+  ])("rejects structurally invalid declarations at the shared safeParse gate: %j", ({ inputs }) => {
+    expect(() => validateRunInputDeclarations(inputs)).toThrow(/^Invalid workflow runInputs:/);
+  });
+
+  it.each<{ name: string; inputs: WorkflowRunInput[] }>([
+    { name: "self reference", inputs: [
+      { key: "self", deriveFrom: { input: "self", extract: "youtubeVideoId" } },
+    ] },
+    { name: "cycle", inputs: [
+      { key: "a", deriveFrom: { input: "b", extract: "youtubeVideoId" } },
+      { key: "b", deriveFrom: { input: "a", extract: "youtubeVideoId" } },
+    ] },
+  ])("does not introduce a new $name restriction", ({ inputs }) => {
+    expect(() => validateRunInputDeclarations(inputs)).not.toThrow();
+  });
   it("rejects a deriveFrom referencing a missing source with the declaration prefix", () => {
     expect(() => validateRunInputDeclarations([
       { key: "videoId", deriveFrom: { input: "url", extract: "youtubeVideoId" } },

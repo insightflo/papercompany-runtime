@@ -140,6 +140,32 @@ describe("validateWorkflowRunInputValues", () => {
     ]);
   });
 
+  it.each([{}, { pick: undefined }])("keeps missing optional controls absent and rejects required checkbox: %j", (raw) => {
+    const optional: WorkflowRunInput[] = [
+      { key: "pick", type: "checkbox", required: false, options: [{ value: "a", label: "A" }] },
+      { key: "radio", type: "radio", required: false, options: [{ value: "a", label: "A" }] },
+      { key: "enabled", type: "switch", required: false },
+    ];
+    const next = applyWorkflowRunInputDefaults(optional, raw);
+    expect(next).toEqual(raw);
+    expect(Object.keys(next)).toEqual(Object.keys(raw));
+    expect(validateWorkflowRunInputValues(optional, next)).toEqual([]);
+    expect(validateWorkflowRunInputValues([{ ...optional[0], required: true }], next)).toEqual([
+      expect.objectContaining({ key: "pick", code: "required" }),
+    ]);
+  });
+
+  it("applies a required checkbox empty default but still rejects it as unanswered", () => {
+    const inputs: WorkflowRunInput[] = [
+      { key: "pick", type: "checkbox", required: true, options: [{ value: "a", label: "A" }], default: [] },
+    ];
+    const next = applyWorkflowRunInputDefaults(inputs, {});
+    expect(next).toEqual({ pick: [] });
+    expect(validateWorkflowRunInputValues(inputs, next)).toEqual([
+      expect.objectContaining({ key: "pick", code: "required" }),
+    ]);
+  });
+
   it("ignores text inputs unless the legacy presence flag is set", () => {
     const inputs: WorkflowRunInput[] = [{ key: "url", type: "text", required: true }];
     expect(validateWorkflowRunInputValues(inputs, {})).toEqual([]);
@@ -188,6 +214,7 @@ describe("validateWorkflowRunInputValues", () => {
     );
     const details = { version: 1, code: "invalid_workflow_run_inputs", fieldErrors: errors };
     expect(workflowRunInputErrorDetailsSchema.parse(details)).toEqual(details);
+    expect(workflowRunInputErrorDetailsSchema.safeParse(details)).toEqual({ success: true, data: details });
     const unversioned = { code: "invalid_workflow_run_inputs", fieldErrors: errors };
     expect(workflowRunInputErrorDetailsSchema.safeParse(unversioned).success).toBe(false);
     expect(workflowRunInputErrorDetailsSchema.safeParse({ ...details, version: 2 }).success).toBe(false);
