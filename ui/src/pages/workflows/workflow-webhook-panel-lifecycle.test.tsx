@@ -25,6 +25,7 @@ vi.mock("react", async (importOriginal) => {
 });
 
 const ENABLED = { enabled: true, last4: "ab12", deliveriesLast24h: 2 };
+const UNCONFIGURED = { enabled: false, last4: null, deliveriesLast24h: 0 };
 const jsonResponse = (body: unknown, status = 200) =>
   ({ ok: status >= 200 && status < 300, status, json: async () => body }) as unknown as Response;
 
@@ -91,7 +92,7 @@ function stubClipboard() {
 async function mountRegisteredWithSecret(io: ReturnType<typeof deferredFetch>, secret: string, last4: string) {
   const clipboard = stubClipboard();
   const panel = await mountPanel("wf-1");
-  io.lastGet().resolve(jsonResponse({ error: "not configured" }, 404));
+  io.lastGet().resolve(jsonResponse(UNCONFIGURED));
   await act(async () => {});
   await click(panel.container, "웹훅 등록");
   io.lastPost().resolve(jsonResponse({ secret, last4, enabled: true }));
@@ -167,20 +168,22 @@ describe("Finding 3 — delayed clipboard completion must reference the CURRENT 
 });
 
 describe("existing unknown-status gating preserved (controls)", () => {
-  it("loading hides mutation buttons; non-404 error hides them; 404 shows register", async () => {
+  it.each([404, 500])("loading and HTTP %s hide mutation buttons; successful unconfigured status shows register", async (errorStatus) => {
     const io = deferredFetch();
     const panel = await mountPanel("wf-1");
     expect(text(panel.container)).toContain("웹훅 상태를 불러오는 중");
     expect([...panel.container.querySelectorAll("button")].find((b) => b.textContent?.includes("웹훅 등록"))).toBeUndefined();
-    io.lastGet().resolve(jsonResponse({ error: "boom" }, 500));
+    io.lastGet().resolve(jsonResponse({ error: "boom" }, errorStatus));
     await act(async () => {});
     expect(text(panel.container)).toContain("웹훅 상태 로드 실패");
     expect([...panel.container.querySelectorAll("button")].find((b) => b.textContent?.includes("웹훅 등록"))).toBeUndefined();
     await panel.unmount();
     const io2 = deferredFetch();
     const panel2 = await mountPanel("wf-2");
-    io2.lastGet().resolve(jsonResponse({ error: "not configured" }, 404));
+    io2.lastGet().resolve(jsonResponse(UNCONFIGURED));
     await act(async () => {});
+    expect(text(panel2.container)).not.toContain("웹훅 상태 로드 실패");
+    expect(text(panel2.container)).not.toContain("****");
     expect([...panel2.container.querySelectorAll("button")].find((b) => b.textContent?.includes("웹훅 등록"))).toBeDefined();
     await panel2.unmount();
   });
