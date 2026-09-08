@@ -154,7 +154,7 @@ export function GraphInspectorControlNode({
     );
   }
 
-  const group = selectedStep.conditionGroup;
+  const group = selectedStep.conditionGroup ?? cloneWorkflowConditionGroup(defaultIfConditionGroup);
   const ancestors = getWorkflowConditionAncestorOptions(steps, selectedStep.id);
   const validation = workflowConditionGroupSchema.safeParse(group);
 
