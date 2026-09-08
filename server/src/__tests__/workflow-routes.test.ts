@@ -649,7 +649,10 @@ describe("workflow routes", () => {
     expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "workflow_run.created" }));
   });
 
-  it("derives declared runInputs from submitted metadata before triggering (youtu.be, watch?v=, shorts)", async () => {
+  it("forwards raw submitted metadata to the engine without route-level derivation (youtu.be, watch?v=, shorts)", async () => {
+    // [care] 파생·검증은 엔진 trigger 경계에서 수행된다(엔진은 여기서 모의). 라우트는
+    // 원본 메타데이터를 그대로 전달하며, 파생 키(videoId)를 추가하지 않는다.
+    // 전체 호출 비교 금지(첫 인자에 실제 DB 가능) — 도메인 projection으로만 단언한다.
     mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({
       runInputs: [
         { key: "url", label: "YouTube URL", required: true },
@@ -673,14 +676,14 @@ describe("workflow routes", () => {
     }
 
     expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(3);
+    const calls = mockWorkflowService.trigger.mock.calls;
     for (const [index] of forms.entries()) {
-      expect(mockWorkflowService.trigger).toHaveBeenNthCalledWith(index + 1, expect.anything(), expect.objectContaining({
-        metadata: { url: forms[index], videoId: "dQw4w9WgXcQ" },
-      }));
+      expect(calls[index]!.length).toBe(2);
+      expect(calls[index]![1].metadata).toEqual({ url: forms[index] });
     }
   });
 
-  it("keeps a user-provided derived run input value instead of overwriting it", async () => {
+  it("forwards user-provided metadata as-is without overwriting or deriving values", async () => {
     mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({
       runInputs: [
         { key: "url", required: true },
@@ -696,27 +699,15 @@ describe("workflow routes", () => {
       .send({ triggeredBy: "board", metadata: { url: "https://youtu.be/dQw4w9WgXcQ", videoId: "custom12345_" } });
 
     expect(res.status).toBe(201);
-    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      metadata: { url: "https://youtu.be/dQw4w9WgXcQ", videoId: "custom12345_" },
-    }));
+    expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(1);
+    const triggerCall = mockWorkflowService.trigger.mock.calls[0]!;
+    expect(triggerCall.length).toBe(2);
+    expect(triggerCall[1].metadata).toEqual({ url: "https://youtu.be/dQw4w9WgXcQ", videoId: "custom12345_" });
   });
 
-  it("returns 400 when a required derived run input cannot be extracted", async () => {
-    mockWorkflowService.getDefinition.mockResolvedValue(workflowDefinition({
-      runInputs: [
-        { key: "url", required: true },
-        { key: "videoId", required: true, deriveFrom: { input: "url", extract: "youtubeVideoId" } },
-      ],
-    }));
-
-    const res = await request(createApp())
-      .post(`/api/workflows/${WORKFLOW_ID}/runs`)
-      .send({ triggeredBy: "board", metadata: { url: "https://example.com/not-youtube" } });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("videoId could not be derived from url; check the URL format");
-    expect(mockWorkflowService.trigger).not.toHaveBeenCalled();
-  });
+  // [care] 타이핑된 run-input 에러 → 400 구조화 details 번역·성공 activity 미기록 단언은
+  // workflow-run-input-route-errors.test.ts(수동·웹훅 경계 전용 스위트)가 소유한다.
+  // I1 정리: 본 파일의 중복 케이스는 동일 보장을 가진 전용 스위트로 일원화했다.
 
   it("returns 422 when a definition declares deriveFrom against an unknown input", async () => {
     mockWorkflowService.createDefinition.mockRejectedValue(

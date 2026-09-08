@@ -13,6 +13,7 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { secretService } from "../services/secrets.js";
 import { workflowWebhookRoutes, webhookRawBodyErrorHandler } from "../routes/workflow-webhooks.js";
+import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -140,16 +141,20 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     const res = await signedPost(payload, { key: "happy-key-1" });
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ runId: lastRunId, idempotencyKey: "happy-key-1" });
-    expect(mockEngine.workflowService.trigger).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        workflowId,
-        companyId,
-        triggerSource: "webhook",
-        triggeredBy: "webhook",
-        metadata: { topic: "release", url: "https://example.com/v" },
-      }),
-    );
+    // [care] 전체 호출 비교 금지(첫 인자 DB 포함, 실패 시 diff 포맷 OOM 위험).
+    // 3-인자 계약(원본 payload + 레거시 웹훅 정책)을 경계 projection으로 단언한다.
+    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(1);
+    const triggerCall = mockEngine.workflowService.trigger.mock.calls[0]!;
+    expect(triggerCall.length).toBe(3);
+    expect(triggerCall[0] === db).toBe(true);
+    expect(triggerCall[1]).toMatchObject({
+      workflowId,
+      companyId,
+      triggerSource: "webhook",
+      triggeredBy: "webhook",
+    });
+    expect(triggerCall[1].metadata).toEqual({ topic: "release", url: "https://example.com/v" });
+    expect(triggerCall[2]).toEqual({ legacyTextRequired: true });
     const [delivery] = await db
       .select()
       .from(workflowWebhookDeliveries)
@@ -224,18 +229,40 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     expect((await signedPost("{}", { omit: ["X-Signature"] })).status).toBe(400);
   });
 
-  it("400 when a required declared runInput is missing; ok when provided", async () => {
+  it("translates a typed engine run-input error into 400 and forwards the legacy webhook policy; ok when values provided", async () => {
+    // [care] 필수 검사는 라우트 프리플라이트에서 엔진 정규화 경계로 이동했다. 엔진은 모의이므로
+    // 이 파일에서는 타입핑 에러 번역(400 + 구조화 details, receipt runId 없음)과 정책 전달만 검증한다.
     mockEngine.workflowService.getDefinition.mockResolvedValue({
       ...definition(),
       runInputs: [{ key: "topic", label: "Topic", required: true }],
     });
-    expect((await signedPost(JSON.stringify({ url: "x" }))).status).toBe(400);
-    const res = await signedPost(JSON.stringify({ topic: "release", url: "x" }));
-    expect(res.status).toBe(202);
-    expect(mockEngine.workflowService.trigger).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ metadata: { topic: "release", url: "x" } }),
+    mockEngine.workflowService.trigger.mockRejectedValueOnce(
+      new WorkflowRunInputValidationError([{ key: "topic", code: "required", message: "'Topic' 항목은 필수 입력입니다." }]),
     );
+
+    const rejected = await signedPost(JSON.stringify({ url: "x" }), { key: "typed-required-key-1" });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.details).toEqual({
+      version: 1,
+      code: "invalid_workflow_run_inputs",
+      fieldErrors: [{ key: "topic", code: "required", message: "'Topic' 항목은 필수 입력입니다." }],
+    });
+    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(1);
+    const rejectedCall = mockEngine.workflowService.trigger.mock.calls[0]!;
+    expect(rejectedCall.length).toBe(3);
+    expect(rejectedCall[2]).toEqual({ legacyTextRequired: true });
+    const [rejectedDelivery] = await db
+      .select()
+      .from(workflowWebhookDeliveries)
+      .where(eq(workflowWebhookDeliveries.idempotencyKey, "typed-required-key-1"));
+    expect(rejectedDelivery?.runId ?? null).toBeNull();
+
+    const ok = await signedPost(JSON.stringify({ topic: "release", url: "x" }), { key: "typed-required-key-2" });
+    expect(ok.status).toBe(202);
+    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(2);
+    const okCall = mockEngine.workflowService.trigger.mock.calls[1]!;
+    expect(okCall[1].metadata).toEqual({ topic: "release", url: "x" });
+    expect(okCall[2]).toEqual({ legacyTextRequired: true });
   });
 
   it("429 when the workflow admission quota is exhausted", async () => {

@@ -1,6 +1,7 @@
+import { assertRetryHeartbeatRows, assertSemanticQaAssignment, resetRetryBoundary } from "./helpers/hybrid-qa-retry-boundary.js";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   activityLog,
   agents,
@@ -36,7 +37,9 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let companyId: string;
+  let fixtureHeartbeatIds: string[];
 
+  beforeEach(() => { resetRetryBoundary(); fixtureHeartbeatIds = []; });
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("hybrid-qa-retry-cas-");
     db = createDb(tempDb.connectionString);
@@ -47,6 +50,8 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
   afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
   afterEach(async () => {
     setWorkflowToolStepExecutor(null);
+    // Assert no runtime writers before deleting parents; only explicit fixture rows may exist.
+    await assertRetryHeartbeatRows(db, fixtureHeartbeatIds);
     await db.delete(workflowTransitionEvents);
     await db.delete(issueComments);
     await db.update(activityLog).set({ runId: null });
@@ -184,6 +189,8 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
     await syncWorkflowRunState(db, runId);
     const [qaRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     if (!qaRun.issueId) throw new Error("Expected issue-backed QA step run");
+    await assertSemanticQaAssignment(db, { companyId, agentId, runId, stepId: qaId, issueId: qaRun.issueId });
+    await assertRetryHeartbeatRows(db, []);
     await db.update(issues).set({ status: "done", completedAt: new Date("2026-07-22T12:00:00.000Z"), updatedAt: new Date("2026-07-22T12:00:00.000Z") }).where(eq(issues.id, qaRun.issueId));
     const heartbeatRunId = randomUUID();
     await db.insert(heartbeatRuns).values({
@@ -195,6 +202,7 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
       startedAt: new Date("2026-07-22T12:00:00.000Z"),
       finishedAt: new Date("2026-07-22T12:00:01.000Z"),
     });
+    fixtureHeartbeatIds.push(heartbeatRunId);
     await db.insert(workflowTransitionEvents).values({
       companyId,
       workflowRunId: runId,
@@ -213,6 +221,7 @@ describeEP("hybrid QA — retry CAS and current-request verdict", () => {
 
     await syncWorkflowRunState(db, runId);
     const [after] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, qaRun.id));
+    await assertSemanticQaAssignment(db, { companyId, agentId, runId, stepId: qaId, issueId: qaRun.issueId });
     expect(after.status).toBe("failed");
     expect(after.retryCount).toBe(0);
     const events = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.workflowStepRunId, qaRun.id));

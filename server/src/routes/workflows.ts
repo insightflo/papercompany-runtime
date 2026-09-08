@@ -23,7 +23,7 @@ import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
-import { applyRunInputDerivations } from "../services/workflow/run-input-derivations.js";
+import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
 import {
@@ -194,6 +194,11 @@ function canAccessRecord(req: Request, companyId: string): boolean {
 }
 
 function translateWorkflowDomainError(error: unknown): never {
+  // [typed run-input error] 엔진 정규화 실패는 구조화 details를 그대로 400으로 번역한다.
+  // 기존 문자열 기반 매핑(정의 없음 → 404, DAG/runInputs → 422 등)은 그대로 유지된다.
+  if (error instanceof WorkflowRunInputValidationError) {
+    throw badRequest(error.message, error.details);
+  }
   if (!(error instanceof Error)) {
     throw error;
   }
@@ -483,20 +488,10 @@ export function workflowRoutes(db: Db) {
       throw notFound("Workflow definition not found");
     }
     const triggeredBy = req.body.triggeredBy ?? (req.actor.type === "agent" ? "agent" : "board");
-    // [runInputs 파생] 선언된 파생 입력(deriveFrom)은 서버가 소스 값에서 계산해 채운다.
-    // 사용자 제공값 우선, 추출 실패+필수 입력은 400. 큐/런 실행 의미 변화 없음(순수 메타데이터 채움).
-    const derivation = applyRunInputDerivations(
-      definition.runInputs,
-      (req.body.metadata && typeof req.body.metadata === "object" && !Array.isArray(req.body.metadata))
-        ? req.body.metadata as Record<string, unknown>
-        : undefined,
-    );
-    if (derivation.status === "error") {
-      throw badRequest(derivation.message);
-    }
+    // [runInputs] 파생·기본값·검증은 엔진 trigger 경계에서 공통 수행한다. 라우트는
+    // 원본 메타데이터를 그대로 전달하고, 엔진이 던지는 타입핑 에러를 400으로 번역만 한다.
     const result = await workflowDomainCall(() => workflowService.trigger(db, {
       ...req.body,
-      ...(definition.runInputs && definition.runInputs.length > 0 ? { metadata: derivation.metadata } : {}),
       workflowId,
       companyId: definition.companyId,
       triggeredBy,

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState, type JSX } from "react";
 import { buildManualRunFeedback, findNewRunId, manualRunUnavailableMessage } from "./run-feedback.js";
-import { collectManualRunLabel, collectWorkflowRunInputs } from "./workflow-run-inputs.js";
+import { WorkflowRunDialog } from "./workflow-run-dialog.js";
+import type { WorkflowRunSubmission } from "./workflow-run-inputs.js";
 import type { WorkflowRunDrawerMode } from "./workflow-runs.js";
 import { jsonToSteps, stepsToJson, type StepDraft } from "./step-draft.js";
 import { applyStepRunsToGraphSteps, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphRunDebugSummary, type WorkflowGraphNavigatorFilter } from "./workflow-graph.js";
@@ -79,6 +80,7 @@ export function DefinitionsTable({
   const [editingTestInputPresetsText, setEditingTestInputPresetsText] = useState("[]");
   const [pendingWorkflowId, setPendingWorkflowId] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<WorkflowOverviewData["workflows"][number] | null>(null);
+  const [runTarget, setRunTarget] = useState<WorkflowOverviewData["workflows"][number] | null>(null);
   const [tableError, setTableError] = useState<string>("");
   const [tableNotice, setTableNotice] = useState<{ tone: "info" | "success"; message: string } | null>(null);
   const [graphShellDismissed, setGraphShellDismissed] = useState<boolean>(false);
@@ -306,7 +308,7 @@ export function DefinitionsTable({
     }
   }
 
-  async function onRunWorkflow(workflow: WorkflowOverviewData["workflows"][number]): Promise<void> {
+  function onRunWorkflow(workflow: WorkflowOverviewData["workflows"][number]): void {
     const normalizedStatus = workflow.status.trim().toLowerCase();
     if (normalizedStatus !== "active") {
       setTableError("");
@@ -315,45 +317,24 @@ export function DefinitionsTable({
       return;
     }
 
+    clearTableFeedback();
+    setRunTarget(workflow);
+  }
+
+  async function submitRun(submission: WorkflowRunSubmission): Promise<void> {
+    if (!runTarget) return;
+    const workflow = runTarget;
     const beforeRunIds = new Set([...activeRuns, ...recentRuns].map((run) => run.id));
     setPendingWorkflowId(workflow.id);
-    clearTableFeedback();
-    const runInputs = workflow.runInputs ?? [];
-    // [manual run label] 실행명(선택)은 입력변수와 구분해 가장 먼저 받는다.
-    //   값이 있으면 runLabel 로 전송되어 미션명에 접미된다. 취소 → 실행 중단.
-    const labelCollection = collectManualRunLabel((message, defaultValue) => window.prompt(message, defaultValue));
-    if (labelCollection.status === "cancelled") {
-      setTableError("");
-      setTableNotice({ tone: "info", message: "실행이 취소되었습니다." });
-      onManualRunStarted(null);
-      setPendingWorkflowId(null);
-      return;
-    }
-    const manualRunLabel = labelCollection.runLabel;
-    let metadata: Record<string, string> | undefined;
-    if (runInputs.length > 0) {
-      const collection = collectWorkflowRunInputs(runInputs, (message, defaultValue) => window.prompt(message, defaultValue));
-      if (collection.status === "cancelled") {
-        setTableError("");
-        setTableNotice({ tone: "info", message: "실행 입력이 취소되어 실행하지 않았습니다." });
-        onManualRunStarted(null);
-        setPendingWorkflowId(null);
-        return;
-      }
-      if (collection.status === "missing_required") {
-        setTableNotice(null);
-        setTableError(`필수 실행 입력이 비어 있습니다: ${collection.label} (${collection.key})`);
-        onManualRunStarted(null);
-        setPendingWorkflowId(null);
-        return;
-      }
-      metadata = collection.metadata;
-      if (collection.derivedNote) {
-        setTableNotice({ tone: "info", message: collection.derivedNote });
-      }
-    }
+    let result: Record<string, unknown> | null | undefined;
     try {
-      const result = await runWorkflow({ companyId, workflowId: workflow.id, ...(manualRunLabel ? { runLabel: manualRunLabel } : {}), ...(metadata ? { metadata } : {}) }) as Record<string, unknown> | null | undefined;
+      result = await runWorkflow({ companyId, workflowId: workflow.id, ...submission }) as typeof result;
+    } finally {
+      setPendingWorkflowId(null);
+    }
+    // Only the POST above may reject back to the form. A created run is never retried for a refresh error.
+    setRunTarget(null);
+    try {
       const runId = typeof result?.runId === "string" ? result.runId : typeof result?.id === "string" ? result.id : null;
       const highlightedRunId = findNewRunId(beforeRunIds, runId, activeRuns, recentRuns);
       onManualRunStarted(highlightedRunId);
@@ -369,10 +350,7 @@ export function DefinitionsTable({
       await refreshOverview();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      onManualRunStarted(null);
-      setTableError(`Run 실패: ${message}`);
-    } finally {
-      setPendingWorkflowId(null);
+      setTableError(`실행은 시작되었지만 화면 갱신에 실패했습니다: ${message}`);
     }
   }
 
@@ -441,6 +419,8 @@ export function DefinitionsTable({
       <div style={{ display: "grid", gap: "8px" }}>
         {tableError ? <p key="table-error" style={noticeStyle("error")}>{tableError}</p> : null}
         {tableNotice ? <p key="table-notice" style={noticeStyle(tableNotice.tone)}>{tableNotice.message}</p> : null}
+        {runTarget ? <WorkflowRunDialog key={runTarget.id} workflow={runTarget}
+          onCancel={() => setRunTarget(null)} onSubmit={submitRun} /> : null}
             {restoreTarget ? (
               <WorkflowRestoreDialog
                 workflow={restoreTarget}
