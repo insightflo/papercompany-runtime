@@ -30,6 +30,47 @@ function roundTrip(over: Record<string, unknown>): Record<string, unknown> {
   return stepsToJson(drafts)[0] as Record<string, unknown>;
 }
 
+describe("Workflows editor serialization — child workflow step (targetWorkflowId)", () => {
+  it("round-trips a workflow step preserving targetWorkflowId as a first-class draft field", () => {
+    const drafts = jsonToSteps([step({ type: "workflow", targetWorkflowId: TARGET })]);
+    expect(drafts[0].type).toBe("workflow");
+    expect(drafts[0].targetWorkflowId).toBe(TARGET);
+    // The id must NOT also linger in the generic extra bag.
+    expect(drafts[0].extra).not.toHaveProperty("targetWorkflowId");
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.type).toBe("workflow");
+    expect(out.targetWorkflowId).toBe(TARGET);
+  });
+
+  it("emits targetWorkflowId only for workflow steps and keeps it through a full round-trip", () => {
+    const agentOut = roundTrip({ type: "agent", agentName: "A", targetWorkflowId: TARGET });
+    expect(agentOut).not.toHaveProperty("targetWorkflowId");
+    const wfOut = roundTrip({ type: "workflow", targetWorkflowId: TARGET });
+    expect(wfOut.targetWorkflowId).toBe(TARGET);
+  });
+
+  it("a workflow step without targetWorkflowId is preserved as an empty draft (server validator rejects at save)", () => {
+    const drafts = jsonToSteps([step({ type: "workflow" })]);
+    expect(drafts[0].targetWorkflowId).toBe("");
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.type).toBe("workflow");
+    expect(out).not.toHaveProperty("targetWorkflowId");
+    // Client contract: the shared schema requires targetWorkflowId when type==="workflow",
+    // so an empty draft must fail the shared validator while the round-trip itself is lossless.
+    expect(() => workflowStepDefinitionSchema.parse({
+      ...out,
+      wait: true,
+      dependsOn: [],
+    })).toThrow(/targetWorkflowId/);
+  });
+
+  it("a serialized workflow step with targetWorkflowId passes the shared definition schema", () => {
+    const drafts = jsonToSteps([step({ type: "workflow", targetWorkflowId: TARGET })]);
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(() => workflowStepDefinitionSchema.parse({ ...out, wait: true, dependsOn: [] })).not.toThrow();
+  });
+});
+
 describe("Workflows editor serialization — stale assignee (AREA-1)", () => {
   it("jsonToSteps hydrates agentId as a first-class field and strips it from extra", () => {
     const drafts = jsonToSteps([step({ agentId: "OLD" })]);
@@ -177,7 +218,10 @@ describe("Workflows editor serialization — workflow child step round-trip", ()
       targetWorkflowId: TARGET,
       wait: true,
     })]);
-    expect(drafts[0].extra.targetWorkflowId).toBe(TARGET);
+    // [workflow child step UI] targetWorkflowId 는 이제 1급 draft 필드로 승격된다(extra 잔존 금지).
+    expect(drafts[0].targetWorkflowId).toBe(TARGET);
+    expect(drafts[0].extra).not.toHaveProperty("targetWorkflowId");
+    // wait/inputs 는 여전히 extra 통과값으로 유지된다(에이전트/도구 정리 분기가 먹지 않음).
     expect(drafts[0].extra.wait).toBe(true);
   });
 

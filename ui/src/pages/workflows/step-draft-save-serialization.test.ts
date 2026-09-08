@@ -20,4 +20,27 @@ describe("workflow step save serialization", () => {
       error: expect.stringContaining('Tool step "publish"의 Tool Args JSON 파싱 실패:'),
     });
   });
+
+  it("emits targetWorkflowId when a workflow step carries one", () => {
+    const [draft] = jsonToSteps([{
+      id: "run-child",
+      title: "Run child workflow",
+      type: "workflow",
+      targetWorkflowId: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    }]);
+    const result = stepsToJsonForSave([draft]);
+    if (!("steps" in result)) throw new Error("expected steps result");
+    expect(result.steps[0]).toMatchObject({
+      type: "workflow",
+      targetWorkflowId: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    });
+  });
+
+  it("keeps a missing targetWorkflowId as an empty draft field and omits it from saved json", () => {
+    const [draft] = jsonToSteps([{ id: "run-child", title: "Run child workflow", type: "workflow" }]);
+    expect(draft.targetWorkflowId).toBe("");
+    const result = stepsToJsonForSave([draft]);
+    if (!("steps" in result)) throw new Error("expected steps result");
+    expect(result.steps[0]).not.toHaveProperty("targetWorkflowId");
+  });
 });
