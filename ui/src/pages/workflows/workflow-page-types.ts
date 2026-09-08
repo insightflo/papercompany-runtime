@@ -1,3 +1,4 @@
+import type { WorkflowRunInput } from "@paperclipai/shared/validators/workflow-run-inputs";
 import type { WorkflowGraphEdgeMetadataRecord, WorkflowGraphWorkProduct, WorkflowGraphStep } from "./workflow-graph.js";
 import type { CreateParentIssuePolicy } from "./workflow-parent-policy.js";
 
@@ -22,13 +23,7 @@ export type WorkflowToolGrant = {
   toolName: string;
 };
 
-export type WorkflowRunInputOption = {
-  key: string;
-  label?: string;
-  required?: boolean;
-  placeholder?: string;
-  deriveFrom?: { input: string; extract: string };
-};
+export type WorkflowRunInputOption = WorkflowRunInput;
 
 export type WorkflowOverviewData = {
   projects?: ProjectOption[];

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { apiBaseUrl, coreApiJson } from "./workflow-core-api.js";
+export { apiBaseUrl, coreApiJson } from "./workflow-core-api.js";
 import { useCompany } from "../../context/CompanyContext.js";
 import { getSelectableWorkflowTools, getWorkflowToolSystemState, type WorkflowToolSystemState } from "./tool-availability.js";
 import type { LabelOption, OverviewData, WorkflowRunDetailData, WorkflowToolGrant, WorkflowToolOption } from "./workflow-page-types.js";
@@ -11,33 +13,9 @@ export function normalizeLabel(input: Record<string, unknown>): LabelOption {
   };
 }
 
-export function apiBaseUrl(): string {
-  if (typeof window !== "undefined" && typeof window.location?.origin === "string" && window.location.origin.startsWith("http")) {
-    return window.location.origin;
-  }
-  return "http://localhost:3100";
-}
-
 export function useHostContext(): { companyId?: string } {
   const { selectedCompanyId } = useCompany();
   return { companyId: selectedCompanyId ?? "" };
-}
-
-export async function coreApiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers ?? undefined);
-  if (!(init?.body instanceof FormData) && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-  const res = await fetch(`${apiBaseUrl()}/api${path}`, {
-    credentials: "include",
-    ...init,
-    headers,
-  });
-  if (!res.ok) {
-    const payload = await res.json().catch(() => null) as { error?: string; message?: string } | null;
-    throw new Error(payload?.error ?? payload?.message ?? `Request failed (${res.status})`);
-  }
-  return await res.json() as T;
 }
 
 export function usePluginData<T>(key: string, params: Record<string, unknown>): {

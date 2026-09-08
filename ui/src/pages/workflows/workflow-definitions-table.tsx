@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState, type JSX } from "react";
 import { buildManualRunFeedback, findNewRunId, manualRunUnavailableMessage } from "./run-feedback.js";
-import { collectManualRunLabel, collectWorkflowRunInputs } from "./workflow-run-inputs.js";
+import { collectManualRunLabel, collectWorkflowRunInputs } from "./workflow-run-input-prompts-legacy.js";
 import type { WorkflowRunDrawerMode } from "./workflow-runs.js";
 import { jsonToSteps, stepsToJson, type StepDraft } from "./step-draft.js";
 import { applyStepRunsToGraphSteps, buildWorkflowGraphDefinitionNavigator, buildWorkflowGraphRunDebugSummary, type WorkflowGraphNavigatorFilter } from "./workflow-graph.js";
