@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useCompany } from "../../context/CompanyContext";
 import { emptyStep, type StepDraft } from "./step-draft.js";
 import { apiBaseUrl } from "./workflow-page-api.js";
+import { StepSecondaryField } from "./workflow-target-picker.js";
 import type { WorkflowToolGrant, WorkflowToolOption } from "./workflow-page-types.js";
 import { buttonStyle, dangerButtonStyle, inputStyle, mutedTextStyle, selectStyle, textareaStyle } from "./workflow-page-styles.js";
 import { FieldLabel, HelpIcon } from "./shared-controls.js";
@@ -54,11 +55,14 @@ export function StepEditor({
   onChange,
   availableTools,
   availableToolGrants,
+  editingWorkflowId,
 }: {
   steps: StepDraft[];
   onChange: (steps: StepDraft[]) => void;
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
+  /** 편집 중 워크플로 id — 하위 워크플로 선택기에서 자기 자신(self-cycle)을 제외한다. */
+  editingWorkflowId?: string;
 }): JSX.Element {
   const { selectedCompanyId } = useCompany();
   const companyId = selectedCompanyId ?? "";
@@ -244,6 +248,7 @@ export function StepEditor({
                 }}>
                   <option value="tool" disabled={availableTools.length === 0}>{"\uD83D\uDD27"} Tool (시스템 실행)</option>
                   <option value="agent">{"\uD83E\uDD16"} Agent (에이전트 작업)</option>
+                  <option value="workflow">🔗 Workflow (하위 워크플로 호출)</option>
                   <option value="if">⬦ IF (조건 분기)</option>
                   <option value="complete">✓ Complete (성공 종료)</option>
                 </select>
@@ -252,38 +257,14 @@ export function StepEditor({
                 ) : null}
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                {step.type === "tool" ? (
-                  <>
-                    <FieldLabel help="Authorized tool that this tool step runs. The picker only lists tools currently available to workflows.">Tool Name</FieldLabel>
-                    <WorkflowToolPicker
-                      value={step.toolName}
-                      multiple={false}
-                      tools={availableTools}
-                      onChange={(value) => update(i, { toolName: value })}
-                    />
-                  </>
-                ) : step.type === "agent" ? (
-                  <>
-                    <FieldLabel help="Worker assigned to this step. Changing this also trims tool access to grants for that agent.">Agent</FieldLabel>
-                    <select style={selectStyle} value={step.agentId || agents.find((a) => a.name === step.agentName)?.id || ""} onChange={(e) => {
-                  const selectedId = e.target.value;
-                  const agent = agents.find((a) => a.id === selectedId);
-                  const newName = agent?.name ?? "";
-                  const granted = new Set(availableToolGrants.filter((g) => g.agentName === newName).map((g) => g.toolName));
-                  const cleaned = splitCommaList(step.tools).filter((t) => granted.has(t)).join(", ");
-                  update(i, { agentId: selectedId, agentName: newName, tools: cleaned });
-                }}>
-                      <option value="">— Select agent —</option>
-                      {agents.map((a) => (
-                        <option key={a.id} value={a.id}>{a.name}</option>
-                      ))}
-                    </select>
-                  </>
-                ) : (
-                  <span style={{ ...mutedTextStyle, alignSelf: "end", fontSize: "11px" }}>
-                    엔진이 직접 실행하며 에이전트나 도구를 호출하지 않습니다.
-                  </span>
-                )}
+                <StepSecondaryField
+                  step={step}
+                  agents={agents}
+                  availableTools={availableTools}
+                  availableToolGrants={availableToolGrants}
+                  editingWorkflowId={editingWorkflowId}
+                  onPatch={(patch) => update(i, patch)}
+                />
               </div>
             </div>
             {(step.type === "if" || step.type === "complete") ? (

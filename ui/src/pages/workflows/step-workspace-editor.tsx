@@ -20,6 +20,7 @@ export type StepWorkspaceGraphEditorProps = {
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
   surface?: StepWorkspaceSurface | undefined;
+  editingWorkflowId?: string | undefined;
 };
 
 export function GraphModeTabs({
@@ -61,6 +62,7 @@ export function StepWorkspaceEditor({
   availableTools,
   availableToolGrants,
   surface = "stacked",
+  editingWorkflowId,
   renderGraphEditor,
 }: {
   steps: StepDraft[];
@@ -77,6 +79,7 @@ export function StepWorkspaceEditor({
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
   surface?: "stacked" | "focus";
+  editingWorkflowId?: string;
   renderGraphEditor: (props: StepWorkspaceGraphEditorProps) => JSX.Element;
 }): JSX.Element {
   const draftDiff = useMemo<WorkflowGraphDraftDiff | null>(() => {
@@ -165,7 +168,7 @@ export function StepWorkspaceEditor({
           </Fragment>
         ) : (
           <Fragment key="form-workspace">
-            <StepEditor key="form-editor" steps={steps} onChange={onChange} availableTools={availableTools} availableToolGrants={availableToolGrants} />
+            <StepEditor key="form-editor" steps={steps} onChange={onChange} availableTools={availableTools} availableToolGrants={availableToolGrants} editingWorkflowId={editingWorkflowId} />
           </Fragment>
         )}
     </div>
