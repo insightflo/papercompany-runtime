@@ -6,18 +6,17 @@
  */
 
 import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
+import type { WorkflowRunInput as SharedWorkflowRunInput } from "@paperclipai/shared/validators/workflow-run-inputs";
+
+/**
+ * 실행 입력(runInputs) 선언 타입. Task 1 공유 계약(text/radio/checkbox/switch 유니온)의
+ * 별칭 — 서버 전역에서 동일한 선언 계약을 쓰도록 중복 선언하지 않는다.
+ */
+export type WorkflowRunInput = SharedWorkflowRunInput;
 
 /**
  * A workflow definition defines a DAG of steps to execute.
  */
-export interface WorkflowRunInput {
-  key: string;
-  label?: string;
-  required?: boolean;
-  placeholder?: string;
-  deriveFrom?: { input: string; extract: "youtubeVideoId" };
-}
-
 export interface WorkflowDefinition {
   id: string;
   companyId: string;

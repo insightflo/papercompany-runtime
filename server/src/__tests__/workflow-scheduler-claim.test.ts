@@ -118,7 +118,7 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
 
     const claim = (workflowService as unknown as {
       claimScheduledRun: (
-        db: typeof db,
+        db: ReturnType<typeof createDb>,
         input: {
           workflowId: string;
           companyId: string;
@@ -215,7 +215,7 @@ describeEmbeddedPostgres("workflow native scheduler slot claiming", () => {
 
     const claim = (workflowService as unknown as {
       claimScheduledRun: (
-        db: typeof db,
+        db: ReturnType<typeof createDb>,
         input: {
           workflowId: string;
           companyId: string;

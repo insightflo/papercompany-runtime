@@ -13,6 +13,8 @@ import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
+import { normalizeWorkflowRunInputs, type WorkflowRunInputPolicy } from "./run-input-normalization.js";
+import { formatDateKeyInTimezone } from "./workflow-run-date.js";
 import { resetFailedControlNodesForResume, resetStaleIfControlNodesForResume } from "./control-flow/control-node-executor.js";
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
@@ -108,24 +110,6 @@ function normalizeWorkflowSteps(
       executionMode: step.executionMode ?? "dynamic_owner_plan",
     };
   });
-}
-
-function formatDateKeyInTimezone(date: Date, timezone: string): string | null {
-  try {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(date);
-    const year = parts.find((part) => part.type === "year")?.value;
-    const month = parts.find((part) => part.type === "month")?.value;
-    const day = parts.find((part) => part.type === "day")?.value;
-    if (!year || !month || !day) return null;
-    return `${year}-${month}-${day}`;
-  } catch {
-    return null;
-  }
 }
 
 function formatWorkflowMissionTitle(
@@ -359,6 +343,7 @@ export const workflowService = {
   async trigger(
     db: Db,
     input: CreateWorkflowRunInput,
+    policy: WorkflowRunInputPolicy = {},
   ): Promise<WorkflowExecutionResult> {
     const workflow = await getWorkflowDefinitionById(db, input.workflowId);
     if (!workflow) {
@@ -367,6 +352,11 @@ export const workflowService = {
     if (workflow.companyId !== input.companyId) {
       throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
     }
+    // [run-input boundary] 회사 귀속 확인 직후, 도구 준비/미션/스토어 순서보다 앞에서
+    // 실행 입력을 정규화한다(기본값 → 파생 → 검증). 정책은 내부 선택 인자이며 공개
+    // 스키마가 아니다. 웹훅만 {legacyTextRequired:true}를 전달하고, 나머지 호출자는
+    // 기본값({})을 쓴다. triggerSource 등 클라이언트 값으로 정책을 추론하지 않는다.
+    input = { ...input, metadata: normalizeWorkflowRunInputs(workflow.runInputs, input.metadata, policy) };
     await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
     const [company] = await db
       .select({ timezone: companies.timezone })

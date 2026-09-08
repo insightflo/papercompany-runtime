@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src"],
+  "files": [
+    "src/__tests__/workflow-run-input-normalization.test.ts",
+    "src/__tests__/workflow-run-input-derivations.test.ts",
+    "src/__tests__/workflow-run-input-route-errors.test.ts",
+    "src/__tests__/workflow-routes.test.ts",
+    "src/__tests__/workflow-webhook.test.ts",
+    "src/__tests__/workflow-webhook-admission.test.ts",
+    "src/__tests__/workflow-webhook-signature.test.ts",
+    "src/__tests__/workflow-scheduler-claim.test.ts",
+    "src/__tests__/workflow-trigger-scheduled-mission-guard.test.ts",
+    "src/__tests__/workflow-manual-run-mission-label.test.ts",
+    "src/__tests__/helpers/workflow-run-input-fixture.ts",
+    "src/__tests__/helpers/workflow-run-input-http-fixture.ts",
+    "src/__tests__/workflow-run-input-trigger.integration.test.ts",
+    "src/__tests__/workflow-run-input-scheduler.integration.test.ts",
+    "src/__tests__/workflow-run-input-http.integration.test.ts",
+    "src/__tests__/workflow-run-input-templates.integration.test.ts",
+    "src/__tests__/workflow-tool-step-args.test.ts",
+    "src/__tests__/workflow-dag-engine.test.ts",
+    "src/__tests__/plugin-routes-workflow-native-fallback.test.ts"
+  ]
+}

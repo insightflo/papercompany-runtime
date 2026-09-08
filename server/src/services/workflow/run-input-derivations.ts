@@ -1,3 +1,6 @@
+import { workflowRunInputsSchema } from "@paperclipai/shared/validators/workflow-run-inputs";
+import type { WorkflowRunInput } from "./types.js";
+
 /**
  * 워크플로우 runInputs 파생 입력(deriveFrom) 지원.
  *
@@ -6,18 +9,9 @@
  *   큐/런 실행 의미는 건드리지 않는다(순수 계산).
  */
 
-export type WorkflowRunInputDeriveFrom = {
-  input: string;
-  extract: "youtubeVideoId";
-};
-
-export type WorkflowRunInputDeclaration = {
-  key: string;
-  label?: string;
-  required?: boolean;
-  placeholder?: string;
-  deriveFrom?: WorkflowRunInputDeriveFrom;
-};
+/** Task 1 공유 선언 계약의 별칭 — 중복 선언 대신 동일 타입을 재사용한다. */
+export type WorkflowRunInputDeclaration = WorkflowRunInput;
+export type WorkflowRunInputDeriveFrom = NonNullable<WorkflowRunInput["deriveFrom"]>;
 
 /** 11자 YouTube 영상 ID 추출. youtu.be/ID, watch?v=ID, shorts/ID (+ &si= 등 파라미터 동반) 지원. */
 export function extractYoutubeVideoId(value: string): string | null {
@@ -40,9 +34,19 @@ const RUN_INPUT_EXTRACTORS: Record<WorkflowRunInputDeriveFrom["extract"], (value
 /**
  * 정의 저장 시점 검증: deriveFrom.input은 같은 runInputs 선언 안의 형제 키를 참조해야 한다.
  * 실패 메시지는 "Invalid workflow runInputs:" 프리픽스를 가지며 라우트가 422로 번역한다.
+ * 먼저 공유 목록 스키마(선언 JSON 계약: 분기/키/옵션/default)로 구조 검증을 하고,
+ * 이어서 기존의 선언 키/소스 참조 루프를 유지한다 — 정의 422와 실행값 400은 별개 계약이다.
  */
 export function validateRunInputDeclarations(runInputs: readonly WorkflowRunInputDeclaration[] | undefined): void {
   if (!runInputs || runInputs.length === 0) return;
+  const parsed = workflowRunInputsSchema.safeParse(runInputs);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const detail = issue
+      ? [issue.path.join("."), issue.message].filter(Boolean).join(": ")
+      : "invalid runInputs declaration";
+    throw new Error(`Invalid workflow runInputs: ${detail}`);
+  }
   const declaredKeys = new Set(runInputs.map((input) => input.key));
   for (const input of runInputs) {
     if (!input.deriveFrom) continue;
@@ -56,7 +60,8 @@ export function validateRunInputDeclarations(runInputs: readonly WorkflowRunInpu
 
 export type RunInputDerivationResult =
   | { status: "ok"; metadata: Record<string, unknown> }
-  | { status: "error"; message: string };
+  // [care] 규칙 9 — key/code 필드가 흐름 제어·식별의 근거다. message는 표시용이며 파싱 대상이 아니다.
+  | { status: "error"; key: string; message: string };
 
 /**
  * 실행 입력 파생 적용:
@@ -86,6 +91,7 @@ export function applyRunInputDerivations(
       if (required) {
         return {
           status: "error",
+          key: input.key,
           message: `${input.key} could not be derived from ${deriveFrom.input}; check the URL format`,
         };
       }

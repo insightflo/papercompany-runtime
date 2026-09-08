@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src"],
+  "files": [
+    "src/pages/workflows/workflow-definition-run-input-preservation.test.ts",
+    "src/pages/workflows/workflow-definition-edit-patch.test.ts",
+    "src/pages/workflows/workflow-run-input-field.test.tsx",
+    "src/pages/workflows/workflow-run-inputs.test.ts",
+    "src/pages/workflows/workflow-core-api.test.ts",
+    "src/pages/workflows/workflow-run-dialog-errors.test.ts",
+    "../tests/workflow-run-inputs/playwright.config.ts",
+    "../tests/workflow-run-inputs/dialog.spec.ts",
+    "../tests/workflow-run-inputs/dialog-helpers.ts",
+    "../tests/workflow-run-inputs/fixtures.ts",
+    "../packages/shared/src/workflow-run-input-values.test.ts",
+    "../packages/shared/src/validators/workflow-run-inputs.test.ts"
+  ]
+}
