@@ -22,12 +22,11 @@ import { eq } from "drizzle-orm";
 import { workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
 import { logActivity } from "../services/activity-log.js";
 import { workflowService } from "../services/workflow/engine.js";
-import { applyRunInputDerivations } from "../services/workflow/run-input-derivations.js";
+import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import {
   WebhookQuotaExceededError,
   admitWebhookDelivery,
   resolveWorkflowWebhookSecret,
-  validateRequiredRunInputs,
   verifyWebhookSignature,
 } from "../services/workflow/workflow-webhook.js";
 import { badRequest, conflict, notFound, unauthorized } from "../errors.js";
@@ -63,6 +62,11 @@ export const webhookRawBodyErrorHandler: ErrorRequestHandler = (err, _req, res, 
 };
 
 function translateWorkflowDomainError(error: unknown): never {
+  // [typed run-input error] 엔진 정규화 실패(웹훅은 legacy text required 정책 포함)를
+  // 구조화 details를 담아 400으로 번역한다. 기존 매핑(정의 없음 → 404, DAG/runInputs → 409)은 유지.
+  if (error instanceof WorkflowRunInputValidationError) {
+    throw badRequest(error.message, error.details);
+  }
   if (error instanceof Error) {
     if (error.message.startsWith("Workflow definition not found:")) {
       throw notFound("Workflow definition not found");
@@ -180,15 +184,9 @@ export function workflowWebhookRoutes(db: Db) {
       return;
     }
 
-    const requiredError = validateRequiredRunInputs(definition.runInputs, payload);
-    if (requiredError) {
-      throw badRequest(requiredError);
-    }
-    const derivation = applyRunInputDerivations(definition.runInputs, payload);
-    if (derivation.status === "error") {
-      throw badRequest(derivation.message);
-    }
-
+    // [runInputs] 필수/파생/검증은 엔진 trigger 경계에서 공통 수행한다. 웹훅만 내부
+    // 정책 {legacyTextRequired:true}를 세 번째 인자로 전달한다(공개 플래그 아님,
+    // triggerSource 추론 아님). 원본 payload를 그대로 metadata로 넘긴다.
     let result;
     try {
       result = await workflowService.trigger(db, {
@@ -196,8 +194,8 @@ export function workflowWebhookRoutes(db: Db) {
         companyId: config.companyId,
         triggerSource: "webhook",
         triggeredBy: "webhook",
-        metadata: derivation.metadata,
-      });
+        metadata: payload,
+      }, { legacyTextRequired: true });
     } catch (error) {
       translateWorkflowDomainError(error);
     }
